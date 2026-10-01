@@ -131,14 +131,21 @@ fn constructor_prefix(class: &IrClass, count: usize) -> Vec<MethodParameter> {
         count <= class.ctor_args.len(),
         "constructor prefix exceeds its arguments"
     );
+    let identities = crate::jvm::parameter_names::constructor_identities(&class.ctor_args);
     class
         .ctor_args
         .iter()
+        .zip(&identities)
         .take(count)
-        .enumerate()
-        .map(|(index, argument)| {
-            if class.is_inner_class && index == 0 {
-                return parameter("this$0", MANDATED);
+        .map(|(argument, identity)| {
+            // The enclosing instance is the generated identity constructor_identities recorded.
+            // An unnamed capture maps to a positional identity and is named by its storage below.
+            if let IrParameterRole::Generated(role @ IrGeneratedParameterRole::OuterInstance) =
+                identity.role
+            {
+                let name = crate::jvm::parameter_names::method_parameter(identity, "<init>")
+                    .expect("a generated constructor prefix has a JVM parameter name");
+                return parameter(name, generated_constructor_flags(role));
             }
             let name = argument
                 .capture
@@ -153,6 +160,15 @@ fn constructor_prefix(class: &IrClass, count: usize) -> Vec<MethodParameter> {
             parameter(name, SYNTHETIC)
         })
         .collect()
+}
+
+/// kotlinc marks an inner class constructor's outer instance `MANDATED`: the Java language requires
+/// it, unlike a synthetic capture.
+fn generated_constructor_flags(role: IrGeneratedParameterRole) -> u16 {
+    match role {
+        IrGeneratedParameterRole::OuterInstance => MANDATED,
+        _ => SYNTHETIC,
+    }
 }
 
 pub(super) fn primary_constructor(
@@ -308,13 +324,32 @@ pub(super) fn holder_forward(
         .collect()
 }
 
-pub(super) fn continuation_constructor(has_outer_receiver: bool) -> Vec<MethodParameter> {
-    let mut parameters = Vec::with_capacity(usize::from(has_outer_receiver) + 1);
-    if has_outer_receiver {
-        parameters.push(parameter("this$0", 0));
-    }
-    parameters.push(parameter("$completion", 0));
-    parameters
+pub(super) fn continuation_constructor(class: &IrClass) -> Vec<MethodParameter> {
+    let identities = crate::jvm::parameter_names::constructor_identities(&class.ctor_args);
+    assert_eq!(
+        identities.len(),
+        class.ctor_args.len(),
+        "a continuation constructor's identities must match its physical parameters"
+    );
+    identities
+        .iter()
+        .map(|identity| {
+            assert!(
+                matches!(
+                    identity.role,
+                    IrParameterRole::Generated(
+                        IrGeneratedParameterRole::ContinuationDispatchReceiver
+                            | IrGeneratedParameterRole::Continuation
+                    )
+                ),
+                "a continuation constructor accepts only its recorded receiver and completion"
+            );
+            (
+                crate::jvm::parameter_names::method_parameter(identity, "<init>"),
+                0,
+            )
+        })
+        .collect()
 }
 
 pub(super) fn continuation_invoke_suspend() -> [MethodParameter; 1] {

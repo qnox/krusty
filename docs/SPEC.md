@@ -5294,6 +5294,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the file that declares `target` as its reflection owner (`ldc DeclarationsKt`), even when another
   file of the module references it. Test:
   `tests/library_function_reference_class_e2e.rs::a_module_function_in_another_file_is_owned_by_its_own_facade`.
+- **An inner class's constructor lists its outer instance as `this$0`.** The constructor takes
+  the outer instance first, and kotlinc names that parameter `this$0` in the constructor's
+  `LocalVariableTable`, like the field it initializes. A local class with no outer instance has no
+  such row. Test: `tests/inner_class_constructor_e2e.rs`.
 - **`typeOf` builds projections with `KTypeProjection`'s static factories.** kotlinc's
   `generateTypeOfArguments` reads the static field `KTypeProjection.star` for `*` and calls the
   static `invariant`, `contravariant` or `covariant` for any other argument, never the companion.

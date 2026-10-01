@@ -41,7 +41,10 @@ pub(super) fn local_variable(
         IrParameterRole::Generated(role) => match role {
             IrGeneratedParameterRole::Positional { .. } => None,
             IrGeneratedParameterRole::Continuation => Some("$completion".to_string()),
+            IrGeneratedParameterRole::ContinuationDispatchReceiver => Some("this$0".to_string()),
             IrGeneratedParameterRole::HolderReceiver => Some("$this".to_string()),
+            // kotlinc names the parameter like the field it initializes.
+            IrGeneratedParameterRole::OuterInstance => Some("this$0".to_string()),
             IrGeneratedParameterRole::ValueClassCarrier => Some("arg0".to_string()),
             IrGeneratedParameterRole::ValueClassEqualsOperand { ordinal } => {
                 Some(value_class_equals_operand(ordinal).to_string())
@@ -290,7 +293,11 @@ fn function_semantic_parameter_types(
         .collect()
 }
 
-fn constructor_identities(arguments: &[crate::ir::IrCtorArg]) -> Vec<IrParameterIdentity> {
+/// The identities of a constructor's physical parameters: the one projection its
+/// `LocalVariableTable` and `MethodParameters` names and flags are derived from.
+pub(super) fn constructor_identities(
+    arguments: &[crate::ir::IrCtorArg],
+) -> Vec<IrParameterIdentity> {
     let mut context_ordinal = 0u32;
     arguments
         .iter()
@@ -308,6 +315,35 @@ fn constructor_identities(arguments: &[crate::ir::IrCtorArg]) -> Vec<IrParameter
                 }
                 crate::types::ContextParameterKind::LegacyReceiver => {
                     IrParameterIdentity::context_receiver(context_ordinal)
+                }
+                crate::types::ContextParameterKind::None
+                    if argument.provenance
+                        == crate::ir::IrCtorParameterProvenance::ContinuationDispatchReceiver =>
+                {
+                    IrParameterIdentity::generated(
+                        IrGeneratedParameterRole::ContinuationDispatchReceiver,
+                        None,
+                    )
+                }
+                crate::types::ContextParameterKind::None
+                    if argument.provenance
+                        == crate::ir::IrCtorParameterProvenance::Continuation =>
+                {
+                    IrParameterIdentity::generated(IrGeneratedParameterRole::Continuation, None)
+                }
+                crate::types::ContextParameterKind::None
+                    if argument.provenance
+                        == crate::ir::IrCtorParameterProvenance::EnclosingInstance =>
+                {
+                    assert!(
+                        argument.name.is_none() && argument.capture.is_none(),
+                        "a generated constructor parameter has no source or capture identity"
+                    );
+                    assert_eq!(
+                        physical_ordinal, 0,
+                        "an outer instance is its constructor's first parameter"
+                    );
+                    IrParameterIdentity::generated(IrGeneratedParameterRole::OuterInstance, None)
                 }
                 crate::types::ContextParameterKind::None => match argument.name.as_deref() {
                     Some(name) => IrParameterIdentity::source(name),
