@@ -69,6 +69,8 @@ pub(crate) struct BackendPassFacts {
 /// Runs, in order:
 /// 1. `plugins::run_enabled` — compiler-extension plugins (kotlinx.serialization) synthesize
 ///    declarations from the file's annotations; no-op without a trigger annotation.
+///    Once their output is final, freeze any exact dependency identity selected by a generated
+///    `super` call, then realize all checked super calls from those frozen facts.
 ///
 /// 2. `realize_top_level_jvm_fields` — select public field storage for eligible top-level
 ///    `@JvmField` declarations through stable property/layout identities.
@@ -122,7 +124,7 @@ pub(crate) fn run_backend_passes(
     facade: &str,
     plugins: BackendPassPlugins<'_>,
     classifiers: &CheckedBackendClassifiers<'_>,
-    callables: &crate::backend::CheckedBackendCallables,
+    callables: &mut crate::backend::CheckedBackendCallables,
     classpath: &crate::jvm::classpath::Classpath,
     stems: &[String],
     facts: &mut BackendPassFacts,
@@ -134,6 +136,12 @@ pub(crate) fn run_backend_passes(
         jvm_plugin_type_descriptor,
         classifiers,
     );
+    // Plugins run after the frontend/backend handoff and may append checked calls selected by an
+    // exact dependency identity. Freeze those provider-normalized records now, once plugin output
+    // is final and before any realization consumes them. Existing facts remain the original copy.
+    callables
+        .freeze_plugin_super_callables(ir, |identity| classpath.external_callable(identity))
+        .map_err(|_| SkipReason::SuperCalls)?;
     run_backend_passes_after_plugins(
         ir,
         facade,
@@ -161,7 +169,7 @@ fn run_backend_passes_after_plugins(
     // Every body of the file is lowered, so each lifting sequence is whole: name its callables
     // before any pass renders a debug name from them.
     crate::jvm::lifted_names::number(ir);
-    crate::jvm::module_calls::realize_super_calls(ir, classpath)
+    crate::jvm::module_calls::realize_super_calls(ir, callables)
         .map_err(|_| SkipReason::SuperCalls)?;
     crate::jvm::annotation_constructions::lower_annotation_constructions(ir, facade);
     // A property's own annotations become a synthetic marker method — a JVM realization of a Kotlin
@@ -199,7 +207,8 @@ fn run_backend_passes_after_plugins(
     if !crate::jvm::value_classes::record_referenced_value_classes(ir, classifiers) {
         return Err(SkipReason::ValueClasses);
     }
-    facts.override_results = crate::jvm::override_results::box_primitive_override_results(ir);
+    facts.override_results =
+        crate::jvm::override_results::box_primitive_override_results(ir, callables)?;
     crate::jvm::bridges::derive_bridges(
         ir,
         classpath,
@@ -687,7 +696,7 @@ impl JvmBackend {
             mut ir,
             source,
             classifiers,
-            callables,
+            mut callables,
             native_plugins,
             module_name,
             stems,
@@ -708,7 +717,7 @@ impl JvmBackend {
                 module_name,
             },
             &classifiers,
-            &callables,
+            &mut callables,
             &self.cp,
             stems,
             &mut pass_facts,
@@ -969,6 +978,7 @@ impl Backend for JvmBackend {
             &mut file.ir,
             file.stems,
             &self.cp,
+            &file.callables,
             &mut property_realizations,
         ) {
             diags.error(
@@ -1391,6 +1401,7 @@ mod tests {
             "src/jvm/external_calls.rs",
             "src/jvm/function_references.rs",
             "src/jvm/bridges.rs",
+            "src/jvm/module_calls.rs",
         ] {
             let text = std::fs::read_to_string(root.join(relative))
                 .expect("read dependency-callable realization pass");

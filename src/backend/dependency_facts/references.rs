@@ -57,6 +57,26 @@ pub(crate) fn referenced_dependencies(ir: &IrFile) -> ReferencedDependencies {
     referenced
 }
 
+/// Exact dependency declarations selected by semantic `super` calls. Target plugins may append
+/// these calls after the ordinary handoff inventory was frozen, so the JVM boundary re-reads this
+/// narrow carrier once plugin output is final.
+pub(super) fn external_super_callables(ir: &IrFile) -> BTreeSet<ExternalCallableId> {
+    ir.exprs
+        .iter()
+        .filter_map(|expression| match expression {
+            IrExpr::Call {
+                callee:
+                    Callee::Super {
+                        declaration: Some(ResolvedFunctionOverrideTarget::External(declaration)),
+                        ..
+                    },
+                ..
+            } => Some(*declaration),
+            _ => None,
+        })
+        .collect()
+}
+
 impl ReferencedDependencies {
     fn expression(&mut self, ir: &IrFile, expression: &IrExpr) {
         match expression {
@@ -154,6 +174,12 @@ impl ReferencedDependencies {
             Callee::ModuleWithDefaults {
                 default_provider, ..
             } => self.function_override(*default_provider),
+            Callee::Super {
+                declaration: Some(ResolvedFunctionOverrideTarget::External(declaration)),
+                ..
+            } => {
+                self.callables.insert(*declaration);
+            }
             Callee::Local(_)
             | Callee::ClassStatic { .. }
             | Callee::ClassStaticWithDefaults { .. }
