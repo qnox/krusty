@@ -1,6 +1,7 @@
 //! `Unit` used as a first-class value: a `Unit?`-returning expression-body, `Unit` as an `==`/`!=`
-//! operand (materializes `Unit.INSTANCE`), and a `Unit`-typed data-class component (its field/ctor-param/
-//! getter use the `kotlin/Unit` reference, not the illegal `V` descriptor). Round-tripped on the JVM.
+//! operand (materializes `Unit.INSTANCE`), a `Unit`-typed data-class component (its field/ctor-param/
+//! getter use the `kotlin/Unit` reference, not the illegal `V` descriptor), and concatenation of a
+//! `Unit` expression. Round-tripped on the JVM.
 
 use super::common;
 
@@ -56,4 +57,17 @@ fun box(): String {\n\
     return if (h.u == Unit) \"OK\" else \"fail\"\n\
 }\n";
     assert_eq!(run(SRC).expect("Unit data-class component"), "OK");
+}
+
+#[test]
+fn unit_expression_in_a_string_template_appends_the_singleton() {
+    const SRC: &str = "fun g() {}\n\
+fun box(): String {\n\
+    val templ = \"a${g()}b\"\n\
+    val plus = \"a\" + g()\n\
+    if (templ != \"akotlin.Unitb\") return \"templ:$templ\"\n\
+    if (plus != \"akotlin.Unit\") return \"plus:$plus\"\n\
+    return \"OK\"\n\
+}\n";
+    common::expect_box_same_as_kotlinc(SRC, "UnitStringConcatenation");
 }

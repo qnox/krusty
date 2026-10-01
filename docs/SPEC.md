@@ -9550,6 +9550,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `Byte`/`Short`) and marks the call's line there, in a source call and in a callable reference's
   adapter body alike, where krusty boxed the value and called the box's `toString()`. Test:
   `tests/primitive_to_string_e2e.rs`.
+  A `Unit` part of a larger concatenation materializes `kotlin/Unit.INSTANCE` and appends that
+  singleton with `StringBuilder.append(Object)`. Such a part stays off the `invokedynamic` concat,
+  whose argument descriptor cannot be `V`. Test:
+  `tests/unit_value_e2e.rs::unit_expression_in_a_string_template_appends_the_singleton`.
 
 - **Equality with an enum operand compares references** (kotlinc's `Equals`, which takes
   `referenceEquals` when `a.isEnumValue || b.isEnumValue`). `==`/`!=` where either operand's type
