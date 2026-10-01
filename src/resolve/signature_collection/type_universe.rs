@@ -56,6 +56,7 @@ impl SymbolSource for BootstrapSymbolSource<'_> {
         }) {
             std::rc::Rc::new(crate::libraries::ResolvedSymbols {
                 classifier_name: declaration,
+                classifier_declaration_name: declaration,
                 classifier: Some(std::sync::Arc::new(
                     crate::libraries::LibraryType::declaration_header(),
                 )),

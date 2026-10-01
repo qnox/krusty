@@ -2555,6 +2555,11 @@ pub struct ResolvedSymbols {
     /// `pkg/Owner$Local`, and a typealias spelling denotes its target. Providers and scopes therefore
     /// return exactly the same record and the selection loop does not need an origin-specific branch.
     pub classifier_name: Option<TypeName>,
+    /// Stable identity of the declaration that supplied `classifier_name`. For an ordinary class
+    /// this is the same identity; for a typealias it is the alias declaration while
+    /// `classifier_name` is its expanded target. Resolution carries this provenance from the
+    /// provider record instead of reconstructing it from the lookup spelling.
+    pub classifier_declaration_name: Option<TypeName>,
     /// Shared with the type-name memo, so cloning a record never deep-clones the classifier.
     pub classifier: Option<std::sync::Arc<LibraryType>>,
     /// The winning classifier was declared in a `.kotlin_builtins` fragment.

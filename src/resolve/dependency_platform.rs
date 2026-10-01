@@ -348,9 +348,11 @@ impl SymbolSource for DependencyPlatform {
             return merged.clone();
         }
         let primary = self.platform.symbols(namespace, name);
-        let source_alias = namespace
+        let source_alias_identity = namespace
             .existing_classifier(name)
-            .and_then(|identity| self.source_alias_expansion(identity));
+            .filter(|identity| self.source_alias_expansion(*identity).is_some());
+        let source_alias =
+            source_alias_identity.and_then(|identity| self.source_alias_expansion(identity));
         let source = source_alias.as_ref().map_or_else(
             || self.source().symbols(namespace, name),
             |alias| {
@@ -361,6 +363,7 @@ impl SymbolSource for DependencyPlatform {
                 });
                 Rc::new(ResolvedSymbols {
                     classifier_name: Some(alias.target),
+                    classifier_declaration_name: source_alias_identity,
                     classifier,
                     importable_declaration: true,
                     ..ResolvedSymbols::default()
@@ -412,6 +415,15 @@ impl SymbolSource for DependencyPlatform {
         }
         let (source_functions, source_properties) = source.callables.clone().into_parts();
         let classifier_name = primary.classifier_name.or(source.classifier_name);
+        let classifier_declaration_name = if primary.classifier_name.is_some() {
+            primary
+                .classifier_declaration_name
+                .or(primary.classifier_name)
+        } else {
+            source
+                .classifier_declaration_name
+                .or(source.classifier_name)
+        };
         let builtin_classifier = if primary.classifier_name.is_some() {
             primary.builtin_classifier
         } else {
@@ -419,6 +431,7 @@ impl SymbolSource for DependencyPlatform {
         };
         let merged = Rc::new(ResolvedSymbols {
             classifier_name,
+            classifier_declaration_name,
             builtin_classifier,
             classifier,
             callables: Callables::from_parts(

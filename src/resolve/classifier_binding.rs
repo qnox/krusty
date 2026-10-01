@@ -64,8 +64,12 @@ impl Checker<'_> {
                     );
                 }
                 InheritedNestedClassifier::NotFound => {
-                    if let Some(classifier) = self.explicit_import_classifier_name(root_name) {
-                        selected_alias = self.selected_explicit_type_alias(root_name, classifier);
+                    if let Some((classifier, declaration)) =
+                        self.explicit_import_classifier_binding(root_name)
+                    {
+                        selected_alias = declaration.and_then(|identity| {
+                            self.selected_alias_from_identity(identity, classifier)
+                        });
                         ResolvedQualifier::Classifier(classifier)
                     } else if let Some((classifier, alias)) =
                         self.selected_same_package_classifier(root_name)
@@ -205,17 +209,6 @@ impl Checker<'_> {
             formals,
             expansion,
         })
-    }
-
-    /// Alias provenance from the exact import rung that selected `classifier`.
-    fn selected_explicit_type_alias(
-        &self,
-        name: &str,
-        classifier: TypeName,
-    ) -> Option<SelectedTypeAlias> {
-        let path = self.imports.get(name)?;
-        let identity = crate::types::existing_type_name(&path.replace('.', "/"))?;
-        self.selected_alias_from_identity(identity, classifier)
     }
 
     /// Classifier and alias provenance from the current-package rung. The package namespace and

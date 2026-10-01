@@ -203,6 +203,7 @@ impl SymbolSource for CompositeSource<'_> {
             _ => {
                 let mut classifier = None;
                 let mut classifier_name = None;
+                let mut classifier_declaration_name = None;
                 let mut builtin_classifier = false;
                 let mut fns = Vec::new();
                 let mut props = Vec::new();
@@ -211,6 +212,8 @@ impl SymbolSource for CompositeSource<'_> {
                     if classifier.is_none() {
                         classifier = r.classifier.clone();
                         classifier_name = r.classifier_name;
+                        classifier_declaration_name =
+                            r.classifier_declaration_name.or(r.classifier_name);
                         builtin_classifier = r.builtin_classifier;
                     }
                     match &r.callables {
@@ -238,6 +241,7 @@ impl SymbolSource for CompositeSource<'_> {
                 };
                 std::rc::Rc::new(ResolvedSymbols {
                     classifier_name,
+                    classifier_declaration_name,
                     classifier,
                     builtin_classifier,
                     callables,
@@ -503,6 +507,7 @@ mod tests {
                 crate::libraries::Callables::None
             };
             std::rc::Rc::new(ResolvedSymbols {
+                classifier_declaration_name: classifier.as_ref().and(classifier_name),
                 classifier_name: classifier.as_ref().map(|classifier| {
                     classifier
                         .alias_target

@@ -630,6 +630,7 @@ impl crate::symbol_source::SymbolSource for EmptySymbolSource {
         std::rc::Rc::new(ResolvedSymbols {
             builtin_classifier: false,
             classifier_name: Some(internal),
+            classifier_declaration_name: Some(internal),
             classifier: Some(std::sync::Arc::new(classifier)),
             callables,
             importable_declaration: false,

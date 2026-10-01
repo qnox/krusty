@@ -7546,6 +7546,7 @@ mod tests {
             std::rc::Rc::new(crate::libraries::ResolvedSymbols {
                 builtin_classifier: false,
                 classifier_name: classifier.as_ref().and(classifier_name),
+                classifier_declaration_name: classifier.as_ref().and(classifier_name),
                 classifier: classifier.map(std::sync::Arc::new),
                 callables: Callables::None,
                 importable_declaration: false,
@@ -7612,6 +7613,7 @@ mod tests {
             std::rc::Rc::new(crate::libraries::ResolvedSymbols {
                 builtin_classifier: false,
                 classifier_name: classifier.as_ref().and(classifier_name),
+                classifier_declaration_name: classifier.as_ref().and(classifier_name),
                 classifier: classifier.map(std::sync::Arc::new),
                 callables: Callables::None,
                 importable_declaration: false,
@@ -7726,6 +7728,7 @@ mod tests {
                 };
             std::rc::Rc::new(crate::libraries::ResolvedSymbols {
                 builtin_classifier: false,
+                classifier_declaration_name: classifier.as_ref().and(classifier_name),
                 classifier_name: classifier.as_ref().map(|classifier| {
                     classifier
                         .alias_target
@@ -8804,6 +8807,7 @@ mod tests {
                 std::rc::Rc::new(crate::libraries::ResolvedSymbols {
                     builtin_classifier: false,
                     classifier_name: None,
+                    classifier_declaration_name: None,
                     classifier: None,
                     callables: crate::libraries::Callables::Functions(FunctionSet { overloads }),
                     importable_declaration: false,
@@ -8853,6 +8857,7 @@ mod tests {
                 std::rc::Rc::new(crate::libraries::ResolvedSymbols {
                     builtin_classifier: false,
                     classifier_name: None,
+                    classifier_declaration_name: None,
                     classifier: None,
                     callables: crate::libraries::Callables::Functions(FunctionSet { overloads }),
                     importable_declaration: false,

@@ -10761,17 +10761,24 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   spellings uniformly); a class TARGET whose type argument carries the `->`
   (`Map<String, (Int) -> Int>`) keeps its plain class-name alias. An alias whose target is ITSELF a
   generic fn alias reference (`typealias Chain<T> = Mapper<T, String>` — no `->` on the line) is not
-  expanded (unresolved → skip). (`generic_fun_type_alias_substitutes_use_site_args`,
-  `generic_suspend_fun_type_alias`, `class_target_alias_with_fn_type_argument_is_preserved`.)
+  expanded (unresolved → skip). JVM metadata may encode a suspend alias with a continuation-bearing
+  physical `FunctionN`; the JVM provider normalizes that to the source-arity classifier before
+  publishing the common semantic record. A use `Bar<String>` still substitutes into the recorded
+  `(T) -> String` template. Applying the
+  use-site argument to `FunctionN` itself would type the value as `Function1<String>` and reject
+  both the lambda and a dependency parameter that already expanded to `(String) -> String`.
+  (`generic_fun_type_alias_substitutes_use_site_args`,
+  `generic_suspend_fun_type_alias`, `class_target_alias_with_fn_type_argument_is_preserved`,
+  `classpath_generic_function_typealias_substitutes_arguments`,
+  `classpath_suspend_function_typealias_substitutes_arguments`.)
+  Corpus: `compileKotlinAgainstKotlin/typeAliasesKt13181.kt`.
 
 - **An UNRESOLVED local type annotation is an error, not a silent `Error` bind.** `resolve_ty` is
   deliberately lenient (returns `Ty::Error` with no diagnostic) for expression positions, but a
   local whose annotation fails to resolve would take its initializer's shape with every use-site
-  check Error-suppressed — a cross-module `val b: Bar<String> = { "OK" }` (alias declared in another
-  module, not importable) SAM-converts the lambda by its own arity and throws
-  `IncompatibleClassChangeError` at the call expecting the annotated shape (corpus
-  `typeAliasesKt13181.kt`, unlocked by the generic-alias expansion). kotlinc rejects the unresolved
-  annotation; krusty now does too. (`unresolved_local_type_annotation_is_rejected`.)
+  check Error-suppressed — a lambda then SAM-converts by its own arity and throws
+  `IncompatibleClassChangeError` at the call expecting the annotated shape. kotlinc rejects the
+  unresolved annotation; krusty now does too. (`unresolved_local_type_annotation_is_rejected`.)
 
 - **A `suspend Bar.() -> R` value invoked with member syntax is a suspension point.** `b.f()` /
   `b?.f()` where `f: suspend Bar.() -> R` is in lexical scope resolves like the non-suspend

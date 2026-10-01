@@ -336,6 +336,7 @@ impl crate::symbol_source::SymbolSource for ExistingLibrary {
         });
         std::rc::Rc::new(ResolvedSymbols {
             builtin_classifier: false,
+            classifier_declaration_name: classifier.as_ref().and(classifier_name),
             classifier_name: classifier.as_ref().map(|classifier| {
                 classifier
                     .alias_target

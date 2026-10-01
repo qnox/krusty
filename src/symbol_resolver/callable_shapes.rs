@@ -107,6 +107,7 @@ mod tests {
             std::rc::Rc::new(ResolvedSymbols {
                 builtin_classifier: false,
                 classifier_name: classifier.as_ref().and(identity),
+                classifier_declaration_name: classifier.as_ref().and(identity),
                 classifier,
                 callables: Callables::None,
                 importable_declaration: false,

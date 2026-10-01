@@ -1178,6 +1178,7 @@ impl SymbolSource for ModuleSymbols<'_> {
             .existing_classifier(name)
             .filter(|&internal| self.classifier_record(internal).is_some());
         let classifier = classifier_name.and_then(|internal| self.classifier_record(internal));
+        let classifier_declaration_name = classifier.as_ref().and(classifier_name);
         let classifier_name = classifier.as_ref().map(|classifier| {
             classifier
                 .alias_target
@@ -1506,6 +1507,7 @@ impl SymbolSource for ModuleSymbols<'_> {
         let record = std::rc::Rc::new(ResolvedSymbols {
             builtin_classifier: false,
             classifier_name,
+            classifier_declaration_name,
             classifier,
             callables,
             importable_declaration,

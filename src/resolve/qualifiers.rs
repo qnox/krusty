@@ -76,11 +76,9 @@ fn walk_qualifier_with_declaration_identity<S: SymbolSource + ?Sized>(
                 let namespace = SymbolNamespace::Package(package);
                 let record = source.symbols(namespace, segment);
                 if let Some(classifier) = record.classifier_name {
-                    declaration_identity = Some(
-                        namespace
-                            .existing_classifier(segment)
-                            .expect("selected classifier declaration must be interned"),
-                    );
+                    declaration_identity = record
+                        .classifier_declaration_name
+                        .or(record.classifier_name);
                     ResolvedQualifier::Classifier(classifier)
                 } else if source.package_exists(package, segment) {
                     declaration_identity = None;
@@ -101,11 +99,9 @@ fn walk_qualifier_with_declaration_identity<S: SymbolSource + ?Sized>(
                         name: segment.clone(),
                     });
                 };
-                declaration_identity = Some(
-                    namespace
-                        .existing_classifier(segment)
-                        .expect("selected nested classifier declaration must be interned"),
-                );
+                declaration_identity = record
+                    .classifier_declaration_name
+                    .or(record.classifier_name);
                 ResolvedQualifier::Classifier(classifier)
             }
         };
@@ -206,8 +202,60 @@ pub(super) fn classifier_path<S: SymbolSource + ?Sized>(
     source: &S,
     scoped_root: Option<TypeName>,
 ) -> Result<TypeName, QualifierError> {
-    match qualifier_path(path, source, scoped_root)? {
-        ResolvedQualifier::Classifier(internal) => Ok(internal),
+    classifier_path_with_declaration_identity(path, source, scoped_root)
+        .map(|(classifier, _)| classifier)
+}
+
+/// Resolve an absolute classifier import once and retain the declaration identity carried by the
+/// provider record. The identity differs from the selected classifier for a typealias and must not
+/// be reconstructed from `path` after selection.
+pub(super) fn classifier_path_with_declaration_identity<S: SymbolSource + ?Sized>(
+    path: &str,
+    source: &S,
+    scoped_root: Option<TypeName>,
+) -> Result<(TypeName, Option<TypeName>), QualifierError> {
+    let segments = path
+        .split(['.', '/'])
+        .filter(|segment| !segment.is_empty())
+        .map(|segment| (None, segment.to_string()))
+        .collect::<Vec<_>>();
+    let Some((root_expression, root_name)) = segments.first() else {
+        return Err(QualifierError::UnresolvedSegment {
+            expression: None,
+            name: String::new(),
+        });
+    };
+    let (prefix, root_declaration) = if let Some(classifier) = scoped_root {
+        (ResolvedQualifier::Classifier(classifier), None)
+    } else {
+        let namespace = SymbolNamespace::Package(TypeName::ROOT);
+        let record = source.symbols(namespace, root_name);
+        if let Some(classifier) = record.classifier_name {
+            (
+                ResolvedQualifier::Classifier(classifier),
+                record.classifier_declaration_name,
+            )
+        } else if source.package_exists(TypeName::ROOT, root_name) {
+            (
+                ResolvedQualifier::Package(crate::types::type_name_child(
+                    TypeName::ROOT,
+                    root_name,
+                )),
+                None,
+            )
+        } else {
+            return Err(QualifierError::UnresolvedSegment {
+                expression: *root_expression,
+                name: root_name.clone(),
+            });
+        }
+    };
+    let (resolved, selected_declaration) =
+        walk_qualifier_with_declaration_identity(source, prefix, &segments[1..])?;
+    match resolved {
+        ResolvedQualifier::Classifier(internal) => {
+            Ok((internal, selected_declaration.or(root_declaration)))
+        }
         ResolvedQualifier::Package(_) | ResolvedQualifier::Value => {
             Err(QualifierError::UnresolvedSegment {
                 expression: None,
@@ -241,6 +289,7 @@ mod tests {
             if namespace == SymbolNamespace::Package(package) && name == "Tail" {
                 return std::rc::Rc::new(crate::libraries::ResolvedSymbols {
                     classifier_name: Some(crate::types::type_name("Clash/Tail")),
+                    classifier_declaration_name: Some(crate::types::type_name("Clash/Tail")),
                     classifier: Some(std::sync::Arc::new(
                         crate::libraries::LibraryType::declaration_header(),
                     )),
@@ -287,6 +336,9 @@ mod tests {
                 if namespace == SymbolNamespace::Package(package) && name == "Transform" {
                     return std::rc::Rc::new(crate::libraries::ResolvedSymbols {
                         classifier_name: Some(crate::types::type_name("fixture/Target")),
+                        classifier_declaration_name: Some(crate::types::type_name(
+                            "fixture/Transform",
+                        )),
                         classifier: Some(std::sync::Arc::new(
                             crate::libraries::LibraryType::declaration_header(),
                         )),

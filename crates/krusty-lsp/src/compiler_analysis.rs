@@ -441,6 +441,7 @@ impl krusty::symbol_source::SymbolSource for StandaloneKotlinSymbols {
         let identity = krusty::types::type_name("kotlin/Deprecated");
         std::rc::Rc::new(krusty::libraries::ResolvedSymbols {
             classifier_name: Some(identity),
+            classifier_declaration_name: Some(identity),
             classifier: Some(std::sync::Arc::new(classifier)),
             builtin_classifier: false,
             callables: krusty::libraries::Callables::None,

@@ -26739,6 +26739,7 @@ val result = object { fun value(): String = captured }
                 return std::rc::Rc::new(crate::libraries::ResolvedSymbols {
                     builtin_classifier: false,
                     classifier_name: None,
+                    classifier_declaration_name: None,
                     classifier: None,
                     callables: crate::libraries::Callables::Functions(
                         crate::libraries::FunctionSet {
@@ -26769,6 +26770,7 @@ val result = object { fun value(): String = captured }
             let classifier = internal.and_then(import_classifier);
             std::rc::Rc::new(crate::libraries::ResolvedSymbols {
                 builtin_classifier: false,
+                classifier_declaration_name: classifier.as_ref().and(internal),
                 classifier_name: internal.map(|internal| {
                     classifier
                         .as_ref()
@@ -29242,6 +29244,7 @@ fun box(): String {
                 return std::rc::Rc::new(crate::libraries::ResolvedSymbols {
                     builtin_classifier: false,
                     classifier_name: None,
+                    classifier_declaration_name: None,
                     classifier: None,
                     callables: crate::libraries::Callables::None,
                     importable_declaration: false,
@@ -29284,6 +29287,7 @@ fun box(): String {
                 return std::rc::Rc::new(crate::libraries::ResolvedSymbols {
                     builtin_classifier: false,
                     classifier_name: None,
+                    classifier_declaration_name: None,
                     classifier: None,
                     callables: crate::libraries::Callables::Functions(
                         crate::libraries::FunctionSet {
@@ -29454,6 +29458,7 @@ fun box(): String {
             std::rc::Rc::new(crate::libraries::ResolvedSymbols {
                 builtin_classifier: false,
                 classifier_name: None,
+                classifier_declaration_name: None,
                 classifier: None,
                 callables: crate::libraries::Callables::Functions(crate::libraries::FunctionSet {
                     overloads: vec![info],
@@ -49368,9 +49373,12 @@ impl<'a> Checker<'a> {
     /// Kotlin's classifier tower ranks explicit imports ABOVE the current package, which in turn
     /// outranks star imports. `import_levels` already encodes package-vs-star, but the explicit
     /// map is separate, so this rung has to be asked before the same-package one.
-    fn explicit_import_classifier_name(&self, name: &str) -> Option<TypeName> {
+    fn explicit_import_classifier_binding(
+        &self,
+        name: &str,
+    ) -> Option<(TypeName, Option<TypeName>)> {
         let path = self.imports.get(name)?;
-        classifier_path(path, &self.fed_source(), None).ok()
+        classifier_path_with_declaration_identity(path, &self.fed_source(), None).ok()
     }
 
     /// Find a nested type visible from the lexical class receiver stack.

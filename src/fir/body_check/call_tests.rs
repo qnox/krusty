@@ -23,6 +23,7 @@ impl crate::symbol_source::SymbolSource for DependencyDefaultSource {
         std::rc::Rc::new(crate::libraries::ResolvedSymbols {
             builtin_classifier: false,
             classifier_name: None,
+            classifier_declaration_name: None,
             classifier: None,
             callables: if matches {
                 crate::libraries::Callables::Functions(crate::libraries::FunctionSet {
