@@ -17,6 +17,6 @@ pub(super) fn realize(ir: &mut IrFile) {
         let IrExpr::Variable { ty, .. } = &mut ir.exprs[expression as usize] else {
             unreachable!("deferred-local provenance must name its variable declaration")
         };
-        *ty = crate::jvm::ir_emit::ir_ty_to_jvm(&stored_value_ty(declared));
+        *ty = crate::jvm::physical_type::ir_ty_to_jvm(&stored_value_ty(declared));
     }
 }

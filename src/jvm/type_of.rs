@@ -467,7 +467,7 @@ impl Generator<'_, '_> {
         let signature = format!(
             "{}{}",
             declaration.name,
-            super::ir_emit::ir_method_desc(&declaration.params, &declaration.ret)
+            super::method_descriptors::ir_method_desc(&declaration.params, &declaration.ret)
         );
         self.push(TypeOfInsn::New(class));
         self.push(TypeOfInsn::Dup);

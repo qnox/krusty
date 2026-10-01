@@ -1,12 +1,23 @@
 //! JVM type-safe collection barriers selected from resolved override edges.
 //!
 //! Common IR retains the overridden declaration identity and semantic signature. This pass records
-//! one plan per bridge; emission writes that plan and does not select it again.
+//! one plan per bridge and one plan per same-descriptor method entry. Emission writes those plans
+//! and does not select them again.
 
-use crate::ir::{Bridge, BridgeKind, CollectionBarrierPlan, IrFile};
+use crate::ir::{Bridge, BridgeKind, CollectionBarrierPlan, FunId, IrFile, IrFunctionOverride};
 use crate::types::Ty;
 
 pub(crate) use crate::libraries::CollectionBarrierOutcome as BarrierOutcome;
+
+/// JVM method-entry guards for collection overrides whose erased descriptor needs no bridge.
+#[derive(Default)]
+pub(crate) struct MethodEntryBarriers(std::collections::HashMap<FunId, CollectionBarrierPlan>);
+
+impl MethodEntryBarriers {
+    pub(crate) fn plan(&self, function: FunId) -> Option<CollectionBarrierPlan> {
+        self.0.get(&function).copied()
+    }
+}
 
 fn valid_result(outcome: BarrierOutcome, erased: Ty, concrete: Ty) -> bool {
     match outcome {
@@ -46,7 +57,43 @@ fn signed_jvm_primitive(ty: Ty) -> bool {
     )
 }
 
-pub(crate) fn select(ir: &mut IrFile) {
+fn method_entry_semantics(
+    edge: &IrFunctionOverride,
+    physical_result: Ty,
+) -> Option<CollectionBarrierPlan> {
+    let outcome = edge.collection_barrier?;
+    let [parameter] = edge.implementation_parameters.as_slice() else {
+        return None;
+    };
+    (*parameter == Ty::obj("kotlin/Any") && edge.declared_parameters.len() == 1)
+        .then_some(CollectionBarrierPlan {
+            parameter: 0,
+            outcome,
+        })
+        .filter(|plan| valid_result(plan.outcome, edge.applied_result, physical_result))
+}
+
+pub(crate) fn select(
+    ir: &mut IrFile,
+    override_results: &crate::jvm::override_results::OverrideResults,
+    method_entries: &mut MethodEntryBarriers,
+) {
+    method_entries.0.clear();
+    for (&class, edges) in &ir.function_overrides {
+        for edge in edges {
+            if edge.implementation_owner != class {
+                continue;
+            }
+            let Some(function) = crate::jvm::bridges::implementation_function(ir, edge) else {
+                continue;
+            };
+            let physical_result = override_results.physical_result(ir, function);
+            let Some(plan) = method_entry_semantics(edge, physical_result) else {
+                continue;
+            };
+            method_entries.0.insert(function, plan);
+        }
+    }
     for class in &mut ir.classes {
         for bridge in &mut class.bridges {
             let barrier = bridge_semantics(bridge);

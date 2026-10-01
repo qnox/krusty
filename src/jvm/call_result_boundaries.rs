@@ -95,8 +95,8 @@ pub(super) fn realize_call_result_boundaries(ir: &mut IrFile) {
             let call = terminal_call(&ir.exprs, expression)?;
             let declared = *ir.call_declared_ret.get(&call)?;
             let physical = erased_result_slot(ir, call, declared)?;
-            let physical_jvm = crate::jvm::ir_emit::ir_ty_to_jvm(&physical);
-            let target_jvm = crate::jvm::ir_emit::ir_ty_to_jvm(&target);
+            let physical_jvm = crate::jvm::physical_type::ir_ty_to_jvm(&physical);
+            let target_jvm = crate::jvm::physical_type::ir_ty_to_jvm(&target);
             (physical_jvm != target_jvm).then_some((coercion, expression, target, physical))
         })
         .collect::<Vec<_>>();

@@ -3,7 +3,7 @@
 //! A primitive-bounded Kotlin type parameter has two physical forms at this boundary: its real
 //! method uses the primitive bound, while its `$default` stub uses the corresponding JDK wrapper.
 
-use crate::jvm::ir_emit::ir_ty_to_jvm;
+use crate::jvm::physical_type::ir_ty_to_jvm;
 use crate::types::Ty;
 
 /// `(primitive, JDK wrapper)` when `declared` is a non-null type parameter bounded by a JVM

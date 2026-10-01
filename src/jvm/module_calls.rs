@@ -22,7 +22,7 @@ fn jvm_field_access(property: &IrModuleProperty, stems: &[String]) -> Option<Pro
     Some(PropertyAccess::Field {
         owner,
         name: property.name.clone(),
-        descriptor: crate::jvm::names::type_descriptor(crate::jvm::ir_emit::ir_ty_to_jvm(
+        descriptor: crate::jvm::names::type_descriptor(crate::jvm::physical_type::ir_ty_to_jvm(
             &property.ty,
         )),
         is_static,

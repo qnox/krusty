@@ -768,7 +768,7 @@ fn module_property(
         .map(|(owner, is_static)| PropertyFieldAccess {
             owner,
             name: name.to_string(),
-            ty: super::ir_emit::ir_ty_to_jvm(&property.ty),
+            ty: super::physical_type::ir_ty_to_jvm(&property.ty),
             is_static,
         });
     let getter_field = field.clone();

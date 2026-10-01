@@ -41,9 +41,10 @@ mod suspend_results;
 mod synth_members;
 mod unboxing_rewrites;
 use crate::ir::{value_tails, Callee, ExprId, IrExpr, IrFile};
-use crate::jvm::ir_emit::{ir_ty_to_jvm, jvm_tys};
+use crate::jvm::method_descriptors::jvm_tys;
 use crate::jvm::names::{method_descriptor, property_getter_name, type_descriptor};
 use crate::jvm::operation_relocation::clone_below_representation_wrapper;
+use crate::jvm::physical_type::ir_ty_to_jvm;
 use crate::libraries::{InlineKind, SemanticCallRole};
 use crate::types::{existing_type_name, type_name, Ty, TypeName};
 use call_results::CallTypes;
@@ -5358,7 +5359,7 @@ fn desc(t: &Ty) -> String {
 }
 
 fn ir_method_desc(params: &[Ty], ret: &Ty) -> String {
-    method_descriptor(&jvm_tys(params), ir_ty_to_jvm(ret))
+    crate::jvm::method_descriptors::ir_method_desc(params, ret)
 }
 
 /// Collect every `ExprId` reachable from `root` (a function body), so rewrites stay within bodies that

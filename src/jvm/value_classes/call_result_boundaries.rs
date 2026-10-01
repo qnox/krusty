@@ -43,8 +43,8 @@ fn physical_boundary(
     } else {
         target
     };
-    let different_slots =
-        crate::jvm::ir_emit::ir_ty_to_jvm(&physical) != crate::jvm::ir_emit::ir_ty_to_jvm(&target);
+    let different_slots = crate::jvm::physical_type::ir_ty_to_jvm(&physical)
+        != crate::jvm::physical_type::ir_ty_to_jvm(&target);
     // A bare type parameter crosses the erased generic slot as a box even when that slot and the
     // value class's carrier share the same descriptor (for example, `T` and `Slot(Any?)` are both
     // `Object`). Preserve the physical slot as a representation fact; descriptor equality alone

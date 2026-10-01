@@ -460,7 +460,7 @@ fn layout(
 /// kotlinc's `Type.normalize()` descriptor: every reference is `Object`, and the sub-int
 /// primitives are `int`.
 fn normalized_descriptor(ty: Ty) -> String {
-    match crate::jvm::ir_emit::ir_ty_to_jvm(&ty) {
+    match crate::jvm::physical_type::ir_ty_to_jvm(&ty) {
         Ty::Boolean | Ty::Char | Ty::Byte | Ty::Short | Ty::Int => "I".to_string(),
         primitive @ (Ty::Long | Ty::Float | Ty::Double) => {
             crate::jvm::names::type_descriptor(primitive)
@@ -472,7 +472,7 @@ fn normalized_descriptor(ty: Ty) -> String {
 /// The type a parameter's field is declared with: `Object` for every reference, the primitive
 /// itself otherwise.
 fn field_ty(ty: Ty) -> Ty {
-    match crate::jvm::ir_emit::ir_ty_to_jvm(&ty) {
+    match crate::jvm::physical_type::ir_ty_to_jvm(&ty) {
         primitive @ (Ty::Boolean
         | Ty::Char
         | Ty::Byte

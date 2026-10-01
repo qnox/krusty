@@ -69,7 +69,7 @@ pub(super) type MachinePlans = HashMap<u32, MachinePlan>;
 /// The JVM representation kind a spilled local is stored under, matching the continuation field
 /// families the reference compiler uses (`I$0`, `L$0`, …).
 pub(super) fn spill_kind(ty: Ty) -> char {
-    match crate::jvm::ir_emit::ir_ty_to_jvm(&ty) {
+    match crate::jvm::physical_type::ir_ty_to_jvm(&ty) {
         Ty::Int | Ty::Short | Ty::Byte | Ty::Char | Ty::Boolean => 'I',
         Ty::Long => 'J',
         Ty::Float => 'F',

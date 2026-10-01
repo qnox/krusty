@@ -499,15 +499,18 @@ fn emit_bridge(
         } else if er.is_reference()
             && cr.is_reference()
             && crate::jvm::names::instanceof_internal_name(cr) == "java/lang/Void"
+            && crate::jvm::names::instanceof_internal_name(er) != "java/lang/Object"
         {
             // `Nothing?` has only the value `null`, but its concrete JVM descriptor is
             // `java/lang/Void`. A bridge returning a narrower reference (for example a nullable
-            // value class box) must refine the verifier type before `areturn`.
+            // value class box) must refine the verifier type before `areturn`. `Void` is already
+            // a subtype of the erased `Object` return, so that bridge returns it directly.
             let ci = cw.class_ref(&crate::jvm::names::instanceof_internal_name(er));
             code.checkcast(ci);
         } else if er.is_reference()
             && !er.is_array()
             && crate::jvm::names::instanceof_internal_name(cr) == "java/lang/Object"
+            && crate::jvm::names::instanceof_internal_name(er) != "java/lang/Object"
         {
             // Covariant generic DIAMOND: the inherited concrete getter returns the erased
             // `Object` (`val x: T` in a generic base), but an interface in the hierarchy requires

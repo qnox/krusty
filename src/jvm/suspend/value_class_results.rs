@@ -42,7 +42,7 @@ pub(super) fn resumed_carrier(
     classifier: TypeName,
     carrier: Ty,
 ) -> ExprId {
-    let physical = crate::jvm::ir_emit::ir_ty_to_jvm(&carrier);
+    let physical = crate::jvm::physical_type::ir_ty_to_jvm(&carrier);
     let descriptor = format!(
         "(){}",
         crate::jvm::names::type_descriptor(physical.non_null())
@@ -88,7 +88,7 @@ pub(super) fn boxed_carrier(
     classifier: TypeName,
     carrier: Ty,
 ) -> ExprId {
-    let physical = crate::jvm::ir_emit::ir_ty_to_jvm(&carrier);
+    let physical = crate::jvm::physical_type::ir_ty_to_jvm(&carrier);
     let owner = classifier.render();
     let descriptor = format!(
         "({})L{owner};",

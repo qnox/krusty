@@ -9221,6 +9221,26 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `nothing_map_contains_value_reports_absence`,
   `nullable_nothing_list_admits_null_and_rejects_a_foreign_value`).
 
+- **A `Nothing?` override keeps the erased collection bridge, and a non-null `Any` parameter
+  answers `null` itself.** `Map.get` erases to `(Object)Object`. An override `get(key: K): Nothing?`
+  is emitted as `(Object)Ljava/lang/Void;`. Bridge deduplication uses that declaration descriptor,
+  the same one emission writes, so the bridge back to `Object` stays. A value position that treats
+  `Nothing?` as `Any` would drop the bridge and a call through the interface would fail with
+  `AbstractMethodError`. Separately, `contains`/`indexOf`/`lastIndexOf`/`remove`/`containsKey`/
+  `containsValue`/`get` written on non-null `Any` have the same descriptor as the Java member, so
+  there is no bridge. The JVM records one method-entry plan for that override — the parameter and
+  the neutral result — and emission writes it instead of `checkNotNullParameter` on that
+  parameter. `null` therefore returns `false`, `-1`, or `null` and never reaches the body. An
+  ordinary same-descriptor member such as `add(Any)` keeps its parameter assertion and has no
+  neutral return. A nullable parameter and a narrower repository-owned one keep the bridge, which
+  dispatches `null` into the body or rejects it by `instanceof`. Tests:
+  `tests/collection_special_member_stub_e2e.rs`
+  (`nothing_nullable_map_get_matches_kotlinc`,
+  `non_null_any_contains_rejects_null_before_the_parameter_assertion`,
+  `an_ordinary_any_add_keeps_its_parameter_assertion`). Corpus:
+  `bridges/special.kt`, `specialBuiltins/emptyMap.kt`, `specialBuiltins/notEmptyListAny.kt`,
+  `specialBuiltins/notEmptyMap.kt`, `specialBuiltins/bridgeNotEmptyMap.kt`.
+
 - **A nullable use of a bounded type parameter is `@Nullable` and unguarded.** `var c: T?` and a
   constructor parameter `p: T?` admit null even when `T : Number` or `T : Any`. The field, the
   getter, the setter parameter, and a plain constructor parameter are `@Nullable`, and the setter
