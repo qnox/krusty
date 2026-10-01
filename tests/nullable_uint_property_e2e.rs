@@ -24,3 +24,20 @@ fn nullable_uint_property_safe_call_matches_kotlinc() {
         "nullable_uint_property_safe_call",
     );
 }
+
+/// A constructor argument that cannot stay on the stack is spilled and reloaded at the
+/// descriptor's operand type. `Array<UInt>` is `[Lkotlin/UInt;`, not the primitive `[I`.
+#[test]
+fn spilled_unsigned_constructor_arguments_match_kotlinc() {
+    expect_box_same_as_kotlinc(
+        "class Holder(val xs: Array<UInt>, val n: UInt?)\n\
+         fun box(): String {\n\
+         \x20 val xs = arrayOf(7u)\n\
+         \x20 val held = Holder(try { xs } finally { }, try { 7u } finally { })\n\
+         \x20 val first = held.xs[0]\n\
+         \x20 val number = held.n\n\
+         \x20 return if (first == 7u && number == 7u) \"OK\" else \"xs=$first n=$number\"\n\
+         }\n",
+        "spilled_unsigned_constructor_arguments",
+    );
+}
