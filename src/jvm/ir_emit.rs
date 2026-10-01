@@ -71,6 +71,9 @@ mod frame_map;
 mod function_annotations;
 mod function_debug;
 mod function_invocation;
+use function_invocation::{
+    is_high_arity_function, jvm_function_interface, jvm_function_invoke_descriptor,
+};
 mod function_reference_class;
 mod function_reference_invoke;
 mod generated_property_operations;
@@ -110,6 +113,7 @@ mod property_reference_class;
 mod property_reference_values;
 mod return_emission;
 mod safe_calls;
+mod sam_wrapper_class;
 mod scalar_coercion;
 mod shared_cell_declaration;
 mod signature_formatter;
@@ -478,6 +482,8 @@ pub(super) struct EmitEnv<'a> {
     /// class. Common IR deliberately carries none of these representation facts.
     property_reference_realizations:
         &'a crate::jvm::property_references::PropertyReferenceRealizations,
+    /// JVM-only construction plans for Kotlin function-value SAM wrappers.
+    sam_wrapper_realizations: &'a crate::jvm::sam_wrappers::SamWrapperRealizations,
     /// Per-call JVM placeholder/mask/marker plans produced during default-call realization.
     default_call_operands: &'a crate::jvm::default_call_operands::DefaultCallOperands,
     /// File-wide `InnerClasses` candidates prepared once from stable classifier identities.
@@ -1617,6 +1623,7 @@ pub(crate) fn emit_all_with_checked_classifiers(
         java_parameters: opts.java_parameters,
         property_realizations: facts.property_realizations,
         property_reference_realizations: facts.property_reference_realizations,
+        sam_wrapper_realizations: facts.sam_wrapper_realizations,
         default_call_operands: facts.default_call_operands,
         inner_classes: crate::jvm::inner_classes::InnerClasses::new(
             ir,
@@ -3007,6 +3014,9 @@ fn emit_class(
     }
     if let Some(lambda) = &c.lambda {
         return lambda_class::emit_lambda_class(ir, c, lambda, facade, env, opts);
+    }
+    if let Some(wrapper) = &c.sam_wrapper {
+        return sam_wrapper_class::emit_sam_wrapper_class(ir, c, wrapper, facade, env, opts);
     }
     if let Some(lambda) = env.emit_time_machines.suspend_lambda(c.fq_name_id()) {
         return suspend_lambda_class::emit_suspend_lambda_class(ir, c, lambda, facade, env, opts);
@@ -6902,6 +6912,7 @@ struct Emitter<'a> {
     jvm_default: JvmDefaultMode,
     property_realizations: &'a crate::jvm::property_realizations::PropertyRealizations,
     default_call_operands: &'a crate::jvm::default_call_operands::DefaultCallOperands,
+    sam_wrapper_realizations: &'a crate::jvm::sam_wrappers::SamWrapperRealizations,
     suspended_result_returns: &'a crate::jvm::suspend::SuspendedResultReturns,
     intrinsic_probe_continuations: &'a crate::jvm::suspend::IntrinsicProbeContinuations,
     /// The exact source class whose code this emitter is writing. A generated holder has no
@@ -7042,6 +7053,7 @@ impl<'a> Emitter<'a> {
             jvm_default: env.jvm_default,
             property_realizations: env.property_realizations,
             default_call_operands: env.default_call_operands,
+            sam_wrapper_realizations: env.sam_wrapper_realizations,
             suspended_result_returns: env.suspended_result_returns,
             self_companion: singleton_instance_load::self_companion(ir, static_owner),
             intrinsic_probe_continuations: env.intrinsic_probe_continuations,
@@ -8836,8 +8848,11 @@ impl<'a> Emitter<'a> {
                 defaults: default_parameters,
                 default_prefix_count,
             } => {
-                let owner = internal.render();
                 let args = args.clone();
+                if self.emit_nullable_sam_wrapper_new(e, *internal, &args, code) {
+                    return;
+                }
+                let owner = internal.render();
                 // The constructor descriptor + its argument-word count come from ONE source, identified by
                 // the owner NAME (no same-file/other-file/classpath control-flow split):
                 //  - a verbatim descriptor (`ctor_desc`) for a classpath ctor whose signature isn't modeled
@@ -10631,7 +10646,10 @@ impl<'a> Emitter<'a> {
                 self.emits_control_flow(*func)
                     || args.iter().any(|&arg| self.emits_control_flow(arg))
             }
-            IrExpr::New { args, .. } => args.iter().any(|&a| self.emits_control_flow(a)),
+            IrExpr::New { args, .. } => {
+                self.nullable_sam_wrapper_emits_control_flow(e)
+                    || args.iter().any(|&a| self.emits_control_flow(a))
+            }
             // A `lateinit` FIELD read carries its own uninitialized guard (`dup; ifnonnull L; ldc name;
             // invokestatic throwUninitializedPropertyAccessException; L:`), whose join requires the
             // surrounding operand baseline to agree — so an earlier operand is spilled first.
@@ -11279,33 +11297,6 @@ const LMF_METAFACTORY_DESC: &str = "(Ljava/lang/invoke/MethodHandles$Lookup;Ljav
 Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodHandle;\
 Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/CallSite;";
 
-/// A JVM method descriptor `(p1p2…)R` from parameter/return `Ty`s.
-/// The erased SAM descriptor `(Ljava/lang/Object;…)Ljava/lang/Object;` for `FunctionN.invoke`.
-fn sam_descriptor(arity: u8) -> String {
-    let mut s = String::from("(");
-    for _ in 0..arity {
-        s.push_str("Ljava/lang/Object;");
-    }
-    s.push_str(")Ljava/lang/Object;");
-    s
-}
-
-fn is_high_arity_function(arity: u8) -> bool {
-    crate::jvm::names::uses_function_n(usize::from(arity))
-}
-
-fn jvm_function_interface(arity: u8) -> String {
-    crate::jvm::names::function_interface_internal_name(usize::from(arity))
-}
-
-fn jvm_function_invoke_descriptor(arity: u8) -> String {
-    if is_high_arity_function(arity) {
-        "([Ljava/lang/Object;)Ljava/lang/Object;".to_string()
-    } else {
-        sam_descriptor(arity)
-    }
-}
-
 /// The boxed (wrapper) descriptor for a `Ty` — primitives map to their wrapper, references unchanged.
 fn boxed_descriptor(t: Ty) -> String {
     if t.non_null().is_unsigned() {
@@ -11732,6 +11723,7 @@ mod invariant_tests {
             crate::jvm::property_references::PropertyReferenceRealizations::default();
         let default_call_operands =
             crate::jvm::default_call_operands::DefaultCallOperands::default();
+        let sam_wrapper_realizations = crate::jvm::sam_wrappers::SamWrapperRealizations::default();
         let bridge_adaptations = crate::jvm::bridge_adaptations::BridgeAdaptations::default();
         let function_argument_arrays =
             crate::jvm::function_argument_arrays::FunctionArgumentArrays::default();
@@ -11759,6 +11751,7 @@ mod invariant_tests {
                 property_realizations: &property_realizations,
                 property_reference_realizations: &property_reference_realizations,
                 default_call_operands: &default_call_operands,
+                sam_wrapper_realizations: &sam_wrapper_realizations,
             },
             &EmitOptions::default(),
             run,

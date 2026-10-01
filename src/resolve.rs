@@ -138,6 +138,7 @@ mod resolved_type_occurrences;
 mod safe_call_flow;
 mod safe_index;
 mod sam_constructors;
+mod sam_conversion_recording;
 mod source_fragment;
 use source_fragment::SourceFragmentMode;
 mod scope;
@@ -9789,6 +9790,15 @@ pub enum PlatformNarrowing {
     Argument,
 }
 
+/// A functional-interface conversion selected for one expression, plus the suspension of the
+/// value being converted. The signature is the target method; `source_suspend` is the value's own
+/// callable view and is false when a non-suspend value is adapted to a suspend method.
+#[derive(Clone, Debug)]
+pub(crate) struct ResolvedSamConversion {
+    pub signature: crate::symbol_resolver::SamSignature,
+    pub source_suspend: bool,
+}
+
 pub struct TypeInfo {
     pub expr_types: Vec<Ty>,
     /// Exact function signature of each callable-reference expression, captured before an expected
@@ -9844,7 +9854,7 @@ pub struct TypeInfo {
     pub expr_lowers: HashMap<ExprId, ExprLowering>,
     /// Exact functional-interface conversion selected for an argument. Lowering consumes this
     /// declaration directly; it must not rediscover a SAM from the expected type or provider.
-    pub(crate) resolved_sam_conversions: HashMap<ExprId, crate::symbol_resolver::SamSignature>,
+    pub(crate) resolved_sam_conversions: HashMap<ExprId, ResolvedSamConversion>,
     /// Selected statement lowerings that differ from the parser's generic statement shape.
     pub stmt_lowers: HashMap<StmtId, StmtLowering>,
     /// Exact control-flow owner selected for each return statement/expression. Labels are resolved
@@ -11342,6 +11352,9 @@ pub enum ExprLowering {
     SamConstructor {
         result: Ty,
         sam: Box<crate::symbol_resolver::SamSignature>,
+        /// The operand's own callable view is `suspend`. The interface method's suspension is
+        /// `sam.suspend`; this bit is the value being wrapped.
+        source_suspend: bool,
     },
     /// Lambda literal resolution facts: receiver-function closure receiver, if any, and whether capture
     /// collection must stay shallow because the lambda is spliced by an inline call.
@@ -17994,7 +18007,7 @@ impl<'a> Checker<'a> {
                         self.resolved_call_type_args.insert(call, resolved);
                     }
                 }
-                self.record_selected_sam_arguments(args, &selected.applied_params());
+                self.record_selected_sam_arguments(scope, args, &selected.applied_params());
                 let result = selected.callable.ret;
                 let mut member = selected.member_with_return(result);
                 // An `operator fun of` is an ordinary member of the classifier's value facet, and
@@ -18706,7 +18719,7 @@ impl<'a> Checker<'a> {
                     }
                 }
                 if let Ok(ResolvedQualifier::Classifier(internal)) = &member_qualifier {
-                    if let Some(result) = self.check_sam_constructor_call(
+                    match self.check_sam_constructor_call(
                         scope,
                         call,
                         *internal,
@@ -18714,7 +18727,9 @@ impl<'a> Checker<'a> {
                         call_fn_name.as_deref(),
                         expected,
                     ) {
-                        return result;
+                        Ok(Some(result)) => return result,
+                        Ok(None) => {}
+                        Err(()) => return Ty::Error,
                     }
                 }
                 // Nested-class construction `Outer.Inner(args)`.
@@ -19207,7 +19222,7 @@ impl<'a> Checker<'a> {
                         self.set(receiver, Ty::obj_name(classifier));
                         let ret = selected.callable.ret;
                         let member = selected.member_with_return(ret);
-                        self.record_selected_sam_arguments(args, &selected.applied_params());
+                        self.record_selected_sam_arguments(scope, args, &selected.applied_params());
                         self.resolved_calls
                             .insert(call, ResolvedCall::Companion(member));
                         return ret;
@@ -23545,17 +23560,19 @@ impl<'a> Checker<'a> {
                 // functions, and companion `invoke` have already had their scope-tower positions, so a
                 // SAM classifier cannot preempt an applicable declaration (`Metric(4)` must select
                 // `fun Metric(Int)`, not reinterpret `4` as a function value).
-                if let Some(result) = bare_classifier.and_then(|internal| {
-                    self.check_sam_constructor_call(
+                if let Some(internal) = bare_classifier {
+                    match self.check_sam_constructor_call(
                         scope,
                         call,
                         internal,
                         args,
                         call_fn_name.as_deref(),
                         expected,
-                    )
-                }) {
-                    return result;
+                    ) {
+                        Ok(Some(result)) => return result,
+                        Ok(None) => {}
+                        Err(()) => return Ty::Error,
+                    }
                 }
                 if self.script_host_may_declare_call(scope, &fname) {
                     return Ty::Error;
@@ -38843,7 +38860,7 @@ struct Checker<'a> {
     in_script_body: bool,
     /// Accumulated output maps (moved into TypeInfo at the end of `check_file`).
     expr_lowers: HashMap<ExprId, ExprLowering>,
-    resolved_sam_conversions: HashMap<ExprId, crate::symbol_resolver::SamSignature>,
+    resolved_sam_conversions: HashMap<ExprId, ResolvedSamConversion>,
     inferred_fun_rets: HashMap<(u32, u32), Ty>,
     inferred_ext_fun_rets: HashMap<(u32, u32, String), Ty>,
     inferred_method_rets: HashMap<(TypeName, String, Vec<Ty>), Ty>,
@@ -46190,7 +46207,7 @@ impl<'a> Checker<'a> {
             }
         }
         if let Some(signatures) = sam_signatures {
-            self.record_selected_sam_signatures(args, signatures);
+            self.record_selected_sam_signatures(scope, args, signatures);
         }
         let implicit = shape
             .context_sources
@@ -57443,86 +57460,8 @@ impl<'a> Checker<'a> {
         arguments: &[ExprId],
         label: Option<&str>,
         expected: Option<Ty>,
-    ) -> Option<Ty> {
-        let [argument] = arguments else {
-            return None;
-        };
-        // A generic SAM constructor is itself context-sensitive. In
-        // `MutableList<Int>.sortWith(Comparator { a, b -> b - a })`, the first expectation-free
-        // probe sees raw `Comparator<T!>`, but the selected outer parameter later supplies
-        // `Comparator<in Int>`. Rechecking the constructor must specialize its abstract method from
-        // that semantic target before entering the lambda scope; the provisional raw `T!` is not a
-        // declaration and must not survive as the parameter type.
-        let contextual_target = expected
-            .map(Ty::non_null)
-            .filter(|target| target.obj_internal() == Some(internal));
-        let explicit_arguments = self.resolved_explicit_type_args(scope, call);
-        let explicit_target = (!explicit_arguments.is_empty())
-            .then(|| Ty::obj_args_name(internal, &explicit_arguments));
-        let fixed_target = explicit_target.or(contextual_target);
-        let target = fixed_target.unwrap_or_else(|| Ty::obj_name(internal));
-        let signature = self.semantic_sam_signature(target)?;
-        let expected_callable = Ty::fun_with_shape(
-            signature.params.clone(),
-            signature.ret,
-            signature.context_count,
-            signature.has_receiver,
-            signature.suspend,
-        );
-        let postpone_lambda_body = expected.is_none()
-            && self.postponed_argument_depth != 0
-            && matches!(self.file.expr(*argument), Expr::Lambda { .. })
-            && matches!(expected_callable, Ty::Fun(shape) if self.contextual_lambda_accepts_function_shape(*argument, shape));
-        crate::trace_compiler!(
-            "lambda_apply",
-            "SAM constructor call={call:?} expected={expected:?} postponed_depth={} postpone_body={postpone_lambda_body}",
-            self.postponed_argument_depth,
-        );
-        // Construction expectations may already have checked this contextual argument against the
-        // exact SAM method shape. Reuse that semantic result; only a genuinely different probe needs
-        // another traversal for adaptation or specialization.
-        let actual = if postpone_lambda_body {
-            // This constructor is itself a postponed argument of an enclosing call. Its raw SAM
-            // formal (`Comparator<T!>`) is sufficient to prove arity, but is not a valid lexical
-            // type for the lambda body. Do not traverse the body until the selected outer parameter
-            // supplies the applied target (`Comparator<in Int>`); the ordinary selected-argument
-            // commit below observes the changed function parameters and performs that one check.
-            self.set(*argument, expected_callable)
-        } else {
-            let checked = self.expr_types[argument.0 as usize];
-            self.expression_function_type(scope, *argument, checked)
-                .filter(|function| *function == expected_callable)
-                .unwrap_or_else(|| {
-                    self.check_argument_expected(
-                        scope,
-                        *argument,
-                        expected_callable,
-                        signature.has_receiver,
-                        label,
-                    )
-                })
-        };
-        let selected = if fixed_target.is_some() {
-            select_fixed_sam_constructor(&self.fed_source(), signature, target, actual)?
-        } else {
-            select_sam_constructor(&self.fed_source(), signature, actual)?
-        };
-        let specialized_callable = Ty::fun_with_shape(
-            selected.signature.params.clone(),
-            selected.signature.ret,
-            selected.signature.context_count,
-            selected.signature.has_receiver,
-            selected.signature.suspend,
-        );
-        self.set(*argument, specialized_callable);
-        self.expr_lowers.insert(
-            call,
-            ExprLowering::SamConstructor {
-                result: selected.result,
-                sam: Box::new(selected.signature),
-            },
-        );
-        Some(self.set(call, selected.result))
+    ) -> Result<Option<Ty>, ()> {
+        self.check_selected_sam_constructor(scope, call, internal, arguments, label, expected)
     }
 
     /// A nested SAM constructor whose sole argument is a lambda is a contextual producer: its
@@ -58246,12 +58185,17 @@ impl<'a> Checker<'a> {
                 sam.suspend,
             );
             if self.callable_reference_types.get(&argument).copied() == Some(sam_function) {
-                self.resolved_sam_conversions.insert(argument, sam);
+                if let Some(conversion) = self.sam_conversion_record(scope, argument, actual, sam) {
+                    self.resolved_sam_conversions.insert(argument, conversion);
+                }
                 return;
             }
             if self.callable_reference_adapts_to(scope, argument, sam_function) {
+                let recorded = self.sam_conversion_record(scope, argument, actual, sam);
                 self.expr_expected(scope, argument, sam_function);
-                self.resolved_sam_conversions.insert(argument, sam);
+                if let Some(recorded) = recorded {
+                    self.resolved_sam_conversions.insert(argument, recorded);
+                }
                 return;
             }
             let function = self
@@ -58307,7 +58251,11 @@ impl<'a> Checker<'a> {
                         &sam.params,
                         implicit_lambda_label,
                     );
-                    self.resolved_sam_conversions.insert(argument, sam);
+                    if let Some(conversion) =
+                        self.sam_conversion_record(scope, argument, actual, sam)
+                    {
+                        self.resolved_sam_conversions.insert(argument, conversion);
+                    }
                     return;
                 }
                 let return_matches = function.fun_ret().is_some_and(|actual_return| {
@@ -58319,11 +58267,17 @@ impl<'a> Checker<'a> {
                     )
                 });
                 if return_matches {
-                    self.resolved_sam_conversions.insert(argument, sam);
+                    if let Some(conversion) =
+                        self.sam_conversion_record(scope, argument, actual, sam)
+                    {
+                        self.resolved_sam_conversions.insert(argument, conversion);
+                    }
                     return;
                 }
             } else if conversion_matches {
-                self.resolved_sam_conversions.insert(argument, sam);
+                if let Some(conversion) = self.sam_conversion_record(scope, argument, actual, sam) {
+                    self.resolved_sam_conversions.insert(argument, conversion);
+                }
                 return;
             }
         }
@@ -58409,75 +58363,6 @@ impl<'a> Checker<'a> {
             return;
         }
         self.expect_assignable(expected, actual, span, "argument");
-    }
-
-    /// Record a SAM conversion after overload selection has already admitted the argument. Some
-    /// provider call paths contextually type lambdas during candidate selection and therefore do not
-    /// revisit [`Self::expect_call_arg`]; this commit hook preserves the same exact target handoff.
-    fn record_selected_sam_conversion(&mut self, expected: Ty, argument: ExprId) {
-        let Some(sam) = self.semantic_sam_signature(expected) else {
-            return;
-        };
-        let convertible = matches!(self.file.expr(argument), Expr::Lambda { .. })
-            || self.callable_reference_types.contains_key(&argument)
-            || matches!(self.expr_types[argument.0 as usize].non_null(), Ty::Fun(_));
-        if convertible {
-            self.resolved_sam_conversions.insert(argument, sam);
-        }
-    }
-
-    fn record_selected_sam_arguments(&mut self, args: &[ExprId], params: &[Ty]) {
-        for (&argument, &parameter) in args.iter().zip(params) {
-            self.record_selected_sam_conversion(parameter, argument);
-        }
-    }
-
-    fn record_selected_sam_signatures(
-        &mut self,
-        args: &[ExprId],
-        signatures: &[Option<crate::symbol_resolver::SamSignature>],
-    ) {
-        for (&argument, signature) in args.iter().zip(signatures) {
-            if let Some(signature) = signature {
-                self.resolved_sam_conversions
-                    .insert(argument, signature.clone());
-            }
-        }
-    }
-
-    fn record_selected_sam_vararg_arguments(
-        &mut self,
-        args: &[ExprId],
-        params: &[Ty],
-        vararg_index: Option<usize>,
-    ) {
-        for (index, &argument) in args.iter().enumerate() {
-            let Some(mut parameter) = params
-                .get(index)
-                .copied()
-                .or_else(|| vararg_index.and_then(|vararg| params.get(vararg).copied()))
-            else {
-                continue;
-            };
-            if vararg_index.is_some_and(|vararg| index >= vararg)
-                && !self.file.is_spread_arg(argument)
-            {
-                parameter = parameter.array_read_elem().unwrap_or(parameter);
-            }
-            self.record_selected_sam_conversion(parameter, argument);
-        }
-    }
-
-    fn record_resolved_extension_sam_arguments(&mut self, call: ExprId, args: &[ExprId]) {
-        let selected_parameters = match self.resolved_calls.get(&call) {
-            Some(ResolvedCall::Extension(extension)) => {
-                Some((extension.params.clone(), extension.vararg_index))
-            }
-            _ => None,
-        };
-        if let Some((parameters, vararg_index)) = selected_parameters {
-            self.record_selected_sam_vararg_arguments(args, &parameters, vararg_index);
-        }
     }
 
     fn expect_source_constructor_args(
@@ -59828,7 +59713,9 @@ impl<'a> Checker<'a> {
                 if let Some(returned) = actual.fun_ret() {
                     self.expect_assignable(sam.ret, returned, self.span(e), "lambda return");
                 }
-                self.resolved_sam_conversions.insert(e, sam);
+                if let Some(conversion) = self.sam_conversion_record(scope, e, function, sam) {
+                    self.resolved_sam_conversions.insert(e, conversion);
+                }
                 return expected;
             }
         }
@@ -60110,8 +59997,33 @@ impl<'a> Checker<'a> {
         if let Some(function) = self.callable_reference_types.get(&expression).copied() {
             return Some(function);
         }
-        if let Expr::Name(name) = self.file.expr(expression) {
-            if let Some((function, _)) = self.local_callable_type(scope, name) {
+        // A non-null cast keeps the operand's flow identity for smart-cast tracking, but the cast
+        // expression itself owns its resolved target type. In particular, casting a suspend value
+        // to its raw `FunctionN<..., Continuation<...>, Any?>` carrier makes that carrier's callable
+        // shape authoritative for the subsequent invoke. Only a checked name read can recover its
+        // declaration's callable view from the selected lexical identity below.
+        if !matches!(self.file.expr(expression), Expr::Name(_)) {
+            return None;
+        }
+        if let Some((_, local)) = self
+            .expr_access_path(expression)
+            .filter(|path| path.segments.is_empty())
+            .and_then(|path| match path.root {
+                scope::PathRoot::Value(identity) => self.visible_flow_value(scope, identity),
+                _ => None,
+            })
+        {
+            let nominal = local.ty;
+            if let Some(function) = matches!(nominal, Ty::Fun(_))
+                .then_some(nominal)
+                .or(local.callable_reference_type)
+                .or_else(|| {
+                    crate::symbol_resolver::classifier_callable_signature(
+                        &self.fed_source(),
+                        nominal,
+                    )
+                })
+            {
                 return Some(function);
             }
         }
@@ -68626,7 +68538,7 @@ impl<'a> Checker<'a> {
             resolved.context_args = context_args;
             self.resolved_calls
                 .insert(e, ResolvedCall::Extension(Box::new(resolved)));
-            self.record_resolved_extension_sam_arguments(e, args);
+            self.record_resolved_extension_sam_arguments(scope, e, args);
             return Some(ret);
         }
 

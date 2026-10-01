@@ -25,7 +25,6 @@ compileKotlinAgainstKotlin/inlineClasses/privateTopLevelValInDifferentModule.kt
 controlStructures/breakContinueInExpressions/inlinedBreakContinue/initializerBlock.kt
 coroutines/featureIntersection/callableReference/function/adapted.kt
 coroutines/featureIntersection/callableReference/function/local/equalsHashCode.kt
-coroutines/featureIntersection/funInterface/kt50950.kt
 coroutines/featureIntersection/inlineSuspendFinally.kt
 coroutines/featureIntersection/overrideInInlineClass.kt
 coroutines/featureIntersection/suspendFunctionIsAs.kt
@@ -52,10 +51,7 @@ extensionFunctions/extensionFunctionAsASupertypeOfValueClass.kt
 extensionFunctions/kt475.kt
 funInterface/contravariantIntersectionTypeWithNonTrivialCommonSupertype.kt
 funInterface/contravariantIntersectionTypeWithNonTrivialCommonSupertype2.kt
-funInterface/funInterfaceWithSuspendMethod.kt
 funInterface/kt46908_functionSupertype.kt
-funInterface/kt77685-sam.kt
-funInterface/kt77685.kt
 funInterface/noConversionForSubtype.kt
 funInterface/noConversionForSubtypeGeneric.kt
 funInterface/suspendFunInterfaceConversionCodegen.kt
@@ -69,8 +65,6 @@ inference/pcla/pclaRootIsTrySyntheticCallWithDelegate.kt
 inline/callableReferenceOfLocalFun.kt
 inline/localDeclarationsClash.kt
 inlineClasses/equalityForIndyLambdaParameter.kt
-inlineClasses/funInterface/mangledSamWrappers.kt
-inlineClasses/funInterface/mangledSamWrappersGeneric.kt
 inlineSizeReduction/lastBreak.kt
 innerNested/nestedInPackage.kt
 ir/privateSignatures/privateLeakThroughInline.kt
@@ -105,7 +99,6 @@ reified/lambdaNameClash.kt
 reified/reifiedTypeArgumentWithIntersectionTypeAsTypeArgument.kt
 reified/safecast.kt
 sam/constructors/sameWrapperClass.kt
-sam/constructors/sameWrapperClass2.kt
 secondaryConstructors/localClasses.kt
 typeErasure/funWithReifiedTypeParameterContextParameterAndExtensionReceiverInsideClass.kt
 unsignedTypes/implicitIntegerCoercionNamedArg.kt

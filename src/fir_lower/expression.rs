@@ -1672,12 +1672,24 @@ impl BodyLowering<'_> {
                         context_count: conversion.context_count,
                         has_receiver: conversion.has_receiver,
                         suspend: conversion.suspend,
+                        source_suspend: conversion.source_suspend,
                         overrides_non_primitive_result: conversion.overrides_non_primitive_result,
+                        overridden_non_primitive_results: conversion
+                            .overridden_non_primitive_results
+                            .iter()
+                            .map(|ty| ty.get())
+                            .collect(),
                         function_adapter: false,
                         wraps_function_value: false,
                         // The lambda object is created here. A null check applies to a captured
                         // function value, not to this literal.
                         nullable: false,
+                        kotlin_interface: conversion.kotlin_interface,
+                        parameter_identities: conversion
+                            .parameter_identities
+                            .iter()
+                            .cloned()
+                            .collect(),
                     };
                     self.ir.lambda_sam_signature.insert(
                         *impl_fn,

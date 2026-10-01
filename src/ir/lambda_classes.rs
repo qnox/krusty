@@ -52,3 +52,18 @@ impl IrInvokeBridge {
         }
     }
 }
+
+/// The class a target writes for function values converted to one fun interface: shared by every
+/// such conversion in the file, it holds the value in its one field, and `method` implements the
+/// interface's single method by calling the value's `invoke`.
+#[derive(Clone, Debug)]
+pub struct IrSamWrapperClass {
+    pub interface: TypeName,
+    pub method: FunId,
+    /// This generated method's primitive semantic result is a boxed JVM result.
+    pub boxes_primitive_result: bool,
+    /// Logical value-parameter count of a suspend method; its function field adds a continuation.
+    pub suspend_arity: Option<u8>,
+    /// An inline declaration exposes this generated class to its inlined call sites.
+    pub public_inline: bool,
+}

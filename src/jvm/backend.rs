@@ -58,6 +58,8 @@ pub(crate) struct BackendPassFacts {
     /// What the property-reference pass selected for each synthesized reference class. The
     /// value-class pass consumes and extends it; nothing recovers these answers from a spelling.
     property_reference_realizations: crate::jvm::property_references::PropertyReferenceRealizations,
+    /// Physical constructions selected for Kotlin function-value SAM wrappers.
+    sam_wrapper_realizations: crate::jvm::sam_wrappers::SamWrapperRealizations,
 }
 
 /// THE post-lowering, pre-emit JVM pass pipeline — the single definition every consumer (the real
@@ -89,9 +91,10 @@ pub(crate) struct BackendPassFacts {
 ///    that erased reference: a number through `Number`, `Boolean` and `Char` through their wrappers.
 ///    Later representation passes may refine the slot.
 ///
-/// 6. `derive_bridges` — synthesize the `ACC_BRIDGE` methods an override needs to be reachable through
-///    a supertype's erased descriptor. A bridge is a JVM realization of an override, not a Kotlin
-///    declaration, so lowering records only the declarations and this pass derives the bridges.
+/// 6. `sam_wrappers::realize`, then `derive_bridges` — create the JVM class for an existing function
+///    value converted to a Kotlin fun interface, then synthesize the `ACC_BRIDGE` methods an override
+///    needs to be reachable through a supertype's erased descriptor. Both are JVM realizations of
+///    checked declarations; common lowering records only the semantic conversion/override facts.
 ///
 /// 7. `collection_barriers::select` — record collection bridge and method-entry plans.
 ///
@@ -196,6 +199,10 @@ fn run_backend_passes_after_plugins(
     // A null check over an erased call result reads the call's own slot, ahead of the coercion
     // that narrows it; erasure and call-result boundaries below rewrite that coercion.
     crate::jvm::result_null_checks::check_before_result_coercion(ir);
+    // A checked Kotlin function-value conversion is represented by one file-owned wrapper class.
+    // Create it before generic erasure and bridge/value-class realization process its generated
+    // method, retaining nullable-construction sites only in JVM pass facts.
+    facts.sam_wrapper_realizations = crate::jvm::sam_wrappers::realize(ir, facade);
     crate::jvm::generic_erasure::lower_function_type_parameters(ir);
     crate::jvm::deferred_local_storage::realize(ir);
     crate::jvm::call_result_boundaries::realize_call_result_boundaries(ir);
@@ -818,6 +825,7 @@ impl JvmBackend {
                 property_realizations: &property_realizations,
                 property_reference_realizations: &pass_facts.property_reference_realizations,
                 default_call_operands: &pass_facts.default_call_operands,
+                sam_wrapper_realizations: &pass_facts.sam_wrapper_realizations,
             },
             &emit_opts,
             &run,

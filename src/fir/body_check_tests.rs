@@ -1606,3 +1606,29 @@ suspend fun inspect(): Boolean {
         Ty::Fun(signature) if !signature.suspend && signature.params.len() == 2
     ));
 }
+
+#[test]
+fn raw_function_cast_owns_the_following_invoke_shape() {
+    let source = r#"
+import kotlin.coroutines.Continuation
+
+fun invokeRaw(
+    block: suspend () -> Unit,
+    continuation: Continuation<Unit>,
+): Any? = (block as Function1<Continuation<Unit>, Any?>)(continuation)
+"#;
+    let mut diagnostics = DiagSink::new();
+    let platform = crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+        crate::jvm::classpath::Classpath::new(crate::toolchain::classpath_jars_for("")),
+    ))
+    .expect("JVM provider initialization");
+    let analysis = crate::frontend::analyze_source_set_with_features(
+        &[SourceInput::kotlin(source).with_file_stem("RawSuspendFunctionCast")],
+        Box::new(platform),
+        &LangFeatures::new(),
+        &mut diagnostics,
+    );
+
+    assert!(analysis.types[0].is_some(), "body must build checked FIR");
+    assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
+}

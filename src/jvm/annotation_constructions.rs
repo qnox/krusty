@@ -181,6 +181,7 @@ fn annotation_implementation(
         prop_ref: None,
         func_ref: None,
         lambda: None,
+        sam_wrapper: None,
         bridges: Vec::new(),
         interfaces: vec![interface].into(),
         is_object: false,
