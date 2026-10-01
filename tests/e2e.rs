@@ -999,6 +999,8 @@ mod invariant_argument_wildcards_e2e;
 mod invoke_operator_extension_e2e;
 #[path = "invoke_operator_lambda_arg_e2e.rs"]
 mod invoke_operator_lambda_arg_e2e;
+#[path = "invoke_receiver_smartcast_e2e.rs"]
+mod invoke_receiver_smartcast_e2e;
 #[path = "ir_edge_coverage_e2e.rs"]
 mod ir_edge_coverage_e2e;
 #[path = "ir_lower_bail_coverage_e2e.rs"]

@@ -777,6 +777,31 @@ impl<'p, B> Scope<'p, B> {
             .map(|narrowing| narrowing.ty)
     }
 
+    /// The scope this frame was opened under.
+    pub(super) fn enclosing(&self) -> Option<&Scope<'p, B>> {
+        self.parent
+    }
+
+    /// Path facts proved in this frame, not facts inherited from an enclosing one.
+    pub(super) fn own_path_narrowings(&self) -> Vec<(NarrowPath, Ty)> {
+        self.flow
+            .borrow()
+            .paths
+            .iter()
+            .map(|(path, narrowing)| (path.clone(), narrowing.ty))
+            .collect()
+    }
+
+    /// Straight-line read types proved in this frame.
+    pub(super) fn own_local_narrowings(&self) -> Vec<(String, Ty)> {
+        self.flow
+            .borrow()
+            .locals
+            .iter()
+            .map(|(name, ty)| (name.clone(), *ty))
+            .collect()
+    }
+
     /// Drop every path fact rooted at `root` in the whole chain: a write replaced that value.
     pub(crate) fn forget_paths_rooted_at(&self, root: &PathRoot) {
         for rung in self.ancestors() {
