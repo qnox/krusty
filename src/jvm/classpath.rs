@@ -3151,13 +3151,6 @@ impl Classpath {
             .unwrap_or_default()
     }
 
-    /// The target internal name of the classpath `typealias` named `internal` (full name, e.g.
-    /// `kotlin/collections/ArrayList` → `java/util/ArrayList`), or `None` if `internal` is not an alias.
-    pub fn type_alias_target(&self, internal: &str) -> Option<String> {
-        self.type_alias_target_name(type_name(internal))
-            .map(TypeName::render)
-    }
-
     pub fn type_alias_target_name(&self, internal: TypeName) -> Option<TypeName> {
         if self.class_load_error.borrow().is_some() {
             return None;
@@ -3238,7 +3231,7 @@ impl Classpath {
         let class = self.find_name(owner)?;
         super::metadata::metadata_type_aliases(&class)
             .iter()
-            .filter_map(|alias| crate::types::existing_type_name(&alias.name))
+            .map(|alias| alias.name)
             .find(|identity| identity.segment_ref() == name)
     }
 
@@ -3251,7 +3244,7 @@ impl Classpath {
         let class = self.find_name(owner)?;
         let alias = super::metadata::metadata_type_aliases(&class)
             .iter()
-            .find(|alias| crate::types::existing_type_name(&alias.name) == Some(identity))?;
+            .find(|alias| alias.name == identity)?;
         Some((
             type_name(&alias.target),
             alias.formals.clone(),
@@ -3285,32 +3278,6 @@ impl Classpath {
             reversed_segments.push(cursor.segment_ref());
             cursor = cursor.parent().unwrap_or(TypeName::ROOT);
         }
-    }
-
-    /// Textual alias lookup for the unified `symbols(&str)` namespace query. Only a proven package is
-    /// internalized; the leaf spelling is compared against actual alias declarations, so querying a
-    /// unique property/function name cannot pollute the global type-name tree.
-    pub fn type_alias_target_text(&self, internal: &str) -> Option<TypeName> {
-        if self.class_load_error.borrow().is_some() {
-            return None;
-        }
-        if let Some(internal) = crate::types::existing_type_name(internal) {
-            if let Some(target) = self.type_alias_target_name(internal) {
-                return Some(target);
-            }
-        }
-        let package_text = internal.rsplit_once('/').map_or("", |(package, _)| package);
-        let package = crate::types::existing_type_name(package_text).or_else(|| {
-            self.package_tree()
-                .node_for(package_text)
-                .map(|_| crate::types::type_name(package_text))
-        })?;
-        self.package_alias_index(package).and_then(|index| {
-            index
-                .type_aliases
-                .iter()
-                .find_map(|(alias, target)| alias.matches(internal).then_some(*target))
-        })
     }
 
     fn entry_package_types(&self, entry_id: usize, package: TypeName) -> EntryPkgTypes {
@@ -3497,8 +3464,8 @@ impl Classpath {
         // aliases) is built ONCE via `EntryCache` — which holds its map lock across the build — and shared
         // by every classpath that includes the jar. So the expensive scan no longer races across all
         // worker threads on cold start (it dominated `resolve_type` in the flamegraph via
-        // `type_alias_target`); only the cheap map merge runs per classpath. This mirrors the ext index's
-        // per-entry composition (d8bbc91).
+        // `type_alias_target_name`); only the cheap map merge runs per classpath. This mirrors the ext
+        // index's per-entry composition (d8bbc91).
         let mut idx = TypeIndex::default();
         for (entry_id, e) in self.entries.iter().enumerate() {
             let packages = self.entry_packages(entry_id);
