@@ -17,12 +17,20 @@ use crate::types::CapturedContextKind;
 pub(super) fn capture_name(capture: &IrConstructorCapture) -> String {
     match &capture.receiver {
         None => format!("${}", capture.source_name),
-        Some(IrCapturedReceiver::Enclosing) => "this$0".to_string(),
-        Some(IrCapturedReceiver::Callable(label) | IrCapturedReceiver::Lambda(Some(label))) => {
+        Some(receiver) => receiver_name(receiver, 0),
+    }
+}
+
+/// JVM spelling shared by a stored receiver capture and a lifted callable's capture parameter.
+/// Only nested dispatch captures need a caller-supplied occurrence ordinal.
+pub(super) fn receiver_name(receiver: &IrCapturedReceiver, dispatch: usize) -> String {
+    match receiver {
+        IrCapturedReceiver::Enclosing => format!("this${dispatch}"),
+        IrCapturedReceiver::Callable(label) | IrCapturedReceiver::Lambda(Some(label)) => {
             format!("$this_{label}")
         }
-        Some(IrCapturedReceiver::Lambda(None)) => "$this".to_string(),
-        Some(IrCapturedReceiver::Context { kind, types, index }) => match kind {
+        IrCapturedReceiver::Lambda(None) => "$this".to_string(),
+        IrCapturedReceiver::Context { kind, types, index } => match kind {
             CapturedContextKind::Anonymous | CapturedContextKind::FunctionType => {
                 format!(
                     "${}",

@@ -5,8 +5,8 @@
 //! common-IR identity or leaking onto another class-file surface.
 
 use crate::ir::{
-    IrCapturedDeclaration, IrCapturingCallable, IrFile, IrGeneratedParameterRole,
-    IrParameterIdentity, IrParameterRole,
+    IrCapturedDeclaration, IrCapturedReceiver, IrCapturingCallable, IrFile,
+    IrGeneratedParameterRole, IrParameterIdentity, IrParameterRole,
 };
 use crate::jvm::anonymous_context_labels;
 use crate::jvm::capture_names::capture_parameter_local;
@@ -138,6 +138,21 @@ pub(super) fn lambda_receiver(origin: &crate::ir::IrLambdaOrigin) -> String {
     }
 }
 
+/// kotlinc's `LocalDeclarationsLowering` name for the parameter a captured implicit receiver is
+/// lifted into: `this$N` for the Nth captured dispatch receiver, and for an extension receiver
+/// `$` before the receiver's own name with its `$` separators turned into `_` (`$this_with2` for
+/// `$this$with2`, `$this` for a lambda's unlabelled `<this>`).
+fn captured_receiver(origins: &[IrCapturedReceiver], ordinal: usize) -> String {
+    let receiver = origins
+        .get(ordinal)
+        .expect("a lifted callable publishes the origin of each captured receiver");
+    let dispatch = origins[..ordinal]
+        .iter()
+        .filter(|origin| matches!(origin, IrCapturedReceiver::Enclosing))
+        .count();
+    super::capture_names::receiver_name(receiver, dispatch)
+}
+
 /// JVM local-table spelling for a parameter of one exact common-IR function, apart from the
 /// anonymous context labels [`function_locals`] adds for the whole parameter list.
 ///
@@ -149,6 +164,14 @@ fn function_local_variable(
     function: u32,
     identity: &IrParameterIdentity,
 ) -> Option<String> {
+    if let IrParameterRole::CapturedReceiver { ordinal } = identity.role {
+        let origins = &ir
+            .fn_params
+            .get(&function)
+            .expect("a lifted callable publishes its parameters")
+            .captured_receivers;
+        return Some(captured_receiver(origins, ordinal as usize));
+    }
     if matches!(identity.role, IrParameterRole::ExtensionReceiver) {
         // Only a source lambda's implementation takes an extension receiver among the functions
         // with lambda parameters; a generated adapter passes its receiver as a value.

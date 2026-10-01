@@ -61,6 +61,7 @@ mod progressions;
 mod properties;
 #[cfg(test)]
 mod property_tests;
+mod receiver_provenance;
 #[cfg(test)]
 mod receiver_tests;
 #[cfg(test)]
@@ -89,6 +90,8 @@ pub use failure::{BodyCheckFailure, BodyCheckFailureKind, CheckedBodyDriverFailu
 
 use std::collections::HashMap;
 
+use receiver_provenance::ReceiverFrame;
+
 use crate::ast::{BinOp, Expr, ExprId, File, RangeKind, Stmt, StmtId, TemplatePart, UnOp};
 use crate::diag::Span;
 use crate::resolve::{
@@ -107,19 +110,20 @@ use super::{
     FirAdaptedReferenceArgument, FirAnnotationConstruction, FirAnnotationDefaultValue,
     FirAnonymousObject, FirArrayElement, FirBinaryOperation, FirBody, FirBuiltinIterableKind,
     FirCall, FirCallArgument, FirCallTarget, FirCallableReferenceBinding,
-    FirCallableReferenceTarget, FirCapture, FirCaptureSource, FirClassifierProperty, FirConstant,
-    FirConstructorCall, FirConstructorCaptureArgument, FirConstructorTarget, FirControlTarget,
-    FirControlTargetKind, FirConversion, FirConversionKind, FirConvertedValue, FirDefaultValue,
-    FirDelegateCall, FirDelegateDispatchReceiver, FirDestructureEntry, FirExpr, FirExprId,
-    FirExprKind, FirImplicitReceiverCapture, FirIndexedAccessKind, FirInterfaceDelegateArgument,
-    FirIntrinsic, FirJumpKind, FirLocalCallableRef, FirLocalClassCapture,
-    FirLocalClassCaptureSource, FirLoopHeader, FirPlatformNarrowing, FirPluginOperand,
-    FirPropertyDelegatePlan, FirPropertyReferenceTarget, FirPropertyTarget, FirRangeOperation,
-    FirReceiver, FirReferenceAdaptation, FirSamConversion, FirStatement, FirStatementId,
-    FirStatementKind, FirTypeOperation, FirTypeParameterRef, FirTypeSubstitution,
-    FirUnaryOperation, FirValueParameter, FirVarargElement, InlineBodyStore, LocalBinding,
-    LocalCallableId, LocalDelegateBinding, LocalValueId, OriginId, OriginStore, PropertyId,
-    ResolvedCallableHeader, ResolvedModuleIndex, ResolvedTy, SourceFileId, SyntheticOriginKind,
+    FirCallableReferenceTarget, FirCapture, FirCaptureSource, FirCapturedReceiver,
+    FirClassifierProperty, FirConstant, FirConstructorCall, FirConstructorCaptureArgument,
+    FirConstructorTarget, FirControlTarget, FirControlTargetKind, FirConversion, FirConversionKind,
+    FirConvertedValue, FirDefaultValue, FirDelegateCall, FirDelegateDispatchReceiver,
+    FirDestructureEntry, FirExpr, FirExprId, FirExprKind, FirImplicitReceiverCapture,
+    FirIndexedAccessKind, FirInterfaceDelegateArgument, FirIntrinsic, FirJumpKind,
+    FirLocalCallableRef, FirLocalClassCapture, FirLocalClassCaptureSource, FirLoopHeader,
+    FirPlatformNarrowing, FirPluginOperand, FirPropertyDelegatePlan, FirPropertyReferenceTarget,
+    FirPropertyTarget, FirRangeOperation, FirReceiver, FirReferenceAdaptation, FirSamConversion,
+    FirStatement, FirStatementId, FirStatementKind, FirTypeOperation, FirTypeParameterRef,
+    FirTypeSubstitution, FirUnaryOperation, FirValueParameter, FirVarargElement, InlineBodyStore,
+    LocalBinding, LocalCallableId, LocalDelegateBinding, LocalValueId, OriginId, OriginStore,
+    PropertyId, ResolvedCallableHeader, ResolvedModuleIndex, ResolvedTy, SourceFileId,
+    SyntheticOriginKind,
 };
 
 /// The unoptimized expression dispatcher currently reserves about 98 KiB. Checking before the
@@ -523,24 +527,6 @@ struct BodyFirChecker<'a> {
     constructor_prefix_capture_access: bool,
     /// Whether an anonymous-super argument is being evaluated in its enclosing scope.
     hoist_anonymous_super_argument: bool,
-}
-
-#[derive(Clone, Debug)]
-struct ReceiverFrame {
-    /// Width in resolver receiver-tower coordinates, including named context values that are
-    /// materialized as ordinary FIR parameters rather than receiver slots.
-    width: u32,
-    /// Stable owner of this frame's dispatch receiver. Enum entries are classifier-like semantic
-    /// owners even though their anonymous runtime subclass is not a source classifier header.
-    dispatch_owner: Option<DeclarationId>,
-    /// Runtime receiver-slot coordinate of `dispatch_owner` inside this frame.
-    dispatch_depth: Option<u32>,
-    /// Resolver coordinate to runtime receiver-slot coordinate for capturable receivers. Named
-    /// context values are absent because their stable `context_binding` captures the value.
-    capture_depths: HashMap<u32, u32>,
-    /// Receiver coordinates in this frame that are reached through checked enclosing-instance
-    /// edges rather than direct callable slots.
-    structural_paths: HashMap<u32, Box<[DeclarationId]>>,
 }
 
 /// Transient checked context shared only by body callbacks for the currently active source unit.
@@ -1040,231 +1026,6 @@ impl BodyFirChecker<'_> {
             .and_then(|count| count.checked_sub(self.body.context_value_count()))
             .and_then(|count| count.checked_add(u32::from(extension_receiver.is_some())))
             .expect("too many checked-body implicit receivers");
-    }
-
-    /// Semantic receiver frame exposed to a nested callable. Direct callable receivers are ordinary
-    /// slots. A non-local member body can additionally expose outer instances through an `inner`
-    /// classifier chain; publish the exact declaration path for each such coordinate so a nested
-    /// capture never degrades it to type/depth lookup in lowering.
-    fn receiver_frame(&self) -> ReceiverFrame {
-        let mut structural_paths = HashMap::new();
-        let mut capture_depths = HashMap::new();
-        let extension_count = u32::from(self.body.receiver_type().is_some());
-        let context_count = u32::try_from(self.body.context_receiver_types().len())
-            .expect("too many checked-body context receivers");
-        let mut semantic_depth = 0;
-        let mut runtime_depth = 0;
-        if extension_count != 0 {
-            capture_depths.insert(semantic_depth, runtime_depth);
-            semantic_depth += 1;
-            runtime_depth += 1;
-        }
-        for declaration_ordinal in (0..context_count).rev() {
-            if !self
-                .body
-                .is_context_value_ordinal(declaration_ordinal as usize)
-            {
-                capture_depths.insert(semantic_depth, runtime_depth);
-                semantic_depth += 1;
-                runtime_depth += 1;
-            }
-        }
-        if self.body.local_callable().is_some() {
-            return ReceiverFrame {
-                width: self.owned_receiver_count,
-                dispatch_owner: None,
-                dispatch_depth: None,
-                capture_depths,
-                structural_paths,
-            };
-        }
-        let dispatch_owner = self.current_storage_owner();
-        let dispatch_depth = dispatch_owner.map(|_| {
-            capture_depths.insert(semantic_depth, runtime_depth);
-            runtime_depth
-        });
-        let owner = DeclarationId::from_raw(self.body.owner().raw());
-        let mut classifier = self
-            .index
-            .enclosing_classifier(owner)
-            .map(|classifier| classifier.declaration);
-        let mut path = Vec::new();
-        while let Some(current) = classifier {
-            let Some(header) = self.index.declaration_header(current) else {
-                break;
-            };
-            if !header.flags.has(crate::fir::DeclarationFlags::INNER) {
-                break;
-            }
-            let Some(outer) = self
-                .index
-                .declaration_anchor(current)
-                .and_then(|anchor| anchor.owner)
-                .filter(|owner| self.index.classifier_header(*owner).is_some())
-            else {
-                break;
-            };
-            path.push(current);
-            let depth = self
-                .owned_receiver_count
-                .checked_add(
-                    u32::try_from(structural_paths.len())
-                        .expect("too many structural receiver paths"),
-                )
-                .expect("too many implicit receivers");
-            structural_paths.insert(depth, path.clone().into_boxed_slice());
-            capture_depths.insert(depth, depth);
-            classifier = Some(outer);
-        }
-        ReceiverFrame {
-            width: self
-                .owned_receiver_count
-                .checked_add(
-                    u32::try_from(structural_paths.len())
-                        .expect("too many structural receiver paths"),
-                )
-                .expect("too many implicit receivers"),
-            dispatch_owner,
-            dispatch_depth,
-            capture_depths,
-            structural_paths,
-        }
-    }
-
-    /// The nearest stable declaration that owns instance storage for this body. This is a checked
-    /// ownership edge, not a classifier/name search: entry-body members point directly at their
-    /// stable enum-entry declaration, while ordinary members point at a classifier declaration.
-    fn current_storage_owner(&self) -> Option<DeclarationId> {
-        let mut declaration = DeclarationId::from_raw(self.body.owner().raw());
-        loop {
-            let anchor = self.index.declaration_anchor(declaration)?;
-            if matches!(
-                anchor.kind,
-                crate::fir::DeclarationKind::Classifier | crate::fir::DeclarationKind::EnumEntry
-            ) {
-                return Some(declaration);
-            }
-            declaration = anchor.owner?;
-        }
-    }
-
-    fn current_named_context_parameter(
-        &self,
-        name: &str,
-    ) -> Option<(DeclarationId, u32, ResolvedTy)> {
-        let owner = self.current_storage_owner()?;
-        let (ordinal, parameter) = self
-            .index
-            .classifier_header(owner)?
-            .context_parameters
-            .iter()
-            .enumerate()
-            .find(|(_, parameter)| parameter.name.as_deref() == Some(name))?;
-        Some((
-            owner,
-            u32::try_from(ordinal).expect("too many classifier context parameters"),
-            parameter.ty,
-        ))
-    }
-
-    fn enclosing_receiver_capture(
-        &self,
-        receiver_depth: usize,
-    ) -> Option<(u32, u32, Box<[DeclarationId]>)> {
-        let mut depth = receiver_depth.checked_sub(self.owned_receiver_count as usize)?;
-        for (enclosing_depth, frame) in self.outer_receiver_frames.iter().enumerate() {
-            if depth < frame.width as usize {
-                let semantic_depth = u32::try_from(depth).ok()?;
-                let captured_depth = *frame.capture_depths.get(&semantic_depth)?;
-                return Some((
-                    u32::try_from(enclosing_depth).expect("too many nested receiver frames"),
-                    captured_depth,
-                    frame
-                        .structural_paths
-                        .get(&semantic_depth)
-                        .cloned()
-                        .unwrap_or_default(),
-                ));
-            }
-            depth = depth.checked_sub(frame.width as usize)?;
-        }
-        None
-    }
-
-    /// Translate a resolver receiver-tower coordinate beyond this callable's own receiver slots
-    /// into the exact semantic `inner`-classifier path that supplies it at runtime. This publishes
-    /// declaration identities only; how a backend stores each enclosing instance is deliberately
-    /// absent from checked FIR.
-    fn enclosing_receiver_path(
-        &self,
-        selected: &crate::resolve::ImplicitReceiverSelection,
-    ) -> Option<Box<[DeclarationId]>> {
-        // An enum-entry body exposes both the anonymous entry receiver and its parent-enum view as
-        // receiver-tower rungs, but they are the same runtime dispatch object. Publish that exact
-        // alias as the zero-edge enclosing path; lowering then reads the current dispatch slot and
-        // performs no tower interpretation of its own.
-        if let Some(entry) = self.current_storage_owner().filter(|owner| {
-            self.index
-                .declaration_anchor(*owner)
-                .is_some_and(|anchor| anchor.kind == crate::fir::DeclarationKind::EnumEntry)
-        }) {
-            let parent = self
-                .index
-                .declaration_anchor(entry)?
-                .owner
-                .and_then(|owner| self.index.classifier_header(owner))?;
-            if selected.ty.non_null().kotlin_class_internal() == Some(parent.classifier) {
-                return Some(Box::new([]));
-            }
-        }
-        selected
-            .receiver_depth
-            .checked_sub(self.owned_receiver_count as usize)?;
-        let owner = DeclarationId::from_raw(self.body.owner().raw());
-        let mut classifier = self.index.enclosing_classifier(owner)?.declaration;
-        let selected_classifier = selected.classifier;
-        let selected_type = selected.ty.non_null().kotlin_class_internal()?;
-        let matches_selected = |candidate: DeclarationId| {
-            selected_classifier == Some(candidate)
-                || self
-                    .index
-                    .classifier_header(candidate)
-                    .is_some_and(|header| header.classifier == selected_type)
-                || self
-                    .index
-                    .declaration_anchor(candidate)
-                    .filter(|anchor| anchor.kind == crate::fir::DeclarationKind::EnumEntry)
-                    .and_then(|anchor| anchor.owner)
-                    .is_some_and(|parent| {
-                        selected_classifier == Some(parent)
-                            || self
-                                .index
-                                .classifier_header(parent)
-                                .is_some_and(|header| header.classifier == selected_type)
-                    })
-        };
-        let mut path = Vec::new();
-        loop {
-            if matches_selected(classifier) {
-                return Some(path.into_boxed_slice());
-            }
-            let header = self.index.declaration_header(classifier)?;
-            if !header.flags.has(crate::fir::DeclarationFlags::INNER) {
-                return None;
-            }
-            let outer = self
-                .index
-                .declaration_anchor(classifier)?
-                .owner
-                .filter(|owner| {
-                    self.index.classifier_header(*owner).is_some()
-                        || self.index.declaration_anchor(*owner).is_some_and(|anchor| {
-                            anchor.kind == crate::fir::DeclarationKind::EnumEntry
-                        })
-                })?;
-            path.push(classifier);
-            classifier = outer;
-        }
     }
 
     fn failure(&self, span: Option<Span>, kind: BodyCheckFailureKind) -> BodyCheckFailure {

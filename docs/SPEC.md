@@ -1762,6 +1762,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   lifted name and descriptor are already taken in the class it lands in (an enum entry's argument
   lambdas are placed in the enum rather than the entry class kotlinc uses, so they are numbered
   with the enum's) (`tests/lifted_callable_names_e2e.rs`).
+- **Lifted captured receivers.** A lifted lambda or local function takes each implicit receiver it
+  captures as a leading parameter. The Nth captured class instance is `this$N`. An extension
+  receiver is `$` before the receiver's own name, with its `$` separators turned into `_`:
+  `$this_within` for a lambda labelled `within`, `$this_extension` for `fun String.extension()`,
+  `$this_property` for an extension property's accessor, and `$this` for an unlabelled one.
+  Anonymous and function-type context captures retain the complete declared rung, so repeated
+  classifier labels are disambiguated (`$$context-Token$2` on 2.4.20); a legacy context receiver
+  instead uses `$$context_receiver_N`. A named context value remains an ordinary value capture.
+  A lifted receiver lambda's guard quotes its receiver's local name (`$this$within`), not `<this>`
+  (`tests/captured_receiver_names_e2e.rs`).
 - `enum class`: compiled as a `final` class extending `java/lang/Enum` with a `public static final`
   constant per entry, a synthetic `$VALUES` array, a private `(String name, int ordinal, …userArgs)`
   constructor calling `super(name, ordinal)`, a `<clinit>` that constructs entries in declaration

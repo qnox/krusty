@@ -2442,12 +2442,13 @@ impl FirBody {
     }
 
     fn merge_implicit_receiver_capture(&mut self, capture: FirImplicitReceiverCapture) -> bool {
-        if self.implicit_receiver_captures.iter().any(|existing| {
+        if let Some(existing) = self.implicit_receiver_captures.iter().find(|existing| {
             existing.enclosing_depth == capture.enclosing_depth
                 && existing.current == capture.current
                 && existing.depth == capture.depth
                 && existing.path == capture.path
         }) {
+            debug_assert_eq!(existing.receiver, capture.receiver);
             false
         } else {
             self.implicit_receiver_captures.push(capture);
@@ -2741,7 +2742,7 @@ impl FirBody {
             + self
                 .implicit_receiver_captures
                 .iter()
-                .map(|capture| capture.path.len() * std::mem::size_of::<DeclarationId>())
+                .map(FirImplicitReceiverCapture::storage_payload_bytes)
                 .sum::<usize>()
             + self.sam_conversions.len() * std::mem::size_of::<FirSamConversion>()
             + self

@@ -41,6 +41,7 @@ impl BodyFirChecker<'_> {
                     depth: 0,
                     path: path.clone().into_boxed_slice(),
                     ty,
+                    receiver: FirCapturedReceiver::Enclosing,
                 });
             self.body.add_expr(FirExpr {
                 origin,
