@@ -13,12 +13,12 @@ use crate::jvm::names::classfile_internal_name;
 impl ConstPool {
     /// Non-interning lookup of an existing `CONSTANT_Utf8` entry.
     pub(super) fn lookup_utf8(&self, text: &str) -> Option<u16> {
-        self.dedup.get(&Const::Utf8(text.to_string())).copied()
+        self.utf8_index.get(text)
     }
 
     /// Non-interning lookup of an existing `CONSTANT_String` entry.
     pub(super) fn lookup_string(&self, text: &str) -> Option<u16> {
-        let utf8 = self.dedup.get(&Const::Utf8(text.to_string())).copied()?;
+        let utf8 = self.utf8_index.get(text)?;
         self.dedup.get(&Const::String(utf8)).copied()
     }
 

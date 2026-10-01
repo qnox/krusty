@@ -29,6 +29,7 @@ mod method_parameters;
 mod method_rewrite;
 mod pool_layout;
 mod stack_maps;
+mod utf8_pool;
 
 use descriptor_mentions::DescriptorMentionCache;
 
@@ -123,6 +124,8 @@ enum Const {
 struct ConstPool {
     entries: Vec<Const>, // index 0 unused conceptually; we store 1-based via len()
     dedup: HashMap<Const, u16>,
+    /// `CONSTANT_Utf8` slots, keyed by text so a repeat lookup does not allocate a key.
+    utf8_index: utf8_pool::Utf8Pool,
     /// The entry occupying each pool slot, by `slot - 1`. A `Long`/`Double` takes two slots, so
     /// once one is interned slots and entries no longer line up; its second slot holds
     /// [`Self::UNUSABLE_SLOT`], which names no entry.
@@ -138,8 +141,12 @@ impl ConstPool {
     }
 
     fn intern(&mut self, c: Const) -> u16 {
-        if let Some(&i) = self.dedup.get(&c) {
-            return i;
+        if let Const::Utf8(text) = &c {
+            if let Some(index) = self.utf8_index.get(text) {
+                return index;
+            }
+        } else if let Some(&index) = self.dedup.get(&c) {
+            return index;
         }
         let idx = self.slot_count() + 1; // 1-based
         self.slot_entries.push(self.entries.len() as u32);
@@ -147,26 +154,15 @@ impl ConstPool {
             self.slot_entries.push(Self::UNUSABLE_SLOT);
         }
         self.entries.push(c.clone());
-        self.dedup.insert(c, idx);
+        match c {
+            Const::Utf8(text) => self.utf8_index.insert(text, idx),
+            other => {
+                self.dedup.insert(other, idx);
+            }
+        }
         idx
     }
 
-    fn utf8(&mut self, s: &str) -> u16 {
-        self.intern(Const::Utf8(s.to_string()))
-    }
-    fn class(&mut self, internal_name: &str) -> u16 {
-        // Ty→bytecode boundary: a built-in type may reach here under its Kotlin name (`kotlin/Any`);
-        // a `CONSTANT_Class` must carry the JVM name (`java/lang/Object`). Every bare class reference
-        // (class_ref, method/field owner, super, interfaces) funnels through here, so this single
-        // mapping keeps the rest of the compiler free of `java/lang/…` names.
-        let physical = super::names::classfile_internal_name(internal_name);
-        let n = self.utf8(&physical);
-        self.intern(Const::Class(n))
-    }
-    fn string(&mut self, s: &str) -> u16 {
-        let n = self.utf8(s);
-        self.intern(Const::String(n))
-    }
     /// Intern the `CONSTANT_Utf8` for a Kotlin string VALUE, keeping its code units.
     fn utf8_kt(&mut self, s: &KtString) -> u16 {
         match s.as_str() {
@@ -177,15 +173,6 @@ impl ConstPool {
     fn string_kt(&mut self, s: &KtString) -> u16 {
         let n = self.utf8_kt(s);
         self.intern(Const::String(n))
-    }
-    /// Whether a `CONSTANT_Class` for `internal_name` is already in the pool (WITHOUT interning it).
-    /// kotlinc emits an `InnerClasses` entry for a nested class only when it appears as a class
-    /// constant (a `new`/`checkcast`/owner ref), not merely inside a descriptor string.
-    fn has_class(&self, internal_name: &str) -> bool {
-        let mapped = super::jvm_class_map::to_jvm_internal(internal_name);
-        self.dedup
-            .get(&Const::Utf8(mapped.to_string()))
-            .is_some_and(|&u| self.dedup.contains_key(&Const::Class(u)))
     }
     fn class_names(&self) -> Vec<String> {
         self.entries
