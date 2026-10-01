@@ -1,5 +1,6 @@
 //! Compiler orchestration.
 
+mod backend_handoff;
 mod declaration_metadata;
 mod diagnostic_recovery;
 mod metadata_handoff;
@@ -248,21 +249,18 @@ pub fn emit_analyzed<B: Backend>(
         if diags.has_errors() {
             continue;
         }
-        outputs.extend(backend.lower_ir_file(
-            crate::backend::CheckedIrFile {
-                ir,
-                source: source_id,
-                classifiers: crate::backend::CheckedBackendClassifiers::new(
-                    &backend_module_facts,
-                    symbols.semantic_platform(),
-                ),
-                native_plugins: symbols.native_plugins(),
-                module_name,
-                stems,
-            },
-            &mut state,
+        let Some(file) = backend_handoff::checked_ir_file(
+            ir,
+            source_id,
+            &backend_module_facts,
+            &symbols,
+            module_name,
+            stems,
             diags,
-        ));
+        ) else {
+            continue;
+        };
+        outputs.extend(backend.lower_ir_file(file, &mut state, diags));
     }
     assert!(
         default_arguments.is_empty(),

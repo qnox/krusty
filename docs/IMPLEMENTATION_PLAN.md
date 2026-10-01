@@ -4883,8 +4883,8 @@ plugin-generated serializers) record no selection.
 ## Checked facts at the IR/backend boundary  ◐
 
 A backend emits from checked IR and the frozen facts beside it; it does not reconstruct a frontend
-decision from a spelling or query a symbol provider again. These are additive IR contracts that the
-JVM backend does not need to read, and that a program-producing backend (the native one) consumes.
+decision from a spelling. Dependency callables are frozen and consumed by the JVM realization
+passes; a dependency classifier is still answered through its provider during emission.
 - ✅ The program entry point: the resolver selects each source unit's Kotlin `main` once, where it
   classifies top-level conflicts (`fir::MainEntryShape`, preferring `main(args)` over a parameterless
   `main()`), and records it in the module index (`source_entry_point`); common lowering maps that
@@ -4896,6 +4896,24 @@ JVM backend does not need to read, and that a program-producing backend (the nat
   `main(args)` gets a second `main([Ljava/lang/String;)V` and panics in frame computation. Moving it
   to `entry_point` fixes both but changes JVM output, so it is a separate change checked against
   kotlinc.
+- ✅ Dependency callable facts (`CheckedIrFile::callables`, `backend/dependency_facts.rs`). At the
+  frontend/backend boundary (`compiler/backend_handoff.rs`) every `ExternalCallableId` the file's IR
+  references (its expressions, default providers, function and property override edges, dependency
+  primary and secondary super constructors, and delegate conventions) is copied from its provider
+  once. The record separates the provider-selected physical owner from declaration/reflection
+  spelling and carries the exact invocation, default-call, inline, generic, and representation facts
+  the JVM consumes. The table answers only for identities the IR holds. External calls,
+  constructors, callable references, and override bridges consume it without querying the classpath
+  callable table again.
+- ☐ Dependency property facts, one per `ExternalPropertyId` the IR references.
+  Property-reference realization still asks the provider for the selected property's accessor ids;
+  that property-owned lookup is not a second authority for a callable already carried by this table.
+- ☐ Freeze the referenced dependency classifier facts too. `CheckedBackendClassifiers` still holds
+  the provider (`&dyn SymbolSource`) and answers a dependency classifier by asking it during
+  emission (`backend/module_facts.rs`), so a backend is not yet provider-free; only callables are.
+- ☐ Publish a separate semantic Kotlin owner for dependency declarations. The frozen
+  `physical_owner` is deliberately the provider's target container (a mapped builtin's JVM class or
+  a top-level facade) and is consumed only as a realization fact.
 
 ## The SAM method on a conversion  ✅
 
