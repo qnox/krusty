@@ -76,14 +76,10 @@ pub trait MethodBodies {
         None
     }
 
-    /// Whether `owner` is an interface, which determines the constant-pool reference kind.
-    fn owner_is_interface(&self, _owner: &str) -> bool {
+    /// Whether the already-resolved `owner` is represented by a JVM interface, which determines
+    /// the constant-pool reference kind.
+    fn owner_is_interface_name(&self, _owner: TypeName) -> bool {
         false
-    }
-
-    /// [`Self::owner_is_interface`] for a classifier that is already interned.
-    fn owner_is_interface_name(&self, owner: TypeName) -> bool {
-        self.owner_is_interface(&owner.render())
     }
 
     /// Whether an instruction-level method or field reference is private to its defining class.
@@ -141,5 +137,39 @@ pub trait MethodBodies {
     /// JVM storage for an already-resolved semantic singleton classifier.
     fn singleton_storage(&self, _classifier: TypeName) -> Option<(TypeName, String)> {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+
+    use super::MethodBodies;
+    use crate::jvm::classreader::MethodCode;
+    use crate::types::{type_name, TypeName};
+
+    struct IdentityProbe {
+        owner: RefCell<Option<TypeName>>,
+    }
+
+    impl MethodBodies for IdentityProbe {
+        fn body(&self, _owner: &str, _name: &str, _descriptor: &str) -> Option<MethodCode> {
+            None
+        }
+
+        fn owner_is_interface_name(&self, owner: TypeName) -> bool {
+            self.owner.replace(Some(owner));
+            owner == type_name("sample/Interface")
+        }
+    }
+
+    #[test]
+    fn interface_probe_preserves_the_resolved_owner_identity() {
+        let probe = IdentityProbe {
+            owner: RefCell::new(None),
+        };
+        let interface = type_name("sample/Interface");
+        assert!(probe.owner_is_interface_name(interface));
+        assert_eq!(probe.owner.take(), Some(interface));
     }
 }
