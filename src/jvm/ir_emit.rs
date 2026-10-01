@@ -10093,6 +10093,7 @@ impl<'a> Emitter<'a> {
                     // descriptor and emit a plain virtual/interface call. The classpath-operator
                     // special-casing below only applies to the `descriptor` form (a classpath receiver).
                     if let Some((param_tys, ret_ty)) = params {
+                        let owner_identity = *owner;
                         let owner = owner.render();
                         let name = name.clone();
                         let ptys = jvm_tys(param_tys);
@@ -10126,29 +10127,26 @@ impl<'a> Emitter<'a> {
                             return;
                         }
                         let aw: i32 = ptys.iter().map(|t| slot_words(*t) as i32).sum();
-                        if let Some(bridge) = bridge {
-                            let mut bridge_params =
-                                Vec::with_capacity(bridge.bridge_parameters.len() + 1);
-                            bridge_params.push(Ty::obj_name(bridge.owner));
-                            bridge_params.extend(bridge.bridge_parameters.iter().copied());
-                            let bridge_descriptor = method_descriptor(&bridge_params, ret);
-                            let bridge_name = format!("access${name}");
-                            let method = self.cw.methodref(
-                                &bridge.owner.render(),
-                                &bridge_name,
-                                &bridge_descriptor,
-                            );
-                            self.mark_call_start(e, code);
-                            code.invokestatic(method, aw + 1, physical_call_result_words(ret));
-                        } else if interface {
-                            let m = self.cw.interface_methodref(&owner, &name, &descriptor);
-                            self.mark_call_start(e, code);
-                            code.invokeinterface(m, aw, physical_call_result_words(ret));
-                        } else {
-                            let m = self.cw.methodref(&owner, &name, &descriptor);
-                            self.mark_call_start(e, code);
-                            code.invokevirtual(m, aw, physical_call_result_words(ret));
-                        }
+                        self.mark_call_start(e, code);
+                        access_bridges::emit_selected_member_call(
+                            self.ir,
+                            self.run,
+                            self.static_owner,
+                            self.cw,
+                            code,
+                            &access_bridges::SelectedMemberCall {
+                                expression: e,
+                                owner_identity,
+                                owner: &owner,
+                                name: &name,
+                                descriptor: &descriptor,
+                                parameters: &ptys,
+                                result: ret,
+                                interface_owner: interface,
+                                argument_words: aw,
+                                protected: bridge.as_ref(),
+                            },
+                        );
                         return;
                     }
                     let owner_identity = *owner;

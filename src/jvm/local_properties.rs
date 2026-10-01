@@ -28,6 +28,7 @@ pub(super) fn realize(
             realizations.record_local(access.operation, access.target);
             mark_private_cross_class_access(ir, &layout, access.operation, access.read);
         }
+        mark_private_member_extension(ir, &layout, access.operation, access.read);
     }
     Ok(())
 }
@@ -72,4 +73,25 @@ fn mark_private_cross_class_access(
             ir.jvm_member_targets.insert(operation, getter);
         }
     }
+}
+
+/// A private member-extension accessor is an instance method of the declaring class. Another class
+/// reaches it through `access$<name>`, the same bridge an ordinary private member uses. The
+/// cross-owner walk bridges the function only when a different class calls it, so a call inside
+/// the declaring class stays direct.
+fn mark_private_member_extension(
+    ir: &mut IrFile,
+    layout: &IrLocalPropertyLayout,
+    operation: ExprId,
+    read: bool,
+) {
+    let IrLocalPropertyLayout::MemberExtension { getter, setter, .. } = layout else {
+        return;
+    };
+    let function = if read { Some(*getter) } else { *setter };
+    let Some(function) = function.filter(|&function| ir.method_visibility(function).is_private())
+    else {
+        return;
+    };
+    ir.jvm_member_targets.insert(operation, function);
 }
