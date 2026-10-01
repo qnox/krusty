@@ -27,6 +27,9 @@ pub struct ResolvedSuperCall {
     /// Stable source declaration selected for this call. Dependency declarations leave this unset;
     /// current-compilation defaults use it to retain their exact checked default-expression owner.
     pub stable_declaration: Option<crate::fir::DeclarationId>,
+    /// Stable dependency declaration selected for this call. Resolution keeps the declaration it
+    /// selected; a target realizes the declaration's physical holder from this identity.
+    pub external: Option<crate::fir::ExternalCallableId>,
     /// Kotlin property declaration selected by property syntax. The callable declaration above is
     /// still the exact accessor target used by FIR; editor/navigation consumers use this identity
     /// to reach the source property rather than its generated getter or setter.
@@ -49,6 +52,7 @@ impl ResolvedSuperCall {
     ) -> Option<Self> {
         let realization = member.realization;
         let stable_declaration = member.stable_declaration;
+        let external = member.external_identity;
         let source_member = member.source_member;
         let external_property = member.external_property_identity;
         let suspend = member.suspend();
@@ -84,6 +88,7 @@ impl ResolvedSuperCall {
             interface,
             realization,
             stable_declaration,
+            external,
             property_declaration: None,
             source_member,
             external_property,
@@ -276,6 +281,7 @@ impl Checker<'_> {
                     interface,
                     realization,
                     stable_declaration,
+                    external: callable.external_identity,
                     property_declaration,
                     source_member: setter.source_member,
                     external_property: callable.external_property_identity,

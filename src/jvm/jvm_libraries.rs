@@ -1912,22 +1912,15 @@ impl JvmLibraries {
                     }
                 }
                 // A concrete Kotlin interface declaration may have no body on the interface at
-                // all. Normalize that ABI at the provider boundary: semantic selection still sees
-                // the metadata declaration, while lowering receives the exact static holder owner,
-                // name, and descriptor as its ordinary direct realization.
+                // all. Ordinary calls still dispatch through the interface method, as kotlinc's do;
+                // only a nonvirtual `super` call needs the body, so the provider publishes the
+                // exact receiver-first holder static as that call's target.
                 if ci.is_interface()
                     && declaration.is_some_and(|declaration| !declaration.is_abstract())
                     && m.is_abstract()
                 {
-                    if let Some((holder, holder_method_descriptor)) =
-                        interface_holder_method(&self.cp, internal_name, &m.name, &m.descriptor)
-                    {
-                        member.owner = Some(holder);
-                        member.descriptor = holder_method_descriptor;
-                        member.realization = crate::libraries::MemberRealization::Direct {
-                            pass_receiver: true,
-                        };
-                    }
+                    member.nonvirtual_realization =
+                        interface_holder_method(&self.cp, internal_name, &m.name, &m.descriptor);
                 }
                 // The declared return classifier comes directly from the metadata declaration. A
                 // nullable declared return stays absent because it is genuinely boxed.
@@ -1972,6 +1965,9 @@ impl JvmLibraries {
                     // re-threads the CPS `Continuation` at the call. `physical_params` retains the classfile
                     // shape while `params` is the normalized source-semantic shape used by resolution.
                     member.descriptor = strip_continuation_param(&member.descriptor);
+                    if let Some(holder) = member.nonvirtual_realization.as_deref_mut() {
+                        holder.descriptor = strip_continuation_param(&holder.descriptor);
+                    }
                 }
                 if is_map && member.name == "put" {
                     member.set_ret_nullable(true);
@@ -2408,12 +2404,12 @@ impl JvmLibraries {
                         params.len() >= real_end
                             && params[real_start..real_end] == expected_real_params
                     };
-                    constructor.constructor_realization = ci.methods.iter().find_map(|method| {
+                    constructor.nonvirtual_realization = ci.methods.iter().find_map(|method| {
                         let params = marker_parameters(method)?;
                         (params.len() == outer_count + source_count + 1
                             && real_parameters_match(&params))
                         .then(|| {
-                            Box::new(crate::libraries::ConstructorCallRealization {
+                            Box::new(crate::libraries::NonvirtualCallRealization {
                                 owner: internal_name,
                                 descriptor: method.descriptor.clone(),
                             })
@@ -3372,7 +3368,7 @@ fn strip_continuation_param(desc: &str) -> String {
     desc.to_string()
 }
 
-/// Exact physical realization of a legacy concrete interface declaration, if the classpath
+/// Exact nonvirtual realization of a legacy concrete interface declaration, if the classpath
 /// publishes one. Semantic selection stays on the metadata declaration; this only couples it to the
 /// matching receiver-first static method at the provider boundary.
 fn interface_holder_method(
@@ -3380,7 +3376,7 @@ fn interface_holder_method(
     interface: TypeName,
     name: &str,
     descriptor: &str,
-) -> Option<(TypeName, String)> {
+) -> Option<Box<crate::libraries::NonvirtualCallRealization>> {
     // `$DefaultImpls` also exists in compatibility mode, where the interface method itself is
     // concrete and remains the dispatch target. Only the legacy shape has an ABSTRACT interface
     // method whose implementation must be replaced by the receiver-first holder static. Keeping
@@ -3402,7 +3398,10 @@ fn interface_holder_method(
                 &method.descriptor,
             )
     })?;
-    Some((holder, method.descriptor.clone()))
+    Some(Box::new(crate::libraries::NonvirtualCallRealization {
+        owner: holder,
+        descriptor: method.descriptor.clone(),
+    }))
 }
 
 pub(crate) fn parse_method_desc(desc: &str) -> Option<(Vec<Ty>, Ty)> {
@@ -3848,15 +3847,8 @@ impl JvmLibraries {
                 getter.owner_is_interface = ci.is_interface();
                 getter.is_abstract = mp.is_abstract;
                 getter.inline = property_accessor_inline(getter_public);
-                if let Some((holder, descriptor)) =
-                    interface_holder_method(&self.cp, cn, &getter.name, &getter.descriptor)
-                {
-                    getter.owner = holder;
-                    getter.descriptor = descriptor;
-                    getter.member_realization = crate::libraries::MemberRealization::Direct {
-                        pass_receiver: true,
-                    };
-                }
+                getter.nonvirtual_realization =
+                    interface_holder_method(&self.cp, cn, &getter.name, &getter.descriptor);
                 let getter_signature = self
                     .member_functions(recv, &getter.name)
                     .overloads
@@ -3899,15 +3891,8 @@ impl JvmLibraries {
                     setter.context_count = context_count;
                     setter.owner_is_interface = ci.is_interface();
                     setter.is_abstract = mp.is_abstract;
-                    if let Some((holder, descriptor)) =
-                        interface_holder_method(&self.cp, cn, &setter.name, &setter.descriptor)
-                    {
-                        setter.owner = holder;
-                        setter.descriptor = descriptor;
-                        setter.member_realization = crate::libraries::MemberRealization::Direct {
-                            pass_receiver: true,
-                        };
-                    }
+                    setter.nonvirtual_realization =
+                        interface_holder_method(&self.cp, cn, &setter.name, &setter.descriptor);
                     Some(setter)
                 });
                 overloads.push(PropertyInfo {
@@ -5197,6 +5182,7 @@ impl JvmLibraries {
                             default_realization: self
                                 .member_default_realization(physical_owner, m)
                                 .map(Box::new),
+                            nonvirtual_realization: m.nonvirtual_realization.clone(),
                             ..LibraryCallable::library(
                                 physical_owner,
                                 m.physical_name.clone().unwrap_or_else(|| m.name.clone()),

@@ -229,6 +229,7 @@ pub(super) fn add_serializer_members(
             realization: crate::libraries::MemberRealization::Dispatch,
             descriptor: String::new(),
             source: None,
+            external: None,
             defaults: Vec::new(),
             source_member: None,
         },

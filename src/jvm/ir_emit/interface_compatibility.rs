@@ -59,8 +59,7 @@ pub(super) fn emit_inherited_default_surface(
                            is_abstract: bool,
                            visibility: crate::types::Visibility,
                            realization: crate::libraries::MemberRealization,
-                           owner: Option<crate::types::TypeName>,
-                           descriptor: &str,
+                           nonvirtual: Option<&crate::libraries::NonvirtualCallRealization>,
                            cw: &mut ClassWriter,
                            default_impls: &mut Option<ClassWriter>| {
             let key = method_key(name, param_tys);
@@ -71,20 +70,15 @@ pub(super) fn emit_inherited_default_surface(
             if is_abstract || visibility == crate::types::Visibility::Private {
                 return;
             }
-            let target = match realization {
+            let target = match (nonvirtual, realization) {
                 // The dependency's `disable` realization: its holder static is the only body.
-                crate::libraries::MemberRealization::Direct {
-                    pass_receiver: true,
-                } => {
-                    let Some(holder) = owner else { return };
-                    JdHolderTarget::DependencyHolder {
-                        declaring: interface,
-                        holder,
-                        descriptor,
-                    }
-                }
+                (Some(holder), _) => JdHolderTarget::DependencyHolder {
+                    declaring: interface,
+                    holder: holder.owner,
+                    descriptor: &holder.descriptor,
+                },
                 // A Kotlin default method somewhere above: bridge through this interface itself.
-                crate::libraries::MemberRealization::Dispatch if shape.is_kotlin => {
+                (None, crate::libraries::MemberRealization::Dispatch) if shape.is_kotlin => {
                     JdHolderTarget::AccessBridge
                 }
                 // A JAVA default method never joins the Kotlin compatibility surface.
@@ -213,8 +207,7 @@ pub(super) fn emit_inherited_default_surface(
                 member.is_abstract(),
                 member.visibility,
                 member.realization,
-                member.owner,
-                &member.descriptor,
+                member.nonvirtual.as_deref(),
                 cw,
                 default_impls,
             );

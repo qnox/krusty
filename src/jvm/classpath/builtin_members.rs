@@ -154,7 +154,7 @@ impl Classpath {
                         return_value_status: Some(m.return_value_status),
                         default_values: Vec::new(),
                         default_realization: None,
-                        constructor_realization: None,
+                        nonvirtual_realization: None,
                         declared_ret: None,
                         implicit_classifier_callable: None,
                         associated_classifier: None,

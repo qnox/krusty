@@ -2930,6 +2930,7 @@ impl BodyFirChecker<'_> {
                     .stable_declaration
                     .and_then(|declaration| self.index.callable_for_declaration(declaration))
                     .map(|callable| callable.id),
+                external: target.external,
                 source_member: target.source_member.clone(),
                 suspend: target.suspend,
             },

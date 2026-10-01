@@ -151,9 +151,6 @@ properties/backingField/typeCheckSupertypeWithValueClassExplicitBackingField.kt
 properties/complexPropertyInitializer.kt
 ranges/contains/generated/doubleRangeUntil.kt
 ranges/contains/inComparableRange.kt
-ranges/contains/inOptimizableDoubleRange.kt
-ranges/contains/inOptimizableFloatRange.kt
-ranges/contains/inRangeWithCustomContains.kt
 reflection/functions/genericOverriddenFunction.kt
 reflection/functions/typeParameterInReturnType.kt
 reflection/noReflectAtRuntime/methodsFromAny/delegatedProperty.kt

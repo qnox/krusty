@@ -30037,7 +30037,7 @@ fun box(): String {
                         equality_bound: None,
                         default_values: Vec::new(),
                         default_realization: None,
-                        constructor_realization: None,
+                        nonvirtual_realization: None,
                         declared_ret: None,
                         implicit_classifier_callable: None,
                         plugin_expression: None,

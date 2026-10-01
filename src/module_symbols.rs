@@ -948,7 +948,7 @@ fn fn_info(
         generic_sig: sig.generic_sig.clone().map(Box::new),
         singleton_dispatch: None,
         default_realization: None,
-        constructor_realization: None,
+        nonvirtual_realization: None,
         // A SOURCE callable's `ret` is already the declared type and its `physical_ret` is not yet
         // erased, so there is no carrier-vs-box question for the value-class pass to answer here — it
         // sees the declaration itself. The fact exists for callables read back from a class file.
@@ -1060,7 +1060,7 @@ fn source_callable(
         generic_sig: None,
         singleton_dispatch: None,
         default_realization: None,
-        constructor_realization: None,
+        nonvirtual_realization: None,
         // See the note in the builder above: a source callable carries its declaration un-erased.
         declared_ret: None,
     }
