@@ -8,7 +8,7 @@
 use super::{erase, nullable_is_boxed, Under};
 use crate::fir::ResolvedFunctionOverrideTarget;
 use crate::ir::{IrExpr, IrFile, IrTypeOp, IrValueClassSuspendResult};
-use crate::types::Ty;
+use crate::types::{Ty, TypeName};
 use std::collections::HashSet;
 
 /// Record the representation of every suspend function's result and of every suspend call's
@@ -20,18 +20,44 @@ pub(super) fn record_suspend_results(
     suspend_functions: &HashSet<u32>,
 ) -> HashSet<u32> {
     let forced = force_boxed_results(ir, under, declared_results, suspend_functions);
+    // A suspend lambda's `invoke` erases its result to `Object`, so its implementation returns the
+    // value class boxed, as every lambda does, unless its SAM method declares that very value class.
+    let lambdas = ir
+        .exprs
+        .iter()
+        .filter_map(|expression| match expression {
+            IrExpr::Lambda { impl_fn, .. } => Some(*impl_fn),
+            _ => None,
+        })
+        .filter(|&function| !super::sam_declares_vc_return(ir, declared_results, function, under))
+        .collect::<HashSet<_>>();
     // This includes nullable value classes: `X<String>?` can use `String` itself as the nullable
     // carrier, whereas `X<Int>?` must remain the boxed `X` because an `int` cannot represent null.
     for &function in suspend_functions {
         if let Some(realization) = declared_results.get(function as usize).and_then(|result| {
             suspend_result_representation(result, under, forced.contains(&function))
         }) {
+            let realization = match lambdas.contains(&function) {
+                true => boxed(realization),
+                false => realization,
+            };
             ir.value_class_suspend_returns.insert(function, realization);
         }
     }
-    // A call to a dependency receives the representation its applied result selects.
+    // A call to a dependency receives the representation its applied result selects: the box when
+    // the callee overrides a declaration returning another classifier, as a module override does.
     let external = ir.suspend_calls.iter().filter_map(|(&call, result)| {
-        suspend_result_representation(result, under, false).map(|realization| (call, realization))
+        let overrides_another = result.non_null().obj_internal().is_some_and(|classifier| {
+            ir.suspend_call_overridden_results
+                .get(&call)
+                .is_some_and(|overridden| {
+                    overridden
+                        .iter()
+                        .any(|&overridden| declares_another_classifier(overridden, classifier))
+                })
+        });
+        suspend_result_representation(result, under, overrides_another)
+            .map(|realization| (call, realization))
     });
     // A callee that declares a type parameter, or another classifier, as its result completes with
     // the box on either path, in this module or a dependency; the call's checked coercion names the
@@ -58,7 +84,42 @@ pub(super) fn record_suspend_results(
     });
     let calls = external.chain(generic).collect::<Vec<_>>();
     ir.value_class_suspend_calls.extend(calls);
+    keep_handed_over_boxes(ir);
     forced
+}
+
+/// A call that hands over its value class's box already is the value its checked coercion to that
+/// class names. Keep the box, as a call to a same-module callee returning the box does, so each
+/// consumer takes the carrier at its own boundary and a reference consumer, `Any` included, keeps
+/// the box it was handed.
+fn keep_handed_over_boxes(ir: &mut IrFile) {
+    let coercions = ir
+        .exprs
+        .iter()
+        .enumerate()
+        .filter_map(|(id, expression)| match *expression {
+            IrExpr::TypeOp {
+                op: IrTypeOp::ImplicitCoercion,
+                arg: call,
+                type_operand,
+            } if !type_operand.is_nullable()
+                && matches!(
+                    ir.value_class_suspend_calls.get(&call),
+                    Some(IrValueClassSuspendResult::Boxed { classifier, .. })
+                        if type_operand.obj_internal() == Some(*classifier)
+                ) =>
+            {
+                Some((id, call))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    for (coercion, call) in coercions {
+        ir.exprs[coercion] = IrExpr::Block {
+            stmts: Vec::new(),
+            value: Some(call),
+        };
+    }
 }
 
 /// The box of a value class a callee hands over as its type parameter's (or supertype's) value.
@@ -125,14 +186,19 @@ fn force_boxed_results(
             .non_null()
             .obj_internal()
             .filter(|classifier| under.contains_key(classifier))?;
-        // A type parameter has no classifier of its own, whatever its bound.
-        let overridden_classifier = match edge.declared_result.non_null() {
-            Ty::TyParam(..) => None,
-            result => result.obj_internal(),
-        };
-        (overridden_classifier != Some(classifier)).then_some(function)
+        declares_another_classifier(edge.declared_result, classifier).then_some(function)
     });
     bridged.chain(overridden).collect()
+}
+
+/// Whether an overridden declaration's result names another classifier than `classifier`, a type
+/// parameter included: a type parameter has no classifier of its own, whatever its bound.
+fn declares_another_classifier(overridden: Ty, classifier: TypeName) -> bool {
+    let overridden = match overridden.non_null() {
+        Ty::TyParam(..) => None,
+        result => result.obj_internal(),
+    };
+    overridden != Some(classifier)
 }
 
 /// Select the physical result carried through a suspend function's erased `Object` boundary.

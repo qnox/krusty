@@ -211,6 +211,7 @@ pub(super) fn candidate(
             .map(|signature| signature.params.clone())
             .unwrap_or_else(|| shape.function.signature.params.clone()),
         declared_ret: shape.function.declared_ret,
+        overridden_results: shape.function.overridden_results.clone(),
         owner: shape.owner,
         physical_name: shape.function.physical_name.clone(),
     }
@@ -256,6 +257,7 @@ impl MemberExtensionFunctionCandidate {
             inline_body_plan: self.inline_body_plan.clone(),
             suspend: self.suspend,
             declared_ret: self.declared_ret,
+            overridden_results: self.overridden_results.clone(),
             interface,
             vararg_index: self.physical_vararg_index,
         }

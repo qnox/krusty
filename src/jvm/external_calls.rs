@@ -1345,6 +1345,9 @@ fn copy_call_facts(ir: &mut IrFile, source: crate::ir::ExprId, target: crate::ir
     if let Some(value) = ir.suspend_calls.remove(&source) {
         ir.suspend_calls.insert(target, value);
     }
+    if let Some(value) = ir.suspend_call_overridden_results.remove(&source) {
+        ir.suspend_call_overridden_results.insert(target, value);
+    }
     if let Some(value) = ir.reified_call_subst.get(&source).cloned() {
         ir.reified_call_subst.insert(target, value);
     }

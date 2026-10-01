@@ -22,16 +22,20 @@ pub(super) fn unboxed_carrier(result: Option<IrValueClassSuspendResult>) -> Opti
     }
 }
 
-/// The value class and carrier of a suspend call whose callee's continuation completes with the box.
-/// Only the callee's own declaration says so: a call to a generic callee receives the box on
-/// either path, which its call-site representation already consumes.
+/// The value class and carrier of a suspend call whose callee's continuation completes with the box:
+/// a callee that returns the carrier, in this module or a dependency (a `$default` stub included).
+/// A call to a generic callee is recorded as receiving the box on either path, which its call-site
+/// representation already consumes.
 pub(super) fn boxed_on_resume(
     ir: &IrFile,
     call: ExprId,
     suspend_functions: &HashSet<u32>,
 ) -> Option<(TypeName, Ty)> {
-    let callee = super::suspend_call_fid(ir, call, suspend_functions)?;
-    unboxed_carrier(ir.value_class_suspend_returns.get(&callee).copied())
+    unboxed_carrier(super::value_class_suspension_result(
+        ir,
+        call,
+        suspend_functions,
+    ))
 }
 
 /// The carrier of the boxed value `resumed` reads: `checkcast X; unbox-impl`, with the `null` of a

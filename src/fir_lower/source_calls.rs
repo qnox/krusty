@@ -68,6 +68,7 @@ pub(super) struct ExternalCallRequest<'a> {
     pub(super) parameters: &'a [ResolvedTy],
     pub(super) result: ResolvedTy,
     pub(super) declared_result: Option<ResolvedTy>,
+    pub(super) overridden_results: &'a [ResolvedTy],
     pub(super) suspend: bool,
     pub(super) can_inline: bool,
     pub(super) inline_plan: Option<&'a crate::fir::FirInlineBodyPlan>,
@@ -342,6 +343,7 @@ impl BodyLowering<'_> {
             parameters,
             result,
             declared_result,
+            overridden_results,
             suspend,
             can_inline,
             inline_plan,
@@ -430,6 +432,15 @@ impl BodyLowering<'_> {
         }
         if suspend {
             self.ir.suspend_calls.insert(call, result.get());
+            if !overridden_results.is_empty() {
+                self.ir.suspend_call_overridden_results.insert(
+                    call,
+                    overridden_results
+                        .iter()
+                        .map(|result| result.get())
+                        .collect(),
+                );
+            }
             crate::trace_compiler!(
                 "fir",
                 "published external suspend call expression={call} target={target:?} result={:?}",

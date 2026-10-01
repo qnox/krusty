@@ -140,6 +140,64 @@ fn a_dependency_override_hands_its_callers_the_box_on_either_path() {
     );
 }
 
+const DEPENDENCY_IMPLEMENTATION: &str = "package dep\n\
+class ResultPayload(val text: String)\n\
+@JvmInline value class ResultTicket(val payload: ResultPayload)\n\
+interface Gate { suspend fun open(): Int }\n\
+interface Base<T> { suspend fun value(): T }\n\
+class Impl(val g: Gate) : Base<ResultTicket> { override suspend fun value(): ResultTicket { g.open(); return ResultTicket(ResultPayload(\"z\")) } }\n";
+
+/// A dependency's `Impl.value` overrides `Base<T>.value(): T`, so it hands over the box on either
+/// path however its caller names it; a caller returning `Any` forwards its continuation to it.
+#[test]
+fn a_dependency_override_of_a_type_parameter_result_hands_over_the_box() {
+    expect_method_matches_over(
+        &[("Lib.kt", DEPENDENCY_IMPLEMENTATION)],
+        "import dep.*\n\
+         suspend fun viaImpl(i: Impl): Any = i.value()\n",
+        "SuspendValueClassResultsKt",
+        "public static final java.lang.Object viaImpl(",
+    );
+}
+
+/// A caller of the dependency's `Impl.value` unboxes the box, and a caller returning `Any` hands it
+/// on, whether the call completes at once or suspends and is resumed later.
+#[test]
+fn a_dependency_override_is_unboxed_on_either_path() {
+    let main = "import dep.*\n\
+         import kotlin.coroutines.*\n\
+         import kotlin.coroutines.intrinsics.*\n\
+         var parked: Continuation<Int>? = null\n\
+         class Immediate : Gate { override suspend fun open(): Int = 1 }\n\
+         class Parking : Gate {\n\
+         \x20   override suspend fun open(): Int = suspendCoroutineUninterceptedOrReturn { parked = it; COROUTINE_SUSPENDED }\n\
+         }\n\
+         suspend fun read(i: Impl): String = i.value().payload.text\n\
+         suspend fun viaImpl(i: Impl): Any = i.value()\n\
+         fun box(): String {\n\
+         \x20   var result = \"\"\n\
+         \x20   val body: suspend () -> Unit = {\n\
+         \x20       result += read(Impl(Immediate()))\n\
+         \x20       result += read(Impl(Parking()))\n\
+         \x20       result += (viaImpl(Impl(Immediate())) as ResultTicket).payload.text\n\
+         \x20       result += (viaImpl(Impl(Parking())) as ResultTicket).payload.text\n\
+         \x20   }\n\
+         \x20   body.startCoroutine(Continuation(EmptyCoroutineContext) { it.getOrThrow() })\n\
+         \x20   parked!!.resume(2)\n\
+         \x20   parked!!.resume(3)\n\
+         \x20   return if (result == \"zzzz\") \"OK\" else \"result $result\"\n\
+         }\n";
+    assert_eq!(
+        common::expect_box_run_against_ref(
+            "dependency-implementation-results",
+            DEPENDENCY_IMPLEMENTATION,
+            main
+        )
+        .as_deref(),
+        Some("OK")
+    );
+}
+
 const PRIVATE_MEMBER: &str = "class Holder {\n\
     private suspend fun h(x: Int): String = \"OK\"\n\
     fun k(): suspend () -> String = { h(1) }\n\
@@ -163,4 +221,75 @@ fn a_private_suspend_member_called_from_a_lambda_class_has_one_access_bridge() {
         Some(jdk.as_path()),
     );
     assert_eq!(out.as_deref(), Some("OK"));
+}
+
+const INTRINSIC: &str =
+    "import kotlin.coroutines.intrinsics.suspendCoroutineUninterceptedOrReturn\n\
+class IntrinsicPayload(val text: String)\n\
+@JvmInline value class IntrinsicTicket(val payload: IntrinsicPayload)\n\
+suspend fun direct(): IntrinsicTicket = suspendCoroutineUninterceptedOrReturn { IntrinsicTicket(IntrinsicPayload(\"x\")) }\n\
+suspend fun read(): String = direct().payload.text\n";
+
+/// `suspendCoroutineUninterceptedOrReturn`'s block hands back the box, so a function returning the
+/// carrier unboxes it and keeps a continuation of its own; the continuation boxes the result again.
+#[test]
+fn an_intrinsic_suspension_point_is_not_forwarded_by_a_carrier_result() {
+    for class in [
+        "SuspendValueClassResultsKt$direct$1",
+        "SuspendValueClassResultsKt$read$1",
+    ] {
+        expect_method_matches(
+            INTRINSIC,
+            class,
+            "public final java.lang.Object invokeSuspend(java.lang.Object);",
+        );
+    }
+}
+
+const RESUMED_LATER: &str = r#"
+import kotlin.coroutines.*
+import kotlin.coroutines.intrinsics.*
+
+class ResumePayload(val text: String)
+class WrappedPayload(val text: String)
+@JvmInline value class ResumeTicket(val payload: ResumePayload)
+@JvmInline value class Wrapped(val payload: WrappedPayload)
+
+var parked: Continuation<ResumeTicket>? = null
+var parkedWrapped: Continuation<Wrapped>? = null
+var out = ""
+
+suspend fun park(tag: String = "O"): ResumeTicket = suspendCoroutineUninterceptedOrReturn { c ->
+    parked = c
+    COROUTINE_SUSPENDED
+}
+
+suspend fun parkWrapped(): Wrapped = suspendCoroutineUninterceptedOrReturn { c ->
+    parkedWrapped = c
+    COROUTINE_SUSPENDED
+}
+
+suspend fun <T> call(fn: suspend () -> T): T = fn()
+
+fun builder(c: suspend () -> Unit) {
+    c.startCoroutine(Continuation(EmptyCoroutineContext) { it.getOrThrow() })
+}
+
+fun box(): String {
+    builder { out += park().payload.text }
+    parked!!.resume(ResumeTicket(ResumePayload("O")))
+    builder { out += call { parkWrapped() }.payload.text }
+    parkedWrapped!!.resume(Wrapped(WrappedPayload("K")))
+    return out
+}
+"#;
+
+/// A value class resumed into a caller of `$default` unboxes it, and a suspend lambda hands its
+/// value-class result over boxed, as every lambda does, so its continuation does not box it again.
+#[test]
+fn a_value_class_resumed_through_a_default_stub_and_a_lambda_is_boxed_once() {
+    assert_eq!(
+        common::compile_and_run_with_stdlib(RESUMED_LATER, "SuspendValueClassResults").as_deref(),
+        Some("OK")
+    );
 }

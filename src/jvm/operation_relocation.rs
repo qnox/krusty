@@ -30,6 +30,7 @@ pub(super) fn clone_below_representation_wrapper(ir: &mut IrFile, source: ExprId
     }
     // CPS and bytecode specialization consume the selected call, not its result wrapper.
     move_fact!(suspend_calls);
+    move_fact!(suspend_call_overridden_results);
     move_fact!(value_class_suspend_calls);
     move_fact!(intrinsic_suspension_points);
     move_fact!(reified_call_subst);

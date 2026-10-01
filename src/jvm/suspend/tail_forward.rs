@@ -1,7 +1,7 @@
 //! Detection and body rewriting for a suspend function that directly forwards its continuation.
 
 use super::bottom_completion::unwrap_suspend_cast;
-use super::value_class_results::boxed_on_resume;
+use super::value_class_results::{boxed_on_resume, unboxed_carrier};
 use super::{
     expr_calls_suspend, is_suspension_point, recorded_suspension_result, suspend_call_fid,
     value_class_suspension_result,
@@ -82,12 +82,15 @@ pub(super) fn tail_forward(
         )?),
     };
     // A callee's continuation completes with its value class boxed, so the caller unboxes the
-    // resumed result and cannot hand its own continuation over.
-    let boxes_on_resume = forward
-        .calls()
-        .iter()
-        .any(|&call| boxed_on_resume(ir, call, suspend_functions).is_some());
-    (!boxes_on_resume).then_some(forward)
+    // resumed result and cannot hand its own continuation over. An intrinsic point's value is the
+    // box on either path, which a function returning the carrier unboxes too.
+    let returns_carrier =
+        unboxed_carrier(ir.value_class_suspend_returns.get(&function).copied()).is_some();
+    let unboxes = forward.calls().iter().any(|&call| {
+        boxed_on_resume(ir, call, suspend_functions).is_some()
+            || (returns_carrier && ir.intrinsic_suspension_points.contains_key(&call))
+    });
+    (!unboxes).then_some(forward)
 }
 
 /// Rewrite the body so each forwarded call's CPS `Object` is what the function returns.

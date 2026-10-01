@@ -93,3 +93,56 @@ fn a_forwarded_suspension_still_resumes() {
         Some("OK")
     );
 }
+
+#[test]
+fn a_dependency_unit_suspend_override_runs() {
+    let library = "package dep\n\
+        interface Host {\n\
+        \x20   suspend fun run()\n\
+        }\n\
+        class Worker : Host {\n\
+        \x20   override inline suspend fun run() {}\n\
+        }\n";
+    let main = "import dep.Worker\n\
+        import kotlin.coroutines.*\n\
+        fun box(): String {\n\
+        \x20   var done = false\n\
+        \x20   val body: suspend () -> Unit = {\n\
+        \x20       Worker().run()\n\
+        \x20       done = true\n\
+        \x20   }\n\
+        \x20   body.startCoroutine(Continuation(EmptyCoroutineContext) { it.getOrThrow() })\n\
+        \x20   return if (done) \"OK\" else \"suspended\"\n\
+        }\n";
+    assert_eq!(
+        common::expect_box_run_against_kotlinc(library, main).as_deref(),
+        Some("OK")
+    );
+}
+
+#[test]
+fn a_dependency_inline_suspend_override_calls_a_generic_suspend() {
+    let library = "package dep\n\
+        suspend fun <T> foo(v: T): T = v\n\
+        interface Host {\n\
+        \x20   suspend fun run()\n\
+        }\n\
+        class Worker(val v: String) : Host {\n\
+        \x20   override inline suspend fun run() { foo(v) }\n\
+        }\n";
+    let main = "import dep.Worker\n\
+        import kotlin.coroutines.*\n\
+        fun box(): String {\n\
+        \x20   var seen = \"\"\n\
+        \x20   val body: suspend () -> Unit = {\n\
+        \x20       Worker(\"OK\").run()\n\
+        \x20       seen = \"ran\"\n\
+        \x20   }\n\
+        \x20   body.startCoroutine(Continuation(EmptyCoroutineContext) { it.getOrThrow() })\n\
+        \x20   return seen\n\
+        }\n";
+    assert_eq!(
+        common::expect_box_run_against_kotlinc(library, main).as_deref(),
+        Some("ran")
+    );
+}

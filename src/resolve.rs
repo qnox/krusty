@@ -1516,23 +1516,22 @@ impl MemberExtPropSig {
 /// Everything a caller needs about a declared Kotlin class.
 #[derive(Clone, Debug)]
 pub struct MemberExtFunSig {
-    /// Semantic receiver shape. Type parameters remain symbolic in the signature's `generic_sig` and
-    /// are unified at the call site; no source `TypeRef`, classpath descriptor, or provider identity is
-    /// retained here. This is what lets module and dependency declarations enter one selection path.
+    /// Semantic receiver shape, its type parameters symbolic until the call site unifies them: no
+    /// source `TypeRef`, descriptor or provider identity, so module and dependency share selection.
     receiver_ty: Ty,
     physical_receiver: Ty,
     signature: Signature,
-    /// Physical method parameters after the extension receiver. Kept opaque until a target is
-    /// selected; semantic resolution uses `signature.params` exclusively.
+    /// Physical method parameters after the extension receiver, opaque to semantic resolution.
     physical_params: Vec<Ty>,
-    /// Provider-owned physical method spelling. It is never used for source selection or diagnostics;
-    /// it travels only with the selected target so a backend can emit a mangled dependency method.
+    /// Provider-owned physical method spelling, travelling with the selected target only so a
+    /// backend can emit a mangled dependency method; never selection or diagnostic input.
     physical_name: String,
     /// Stable provider identity for a dependency declaration. Current-module declarations use
     /// `signature.stable_declaration` instead; exactly one identity is present after selection.
     external_identity: Option<crate::fir::ExternalCallableId>,
     external_default_provider: Option<crate::fir::ExternalCallableId>,
     declared_ret: Option<Ty>,
+    overridden_results: Box<[Ty]>,
     inline_body_plan: Option<Box<crate::libraries::InlineBodyPlan>>,
 }
 
@@ -10231,27 +10230,25 @@ pub enum ResolvedCall {
         external_identity: Option<crate::fir::ExternalCallableId>,
         external_default_provider: Option<crate::fir::ExternalCallableId>,
         owner: TypeName,
-        /// Exact implicit dispatch receiver selected by the checker. The extension receiver is the
-        /// explicit call-site value; this binding identifies the class/object instance that owns the
-        /// member extension and must never be rediscovered by lowering.
+        /// Exact implicit dispatch receiver selected by the checker: the instance owning the member
+        /// extension (the extension receiver is the explicit value), never rediscovered by lowering.
         dispatch_receiver: ImplicitReceiverSelection,
         extension_receiver: Ty,
         physical_receiver: Ty,
         name: String,
         params: Vec<Ty>,
         physical_params: Vec<Ty>,
-        /// One entry per leading context parameter. `Some` is supplied from scope; `None` is an
-        /// explicitly named source argument. The extension receiver is carried separately.
+        /// Per leading context parameter: `Some` from scope, `None` an explicitly named argument.
         context_args: Vec<Option<ResolvedContextArgument>>,
         ret: Ty,
         physical_ret: Ty,
-        /// Selected callable capabilities. These stay on the semantic target so every later consumer
-        /// answers "does this exact call suspend/require splicing?" without looking the source name up
-        /// again or branching on whether the declaration came from this file or a dependency.
+        /// Selected callable capabilities, on the semantic target so later consumers ask whether this
+        /// exact call suspends or splices without a lookup or an origin branch.
         inline: InlineKind,
         inline_body_plan: Option<Box<crate::libraries::InlineBodyPlan>>,
         suspend: bool,
         declared_ret: Option<Ty>,
+        overridden_results: Box<[Ty]>,
         interface: bool,
         /// The semantic vararg slot. Its presence is the vararg flag and its value drives packing.
         vararg_index: Option<usize>,
@@ -30081,6 +30078,7 @@ fun box(): String {
                         default_realization: None,
                         nonvirtual_realization: None,
                         declared_ret: None,
+                        overridden_results: Box::new([]),
                         implicit_classifier_callable: None,
                         plugin_expression: None,
                         stable_declaration: None,
@@ -38967,6 +38965,7 @@ pub(crate) struct MemberExtensionFunctionCandidate {
     /// Un-erased declaration parameters before call substitution; ordinary when non-generic.
     declared_params: Vec<Ty>,
     declared_ret: Option<Ty>,
+    overridden_results: Box<[Ty]>,
     owner: TypeName,
     physical_name: String,
 }
@@ -73442,6 +73441,7 @@ impl<'a> Checker<'a> {
             external_identity: member.external_identity,
             external_default_provider: member.external_default_provider,
             declared_ret: member.declared_ret,
+            overridden_results: member.overridden_results.clone(),
             inline_body_plan: member.inline_body_plan.clone(),
         })
     }
