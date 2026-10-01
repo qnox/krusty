@@ -3355,8 +3355,8 @@ fn emit_class(
                     .chain(c.init_body),
             );
             e.this_uninitialized = true;
-            let receiver = e.frame.enter(FrameKey::Receiver, Ty::obj(&fq_name));
-            e.slots.insert(0, (receiver, Ty::obj(&fq_name)));
+            let receiver = e.frame.enter(FrameKey::Receiver, Ty::obj_name(c.fq_name));
+            e.slots.insert(0, (receiver, Ty::obj_name(c.fq_name)));
             for (vi, t) in param_tys.iter().enumerate() {
                 let value = vi as u32 + 1;
                 let s = e.frame.enter(FrameKey::Value(value), *t);
@@ -4731,8 +4731,8 @@ fn emit_enum_class(
             Ty::Unit,
             [init_body],
         );
-        let receiver = e.frame.enter(FrameKey::Receiver, Ty::obj(&fq));
-        e.slots.insert(0, (receiver, Ty::obj(&fq)));
+        let receiver = e.frame.enter(FrameKey::Receiver, Ty::obj_name(c.fq_name));
+        e.slots.insert(0, (receiver, Ty::obj_name(c.fq_name)));
         // The synthetic name and ordinal come first; no semantic value names them.
         e.frame.enter(FrameKey::Parameter(0), Ty::String);
         e.frame.enter(FrameKey::Parameter(1), Ty::Int);
@@ -9380,7 +9380,7 @@ impl<'a> Emitter<'a> {
                         code.push_int(mask, self.cw);
                     }
                     code.aconst_null();
-                    let mut stub_params = vec![Ty::obj(&owner)];
+                    let mut stub_params = vec![Ty::obj_name(c.fq_name)];
                     stub_params.extend(stub_param_tys.iter().copied());
                     stub_params.extend(std::iter::repeat_n(
                         Ty::Int,
@@ -9491,7 +9491,7 @@ impl<'a> Emitter<'a> {
                             .contains(&fid)
                     {
                         let mut bridge_params = Vec::with_capacity(param_tys.len() + 1);
-                        bridge_params.push(Ty::obj(&owner));
+                        bridge_params.push(Ty::obj_name(c.fq_name));
                         bridge_params.extend(param_tys.iter().copied());
                         let bridge_desc = method_descriptor(&bridge_params, ret);
                         let bridge_name = format!("access${name}");
@@ -11792,8 +11792,7 @@ impl<'a> Emitter<'a> {
         }
         match self.ir.expr(e) {
             IrExpr::StringConcat(_) => Ty::String,
-            // A class literal `T::class` is a `java/lang/Class` constant — a reference, so `==`/`!=` on
-            // two class literals routes to reference equality, not the primitive `if_icmpeq`.
+            // A JVM class literal is a reference, so equality uses reference comparison.
             IrExpr::ClassConst { .. } => Ty::obj("java/lang/Class"),
             IrExpr::KClassLiteral { .. } => Ty::obj("kotlin/reflect/KClass"),
             IrExpr::Const(c) => match c {
@@ -11889,12 +11888,9 @@ impl<'a> Emitter<'a> {
                 | IrBinOp::RefNe
                 | IrBinOp::And
                 | IrBinOp::Or => Ty::Boolean,
-                // An arithmetic/bitwise op leaves a PRIMITIVE on the stack — the emitter unboxes each
-                // operand first. So the result type is the UNBOXED primitive of the lhs, even when the lhs
-                // value is a boxed wrapper (`it + 100` where `it` is an `Integer` from a `Map` get). Using
-                // the boxed `value_ty(lhs)` here made a caller (e.g. the safe-call/elvis boxing coercion)
-                // believe the result was already a reference and skip its `valueOf` → an `int`/`Integer`
-                // stackmap mismatch once the masking spill was removed.
+                // Arithmetic leaves an unboxed primitive on the stack. Use the lhs carrier even when its
+                // value is boxed (`it + 100` from `Map.get`); otherwise safe-call/elvis boxing may skip
+                // `valueOf` and produce an `int`/`Integer` stackmap mismatch after spill removal.
                 _ => {
                     let t = self.value_ty(*lhs);
                     let physical = match boxed_prim_of(t).unwrap_or(t) {
@@ -11912,7 +11908,9 @@ impl<'a> Emitter<'a> {
             IrExpr::When { branches } => self.value_ty_of_when(branches),
             IrExpr::EnumEntry { classifier, .. } => Ty::obj_name(*classifier),
             IrExpr::EnumValueOf { classifier, .. } => Ty::obj_name(*classifier),
-            IrExpr::StaticInstance { ty, .. } => Ty::obj(&self.ir.classes[*ty as usize].fq_name()),
+            IrExpr::StaticInstance { ty, .. } => {
+                Ty::obj_name(self.ir.classes[*ty as usize].fq_name)
+            }
             IrExpr::SingletonValue { classifier } => Ty::obj_name(*classifier),
             IrExpr::ExternalStaticInstance { ty, .. } => Ty::obj_name(*ty),
             // The static field's JVM type, from its descriptor.
