@@ -8345,19 +8345,7 @@ impl<'a> Emitter<'a> {
             return;
         }
         // The assigned value is bridged to what the realization stores, the mirror of the read's bridge.
-        let target = match &access {
-            PropertyAccess::Field { descriptor, .. } => ty_from_field_descriptor(descriptor),
-            PropertyAccess::Accessor { descriptor, .. } => {
-                crate::jvm::names::parse_method_descriptor(descriptor)
-                    .and_then(|(params, _)| params.first().map(|p| ty_from_field_descriptor(p)))
-                    .unwrap_or_else(|| ir_ty_to_jvm(operation.ty))
-            }
-            PropertyAccess::AccessBridge { descriptor, .. } => {
-                crate::jvm::names::parse_method_descriptor(descriptor)
-                    .and_then(|(params, _)| params.last().map(|p| ty_from_field_descriptor(p)))
-                    .unwrap_or_else(|| ir_ty_to_jvm(operation.ty))
-            }
-        };
+        let target = property_access::property_store_slot(&access, *operation.ty);
         if let Some(temps) = &spilled {
             let (slot, value_ty, _) = temps[1];
             load(value_ty, slot, code);
@@ -8393,12 +8381,12 @@ impl<'a> Emitter<'a> {
                 is_static,
             } => {
                 let owner = owner.render();
-                let jt = ty_from_field_descriptor(&descriptor);
+                let words = crate::jvm::physical_type::field_slot(&descriptor).words();
                 let fref = self.cw.fieldref(&owner, &name, &descriptor);
                 if is_static {
-                    code.putstatic(fref, slot_words(jt) as i32);
+                    code.putstatic(fref, words);
                 } else {
-                    code.putfield(fref, slot_words(jt) as i32);
+                    code.putfield(fref, words);
                 }
             }
             PropertyAccess::Accessor {
@@ -9021,8 +9009,7 @@ impl<'a> Emitter<'a> {
                             source_parameter_count,
                         )
                     };
-                let physical_params =
-                    parse_descriptor_params(&desc).expect("constructor descriptor must be valid");
+                let physical_params = self.constructor_physical_params(e, &desc);
                 let aw = physical_params.iter().map(|t| slot_words(*t) as i32).sum();
                 if args.iter().any(|&a| self.spills_operand_prefix(a)) {
                     // An argument that enters a handler, suspends, or leaves for a loop target can't

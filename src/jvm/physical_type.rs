@@ -40,21 +40,126 @@ fn jvm_reference_array_element(semantic: Ty) -> Ty {
     }
 }
 
-/// A JVM class descriptor is a reference slot.
-///
-/// Unsigned scalars are stored as `Ty::Obj(kotlin/UInt)` and so on, the same classifier their
-/// box uses. `Lkotlin/UInt;` is that box. Returning the bare scalar would make `is_jvm_scalar`
-/// true and emit `box-impl` on a value the getter already returned boxed.
+/// Classifier named by a class descriptor. Every `L...;` is this path: no unsigned-name branch
+/// and no nullability. [`FieldSlot`] records that the descriptor is a reference slot, because
+/// `kotlin/UInt` is also the semantic scalar and `Ty` cannot say both.
 pub(super) fn class_descriptor_ty(descriptor: &str) -> Ty {
     let internal = descriptor
         .strip_prefix('L')
         .and_then(|name| name.strip_suffix(';'))
         .unwrap_or(descriptor);
-    let name = crate::types::type_name(internal);
-    match crate::types::builtin_semantic(name) {
-        Some(scalar) if scalar.is_unsigned() => Ty::nullable(scalar),
-        _ => Ty::obj_name(name),
+    Ty::obj_name(crate::types::type_name(internal))
+}
+
+/// Physical category of one JVM field descriptor.
+///
+/// `reference` is the descriptor's own slot. It is true for every class and array descriptor,
+/// including `Lkotlin/UInt;`, and it is not semantic nullability.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FieldSlot {
+    pub(crate) ty: Ty,
+    pub(crate) reference: bool,
+}
+
+impl FieldSlot {
+    pub(crate) fn words(self) -> i32 {
+        if self.reference {
+            1
+        } else {
+            match self.ty {
+                Ty::Long | Ty::Double => 2,
+                Ty::Unit => 0,
+                _ => 1,
+            }
+        }
     }
+}
+
+pub(crate) fn method_return_slot(descriptor: &str) -> FieldSlot {
+    let ret = descriptor.rsplit(')').next().unwrap_or("V");
+    field_slot(ret)
+}
+
+pub(crate) fn field_slot(descriptor: &str) -> FieldSlot {
+    match descriptor.as_bytes().first() {
+        Some(b'I') => FieldSlot {
+            ty: Ty::Int,
+            reference: false,
+        },
+        Some(b'J') => FieldSlot {
+            ty: Ty::Long,
+            reference: false,
+        },
+        Some(b'Z') => FieldSlot {
+            ty: Ty::Boolean,
+            reference: false,
+        },
+        Some(b'B') => FieldSlot {
+            ty: Ty::Byte,
+            reference: false,
+        },
+        Some(b'C') => FieldSlot {
+            ty: Ty::Char,
+            reference: false,
+        },
+        Some(b'S') => FieldSlot {
+            ty: Ty::Short,
+            reference: false,
+        },
+        Some(b'F') => FieldSlot {
+            ty: Ty::Float,
+            reference: false,
+        },
+        Some(b'D') => FieldSlot {
+            ty: Ty::Double,
+            reference: false,
+        },
+        Some(b'V') => FieldSlot {
+            ty: Ty::Unit,
+            reference: false,
+        },
+        Some(b'L') => FieldSlot {
+            ty: class_descriptor_ty(descriptor),
+            reference: true,
+        },
+        Some(b'[') => FieldSlot {
+            ty: Ty::array(field_slot(&descriptor[1..]).ty),
+            reference: true,
+        },
+        _ => FieldSlot {
+            ty: Ty::Error,
+            reference: false,
+        },
+    }
+}
+
+/// Operand type for a descriptor slot.
+///
+/// A class descriptor whose classifier is a semantic scalar is still a reference. The checked
+/// type supplies that reference when it is one; otherwise the slot is a plain object reference.
+/// Neither result is a nullability invented from the descriptor spelling.
+pub(crate) fn operand_slot_ty(descriptor: &str, checked: Option<Ty>) -> Ty {
+    let slot = field_slot(descriptor);
+    if !(slot.reference && slot.ty.is_jvm_scalar()) {
+        return slot.ty;
+    }
+    checked
+        .map(|ty| ir_ty_to_jvm(&crate::types::stored_value_ty(ty)))
+        .filter(|ty| ty.is_reference() && !ty.is_jvm_scalar())
+        .unwrap_or_else(|| Ty::obj("java/lang/Object"))
+}
+
+pub(crate) fn constructor_operand_tys(descriptor: &str, checked: Option<&[Ty]>) -> Option<Vec<Ty>> {
+    let (params, _) = crate::jvm::names::parse_method_descriptor(descriptor)?;
+    Some(
+        params
+            .into_iter()
+            .enumerate()
+            .map(|(index, param)| {
+                operand_slot_ty(param, checked.and_then(|types| types.get(index)).copied())
+            })
+            .collect(),
+    )
 }
 
 pub fn ir_ty_to_jvm(t: &Ty) -> Ty {
@@ -178,25 +283,42 @@ mod tests {
     use crate::types::{type_name, Ty};
 
     #[test]
-    fn an_unsigned_box_descriptor_is_the_nullable_reference() {
-        for (descriptor, scalar) in [
-            ("Lkotlin/UByte;", Ty::UByte),
-            ("Lkotlin/UShort;", Ty::UShort),
-            ("Lkotlin/UInt;", Ty::UInt),
-            ("Lkotlin/ULong;", Ty::ULong),
+    fn every_class_descriptor_is_a_reference_slot_without_semantic_nullability() {
+        for descriptor in [
+            "Lkotlin/UByte;",
+            "Lkotlin/UShort;",
+            "Lkotlin/UInt;",
+            "Lkotlin/ULong;",
+            "Lexample/Point;",
+            "Ljava/lang/String;",
         ] {
-            let parsed = super::super::ir_emit::ty_from_field_descriptor(descriptor);
-            assert!(
-                !parsed.is_jvm_scalar(),
-                "{descriptor} is the box, not the carrier"
-            );
-            assert_eq!(parsed, Ty::nullable(scalar));
-            assert_eq!(
-                crate::jvm::names::type_descriptor(parsed),
-                descriptor,
-                "{descriptor} must round-trip"
-            );
+            let slot = super::field_slot(descriptor);
+            assert!(slot.reference, "{descriptor}");
+            assert!(!slot.ty.is_nullable(), "{descriptor}");
+            assert_eq!(slot.words(), 1, "{descriptor}");
         }
+        let point = super::field_slot("Lexample/Point;");
+        assert_eq!(point.ty, Ty::obj("example/Point"));
+        assert!(!point.ty.is_jvm_scalar());
+
+        let unsigned = super::field_slot("Lkotlin/UInt;");
+        assert!(
+            unsigned.ty.is_jvm_scalar(),
+            "the classifier is still the scalar"
+        );
+        let checked = Ty::nullable(Ty::UInt);
+        let operand = super::operand_slot_ty("Lkotlin/UInt;", Some(checked));
+        assert!(operand.is_reference() && !operand.is_jvm_scalar());
+        assert_eq!(operand.is_nullable(), checked.is_nullable());
+        let bare = super::operand_slot_ty("Lkotlin/UInt;", None);
+        assert!(bare.is_reference());
+        assert!(!bare.is_nullable());
+        assert!(!bare.is_jvm_scalar());
+
+        let carrier = super::field_slot("I");
+        assert!(!carrier.reference);
+        assert_eq!(carrier.ty, Ty::Int);
+        assert!(!super::operand_slot_ty("Ljava/lang/String;", None).is_nullable());
     }
 
     #[test]

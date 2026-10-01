@@ -1511,12 +1511,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **Nullability is a first-class fact on `Ty`** (`Ty::Nullable(&Ty)`, `types.rs`), not faked as the
   boxed JVM wrapper. `Int?` is `Nullable(Int)` (a Kotlin-level type), and the boxing to a JVM reference
   (`Int?` → `Ljava/lang/Integer;`, `UInt?` → `Lkotlin/UInt;`, a nullable reference → its own descriptor)
-  lives only in `Ty::descriptor()` — the backend boundary. The inverse parse of an unsigned box
-  (`Lkotlin/UInt;`, and the `UByte`/`UShort`/`ULong` twins) is that same nullable reference, not the
-  bare scalar: `Ty::UInt` is the unboxed carrier, so reading the box descriptor as `Ty::UInt` makes
-  a getter that already returned `kotlin.UInt` look like an `int` and emits `box-impl` on it.
-  `UInt?` therefore stays the box through a safe call, and `toString` unboxes that box once.
-  Tests: `jvm::physical_type::tests::an_unsigned_box_descriptor_is_the_nullable_reference`,
+  lives only in `Ty::descriptor()` — the backend boundary. A JVM class descriptor is a reference
+  slot for every classifier, including `Lkotlin/UInt;`. The parse does not invent semantic
+  nullability and does not special-case unsigned names: the checked property type decides whether
+  that reference is boxed or unboxed. A getter that already returned the box is not boxed again,
+  and `toString` unboxes it once.
+  Tests: `jvm::physical_type::tests::every_class_descriptor_is_a_reference_slot_without_semantic_nullability`,
   `tests/nullable_uint_property_e2e.rs`, box `unsignedTypes/kt43286.kt`. `Ty::nullable` is
   idempotent (no `T??`) and
   collapses degenerate inputs (`Null?` = `Null`, `Error?` = `Error`); `Nothing?` is kept (it is the type
