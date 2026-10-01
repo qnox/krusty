@@ -136,6 +136,7 @@ mod tests {
             barrier_plan: None,
             special: false,
             target_name: None,
+            property_implementation: None,
         }
     }
 

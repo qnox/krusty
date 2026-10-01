@@ -7,7 +7,6 @@ use super::{
 };
 use crate::ir::{Callee, ClassId, ExprId, IrConst, IrExpr, IrFile};
 use crate::libraries::InlineKind;
-use crate::names::property_getter_name;
 use crate::plugins::PluginContext;
 use crate::types::Ty;
 
@@ -152,18 +151,14 @@ impl SerializeBody<'_> {
                 }
                 // The generic inlined shape lives on `$serializer`, so it uses the public getter.
                 let descriptor = ty_descriptor(ctx, ty)?;
-                Some(ir.add_expr(IrExpr::Call {
-                    callee: Callee::Virtual {
-                        owner: serialized_name,
-                        name: property_getter_name(name),
-                        descriptor: format!("(){descriptor}"),
-                        params: None,
-                        interface: false,
-                        module_target: None,
-                    },
-                    dispatch_receiver: Some(receiver),
-                    args: vec![],
-                }))
+                Some(super::synthesized_accessor::getter(
+                    ir,
+                    receiver,
+                    serialized_name,
+                    name,
+                    descriptor,
+                    (foo_id, field_index as u32),
+                ))
             };
         // Element `i` is written from backing field `field`; they differ after a transient property.
         for (i, &field) in elements.iter().enumerate() {

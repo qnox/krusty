@@ -27,6 +27,23 @@ pub struct CollectionBarrierPlan {
     pub outcome: crate::libraries::CollectionBarrierOutcome,
 }
 
+/// Which accessor of a property a bridge delegates to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BridgeAccessorRole {
+    Getter,
+    Setter,
+}
+
+/// The same-module property a property-accessor bridge delegates to.
+///
+/// This is the override edge's selected implementation, not a JVM spelling. Retargeting matches
+/// it through the property's layout; `Bridge::name` and `Bridge::target_name` stay emission text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BridgePropertyImplementation {
+    pub property: crate::fir::PropertyId,
+    pub accessor: BridgeAccessorRole,
+}
+
 /// A JVM declaration adapter (`name(erased_params)erased_ret` → a selected concrete target).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BridgeKind {
@@ -72,4 +89,7 @@ pub struct Bridge {
     /// override is emitted under a mangled name (`foo-<hash>`), so the unmangled bridge (`foo`, the
     /// supertype's erased signature) must call the mangled one. `None` ⇒ same as `name`.
     pub target_name: Option<String>,
+    /// Selected implementation of a property-accessor bridge. Function bridges and external
+    /// implementations leave this absent.
+    pub property_implementation: Option<BridgePropertyImplementation>,
 }
