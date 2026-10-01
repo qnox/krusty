@@ -4012,17 +4012,7 @@ struct ReprCtx<'a> {
 
 impl ReprCtx<'_> {
     fn repr(&self, id: ExprId) -> Repr {
-        repr(
-            self.exprs,
-            self.rets,
-            self.fields,
-            self.slots,
-            self.under,
-            self.types,
-            self.physical,
-            self.field_getters,
-            id,
-        )
+        repr(self, id)
     }
 
     /// A selected call is non-null when its checked declaration returns a non-null type.
@@ -4315,18 +4305,18 @@ fn target(t: &Ty, under: &Under) -> Target {
 }
 
 /// The representation of the value the expr at `id` produces (after the construction/property rewrite).
-#[allow(clippy::too_many_arguments)]
-fn repr(
-    exprs: &[IrExpr],
-    rets: &[Ty],
-    fields: &[Vec<Ty>],
-    slots: &HashMap<u32, Ty>,
-    under: &Under,
-    types: CallTypes<'_>,
-    physical: &HashMap<u32, Ty>,
-    field_getters: &FieldGetters,
-    id: ExprId,
-) -> Repr {
+fn repr(context: &ReprCtx<'_>, id: ExprId) -> Repr {
+    let ReprCtx {
+        exprs,
+        rets,
+        fields,
+        slots,
+        under,
+        types,
+        physical,
+        field_getters,
+        ..
+    } = *context;
     // A backend pass may have selected the value-class box as this exact expression's physical type
     // (notably at a suspend `Object` boundary). That representation fact is later than the declaration's
     // semantic return type and therefore wins before structural call analysis.
@@ -4343,17 +4333,7 @@ fn repr(
             value: Some(value), ..
         } = &exprs[id as usize]
         {
-            let structural = repr(
-                exprs,
-                rets,
-                fields,
-                slots,
-                under,
-                types,
-                physical,
-                field_getters,
-                *value,
-            );
+            let structural = repr(context, *value);
             if !matches!(structural, Repr::NotVc) {
                 return structural;
             }
@@ -4456,17 +4436,7 @@ fn repr(
             .is_some_and(|fq| under.contains_key(&fq)) =>
         {
             let fq_name = type_operand.non_null().obj_internal().unwrap();
-            match repr(
-                exprs,
-                rets,
-                fields,
-                slots,
-                under,
-                types,
-                physical,
-                field_getters,
-                *arg,
-            ) {
+            match repr(context, *arg) {
                 Repr::Unboxed(x) if x == fq_name => Repr::Unboxed(x),
                 _ if physical.get(arg).is_some_and(|physical| {
                     physical.is_reference() && physical.non_null().obj_internal() != Some(fq_name)
@@ -4484,17 +4454,7 @@ fn repr(
             type_operand,
             ..
         } => repr_of_ty(type_operand, under),
-        IrExpr::NotNullAssert { operand, .. } => repr(
-            exprs,
-            rets,
-            fields,
-            slots,
-            under,
-            types,
-            physical,
-            field_getters,
-            *operand,
-        ),
+        IrExpr::NotNullAssert { operand, .. } => repr(context, *operand),
         // Reading a captured mutable local through its `Ref` holder: its representation is that of the
         // boxed element type (`var res: Result<T>?` → a boxed `Result`).
         IrExpr::RefGet { elem, .. } => repr_of_ty(elem, under),
@@ -4503,34 +4463,12 @@ fn repr(
         IrExpr::NewArray { array_type, .. } | IrExpr::Vararg { array_type, .. } => {
             repr_of_ty(array_type, under)
         }
-        IrExpr::Block { value: Some(v), .. } => repr(
-            exprs,
-            rets,
-            fields,
-            slots,
-            under,
-            types,
-            physical,
-            field_getters,
-            *v,
-        ),
+        IrExpr::Block { value: Some(v), .. } => repr(context, *v),
         // A `when`/safe-call or a `try` selects one of its branch values (`s?.foo()` → `when {
         // s!=null -> foo(s); else -> null }`): its representation is the FIRST value-class branch's,
         // so a boxed result out of a `?.` is recognized and a diverging `try` body is skipped.
         IrExpr::When { .. } | IrExpr::Try { .. } => crate::ir::selected_values(&exprs[id as usize])
-            .map(|v| {
-                repr(
-                    exprs,
-                    rets,
-                    fields,
-                    slots,
-                    under,
-                    types,
-                    physical,
-                    field_getters,
-                    v,
-                )
-            })
+            .map(|v| repr(context, v))
             .find(|r| !matches!(r, Repr::NotVc))
             .unwrap_or(Repr::NotVc),
         // A function value's `invoke` returns its declared type through the `FunctionN` `Object` slot — a
@@ -5184,59 +5122,6 @@ fn sam_declares_vc_return(
     ir.lambda_sam_signature
         .get(&impl_fn)
         .is_some_and(|(_, ret)| ret.non_null().obj_internal() == Some(x))
-}
-
-/// Whether the erased type occupies a JVM *reference* slot. A non-null Kotlin primitive class
-/// (`kotlin/Int`, `kotlin/Boolean`, …) emits as a JVM primitive (`I`, `Z`, …), so it is NOT a
-/// reference; its NULLABLE form is the boxed wrapper (`Integer`), which is. Everything else that is a
-/// `Class` is a reference.
-fn is_ref(t: &Ty) -> bool {
-    if t.is_nullable() {
-        return true;
-    }
-    // A Kotlin type parameter always occupies an erased JVM reference slot, even when its upper
-    // bound names a primitive-like Kotlin class. Treating `T` as non-reference loses the boxing
-    // boundary in `Holder<T>(value: T)` and stores an unboxed value-class carrier as `Integer`
-    // instead of the value class's boxed wrapper.
-    if matches!(t.non_null(), Ty::TyParam(..)) {
-        return true;
-    }
-    // A JVM scalar (`Int`/`Long`/… AND the unsigned `UInt`/`ULong`, which are unboxed primitives) is NOT a
-    // reference. Check this FIRST — `kotlin_class_internal(UInt)` is "kotlin/UInt" but `unboxed_primitive`
-    // only knows the signed wrappers, so the descriptor check below would misclassify it as a reference.
-    if t.is_jvm_scalar() {
-        return false;
-    }
-    // A FUNCTION type realizes as a `FunctionN` object and an array as its array class — both are
-    // references with no `kotlin_class_internal`, and the `None => false` fallback below silently
-    // stripped their `checkNotNullParameter` guards (kotlinc guards a `block: () -> Unit` like any
-    // other non-null reference parameter).
-    if matches!(t, Ty::Fun(_)) || t.is_array() {
-        return true;
-    }
-    // `kotlin_class_internal` (not `obj_internal`): a bare `Ty::String` variant is a REFERENCE but has no
-    // `obj_internal()` — treating it as a non-reference makes `nullable_is_boxed` think a `String`-backed
-    // value class is primitive-like (`Str?` wrongly boxed instead of unboxed to `String?`).
-    match t.kotlin_class_internal() {
-        Some(fq_name) => Ty::obj_name(fq_name).unboxed_primitive().is_none(),
-        None => false,
-    }
-}
-/// Decrement every value-slot index (`GetValue`/`SetValue`/`Variable`) reachable from `root` by one —
-/// reframing an instance-lowered body (`this` at slot 0) as a static one (params at slot 0).
-fn shift_slots(ir: &mut IrFile, root: ExprId) {
-    let mut reach = HashSet::new();
-    collect_reachable_scoped(&ir.exprs, root, &mut reach);
-    for id in reach {
-        match &mut ir.exprs[id as usize] {
-            IrExpr::GetValue(i)
-            | IrExpr::SetValue { var: i, .. }
-            | IrExpr::Variable { index: i, .. } => {
-                *i = i.saturating_sub(1);
-            }
-            _ => {}
-        }
-    }
 }
 
 /// Erase the value-class types in a JVM method descriptor: each `L<fq>;` whose `<fq>` is a value class
