@@ -282,17 +282,24 @@ pub(crate) fn reference_array_element(ty: Ty) -> Ty {
 }
 
 /// A JVM method descriptor `(params)ret` from krusty `Ty`s.
+///
+/// Component descriptors are appended directly to the result. Keeping a separate parameter
+/// descriptor would allocate and then copy the whole parameter spelling on every call.
 pub fn method_descriptor(params: &[Ty], ret: Ty) -> String {
-    let mut s = String::from("(");
-    s.push_str(&params_descriptor(params));
-    s.push(')');
-    s.push_str(&type_descriptor(ret));
-    s
+    let mut descriptor = String::with_capacity(params.len().saturating_add(2));
+    descriptor.push('(');
+    append_type_descriptors(&mut descriptor, params);
+    descriptor.push(')');
+    let ret = type_descriptor(ret);
+    descriptor.push_str(&ret);
+    descriptor
 }
 
-/// The parameter-only JVM descriptor key used where JVM lowering needs an overload identity.
-pub fn params_descriptor(params: &[Ty]) -> String {
-    params.iter().map(|t| type_descriptor(*t)).collect()
+fn append_type_descriptors(out: &mut String, types: &[Ty]) {
+    for ty in types {
+        let descriptor = type_descriptor(*ty);
+        out.push_str(&descriptor);
+    }
 }
 
 /// The JVM array descriptor for a primitive-array class name (`kotlin/IntArray` → `[I`), or `None`.
@@ -765,6 +772,26 @@ mod tests {
         assert_eq!(
             method_descriptor(&[Ty::nullable(Ty::Unit)], Ty::Unit),
             "(Lkotlin/Unit;)V"
+        );
+    }
+
+    #[test]
+    fn method_descriptor_appends_each_component_in_declaration_order() {
+        assert_eq!(method_descriptor(&[], Ty::Unit), "()V");
+        assert_eq!(
+            method_descriptor(&[Ty::Int, Ty::Long], Ty::Boolean),
+            "(IJ)Z"
+        );
+        assert_eq!(
+            method_descriptor(
+                &[
+                    Ty::String,
+                    Ty::obj("kotlin/IntArray"),
+                    Ty::nullable(Ty::Int),
+                ],
+                Ty::obj("sample/Result"),
+            ),
+            "(Ljava/lang/String;[ILjava/lang/Integer;)Lsample/Result;"
         );
     }
 
