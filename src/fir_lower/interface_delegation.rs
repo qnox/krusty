@@ -6,10 +6,13 @@
 
 use crate::fir::{
     DeclarationId, DeclarationKind, ResolvedDelegatedCall, ResolvedDelegatedCallTarget,
-    ResolvedDelegatedMember, ResolvedInterfaceDelegateSource, ResolvedInterfaceDelegation,
-    ResolvedModuleIndex,
+    ResolvedDelegatedMember, ResolvedDelegatedModuleTarget, ResolvedFunctionOverrideTarget,
+    ResolvedInterfaceDelegateSource, ResolvedInterfaceDelegation, ResolvedModuleIndex,
 };
-use crate::ir::{Callee, IrExpr, IrField, IrFile, IrFunction, IrNodeOrigin, IrProperty, IrTypeOp};
+use crate::ir::{
+    Callee, IrExpr, IrField, IrFile, IrFunction, IrNodeOrigin, IrProperty, IrTypeOp,
+    IrVirtualTarget,
+};
 use crate::types::Ty;
 
 use super::FirFileLoweringFailure;
@@ -519,7 +522,7 @@ fn delegated_call(
         .collect::<Vec<_>>();
     let (callee, arguments, physical_result) = match &call.target {
         ResolvedDelegatedCallTarget::Module {
-            target: _,
+            target,
             owner,
             name,
             parameters,
@@ -538,15 +541,15 @@ fn delegated_call(
                 .enumerate()
                 .map(|(ordinal, (declared, semantic))| {
                     let value = ir.add_expr(IrExpr::GetValue(ordinal as u32 + 1));
-                    (*semantic != declared.get())
-                        .then(|| {
-                            ir.add_expr(IrExpr::TypeOp {
-                                op: IrTypeOp::ImplicitCoercion,
-                                arg: value,
-                                type_operand: declared.get(),
-                            })
+                    if *semantic != declared.get() {
+                        ir.add_expr(IrExpr::TypeOp {
+                            op: IrTypeOp::ImplicitCoercion,
+                            arg: value,
+                            type_operand: declared.get(),
                         })
-                        .unwrap_or(value)
+                    } else {
+                        value
+                    }
                 })
                 .collect::<Vec<_>>();
             (
@@ -560,6 +563,19 @@ fn delegated_call(
                     )),
                     interface: *interface,
                     module_target: None,
+                    target: Some(match *target {
+                        ResolvedDelegatedModuleTarget::Function(callable) => {
+                            IrVirtualTarget::Function(ResolvedFunctionOverrideTarget::Module(
+                                callable,
+                            ))
+                        }
+                        ResolvedDelegatedModuleTarget::PropertyGetter(property) => {
+                            IrVirtualTarget::PropertyGetter(property)
+                        }
+                        ResolvedDelegatedModuleTarget::PropertySetter(property) => {
+                            IrVirtualTarget::PropertySetter(property)
+                        }
+                    }),
                 },
                 arguments,
                 result.get(),
@@ -604,15 +620,15 @@ fn delegated_call(
     if call.suspend {
         ir.suspend_calls.insert(expression, call.result.get());
     }
-    Ok((physical_result != call.result.get())
-        .then(|| {
-            ir.add_expr(IrExpr::TypeOp {
-                op: IrTypeOp::ImplicitCoercion,
-                arg: expression,
-                type_operand: call.result.get(),
-            })
+    Ok(if physical_result != call.result.get() {
+        ir.add_expr(IrExpr::TypeOp {
+            op: IrTypeOp::ImplicitCoercion,
+            arg: expression,
+            type_operand: call.result.get(),
         })
-        .unwrap_or(expression))
+    } else {
+        expression
+    })
 }
 
 fn prepend_initializer(ir: &mut IrFile, class: crate::ir::ClassId, store: u32) {

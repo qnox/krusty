@@ -6,7 +6,9 @@
 //! nodes for the selected backend to realize.
 
 use crate::fir::PropertyId;
-use crate::ir::{Callee, ExprId, IrCheckedOperation, IrExpr, IrFile, IrLocalPropertyLayout};
+use crate::ir::{
+    Callee, ExprId, IrCheckedOperation, IrExpr, IrFile, IrLocalPropertyLayout, IrVirtualTarget,
+};
 use crate::types::{Ty, TypeName};
 
 /// A same-file call to a property accessor. A `companion { … }` block property's accessor is a
@@ -217,6 +219,7 @@ fn property_read(
                     )),
                     interface: *interface,
                     module_target: None,
+                    target: Some(IrVirtualTarget::PropertyGetter(target)),
                 },
                 dispatch_receiver: Some(dispatch),
                 args,
@@ -260,6 +263,7 @@ fn property_read(
                         || class_declaration.is_interface
                         || class_declaration.is_annotation,
                     module_target: None,
+                    target: Some(IrVirtualTarget::PropertyGetter(target)),
                 },
                 dispatch_receiver: Some(receiver),
                 args: context_arguments.to_vec(),
@@ -375,6 +379,7 @@ fn property_write(
                     )),
                     interface: *interface,
                     module_target: None,
+                    target: Some(IrVirtualTarget::PropertySetter(target)),
                 },
                 dispatch_receiver: Some(receiver),
                 args: context_arguments
@@ -417,6 +422,7 @@ fn property_write(
                     )),
                     interface: *interface,
                     module_target: None,
+                    target: Some(IrVirtualTarget::PropertySetter(target)),
                 },
                 dispatch_receiver: Some(dispatch),
                 args: context_arguments

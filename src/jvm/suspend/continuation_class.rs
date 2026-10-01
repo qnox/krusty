@@ -126,14 +126,7 @@ pub(super) fn build_continuation_class(
                 // with `IncompatibleClassChangeError` (coroutines/suspendDefaultImpl).
                 let interface = owner_cid.is_some_and(|cid| ir.classes[cid].is_interface);
                 ir.add_expr(IrExpr::Call {
-                    callee: Callee::Virtual {
-                        owner,
-                        name,
-                        descriptor,
-                        params: None,
-                        interface,
-                        module_target: None,
-                    },
+                    callee: Callee::realized_virtual(owner, name, descriptor, None, interface),
                     dispatch_receiver: Some(recv),
                     args: reentry_args,
                 })

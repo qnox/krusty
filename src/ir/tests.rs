@@ -1,5 +1,6 @@
 use super::test_support::blank_class;
 use super::*;
+use crate::libraries::InlineKind;
 
 #[test]
 fn external_callable_reference_target_keeps_only_provider_identity() {

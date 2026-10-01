@@ -158,6 +158,7 @@ mod tests {
                 params: None,
                 interface: false,
                 module_target: None,
+                target: None,
             },
             dispatch_receiver: Some(same_spelling_cast),
             args: vec![],

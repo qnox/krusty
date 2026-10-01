@@ -366,14 +366,13 @@ fn call_generated_serializer(
                 field: "INSTANCE",
             });
             ir.add_expr(IrExpr::Call {
-                callee: Callee::Virtual {
-                    owner: classifier,
-                    name: "serializer".to_string(),
-                    descriptor: String::new(),
-                    params: Some((params, ret)),
-                    interface: false,
-                    module_target: None,
-                },
+                callee: Callee::realized_virtual(
+                    classifier,
+                    "serializer".to_string(),
+                    String::new(),
+                    Some((params, ret)),
+                    false,
+                ),
                 dispatch_receiver: Some(receiver),
                 args,
             })
@@ -385,14 +384,13 @@ fn call_generated_serializer(
                 field: "Companion".to_string(),
             });
             ir.add_expr(IrExpr::Call {
-                callee: Callee::Virtual {
-                    owner: companion,
-                    name: "serializer".to_string(),
-                    descriptor: String::new(),
-                    params: Some((params, ret)),
-                    interface: false,
-                    module_target: None,
-                },
+                callee: Callee::realized_virtual(
+                    companion,
+                    "serializer".to_string(),
+                    String::new(),
+                    Some((params, ret)),
+                    false,
+                ),
                 dispatch_receiver: Some(receiver),
                 args,
             })
@@ -455,14 +453,13 @@ fn call_external_companion_serializer(
     let params = vec![kserializer_of(class_ty("kotlin/Any")); args.len()];
     let ret = kserializer_of(Ty::obj_name(classifier));
     Some(ir.add_expr(IrExpr::Call {
-        callee: Callee::Virtual {
+        callee: Callee::realized_virtual(
             owner,
-            name: "serializer".to_string(),
-            descriptor: String::new(),
-            params: Some((params, ret)),
-            interface: false,
-            module_target: None,
-        },
+            "serializer".to_string(),
+            String::new(),
+            Some((params, ret)),
+            false,
+        ),
         dispatch_receiver: Some(receiver),
         args,
     }))
@@ -619,14 +616,13 @@ fn specialize_expression_placeholders(ir: &mut IrFile, ctx: &PluginContext) {
             _ => continue,
         };
         let call = |descriptor: &str| IrExpr::Call {
-            callee: Callee::Virtual {
-                owner: fmt,
-                name: kind.to_string(),
-                descriptor: descriptor.to_string(),
-                params: None,
-                interface: false,
-                module_target: None,
-            },
+            callee: Callee::realized_virtual(
+                fmt,
+                kind.to_string(),
+                descriptor.to_string(),
+                None,
+                false,
+            ),
             dispatch_receiver: Some(recv),
             args: vec![ser, arg],
         };
@@ -695,14 +691,13 @@ fn decode_element_method(ty: &Ty) -> Option<(&'static str, &'static str)> {
 
 /// An `invokeinterface` callee on a runtime interface (`Encoder`/`CompositeEncoder`/…).
 fn virtual_iface(owner: &str, name: &str, descriptor: &str) -> Callee {
-    Callee::Virtual {
-        owner: type_name(owner),
-        name: name.to_string(),
-        descriptor: descriptor.to_string(),
-        params: None,
-        interface: true,
-        module_target: None,
-    }
+    Callee::realized_virtual(
+        type_name(owner),
+        name.to_string(),
+        descriptor.to_string(),
+        None,
+        true,
+    )
 }
 
 /// The `CompositeEncoder.encode<T>Element` method + descriptor for a property type, or `None` if the
@@ -994,14 +989,13 @@ impl SerializationPlugin {
             args: vec![],
         });
         let get_value = ir.add_expr(IrExpr::Call {
-            callee: Callee::Virtual {
-                owner: type_name("kotlin/Lazy"),
-                name: "getValue".to_string(),
-                descriptor: String::new(),
-                params: Some((vec![], class_ty("kotlin/Any"))),
-                interface: true,
-                module_target: None,
-            },
+            callee: Callee::realized_virtual(
+                type_name("kotlin/Lazy"),
+                "getValue".to_string(),
+                String::new(),
+                Some((vec![], class_ty("kotlin/Any"))),
+                true,
+            ),
             dispatch_receiver: Some(acc_call),
             args: vec![],
         });
@@ -1717,14 +1711,13 @@ impl IrPlugin for SerializationPlugin {
                     let is_optional = foo_optional.get(i).copied().unwrap_or(false);
                     let opt = ir.add_expr(IrExpr::Const(IrConst::Boolean(is_optional)));
                     init_stmts.push(ir.add_expr(IrExpr::Call {
-                        callee: Callee::Virtual {
-                            owner: type_name(pgsd_internal),
-                            name: "addElement".to_string(),
-                            descriptor: "(Ljava/lang/String;Z)V".to_string(),
-                            params: None,
-                            interface: false,
-                            module_target: None,
-                        },
+                        callee: Callee::realized_virtual(
+                            type_name(pgsd_internal),
+                            "addElement".to_string(),
+                            "(Ljava/lang/String;Z)V".to_string(),
+                            None,
+                            false,
+                        ),
                         dispatch_receiver: Some(d),
                         args: vec![nm, opt],
                     }));

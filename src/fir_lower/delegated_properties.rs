@@ -878,6 +878,9 @@ fn delegated_call(
                                 |header| header.flags.has(DeclarationFlags::INTERFACE),
                             ),
                             module_target: Some(*target),
+                            target: Some(crate::ir::IrVirtualTarget::Function(
+                                crate::fir::ResolvedFunctionOverrideTarget::Module(*target),
+                            )),
                         },
                         dispatch_receiver: Some(receiver),
                         args: arguments,

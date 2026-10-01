@@ -804,7 +804,7 @@ fn super_call_preserves_checked_default_ordinals_and_source_identity() {
         expression,
         IrExpr::Call {
             callee: crate::ir::Callee::Super {
-                source: Some(_),
+                declaration: Some(crate::fir::ResolvedFunctionOverrideTarget::Module(_)),
                 realization: crate::libraries::MemberRealization::Dispatch,
                 defaults,
                 ..
