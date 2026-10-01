@@ -8118,13 +8118,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   function, a library one included, is spliced and gets no class. A value class over a primitive
   or a nullable type keeps the indy lambda; a type parameter is nullable when a bound is, or when it
   has none, and a dependency's value class reads that from its metadata's type-parameter bounds
-  (`Wrap<T>(val a: T)` keeps indy). Three shapes are not realized as the class yet: a body that
-  declares a lambda or local function, whose lifted function kotlinc moves into the class; a lambda
-  passed to an inline function's `noinline` parameter, which only call realization tells apart from
-  a spliced one; and a `crossinline` lambda an inline function's anonymous object captures, which
-  kotlinc inlines into the object it regenerates per call site. Each is a compile error naming the
-  lambda, never an `invokedynamic` that cannot link. Tests: `tests/value_class_lambda_class_e2e.rs` (each class byte for byte
-  against kotlinc; the whole source at run time; the exact error for both unrealized shapes) and
+  (`Wrap<T>(val a: T)` keeps indy). A lambda passed to a same-file inline function's `noinline`
+  parameter is materialized by that expansion before lambda classes are realized, so it is the
+  class (`NoinlineLambdaClassKt$box$1`). Two shapes are not realized as the class yet: a body that
+  declares a lambda or local function, whose lifted function kotlinc moves into the class; and a
+  `crossinline` lambda an inline function's anonymous object captures, which kotlinc inlines into
+  the object it regenerates per call site. Each of those is a compile error naming the lambda,
+  never an `invokedynamic` that cannot link. Tests: `tests/value_class_lambda_class_e2e.rs` (each class byte for byte
+  against kotlinc; the whole source at run time; the exact error for the unrealized shape) and
   `tests/inline_value_class_lambda_e2e.rs`.
 - **Which constructor slots hide a constructor behind `DefaultConstructorMarker`.** kotlinc decides
   it from the slots a constructor has when it lowers value classes: declared parameters, an inner

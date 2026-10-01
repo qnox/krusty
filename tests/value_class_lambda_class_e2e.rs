@@ -83,29 +83,35 @@ fn lambda_classes_run() {
     common::expect_box_same_as_kotlinc(SRC, "ValueClassLambdaClass");
 }
 
-/// A lambda passed to an inline function's `noinline` parameter is a value the function receives,
-/// not a body it splices. Whether a lambda argument is spliced is known only once calls are
-/// realized, after lambda classes are, so this step does not realize its class yet; the backend
-/// reports it rather than emitting an `invokedynamic` that cannot link.
+/// A lambda passed to a same-file inline function's `noinline` parameter is a value that function
+/// receives, not a body it splices. The expansion materializes the value before lambda classes are
+/// realized, so it is the class kotlinc writes.
 #[test]
-fn a_noinline_argument_of_an_inline_call_is_reported_not_left_to_indy() {
-    let src = "@JvmInline value class Tag(val name: String)\n\
+fn a_noinline_argument_of_an_inline_call_is_its_own_class() {
+    const SRC: &str = "@JvmInline value class Tag(val name: String)\n\
         inline fun later(noinline f: (Tag) -> String, t: Tag): String = keep(f)(t)\n\
         fun keep(f: (Tag) -> String): (Tag) -> String = f\n\
         fun box(): String = later({ it.name }, Tag(\"OK\"))\n";
-    let diagnostics = common::compile_in_process_diagnostics(
-        src,
+    let built = common::compare_with_kotlinc_plugin(
         "NoinlineLambdaClass",
+        SRC,
+        "NoinlineLambdaClassKt$box$1",
         &[common::stdlib_jar()],
-        None,
+        "25",
+        &[],
+    )
+    .expect("reference kotlinc is provisioned");
+    assert!(
+        !built.reference_bytes.is_empty(),
+        "kotlinc writes NoinlineLambdaClassKt$box$1"
     );
-    assert_eq!(
-        diagnostics,
-        [
-            "internal error: lambda box$lambda$0 needs the class kotlinc writes when \
-          LambdaMetafactory cannot adapt its signature, and its shape is not realized as one yet"
-        ]
+    assert!(
+        built.krusty_bytes == built.reference_bytes,
+        "NoinlineLambdaClassKt$box$1 differs from kotlinc's:\n{}\n---\n{}",
+        built.krusty,
+        built.reference
     );
+    common::expect_box_same_as_kotlinc(SRC, "NoinlineLambdaClass");
 }
 
 /// A lambda the metafactory cannot adapt whose body declares a local function would need that
