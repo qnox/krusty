@@ -6,6 +6,125 @@
 use super::*;
 
 impl Parser<'_> {
+    /// `receiver?.name[indices]` without parentheses. `access` is the member the index reads;
+    /// `element` is that index, so a later update can share its operands.
+    pub(super) fn safe_index_selector(
+        &mut self,
+        safe_call: ExprId,
+        indices: Vec<ExprId>,
+        span: Span,
+    ) -> Option<ExprId> {
+        if self.parenthesized_expressions.contains(&safe_call.0) {
+            return None;
+        }
+        let Expr::SafeCall {
+            receiver,
+            name,
+            args: None,
+        } = self.file.expr(safe_call).clone()
+        else {
+            return None;
+        };
+        let name_span = self.file.exact_member_name_spans.get(&safe_call.0).copied();
+        let access = self.file.add_expr(
+            Expr::Member {
+                receiver,
+                name: name.clone(),
+            },
+            span,
+        );
+        if let Some(name_span) = name_span {
+            self.file
+                .exact_member_name_spans
+                .insert(access.0, name_span);
+        }
+        let element = self.file.add_expr(
+            Expr::Index {
+                array: access,
+                indices: indices.clone(),
+            },
+            span,
+        );
+        Some(self.file.add_expr(
+            Expr::SafeIndex {
+                receiver,
+                access,
+                element,
+                indices,
+            },
+            span,
+        ))
+    }
+
+    /// A parenthesized safe index is an ordinary subscript of the nullable safe call.
+    pub(super) fn reopen_parenthesized_safe_index(&mut self, expression: ExprId) -> ExprId {
+        let Expr::SafeIndex {
+            receiver,
+            access,
+            indices,
+            ..
+        } = self.file.expr(expression).clone()
+        else {
+            return expression;
+        };
+        let Expr::Member { name, .. } = self.file.expr(access).clone() else {
+            return expression;
+        };
+        let span = self.file.expr_spans[expression.0 as usize];
+        let name_span = self.file.exact_member_name_spans.get(&access.0).copied();
+        let safe_call = self.file.add_expr(
+            Expr::SafeCall {
+                receiver,
+                name,
+                args: None,
+            },
+            span,
+        );
+        if let Some(name_span) = name_span {
+            self.file
+                .exact_member_name_spans
+                .insert(safe_call.0, name_span);
+        }
+        self.file.add_expr(
+            Expr::Index {
+                array: safe_call,
+                indices,
+            },
+            span,
+        )
+    }
+
+    /// Replace a provisional `IncDec` with the safe-index update it actually parsed.
+    pub(super) fn safe_index_incdec(
+        &mut self,
+        expression: ExprId,
+        target: ExprId,
+        dec: bool,
+        prefix: bool,
+    ) -> ExprId {
+        let Expr::SafeIndex {
+            receiver,
+            access,
+            element,
+            indices,
+        } = self.file.expr(target).clone()
+        else {
+            return expression;
+        };
+        let span = self.file.expr_spans[expression.0 as usize];
+        let updated = self.file.add_expr(Expr::NullLit, span);
+        self.file.expr_arena[expression.0 as usize] = Expr::SafeIndexIncDec {
+            receiver,
+            access,
+            element,
+            indices,
+            updated,
+            dec,
+            prefix,
+        };
+        expression
+    }
+
     /// Build the store half shared by discarded-value and value-producing member/index inc/dec.
     /// Centralizing this match keeps the accepted lvalue families, source spans, and future property
     /// or index-store extensions identical across both syntactic contexts.
@@ -350,6 +469,106 @@ impl Parser<'_> {
     }
 }
 
+impl Parser<'_> {
+    /// `receiver?.name[indices] = value`. The index stays inside the safe selector.
+    pub(super) fn finish_safe_index_assignment(
+        &mut self,
+        expression: ExprId,
+        start: Span,
+        target_span: Span,
+    ) -> StmtId {
+        let Expr::SafeIndex {
+            receiver,
+            access,
+            element,
+            indices,
+        } = self.file.expr(expression).clone()
+        else {
+            unreachable!("a safe index assignment target is a safe index");
+        };
+        let operator = self.bump().span;
+        self.skip_newlines();
+        let value = self.parse_unlabelled_expr();
+        self.file.value_operator_spans.insert(value.0, operator);
+        self.finish_assignment_stmt(
+            Stmt::AssignSafeIndex {
+                receiver,
+                access,
+                element,
+                indices,
+                value,
+            },
+            start,
+            target_span,
+        )
+    }
+
+    /// `receiver?.name[indices] op= value` reuses the index read as the operator's left operand.
+    pub(super) fn finish_compound_safe_index_assignment(
+        &mut self,
+        expression: ExprId,
+        op: BinOp,
+        op_span: Span,
+        start: Span,
+        target_span: Span,
+    ) -> StmtId {
+        let Expr::SafeIndex {
+            receiver,
+            access,
+            element,
+            indices,
+        } = self.file.expr(expression).clone()
+        else {
+            unreachable!("a compound safe index assignment target is a safe index");
+        };
+        self.bump();
+        self.skip_newlines();
+        let rhs = self.parse_unlabelled_expr();
+        let value = self.file.add_expr(
+            Expr::Binary {
+                op,
+                lhs: element,
+                rhs,
+                operator_span: op_span,
+            },
+            Span::new(target_span.lo, self.file.expr_spans[rhs.0 as usize].hi),
+        );
+        self.finish_assignment_stmt(
+            Stmt::AssignSafeIndex {
+                receiver,
+                access,
+                element,
+                indices,
+                value,
+            },
+            start,
+            target_span,
+        )
+    }
+
+    pub(super) fn assignment_target_span(&self, expression: ExprId) -> Span {
+        match self.file.expr(expression) {
+            Expr::Member { name, .. }
+            | Expr::SafeCall {
+                name, args: None, ..
+            } => self
+                .file
+                .exact_member_name_spans
+                .get(&expression.0)
+                .copied()
+                .unwrap_or_else(|| {
+                    let span = self.file.expr_spans[expression.0 as usize];
+                    Span::new(span.hi.saturating_sub(name.len() as u32), span.hi)
+                }),
+            Expr::SafeIndex { access, .. } | Expr::SafeIndexIncDec { access, .. } => {
+                let access = *access;
+                self.assignment_target_span(access)
+            }
+            _ => self.file.expr_spans[expression.0 as usize],
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -365,6 +584,34 @@ mod tests {
             diagnostics.render("test", source)
         );
         file.debug_tree()
+    }
+
+    #[test]
+    fn unparenthesized_safe_index_stays_one_selector() {
+        assert_eq!(
+            tree("fun f(arg: Any) { arg?.alias[42] }"),
+            "(fun f (param arg Any) (block =>(safe-index arg alias 42)))\n"
+        );
+        assert_eq!(
+            tree("fun f(arg: Any) { arg?.alias[42] = arg }"),
+            "(fun f (param arg Any) (block (set-safe-index arg alias 42 arg)))\n"
+        );
+        assert_eq!(
+            tree("fun f(arg: Any) { ++arg?.alias[42] }"),
+            "(fun f (param arg Any) (block =>(safe-index-pre arg alias 42)))\n"
+        );
+        assert_eq!(
+            tree("fun f(arg: Any) { arg?.alias[42]++ }"),
+            "(fun f (param arg Any) (block =>(safe-index-post arg alias 42)))\n"
+        );
+        assert_eq!(
+            tree("fun f(arg: Any) { (arg?.alias)[42] }"),
+            "(fun f (param arg Any) (block =>(index (?. arg alias) 42)))\n"
+        );
+        assert_eq!(
+            tree("fun f(arg: Any) { (arg?.alias[42]) }"),
+            "(fun f (param arg Any) (block =>(index (?. arg alias) 42)))\n"
+        );
     }
 
     #[test]

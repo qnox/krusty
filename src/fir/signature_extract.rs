@@ -4,6 +4,7 @@
 //! resolver/checker semantics remain behind `SignatureSemantics` during graph evaluation.
 
 mod definitely_evaluated;
+mod safe_index;
 
 use crate::ast::{BinOp, Expr, ExprId, File, RangeKind, Stmt, TrFlags, TypeRef, UnOp};
 use crate::types::Ty;
@@ -1672,6 +1673,9 @@ impl SignatureConstraintExtractor {
                 }
                 self.member_call(receiver, "get", arguments, scope, node_origin)
             }
+            Expr::SafeIndex { .. } | Expr::SafeIndexIncDec { .. } => {
+                self.safe_index_read(file, expression, scope, origin, node_origin)?
+            }
             Expr::RangeTo { lo, hi, kind } => {
                 let receiver = self.expression(file, *lo, scope, origin)?;
                 let argument = self.expression(file, *hi, scope, origin)?;
@@ -1977,6 +1981,8 @@ impl SignatureConstraintExtractor {
                     | Expr::Binary { .. }
                     | Expr::ExtensionAccess { .. }
                     | Expr::Index { .. }
+                    | Expr::SafeIndex { .. }
+                    | Expr::SafeIndexIncDec { .. }
                     | Expr::Call { .. }
                     | Expr::If { .. }
                     | Expr::Block { .. }
@@ -2214,6 +2220,13 @@ impl SignatureConstraintExtractor {
                                 effects.push(self.expression(file, *index, scope, origin)?);
                             }
                             effects.push(self.expression(file, *value, scope, origin)?);
+                        }
+                        Stmt::AssignSafeIndex { .. } => {
+                            effects.extend(
+                                self.safe_index_assignment_effects(
+                                    file, *statement, scope, origin,
+                                )?,
+                            );
                         }
                         Stmt::CompoundAssign { target, value, .. } => {
                             effects.push(self.expression(file, *target, scope, origin)?);

@@ -45,6 +45,16 @@ pub(super) fn checked_function_body_with_platform_and_features(
     platform: Box<dyn SemanticPlatform>,
     features: &LangFeatures,
 ) -> (FirBody, ResolvedModuleIndex) {
+    checked_function_body_rewriting(source, function_name, platform, features, |_, _| {})
+}
+
+pub(super) fn checked_function_body_rewriting(
+    source: &str,
+    function_name: &str,
+    platform: Box<dyn SemanticPlatform>,
+    features: &LangFeatures,
+    rewrite: impl FnOnce(&mut crate::ast::File, &mut crate::resolve::TypeInfo),
+) -> (FirBody, ResolvedModuleIndex) {
     let mut diagnostics = DiagSink::new();
     let mut analysis = crate::frontend::analyze_source_set_with_features(
         &[SourceInput::kotlin(source).with_file_stem("FirBody")],
@@ -53,6 +63,8 @@ pub(super) fn checked_function_body_with_platform_and_features(
         &mut diagnostics,
     );
     assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+    let types = analysis.types[0].as_mut().expect("checked file");
+    rewrite(&mut analysis.files[0], types);
     let streamed = analysis.streamed.take().expect("Pass 1 must finalize");
     let (mut index, _, _, mut sources) = streamed.module.into_parts();
     let file = &analysis.files[0];
