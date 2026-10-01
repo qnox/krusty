@@ -1097,6 +1097,7 @@ mod tests {
             enum_entry_of: None,
             prop_ref: None,
             func_ref: None,
+            lambda: None,
             bridges: Vec::new(),
             interfaces: Default::default(),
             is_object: false,

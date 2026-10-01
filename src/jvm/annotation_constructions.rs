@@ -180,6 +180,7 @@ fn annotation_implementation(
         enum_entry_of: None,
         prop_ref: None,
         func_ref: None,
+        lambda: None,
         bridges: Vec::new(),
         interfaces: vec![interface].into(),
         is_object: false,
