@@ -10,15 +10,15 @@ impl Emitter<'_> {
     /// receiver's static class (`HolderChild.getStamp`), not on the class that declared the field.
     fn explicit_backing_receiver_class(
         &self,
-        owner: &str,
+        owner: TypeName,
         name: &str,
         receiver: Option<crate::ir::ExprId>,
-    ) -> Option<String> {
+    ) -> Option<TypeName> {
         let class = self
             .ir
             .classes
             .iter()
-            .find(|class| class.fq_name_matches(owner))?;
+            .find(|class| class.fq_name == owner)?;
         class
             .properties
             .iter()
@@ -34,7 +34,7 @@ impl Emitter<'_> {
         if class.fq_name_id() == static_name {
             return None;
         }
-        Some(static_name.render())
+        Some(static_name)
     }
 
     pub(super) fn retarget_explicit_backing_read(
