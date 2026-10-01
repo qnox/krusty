@@ -1686,6 +1686,7 @@ pub struct ResolvedAppliedClassifier {
 pub struct ResolvedTypeAliasHeader {
     pub declaration: DeclarationId,
     pub identity: TypeName,
+    pub target: TypeName,
     pub expansion: ResolvedTy,
     pub expansion_spelling: crate::spelling::Spelled,
 }
@@ -2663,6 +2664,7 @@ impl ResolvedModuleIndex {
         &mut self,
         declaration: DeclarationId,
         identity: TypeName,
+        target: TypeName,
         expansion: Ty,
         expansion_spelling: crate::spelling::Spelled,
     ) -> Result<(), UnpublishableType> {
@@ -2674,6 +2676,7 @@ impl ResolvedModuleIndex {
                     ResolvedTypeAliasHeader {
                         declaration,
                         identity,
+                        target,
                         expansion,
                         expansion_spelling,
                     },

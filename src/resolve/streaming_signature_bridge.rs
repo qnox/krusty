@@ -5554,13 +5554,21 @@ pub(crate) fn finalized_streamed_signature_index(
             );
             stop_with_failure!(stub.id);
         };
+        let Some(&target) = table.source_alias_fqns.get(&identity) else {
+            crate::trace_compiler!(
+                "fir",
+                "signature finalization declined {:?}: resolved type-alias target is missing",
+                stub.id,
+            );
+            stop_with_failure!(stub.id);
+        };
         let expansion_spelling = table
             .alias_expansion_spellings
             .get(&identity)
             .map(|(spelling, _, _)| spelling.clone())
             .unwrap_or_default();
         if index
-            .publish_type_alias_header(stub.id, identity, *expansion, expansion_spelling)
+            .publish_type_alias_header(stub.id, identity, target, *expansion, expansion_spelling)
             .is_err()
         {
             stop_with_failure!(stub.id);

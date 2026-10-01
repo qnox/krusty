@@ -189,25 +189,21 @@ impl Checker<'_> {
         self.select_classifier_binding(scope, name).0
     }
 
-    fn alias_target_classifier(&self, expansion: Ty) -> Option<TypeName> {
-        match expansion.non_null() {
-            Ty::Unit => Some(type_name("kotlin/Unit")),
-            expansion => expansion
-                .obj_internal()
-                .map(|classifier| self.libraries.canonical_source_type_name(classifier)),
-        }
-    }
-
     fn selected_alias_from_identity(
         &self,
         identity: TypeName,
         classifier: TypeName,
     ) -> Option<SelectedTypeAlias> {
-        let (formals, expansion) = self.source_alias_expansion(identity)?;
-        (self.alias_target_classifier(expansion) == Some(classifier)).then_some(SelectedTypeAlias {
-            identity: Some(identity),
-            formals,
-            expansion,
+        // An ordinary classifier publishes its own identity in both record fields. Do not query
+        // another provider for an equally qualified alias after that classifier has won.
+        if identity == classifier {
+            return None;
+        }
+        let binding = self.source_alias_binding(identity)?;
+        (binding.target == classifier).then_some(SelectedTypeAlias {
+            identity: Some(binding.identity),
+            formals: binding.formals,
+            expansion: binding.expansion,
         })
     }
 
@@ -224,10 +220,9 @@ impl Checker<'_> {
         let classifier = self
             .libraries
             .canonical_source_type_name(record.classifier_name?);
-        let identity = namespace
-            .existing_classifier(name)
-            .expect("selected same-package classifier declaration must be interned");
-        let alias = self.selected_alias_from_identity(identity, classifier);
+        let alias = record
+            .classifier_declaration_name
+            .and_then(|identity| self.selected_alias_from_identity(identity, classifier));
         Some((classifier, alias))
     }
 
@@ -237,21 +232,6 @@ impl Checker<'_> {
         name: &str,
         classifier: TypeName,
     ) -> Option<SelectedTypeAlias> {
-        if let CheckerModuleSymbols::Legacy(source) = &self.module {
-            if let Some(alias) = source
-                .pass_one_symbols()
-                .class_names
-                .alias_expansion(name)
-                .filter(|alias| alias.target == classifier)
-            {
-                return Some(SelectedTypeAlias {
-                    identity: Some(alias.identity),
-                    formals: alias.formals.clone(),
-                    expansion: alias.expansion,
-                });
-            }
-        }
-
         let source = self.fed_source();
         for level in &self.import_levels {
             let candidates = level
@@ -267,7 +247,7 @@ impl Checker<'_> {
                         .filter(|_| !level.builtins_only || record.builtin_classifier)
                         .map(|target| {
                             (
-                                crate::types::type_name_child(package, name),
+                                record.classifier_declaration_name,
                                 self.libraries.canonical_source_type_name(target),
                             )
                         })
@@ -284,6 +264,11 @@ impl Checker<'_> {
             }
             let mut selected: Option<SelectedTypeAlias> = None;
             for (identity, _) in candidates {
+                let Some(identity) = identity else {
+                    // The selected provider did not publish alias provenance. Do not reinterpret
+                    // that classifier through an equally named declaration from another source.
+                    return None;
+                };
                 let Some(alias) = self.selected_alias_from_identity(identity, classifier) else {
                     // A real classifier occupies the selected rung. A same-target alias from a
                     // lower package must not change that declaration into an alias application.
@@ -307,22 +292,26 @@ impl Checker<'_> {
         scope: &CheckerScope<'_>,
         name: &str,
     ) -> Option<(TypeName, SelectedTypeAlias)> {
-        let alias = if let Some(alias) = scope.type_alias(name) {
+        if let Some(alias) = scope.type_alias(name) {
+            return Some((
+                alias.target,
+                SelectedTypeAlias {
+                    identity: None,
+                    formals: alias.formals,
+                    expansion: alias.expansion,
+                },
+            ));
+        }
+        let identity = self.lexical_source_alias_identity(name)?;
+        let binding = self.source_alias_binding(identity)?;
+        Some((
+            binding.target,
             SelectedTypeAlias {
-                identity: None,
-                formals: alias.formals,
-                expansion: alias.expansion,
-            }
-        } else {
-            let identity = self.lexical_source_alias_identity(name)?;
-            let (formals, expansion) = self.source_alias_expansion(identity)?;
-            SelectedTypeAlias {
-                identity: Some(identity),
-                formals,
-                expansion,
-            }
-        };
-        Some((self.alias_target_classifier(alias.expansion)?, alias))
+                identity: Some(binding.identity),
+                formals: binding.formals,
+                expansion: binding.expansion,
+            },
+        ))
     }
 
     fn selected_scoped_type_alias(

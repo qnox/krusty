@@ -63,12 +63,7 @@ impl DependencyPlatform {
         identity: TypeName,
     ) -> Option<crate::libraries::AliasExpansion> {
         let (formals, expansion) = self.symbols.source_alias_expansions.get(&identity)?;
-        let target = expansion.non_null().kotlin_class_internal().or_else(|| {
-            expansion
-                .fun_arity()
-                .and_then(|arity| self.platform.function_type(usize::from(arity)))
-                .and_then(Ty::obj_internal)
-        })?;
+        let target = *self.symbols.source_alias_fqns.get(&identity)?;
         let expansion_spelling = self
             .symbols
             .alias_expansion_spellings

@@ -94,12 +94,18 @@ impl<'a> StreamedModuleSymbols<'a> {
             })
     }
 
-    pub(crate) fn type_alias_expansion(&self, identity: TypeName) -> Option<(Vec<String>, Ty)> {
+    pub(crate) fn type_alias_binding(
+        &self,
+        identity: TypeName,
+    ) -> Option<crate::libraries::AliasExpansion> {
         let header = self.index.type_alias_by_identity(identity)?;
-        Some((
-            self.index.type_alias_formals(header.declaration),
-            header.expansion.get(),
-        ))
+        Some(crate::libraries::AliasExpansion {
+            identity: header.identity,
+            target: header.target,
+            formals: self.index.type_alias_formals(header.declaration),
+            expansion: header.expansion.get(),
+            expansion_spelling: header.expansion_spelling.clone(),
+        })
     }
 
     pub(crate) fn type_parameter_extra_bounds(&self, identity: &str) -> Vec<Ty> {

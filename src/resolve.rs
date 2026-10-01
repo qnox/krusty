@@ -554,13 +554,20 @@ fn import_path_diagnostic(
 }
 
 impl Checker<'_> {
+    /// Complete bind-once facts for one selected module or dependency type-alias declaration.
+    fn source_alias_binding(&self, identity: TypeName) -> Option<crate::libraries::AliasExpansion> {
+        // `identity` is already the selected declaration. These stores own disjoint declaration
+        // lifetimes; this does not retry source spelling or a lower scope rung.
+        if let Some(binding) = self.module.type_alias_binding(identity) {
+            return Some(binding);
+        }
+        self.libraries.type_alias_expansion(identity)
+    }
+
     /// Stable module-level type-alias expansion visible through the active module provider.
     fn source_alias_expansion(&self, identity: TypeName) -> Option<(Vec<String>, Ty)> {
-        self.module.type_alias_expansion(identity).or_else(|| {
-            self.libraries
-                .type_alias_expansion(identity)
-                .map(|expansion| (expansion.formals, expansion.expansion))
-        })
+        self.source_alias_binding(identity)
+            .map(|binding| (binding.formals, binding.expansion))
     }
 
     fn source_alias_declared(&self, identity: TypeName) -> bool {
@@ -12827,11 +12834,13 @@ struct LexicalCallable {
     signature: Signature,
 }
 
-/// A typealias whose lifetime is one lexical body scope. `formals` are declaration-owned semantic
-/// identities, not source spellings; applying the alias therefore cannot capture an enclosing type
-/// parameter that happens to use the same name.
+/// A typealias whose lifetime is one lexical body scope. `target` is recorded once when the
+/// declaration is checked; later selection never has to recover a classifier from the expansion.
+/// `formals` are declaration-owned semantic identities, not source spellings; applying the alias
+/// therefore cannot capture an enclosing type parameter that happens to use the same name.
 #[derive(Clone)]
 struct LexicalTypeAlias {
+    target: TypeName,
     formals: Vec<String>,
     expansion: Ty,
 }
@@ -38594,10 +38603,10 @@ impl<'a> CheckerModuleSymbols<'a> {
         }
     }
 
-    fn type_alias_expansion(&self, identity: TypeName) -> Option<(Vec<String>, Ty)> {
+    fn type_alias_binding(&self, identity: TypeName) -> Option<crate::libraries::AliasExpansion> {
         match self {
-            Self::Legacy(source) => source.type_alias_expansion(identity),
-            Self::Streamed(source) => source.type_alias_expansion(identity),
+            Self::Legacy(source) => source.type_alias_binding(identity),
+            Self::Streamed(source) => source.type_alias_binding(identity),
         }
     }
 
@@ -50227,6 +50236,7 @@ impl<'a> Checker<'a> {
             self.report_unresolved_type_ref(&alias.target);
             return None;
         }
+        let target = crate::libraries::type_alias_target_classifier(expansion)?;
         let formals = alias
             .type_params
             .iter()
@@ -50238,7 +50248,11 @@ impl<'a> Checker<'a> {
                     .to_string()
             })
             .collect();
-        let resolved = LexicalTypeAlias { formals, expansion };
+        let resolved = LexicalTypeAlias {
+            target,
+            formals,
+            expansion,
+        };
         scope.rebind(
             &alias.name,
             Ns::Classifier,

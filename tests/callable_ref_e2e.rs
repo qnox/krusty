@@ -463,7 +463,7 @@ fn an_applied_callable_reference_keeps_the_selected_classifier_rung() {
             "package sample\n\
              import lower.*\n\
              fun box(): String {\n\
-             \x20   val selected = (Pick<First, Second>::selected)(Pick(First, Second))\n\
+             \x20   val selected = (Pick<First, Second>::selected)(Pick<First, Second>(First, Second))\n\
              \x20   return if (selected === Second) \"OK\" else \"fail\"\n\
              }\n",
         ),

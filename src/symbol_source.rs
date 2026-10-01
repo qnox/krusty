@@ -209,7 +209,9 @@ impl SymbolSource for CompositeSource<'_> {
                 let mut props = Vec::new();
                 let mut importable_declaration = false;
                 for r in &records {
-                    if classifier.is_none() {
+                    // Declaration identity owns classifier precedence even when its physical shape
+                    // lives in another provider (for example a source function-type alias).
+                    if classifier_name.is_none() {
                         classifier = r.classifier.clone();
                         classifier_name = r.classifier_name;
                         classifier_declaration_name =
@@ -820,5 +822,45 @@ mod tests {
             ),
             vec![list]
         );
+    }
+
+    struct IdentityOnlySource {
+        declaration: TypeName,
+        target: TypeName,
+    }
+
+    impl SymbolSource for IdentityOnlySource {
+        fn symbols(&self, namespace: SymbolNamespace, name: &str) -> std::rc::Rc<ResolvedSymbols> {
+            if namespace.existing_classifier(name) != Some(self.declaration) {
+                return std::rc::Rc::new(ResolvedSymbols::default());
+            }
+            std::rc::Rc::new(ResolvedSymbols {
+                classifier_name: Some(self.target),
+                classifier_declaration_name: Some(self.declaration),
+                ..ResolvedSymbols::default()
+            })
+        }
+    }
+
+    #[test]
+    fn an_identity_only_classifier_record_still_owns_composite_precedence() {
+        let declaration = crate::types::type_name("sample/Alias");
+        let target = crate::types::type_name("kotlin/Function1");
+        let alias = IdentityOnlySource {
+            declaration,
+            target,
+        };
+        let lower = ProvenanceSource {
+            identity: declaration,
+            builtin: false,
+        };
+        let source = CompositeSource::new(vec![&alias as &dyn SymbolSource, &lower]);
+        let record = source.symbols(
+            SymbolNamespace::Package(crate::types::type_name("sample")),
+            "Alias",
+        );
+        assert_eq!(record.classifier_name, Some(target));
+        assert_eq!(record.classifier_declaration_name, Some(declaration));
+        assert!(record.classifier.is_none());
     }
 }
