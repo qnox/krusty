@@ -1042,6 +1042,31 @@ impl BodyLowering<'_> {
         }
     }
 
+    fn record_inline_property_splice(
+        &mut self,
+        expression: ExprId,
+        splice: &Option<Box<crate::fir::FirInlineAccessorSplice>>,
+    ) {
+        let Some(splice) = splice else {
+            return;
+        };
+        self.ir.inline_property_access.splices.insert(
+            expression,
+            crate::ir::IrInlinePropertySplice {
+                accessor: splice.accessor,
+                substitutions: splice
+                    .substitutions
+                    .iter()
+                    .map(|substitution| crate::ir::IrInlineTypeSubstitution {
+                        name: substitution.name.to_string(),
+                        reified: substitution.reified,
+                        value: substitution.value.get(),
+                    })
+                    .collect(),
+            },
+        );
+    }
+
     pub(super) fn checked_property_read(
         &mut self,
         target: &FirPropertyTarget,
@@ -1051,7 +1076,10 @@ impl BodyLowering<'_> {
         substitutions: &[FirTypeSubstitution],
     ) -> Result<ExprId, FirLoweringFailure> {
         match target {
-            FirPropertyTarget::Module(target) => {
+            FirPropertyTarget::Module {
+                property: target,
+                inline_splice,
+            } => {
                 self.index
                     .property(*target)
                     .ok_or(FirLoweringFailure::MissingProperty(*target))?;
@@ -1068,7 +1096,9 @@ impl BodyLowering<'_> {
                         .collect::<Result<Vec<_>, _>>()?,
                     substitutions: lower_substitutions(substitutions),
                 };
-                Ok(self.ir.add_expr(IrExpr::Checked(operation)))
+                let expression = self.ir.add_expr(IrExpr::Checked(operation));
+                self.record_inline_property_splice(expression, inline_splice);
+                Ok(expression)
             }
             FirPropertyTarget::External {
                 property,
@@ -1118,7 +1148,10 @@ impl BodyLowering<'_> {
         substitutions: &[FirTypeSubstitution],
     ) -> Result<ExprId, FirLoweringFailure> {
         match target {
-            FirPropertyTarget::Module(target) => {
+            FirPropertyTarget::Module {
+                property: target,
+                inline_splice,
+            } => {
                 self.index
                     .property(*target)
                     .ok_or(FirLoweringFailure::MissingProperty(*target))?;
@@ -1136,7 +1169,9 @@ impl BodyLowering<'_> {
                     value: self.expression_with_conversion(value, conversion)?,
                     substitutions: lower_substitutions(substitutions),
                 };
-                Ok(self.ir.add_expr(IrExpr::Checked(operation)))
+                let expression = self.ir.add_expr(IrExpr::Checked(operation));
+                self.record_inline_property_splice(expression, inline_splice);
+                Ok(expression)
             }
             FirPropertyTarget::External {
                 property,

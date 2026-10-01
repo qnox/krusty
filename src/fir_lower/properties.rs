@@ -171,6 +171,8 @@ pub(super) fn predeclare_properties(
             .ok_or(FirFileLoweringFailure::MissingProperty(declaration))?
             .to_owned();
         let source_order = declaration_source_order(index, declaration)?;
+        let (getter_declaration, getter_inline) = accessor_disposition(index, declaration, 0);
+        let (setter_declaration, setter_inline) = accessor_disposition(index, declaration, 1);
         assert!(
             ir.checked_properties
                 .insert(
@@ -195,10 +197,93 @@ pub(super) fn predeclare_properties(
                         delegate_plan: None,
                         getter: None,
                         setter: None,
+                        getter_declaration,
+                        getter_inline,
+                        setter_declaration,
+                        setter_inline,
                     },
                 )
                 .is_none(),
             "a stable property has one common-IR declaration"
+        );
+    }
+    Ok(())
+}
+
+/// A foreign inline accessor is a template in the caller's file, not a property declared there.
+/// Local classes copied out of that accessor still name it as their enclosure, which is resolved
+/// through the property layout. Publish the layout the template's functions already describe.
+fn publish_foreign_accessor_layouts(
+    index: &ResolvedModuleIndex,
+    ir: &IrFile,
+    realizations: &mut HashMap<crate::fir::PropertyId, IrLocalPropertyLayout>,
+) -> Result<(), FirFileLoweringFailure> {
+    let mut accessors: HashMap<crate::fir::PropertyId, (Option<FunId>, Option<FunId>)> =
+        HashMap::new();
+    for (&declaration, &function) in &ir.inline_property_access.accessor_functions {
+        let Some(anchor) = index.declaration_anchor(declaration) else {
+            continue;
+        };
+        if anchor.kind != DeclarationKind::Accessor {
+            continue;
+        }
+        let Some(property) = anchor.owner else {
+            continue;
+        };
+        let Some(property_id) = index.property_for_declaration(property) else {
+            continue;
+        };
+        if realizations.contains_key(&property_id) {
+            continue;
+        }
+        let slot = accessors.entry(property_id).or_default();
+        match anchor.sibling {
+            0 => slot.0 = Some(function),
+            1 => slot.1 = Some(function),
+            _ => return Err(FirFileLoweringFailure::MissingProperty(property)),
+        }
+    }
+    for (property_id, (getter, setter)) in accessors {
+        let Some(getter) = getter else {
+            continue;
+        };
+        let shape = index
+            .property(property_id)
+            .ok_or(FirFileLoweringFailure::MissingProperty(
+                DeclarationId::from_raw(property_id.raw()),
+            ))?;
+        let header = index
+            .declaration_header(shape.declaration)
+            .ok_or(FirFileLoweringFailure::MissingProperty(shape.declaration))?;
+        let extension = (!header.flags.has(DeclarationFlags::COMPANION))
+            .then_some(shape.extension_receiver)
+            .flatten()
+            .map(crate::fir::ResolvedTy::get);
+        let context_parameters = index
+            .signature(shape.declaration)
+            .and_then(|signature| {
+                signature
+                    .parameters
+                    .get(..shape.context_parameter_count as usize)
+            })
+            .ok_or(FirFileLoweringFailure::MissingProperty(shape.declaration))?
+            .iter()
+            .map(|parameter| parameter.get())
+            .collect::<Vec<_>>();
+        if index.enclosing_classifier(shape.declaration).is_some() {
+            // A member template's class is realized with the member. Only a package accessor is
+            // enclosed from this file, and its layout carries no storage of its own.
+            continue;
+        }
+        realizations.insert(
+            property_id,
+            IrLocalPropertyLayout::TopLevelAccessor {
+                getter,
+                setter,
+                receiver: extension,
+                context_parameters,
+                delegate: None,
+            },
         );
     }
     Ok(())
@@ -324,7 +409,12 @@ pub(super) fn finalize_properties(
     }
     merge_class_initialization(ir, initialization)?;
     realize_backing_field_operations(index, ir, &realizations)?;
+    publish_foreign_accessor_layouts(index, ir, &mut realizations)?;
     ir.local_property_layouts.extend(realizations);
+    // Accessor functions exist now, and checked reads still carry the call site's type arguments.
+    // Splice `inline` accessors before a backend turns the read into a call and drops those
+    // arguments: a reified `T::class` in the accessor is the call site's class.
+    super::inlining::splice_inline_property_accessors(ir)?;
     Ok(())
 }
 
@@ -1492,6 +1582,62 @@ pub(super) fn record_accessor_visibilities(
             setter_visibility(index, declaration, property_visibility),
         );
     }
+    let inline = ir
+        .checked_properties
+        .values()
+        .find(|property| property.declaration == declaration)
+        .map(|property| {
+            (
+                property.getter_declaration,
+                property.getter_inline,
+                property.setter_declaration,
+                property.setter_inline,
+            )
+        });
+    if let Some((getter_declaration, getter_inline, setter_declaration, setter_inline)) = inline {
+        publish_accessor_function(ir, getter_declaration, getter_inline, getter);
+        publish_accessor_function(ir, setter_declaration, setter_inline, setter);
+    }
+}
+
+fn accessor_disposition(
+    index: &ResolvedModuleIndex,
+    declaration: DeclarationId,
+    sibling: u32,
+) -> (Option<DeclarationId>, bool) {
+    let Some(accessor) = index.owned_declaration(declaration, DeclarationKind::Accessor, sibling)
+    else {
+        return (None, false);
+    };
+    let inline = index
+        .declaration_header(accessor)
+        .is_some_and(|header| header.flags.has(DeclarationFlags::INLINE));
+    (Some(accessor), inline)
+}
+
+fn publish_accessor_function(
+    ir: &mut IrFile,
+    declaration: Option<DeclarationId>,
+    inline: bool,
+    function: Option<FunId>,
+) {
+    let (Some(declaration), Some(function)) = (declaration, function) else {
+        return;
+    };
+    ir.inline_property_access
+        .accessor_functions
+        .insert(declaration, function);
+    if !inline {
+        return;
+    }
+    ir.inline_fns.insert(function);
+    let static_accessor = ir
+        .functions
+        .get(function as usize)
+        .is_some_and(|function| function.is_static && function.dispatch_receiver.is_none());
+    if static_accessor {
+        ir.top_level_inline_functions.insert(function);
+    }
 }
 
 /// Where each accessor of a top-level (or companion-block) stored property comes from. A bodiless
@@ -1889,6 +2035,88 @@ pub(super) fn accept_property_body(
     };
     if slot.replace(value).is_some() {
         return Err(FirFileLoweringFailure::MissingProperty(declaration));
+    }
+    Ok(())
+}
+
+/// Attach a retained accessor body to the inline-only function predeclared in a caller's file.
+/// The foreign property itself is not imported into that file: it is only the lexical owner of
+/// this checked template, while the selected accessor identity is the splice boundary.
+pub(super) fn accept_inline_accessor_template(
+    declaration: DeclarationId,
+    body: FirBody,
+    index: &ResolvedModuleIndex,
+    ir: &mut IrFile,
+    local_callables: &mut LocalCallableLoweringContext,
+    function: FunId,
+) -> Result<(), FirFileLoweringFailure> {
+    let anchor = index
+        .declaration_anchor(declaration)
+        .filter(|anchor| anchor.kind == DeclarationKind::Accessor)
+        .ok_or(FirFileLoweringFailure::MissingProperty(declaration))?;
+    let returns_value = match anchor.sibling {
+        0 => true,
+        1 => false,
+        _ => return Err(FirFileLoweringFailure::MissingProperty(declaration)),
+    };
+    if ir.functions[function as usize].body.is_some() {
+        let callable = index
+            .callable_for_declaration(declaration)
+            .ok_or(FirFileLoweringFailure::MissingCallable(declaration))?;
+        return Err(FirFileLoweringFailure::DuplicateBody(callable.id));
+    }
+    let origin = body
+        .roots()
+        .first()
+        .and_then(|root| body.statement(*root))
+        .map_or(crate::fir::OriginId::from_raw(0), |statement| {
+            statement.origin
+        });
+    let lowered = lower_body_with_context(body, index, ir, local_callables)
+        .map_err(FirFileLoweringFailure::Body)?;
+    if !lowered.defaults.is_empty() {
+        return Err(FirFileLoweringFailure::MissingProperty(declaration));
+    }
+    let result = lowered
+        .result_type
+        .ok_or(FirFileLoweringFailure::MissingResultType(declaration))?;
+    if result != ir.functions[function as usize].ret {
+        return Err(FirFileLoweringFailure::ResultTypeMismatch(declaration));
+    }
+    ir.callable_scopes.extend(lowered.root_block);
+    let value = body_value(lowered.roots.into_vec(), Some(origin), ir)?;
+    let line = returns_value
+        .then(|| ir.expr_source_lines.get(&value).copied())
+        .flatten();
+    let returned = ir.add_expr(IrExpr::Return(returns_value.then_some(value)));
+    if let Some(line) = line {
+        ir.expr_source_lines.insert(returned, line);
+    }
+    let body = if returns_value {
+        ir.add_expr(IrExpr::Block {
+            stmts: vec![returned],
+            value: None,
+        })
+    } else {
+        ir.add_expr(IrExpr::Block {
+            stmts: vec![value, returned],
+            value: None,
+        })
+    };
+    ir.callable_scopes.insert(body);
+    ir.functions[function as usize].body = Some(body);
+    if ir
+        .inline_property_access
+        .accessor_functions
+        .insert(declaration, function)
+        .is_some()
+    {
+        return Err(FirFileLoweringFailure::DuplicateBody(
+            index
+                .callable_for_declaration(declaration)
+                .ok_or(FirFileLoweringFailure::MissingCallable(declaration))?
+                .id,
+        ));
     }
     Ok(())
 }
