@@ -167,12 +167,14 @@ output once. A run keeps new dumps in memory and writes that file once, when the
 `2.4.20..` covers that release and every newer one until a
 later recording disagrees, so adding a Kotlin version does not copy the dumps. RC tags of one
 release share `2.4.20-RC..` and do not share the release range. A dump is used when its fingerprint
-still matches the fixture and the compiler's version falls in the range. That fingerprint is the
-compiled sources and the class files compiled from them. The Kotlin distribution is the version
-range, so its jars are not hashed, and the JDK image is not part of the key. Locally, a release
-(`2.4.20`, `2.4.20-release-482`) or an RC tag (`2.4.20-RC`, `2.4.20-RC2`, `2.4.0-RC-137`) with no
-matching dump fails the test and does not run kotlinc. `KRUSTY_RECORD_CLASS_DUMPS=1` recompiles and
-rewrites the ranges the run reaches. GitHub restores an immutable cache for the PR's master base.
+still matches the fixture and the compiler's version falls in the range. That fingerprint includes
+the compiled sources and the class files compiled from them. Selected kotlinc entries contribute
+their logical distribution paths. Selected JDK `modules` and `ct.sym` entries contribute their kind
+plus the hashed identity of the selected JDK's `release` file. Every other arbitrary dependency
+remains content-hashed. Locally, a release (`2.4.20`, `2.4.20-release-482`) or an RC tag
+(`2.4.20-RC`, `2.4.20-RC2`, `2.4.0-RC-137`) with no matching dump fails the test and does not run
+kotlinc. `KRUSTY_RECORD_CLASS_DUMPS=1` recompiles and rewrites the ranges the run reaches. GitHub
+restores an immutable cache for the PR's master base.
 PR and merge-group jobs replay every matching entry, compile missing or incomplete entries live,
 and never save the result. Thus a partial prefix cache is an accelerator, not an authority. A
 successful master job refreshes and saves the cache under the supported Kotlin version and master
