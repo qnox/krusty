@@ -1125,6 +1125,24 @@ pub(crate) fn merge_inferred_ty_from_symbols(
 ) -> Ty {
     let current = current.projection_inner().unwrap_or(current);
     let actual = actual.projection_inner().unwrap_or(actual);
+    // Nullable-formal inference carries the caller's original nullable bound in
+    // `DefinitelyNotNull`, while an ordinary/source `T & Any` uses the established compact
+    // `TyParam(T, tightened_bound)` representation. They are the same DNN occurrence only when the
+    // parameter identity and tightened bound agree. Keep the provenance-bearing form at that join
+    // so substituting the inferred result through `R?` can reopen the original caller `T?`.
+    let same_parameter_dnn = |provenance: Ty, compact: Ty| match provenance {
+        Ty::DefinitelyNotNull(original) => match *original {
+            Ty::TyParam(name, bound) => compact == Ty::ty_param(name, bound.definitely_non_null()),
+            _ => false,
+        },
+        _ => false,
+    };
+    if same_parameter_dnn(current, actual) {
+        return current;
+    }
+    if same_parameter_dnn(actual, current) {
+        return actual;
+    }
     if current.non_null() == actual.non_null() {
         let base = current.non_null();
         return if current.is_nullable() || actual.is_nullable() {

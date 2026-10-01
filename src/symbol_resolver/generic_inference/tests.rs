@@ -616,3 +616,185 @@ fn flexible_member_return_seeds_the_receivers_symbolic_argument() {
     assert_eq!(bindings.get("caller:Y"), Some(&caller_value));
     assert_eq!(ty_subst(flexible, &bindings), flexible);
 }
+
+fn nullable_any_bound_signature(params: Vec<Ty>, ret: Ty) -> GenericSig {
+    let any = Ty::obj("kotlin/Any");
+    GenericSig {
+        formals: vec!["R".to_string()],
+        formal_bounds: vec![vec![any]],
+        receiver: None,
+        params,
+        ret,
+        return_policy: crate::libraries::GenericReturnPolicy::Exact,
+    }
+}
+
+#[test]
+fn nullable_any_bound_solves_to_definitely_non_null_and_substitutes_as_nullable() {
+    let caller = Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")));
+    let formal = Ty::nullable(Ty::ty_param("R", Ty::obj("kotlin/Any")));
+    let signature = nullable_any_bound_signature(vec![formal], formal);
+    let solved = caller.contributed_through_nullable_formal();
+
+    let inferred = infer_generic_call_constraints_from_symbols(
+        &crate::libraries::EmptySymbolSource,
+        &signature,
+        [(0, caller, false)],
+        None,
+    );
+
+    assert!(matches!(solved, Ty::DefinitelyNotNull(_)));
+    assert_eq!(inferred.bindings.get("R"), Some(&solved));
+    assert!(inferred.bound_violation.is_none());
+    let substituted = ty_subst(signature.ret, &inferred.bindings);
+    assert_eq!(substituted, Ty::nullable(caller));
+    assert_eq!(
+        substituted.non_null().ty_param_bound(),
+        Some(Ty::nullable(Ty::obj("kotlin/Any")))
+    );
+
+    let nullable_actual = infer_generic_call_constraints_from_symbols(
+        &crate::libraries::EmptySymbolSource,
+        &signature,
+        [(0, Ty::nullable(caller), false)],
+        None,
+    );
+    assert_eq!(nullable_actual.bindings.get("R"), Some(&solved));
+    assert!(nullable_actual.bound_violation.is_none());
+    assert_eq!(
+        ty_subst(signature.ret, &nullable_actual.bindings),
+        Ty::nullable(caller)
+    );
+}
+
+#[test]
+fn nullable_formal_drops_unneeded_dnn_provenance_when_its_bound_accepts_the_caller() {
+    let any = Ty::obj("kotlin/Any");
+    let nullable_any = Ty::nullable(any);
+    let caller = Ty::ty_param("caller:T", nullable_any);
+    let formal = Ty::ty_param("callee:R", nullable_any);
+    let signature = GenericSig {
+        formals: vec!["callee:R".to_string()],
+        formal_bounds: vec![vec![nullable_any]],
+        receiver: None,
+        params: vec![Ty::nullable(formal)],
+        ret: formal,
+        return_policy: crate::libraries::GenericReturnPolicy::Exact,
+    };
+
+    let inferred = infer_generic_call_constraints_from_symbols(
+        &crate::libraries::EmptySymbolSource,
+        &signature,
+        [(0, Ty::nullable(caller), false)],
+        None,
+    );
+
+    assert_eq!(inferred.bindings.get("callee:R"), Some(&caller));
+    assert!(inferred.bound_violation.is_none());
+    assert_eq!(ty_subst(signature.ret, &inferred.bindings), caller);
+}
+
+#[test]
+fn nullable_and_exact_dnn_paths_merge_without_losing_the_caller_bound() {
+    let caller = Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")));
+    let formal = Ty::ty_param("R", Ty::obj("kotlin/Any"));
+    let nullable_formal = Ty::nullable(formal);
+    let signature = nullable_any_bound_signature(vec![nullable_formal, formal], nullable_formal);
+    let compact = caller.definitely_non_null();
+    let provenance = caller.contributed_through_nullable_formal();
+
+    assert_ne!(provenance, compact);
+    assert!(matches!(provenance, Ty::DefinitelyNotNull(_)));
+    for (left, right) in [(provenance, compact), (compact, provenance)] {
+        assert_eq!(
+            merge_inferred_ty_from_symbols(Some(&crate::libraries::EmptySymbolSource), left, right),
+            provenance,
+            "the semantic join must retain nullable-formal provenance in either order"
+        );
+    }
+    let inferred = infer_generic_call_constraints_from_symbols(
+        &crate::libraries::EmptySymbolSource,
+        &signature,
+        [(0, caller, false), (1, compact, false)],
+        None,
+    );
+
+    assert_eq!(inferred.bindings.get("R"), Some(&provenance));
+    assert!(inferred.bound_violation.is_none());
+    assert_eq!(
+        ty_subst(signature.ret, &inferred.bindings),
+        Ty::nullable(caller)
+    );
+}
+
+#[test]
+fn non_null_any_bound_keeps_its_recorded_bound_through_nullable_substitution() {
+    let any = Ty::obj("kotlin/Any");
+    let caller = Ty::ty_param("T", any);
+    let formal = Ty::nullable(Ty::ty_param("R", any));
+    let signature = nullable_any_bound_signature(vec![formal], formal);
+
+    let inferred = infer_generic_call_constraints_from_symbols(
+        &crate::libraries::EmptySymbolSource,
+        &signature,
+        [(0, caller, false)],
+        None,
+    );
+
+    assert_eq!(caller.contributed_through_nullable_formal(), caller);
+    assert_eq!(inferred.bindings.get("R"), Some(&caller));
+    assert!(inferred.bound_violation.is_none());
+    let substituted = ty_subst(signature.ret, &inferred.bindings);
+    assert_eq!(substituted, Ty::nullable(caller));
+    assert_eq!(substituted.non_null().ty_param_bound(), Some(any));
+}
+
+#[test]
+fn mixed_nullable_and_bare_any_bound_keeps_the_bound_violation() {
+    let caller = Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")));
+    let bare = Ty::ty_param("R", Ty::obj("kotlin/Any"));
+    let nullable = Ty::nullable(bare);
+    let signature = nullable_any_bound_signature(vec![bare, nullable], nullable);
+
+    let inferred = infer_generic_call_constraints_from_symbols(
+        &crate::libraries::EmptySymbolSource,
+        &signature,
+        [(0, caller, false), (1, caller, false)],
+        None,
+    );
+
+    assert_eq!(
+        inferred.bound_violation,
+        Some(GenericBoundViolation {
+            argument: 0,
+            expected: Ty::obj("kotlin/Any"),
+            actual: caller,
+        })
+    );
+}
+
+#[test]
+fn both_caller_bounds_specialize_a_nullable_any_receiver_by_equality() {
+    let any = Ty::obj("kotlin/Any");
+    let iterable = |argument| Ty::obj_args("kotlin/collections/Iterable", &[argument]);
+    let declared = iterable(Ty::nullable(Ty::ty_param("stdlib:T", any)));
+    let source = crate::libraries::EmptySymbolSource;
+
+    let non_null_caller = Ty::ty_param("caller:T", any);
+    let non_null_receiver = iterable(Ty::nullable(non_null_caller));
+    assert!(super::super::receiver_type_args_match(
+        &source,
+        declared,
+        non_null_receiver
+    ));
+
+    let nullable_caller = Ty::ty_param("caller:U", Ty::nullable(any));
+    let nullable_receiver = iterable(Ty::nullable(nullable_caller));
+    assert!(super::super::receiver_type_args_match(
+        &source,
+        declared,
+        nullable_receiver
+    ));
+    assert_eq!(non_null_caller.ty_param_bound(), Some(any));
+    assert_eq!(nullable_caller.ty_param_bound(), Some(Ty::nullable(any)));
+}

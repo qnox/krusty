@@ -54,6 +54,23 @@ where
             signature.has_receiver,
             signature.suspend,
         ),
+        // An unbound-preserving walk is identity-only and keeps the provenance wrapper. A real
+        // binding consumes the occurrence: concrete nullable types become non-null, while a
+        // nullable-bounded symbolic binding becomes that caller parameter's own `T & Any`.
+        Ty::DefinitelyNotNull(inner) => match *inner {
+            Ty::TyParam(name, bound) => match lookup(name) {
+                Some(binding) => binding.contributed_through_nullable_formal(),
+                None if preserve_unbound => Ty::DefinitelyNotNull(inner),
+                None => bound.contributed_through_nullable_formal(),
+            },
+            other => substitute_type_parameters(
+                other,
+                lookup,
+                preserve_unbound,
+                enforce_bound_nullability,
+            )
+            .contributed_through_nullable_formal(),
+        },
         Ty::Nullable(inner) => Ty::nullable(substitute_type_parameters(
             *inner,
             lookup,
@@ -133,6 +150,9 @@ pub(crate) fn ty_with_param_bounds(ty: Ty, bounds: &HashMap<String, Ty>) -> Ty {
             signature.has_receiver,
             signature.suspend,
         ),
+        Ty::DefinitelyNotNull(inner) => {
+            Ty::DefinitelyNotNull(super::intern_ty(ty_with_param_bounds(*inner, bounds)))
+        }
         Ty::Nullable(inner) => Ty::nullable(ty_with_param_bounds(*inner, bounds)),
         Ty::PlatformNullable(inner) => Ty::platform_nullable(ty_with_param_bounds(*inner, bounds)),
         Ty::InProjection(inner) => Ty::in_projection(ty_with_param_bounds(*inner, bounds)),
@@ -169,6 +189,9 @@ pub(crate) fn ty_rename_params(ty: Ty, identities: &HashMap<&str, &'static str>)
             signature.has_receiver,
             signature.suspend,
         ),
+        Ty::DefinitelyNotNull(inner) => {
+            Ty::DefinitelyNotNull(super::intern_ty(ty_rename_params(*inner, identities)))
+        }
         Ty::Nullable(inner) => Ty::nullable(ty_rename_params(*inner, identities)),
         Ty::PlatformNullable(inner) => Ty::platform_nullable(ty_rename_params(*inner, identities)),
         Ty::InProjection(inner) => Ty::in_projection(ty_rename_params(*inner, identities)),
@@ -218,4 +241,63 @@ where
 
 pub(crate) fn ty_subst_applied_arguments(ty: Ty, bindings: &HashMap<String, Ty>) -> Ty {
     ty_subst_applied_lookup(ty, |name| recorded_binding(bindings, name))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::intern_ty;
+
+    fn nullable_bounded_parameter(name: &'static str) -> Ty {
+        Ty::ty_param(name, Ty::nullable(Ty::obj("kotlin/Any")))
+    }
+
+    #[test]
+    fn identity_only_transforms_preserve_definitely_non_null_provenance() {
+        let original = nullable_bounded_parameter("owner:T");
+        let intersection = Ty::DefinitelyNotNull(intern_ty(original));
+        let identities = HashMap::from([("owner:T", "call:T")]);
+
+        let renamed = ty_rename_params(intersection, &identities);
+        let renamed_original = nullable_bounded_parameter("call:T");
+        assert_eq!(renamed, Ty::DefinitelyNotNull(intern_ty(renamed_original)));
+        assert_eq!(Ty::nullable(renamed), Ty::nullable(renamed_original));
+
+        let rebound = ty_with_param_bounds(
+            intersection,
+            &HashMap::from([("owner:T".to_string(), Ty::nullable(Ty::obj("demo/Payload")))]),
+        );
+        let rebound_original = Ty::ty_param("owner:T", Ty::nullable(Ty::obj("demo/Payload")));
+        assert_eq!(rebound, Ty::DefinitelyNotNull(intern_ty(rebound_original)));
+        assert_eq!(Ty::nullable(rebound), Ty::nullable(rebound_original));
+    }
+
+    #[test]
+    fn substitution_preserves_symbolic_provenance_and_consumes_concrete_bindings() {
+        let declared = nullable_bounded_parameter("callee:T");
+        let intersection = Ty::DefinitelyNotNull(intern_ty(declared));
+
+        assert_eq!(
+            ty_subst_keep_unbound(intersection, &HashMap::new()),
+            intersection
+        );
+        assert_eq!(
+            ty_subst(intersection, &HashMap::new()),
+            Ty::obj("kotlin/Any")
+        );
+
+        let caller = nullable_bounded_parameter("caller:U");
+        let symbolic = ty_subst_keep_unbound(
+            intersection,
+            &HashMap::from([("callee:T".to_string(), caller)]),
+        );
+        assert_eq!(symbolic, Ty::DefinitelyNotNull(intern_ty(caller)));
+        assert_eq!(Ty::nullable(symbolic), Ty::nullable(caller));
+
+        let concrete = ty_subst_keep_unbound(
+            intersection,
+            &HashMap::from([("callee:T".to_string(), Ty::nullable(Ty::String))]),
+        );
+        assert_eq!(concrete, Ty::String);
+    }
 }

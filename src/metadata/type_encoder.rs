@@ -543,6 +543,18 @@ fn encode_type_with_parameter(
         // The engine turns an undetermined declaration into a decline before anything is written,
         // so a pending type here is a broken invariant rather than a shape to encode.
         Ty::Pending => return Err(TypeEncodeError::NotDetermined),
+        Ty::DefinitelyNotNull(inner) => {
+            let mut intersection = spelled.clone();
+            intersection.definitely_non_null = true;
+            return encode_type_with_parameter(
+                strings,
+                *inner,
+                &intersection,
+                type_parameters,
+                forced_parameter,
+                expansion,
+            );
+        }
         Ty::TyParam(name, _) => {
             let reference = type_parameters
                 .get(name)
