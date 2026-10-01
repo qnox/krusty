@@ -117,6 +117,10 @@ pub(super) fn checked_function_body_rewriting(
             ty,
             span: parameter.ty.span,
             context_kind: parameter.context_kind,
+            inline_modifier: crate::types::InlineParameterModifier::written(
+                parameter.is_materialized_lambda,
+                parameter.is_crossinline,
+            ),
         })
         .collect::<Vec<_>>();
     let mut session = BodyCheckSession::default();
