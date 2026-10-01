@@ -37,6 +37,7 @@ mod class_pool_seed;
 mod companion_blocks;
 mod comparison_branches;
 mod condition_emission;
+mod constant_emission;
 mod constructor_accessors;
 mod constructor_defaults;
 mod constructor_initialization;
@@ -8923,24 +8924,7 @@ impl<'a> Emitter<'a> {
             IrExpr::Continue { label } => {
                 self.emit_loop_transfer(e, label, false, code);
             }
-            IrExpr::Const(c) => match c {
-                IrConst::Boolean(b) => code.push_int(if *b { 1 } else { 0 }, self.cw),
-                IrConst::Int(v) => code.push_int(*v, self.cw),
-                // `UByte` rides in a JVM `B`: 200 is `bipush -56`, matching kotlinc. The
-                // untruncated value made equal `UByte`s compare unequal.
-                IrConst::UByte(v) => code.push_int(i32::from(*v as i8), self.cw),
-                IrConst::UShort(v) => code.push_int(i32::from(*v as i16), self.cw),
-                IrConst::UInt(v) => code.push_int(*v as i32, self.cw),
-                IrConst::ULong(v) => code.push_long(*v as i64, self.cw),
-                IrConst::Short(v) => code.push_int(*v as i32, self.cw),
-                IrConst::Byte(v) => code.push_int(*v as i32, self.cw),
-                IrConst::Char(v) => code.push_int(*v as i32, self.cw),
-                IrConst::Long(v) => code.push_long(*v, self.cw),
-                IrConst::Double(v) => code.push_double(*v, self.cw),
-                IrConst::Float(v) => code.push_float(*v, self.cw),
-                IrConst::String(s) => super::string_constant::push_string(s, code, self.cw),
-                IrConst::Null => code.aconst_null(),
-            },
+            IrExpr::Const(constant) => constant_emission::emit(constant, code, self.cw),
             IrExpr::ForwardedSuperArgument { .. } => {
                 self.run.set_emit_error(
                     "anonymous super forward was not bound to its constructor parameter"

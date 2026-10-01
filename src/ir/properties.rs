@@ -125,7 +125,7 @@ pub struct IrProperty {
 }
 
 /// A property declared by another file of the module, as the file's code selects it.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct IrModuleProperty {
     pub source: IrModuleSource,
     pub name: String,
@@ -149,6 +149,9 @@ pub struct IrModuleProperty {
     /// namespace; common lowering never turns one into a physical access kind.
     pub annotations: Box<[TypeName]>,
     pub flags: crate::fir::DeclarationFlags,
+    /// Provider-normalized payload of a `const val`. Uses consume the value without reopening the
+    /// declaration or selecting target storage by owner/spelling.
+    pub compile_time_constant: Option<IrConst>,
     /// Where the property lives when `owner` is absent.
     pub placement: IrStaticPlacement,
 }

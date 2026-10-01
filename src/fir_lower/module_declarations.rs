@@ -240,6 +240,9 @@ fn publish_property(
                 .to_vec()
                 .into_boxed_slice(),
             flags: header.flags,
+            compile_time_constant: index
+                .compile_time_constant(property.declaration)
+                .and_then(crate::ir::IrConst::from_library_constant),
             placement: super::companion_blocks::static_placement(
                 header.flags,
                 property.extension_receiver.map(ResolvedTy::get),

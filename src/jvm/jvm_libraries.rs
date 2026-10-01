@@ -3504,9 +3504,12 @@ impl JvmLibraries {
             .setter
             .as_ref()
             .and_then(|setter| setter.external_identity);
-        let identity = self
-            .cp
-            .intern_external_property(&property.name, getter, setter);
+        let identity = self.cp.intern_external_property(
+            &property.name,
+            getter,
+            setter,
+            property.compile_time_constant.clone(),
+        );
         property.getter.external_property_identity = Some(identity);
         if let Some(setter) = &mut property.setter {
             setter.external_property_identity = Some(identity);
