@@ -483,9 +483,28 @@ pub enum FirPropertyDispatch {
     },
 }
 
+/// A checker-selected inline accessor and the type arguments already fixed for this use.
+/// Later expansion consumes this record; it does not look the accessor or its type parameters up again.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FirInlineAccessorSplice {
+    pub accessor: DeclarationId,
+    pub substitutions: Box<[FirInlineTypeSubstitution]>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FirInlineTypeSubstitution {
+    pub name: Box<str>,
+    pub reified: bool,
+    pub value: ResolvedTy,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FirPropertyTarget {
-    Module(PropertyId),
+    Module {
+        property: PropertyId,
+        /// `Some` when this use's getter or setter was selected as `inline`.
+        inline_splice: Option<Box<FirInlineAccessorSplice>>,
+    },
     External {
         property: super::ExternalPropertyId,
         receiver: Option<ResolvedTy>,
@@ -577,21 +596,37 @@ impl FirPropertyReferenceTarget {
 
 impl From<PropertyId> for FirPropertyTarget {
     fn from(target: PropertyId) -> Self {
-        Self::Module(target)
+        Self::of_module(target)
     }
 }
 
 impl FirPropertyTarget {
+    pub const fn of_module(property: PropertyId) -> Self {
+        Self::Module {
+            property,
+            inline_splice: None,
+        }
+    }
+
     pub fn module(&self) -> Option<PropertyId> {
         match self {
-            Self::Module(target) => Some(*target),
+            Self::Module { property, .. } => Some(*property),
+            Self::External { .. } => None,
+        }
+    }
+
+    pub fn inline_splice(&self) -> Option<&FirInlineAccessorSplice> {
+        match self {
+            Self::Module { inline_splice, .. } => inline_splice.as_deref(),
             Self::External { .. } => None,
         }
     }
 
     fn storage_payload_bytes(&self) -> usize {
         match self {
-            Self::Module(_) => 0,
+            Self::Module { inline_splice, .. } => inline_splice.as_ref().map_or(0, |splice| {
+                splice.substitutions.len() * std::mem::size_of::<FirInlineTypeSubstitution>()
+            }),
             Self::External {
                 receiver,
                 parameters,

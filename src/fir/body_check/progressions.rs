@@ -292,6 +292,8 @@ impl BodyFirChecker<'_> {
                     result: member.ty,
                     extension_receiver_parameter: None,
                 }),
+                false,
+                &[],
             )
         };
         Ok(Some(FirProgressionClass {

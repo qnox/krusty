@@ -35,3 +35,73 @@ fun box(): String {\n\
         Some("SZString".to_string())
     );
 }
+
+/// The extension receiver and the stored value each run once. The setter sees that value.
+#[test]
+fn an_inline_setter_evaluates_its_receiver_and_value_once() {
+    common::expect_box_same_as_kotlinc(
+        "var log = \"\"\n\
+         fun touch(label: String): String {\n\
+             log += label\n\
+             return \"v\"\n\
+         }\n\
+         inline var String.note: String\n\
+             get() = \"g\"\n\
+             set(value) { log += value }\n\
+         fun box(): String {\n\
+             touch(\"R\").note = touch(\"W\")\n\
+             return if (log == \"RWv\") \"OK\" else log\n\
+         }\n",
+        "inlineSetterOnce",
+    );
+}
+
+/// The dispatch receiver of a member extension is the selected instance, evaluated once.
+#[test]
+fn an_inline_member_extension_evaluates_its_dispatch_receiver_once() {
+    common::expect_box_same_as_kotlinc(
+        "class Host {\n\
+             var log = \"\"\n\
+             fun touch(): Host {\n\
+                 log += \"D\"\n\
+                 return this\n\
+             }\n\
+             inline var String.mark: String\n\
+                 get() = \"g\"\n\
+                 set(value) { log += value }\n\
+         }\n\
+         fun box(): String {\n\
+             val host = Host()\n\
+             with(host.touch()) { \"x\".mark = \"V\" }\n\
+             return if (host.log == \"DV\") \"OK\" else host.log\n\
+         }\n",
+        "inlineDispatchOnce",
+    );
+}
+
+/// An inline accessor that reads another inline accessor expands both at the use.
+#[test]
+fn a_nested_inline_accessor_uses_the_outer_type_argument() {
+    common::expect_box_same_as_kotlinc(
+        "inline val <reified T> T.inner: String\n\
+             get() = if (T::class.simpleName == \"String\") \"K\" else \"fail\"\n\
+         inline val <reified T> T.outer: String\n\
+             get() = this.inner\n\
+         fun box(): String = if (\"\".outer == \"K\") \"OK\" else \"fail\"\n",
+        "nestedInlineAccessor",
+    );
+}
+
+/// A `return` inside the accessor is the property read's value, including an early return.
+#[test]
+fn an_inline_getter_return_is_the_property_value() {
+    common::expect_box_same_as_kotlinc(
+        "inline val String.head: String\n\
+             get() {\n\
+                 if (isEmpty()) return \"empty\"\n\
+                 return \"OK\"\n\
+             }\n\
+         fun box(): String = if (\"a\".head == \"OK\" && \"\".head == \"empty\") \"OK\" else \"fail\"\n",
+        "inlineGetterReturn",
+    );
+}

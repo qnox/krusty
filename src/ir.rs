@@ -353,6 +353,21 @@ pub struct IrCheckedSubstitution {
     pub additional_bounds: Vec<Ty>,
 }
 
+/// One inline property use. `accessor` is the declaration the checker selected; `substitutions`
+/// already carry each type parameter's semantic name and reified flag.
+#[derive(Clone, Debug, PartialEq)]
+pub struct IrInlinePropertySplice {
+    pub accessor: crate::fir::DeclarationId,
+    pub substitutions: Vec<IrInlineTypeSubstitution>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct IrInlineTypeSubstitution {
+    pub name: String,
+    pub reified: bool,
+    pub value: Ty,
+}
+
 /// One source constructor after checked FIR has been consumed. The stable declaration ordinal
 /// distinguishes the primary constructor (`0`) from secondary constructors (`1..`). Delegation is
 /// retained as an already-selected checked operation; no later phase may repeat constructor lookup
@@ -405,6 +420,12 @@ pub struct IrCheckedProperty {
     pub delegate_plan: Option<crate::fir::FirPropertyDelegatePlan>,
     pub getter: Option<ExprId>,
     pub setter: Option<ExprId>,
+    /// Accessor declarations and whether each was declared `inline`. Published with the property
+    /// so later expansion does not rediscover the flag from the declaration index.
+    pub getter_declaration: Option<crate::fir::DeclarationId>,
+    pub setter_declaration: Option<crate::fir::DeclarationId>,
+    pub getter_inline: bool,
+    pub setter_inline: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -2257,6 +2278,12 @@ pub struct IrFile {
     /// Function ids declared `inline`. This is the declaration-semantic set used by metadata;
     /// visibility-specific inline handling remains in [`Self::public_inline_functions`].
     pub inline_fns: std::collections::HashSet<u32>,
+    /// Accessor declaration → the function created for it. Inline property expansion addresses
+    /// the accessor through this map.
+    pub accessor_functions: std::collections::HashMap<crate::fir::DeclarationId, FunId>,
+    /// Checked property reads and writes whose accessor is `inline`, keyed by the common-IR
+    /// expression that still holds the access.
+    pub inline_property_splices: std::collections::HashMap<ExprId, IrInlinePropertySplice>,
     /// Function ids with a value parameter (context parameters excluded) or extension receiver of a
     /// function type, as the checker classified the declaration.
     pub function_typed_parameter_fns: std::collections::HashSet<u32>,

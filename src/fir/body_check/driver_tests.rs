@@ -1732,7 +1732,10 @@ fn enum_entry_inner_class_reads_entry_property_through_outer_enum_receiver() {
             (0..body.expression_count()).filter_map(|raw| {
                 let expression = body.expr(FirExprId::from_raw(raw as u32))?;
                 let FirExprKind::PropertyRead {
-                    target: FirPropertyTarget::Module(target),
+                    target:
+                        FirPropertyTarget::Module {
+                            property: target, ..
+                        },
                     dispatch_receiver: Some(receiver),
                     ..
                 } = &expression.kind

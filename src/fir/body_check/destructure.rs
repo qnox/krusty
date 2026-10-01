@@ -113,7 +113,7 @@ impl BodyFirChecker<'_> {
                 let target = if let Some(declaration) = member.member.stable_declaration {
                     if let Some(property) = self.index.property_for_declaration(declaration) {
                         return Ok(FirExprKind::PropertyRead {
-                            target: FirPropertyTarget::Module(property),
+                            target: FirPropertyTarget::of_module(property),
                             dispatch_receiver: Some(self.destructure_receiver(
                                 receiver_source,
                                 receiver,

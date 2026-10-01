@@ -184,7 +184,11 @@ impl BodyFirChecker<'_> {
                 | FirCallTarget::Super { result, .. } => Some(*result),
             },
             FirExprKind::PropertyRead {
-                target: FirPropertyTarget::Module(property),
+                target:
+                    FirPropertyTarget::Module {
+                        property,
+                        inline_splice: None,
+                    },
                 substitutions,
                 ..
             } => self

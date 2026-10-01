@@ -171,6 +171,8 @@ pub(super) fn predeclare_properties(
             .ok_or(FirFileLoweringFailure::MissingProperty(declaration))?
             .to_owned();
         let source_order = declaration_source_order(index, declaration)?;
+        let (getter_declaration, getter_inline) = accessor_disposition(index, declaration, 0);
+        let (setter_declaration, setter_inline) = accessor_disposition(index, declaration, 1);
         assert!(
             ir.checked_properties
                 .insert(
@@ -195,6 +197,10 @@ pub(super) fn predeclare_properties(
                         delegate_plan: None,
                         getter: None,
                         setter: None,
+                        getter_declaration,
+                        getter_inline,
+                        setter_declaration,
+                        setter_inline,
                     },
                 )
                 .is_none(),
@@ -328,7 +334,7 @@ pub(super) fn finalize_properties(
     // Accessor functions exist now, and checked reads still carry the call site's type arguments.
     // Splice `inline` accessors before a backend turns the read into a call and drops those
     // arguments: a reified `T::class` in the accessor is the call site's class.
-    super::inlining::splice_inline_property_accessors(index, ir)?;
+    super::inlining::splice_inline_property_accessors(ir)?;
     Ok(())
 }
 
@@ -1495,6 +1501,60 @@ pub(super) fn record_accessor_visibilities(
             setter,
             setter_visibility(index, declaration, property_visibility),
         );
+    }
+    let inline = ir
+        .checked_properties
+        .values()
+        .find(|property| property.declaration == declaration)
+        .map(|property| {
+            (
+                property.getter_declaration,
+                property.getter_inline,
+                property.setter_declaration,
+                property.setter_inline,
+            )
+        });
+    if let Some((getter_declaration, getter_inline, setter_declaration, setter_inline)) = inline {
+        publish_accessor_function(ir, getter_declaration, getter_inline, getter);
+        publish_accessor_function(ir, setter_declaration, setter_inline, setter);
+    }
+}
+
+fn accessor_disposition(
+    index: &ResolvedModuleIndex,
+    declaration: DeclarationId,
+    sibling: u32,
+) -> (Option<DeclarationId>, bool) {
+    let Some(accessor) = index.owned_declaration(declaration, DeclarationKind::Accessor, sibling)
+    else {
+        return (None, false);
+    };
+    let inline = index
+        .declaration_header(accessor)
+        .is_some_and(|header| header.flags.has(DeclarationFlags::INLINE));
+    (Some(accessor), inline)
+}
+
+fn publish_accessor_function(
+    ir: &mut IrFile,
+    declaration: Option<DeclarationId>,
+    inline: bool,
+    function: Option<FunId>,
+) {
+    let (Some(declaration), Some(function)) = (declaration, function) else {
+        return;
+    };
+    ir.accessor_functions.insert(declaration, function);
+    if !inline {
+        return;
+    }
+    ir.inline_fns.insert(function);
+    let static_accessor = ir
+        .functions
+        .get(function as usize)
+        .is_some_and(|function| function.is_static && function.dispatch_receiver.is_none());
+    if static_accessor {
+        ir.top_level_inline_functions.insert(function);
     }
 }
 

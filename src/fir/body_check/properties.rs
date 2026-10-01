@@ -20,6 +20,16 @@ type SelectedPropertyRead = (
     Box<[FirTypeSubstitution]>,
 );
 
+/// The property an increment reads and writes, once resolution has chosen it.
+struct PropertyIncDecTarget<'a> {
+    declaration: Option<DeclarationId>,
+    external_getter: Option<ExternalPropertyTarget>,
+    external_setter: Option<ExternalPropertyTarget>,
+    dispatch_receiver: Option<FirReceiver>,
+    extension_receiver: Option<FirReceiver>,
+    context_args: &'a [crate::resolve::ResolvedContextArgument],
+}
+
 /// Property whose own accessor body `declaration` checks. A nested initializer is not an accessor
 /// and therefore keeps the enclosing accessor property supplied by the body-check session.
 pub(super) fn accessor_property(
@@ -724,7 +734,7 @@ impl BodyFirChecker<'_> {
                 )
             })?;
             return Ok(Some(FirExprKind::PropertyRead {
-                target: FirPropertyTarget::Module(target),
+                target: FirPropertyTarget::of_module(target),
                 dispatch_receiver: Some(dispatch_receiver),
                 extension_receiver: None,
                 context_arguments: Box::new([]),
@@ -1191,7 +1201,8 @@ impl BodyFirChecker<'_> {
             declaration,
             &context_args,
         )?;
-        let target = self.property_target(expression, declaration, external)?;
+        let target =
+            self.property_target(expression, declaration, external, false, &substitutions)?;
         Ok(Some(FirExprKind::PropertyRead {
             target,
             dispatch_receiver,
@@ -1257,13 +1268,71 @@ impl BodyFirChecker<'_> {
             .map(Vec::into_boxed_slice)
     }
 
+    /// Record an inline accessor and the names of its already-checked type arguments.
+    /// Expansion reads this record and does not ask the index whether the accessor is inline.
+    fn inline_accessor_splice(
+        &self,
+        span: Option<Span>,
+        declaration: DeclarationId,
+        setter: bool,
+        substitutions: &[FirTypeSubstitution],
+    ) -> Result<Option<Box<crate::fir::FirInlineAccessorSplice>>, BodyCheckFailure> {
+        let Some(accessor) = self.index.owned_declaration(
+            declaration,
+            crate::fir::DeclarationKind::Accessor,
+            u32::from(setter),
+        ) else {
+            return Ok(None);
+        };
+        let inline = self
+            .index
+            .declaration_header(accessor)
+            .is_some_and(|header| header.flags.has(crate::fir::DeclarationFlags::INLINE));
+        if !inline {
+            return Ok(None);
+        }
+        let mut recorded = Vec::with_capacity(substitutions.len());
+        for substitution in substitutions {
+            let crate::fir::FirTypeParameterRef::Module(parameter) = substitution.parameter else {
+                return Err(self.failure(span, BodyCheckFailureKind::MissingStablePropertyTarget));
+            };
+            let name = self
+                .index
+                .type_parameter_semantic_name(parameter)
+                .ok_or_else(|| {
+                    self.failure(span, BodyCheckFailureKind::MissingStablePropertyTarget)
+                })?;
+            let reified = self
+                .index
+                .type_parameter_header(parameter)
+                .is_some_and(|header| header.flags.is_reified());
+            recorded.push(crate::fir::FirInlineTypeSubstitution {
+                name: Box::from(name),
+                reified,
+                value: substitution.value,
+            });
+        }
+        Ok(Some(Box::new(crate::fir::FirInlineAccessorSplice {
+            accessor,
+            substitutions: recorded.into_boxed_slice(),
+        })))
+    }
+
     fn property_target(
         &self,
         expression: ExprId,
         declaration: Option<DeclarationId>,
         external: Option<ExternalPropertyTarget>,
+        setter: bool,
+        substitutions: &[FirTypeSubstitution],
     ) -> Result<FirPropertyTarget, BodyCheckFailure> {
-        self.property_target_at(self.file.expr_span(expression), declaration, external)
+        self.property_target_at(
+            self.file.expr_span(expression),
+            declaration,
+            external,
+            setter,
+            substitutions,
+        )
     }
 
     pub(super) fn property_target_at(
@@ -1271,15 +1340,22 @@ impl BodyFirChecker<'_> {
         span: Option<Span>,
         declaration: Option<DeclarationId>,
         external: Option<ExternalPropertyTarget>,
+        setter: bool,
+        substitutions: &[FirTypeSubstitution],
     ) -> Result<FirPropertyTarget, BodyCheckFailure> {
         if let Some(declaration) = declaration {
-            return self
+            let property = self
                 .index
                 .property_for_declaration(declaration)
-                .map(FirPropertyTarget::Module)
                 .ok_or_else(|| {
                     self.failure(span, BodyCheckFailureKind::MissingStablePropertyTarget)
-                });
+                })?;
+            let inline_splice =
+                self.inline_accessor_splice(span, declaration, setter, substitutions)?;
+            return Ok(FirPropertyTarget::Module {
+                property,
+                inline_splice,
+            });
         }
         let ExternalPropertyTarget {
             property,
@@ -1336,12 +1412,14 @@ impl BodyFirChecker<'_> {
                     prefix,
                     span,
                     cause,
-                    access.property.stable_declaration,
-                    getter,
-                    setter,
-                    None,
-                    None,
-                    &access.context_args,
+                    PropertyIncDecTarget {
+                        declaration: access.property.stable_declaration,
+                        external_getter: getter,
+                        external_setter: setter,
+                        dispatch_receiver: None,
+                        extension_receiver: None,
+                        context_args: &access.context_args,
+                    },
                 );
             }
             _ => return Ok(None),
@@ -1402,18 +1480,19 @@ impl BodyFirChecker<'_> {
             prefix,
             span,
             cause,
-            declaration,
-            external_getter,
-            external_setter,
-            dispatch_receiver,
-            extension_receiver,
-            &context_args,
+            PropertyIncDecTarget {
+                declaration,
+                external_getter,
+                external_setter,
+                dispatch_receiver,
+                extension_receiver,
+                context_args: &context_args,
+            },
         )
     }
 
     /// The shared read → operator → write triple for a property increment, once its target and
     /// receivers are known.
-    #[allow(clippy::too_many_arguments)]
     fn property_inc_dec_write(
         &mut self,
         statement: StmtId,
@@ -1421,15 +1500,20 @@ impl BodyFirChecker<'_> {
         prefix: bool,
         span: Option<Span>,
         cause: OriginId,
-        declaration: Option<DeclarationId>,
-        external_getter: Option<ExternalPropertyTarget>,
-        external_setter: Option<ExternalPropertyTarget>,
-        dispatch_receiver: Option<FirReceiver>,
-        extension_receiver: Option<FirReceiver>,
-        context_args: &[crate::resolve::ResolvedContextArgument],
+        access: PropertyIncDecTarget<'_>,
     ) -> Result<Option<FirExprKind>, BodyCheckFailure> {
-        let read_target = self.property_target_at(span, declaration, external_getter)?;
-        let write_target = self.property_target_at(span, declaration, external_setter)?;
+        let PropertyIncDecTarget {
+            declaration,
+            external_getter,
+            external_setter,
+            dispatch_receiver,
+            extension_receiver,
+            context_args,
+        } = access;
+        let read_target =
+            self.property_target_at(span, declaration, external_getter, false, &[])?;
+        let write_target =
+            self.property_target_at(span, declaration, external_setter, true, &[])?;
         let resolution = self
             .info
             .resolved_inc_dec
@@ -1748,8 +1832,10 @@ impl BodyFirChecker<'_> {
             declaration,
             &context_args,
         )?;
-        let read_target = self.property_target_at(Some(span), declaration, external_getter)?;
-        let write_target = self.property_target_at(Some(span), declaration, external_setter)?;
+        let read_target =
+            self.property_target_at(Some(span), declaration, external_getter, false, &[])?;
+        let write_target =
+            self.property_target_at(Some(span), declaration, external_setter, true, &[])?;
         let resolution = self
             .info
             .resolved_inc_dec
@@ -2203,13 +2289,13 @@ impl BodyFirChecker<'_> {
         let checked_value = self.expression(value)?;
         let conversion =
             self.selected_value_conversion(value, checked_value, value_target, cause)?;
-        let target = self.property_target(value, declaration, external)?;
         let substitutions = match (declaration, selected_property.as_ref()) {
             (Some(declaration), Some(property)) => {
                 self.selected_property_substitutions(value, declaration, property)?
             }
             _ => Box::new([]),
         };
+        let target = self.property_target(value, declaration, external, true, &substitutions)?;
         Ok(Some(FirExprKind::PropertyWrite {
             target,
             dispatch_receiver,

@@ -69,6 +69,20 @@ pub enum FirFileLoweringFailure {
     ValueIdentityOverflow,
     /// The frontend's selected entry point has no realization in this file's function arena.
     UnmappedEntryPoint(CallableId),
+    /// A checked inline property accessor could not be expanded. The access stays unexpanded
+    /// only when this failure is reported.
+    InlineAccessor(DeclarationId, InlineAccessorFailure),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InlineAccessorFailure {
+    MissingFunction,
+    MissingBody,
+    OperandMismatch,
+    ArityMismatch,
+    MissingCopy,
+    ValueRebase,
+    Recursive,
 }
 
 fn lower_property_override_plans(
