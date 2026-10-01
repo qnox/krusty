@@ -409,6 +409,9 @@ fn materialize_delegation(
                     getter,
                     crate::ir::FnParamInfo::identities(identities.clone()),
                 );
+                // kotlinc gives an accessor forwarder its receiver and parameters as locals.
+                ir.fn_debug_locals
+                    .extend(std::iter::once(getter).chain(setter));
                 if let Some(setter) = setter {
                     identities.push(crate::ir::IrParameterIdentity::property_setter_value());
                     ir.fn_params
@@ -469,7 +472,7 @@ fn materialize_delegation(
                             ty,
                             is_var: setter.is_some(),
                             is_abstract: false,
-                            modifiers: Default::default(),
+                            modifiers: DELEGATION_PROPERTY_MODIFIERS,
                             delegate_field: None,
                             getter,
                             setter,
@@ -493,7 +496,7 @@ fn materialize_delegation(
                     backing_field: None,
                     is_var: property.setter.is_some(),
                     is_open: true,
-                    modifiers: Default::default(),
+                    modifiers: DELEGATION_PROPERTY_MODIFIERS,
                     delegate_field: None,
                     is_private: false,
                     setter_visibility: crate::types::Visibility::Public,
@@ -655,7 +658,13 @@ fn prepend_initializers(ir: &mut IrFile, class: crate::ir::ClassId, stores: Vec<
     if stores.is_empty() {
         return;
     }
+    // The stores open the existing initializer block rather than nesting it, so the constructor
+    // keeps the per-property statements whose source lines it maps.
     let previous = ir.classes[class as usize].init_body.take();
+    let previous = match previous.map(|body| ir.expr(body).clone()) {
+        Some(IrExpr::Block { stmts, value: None }) => stmts,
+        _ => previous.into_iter().collect(),
+    };
     let body = ir.add_expr(IrExpr::Block {
         stmts: stores.into_iter().chain(previous).collect(),
         value: None,
@@ -745,6 +754,18 @@ fn add_forwarder(
     ir.interface_delegation_forwarders.insert(function);
     function
 }
+
+/// A delegated property is an overridable override, whatever the delegating class's modality, and
+/// Kotlin metadata records it as a delegation member rather than a declaration.
+const DELEGATION_PROPERTY_MODIFIERS: crate::ir::IrPropertyModifiers =
+    crate::ir::IrPropertyModifiers {
+        modality: crate::ir::IrPropertyModality::Open,
+        declared_getter: false,
+        declared_setter: false,
+        delegated: false,
+        lateinit: false,
+        member_kind: crate::ir::IrMemberKind::Delegation,
+    };
 
 fn stamp_generated(ir: &mut IrFile, first: usize) {
     let cause = crate::fir::OriginId::from_raw(0);

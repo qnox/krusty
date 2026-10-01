@@ -1533,6 +1533,7 @@ pub(super) fn member_property_modifiers(
             || (delegated && flags.has(DeclarationFlags::MUTABLE)),
         delegated,
         lateinit: flags.has(DeclarationFlags::LATEINIT),
+        member_kind: crate::ir::IrMemberKind::Declaration,
     }
 }
 

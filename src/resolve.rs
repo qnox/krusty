@@ -66567,10 +66567,10 @@ impl<'a> Checker<'a> {
         if let Some(function_type) = function_type {
             self.callable_reference_types.insert(e, function_type);
         }
-        // A callable reference in a function-typed context is the adapted function value selected
-        // above. Its reflection classifier remains the natural standalone type, but must not replace
-        // the contextual function type after overload/default/vararg adaptation has succeeded.
-        if matches!(expected, Some(Ty::Fun(_))) {
+        // A callable reference in a (possibly nullable) function-typed context is the adapted value
+        // selected above. Its reflection classifier stays the natural standalone type, but must not
+        // replace the contextual function type after overload/default/vararg adaptation succeeded.
+        if expected.is_some_and(|expected| matches!(expected.non_null(), Ty::Fun(_))) {
             return self.set(e, function_type.unwrap_or(nominal));
         }
         if let Some(reflect) = function_type

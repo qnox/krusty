@@ -120,6 +120,7 @@ mod try_emission;
 use annotation_impl::emit_annotation_impl_class;
 use array_elements::reference_array_scalar_adapter;
 mod value_class_descriptors;
+mod value_class_override_metadata;
 mod value_class_signatures;
 use crate::jvm::private_static_access::StaticOwner;
 use class_pool_seed::{
