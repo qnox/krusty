@@ -102,6 +102,11 @@ impl FrameComputation<'_> {
         &self,
         entry: Vec<VerificationType>,
     ) -> Result<ComputedFrames, Decline> {
+        // An empty body has no entry block. A rewrite that laid out no instructions is declined
+        // so the method is kept as emitted, instead of indexing a block list that does not exist.
+        if self.insns.is_empty() {
+            return Err(Decline::UnsupportedControlFlow);
+        }
         let n = self.insns.len();
         let blocks = self.blocks()?;
         let block_of = {
@@ -538,6 +543,19 @@ mod tests {
 
     fn reference(name: &str) -> VerificationType {
         VerificationType::Reference(name.into())
+    }
+
+    #[test]
+    fn an_empty_body_declines_frame_computation() {
+        let declined = FrameComputation {
+            insns: &[],
+            handlers: &[],
+            labels: &[],
+            this_class: "p/K",
+            pool: &Pool,
+        }
+        .compute(0x0008, "f", "()V");
+        assert_eq!(declined, Err(Decline::UnsupportedControlFlow));
     }
 
     #[test]

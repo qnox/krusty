@@ -114,6 +114,9 @@ impl Emitter<'_> {
         let suspension = self.machine_before(expression, code);
         self.open_transformed_suspension(expression, code);
         self.emit_value_node(expression, node, code);
+        // A statement still suspends. The probe reads the result before it is popped, the same
+        // way a used result is probed before its consumer.
+        self.probe_intrinsic_suspension(expression, code);
         self.machine_after(suspension, code);
         if self.transformed_result(expression).is_some() {
             // kotlinc discards the erased result itself, without coercing it first.

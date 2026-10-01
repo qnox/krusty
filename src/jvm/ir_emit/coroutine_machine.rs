@@ -11,8 +11,8 @@
 
 use std::collections::HashMap;
 
-use crate::jvm::classfile::VerifType;
-use crate::jvm::ir_emit::{ir_ty_to_jvm, slot_words};
+use crate::jvm::classfile::{CodeBuilder, VerifType};
+use crate::jvm::ir_emit::{ir_ty_to_jvm, slot_words, Emitter};
 use crate::types::Ty;
 
 /// Where the machine keeps its own state. Reserved above the parameters and below the body's own
@@ -698,5 +698,43 @@ fn push_zero_descriptor(
         Some(b'D') => code.push_double(0.0, cw),
         Some(b'L') | Some(b'[') => code.aconst_null(),
         _ => code.push_int(0, cw),
+    }
+}
+
+impl Emitter<'_> {
+    /// Open a suspension this emission's machine owns, if `e` is one.
+    ///
+    /// Both the value and the discarding path go through this: a suspension whose result is thrown
+    /// away — `api.stop(id)` as a statement — is a state of the machine like any other, and one
+    /// that never spilled would resume into a frame the dispatch cannot produce.
+    pub(super) fn machine_before(&mut self, e: u32, code: &mut CodeBuilder) -> Option<usize> {
+        if !self.machine_suspensions.contains(&e) {
+            return None;
+        }
+        let ordinal = self.machine_next_ordinal;
+        self.machine_next_ordinal += 1;
+        match self.machine.is_some() {
+            // Building the machine: spill first, then the call, then the check.
+            true => self.emit_machine_spills(ordinal, code),
+            // Discovering the frame: mark where the splice put this suspension. The discovery pass
+            // reads everything else — the locals held here and what is on the stack under the
+            // call — off the finished bytecode.
+            false => {
+                if let Ok(marker) = u16::try_from(ordinal) {
+                    code.coroutine_marker(
+                        crate::jvm::classfile::CoroutineMarker::Suspension,
+                        marker,
+                    );
+                }
+            }
+        }
+        Some(ordinal)
+    }
+
+    /// Close a suspension opened by [`Self::machine_before`].
+    pub(super) fn machine_after(&mut self, suspension: Option<usize>, code: &mut CodeBuilder) {
+        if let (Some(ordinal), true) = (suspension, self.machine.is_some()) {
+            self.emit_machine_check(ordinal, code);
+        }
     }
 }

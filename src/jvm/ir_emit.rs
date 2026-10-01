@@ -80,6 +80,7 @@ mod inline_frame_marker;
 mod instance_field_names;
 use instance_field_names::instance_field_jvm_name;
 mod interface_compatibility;
+mod intrinsic_probes;
 mod lambda_class;
 mod lambda_class_names;
 mod local_updates;
@@ -430,6 +431,13 @@ impl EmitRun {
             *current = Some(reason);
         }
     }
+
+    /// Whether this pass has already declined to emit the file. Class finalization must observe
+    /// this before frame computation: a method that reported a missing backend fact can have an
+    /// intentionally incomplete operand stack at the point where it stopped.
+    fn emission_failed(&self) -> bool {
+        self.inline_bail.borrow().is_some() || self.emit_bail.get()
+    }
 }
 
 /// The emit environment threaded (by `&`) through the whole emit callgraph in place of the bare
@@ -445,6 +453,7 @@ pub(super) struct EmitEnv<'a> {
     continuation_metadata: &'a crate::jvm::suspend::ContinuationMetadataMap,
     emit_time_machines: &'a crate::jvm::suspend::EmitTimeMachines,
     suspended_result_returns: &'a crate::jvm::suspend::SuspendedResultReturns,
+    intrinsic_probe_continuations: &'a crate::jvm::suspend::IntrinsicProbeContinuations,
     bridge_adaptations: &'a crate::jvm::bridge_adaptations::BridgeAdaptations,
     /// The bridges that take `FunctionN.invoke`'s packed argument array.
     function_argument_arrays: &'a crate::jvm::function_argument_arrays::FunctionArgumentArrays,
@@ -1595,6 +1604,7 @@ pub(crate) fn emit_all_with_checked_classifiers(
         continuation_metadata: facts.metadata.continuations,
         emit_time_machines: facts.metadata.emit_time_machines,
         suspended_result_returns: facts.metadata.suspended_result_returns,
+        intrinsic_probe_continuations: facts.metadata.intrinsic_probe_continuations,
         bridge_adaptations: facts.metadata.bridge_adaptations,
         function_argument_arrays: facts.metadata.function_argument_arrays,
         override_results: facts.metadata.override_results,
@@ -1977,11 +1987,8 @@ fn emit_pass(
     }
     out.extend(drain_lambda_classes(env, opts));
     out.extend(env.run.machine_classes.borrow_mut().drain(..));
-    if env.run.inline_bail.borrow().is_some() {
-        return None;
-    }
-    if env.run.emit_bail.get() {
-        return None; // a value slot was never allocated (malformed IR) — skip, never miscompile
+    if env.run.emission_failed() {
+        return None; // malformed backend input — discard every class from this pass
     }
     Some(out)
 }
@@ -6904,6 +6911,7 @@ struct Emitter<'a> {
     property_realizations: &'a crate::jvm::property_realizations::PropertyRealizations,
     default_call_operands: &'a crate::jvm::default_call_operands::DefaultCallOperands,
     suspended_result_returns: &'a crate::jvm::suspend::SuspendedResultReturns,
+    intrinsic_probe_continuations: &'a crate::jvm::suspend::IntrinsicProbeContinuations,
     /// The exact source class whose code this emitter is writing. A generated holder has no
     /// source-static ownership; it must route every private static access through the owner.
     static_owner: Option<StaticOwner>,
@@ -7044,6 +7052,7 @@ impl<'a> Emitter<'a> {
             default_call_operands: env.default_call_operands,
             suspended_result_returns: env.suspended_result_returns,
             self_companion: singleton_instance_load::self_companion(ir, static_owner),
+            intrinsic_probe_continuations: env.intrinsic_probe_continuations,
             static_owner,
             classifiers: env.signature_symbols,
             owner: owner.to_string(),
@@ -8099,44 +8108,9 @@ impl<'a> Emitter<'a> {
         let node = self.ir.expr(e).clone();
         self.emit_value_node(e, &node, code);
         self.mark_after_inlined_call(e, code);
+        self.probe_intrinsic_suspension(e, code);
         self.machine_after(suspension, code);
         self.close_declared_suspension(e, code);
-    }
-
-    /// Open a suspension this emission's machine owns, if `e` is one.
-    ///
-    /// Both the value and the discarding path go through this: a suspension whose result is thrown
-    /// away — `api.stop(id)` as a statement — is a state of the machine like any other, and one
-    /// that never spilled would resume into a frame the dispatch cannot produce.
-    fn machine_before(&mut self, e: u32, code: &mut CodeBuilder) -> Option<usize> {
-        if !self.machine_suspensions.contains(&e) {
-            return None;
-        }
-        let ordinal = self.machine_next_ordinal;
-        self.machine_next_ordinal += 1;
-        match self.machine.is_some() {
-            // Building the machine: spill first, then the call, then the check.
-            true => self.emit_machine_spills(ordinal, code),
-            // Discovering the frame: mark where the splice put this suspension. The discovery pass
-            // reads everything else — the locals held here and what is on the stack under the
-            // call — off the finished bytecode.
-            false => {
-                if let Ok(marker) = u16::try_from(ordinal) {
-                    code.coroutine_marker(
-                        crate::jvm::classfile::CoroutineMarker::Suspension,
-                        marker,
-                    );
-                }
-            }
-        }
-        Some(ordinal)
-    }
-
-    /// Close a suspension opened by [`Self::machine_before`].
-    fn machine_after(&mut self, suspension: Option<usize>, code: &mut CodeBuilder) {
-        if let (Some(ordinal), true) = (suspension, self.machine.is_some()) {
-            self.emit_machine_check(ordinal, code);
-        }
     }
 
     /// Realize `IrExpr::PropertyRead` — the one place that decides what reading a Kotlin property
@@ -11830,11 +11804,12 @@ mod invariant_tests {
         facade: &str,
         run: &EmitRun,
     ) -> Option<Vec<(String, Vec<u8>)>> {
-        emit_for_test_with_machines(
+        emit_for_test_with_facts(
             ir,
             facade,
             run,
             &crate::jvm::suspend::EmitTimeMachines::default(),
+            &crate::jvm::suspend::IntrinsicProbeContinuations::default(),
         )
     }
 
@@ -11844,6 +11819,37 @@ mod invariant_tests {
         facade: &str,
         run: &EmitRun,
         emit_time_machines: &crate::jvm::suspend::EmitTimeMachines,
+    ) -> Option<Vec<(String, Vec<u8>)>> {
+        emit_for_test_with_facts(
+            ir,
+            facade,
+            run,
+            emit_time_machines,
+            &crate::jvm::suspend::IntrinsicProbeContinuations::default(),
+        )
+    }
+
+    pub(super) fn emit_for_test_with_probe_continuations(
+        ir: &IrFile,
+        facade: &str,
+        run: &EmitRun,
+        intrinsic_probe_continuations: &crate::jvm::suspend::IntrinsicProbeContinuations,
+    ) -> Option<Vec<(String, Vec<u8>)>> {
+        emit_for_test_with_facts(
+            ir,
+            facade,
+            run,
+            &crate::jvm::suspend::EmitTimeMachines::default(),
+            intrinsic_probe_continuations,
+        )
+    }
+
+    fn emit_for_test_with_facts(
+        ir: &IrFile,
+        facade: &str,
+        run: &EmitRun,
+        emit_time_machines: &crate::jvm::suspend::EmitTimeMachines,
+        intrinsic_probe_continuations: &crate::jvm::suspend::IntrinsicProbeContinuations,
     ) -> Option<Vec<(String, Vec<u8>)>> {
         let continuations = crate::jvm::suspend::ContinuationMetadataMap::default();
         let property_realizations =
@@ -11873,6 +11879,7 @@ mod invariant_tests {
                     collection_method_entry_barriers: &collection_method_entry_barriers,
                     emit_time_machines,
                     suspended_result_returns: &suspended_result_returns,
+                    intrinsic_probe_continuations,
                 },
                 signature_symbols: &NoClassifiers,
                 property_realizations: &property_realizations,
