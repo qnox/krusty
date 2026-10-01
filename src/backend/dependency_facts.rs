@@ -102,6 +102,7 @@ impl CheckedBackendCallables {
     ) -> Result<Self, DependencyFactError> {
         let referenced = references::referenced_dependencies(ir);
         let mut facts = Self::default();
+        let mut callable = |identity| provider.external_callable(identity);
         for property in referenced.properties {
             let realization = provider
                 .external_property(property)
@@ -115,7 +116,7 @@ impl CheckedBackendCallables {
                 })
                 .transpose()?;
             let owner = facts
-                .freeze_callable(realization.getter, provider)?
+                .freeze_callable(realization.getter, &mut callable)?
                 .physical_owner;
             let result = provider
                 .external_callable(realization.getter)
@@ -123,7 +124,7 @@ impl CheckedBackendCallables {
                 .callable
                 .ret;
             if let Some(setter) = realization.setter {
-                facts.freeze_callable(setter, provider)?;
+                facts.freeze_callable(setter, &mut callable)?;
             }
             facts.properties.insert(
                 property,
@@ -138,23 +139,51 @@ impl CheckedBackendCallables {
                 },
             );
         }
-        for callable in referenced.callables {
-            facts.freeze_callable(callable, provider)?;
-        }
+        facts.freeze_callables(referenced.callables, callable)?;
         Ok(facts)
+    }
+
+    /// Freeze dependency identities on `super` calls introduced after the initial handoff.
+    ///
+    /// Target plugins run inside the backend and may append checked super calls only after the
+    /// ordinary file facts were copied. Re-scan that narrow carrier in the now-final IR at this one
+    /// boundary; identities already present remain the original frozen records, while each newly
+    /// selected identity is copied exactly once before super-call realization consumes it.
+    pub(crate) fn freeze_plugin_super_callables(
+        &mut self,
+        ir: &crate::ir::IrFile,
+        provider: impl FnMut(
+            ExternalCallableId,
+        ) -> Option<crate::libraries::ExternalCallableRealization>,
+    ) -> Result<(), DependencyFactError> {
+        self.freeze_callables(references::external_super_callables(ir), provider)
+    }
+
+    fn freeze_callables(
+        &mut self,
+        identities: impl IntoIterator<Item = ExternalCallableId>,
+        mut provider: impl FnMut(
+            ExternalCallableId,
+        ) -> Option<crate::libraries::ExternalCallableRealization>,
+    ) -> Result<(), DependencyFactError> {
+        for identity in identities {
+            self.freeze_callable(identity, &mut provider)?;
+        }
+        Ok(())
     }
 
     fn freeze_callable(
         &mut self,
         identity: ExternalCallableId,
-        provider: &dyn SymbolSource,
+        provider: &mut impl FnMut(
+            ExternalCallableId,
+        ) -> Option<crate::libraries::ExternalCallableRealization>,
     ) -> Result<&BackendCallableFact, DependencyFactError> {
         let fact = match self.callables.entry(identity) {
             Entry::Occupied(fact) => fact.into_mut(),
             Entry::Vacant(slot) => {
-                let realization = provider
-                    .external_callable(identity)
-                    .ok_or(DependencyFactError::UnknownCallable(identity))?;
+                let realization =
+                    provider(identity).ok_or(DependencyFactError::UnknownCallable(identity))?;
                 let callable = realization.callable;
                 slot.insert(BackendCallableFact {
                     name: callable.name,

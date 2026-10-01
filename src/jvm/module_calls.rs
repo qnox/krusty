@@ -9,9 +9,13 @@ use crate::types::TypeName;
 
 use super::default_call_operands::{DefaultCallOperand, DefaultCallOperands};
 
+#[cfg(test)]
+mod tests;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ModuleRealizationTarget {
     Callable(CallableId),
+    DependencyCallable(crate::fir::ExternalCallableId),
     Property(PropertyId),
     Classifier(TypeName),
     Function(crate::ir::FunId),
@@ -453,7 +457,7 @@ pub(super) fn realize_default_calls(
 /// opcodes.
 pub(super) fn realize_super_calls(
     ir: &mut IrFile,
-    classpath: &crate::jvm::classpath::Classpath,
+    callables: &crate::backend::CheckedBackendCallables,
 ) -> Result<(), ModuleRealizationTarget> {
     for raw in 0..ir.exprs.len() {
         // `super` dispatch: the checker fixed the supertype declaration, so only the PHYSICAL
@@ -493,9 +497,14 @@ pub(super) fn realize_super_calls(
                 }
                 None => (None, None),
             };
-            let holder = external
-                .and_then(|target| classpath.external_callable(target))
-                .and_then(|target| target.callable.nonvirtual_realization);
+            let holder = match external {
+                Some(target) => callables
+                    .callable(target)
+                    .ok_or(ModuleRealizationTarget::DependencyCallable(target))?
+                    .nonvirtual_realization
+                    .clone(),
+                None => None,
+            };
             // A holder static is public, so `super@Outer` from an inner class calls it directly
             // with the outer receiver; only a real nonvirtual dispatch needs the outer accessor.
             let enclosing_dispatch = enclosing_dispatch && holder.is_none();
@@ -671,10 +680,11 @@ pub(super) fn realize(
     ir: &mut IrFile,
     stems: &[String],
     classpath: &crate::jvm::classpath::Classpath,
+    callables: &crate::backend::CheckedBackendCallables,
     property_realizations: &mut PropertyRealizations,
 ) -> Result<(), ModuleRealizationTarget> {
     realize_declared_function_names(ir)?;
-    realize_super_calls(ir, classpath)?;
+    realize_super_calls(ir, callables)?;
     prepare_inherited_default_calls(ir)?;
     for raw in 0..ir.exprs.len() {
         // A property accessor call keeps its declaration's parameter vector (contexts, receiver,

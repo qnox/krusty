@@ -623,11 +623,14 @@ fn delegated_call(
         args: arguments,
     });
     match &call.target {
-        ResolvedDelegatedCallTarget::Module { parameters, .. } => {
+        ResolvedDelegatedCallTarget::Module {
+            parameters, result, ..
+        } => {
             ir.call_declared_params.insert(
                 expression,
                 parameters.iter().map(|parameter| parameter.get()).collect(),
             );
+            ir.call_declared_ret.insert(expression, result.get());
         }
         ResolvedDelegatedCallTarget::External(_) => {
             ir.ext_call_source_receiver
@@ -641,11 +644,14 @@ fn delegated_call(
         ir.suspend_calls.insert(expression, call.result.get());
     }
     Ok(if physical_result != call.result.get() {
-        ir.add_expr(IrExpr::TypeOp {
+        // The declaration's result read at the forwarder's substitution, as at a source call.
+        let coercion = ir.add_expr(IrExpr::TypeOp {
             op: IrTypeOp::ImplicitCoercion,
             arg: expression,
             type_operand: call.result.get(),
-        })
+        });
+        ir.declaration_result_coercions.insert(coercion);
+        coercion
     } else {
         expression
     })
