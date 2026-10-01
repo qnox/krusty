@@ -120,6 +120,8 @@ impl ReferencedDependencies {
             | IrExpr::EnumEntries { .. }
             | IrExpr::ReifiedClassMarker { .. }
             | IrExpr::ReifiedTypeOp { .. }
+            // Debug-frame provenance names no dependency declaration.
+            | IrExpr::InlineFrameMarker
             | IrExpr::Lambda { .. }
             | IrExpr::UnitInstance
             | IrExpr::CurrentContinuation
