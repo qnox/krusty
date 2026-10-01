@@ -100,8 +100,45 @@ pub struct SymbolIndexBatch {
 
 #[derive(Debug)]
 pub struct AnalysisJob {
-    pub documents: Vec<(String, String, i64)>,
+    /// URI, text, editor version, and the document lifetime assigned at open.
+    pub documents: Vec<(String, String, i64, u64)>,
     pub open_uris: Vec<String>,
+}
+
+impl AnalysisJob {
+    /// Install this job's document lifetimes, then analyze. Both the threaded engine and
+    /// `InlineBackend` enter here, so an interactive analysis cannot hash open buffers without
+    /// the lifetime that identifies them.
+    pub fn run<A: Analysis>(&self, analyze: &mut A) -> AnalysisBatch {
+        let docs = self
+            .documents
+            .iter()
+            .map(|(uri, text, _, _)| (uri.as_str(), text.as_str()))
+            .collect::<Vec<_>>();
+        let open = self
+            .open_uris
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let versions = self
+            .documents
+            .iter()
+            .map(|(uri, _, version, lifetime)| (uri.as_str(), *version, *lifetime))
+            .collect::<Vec<_>>();
+        let _versions = crate::open_document_digest::OpenDocumentVersions::install(&versions);
+        let (analyses, support_documents) = analyze.analyze_open_documents(&docs, &open);
+        drop(_versions);
+        AnalysisBatch {
+            analyzed: self
+                .documents
+                .iter()
+                .map(|(uri, _, version, _)| (uri.clone(), *version))
+                .collect(),
+            analyses,
+            support_documents,
+            pending: analyze.analysis_pending(),
+        }
+    }
 }
 
 pub struct AnalysisBatch {
@@ -1047,24 +1084,8 @@ fn run<A: Analysis>(
                 }
             }
             Some(EngineCommand::Analyze(job)) => {
-                let docs: Vec<(&str, &str)> = job
-                    .documents
-                    .iter()
-                    .map(|(uri, text, _)| (uri.as_str(), text.as_str()))
-                    .collect();
-                let open: Vec<&str> = job.open_uris.iter().map(String::as_str).collect();
-                let (analyses, support_documents) = analyze.analyze_open_documents(&docs, &open);
-                let analyzed = job
-                    .documents
-                    .iter()
-                    .map(|(uri, _, version)| (uri.clone(), *version))
-                    .collect();
-                let batch = AnalysisBatch {
-                    analyzed,
-                    analyses,
-                    support_documents,
-                    pending: analyze.analysis_pending(),
-                };
+                let open = job.open_uris.iter().map(String::as_str).collect::<Vec<_>>();
+                let batch = job.run(&mut analyze);
                 if events
                     .send(Incoming::Engine(EngineEvent::AnalysisComplete(batch)))
                     .is_err()
@@ -1375,7 +1396,7 @@ mod tests {
     fn workspace_reconfiguration_stays_before_pending_analysis() {
         let mut state = CommandState::default();
         state.enqueue(EngineCommand::Analyze(AnalysisJob {
-            documents: vec![("file:///old.kt".into(), String::new(), 1)],
+            documents: vec![("file:///old.kt".into(), String::new(), 1, 0)],
             open_uris: Vec::new(),
         }));
         state.enqueue(EngineCommand::SetWorkspaceRoot(Some("/workspace".into())));
@@ -1400,7 +1421,7 @@ mod tests {
                 uris: vec![format!("file:///{index}.kt")],
             });
             state.enqueue(EngineCommand::Analyze(AnalysisJob {
-                documents: vec![(format!("file:///{index}.kt"), String::new(), 1)],
+                documents: vec![(format!("file:///{index}.kt"), String::new(), 1, 0)],
                 open_uris: Vec::new(),
             }));
         }
@@ -1424,7 +1445,7 @@ mod tests {
             uri: "file:///a.kt".into(),
         }));
         state.enqueue(EngineCommand::Analyze(AnalysisJob {
-            documents: vec![("file:///a.kt".into(), "fun a(){}".into(), 2)],
+            documents: vec![("file:///a.kt".into(), "fun a(){}".into(), 2, 0)],
             open_uris: Vec::new(),
         }));
 
@@ -1463,7 +1484,7 @@ mod tests {
     #[test]
     fn job_and_batch_round_trip_fields() {
         let job = AnalysisJob {
-            documents: vec![("file:///a.kt".into(), "fun a(){}".into(), 3)],
+            documents: vec![("file:///a.kt".into(), "fun a(){}".into(), 3, 0)],
             open_uris: vec!["file:///a.kt".into()],
         };
         assert_eq!(job.documents[0].2, 3);
@@ -1495,7 +1516,7 @@ mod tests {
         let (tx, rx) = sync_channel(4);
         let engine = AnalysisEngine::spawn(Mock, tx);
         engine.submit(EngineCommand::Analyze(AnalysisJob {
-            documents: vec![("file:///a.kt".into(), "fun a(){}".into(), 2)],
+            documents: vec![("file:///a.kt".into(), "fun a(){}".into(), 2, 0)],
             open_uris: vec!["file:///a.kt".into()],
         }));
         let mut found = false;
@@ -1613,7 +1634,7 @@ mod tests {
         );
         engine.submit(EngineCommand::SetWorkspaceRoot(None));
         engine.submit(EngineCommand::Analyze(AnalysisJob {
-            documents: vec![("file:///a.kt".into(), "fun a(){}".into(), 1)],
+            documents: vec![("file:///a.kt".into(), "fun a(){}".into(), 1, 0)],
             open_uris: vec!["file:///a.kt".into()],
         }));
 
@@ -1711,7 +1732,7 @@ mod tests {
         let mut backend = EngineBackend::new(AnalysisEngine::spawn(Mock, tx), false);
         backend.set_ready(true);
         let now = backend.submit(AnalysisJob {
-            documents: vec![("file:///a.kt".into(), "x".into(), 1)],
+            documents: vec![("file:///a.kt".into(), "x".into(), 1, 0)],
             open_uris: vec!["file:///a.kt".into()],
         });
         assert!(now.is_none(), "engine backend is asynchronous");
@@ -1877,7 +1898,7 @@ mod tests {
         let engine = AnalysisEngine::spawn(Mock, tx);
         engine.submit(EngineCommand::SetWorkspaceRoot(None));
         engine.submit(EngineCommand::Analyze(AnalysisJob {
-            documents: vec![("file:///a.kt".into(), "fun a(){}".into(), 1)],
+            documents: vec![("file:///a.kt".into(), "fun a(){}".into(), 1, 0)],
             open_uris: vec!["file:///a.kt".into()],
         }));
 
@@ -1944,7 +1965,7 @@ mod tests {
         let engine = AnalysisEngine::spawn(Mock { reporter: None }, tx);
         engine.submit(EngineCommand::SetWorkspaceRoot(None));
         engine.submit(EngineCommand::Analyze(AnalysisJob {
-            documents: vec![("file:///a.kt".into(), "fun a(){}".into(), 1)],
+            documents: vec![("file:///a.kt".into(), "fun a(){}".into(), 1, 0)],
             open_uris: vec!["file:///a.kt".into()],
         }));
 
@@ -2079,7 +2100,7 @@ mod tests {
             uris: vec!["file:///w/Swept.kt".into()],
         }));
         state.enqueue(EngineCommand::Analyze(AnalysisJob {
-            documents: vec![("file:///w/Open.kt".into(), String::new(), 1)],
+            documents: vec![("file:///w/Open.kt".into(), String::new(), 1, 0)],
             open_uris: vec!["file:///w/Open.kt".into()],
         }));
 
@@ -2399,7 +2420,7 @@ mod tests {
     fn a_disconnected_queue_abandons_index_work_but_finishes_interactive_work() {
         let (sender, receiver) = command_queue();
         sender.send(EngineCommand::Analyze(AnalysisJob {
-            documents: vec![("file:///w/Open.kt".into(), String::new(), 1)],
+            documents: vec![("file:///w/Open.kt".into(), String::new(), 1, 0)],
             open_uris: vec!["file:///w/Open.kt".into()],
         }));
         sender.send(EngineCommand::Index(IndexJob {
@@ -2684,7 +2705,12 @@ mod tests {
         );
         for version in [1, 2] {
             engine.submit(EngineCommand::Analyze(AnalysisJob {
-                documents: vec![("file:///w/Open.kt".into(), "fun open() {}".into(), version)],
+                documents: vec![(
+                    "file:///w/Open.kt".into(),
+                    "fun open() {}".into(),
+                    version,
+                    0,
+                )],
                 open_uris: vec!["file:///w/Open.kt".into()],
             }));
             loop {

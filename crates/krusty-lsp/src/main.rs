@@ -3,22 +3,25 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 mod analysis_group;
-use analysis_group::{
-    project_group_fingerprint, project_group_inputs, project_group_uris, ProjectAnalysisGroup,
-};
+use analysis_group::{project_group_inputs, project_group_uris, ProjectAnalysisGroup};
 mod canonical_support;
 use canonical_support::{register_canonical_support, OpenDocumentSlots};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+mod project_analysis_group;
 mod support_splice;
+
+use project_analysis_group::{
+    project_analysis_groups, project_group_compiler_config, project_group_fingerprint,
+};
 
 use krusty::source::SourceKind;
 use krusty_lsp::{
     detect, resolve_jdk, AnalysisWorker, DocumentAnalysis, DumpResult, DumpTarget, JdkRequest,
     LibraryRef, LspOptions, MaterializedDefinition, ProcessRunner, ProjectFeedback,
-    ProjectMessageKind, ProjectModel, ProjectSources, ProjectSync, ProviderKind, RefreshOutcome,
+    ProjectMessageKind, ProjectSources, ProjectSync, ProviderKind, RefreshOutcome,
     SystemEnvironment,
 };
 
@@ -2053,59 +2056,6 @@ fn project_module_assignments(
     )
 }
 
-/// Partition the open documents into the source sets that are analyzed together.
-///
-/// Each module owns one group, so a module's analysis never sees another module's sources. A
-/// document the model claims for no module — a scratch file, a source root the build system does
-/// not describe — gets a group to ITSELF, carrying no module classpath and no support sources.
-/// Pooling the unowned documents into one group instead would let two unrelated scratch files see
-/// each other's top-level declarations, so the same `fun` in each would report a conflict; dropping
-/// them would leave them open in the editor with no diagnostics, no completion, and no navigation.
-///
-/// A workspace with no model at all is a different case and does not reach here: every document is
-/// assigned the one synthetic module by [`project_module_assignments`], because a plain folder of
-/// `.kt` files is meant to be one source set.
-fn project_analysis_groups(
-    module_assignments: &[Option<usize>],
-) -> Vec<(Option<usize>, Vec<usize>)> {
-    let mut groups: Vec<(Option<usize>, Vec<usize>)> = Vec::new();
-    for (document_index, module_index) in module_assignments.iter().copied().enumerate() {
-        match module_index.and_then(|module| {
-            groups
-                .iter_mut()
-                .find(|(candidate, _)| *candidate == Some(module))
-        }) {
-            Some((_, document_indices)) => document_indices.push(document_index),
-            None => groups.push((module_index, vec![document_index])),
-        }
-    }
-    groups
-}
-
-fn project_group_compiler_config(
-    model: Option<&ProjectModel>,
-    module_index: Option<usize>,
-    platform_classpath: &[PathBuf],
-    options: &LspOptions,
-) -> (Option<Vec<PathBuf>>, Vec<String>) {
-    let Some((model, module)) = model
-        .zip(module_index)
-        .and_then(|(model, index)| model.modules.get(index).map(|module| (model, module)))
-    else {
-        return (None, options.language_arguments().to_vec());
-    };
-
-    let mut classpath = model.compile_classpath(module);
-    for entry in platform_classpath {
-        if !classpath.contains(entry) {
-            classpath.push(entry.clone());
-        }
-    }
-    let mut language_arguments = module.kotlinc_args.clone();
-    language_arguments.extend_from_slice(options.language_arguments());
-    (Some(classpath), language_arguments)
-}
-
 struct CachedProjectAnalysis {
     module_index: Option<usize>,
     fingerprint: u64,
@@ -2656,8 +2606,8 @@ mod tests {
             "/workspace/second",
         );
         second.classpath = vec![PathBuf::from("/deps/second.jar")];
-        let model =
-            ProjectModel::new("/workspace", ProviderKind::Gradle).with_modules(vec![first, second]);
+        let model = krusty_lsp::ProjectModel::new("/workspace", ProviderKind::Gradle)
+            .with_modules(vec![first, second]);
         let options = LspOptions::parse(Vec::<String>::new()).unwrap();
         let platform = [PathBuf::from("/jdk/lib/modules")];
 

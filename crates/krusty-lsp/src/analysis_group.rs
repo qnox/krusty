@@ -5,7 +5,6 @@
 //! any order without blanking an in-group file or dropping it from the cache key.
 
 use std::collections::HashSet;
-use std::hash::{DefaultHasher, Hash, Hasher};
 
 pub(super) struct ProjectAnalysisGroup<'a> {
     pub(super) module_index: Option<usize>,
@@ -38,7 +37,7 @@ impl<'a> ProjectAnalysisGroup<'a> {
         }
     }
 
-    fn contains_document(&self, index: usize) -> bool {
+    pub(super) fn contains_document(&self, index: usize) -> bool {
         self.members.contains(&index)
     }
 }
@@ -101,30 +100,6 @@ pub(super) fn project_group_uris<'a>(
         .collect()
 }
 
-pub(super) fn project_group_fingerprint(
-    documents: &[(&str, &str)],
-    group: &ProjectAnalysisGroup<'_>,
-) -> u64 {
-    let mut fingerprint = DefaultHasher::new();
-    documents.len().hash(&mut fingerprint);
-    group.module_index.hash(&mut fingerprint);
-    group.document_indices.hash(&mut fingerprint);
-    group.inferred_support_count.hash(&mut fingerprint);
-    group.navigation_file_remaps.hash(&mut fingerprint);
-    for (index, (uri, source)) in documents.iter().enumerate() {
-        if group.contains_document(index) {
-            uri.hash(&mut fingerprint);
-            source.hash(&mut fingerprint);
-        }
-    }
-    for (uri, source) in &group.support_documents {
-        uri.hash(&mut fingerprint);
-        source.hash(&mut fingerprint);
-    }
-    group.java_sources.hash(&mut fingerprint);
-    fingerprint.finish()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -151,33 +126,6 @@ mod tests {
                 ("", ""),
                 ("file:///c.kt", "fun c() {}"),
             ]
-        );
-
-        let fingerprint = project_group_fingerprint(&documents, &group);
-        let outsider_changed = [
-            documents[0],
-            ("file:///b.kt", "fun changed() {}"),
-            documents[2],
-        ];
-        assert_eq!(
-            project_group_fingerprint(&outsider_changed, &group),
-            fingerprint
-        );
-        let member_changed = [
-            ("file:///a.kt", "fun changed() {}"),
-            documents[1],
-            documents[2],
-        ];
-        assert_ne!(
-            project_group_fingerprint(&member_changed, &group),
-            fingerprint
-        );
-
-        let source_order =
-            ProjectAnalysisGroup::new(Some(1), vec![0, 2], Vec::new(), 0, Vec::new(), Vec::new());
-        assert_ne!(
-            project_group_fingerprint(&documents, &source_order),
-            fingerprint
         );
     }
 }
