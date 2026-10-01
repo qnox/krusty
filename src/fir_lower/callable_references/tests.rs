@@ -1407,13 +1407,60 @@ fn consuming_lowering_attaches_selected_sam_target_to_lambda() {
     assert_eq!(conversions[0].result, Ty::String);
 }
 
+fn module_member_callable(
+    source: &str,
+    stem: &str,
+    owner: &str,
+    name: &str,
+    parameter: Ty,
+) -> crate::fir::CallableId {
+    let mut diagnostics = crate::diag::DiagSink::new();
+    let mut analysis = crate::frontend::analyze_source_set_with_features(
+        &[crate::source::SourceInput::kotlin(source).with_file_stem(stem)],
+        Box::new(crate::libraries::EmptySymbolSource),
+        &crate::features::LangFeatures::new(),
+        &mut diagnostics,
+    );
+    assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+    let index = analysis
+        .streamed
+        .take()
+        .expect("Pass 1 must finalize")
+        .module
+        .into_parts()
+        .0;
+    let owner_name = crate::types::type_name(owner);
+    let matches = (0..index.declaration_count())
+        .map(|raw| crate::fir::DeclarationId::from_raw(raw as u32))
+        .filter(|declaration| {
+            index.declaration_name(*declaration) == Some(name)
+                && index
+                    .declaration_anchor(*declaration)
+                    .and_then(|anchor| anchor.owner)
+                    .and_then(|owner| index.classifier_header(owner))
+                    .is_some_and(|classifier| classifier.classifier == owner_name)
+                && index.signature(*declaration).is_some_and(|signature| {
+                    signature
+                        .parameters
+                        .iter()
+                        .map(|parameter| parameter.get())
+                        .eq([parameter])
+                })
+        })
+        .filter_map(|declaration| index.callable_for_declaration(declaration))
+        .map(|callable| callable.id)
+        .collect::<Vec<_>>();
+    let [callable] = matches[..] else {
+        panic!("one {owner}.{name}({parameter:?}), found {matches:?}")
+    };
+    callable
+}
+
 #[test]
 fn fun_interface_constructor_reference_returns_a_checked_sam_delegate() {
-    let ir = lower_single_source(
-        "fun interface Action { fun run(value: Int): String }\n\
-         fun reference(): ((Int) -> String) -> Action = ::Action\n",
-        "SamConstructorReference",
-    );
+    const SOURCE: &str = "fun interface Action { fun run(value: Int): String }\n\
+         fun reference(): ((Int) -> String) -> Action = ::Action\n";
+    let ir = lower_single_source(SOURCE, "SamConstructorReference");
 
     let constructor = ir
         .functions
@@ -1437,6 +1484,15 @@ fn fun_interface_constructor_reference_returns_a_checked_sam_delegate() {
     assert_eq!(delegates.len(), 1);
     assert!(delegates[0].1.classifier.matches("Action"));
     assert_eq!(delegates[0].1.method, "run");
+    assert!(delegates[0].1.wraps_function_value);
+    let action_run =
+        module_member_callable(SOURCE, "SamConstructorReference", "Action", "run", Ty::Int);
+    assert_eq!(
+        delegates[0].1.method_target,
+        crate::fir::FirSamMethod::Declared(crate::fir::ResolvedFunctionOverrideTarget::Module(
+            action_run
+        ))
+    );
     assert!(ir.exprs.iter().any(|expression| matches!(
         expression,
         IrExpr::Lambda {
