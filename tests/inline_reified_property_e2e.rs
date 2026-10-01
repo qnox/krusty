@@ -105,3 +105,45 @@ fn an_inline_getter_return_is_the_property_value() {
         "inlineGetterReturn",
     );
 }
+
+/// An inline accessor declared in another file is an ordinary call. This file does not contain
+/// the accessor function, so the use is not recorded as a splice.
+#[test]
+fn an_inline_property_in_another_file_stays_a_call() {
+    const LIB: &str = r#"
+inline fun (Int.() -> String).foo(): String = this(1)
+
+inline var (Int.() -> String).bar: String
+    get() = this(1)
+    set(value) { this(1) }
+
+inline fun localFoo(): String {
+    return object {
+        fun func(): String {
+            class C
+            C()
+            return "L"
+        }
+    }.func()
+}
+
+object Host {
+    inline val <T> T.tag: Int get() = 7
+}
+"#;
+    const MAIN: &str = r#"
+import Host.tag
+
+fun box(): String {
+    val text = { a: Int -> if (a == 1) "O" else "fail" }.foo() +
+        { a: Int -> if (a == 1) "K" else "fail" }.bar
+    if (localFoo() != "L") return "fail local"
+    if (1.tag != 7) return "fail tag"
+    return text
+}
+"#;
+    common::expect_box_ok_files_with_stdlib(
+        &[("lib.kt", LIB), ("main.kt", MAIN)],
+        "crossFileInlineProperty",
+    );
+}

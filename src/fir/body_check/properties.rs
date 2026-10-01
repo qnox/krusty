@@ -1291,6 +1291,16 @@ impl BodyFirChecker<'_> {
         if !inline {
             return Ok(None);
         }
+        // Another source file emits the accessor and does not put its function in this file.
+        // The use stays an ordinary call. A same-file accessor that cannot expand still fails
+        // closed while lowering.
+        if self
+            .index
+            .declaration_anchor(accessor)
+            .is_none_or(|anchor| anchor.source != self.source)
+        {
+            return Ok(None);
+        }
         let mut recorded = Vec::with_capacity(substitutions.len());
         for substitution in substitutions {
             let crate::fir::FirTypeParameterRef::Module(parameter) = substitution.parameter else {
