@@ -617,7 +617,7 @@ fn local_class_init_reads_a_property_parameter_through_the_captured_outer_instan
     let (mut index, mut inline_bodies, _default_arguments, mut sources) =
         streamed.module.into_parts();
     let info = analysis.types[0].as_ref().expect("checked source");
-    let local_class_span = {
+    let local_class_source = {
         let mut local_classes = analysis.files[0]
             .local_class_enclosing_declarations
             .keys()
@@ -630,10 +630,10 @@ fn local_class_init_reads_a_property_parameter_through_the_captured_outer_instan
             None,
             "fixture must contain exactly one source local class"
         );
-        let crate::ast::Decl::Class(class) = analysis.files[0].decl(local) else {
+        let crate::ast::Decl::Class(_) = analysis.files[0].decl(local) else {
             panic!("recorded source local declaration must be a class")
         };
-        class.span
+        local
     };
     crate::resolve::publish_checked_local_signatures(
         &analysis.files[0],
@@ -643,12 +643,14 @@ fn local_class_init_reads_a_property_parameter_through_the_captured_outer_instan
         &mut index,
     )
     .expect("checked local signatures must publish before FIR body checking");
-    let local_class = index
-        .declaration_at(
-            SourceFileId::from_raw(0),
-            local_class_span,
-            DeclarationKind::Classifier,
-        )
+    let active = ActiveSourceDeclarations::bind_complete_source(
+        &analysis.files[0],
+        SourceFileId::from_raw(0),
+        &index,
+    )
+    .expect("source declarations must bind to the finalized stable inventory");
+    let local_class = active
+        .canonical_classifier_declaration(local_class_source, &index)
         .expect("source local class must have a stable classifier identity");
     let mut session = BodyCheckSession::default();
     let mut sink = RecordingSink::default();
