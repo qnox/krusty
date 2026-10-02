@@ -4352,6 +4352,26 @@ method being present for Java interop. That test also pins the library's JVM tar
 concatenation compiles to `invokedynamic` only from target 9, so on a lower target the concatenating
 body contains none and krusty splices it.
 
+## Native runtime — prebuilt with krusty  ◐
+
+The native target links a user's program against a runtime written in freestanding C under
+`src/native/runtime/`. `build.rs` compiles it once, when krusty itself is built, for every supported
+target, so a user's build needs no C toolchain; `src/native/runtime.rs` describes its translation
+units and headers.
+
+- The collector (`krusty_gc.c`) finds roots conservatively and traces the heap precisely. Precise
+  roots would need stack maps at every call site, which the code generator does not emit yet; the
+  heap has no such limit, because every object carries its `KType` and the type names exactly which
+  fields are references, so a `Long` field that looks like a pointer retains nothing. The compiler
+  emits no stack maps, safepoints or write barriers for it; what the generated code does owe it is
+  small and fixed: the program entry initializes the runtime (recording the stack bottom), and each
+  emitted global that holds a reference registers itself as a root. When stack maps arrive only
+  root-finding changes. The cost, chosen rather than discovered: conservative roots
+  forbid moving objects, so there is no compaction or copying nursery. Objects are segregated by size
+  into chunks, so a candidate address resolves to its object by arithmetic, and collection is
+  triggered by the bytes allocated since the last one, with a threshold that rises with the
+  surviving heap.
+
 ## Native linker — krusty's own static ELF linker  ◐
 
 `src/native/linker/` links a program's relocatable objects with the prebuilt runtime into a static
