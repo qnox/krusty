@@ -10,7 +10,7 @@
 //! - `simple_name → internal_name` for every class in the classpath
 //! - Kotlin type aliases from `@kotlin.Metadata` `d2` arrays in `*TypeAliasesKt.class` files
 
-pub(super) mod builtin_inventory;
+mod builtin_inventory;
 mod builtin_signatures;
 mod builtins_validation;
 mod candidate_union;

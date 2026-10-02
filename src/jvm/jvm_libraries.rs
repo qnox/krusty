@@ -4656,14 +4656,13 @@ impl JvmLibraries {
         if let SymbolNamespace::Package(package) = namespace {
             for overload in &mut overloads {
                 if let Some(intrinsic) =
-                    crate::libraries::builtin_top_level_realization::normalized_function_realization(
-                        package, name, overload,
-                    )
-                    .or_else(|| {
-                        super::classpath::builtin_inventory::published_floating_range_membership(
-                            overload,
-                        )
-                    })
+                    self.cp
+                        .builtin_package_function_role(package, name, overload)
+                        .or_else(|| {
+                            crate::libraries::builtin_top_level_realization::normalized_function_realization(
+                                package, name, overload,
+                            )
+                        })
                 {
                     overload.callable.compiler_intrinsic = Some(intrinsic);
                 }

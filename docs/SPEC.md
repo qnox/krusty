@@ -10662,19 +10662,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   handling. Classpath generic signatures preserve declared bounds for receiver matching and JVM
   erasure. Tests: `tests/reference_range_expression_e2e.rs`.
 
-- **A nearer `Double`/`Float` `rangeTo` replaces primitive `in`.** `x in a..b` for those
-  primitives is a direct IEEE comparison only when overload resolution selects the `RangesKt`
-  `Double`/`Float` `rangeTo` declaration returning `ClosedFloatingPointRange`. The same facade's
-  `rangeUntil` declarations returning `OpenEndRange` carry the same role, so `x in a..<b` stays
-  that comparison too. Those operators are the facade's Kotlin metadata, not `.kotlin_builtins`
-  package functions; the provider assigns `FloatingRangeMembership` while publishing the facade.
-  A declaration with the same shape on any other owner, and `Comparable.rangeTo` returning
-  `ClosedRange`, do not carry it (`-0.0 in 0.0..0.0` is true and `NaN in NaN..NaN` is false only
-  for the catalog operator). A declaration in a nearer scope is an ordinary operator call
-  followed by `contains`. The generic `Comparable.rangeTo` orders with `compareTo`, so `-0.0` is
-  outside `0.0..0.0` and `NaN` is inside `NaN..NaN`. Integral ranges stay comparisons. Tests:
+- **A nearer `Double`/`Float` range operator replaces primitive `in`.** `x in a..b` and
+  `x in a..<b` for those primitives are direct IEEE comparisons only when overload resolution
+  selects the exact catalog `kotlin.ranges` `rangeTo`/`rangeUntil` declaration returning
+  `ClosedFloatingPointRange`/`OpenEndRange`. The provider assigns `FloatingRangeMembership` while
+  decoding that trusted catalog, then copies it to a physical metadata declaration only through an
+  exact common-signature join. A declaration with the same shape but no catalog identity, and
+  `Comparable.rangeTo` returning `ClosedRange`, do not carry it (`-0.0 in 0.0..0.0` is true and
+  `NaN in NaN..NaN` is false only for the catalog operator). A declaration in a nearer scope is an
+  ordinary operator call followed by `contains`. The generic `Comparable.rangeTo` orders with
+  `compareTo`, so `-0.0` is outside `0.0..0.0` and `NaN` is inside `NaN..NaN`. Integral ranges stay
+  comparisons. Tests:
   `jvm::classpath::builtin_inventory::tests::the_ranges_facade_publishes_floating_range_membership`,
-  `a_same_shaped_facade_does_not_publish_floating_range_membership`,
+  `a_same_shaped_non_catalog_declaration_has_no_floating_range_role`,
   `floating_range_role_is_owned_by_the_exact_builtins_catalog`,
   `libraries::builtin_top_level_realization::tests::a_shape_equivalent_floating_range_has_no_realization`,
   `a_nearer_double_range_to_is_a_contains_call`,

@@ -1,6 +1,6 @@
-//! Semantic roles assigned while a trusted catalog declaration enters the classpath inventory.
-//! `.kotlin_builtins` records and the `kotlin.ranges.RangesKt` file facade are those catalogs.
-//! A classfile or KLIB declaration with the same shape does not acquire a catalog role.
+//! Semantic roles assigned while a decoded `.kotlin_builtins` declaration enters the classpath
+//! inventory, then joined onto the exact normalized physical declaration. A classfile or KLIB
+//! declaration with the same shape but no matching catalog declaration never acquires a role.
 
 use crate::libraries::{CompilerIntrinsic, FunctionInfo, GenericSig};
 use crate::types::{Ty, TypeName};
@@ -55,25 +55,6 @@ pub(super) fn function_role(
     )
 }
 
-/// Role of a published `RangesKt` metadata function. The floating `rangeTo` / `rangeUntil`
-/// operators are that facade's Kotlin metadata, not `.kotlin_builtins` package functions.
-pub(in crate::jvm) fn published_floating_range_membership(
-    function: &FunctionInfo,
-) -> Option<CompilerIntrinsic> {
-    if function.callable.owner != crate::types::wk::ranges_facade() {
-        return None;
-    }
-    let signature = function.generic_sig.as_ref()?;
-    floating_range_membership(
-        function.flags.operator,
-        function.flags.suspend,
-        function.flags.infix,
-        function.context_count,
-        function.call_sig.vararg,
-        signature,
-    )
-}
-
 impl super::Classpath {
     pub(in crate::jvm) fn builtin_package_functions(
         &self,
@@ -111,6 +92,31 @@ impl super::Classpath {
             })
             .collect()
     }
+
+    /// The semantic role already assigned to the exact catalog declaration represented by
+    /// `candidate`. This joins provider records by their complete common signature and declaration
+    /// flags; it does not infer a role from the candidate's JVM owner, descriptor, or shape.
+    pub(in crate::jvm) fn builtin_package_function_role(
+        &self,
+        package: TypeName,
+        name: &str,
+        candidate: &FunctionInfo,
+    ) -> Option<CompilerIntrinsic> {
+        let signature = candidate.generic_sig.as_ref()?;
+        self.builtins_file_for_package(package)
+            .functions
+            .iter()
+            .find(|function| {
+                function.name == name
+                    && function.generic_sig == *signature
+                    && function.is_operator == candidate.flags.operator
+                    && function.is_suspend == candidate.flags.suspend
+                    && function.is_infix == candidate.flags.infix
+                    && function.context_count == candidate.context_count
+                    && function.vararg.is_some() == candidate.call_sig.vararg
+            })
+            .and_then(|function| function.compiler_intrinsic)
+    }
 }
 
 #[cfg(test)]
@@ -122,7 +128,7 @@ mod tests {
     use crate::types::{type_name, Ty};
 
     use super::super::{builtin_bounds, builtin_ty};
-    use super::{function_role, published_floating_range_membership};
+    use super::function_role;
 
     fn floating_range_builtin() -> super::super::super::metadata::BuiltinFunction {
         let element = super::super::super::metadata::BuiltinTy::class("kotlin/Double");
@@ -207,7 +213,7 @@ mod tests {
     }
 
     #[test]
-    fn a_same_shaped_facade_does_not_publish_floating_range_membership() {
+    fn a_same_shaped_non_catalog_declaration_has_no_floating_range_role() {
         let result = Ty::obj_args("kotlin/ranges/ClosedFloatingPointRange", &[Ty::Double]);
         let callable = LibraryCallable::library(
             "example/Ranges",
@@ -231,7 +237,26 @@ mod tests {
             ret: result,
             return_policy: Default::default(),
         });
-        assert_eq!(published_floating_range_membership(&function), None);
+        let Some(stdlib) = crate::toolchain::stdlib_jar() else {
+            return;
+        };
+        let classpath = super::super::Classpath::new(vec![stdlib]);
+        assert_eq!(
+            classpath.builtin_package_function_role(
+                type_name("example/ranges"),
+                "rangeTo",
+                &function,
+            ),
+            None
+        );
+        assert_eq!(
+            classpath.builtin_package_function_role(
+                crate::types::wk::kotlin_ranges_package(),
+                "rangeTo",
+                &function,
+            ),
+            Some(CompilerIntrinsic::FloatingRangeMembership)
+        );
     }
 
     #[test]
@@ -243,7 +268,7 @@ mod tests {
             crate::jvm::classpath::Classpath::new(vec![stdlib]),
         ))
         .expect("stdlib provider");
-        let membership = |name: &str, descriptor: &str| {
+        let membership = |name: &str, scalar: Ty, range: &str| {
             let symbols =
                 libraries.symbols(SymbolNamespace::Package(type_name("kotlin/ranges")), name);
             let functions = match &symbols.callables {
@@ -254,10 +279,16 @@ mod tests {
             let function = functions
                 .overloads
                 .iter()
-                .find(|function| function.callable.descriptor == descriptor)
+                .find(|function| {
+                    function.generic_sig.as_ref().is_some_and(|signature| {
+                        signature.receiver == Some(scalar)
+                            && signature.params == [scalar]
+                            && signature.ret == Ty::obj_args(range, &[scalar])
+                    })
+                })
                 .unwrap_or_else(|| {
                     panic!(
-                        "no {name} {descriptor}; overloads={:?}",
+                        "no {name} {scalar:?} -> {range}; overloads={:?}",
                         functions
                             .overloads
                             .iter()
@@ -275,16 +306,23 @@ mod tests {
                             .collect::<Vec<_>>()
                     )
                 });
-            assert_eq!(function.callable.owner, crate::types::wk::ranges_facade());
             assert_eq!(
                 function.callable.compiler_intrinsic,
                 Some(CompilerIntrinsic::FloatingRangeMembership)
             );
         };
-        membership("rangeTo", "(DD)Lkotlin/ranges/ClosedFloatingPointRange;");
-        membership("rangeTo", "(FF)Lkotlin/ranges/ClosedFloatingPointRange;");
-        membership("rangeUntil", "(DD)Lkotlin/ranges/OpenEndRange;");
-        membership("rangeUntil", "(FF)Lkotlin/ranges/OpenEndRange;");
+        membership(
+            "rangeTo",
+            Ty::Double,
+            "kotlin/ranges/ClosedFloatingPointRange",
+        );
+        membership(
+            "rangeTo",
+            Ty::Float,
+            "kotlin/ranges/ClosedFloatingPointRange",
+        );
+        membership("rangeUntil", Ty::Double, "kotlin/ranges/OpenEndRange");
+        membership("rangeUntil", Ty::Float, "kotlin/ranges/OpenEndRange");
 
         let symbols = libraries.symbols(
             SymbolNamespace::Package(type_name("kotlin/ranges")),
