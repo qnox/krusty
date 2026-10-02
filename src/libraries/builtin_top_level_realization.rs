@@ -196,6 +196,29 @@ fn kotlin_function(facts: &BuiltinFunctionDeclaration<'_>) -> Option<CompilerInt
     }
 }
 
+/// `kotlin.enums.enumEntries<T>()` has no callable body. The one-argument overloads are ordinary.
+fn enum_entries(facts: &BuiltinFunctionDeclaration<'_>) -> Option<CompilerIntrinsic> {
+    if !facts.package.matches("kotlin/enums")
+        || facts.name != "enumEntries"
+        || !plain(facts, FnKind::TopLevel)
+        || facts.receiver.is_some()
+        || facts.type_parameter_count != 1
+        || facts.vararg.is_some()
+        || facts.is_operator
+        || !facts.params.is_empty()
+    {
+        return None;
+    }
+    let returned = facts.ret.non_null();
+    let [Ty::TyParam(_, _)] = returned.type_args() else {
+        return None;
+    };
+    returned
+        .obj_internal()
+        .is_some_and(|name| name.matches("kotlin/enums/EnumEntries"))
+        .then_some(CompilerIntrinsic::EnumEntries)
+}
+
 fn console(facts: &BuiltinFunctionDeclaration<'_>) -> Option<CompilerIntrinsic> {
     if !facts.package.matches("kotlin/io")
         || !plain(facts, FnKind::TopLevel)
@@ -472,6 +495,8 @@ pub(crate) fn function_realization(
         kotlin_test(&facts)
     } else if facts.package.matches("kotlin/reflect") {
         reflection(&facts)
+    } else if facts.package.matches("kotlin/enums") {
+        enum_entries(&facts)
     } else if facts.package == crate::types::wk::kotlin_ranges_package() {
         progression_builder(&facts)
     } else {

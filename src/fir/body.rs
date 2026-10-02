@@ -270,6 +270,8 @@ pub enum FirClassifierCallable {
     /// The standard library's top-level `enumValueOf<E>(name)`. It resolves to the same lookup as
     /// the member, but it is a different — and `inline` — declaration, so the two stay apart.
     TopLevelEnumValueOf,
+    /// The standard library's top-level `enumEntries<E>()`, realized as `E.getEntries()`.
+    EnumEntries,
     ArrayConstructor {
         element: ResolvedTy,
     },

@@ -70,6 +70,9 @@ pub enum CompilerIntrinsic {
     SuspendCoroutineUninterceptedOrReturn,
     EnumValues,
     EnumValueOf,
+    /// The zero-argument `kotlin.enums.enumEntries<T>()`. Its stdlib body only throws; the selected
+    /// enum type argument is realized as that enum's `getEntries()`.
+    EnumEntries,
     /// The exact `kotlin.Enum.name` declaration published by the core provider. A direct enum entry
     /// folds to that entry's declaration name; any other receiver stays an ordinary property call.
     EnumName,

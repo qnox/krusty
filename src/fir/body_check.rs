@@ -36,6 +36,7 @@ mod driver;
 #[cfg(test)]
 mod driver_tests;
 mod enum_entries;
+mod enum_reflection;
 mod failure;
 mod inline_body_plan;
 #[cfg(test)]
