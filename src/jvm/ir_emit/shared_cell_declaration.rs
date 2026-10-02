@@ -80,7 +80,7 @@ impl Emitter<'_> {
             // The element store is the declaration's statement: its value marks its own line,
             // and the `putfield` returns to the declaration's.
             load(holder, slot, code);
-            debug_lines::mark_expression_start(self.ir, value, code);
+            self.mark_expression_start(value, code);
             self.emit_value(value, code);
             debug_lines::mark_statement(self.ir, declaration, code);
             self.put_element(&elem, code);
@@ -163,6 +163,12 @@ impl Emitter<'_> {
             start: code.bytes.len() as u16,
             name,
             descriptor: local_variable_desc(ty),
+            inline_operand: self.ir.call_operand_bindings.contains(&declaration)
+                && matches!(
+                    provenance,
+                    Some(crate::ir::IrDebugLocalProvenance::InlineValue { .. })
+                        | Some(crate::ir::IrDebugLocalProvenance::InlineLambdaReceiver { .. })
+                ),
             table_position,
         };
         // kotlinc lists an inline frame's marker ahead of the locals binding that frame's operands,

@@ -1329,6 +1329,7 @@ impl BodyLowering<'_> {
         arguments: &[IrCheckedArgument],
         specialized_parameters: &[Ty],
         substitutions: &[crate::fir::FirTypeSubstitution],
+        source_line: Option<u32>,
     ) -> Option<Result<ExprId, FirLoweringFailure>> {
         let callable = self.index.callable(target)?;
         let declaration = self.index.declaration_anchor(callable.declaration)?;
@@ -1527,6 +1528,7 @@ impl BodyLowering<'_> {
             }
             operands.extend(slots.iter().copied());
             inlined_lambda_operands.extend(inline_lambdas.iter().copied());
+            let first_generated = self.ir.exprs.len();
             let Some(inlined) = self.inline_same_file_call(
                 target,
                 function,
@@ -1536,6 +1538,12 @@ impl BodyLowering<'_> {
             ) else {
                 return Some(Err(declined));
             };
+            if let Some(source_line) = source_line {
+                for expression in first_generated..self.ir.exprs.len() {
+                    self.ir
+                        .record_inline_copy_call_line(expression as u32, source_line);
+                }
+            }
             let expanded = if statements.is_empty() {
                 inlined
             } else {

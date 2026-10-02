@@ -322,14 +322,23 @@ pub(super) fn order_lifted_functions(ir: &IrFile, members: &mut [u32]) {
     if slots.len() < 2 {
         return;
     }
-    // Sequences keep the order in which their first function was registered: lowering registers
-    // each declaration's lifted functions together, in declaration order.
+    // Lowering normally registers each declaration's lifted functions together, in declaration
+    // order. A target-realized helper can arrive later, after another member's lambda has already
+    // registered its sequence, so restore the recorded member order when all sequences are from
+    // this source. Keep registration order across sources: their source-order domains are local.
     let mut sequences = Vec::new();
     for &slot in &slots {
         let (sequence, _) = &ir.lifted_functions[&members[slot]];
         if !sequences.contains(&sequence) {
             sequences.push(sequence);
         }
+    }
+    if sequences.first().is_some_and(|first| {
+        sequences
+            .iter()
+            .all(|sequence| sequence.source == first.source)
+    }) {
+        sequences.sort_by_key(|sequence| sequence.source_order);
     }
     let sequence_rank = |sequence| sequences.iter().position(|&s| s == sequence);
     let site = |function: &u32| &ir.lifted_functions[function];

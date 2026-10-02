@@ -201,8 +201,14 @@ impl BodyLowering<'_> {
         substitutions: &[FirTypeSubstitution],
     ) -> Option<ExprId> {
         let template = self.ir.functions.get(function as usize)?.body?;
+        let close_line = self.ir.fn_close_lines.get(&function).copied();
         // The name its inline frames are opened under.
         let callee = self.index.callable_name(target)?.to_owned();
+        let source_owner = self
+            .index
+            .callable(target)
+            .and_then(|callable| self.index.enclosing_classifier(callable.declaration))
+            .map(|classifier| classifier.classifier);
         let function_shape = self.ir.functions.get(function as usize)?;
         let parameter_count = u32::try_from(
             function_shape.params.len() + usize::from(function_shape.dispatch_receiver.is_some()),
@@ -441,9 +447,9 @@ impl BodyLowering<'_> {
         let operand_slots = plans
             .into_iter()
             .zip(operands.iter())
-            .zip(&operand_types)
+            .zip(&declared_operand_types)
             .enumerate()
-            .map(|(index, ((plan, operand), ty))| match plan {
+            .map(|(index, ((plan, operand), declared_ty))| match plan {
                 InlineOperandPlan::Splice => None,
                 InlineOperandPlan::Reuse(slot) => Some(slot),
                 InlineOperandPlan::Default => {
@@ -456,7 +462,9 @@ impl BodyLowering<'_> {
                     let slot = self.allocate_temporary();
                     let declaration = self.ir.add_expr(IrExpr::Variable {
                         index: slot,
-                        ty: stored_value_ty(*ty),
+                        // The copied body consumes the specialized type, but kotlinc's inline
+                        // parameter local retains the declaration's erased storage type.
+                        ty: stored_value_ty(*declared_ty),
                         init: Some(operand),
                         named: true,
                     });
@@ -574,7 +582,7 @@ impl BodyLowering<'_> {
             .collect::<Vec<_>>();
         copies.sort_by_key(|&(_, copy)| copy);
         for &(source, copy) in &copies {
-            self.ir.mark_inline_copy(copy);
+            self.ir.record_inline_copy_owner(copy, source_owner);
             // A compiler temporary's synthetic zero is refreshed after its type specializes.
             // A deferred source local carries explicit declaration provenance instead: its
             // semantic type specializes normally, and each backend selects its physical zero.
@@ -714,7 +722,7 @@ impl BodyLowering<'_> {
         // the expansion crosses a suspension that local takes a continuation field kotlinc has no
         // counterpart for.
         if let [(tail, value)] = returns[..] {
-            if produce_sole_tail_return(self.ir, cloned_root, tail, value) {
+            if produce_sole_tail_return(self.ir, cloned_root, tail, value, close_line) {
                 let mut statements = operand_declarations;
                 statements.push(cloned_root);
                 let value = statements.pop();
@@ -779,9 +787,17 @@ impl BodyLowering<'_> {
             post_test: false,
             label: Some(label),
         }));
-        let value = result_slot
-            .map(|slot| self.ir.add_expr(IrExpr::GetValue(slot)))
-            .or_else(|| Some(self.ir.add_expr(IrExpr::UnitInstance)));
+        let value = match result_slot {
+            None => {
+                let unit = self.ir.add_expr(IrExpr::UnitInstance);
+                self.ir.record_inline_copy_owner(unit, source_owner);
+                if let Some(line) = close_line {
+                    self.ir.expr_source_lines.insert(unit, line);
+                }
+                Some(unit)
+            }
+            Some(slot) => Some(self.ir.add_expr(IrExpr::GetValue(slot))),
+        };
         Some(self.ir.add_expr(IrExpr::Block {
             stmts: statements,
             value,
@@ -1565,11 +1581,28 @@ fn produce_sole_tail_return(
     root: ExprId,
     tail: ExprId,
     value: Option<ExprId>,
+    close_line: Option<u32>,
 ) -> bool {
     let Some(chain) = tail_statement_block_chain(ir, root, tail) else {
         return false;
     };
     let produced = value.unwrap_or_else(|| ir.add_expr(IrExpr::UnitInstance));
+    if matches!(ir.expr(produced), IrExpr::UnitInstance) {
+        ir.copy_inline_copy_mark(tail, produced);
+        if !ir.expr_source_lines.contains_key(&produced) {
+            if let Some(line) = ir
+                .expr_source_lines
+                .get(&tail)
+                .copied()
+                .or_else(|| ir.fallthrough_return_line(tail))
+                .or_else(|| ir.expr_end_lines.get(&tail).copied())
+                .or_else(|| ir.expr_end_lines.get(&root).copied())
+                .or(close_line)
+            {
+                ir.expr_source_lines.insert(produced, line);
+            }
+        }
+    }
     ir.exprs[tail as usize] = IrExpr::Block {
         stmts: Vec::new(),
         value: Some(produced),

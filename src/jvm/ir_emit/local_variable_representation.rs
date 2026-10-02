@@ -97,7 +97,7 @@ impl Emitter<'_> {
                 .copied()
                 .unwrap_or(source);
             self.adapt_physical_operand(source, semantic, Some(semantic_ty), slot_ty, code);
-            debug_lines::mark_expression_start(self.ir, initializer, code);
+            self.mark_expression_start(initializer, code);
             debug_lines::mark_statement(self.ir, declaration, code);
             let slot = entered
                 .unwrap_or_else(|| self.enter_unassigned_value(index, slot_ty, holds_operand));

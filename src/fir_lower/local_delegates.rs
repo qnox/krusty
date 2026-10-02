@@ -115,6 +115,7 @@ impl BodyLowering<'_> {
             site,
             line,
         } = request;
+        let source_order = reference.member_order;
         // Each convention operand is a distinct use. Sharing one expression identity would let an
         // inline accessor's unread-operand marker alias into the provider or the other accessor.
         let reference = self
@@ -134,7 +135,7 @@ impl BodyLowering<'_> {
         }
         let declaration = DeclarationId::from_raw(self.body.owner().raw());
         let mut body =
-            self.local_delegate_call(declaration, call, delegate, dispatch, arguments)?;
+            self.local_delegate_call(declaration, call, delegate, dispatch, arguments, line)?;
         if result != Ty::Unit && call.result.get() != result {
             body = self.ir.add_expr(IrExpr::TypeOp {
                 op: IrTypeOp::ImplicitCoercion,
@@ -160,11 +161,26 @@ impl BodyLowering<'_> {
             parameters.push(value_type);
             identities.push(IrParameterIdentity::property_setter_value());
         }
+        let mut type_parameters = Vec::new();
+        for ty in parameters.iter().copied().chain(std::iter::once(result)) {
+            for parameter in super::generics::named_type_parameters(self.index, ty) {
+                if !type_parameters
+                    .iter()
+                    .any(|present: &crate::ir::IrTypeParameter| {
+                        present.semantic_name == parameter.semantic_name
+                    })
+                {
+                    type_parameters.push(parameter);
+                }
+            }
+        }
         Ok(crate::ir::IrLocalDelegateAccessorPlan {
             body,
             parameters,
             parameter_identities: identities,
+            type_parameters,
             result,
+            source_order,
             site,
             line,
         })
@@ -208,6 +224,7 @@ impl BodyLowering<'_> {
         delegate: crate::ir::ExprId,
         dispatch: Option<crate::ir::ExprId>,
         arguments: Vec<(crate::ir::ExprId, Ty)>,
+        source_line: u32,
     ) -> Result<crate::ir::ExprId, FirLoweringFailure> {
         let dispatch = match (&call.dispatch_receiver, dispatch) {
             (Some(FirDelegateDispatchReceiver::Singleton { classifier, .. }), None) => {
@@ -267,6 +284,7 @@ impl BodyLowering<'_> {
                     &checked,
                     &selected_parameters,
                     &call.substitutions,
+                    Some(source_line),
                 )
                 .ok_or(FirLoweringFailure::MissingCallable(target))??;
             return Ok(expression);

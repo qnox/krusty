@@ -439,6 +439,7 @@ impl BodyLowering<'_> {
             &arguments,
             &signature_parameters,
             substitutions,
+            None,
         );
         self.next_temporary = enclosing_temporary;
         let Some(call) = call.transpose()? else {
@@ -574,7 +575,11 @@ impl BodyLowering<'_> {
             })))
     }
 
-    pub(super) fn checked_call(&mut self, call: &FirCall) -> Result<ExprId, FirLoweringFailure> {
+    pub(super) fn checked_call(
+        &mut self,
+        call: &FirCall,
+        source_line: u32,
+    ) -> Result<ExprId, FirLoweringFailure> {
         let dispatch_receiver = self.receiver(call.dispatch_receiver)?;
         let extension_receiver = self.receiver(call.extension_receiver)?;
         match &call.target {
@@ -596,6 +601,7 @@ impl BodyLowering<'_> {
                         &arguments,
                         &parameter_types,
                         &call.substitutions,
+                        Some(source_line),
                     )
                     .transpose()?
                 {

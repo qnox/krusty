@@ -324,7 +324,8 @@ impl BodyLowering<'_> {
                 })
             }
             FirExprKind::Call(call) => {
-                let lowered = self.checked_call(call)?;
+                let lowered = self
+                    .checked_call(call, self.body.expression_debug_lines(expression_id).source)?;
                 let declared_result = match call.target {
                     crate::fir::FirCallTarget::Module(target) => self
                         .index
@@ -347,7 +348,8 @@ impl BodyLowering<'_> {
             FirExprKind::ConstructorCall(call) => self.checked_constructor_call(call)?,
             FirExprKind::AnonymousObject(object) => self.anonymous_object(object)?,
             FirExprKind::ComparisonCall { operation, call } => {
-                let call = self.checked_call(call)?;
+                let call = self
+                    .checked_call(call, self.body.expression_debug_lines(expression_id).source)?;
                 if let IrExpr::Call {
                     callee:
                         Callee::Intrinsic {
@@ -371,7 +373,8 @@ impl BodyLowering<'_> {
                 })
             }
             FirExprKind::ContainmentCall { call, negated } => {
-                let call = self.checked_call(call)?;
+                let call = self
+                    .checked_call(call, self.body.expression_debug_lines(expression_id).source)?;
                 if *negated {
                     let false_value = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(false)));
                     self.ir.add_expr(IrExpr::PrimitiveBinOp {

@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use super::frame_map::{FrameKey, Mark};
-use super::{debug_lines, CodeBuilder, Emitter, Label, Ty};
+use super::{CodeBuilder, Emitter, Label, Ty};
 use crate::ir::{IrDebugLocalProvenance, IrExpr};
 
 impl Emitter<'_> {
@@ -181,7 +181,9 @@ impl Emitter<'_> {
     }
 
     pub(super) fn mark_statement_line(&mut self, statement: u32, code: &mut CodeBuilder) {
-        debug_lines::mark_statement(self.ir, statement, code);
+        if let Some(line) = self.ir.expr_lines.get(&statement).copied() {
+            self.mark_expression_line(statement, line, code);
+        }
         // A line stays in effect until another statement replaces it, exactly as the
         // `LineNumberTable` reads: a statement without a line of its own does not clear it.
         if let Some(line) = self.ir.expr_lines.get(&statement).copied() {
@@ -264,6 +266,9 @@ pub(super) struct OpenLocal {
     pub(super) start: u16,
     pub(super) name: String,
     pub(super) descriptor: String,
+    /// This local binds an inline call operand and starts with the inline frame, after all operands
+    /// have been evaluated, rather than at its individual store.
+    pub(super) inline_operand: bool,
     /// Where in the table the entry goes when it must precede entries recorded after it opened,
     /// rather than follow them.
     pub(super) table_position: Option<usize>,

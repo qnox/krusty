@@ -314,14 +314,24 @@ fn realize_accessor(
     if accessor.parameters.len() != accessor.parameter_identities.len() {
         return Err(());
     }
+    if accessor.line != 0 {
+        ir.expr_lines.insert(accessor.body, accessor.line);
+        ir.expr_source_lines.insert(accessor.body, accessor.line);
+    }
     let returned = if accessor.result == crate::types::Ty::Unit {
         let returned = ir.add_expr(IrExpr::Return(None));
+        if accessor.line != 0 {
+            ir.expr_source_lines.insert(returned, accessor.line);
+        }
         ir.add_expr(IrExpr::Block {
             stmts: vec![accessor.body, returned],
             value: None,
         })
     } else {
         let returned = ir.add_expr(IrExpr::Return(Some(accessor.body)));
+        if accessor.line != 0 {
+            ir.expr_source_lines.insert(returned, accessor.line);
+        }
         ir.add_expr(IrExpr::Block {
             stmts: vec![returned],
             value: None,
@@ -336,6 +346,18 @@ fn realize_accessor(
         is_static: true,
         dispatch_receiver: None,
     });
+    if !accessor.type_parameters.is_empty() {
+        let signature = &ir.functions[function as usize];
+        ir.signatures.insert(
+            function,
+            crate::ir::IrGenericSig {
+                type_params: accessor.type_parameters,
+                params: signature.params.clone(),
+                ret: Some(signature.ret),
+                supers: Vec::new(),
+            },
+        );
+    }
     ir.fn_source_names.insert(function, source_name.to_owned());
     ir.fn_params.insert(
         function,
@@ -350,6 +372,7 @@ fn realize_accessor(
         (
             IrLiftingSequence {
                 source,
+                source_order: accessor.source_order,
                 owner: accessor.site.owner.clone(),
                 container: accessor.site.container.clone(),
             },

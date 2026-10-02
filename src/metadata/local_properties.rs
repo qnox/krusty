@@ -40,12 +40,14 @@ pub(crate) fn local_property_pb(
     type_parameters: &TypeParameters,
 ) -> Pb {
     let mut record = Pb::new();
-    let (mut property_type_parameters, first_own) =
-        type_parameters.member(property.type_parameters.len());
-    for (ordinal, parameter) in property.type_parameters.iter().enumerate() {
-        let id = TypeParameterRef::Id(first_own + ordinal as u64);
-        property_type_parameters.insert(parameter.source_name.clone(), id.clone());
-        property_type_parameters.insert(parameter.semantic_name.clone(), id);
+    // A local property's copied parameters form an isolated declaration table: kotlinc numbers
+    // them from zero and refers to them by source name, even when the identity came from an
+    // enclosing class parameter. Keep unrelated enclosing parameters available for bounds.
+    let mut property_type_parameters = type_parameters.clone();
+    for parameter in &property.type_parameters {
+        let reference = TypeParameterRef::Named(parameter.source_name.clone());
+        property_type_parameters.insert(parameter.source_name.clone(), reference.clone());
+        property_type_parameters.insert(parameter.semantic_name.clone(), reference);
     }
     record.field_varint(2, st.local(&property.name) as u64);
     let ty = encode_type(st, property.ty, &property_type_parameters)
@@ -55,7 +57,7 @@ pub(crate) fn local_property_pb(
         let implicit_bound = Ty::nullable(Ty::obj("kotlin/Any"));
         let encoded = encode_metadata_type_parameter(
             st,
-            first_own as usize + ordinal,
+            ordinal,
             &MetadataTypeParameter {
                 name: parameter.source_name.clone(),
                 reified: false,

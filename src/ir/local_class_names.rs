@@ -527,6 +527,7 @@ impl super::IrFile {
         }
 
         annotations(&mut self.file_annotations, names);
+        self.remap_inline_copy_owners(names);
         for function in &mut self.functions {
             tys(&mut function.params, names);
             function.ret = ty(function.ret, names);
@@ -541,6 +542,7 @@ impl super::IrFile {
             plan.reference.property_type = ty(plan.reference.property_type, names);
             for accessor in std::iter::once(&mut plan.getter).chain(plan.setter.iter_mut()) {
                 tys(&mut accessor.parameters, names);
+                type_parameters(&mut accessor.type_parameters, names);
                 accessor.result = ty(accessor.result, names);
             }
         }

@@ -1448,6 +1448,7 @@ fn lifting_sequence(
     let declaration = crate::fir::DeclarationId::from_raw(body.owner().raw());
     Some(crate::ir::IrLiftingSequence {
         source: index.declaration_anchor(declaration)?.source,
+        source_order: index.source_order(declaration)?,
         owner: site.owner.clone(),
         container: site.container.clone(),
     })
@@ -1467,6 +1468,9 @@ pub(super) fn record_lifting_sites(
     else {
         return;
     };
+    let Some(source_order) = index.source_order(declaration) else {
+        return;
+    };
     let mut sites = Vec::new();
     body.collect_lifting_sites(&mut sites);
     for site in sites {
@@ -1476,6 +1480,7 @@ pub(super) fn record_lifting_sites(
         ir.lifting_sequences
             .entry(crate::ir::IrLiftingSequence {
                 source,
+                source_order,
                 owner: site.owner.clone(),
                 container: site.container.clone(),
             })
