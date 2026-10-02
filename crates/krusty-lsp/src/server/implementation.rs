@@ -21,12 +21,16 @@ use super::super::{
     CompletionIndex, DefinitionIndex, DependencyCandidate, DependencySymbolIndex, DocumentAnalysis,
     DocumentSymbolIndex, FoldingRangeIndex, HoverIndex, IndexOutcome, IndexedFile,
     LibraryDefinitionIndex, LocatedDependency, MaterializedDefinition, ProjectSymbolIndex,
-    SemanticTokenIndex, SemanticTokenRange, SignatureHelpIndex, WorkspaceSymbolIndex,
-    MAX_RETAINED_ANALYSIS_BYTES, MAX_WORKSPACE_SYMBOL_WIRE_BYTES, SEMANTIC_TOKEN_MODIFIERS,
-    SEMANTIC_TOKEN_TYPES,
+    SemanticTokenIndex, SignatureHelpIndex, WorkspaceSymbolIndex, MAX_RETAINED_ANALYSIS_BYTES,
+    MAX_WORKSPACE_SYMBOL_WIRE_BYTES, SEMANTIC_TOKEN_MODIFIERS, SEMANTIC_TOKEN_TYPES,
 };
 pub use super::line_index::{byte_offset_to_position, position_to_byte_offset, Position};
 use super::line_index::{position_to_byte_offset_with_budget, LineIndex};
+use super::response_page::{
+    array_messages, fit_completion_items, limit_signature_help, limit_text, location_messages,
+    partial_result_token, too_large, HOVER_TEXT_BYTES,
+};
+use super::semantic_token_response;
 use super::workspace_index::{WorkspaceDiagnosticStore, WorkspaceDiagnostics};
 use crate::analysis::serialized_json_wire_bytes;
 use crate::compiler_analysis::LibraryRef;
@@ -619,8 +623,17 @@ pub struct Dispatch {
     pub exit_code: i32,
 }
 
+macro_rules! partial_token {
+    ($id:expr, $params:expr) => {
+        match partial_result_token(&$params) {
+            Ok(token) => token,
+            Err(()) => return invalid_params(Some($id)),
+        }
+    };
+}
+
 impl Dispatch {
-    fn messages(messages: Vec<Value>) -> Self {
+    pub(crate) fn messages(messages: Vec<Value>) -> Self {
         Self {
             messages,
             exit: false,
@@ -628,7 +641,7 @@ impl Dispatch {
         }
     }
 
-    fn none() -> Self {
+    pub(crate) fn none() -> Self {
         Self::messages(Vec::new())
     }
 }
@@ -852,7 +865,7 @@ fn resolve_span_positions(
     positions
 }
 
-struct OpenDocument {
+pub(crate) struct OpenDocument {
     text: String,
     /// Filled on the first position query for `text` and dropped when `text` changes.
     lines: RefCell<Option<LineIndex>>,
@@ -863,7 +876,7 @@ struct OpenDocument {
     hover: HoverIndex,
     completion: CompletionIndex,
     signature_help: SignatureHelpIndex,
-    semantic_tokens: SemanticTokenIndex,
+    pub(crate) semantic_tokens: SemanticTokenIndex,
     definitions: DefinitionIndex,
     type_definitions: DefinitionIndex,
     implementations: DefinitionIndex,
@@ -1022,7 +1035,7 @@ struct RetainedDependencyLocation {
 }
 
 pub struct LspService<B> {
-    documents: HashMap<String, OpenDocument>,
+    pub(crate) documents: HashMap<String, OpenDocument>,
     source_set: Vec<(String, String)>,
     workspace_symbols: WorkspaceSymbolIndex,
     /// Declarations from every workspace file the background sweep has reached, opened or not.
@@ -1957,13 +1970,13 @@ where
     }
 
     #[cfg(test)]
-    fn force_initialized_for_test(&mut self) {
+    pub(crate) fn force_initialized_for_test(&mut self) {
         self.initialized = true;
         self.client_initialized = true;
     }
 
     #[cfg(test)]
-    fn open_document_for_test(&mut self, uri: &str, text: &str, version: i64) {
+    pub(crate) fn open_document_for_test(&mut self, uri: &str, text: &str, version: i64) {
         self.documents.insert(
             uri.to_string(),
             OpenDocument::new(text.to_string(), version, DiagnosticIndex::default(), false),
@@ -2219,7 +2232,10 @@ where
         };
         let contents = json!({
             "kind": "markdown",
-            "value": format!("````kotlin\n{}\n````\n", hover.value),
+            "value": format!(
+                "````kotlin\n{}\n````\n",
+                limit_text(hover.value, HOVER_TEXT_BYTES)
+            ),
         });
         Dispatch::messages(vec![rpc_result(
             id,
@@ -2237,22 +2253,25 @@ where
         let Some(id) = id else {
             return Dispatch::none();
         };
+        let token = partial_token!(id, params);
         let Ok(params) = serde_json::from_value::<DocumentSymbolParams>(params) else {
             return invalid_params(Some(id));
         };
         let Some(open) = self.documents.get(&params.text_document.uri) else {
             return Dispatch::messages(vec![rpc_result(id, Value::Null)]);
         };
-        Dispatch::messages(vec![rpc_result(
+        Dispatch::messages(array_messages(
             id,
-            Value::Array(open.document_symbols.encode()),
-        )])
+            open.document_symbols.encode(),
+            token.as_ref(),
+        ))
     }
 
     fn workspace_symbols(&mut self, id: Option<Value>, params: Value) -> Dispatch {
         let Some(id) = id else {
             return Dispatch::none();
         };
+        let token = partial_token!(id, params);
         let Ok(params) = serde_json::from_value::<WorkspaceSymbolParams>(params) else {
             return invalid_params(Some(id));
         };
@@ -2294,7 +2313,7 @@ where
             self.backend
                 .locate_dependencies(self.dependency_symbols_generation, missing);
         }
-        Dispatch::messages(vec![rpc_result(id, Value::Array(symbols))])
+        Dispatch::messages(array_messages(id, symbols, token.as_ref()))
     }
 
     fn formatting(&self, id: Option<Value>, params: Value) -> Dispatch {
@@ -2348,16 +2367,18 @@ where
         let Some(id) = id else {
             return Dispatch::none();
         };
+        let token = partial_token!(id, params);
         let Ok(params) = serde_json::from_value::<DocumentSymbolParams>(params) else {
             return invalid_params(Some(id));
         };
         let Some(open) = self.documents.get(&params.text_document.uri) else {
             return Dispatch::messages(vec![rpc_result(id, Value::Null)]);
         };
-        Dispatch::messages(vec![rpc_result(
+        Dispatch::messages(array_messages(
             id,
-            Value::Array(open.folding_ranges.encode(&open.text)),
-        )])
+            open.folding_ranges.encode(&open.text),
+            token.as_ref(),
+        ))
     }
 
     fn completion(&self, id: Option<Value>, params: Value) -> Dispatch {
@@ -2407,9 +2428,12 @@ where
                 item
             })
             .collect();
+        let Ok((items, truncated)) = fit_completion_items(&id, items) else {
+            return Dispatch::messages(vec![too_large(&id)]);
+        };
         Dispatch::messages(vec![rpc_result(
             id,
-            json!({"isIncomplete": is_incomplete, "items": items}),
+            json!({"isIncomplete": is_incomplete || truncated, "items": items}),
         )])
     }
 
@@ -2426,16 +2450,20 @@ where
         let Some(offset) = open.offset_at(params.position) else {
             return invalid_params(Some(id));
         };
-        Dispatch::messages(vec![rpc_result(
-            id,
+        let Ok(help) = limit_signature_help(
+            &id,
             open.signature_help.encode(offset).unwrap_or(Value::Null),
-        )])
+        ) else {
+            return Dispatch::messages(vec![too_large(&id)]);
+        };
+        Dispatch::messages(vec![rpc_result(id, help)])
     }
 
     fn definition(&mut self, id: Option<Value>, params: Value) -> Dispatch {
         let Some(id) = id else {
             return Dispatch::none();
         };
+        let progress = partial_token!(id, params);
         let Ok(params) = serde_json::from_value::<TextDocumentPositionParams>(params) else {
             return invalid_params(Some(id));
         };
@@ -2451,7 +2479,7 @@ where
             .then(|| open.library_definitions.get(offset).cloned())
             .flatten();
         if !locations.is_empty() || library_ref.is_none() {
-            return Dispatch::messages(vec![rpc_result(id, Value::Array(locations))]);
+            return Dispatch::messages(array_messages(id, locations, progress.as_ref()));
         }
         const MAX_PENDING_MATERIALIZATIONS: usize = 128;
         if self.pending_materializations.len() >= MAX_PENDING_MATERIALIZATIONS {
@@ -2546,6 +2574,7 @@ where
         let Some(id) = id else {
             return Dispatch::none();
         };
+        let progress = partial_token!(id, params);
         let Ok(params) = serde_json::from_value::<TextDocumentPositionParams>(params) else {
             return invalid_params(Some(id));
         };
@@ -2556,20 +2585,14 @@ where
             return invalid_params(Some(id));
         };
         let locations = self.navigation_locations(&open.type_definitions, offset);
-        Dispatch::messages(vec![rpc_result(
-            id,
-            if locations.is_empty() {
-                Value::Null
-            } else {
-                Value::Array(locations)
-            },
-        )])
+        Dispatch::messages(location_messages(id, locations, progress.as_ref()))
     }
 
     fn implementation(&self, id: Option<Value>, params: Value) -> Dispatch {
         let Some(id) = id else {
             return Dispatch::none();
         };
+        let progress = partial_token!(id, params);
         let Ok(params) = serde_json::from_value::<TextDocumentPositionParams>(params) else {
             return invalid_params(Some(id));
         };
@@ -2580,14 +2603,7 @@ where
             return invalid_params(Some(id));
         };
         let locations = self.navigation_locations(&open.implementations, offset);
-        Dispatch::messages(vec![rpc_result(
-            id,
-            if locations.is_empty() {
-                Value::Null
-            } else {
-                Value::Array(locations)
-            },
-        )])
+        Dispatch::messages(location_messages(id, locations, progress.as_ref()))
     }
 
     fn navigation_locations(&self, index: &DefinitionIndex, offset: u32) -> Vec<Value> {
@@ -2620,6 +2636,7 @@ where
         let Some(id) = id else {
             return Dispatch::none();
         };
+        let progress = partial_token!(id, params);
         let Ok(params) = serde_json::from_value::<ReferenceParams>(params) else {
             return invalid_params(Some(id));
         };
@@ -2680,7 +2697,7 @@ where
                 }))
             })
             .collect::<Vec<_>>();
-        Dispatch::messages(vec![rpc_result(id, Value::Array(locations))])
+        Dispatch::messages(array_messages(id, locations, progress.as_ref()))
     }
 
     fn rename(&self, id: Option<Value>, params: Value) -> Dispatch {
@@ -3141,32 +3158,7 @@ where
     }
 
     fn semantic_tokens(&self, id: Option<Value>, params: Value, range: bool) -> Dispatch {
-        let Some(id) = id else {
-            return Dispatch::none();
-        };
-        let parsed = if range {
-            serde_json::from_value::<SemanticTokensRangeParams>(params)
-                .map(|params| (params.text_document, Some(params.range)))
-        } else {
-            serde_json::from_value::<SemanticTokensParams>(params)
-                .map(|params| (params.text_document, None))
-        };
-        let Ok((text_document, range)) = parsed else {
-            return invalid_params(Some(id));
-        };
-        let Some(open) = self.documents.get(&text_document.uri) else {
-            return Dispatch::messages(vec![rpc_result(id, Value::Null)]);
-        };
-        let range = range.map(|range| SemanticTokenRange {
-            start_line: range.start.line,
-            start_character: range.start.character,
-            end_line: range.end.line,
-            end_character: range.end.character,
-        });
-        Dispatch::messages(vec![rpc_result(
-            id,
-            json!({"data": open.semantic_tokens.encode(range)}),
-        )])
+        semantic_token_response::dispatch(self, id, params, range)
     }
 }
 
@@ -3618,19 +3610,6 @@ fn rollback_content_changes(text: &mut String, undo: Vec<ChangeUndo>) {
             ChangeUndo::Full(previous) => *text = previous,
         }
     }
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SemanticTokensParams {
-    text_document: TextDocumentIdentifier,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SemanticTokensRangeParams {
-    text_document: TextDocumentIdentifier,
-    range: Range,
 }
 
 fn invalid_params(id: Option<Value>) -> Dispatch {
