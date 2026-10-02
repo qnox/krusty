@@ -184,7 +184,6 @@ impl PropertyReferenceRealizations {
         names: &std::collections::HashMap<TypeName, TypeName>,
     ) {
         self.delegated_arrays.remap_owners(names);
-        self.local_delegated.remap_owners(names);
     }
 
     pub(crate) fn record(

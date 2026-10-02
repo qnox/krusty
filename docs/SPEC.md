@@ -4457,7 +4457,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   A delegate inside a lambda instead belongs to that exact source lambda. The JVM realizes the
   retained source closure and each reified specialized copy as an owned class; each has its own
   private `invoke$lambda-N` helper and reflection table. No outer-declaration access bridge is
-  emitted for them. A regenerated closure preserves a source type-variable's physical return
+  emitted for them. Physical table ownership is separate from reflection identity: each table's
+  property reference still names the original lexical classifier/facade, property name and
+  declaration ordinal, including in regenerated copies. JVM-only placement facts bind each copied
+  reference operand to its closure table without changing the semantic reference or its metadata.
+  A regenerated closure preserves a source type-variable's physical return
   slot (`Object` for an unbounded parameter), while its generic signature records the specialized
   result; no concrete-return method or extra erased bridge is invented.
   Common lowering records the nearest source lambda identity and containing checked inline

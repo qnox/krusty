@@ -1035,6 +1035,7 @@ impl Backend for JvmBackend {
             file.stems,
             &file.callables,
             &facade,
+            &local_delegate_access,
         ) {
             Ok(realizations) => realizations,
             Err(target) => {

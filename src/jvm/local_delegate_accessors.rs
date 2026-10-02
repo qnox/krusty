@@ -33,6 +33,7 @@ pub(crate) struct HelperAccess {
     foreign: HashMap<u32, ForeignHelperOwner>,
     inline_delegates: HashSet<u32>,
     lambda_paths: HashMap<u32, usize>,
+    property_owners: HashMap<ExprId, TypeName>,
 }
 
 impl HelperAccess {
@@ -56,6 +57,10 @@ impl HelperAccess {
 
     pub(crate) fn lambda_path_start(&self, function: u32) -> Option<usize> {
         self.lambda_paths.get(&function).copied()
+    }
+
+    pub(crate) fn closure_property_owner(&self, expression: ExprId) -> Option<TypeName> {
+        self.property_owners.get(&expression).copied()
     }
 }
 
@@ -110,8 +115,11 @@ pub(crate) fn realize(
     let mut realizations = HashMap::new();
     for key in uses {
         let plan = plans.get(key as usize).ok_or(())?;
-        let owner = plan.reference.class;
         let lambda_path = closure_plans.lambda_path_start(key);
+        let owner = match lambda_path {
+            Some(_) => Some(closure_plans.helper_owner(key).ok_or(())?),
+            None => plan.reference.class,
+        };
         let foreign = (lambda_path.is_none() && plan.reference.source != current_source)
             .then(|| {
                 let classifier = match owner {
@@ -180,6 +188,7 @@ pub(crate) fn realize(
         );
     }
 
+    helper_access.property_owners = closure_plans.into_property_owners();
     let live_accesses = accesses.into_iter().collect::<HashMap<_, _>>();
     for raw in 0..ir.exprs.len() {
         let IrExpr::LocalDelegateAccess(access) = ir.exprs[raw].clone() else {

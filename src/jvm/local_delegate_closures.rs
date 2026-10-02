@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::ir::{FunId, IrExpr, IrFile, IrLocalDelegatePlan, IrModuleSource};
-use crate::types::Ty;
+use crate::types::{Ty, TypeName};
 
 /// The checked source lambdas whose inline declaration exposes a retained closure with delegates.
 pub(super) struct Requirements {
@@ -70,7 +70,8 @@ pub(super) fn invoke_result(ir: &IrFile, function: FunId) -> Option<Ty> {
 #[derive(Default)]
 pub(super) struct BoundPlans {
     templates: HashSet<u32>,
-    owned: HashMap<u32, usize>,
+    owned: HashMap<u32, (TypeName, usize)>,
+    property_owners: HashMap<crate::ir::ExprId, TypeName>,
 }
 
 impl BoundPlans {
@@ -79,7 +80,15 @@ impl BoundPlans {
     }
 
     pub(super) fn lambda_path_start(&self, plan: u32) -> Option<usize> {
-        self.owned.get(&plan).copied()
+        self.owned.get(&plan).map(|(_, start)| *start)
+    }
+
+    pub(super) fn helper_owner(&self, plan: u32) -> Option<TypeName> {
+        self.owned.get(&plan).map(|(owner, _)| *owner)
+    }
+
+    pub(super) fn into_property_owners(self) -> HashMap<crate::ir::ExprId, TypeName> {
+        self.property_owners
     }
 }
 
@@ -104,6 +113,7 @@ pub(super) fn bind(ir: &mut IrFile) -> Result<BoundPlans, ()> {
     let mut bound = BoundPlans {
         templates: templates.iter().map(|(plan, _)| *plan).collect(),
         owned: HashMap::new(),
+        property_owners: HashMap::new(),
     };
     for (function, source, owner) in closures {
         let mut replacements = HashMap::new();
@@ -121,16 +131,14 @@ pub(super) fn bind(ir: &mut IrFile) -> Result<BoundPlans, ()> {
                 })
                 .ok_or(())?;
             let mut plan = declaration.clone();
-            plan.reference.class = Some(owner);
-            plan.declaration_lambda = Some(function);
-            clone_accessor(ir, &mut plan, false, owner);
+            clone_accessor(ir, &mut plan, false, owner, &mut bound.property_owners);
             if plan.setter.is_some() {
-                clone_accessor(ir, &mut plan, true, owner);
+                clone_accessor(ir, &mut plan, true, owner, &mut bound.property_owners);
             }
             let copy = u32::try_from(ir.local_delegate_plans.len()).map_err(|_| ())?;
             ir.local_delegate_plans.push(plan);
             replacements.insert(*template, copy);
-            bound.owned.insert(copy, lambda_step + 1);
+            bound.owned.insert(copy, (owner, lambda_step + 1));
         }
         let body = ir
             .functions
@@ -153,7 +161,8 @@ fn clone_accessor(
     ir: &mut IrFile,
     plan: &mut IrLocalDelegatePlan,
     setter: bool,
-    owner: crate::types::TypeName,
+    owner: TypeName,
+    property_owners: &mut HashMap<crate::ir::ExprId, TypeName>,
 ) {
     let accessor = if setter {
         plan.setter
@@ -166,8 +175,13 @@ fn clone_accessor(
     accessor.body = body;
     for expression in copies.values().copied() {
         ir.expression_owners.insert(expression, owner);
-        if let IrExpr::LocalPropertyReference(reference) = &mut ir.exprs[expression as usize] {
-            reference.class = Some(owner);
+        if matches!(
+            ir.exprs[expression as usize],
+            IrExpr::LocalPropertyReference(_)
+        ) {
+            // Table storage follows the helper; the reference still names the checked lexical
+            // declaration in PropertyReference0Impl's Class operand and metadata inventory.
+            property_owners.insert(expression, owner);
         }
     }
 }

@@ -136,6 +136,7 @@ fn cross_file_nested_delegates_match_private_closure_and_direct_export_abi() {
                 complete_method_abi(&reference),
                 "complete closure ABI, including erased invoke and generic signature, in {owner}"
             );
+            assert_closure_initializer(&classes, owner, "NestedOwner", "nestedResult");
         }
         if owner == "NestedDeclarationsKt" {
             use krusty::jvm::classreader::{ACC_PUBLIC, ACC_STATIC, ACC_SYNTHETIC};
@@ -233,6 +234,7 @@ fun box(): String = if (ForceOutOfOrder.callInline() == \"OK\") \"OK\" else \"Fa
                 )]
             );
             assert_eq!(complete_method_abi(&ours), complete_method_abi(&reference));
+            assert_closure_initializer(&classes, owner, "C", "O");
         }
     }
 }
@@ -270,4 +272,37 @@ fn complete_method_abi(
             )
         })
         .collect()
+}
+
+fn assert_closure_initializer(
+    classes: &common::ClassSets,
+    closure: &str,
+    declaration: &str,
+    property: &str,
+) {
+    let (reference, ours) = classes.method_listing(closure, "static {};");
+    // `method_listing` returns the body; the instruction extractor starts at a declaration.
+    let reference = common::method_instructions(&format!("static {{}};\n{reference}"), "static {}");
+    let ours = common::method_instructions(&format!("static {{}};\n{ours}"), "static {}");
+    let literals = reference
+        .iter()
+        .filter_map(|instruction| {
+            let (_, instruction) = instruction.split_once(": ")?;
+            let (operation, literal) = instruction.split_once(" // ")?;
+            operation.starts_with("ldc ").then_some(literal)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        literals,
+        vec![
+            format!("class {declaration}"),
+            format!("String {property}"),
+            "String <v#0>".to_owned(),
+        ],
+        "reference fixture pins the source reflection owner/name/signature in {closure}"
+    );
+    assert_eq!(
+        ours, reference,
+        "complete closure initializer preserves source reflection identity in {closure}"
+    );
 }
