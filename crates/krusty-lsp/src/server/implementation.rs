@@ -5645,9 +5645,13 @@ mod tests {
             .as_str()
             .unwrap();
         assert_eq!(published, pulled);
-        assert!(published.len() <= super::super::diagnostic_page::DIAGNOSTIC_MESSAGE_WIRE_BYTES);
-        assert!(published.starts_with('X'));
-        assert!(published.ends_with('…'));
+        assert_eq!(
+            published,
+            format!(
+                "X{}…",
+                "x".repeat(super::super::diagnostic_page::DIAGNOSTIC_MESSAGE_WIRE_BYTES - 4)
+            )
+        );
         assert!(serialized_value_fits(
             &messages[1],
             super::super::response_page::RESPONSE_PAGE_BYTES
