@@ -1695,51 +1695,6 @@ fn membership_uses_the_operator_named_by_range_syntax() {
 }
 
 #[test]
-fn floating_point_membership_carries_its_checked_comparison_type() {
-    let analysis = checked_analysis("fun test(value: Double): Boolean = value in 1.0..3.0\n");
-    let file = &analysis.files[0];
-    let function = file
-        .decls
-        .iter()
-        .find_map(|declaration| match file.decl(*declaration) {
-            Decl::Fun(function) if function.name == "test" => Some(function),
-            Decl::Class(_) | Decl::Fun(_) | Decl::Property(_) => None,
-        })
-        .expect("test declaration");
-    let crate::ast::FunBody::Expr(root) = function.body else {
-        panic!("test must have an expression body")
-    };
-    let info = analysis.types[0].as_ref().expect("checked file");
-    let parameter = CheckedBodyParameter {
-        name: &function.params[0].name,
-        ty: ResolvedTy::new(info.resolved_type(&function.params[0].ty).unwrap()).unwrap(),
-        span: function.params[0].ty.span,
-        context_kind: crate::types::ContextParameterKind::None,
-        inline_modifier: crate::types::InlineParameterModifier::None,
-    };
-    let mut origins = OriginStore::default();
-    let body = check_expression_body_with_parameters(
-        file,
-        info,
-        SourceFileId::from_raw(0),
-        BodyOwnerId::from_raw(72),
-        root,
-        &[parameter],
-        analysis.streamed.as_ref().expect("Pass 1").module.index(),
-        &mut origins,
-    )
-    .expect("floating-point membership must build checked FIR");
-
-    let FirStatementKind::Expression(root) = body.statement(body.roots()[0]).unwrap().kind else {
-        panic!("root must contain membership FIR")
-    };
-    assert!(matches!(
-        &body.expr(root).unwrap().kind,
-        FirExprKind::InRange { comparison, .. } if comparison.get() == Ty::Double
-    ));
-}
-
-#[test]
 fn exact_selected_floating_range_role_carries_its_checked_comparison_type() {
     let (Some(stdlib), Some(jdk)) = (
         crate::toolchain::stdlib_jar(),
@@ -1787,7 +1742,7 @@ fn exact_selected_floating_range_role_carries_its_checked_comparison_type() {
         file,
         info,
         SourceFileId::from_raw(0),
-        BodyOwnerId::from_raw(76),
+        BodyOwnerId::from_raw(72),
         root,
         &[parameter],
         analysis.streamed.as_ref().expect("Pass 1").module.index(),

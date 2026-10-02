@@ -26101,6 +26101,7 @@ mod tests {
     use crate::parser::{parse, parse_script_with_features, parse_with_features};
 
     mod explicit_backing_fields;
+    mod range_membership;
 
     /// Where NO_VALUE_FOR_PARAMETER is anchored: `argument` in the argument list, or the callee's
     /// name where the reference version reports it there. That table row is checked against kotlinc
@@ -28419,20 +28420,6 @@ enum class EntryChoice {
         );
     }
 
-    /// `when (x: Any) { 1 -> … }` is a BOXED comparison, not a type error: `Int` is a subtype of the
-    /// subject's type, so the equality can be non-trivially true.
-    #[test]
-    fn a_reference_when_subject_accepts_primitive_and_string_comparands() {
-        ok("fun f(x: Any): String = when (x) {\n\
-                1 -> \"i\"\n\
-                2L -> \"l\"\n\
-                'c' -> \"c\"\n\
-                \"s\" -> \"s\"\n\
-                in 4..10 -> \"r\"\n\
-                else -> \"o\"\n\
-            }");
-    }
-
     #[test]
     fn subject_membership_is_a_predicate_for_an_arbitrary_contains_receiver() {
         ok(
@@ -28442,41 +28429,6 @@ enum class EntryChoice {
                 !in 3 -> \"not three\"\n\
                 else -> \"three\"\n\
             }",
-        );
-    }
-
-    /// …but an UNRELATED comparand still has no way to be equal, and a range whose boxed element the
-    /// value can never hold stays rejected.
-    #[test]
-    fn an_unrelated_comparand_is_still_not_comparable_to_the_subject() {
-        let (errors, _) =
-            check("fun f(x: String): String = when (x) { 1 -> \"i\"; else -> \"o\" }");
-        assert_eq!(
-            errors,
-            ["when condition type 'Int' is not comparable to subject 'String'"]
-        );
-
-        let (errors, _) = check("fun g(x: String): Boolean = x in 4..10");
-        assert_eq!(
-            errors,
-            ["operator 'contains' cannot be applied to range 'Int' and 'String'"]
-        );
-
-        // A floating-point range is a `ClosedFloatingPointRange`, not an `Iterable`, so it has no
-        // widened `contains` — kotlinc rejects this too.
-        let (errors, _) = check("fun h(x: Any): Boolean = x in 1.0..2.0");
-        assert_eq!(
-            errors,
-            ["operator 'contains' cannot be applied to range 'Double' and 'Any'"]
-        );
-    }
-
-    #[test]
-    fn floating_membership_without_a_selected_range_operator_fails_closed() {
-        let (errors, _) = check("fun f(x: Double): Boolean = x in 1.0..2.0");
-        assert_eq!(
-            errors,
-            ["operator 'rangeTo' cannot be applied to 'Double' and 'Double'"]
         );
     }
 
@@ -31454,66 +31406,6 @@ fun box(): String {
                         && extension.callable.ret == Ty::String
             ),
             "checker must record same-module extension get selected for index lowering"
-        );
-    }
-
-    #[test]
-    fn reference_range_in_records_operator_calls_for_lowering() {
-        let mut d = DiagSink::new();
-        let file = parse_file(
-            "class VR(val a: Int, val b: Int) {\n\
-             \x20 operator fun contains(v: V): Boolean = v.x in a..b\n\
-             }\n\
-             class V(val x: Int) {\n\
-             \x20 operator fun rangeTo(o: V): VR = VR(x, o.x)\n\
-             }\n\
-             fun box(): Boolean = V(2) in V(1)..V(3)",
-            &mut d,
-        );
-        let files = vec![file];
-        let mut syms = collect_signatures(&files, &mut d);
-        let info = check_file(&files[0], &mut syms, &mut d);
-        assert!(
-            d.diags.is_empty(),
-            "unexpected diagnostics: {:?}",
-            d.diags.iter().map(|x| &x.msg).collect::<Vec<_>>()
-        );
-
-        let in_range = files[0]
-            .expr_arena
-            .iter()
-            .enumerate()
-            .find_map(|(idx, expr)| match expr {
-                Expr::InRange { start, .. } if info.ty(*start) == Ty::obj("V") => {
-                    Some(ExprId(idx as u32))
-                }
-                _ => None,
-            })
-            .expect("source should contain reference in-range expression");
-
-        assert!(
-            matches!(
-                info.resolved_operator_call(in_range, "rangeTo"),
-                Some(ResolvedCall::Member(member))
-                    if matches!(member.origin, Origin::Module { .. })
-                        && member.member.owner.is_some_and(|owner| owner.matches("V"))
-                        && member.member.name == "rangeTo"
-                        && member.member.params.as_slice() == [Ty::obj("V")]
-                        && member.ret == Ty::obj("VR")
-            ),
-            "checker must record rangeTo selected for reference-range lowering"
-        );
-        assert!(
-            matches!(
-                info.resolved_operator_call(in_range, "contains"),
-                Some(ResolvedCall::Member(member))
-                    if matches!(member.origin, Origin::Module { .. })
-                        && member.member.owner.is_some_and(|owner| owner.matches("VR"))
-                        && member.member.name == "contains"
-                        && member.member.params.as_slice() == [Ty::obj("V")]
-                        && member.ret == Ty::Boolean
-            ),
-            "checker must record contains selected for reference-range lowering"
         );
     }
 
