@@ -1804,9 +1804,10 @@ pub struct IrFile {
     pub lambda_origins: std::collections::HashMap<u32, IrLambdaOrigin>,
     /// Specialized function → the implementation it was copied from and the expansion that copied it.
     pub specialized_functions: std::collections::HashMap<FunId, IrSpecializedFunction>,
-    /// Lambda implementations whose bodies execute a runtime reified operation. The declaration
-    /// and each specialized call-site copy are recorded semantically; a backend independently
-    /// chooses the physical closure representation needed to realize that operation.
+    /// Lambda implementations whose bodies execute a runtime reified operation. The outer source
+    /// declaration and each specialized call-site copy are recorded semantically; nested source
+    /// implementations remain owned by the outer closure. A backend independently chooses the
+    /// physical closure representation needed to realize that operation.
     pub(crate) runtime_reified_lambda_implementations: std::collections::HashSet<FunId>,
     /// Class index of a function already published as that class's method.
     pub(crate) class_method_owners: std::collections::HashMap<FunId, Vec<u32>>,

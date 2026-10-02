@@ -253,6 +253,21 @@ fn a_nested_escaping_lambda_is_specialized_too() {
         }),
         "the nested call-site lambda tests Token"
     );
+    assert_eq!(
+        declaration
+            .iter()
+            .filter(|function| ir
+                .runtime_reified_lambda_implementations
+                .contains(*function))
+            .count(),
+        1,
+        "only the outer source closure needs a runtime-reified class"
+    );
+    assert!(
+        call.iter()
+            .all(|function| ir.runtime_reified_lambda_implementations.contains(function)),
+        "each specialized closure needs its own runtime-reified class"
+    );
 }
 
 const ORDINARY: &str = "\

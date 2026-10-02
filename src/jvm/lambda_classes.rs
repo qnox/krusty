@@ -61,14 +61,47 @@ pub(super) fn site(ir: &IrFile, fid: FunId) -> Option<Site> {
     })
 }
 
-/// The `Lambda` nodes building `fid`'s value that some function body still reaches. Earlier
-/// passes rebuild a body into fresh nodes and leave the old ones behind in the arena, so a node
-/// that no body reaches builds no value.
+/// The `Lambda` nodes building `fid`'s value that some emitted root still reaches. Earlier passes
+/// rebuild roots into fresh nodes and leave the old ones behind in the arena, so an unreachable
+/// node builds no value. Property/static initializers matter here too: a suspend lambda stored by
+/// one is a class just like a lambda stored from a function body.
 fn reachable_lambdas(ir: &IrFile, fid: FunId) -> Vec<ExprId> {
-    let mut nodes = ir
-        .functions
-        .iter()
-        .filter_map(|function| function.body)
+    let mut roots = Vec::new();
+    for (function, declaration) in ir.functions.iter().enumerate() {
+        roots.extend(declaration.body);
+        if let Some(defaults) = ir
+            .fn_params
+            .get(&(function as FunId))
+            .and_then(|parameters| parameters.defaults.as_ref())
+        {
+            roots.extend(defaults.iter().flatten().copied());
+        }
+    }
+    for class in &ir.classes {
+        roots.extend(class.init_body);
+        roots.extend(class.super_arg_prelude.iter().copied());
+        roots.extend(class.super_args.iter().copied());
+        roots.extend(
+            class
+                .properties
+                .iter()
+                .filter_map(|property| property.initializer),
+        );
+        for constructor in &class.secondary_ctors {
+            roots.extend(constructor.body.iter().copied());
+            roots.extend(constructor.defaults.iter().flatten().copied());
+            roots.extend(constructor.delegate_prelude.iter().copied());
+            roots.extend(constructor.delegate_args.iter().copied());
+        }
+        for entry in &class.enum_entries {
+            roots.extend(entry.argument_prelude.iter().copied());
+            roots.extend(entry.args.iter().copied());
+        }
+    }
+    roots.extend(ir.statics.iter().filter_map(|property| property.init));
+
+    let mut nodes = roots
+        .into_iter()
         .flat_map(|body| crate::ir::value_namespace_expressions(ir, body))
         .filter(|&node| {
             matches!(ir.exprs[node as usize], IrExpr::Lambda { impl_fn, .. } if impl_fn == fid)
@@ -82,13 +115,19 @@ fn reachable_lambdas(ir: &IrFile, fid: FunId) -> Vec<ExprId> {
 /// Whether the body declares a lambda or local function of its own. Its lifted function would have
 /// to move into the lambda's class with it, which kotlinc does and this step does not yet.
 pub(super) fn nests_lifted_functions(ir: &IrFile, body: ExprId) -> bool {
+    nests_lifted_functions_with(ir, body, false)
+}
+
+fn nests_lifted_functions_with(ir: &IrFile, body: ExprId, allow_nested_lambdas: bool) -> bool {
     crate::ir::value_namespace_expressions(ir, body)
         .iter()
         .any(|&expression| match &ir.exprs[expression as usize] {
             // A specialized escaping implementation remains an independently emitted class whose
             // JVM plan delegates to its already-owned implementation method. It does not have to
             // move into the surrounding lambda class with ordinary lifted declarations.
-            IrExpr::Lambda { impl_fn, .. } => !ir.specialized_functions.contains_key(impl_fn),
+            IrExpr::Lambda { impl_fn, .. } => {
+                !allow_nested_lambdas && !ir.specialized_functions.contains_key(impl_fn)
+            }
             IrExpr::Call {
                 callee:
                     crate::ir::Callee::Local(function)
@@ -147,16 +186,19 @@ pub(super) fn realize(ir: &mut IrFile, classifiers: &dyn crate::types::Classifie
         let Ty::Fun(signature) = function_type.non_null() else {
             continue;
         };
+        let runtime_reified_source = ir.runtime_reified_lambda_implementations.contains(&fid)
+            && !ir.specialized_functions.contains_key(&fid);
         if signature.suspend
-            || !signature
-                .params
-                .iter()
-                .chain([&signature.ret])
-                .any(|&ty| factory_conflict(ir, classifiers, ty))
+            || (!runtime_reified_source
+                && !signature
+                    .params
+                    .iter()
+                    .chain([&signature.ret])
+                    .any(|&ty| factory_conflict(ir, classifiers, ty)))
         {
             continue;
         }
-        match class_shape(ir, fid) {
+        match class_shape(ir, fid, runtime_reified_source) {
             Ok((site, body, captures)) => realize_class(ir, fid, body, &site, signature, &captures),
             Err(shape) => {
                 crate::trace_compiler!(
@@ -171,10 +213,14 @@ pub(super) fn realize(ir: &mut IrFile, classifiers: &dyn crate::types::Classifie
 
 /// The site, body and captures of a lambda this step realizes as a class, or the shape that keeps
 /// it from doing so.
-fn class_shape(ir: &IrFile, fid: FunId) -> Result<(Site, ExprId, Vec<Capture>), &'static str> {
+fn class_shape(
+    ir: &IrFile,
+    fid: FunId,
+    allow_nested_lambdas: bool,
+) -> Result<(Site, ExprId, Vec<Capture>), &'static str> {
     let site = site(ir, fid).ok_or("no single named value outside an inline call")?;
     let body = ir.functions[fid as usize].body.ok_or("no body")?;
-    if nests_lifted_functions(ir, body) {
+    if nests_lifted_functions_with(ir, body, allow_nested_lambdas) {
         return Err("its body declares a lambda or local function");
     }
     let captures = captures(ir, fid, body, &site).ok_or("a capture has no field identity")?;

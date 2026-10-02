@@ -126,17 +126,17 @@ fun nestedBox(): String {\n\
     defineNested<Token>()\n\
     return if (check(Token())) \"OK\" else \"Fail\"\n\
 }\n";
-    let classes = [
-        "NestedReifiedClassKt",
-        "Item",
-        "Token",
-        "NestedReifiedClassKt$defineNested$1",
-        "NestedReifiedClassKt$defineNested$1$1",
-        "NestedReifiedClassKt$nestedBox$$inlined$defineNested$1",
-        "NestedReifiedClassKt$nestedBox$$inlined$defineNested$1$1",
-    ];
-    let pairs = common::compile_with_kotlinc("NestedReifiedClass", source, &[], &classes);
-    assert_eq!(pairs.len(), classes.len());
+    let (reference, krusty) = class_names_with_args("NestedReifiedClass", source, &[]);
+    assert_eq!(krusty, reference);
+    assert!(reference
+        .iter()
+        .any(|class| class == "NestedReifiedClassKt$defineNested$1"));
+    assert!(!reference
+        .iter()
+        .any(|class| class == "NestedReifiedClassKt$defineNested$1$1"));
+    assert!(reference
+        .iter()
+        .any(|class| class == "NestedReifiedClassKt$nestedBox$$inlined$defineNested$1$1"));
 }
 
 #[test]
@@ -205,6 +205,7 @@ fun outer() {\n\
     let expected = [
         "Item",
         "ReifiedClassLambdaCallerKt",
+        "ReifiedClassLambdaCallerKt$check$1",
         "ReifiedClassLambdaCallerKt$defineFunc$1",
         "ReifiedClassLambdaCallerKt$outer$caller$1",
         "ReifiedClassLambdaCallerKt$outer$caller$1$invoke$$inlined$defineFunc$1",
@@ -666,6 +667,7 @@ package external_reified\n\
 interface Item\n\
 class Token : Item\n\
 class Root : Item\n\
+@JvmInline value class Carrier(val item: Item)\n\
 var check: (Item) -> Any? = { null }\n\
 var ordinary: () -> String = { \"unset\" }\n\
 inline fun <T, reified R : Item> define(value: Any) {\n\
@@ -674,6 +676,9 @@ inline fun <T, reified R : Item> define(value: Any) {\n\
 open class Host {\n\
     inline fun <T, reified R : Item> Item.defineMember(value: Any) {\n\
         check = { item -> if (item is R) value as? T else null }\n\
+    }\n\
+    inline fun <T, reified R : Item> Carrier.defineCarrier(value: Any) {\n\
+        check = { candidate -> if (candidate is R && item is R) value as? T else null }\n\
     }\n\
 }\n\
 inline fun <T> defineOrdinary(value: T) { ordinary = { value.toString() } }\n\
@@ -689,19 +694,24 @@ fun result(): String {\n\
 import external_reified.*\n\
 class ConsumerHost : Host() {\n\
     fun install() { Token().defineMember<Root, Token>(Token()) }\n\
+    fun installCarrier() { Carrier(Token()).defineCarrier<Root, Token>(Token()) }\n\
 }\n\
 fun box(): String {\n\
     define<Root, Token>(Token())\n\
     defineOrdinary(\"plain\")\n\
     if (result() != \"OK\") return \"Fail top-level\"\n\
     ConsumerHost().install()\n\
+    if (result() != \"OK\") return \"Fail member\"\n\
+    ConsumerHost().installCarrier()\n\
     return result()\n\
 }\n";
     let jdk = common::jdk_modules();
     let classpath = [library.clone(), common::stdlib_jar(), jdk.clone()];
+    let reference = common::kotlinc_box_result_with_classpath(source, &[library.clone()]);
+    assert_eq!(reference, "OK", "kotlinc fixture must succeed");
     assert_eq!(
         common::compile_and_run_box(source, "ExternalMixedReified", &classpath, Some(&jdk)),
-        Some("OK".to_string())
+        Some(reference)
     );
     let _ = std::fs::remove_dir_all(library);
 }
