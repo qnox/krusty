@@ -1331,9 +1331,9 @@ pub(crate) fn infer_generic_call_bindings_with_receiver_from_symbols(
         actuals,
         vararg_index,
     );
-    let tightest_upper = inferred.tightest_upper_bindings(source);
-    for formal in inferred.upper_only {
-        let binding = tightest_upper.get(&formal).copied().unwrap_or(Ty::Nothing);
+    let formals = inferred.upper_only.iter().cloned().collect::<Vec<_>>();
+    for formal in formals {
+        let binding = inferred.denotable_upper_binding(source, &formal);
         inferred.bindings.entry(formal).or_insert(binding);
     }
     inferred.bindings

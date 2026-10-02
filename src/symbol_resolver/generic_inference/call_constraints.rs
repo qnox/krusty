@@ -317,6 +317,29 @@ impl InferredCallBindings {
             })
             .collect()
     }
+
+    /// The type published for a variable that has only upper bounds. One bound that sits under
+    /// every other bound is that bound (`Context<Any>()` fixes `T` to `Any`). Otherwise the
+    /// bounds are an intersection (`In<Int>()` and `In<String>()` fix `E` to `Int & String`),
+    /// not `Nothing`: the call still returns a value.
+    pub(crate) fn denotable_upper_binding(&self, source: &dyn SymbolSource, formal: &str) -> Ty {
+        let Some(upper_bounds) = self.upper_bounds.get(formal) else {
+            return Ty::Nothing;
+        };
+        let concrete = upper_bounds
+            .iter()
+            .copied()
+            .filter(|bound| *bound != Ty::Error)
+            .collect::<Vec<_>>();
+        if let Some(selected) = concrete.iter().copied().find(|candidate| {
+            concrete
+                .iter()
+                .all(|upper| resolution_subtype(source, *candidate, *upper))
+        }) {
+            return selected;
+        }
+        Ty::intersection(&concrete)
+    }
 }
 
 impl CallInferenceConstraints {

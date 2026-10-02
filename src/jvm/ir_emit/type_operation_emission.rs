@@ -390,6 +390,11 @@ impl Emitter<'_> {
             Ty::DefinitelyNotNull(inner) => {
                 format!("{} & Any", self.rendered_cast_type(*inner, root))
             }
+            Ty::Intersection(parts) => parts
+                .iter()
+                .map(|part| self.rendered_cast_type(*part, root))
+                .collect::<Vec<_>>()
+                .join(" & "),
             Ty::TyParam(name, _) => self.rendered_type_parameter(name),
             Ty::Fun(signature) => format!(
                 "{}{}{}",

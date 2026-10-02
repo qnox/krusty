@@ -465,6 +465,12 @@ fn descriptor_shape(ty: Ty) -> DescriptorShape {
             other => descriptor_shape(other.boxed_ref().unwrap_or(other)),
         },
         Ty::DefinitelyNotNull(inner) => descriptor_shape(*inner),
+        // Incompatible upper bounds (`Int & String`) share no tighter class than `Object`. A
+        // bound that already subtypes the others is published as that bound, not an intersection,
+        // so this arm never has to recover a primitive carrier.
+        Ty::Intersection(_) => {
+            DescriptorShape::Class(classfile_internal_name_of(crate::types::wk::java_object()))
+        }
         Ty::TyParam(_, bound)
         | Ty::PlatformNullable(bound)
         | Ty::OutProjection(bound)

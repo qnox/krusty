@@ -733,6 +733,10 @@ pub enum Ty {
     /// This is distinct from a parameter declared `T : Any`: `(T & Any)?` reopens to that original
     /// `T?`, while `T : Any` keeps its recorded bound when used as `T?`.
     DefinitelyNotNull(&'static Ty),
+    /// A denotable intersection `A & B & …` produced when a type variable's only constraints are
+    /// incompatible upper bounds (`Int & String`). It is a subtype of each component and is not
+    /// [`Ty::Nothing`]: the value still exists at run time.
+    Intersection(&'static [Ty]),
 }
 
 pub(crate) fn stored_value_ty(ty: Ty) -> Ty {
@@ -884,6 +888,12 @@ impl Ty {
                     .collect::<Vec<_>>();
                 Ty::obj_args_name(internal, &arguments)
             }
+            Ty::Intersection(parts) => Ty::intersection(
+                &parts
+                    .iter()
+                    .map(|part| part.substitute_erased(bindings))
+                    .collect::<Vec<_>>(),
+            ),
             _ => self,
         }
     }
@@ -971,6 +981,30 @@ impl Ty {
 
     pub fn star_projection(upper_bound: Ty) -> Ty {
         Ty::StarProjection(intern_ty(upper_bound))
+    }
+
+    /// `A & B & …`. A single component is that component. `Nothing` among the components is
+    /// `Nothing`. Components are flattened, deduplicated, and ordered by their diagnostic name so
+    /// `Int & String` and `String & Int` are one type.
+    pub fn intersection(parts: &[Ty]) -> Ty {
+        let mut flat = Vec::new();
+        for part in parts.iter().copied() {
+            if part == Ty::Error {
+                continue;
+            }
+            match part.non_null() {
+                Ty::Nothing => return Ty::Nothing,
+                Ty::Intersection(inner) => flat.extend(inner.iter().copied()),
+                other => flat.push(other),
+            }
+        }
+        flat.sort_by(|left, right| left.name().cmp(&right.name()));
+        flat.dedup();
+        match flat.as_slice() {
+            [] => Ty::Nothing,
+            [one] => *one,
+            many => Ty::Intersection(intern_tys(many)),
+        }
     }
 
     pub fn projection_inner(self) -> Option<Ty> {
@@ -1221,6 +1255,7 @@ impl Ty {
             Ty::Nullable(inner) | Ty::PlatformNullable(inner) | Ty::DefinitelyNotNull(inner) => {
                 inner.mentions_marker(marker)
             }
+            Ty::Intersection(parts) => parts.iter().any(|part| part.mentions_marker(marker)),
             Ty::InProjection(inner) | Ty::OutProjection(inner) | Ty::StarProjection(inner) => {
                 inner.mentions_marker(marker)
             }
@@ -1237,6 +1272,7 @@ impl Ty {
         match self {
             Ty::TyParam(..) => true,
             Ty::DefinitelyNotNull(inner) => inner.mentions_ty_param(),
+            Ty::Intersection(parts) => parts.iter().any(|part| part.mentions_ty_param()),
             Ty::Nullable(inner)
             | Ty::PlatformNullable(inner)
             | Ty::InProjection(inner)
@@ -1272,6 +1308,9 @@ impl Ty {
         match self {
             Ty::TyParam(candidate, bound) => (candidate == name).then_some(*bound),
             Ty::DefinitelyNotNull(inner) => inner.type_parameter_occurrence_bound(name),
+            Ty::Intersection(parts) => parts
+                .iter()
+                .find_map(|part| part.type_parameter_occurrence_bound(name)),
             Ty::Nullable(inner)
             | Ty::PlatformNullable(inner)
             | Ty::InProjection(inner)
@@ -1405,6 +1444,13 @@ impl Ty {
             Ty::InProjection(inner) => Ty::in_projection(inner.canonical_semantic()),
             Ty::OutProjection(inner) => Ty::out_projection(inner.canonical_semantic()),
             Ty::StarProjection(inner) => Ty::star_projection(inner.canonical_semantic()),
+            Ty::Intersection(parts) => Ty::intersection(
+                &parts
+                    .iter()
+                    .copied()
+                    .map(Ty::canonical_semantic)
+                    .collect::<Vec<_>>(),
+            ),
             Ty::TyParam(name, bound) => Ty::ty_param(name, bound.canonical_semantic()),
             Ty::Fun(signature) => Ty::fun_with_shape(
                 signature
@@ -1603,6 +1649,11 @@ impl Ty {
                 "{} & Any",
                 inner.source_name_with_type_parameter_in(context, type_parameter)
             ),
+            Ty::Intersection(parts) => parts
+                .iter()
+                .map(|part| part.source_name_with_type_parameter_in(context, type_parameter))
+                .collect::<Vec<_>>()
+                .join(" & "),
             Ty::TyParam(n, _) => type_parameter(n),
             // Only reachable from a diagnostic rendered while the declaration is still being
             // resolved; it never names a real type.
@@ -1665,6 +1716,11 @@ impl Ty {
             Ty::StarProjection(_) => "*".to_string(),
             Ty::TyParam(name, _) => name.to_string(),
             Ty::DefinitelyNotNull(inner) => format!("{} & Any", inner.name()),
+            Ty::Intersection(parts) => parts
+                .iter()
+                .map(|part| part.name())
+                .collect::<Vec<_>>()
+                .join(" & "),
         }
     }
 
@@ -1684,7 +1740,7 @@ impl Ty {
     pub fn is_reference(self) -> bool {
         match self {
             scalar if scalar.scalar_value_repr().is_some() => false,
-            Ty::DefinitelyNotNull(_) => true,
+            Ty::DefinitelyNotNull(_) | Ty::Intersection(_) => true,
             Ty::TyParam(_, b) => b.is_reference(),
             // A flexible Java `T!` can be consumed as its non-null lower bound, but until that
             // commitment it also admits null and is represented by a reference — including a method
@@ -1728,6 +1784,7 @@ impl Ty {
                     || signature.ret.contains_error()
             }
             Ty::Nullable(inner) | Ty::DefinitelyNotNull(inner) => inner.contains_error(),
+            Ty::Intersection(parts) => parts.iter().copied().any(Ty::contains_error),
             _ => false,
         }
     }
@@ -1936,6 +1993,7 @@ pub(crate) fn ty_mentions_param(ty: Ty, names: &[String]) -> bool {
     match ty {
         Ty::TyParam(name, _) => names.iter().any(|parameter| parameter == name),
         Ty::DefinitelyNotNull(inner) => ty_mentions_param(*inner, names),
+        Ty::Intersection(parts) => parts.iter().any(|part| ty_mentions_param(*part, names)),
         Ty::Obj(_, arguments) => arguments
             .iter()
             .any(|argument| ty_mentions_param(*argument, names)),
@@ -1961,6 +2019,7 @@ pub(crate) fn ty_mentions_param(ty: Ty, names: &[String]) -> bool {
 pub(crate) fn ty_mentions_any_param(ty: Ty) -> bool {
     match ty {
         Ty::TyParam(..) => true,
+        Ty::Intersection(parts) => parts.iter().any(|part| ty_mentions_any_param(*part)),
         Ty::Obj(_, arguments) => arguments
             .iter()
             .any(|argument| ty_mentions_any_param(*argument)),

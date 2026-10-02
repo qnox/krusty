@@ -42425,6 +42425,22 @@ impl<'a> Checker<'a> {
             } else {
                 inferred.tightest_upper_bindings(&source)
             };
+            // Snapshot the denotable upper before `inferred.bindings` moves. A later `or_insert`
+            // publishes it only for formals the expected result has not already fixed, so
+            // `(): Nothing = intersect(...)` stays `Nothing` while an unconstrained
+            // `intersect(In<Int>(), In<String>())` becomes `Int & String`.
+            let denotable_upper_bindings = if candidate.projected_return_hazard {
+                Vec::new()
+            } else {
+                let formals = inferred.upper_only.iter().cloned().collect::<Vec<_>>();
+                formals
+                    .into_iter()
+                    .map(|formal| {
+                        let binding = inferred.denotable_upper_binding(&source, &formal);
+                        (formal, binding)
+                    })
+                    .collect::<Vec<_>>()
+            };
             crate::symbol_resolver::merge_call_argument_bindings(
                 &source,
                 &signature,
@@ -42738,10 +42754,8 @@ impl<'a> Checker<'a> {
                     );
                 }
             }
-            if !candidate.projected_return_hazard {
-                for formal in &inferred.upper_only {
-                    bindings.entry(formal.clone()).or_insert(Ty::Nothing);
-                }
+            for (formal, binding) in denotable_upper_bindings {
+                bindings.entry(formal).or_insert(binding);
             }
             // Join bottom bindings against `where`-clause subtype constraints IN the real
             // bindings — the return type substitutes from them (`ifBlank { null }` must select

@@ -661,7 +661,8 @@ fn encode_type_with_parameter(
         | Ty::PlatformNullable(_)
         | Ty::InProjection(_)
         | Ty::OutProjection(_)
-        | Ty::StarProjection(_) => return Err(TypeEncodeError::NonMetadataType(ty)),
+        | Ty::StarProjection(_)
+        | Ty::Intersection(_) => return Err(TypeEncodeError::NonMetadataType(ty)),
     }
     Ok(message)
 }

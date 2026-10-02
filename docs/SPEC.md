@@ -2780,6 +2780,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   The same rule instantiates the reified element of `filterIsInstanceTo` from the
   destination collection. Tests: `tests/generic_bound_projection_e2e.rs` and
   `tests/backend_rejection_coverage_e2e.rs`.
+- **Incompatible upper bounds infer an intersection, not `Nothing`.** A type variable
+  constrained only from contravariant inputs (`In<Int>()` and `In<String>()` against
+  `fun <E> intersect(vararg x: In<E>): E`) is fixed to `Int & String`. That intersection
+  is a subtype of each bound and of their supertypes, and it is not `Nothing`, so the
+  call yields a value: `null as E` inside the generic body erases, and the caller keeps
+  the reference (`a == null` is true at run time). One upper bound that is a subtype of
+  the others is that bound (`select(Context<Any>())` is `Any`, not `Nothing`). An
+  expected `Nothing` result still instantiates the variable as `Nothing`, and a star in
+  an `in` position remains `Nothing`. Tests: `tests/empty_intersection_inference_e2e.rs`.
 - **A tail-call-forwarded suspend fn boxes its EARLY returns.** The tail-forward shape (no state machine,
   `$completion` threaded to the callee, callee's `Object` result `areturn`ed verbatim) also admits bodies
   with early exits (`if (n == 0) return true; return odd(n - 1)`); the CPS method returns `Object`, so the
