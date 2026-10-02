@@ -3491,6 +3491,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`tests/classpath_ctor_vs_same_named_function_e2e.rs` exercises the whole shape krusty-built).
 - Non-null reference primary-constructor parameters are guarded with `Intrinsics.checkNotNullParameter`
   at the start of `<init>` (before `super()`), matching kotlinc.
+- A `val`/`var` primary-constructor parameter named in a body-property initializer or an `init`
+  block resolves to the property it declares (Kotlin 2): the constructor reads the field, calls the
+  getter of an open property, and a lambda or local class there captures `this`. Plain parameters,
+  supertype arguments, delegation expressions and parameter defaults keep reading the parameter
+  (`tests/property_parameter_initializers_e2e.rs`).
 - Constructing a classpath (non-IR) class (`RuntimeException("x")`, an imported Java type): `new` +
   `dup` + arguments + `invokespecial <init>`, with the constructor descriptor resolved from the
   classpath. JDK `Throwable` types fall back to the `()`/`(String)` constructors (the classpath reader

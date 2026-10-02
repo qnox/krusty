@@ -132,6 +132,7 @@ pub(super) fn try_checked_function_body_rewriting(
                 parameter.is_materialized_lambda,
                 parameter.is_crossinline,
             ),
+            name_binding: super::CheckedBodyParameterNameBinding::Lexical,
         })
         .collect::<Vec<_>>();
     let mut session = BodyCheckSession::default();

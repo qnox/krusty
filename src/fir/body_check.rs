@@ -47,6 +47,7 @@ mod iterators;
 #[cfg(test)]
 mod lambda_tests;
 mod lambdas;
+mod library_constants;
 #[cfg(test)]
 mod local_class_tests;
 mod local_classes;
@@ -126,24 +127,6 @@ use super::{
 /// grown segment, without paying `stacker`'s TLS/stack-pointer probe for every ordinary AST node.
 const EXPRESSION_STACK_CHECK_INTERVAL: u32 = 64;
 
-fn checked_constant_value(constant: &crate::libraries::LibraryConst) -> FirConstant {
-    match &constant.value {
-        crate::libraries::LibConst::Int(value) => match constant.ty.non_null() {
-            Ty::Boolean => FirConstant::Boolean(*value != 0),
-            Ty::Char => FirConstant::Char(*value as u16),
-            Ty::UInt | Ty::UByte | Ty::UShort => FirConstant::UInt(i64::from(*value as u32)),
-            _ => FirConstant::Int(i64::from(*value)),
-        },
-        crate::libraries::LibConst::Long(value) => match constant.ty.non_null() {
-            Ty::ULong => FirConstant::ULong(*value),
-            _ => FirConstant::Long(*value),
-        },
-        crate::libraries::LibConst::Float(value) => FirConstant::Float(*value),
-        crate::libraries::LibConst::Double(value) => FirConstant::Double(*value),
-        crate::libraries::LibConst::Str(value) => FirConstant::String(value.clone()),
-    }
-}
-
 /// Bind a parser-local statement to its declaration-stream identity without retaining either the
 /// parser id or a text coordinate. Parsing the same bounded declaration unit produces the same
 /// local-function stream; the identity is discarded with the active checker after use.
@@ -175,12 +158,22 @@ fn body_local_callable_declaration(
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CheckedBodyParameterNameBinding {
+    /// The source name is a lexical value in this body.
+    Lexical,
+    /// The physical source parameter remains part of the body contract, but this body's lexical
+    /// name resolves to another semantic declaration (a primary-constructor property).
+    PhysicalOnly,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CheckedBodyParameter<'a> {
     pub name: &'a str,
     pub ty: ResolvedTy,
     pub span: Span,
     pub context_kind: crate::types::ContextParameterKind,
     pub inline_modifier: crate::types::InlineParameterModifier,
+    pub name_binding: CheckedBodyParameterNameBinding,
 }
 
 #[derive(Clone, Copy)]
@@ -457,7 +450,9 @@ fn bind_parameters_and_check_defaults(
         {
             continue;
         }
-        let value = if parameter.name == "_" {
+        let value = if parameter.name == "_"
+            || parameter.name_binding == CheckedBodyParameterNameBinding::PhysicalOnly
+        {
             checker.allocate_local()
         } else {
             checker.bind_local(parameter.name, parameter.ty)
@@ -1777,7 +1772,7 @@ impl BodyFirChecker<'_> {
             .then(|| self.info.resolved_constants.get(&expression))
             .flatten();
         let kind = if let Some(constant) = folded {
-            FirExprKind::Constant(checked_constant_value(constant))
+            FirExprKind::Constant(library_constants::checked_constant_value(constant))
         } else {
             match self.file.expr(expression) {
                 Expr::IntLit(value) => {
@@ -1959,7 +1954,7 @@ impl BodyFirChecker<'_> {
                         // A `const val` referenced by BARE NAME from inside its own classifier. The
                         // checker folds it exactly as it folds a qualified one; there is no property to
                         // read at run time.
-                        FirExprKind::Constant(checked_constant_value(constant))
+                        FirExprKind::Constant(library_constants::checked_constant_value(constant))
                     } else if let Some(property) = self.source_property_read(expression, None)? {
                         property
                     } else {
@@ -2500,7 +2495,7 @@ impl BodyFirChecker<'_> {
                         // Qualifier/classifier receivers have no entry in this map and remain a plain
                         // constant. Publish the sequencing explicitly in checked FIR so lowering does
                         // not need to rediscover whether the source prefix was a runtime expression.
-                        let constant = checked_constant_value(constant);
+                        let constant = library_constants::checked_constant_value(constant);
                         if let Some(receiver) = self.info.resolved_constant_receiver(expression) {
                             let receiver_value = self.expression(receiver)?;
                             let receiver_origin = self.expression_origin(receiver)?;

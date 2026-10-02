@@ -1164,6 +1164,7 @@ fn checked_constructor_parameters<'a>(
             span: *span,
             context_kind: *context_kind,
             inline_modifier: crate::types::InlineParameterModifier::None,
+            name_binding: super::CheckedBodyParameterNameBinding::Lexical,
         })
         .collect::<Vec<_>>();
     let defaults = source

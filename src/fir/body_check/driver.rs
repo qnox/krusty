@@ -138,9 +138,9 @@ fn enclosing_classifier_declaration(
     }
 }
 
-/// Primary-constructor values visible while class initialization runs. These are body-local
-/// bindings in the resolver's checked result, so every independently streamed initializer unit must
-/// bind the same stable source parameters before translating its expressions.
+/// Primary-constructor slots retained while class initialization runs. Every independently streamed
+/// initializer unit keeps the same physical source parameters, but only a plain parameter publishes
+/// its name on the lexical rung; a `val`/`var` name consumes the resolver-selected property instead.
 fn class_initialization_parameters<'a>(
     file: &'a File,
     info: &TypeInfo,
@@ -178,6 +178,11 @@ fn class_initialization_parameters<'a>(
                 span: parameter.span,
                 context_kind: crate::types::ContextParameterKind::None,
                 inline_modifier: crate::types::InlineParameterModifier::None,
+                name_binding: if parameter.is_property {
+                    super::CheckedBodyParameterNameBinding::PhysicalOnly
+                } else {
+                    super::CheckedBodyParameterNameBinding::Lexical
+                },
             })
         })
         .collect()
@@ -649,12 +654,13 @@ fn check_and_dispatch_property_body(
             span: parameter.ty.span,
             context_kind: parameter.context_kind,
             inline_modifier: crate::types::InlineParameterModifier::None,
+            name_binding: super::CheckedBodyParameterNameBinding::Lexical,
         })
         .collect::<Vec<_>>();
     // A member property initializer or delegate expression runs inside the constructor, where every
-    // primary-constructor parameter — a plain one and a constructor property — keeps its source slot.
-    // The JVM reads a constructor property from its field after that parameter is stored; dropping the
-    // parameter here would erase the source-slot identity the initializer still reads.
+    // primary-constructor parameter — plain or property — keeps its physical source slot. The name of
+    // a constructor property is deliberately not rebound: checked FIR consumes the resolver-selected
+    // property identity after its parameter has been stored.
     if matches!(work.kind, BodyKind::Initializer | BodyKind::Delegate) {
         if let Some(class) = index
             .declaration_anchor(property_declaration)
@@ -677,6 +683,7 @@ fn check_and_dispatch_property_body(
             span: property.span,
             context_kind: crate::types::ContextParameterKind::None,
             inline_modifier: crate::types::InlineParameterModifier::None,
+            name_binding: super::CheckedBodyParameterNameBinding::Lexical,
         });
     }
     let property_storage_type = property
@@ -923,6 +930,7 @@ fn check_and_dispatch_scheduled_function_body_in_session_with_source(
                 parameter.is_materialized_lambda,
                 parameter.is_crossinline,
             ),
+            name_binding: super::CheckedBodyParameterNameBinding::Lexical,
         })
         .collect::<Vec<_>>();
     // Defaults were checked and moved to `DefaultArgumentStore` during Pass 1. A declaration with
@@ -1037,6 +1045,7 @@ pub(crate) fn check_and_dispatch_signature_defaults_in_session(
                 parameter.is_materialized_lambda,
                 parameter.is_crossinline,
             ),
+            name_binding: super::CheckedBodyParameterNameBinding::Lexical,
         })
         .collect::<Vec<_>>();
     let defaults = function
