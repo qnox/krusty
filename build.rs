@@ -108,7 +108,7 @@ fn prebuild_runtime() -> Result<(), String> {
                 .status();
             match status {
                 Ok(status) if status.success() => {
-                    if let Err(problem) = check_object(&object, machine) {
+                    if let Err(problem) = check_object(&object, machine, arch.max_page_size()) {
                         return Err(format!(
                             "native runtime: `{compiler}` built `{source}` for `{triple}` as {problem}"
                         ));
@@ -177,9 +177,12 @@ fn prebuild_runtime() -> Result<(), String> {
     Ok(())
 }
 
-/// The ELF identity of a freshly compiled object: a 64-bit little-endian relocatable for `machine`.
-/// `Err` names what it is instead.
-fn check_object(object: &Path, machine: u16) -> Result<(), String> {
+/// The ELF identity of a freshly compiled object: a 64-bit little-endian relocatable for `machine`
+/// whose loaded sections ask for no more alignment than `max_page_size`, the most krusty's linker
+/// can give on the target (it starts the writable segment on such a page). `Err` names what it is
+/// instead: an object the linker would refuse is a target that cannot link, and saying so here
+/// names the cause where it arises rather than at every link.
+fn check_object(object: &Path, machine: u16, max_page_size: u64) -> Result<(), String> {
     let bytes = std::fs::read(object).map_err(|error| format!("an unreadable file ({error})"))?;
     if bytes.len() < 20 || &bytes[..4] != b"\x7fELF" {
         return Err("something that is not ELF".to_string());
@@ -197,6 +200,32 @@ fn check_object(object: &Path, machine: u16) -> Result<(), String> {
     let found = u16::from_le_bytes([bytes[18], bytes[19]]);
     if found != machine {
         return Err(format!("code for ELF machine {found}, not {machine}"));
+    }
+    // A little-endian field of `width` bytes at `at`, read only if the file holds all of it.
+    let field = |at: u64, width: usize| {
+        usize::try_from(at)
+            .ok()
+            .and_then(|at| bytes.get(at..at.checked_add(width)?))
+            .map(|field| {
+                field
+                    .iter()
+                    .rev()
+                    .fold(0u64, |value, byte| value << 8 | u64::from(*byte))
+            })
+            .ok_or_else(|| "an ELF object whose section headers are cut short".to_string())
+    };
+    const SHF_ALLOC: u64 = 2;
+    let (table, entry_size, count) = (field(0x28, 8)?, field(0x3a, 2)?, field(0x3c, 2)?);
+    for index in 0..count {
+        let header = table.saturating_add(index * entry_size);
+        let flags = field(header.saturating_add(0x08), 8)?;
+        let align = field(header.saturating_add(0x30), 8)?;
+        if flags & SHF_ALLOC != 0 && align > max_page_size {
+            return Err(format!(
+                "an object with a section aligned to {align:#x} bytes, more than the target's \
+                 {max_page_size:#x}-byte maximum page size"
+            ));
+        }
     }
     Ok(())
 }
