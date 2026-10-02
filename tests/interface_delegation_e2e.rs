@@ -757,3 +757,18 @@ fn a_dependency_superclass_delegation_implements_the_interface() {
     fun box(): String = if (C().foo() === Mark) \"OK\" else \"fail\"\n";
     common::expect_box_ok_against("dependency_superclass_delegation", LIB, MAIN);
 }
+
+/// A class that owns a signature default is re-entered by the Pass-1 SignatureDefaults check,
+/// whose primary-constructor header walk evaluates the `super(…)` arguments and each delegation
+/// value. Those header expressions must survive retained-syntax compaction; a dropped delegation
+/// value crashed the checker on the Kotlin monorepo's `SmartPrinter` shape.
+#[test]
+fn delegation_with_a_secondary_constructor_default() {
+    const SRC: &str = "interface Iface { fun f(): String }\n\
+class Impl : Iface { override fun f(): String = \"OK\" }\n\
+class Deleg private constructor(private val p: Impl) : Iface by p {\n\
+\x20   constructor(tag: String = \"d\") : this(Impl())\n\
+}\n\
+fun box(): String = Deleg().f()\n";
+    common::expect_box_same_as_kotlinc(SRC, "RetainedDefaultClassHeaders");
+}
