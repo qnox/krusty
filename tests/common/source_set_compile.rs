@@ -13,19 +13,6 @@ pub fn compile_in_process_files(
     compile_in_process_files_target(sources, cp_jars, jdk_modules, None)
 }
 
-/// [`compile_in_process_files`] with an internal metadata stamp (`[X, Y, 0]`; `None` keeps the
-/// default), for fixtures asserting the `@kotlin.Metadata` `mv` and the `.kotlin_module` header
-/// version. This is not `-language-version`.
-#[allow(dead_code)] // e2e-only today; the conformance target shares this module
-pub fn compile_in_process_files_metadata_version(
-    sources: &[(&str, &str)],
-    cp_jars: &[PathBuf],
-    jdk_modules: Option<&std::path::Path>,
-    metadata_version: Option<[i32; 3]>,
-) -> Option<Vec<(String, Vec<u8>)>> {
-    compile(sources, cp_jars, jdk_modules, None, metadata_version)
-}
-
 /// [`compile_in_process_files`] emitting class files of major version `class_major` (`None` keeps
 /// the backend's default), for a byte comparison with kotlinc's `-jvm-target` output.
 pub fn compile_in_process_files_target(
@@ -37,7 +24,7 @@ pub fn compile_in_process_files_target(
     compile(sources, cp_jars, jdk_modules, class_major, None)
 }
 
-fn compile(
+pub(crate) fn compile(
     sources: &[(&str, &str)],
     cp_jars: &[PathBuf],
     jdk_modules: Option<&std::path::Path>,

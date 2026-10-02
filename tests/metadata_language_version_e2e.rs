@@ -56,7 +56,7 @@ fn module_header(bytes: &[u8]) -> Vec<i32> {
 
 /// The fixture compiled with the given `-language-version` stamp (`None` = no flag).
 fn stamped(metadata_version: Option<[i32; 3]>) -> Vec<(String, Vec<u8>)> {
-    common::source_set_compile::compile_in_process_files_metadata_version(
+    common::compile_in_process_files_metadata_version(
         &[("Holder.kt", SRC)],
         &[common::stdlib_jar()],
         None,
@@ -239,7 +239,7 @@ fn regenerated_inline_object_takes_the_caller_metadata_stamp() {
     let copy = "CallerKt$box$$inlined$greeter$1";
     let reference = std::fs::read(caller_out.join(format!("{copy}.class")))
         .unwrap_or_else(|_| panic!("kotlinc did not regenerate {copy}"));
-    let actual = common::source_set_compile::compile_in_process_files_metadata_version(
+    let actual = common::compile_in_process_files_metadata_version(
         &[("Caller.kt", INLINE_CALLER)],
         &[lib_out, stdlib],
         None,

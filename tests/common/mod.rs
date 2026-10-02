@@ -1,7 +1,7 @@
 //! Shared test helpers.
 
 pub(crate) mod byte_dump;
-mod kotlin_metadata;
+pub(crate) mod kotlin_metadata;
 mod kotlinc_lib;
 pub mod language_directives;
 mod metadata_diff;
@@ -17,8 +17,7 @@ pub mod source_set_compile;
 
 pub use source_set_compile::compile_in_process_files;
 
-#[allow(unused_imports)] // e2e-only today; the conformance target shares this module
-pub(crate) use kotlin_metadata::{kotlin_metadata_ints, raw_kotlin_metadata};
+pub(crate) use kotlin_metadata::raw_kotlin_metadata;
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read as _, Write as _};
