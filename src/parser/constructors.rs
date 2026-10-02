@@ -53,19 +53,24 @@ impl Parser<'_> {
                 }
             };
         }
+        // A bodyless constructor ends at its delegation, not at the newlines skipped after it.
+        let mut end = self.t[self.i.saturating_sub(1)].span.hi;
         self.skip_newlines();
         let body = self
             .at(TokenKind::LBrace)
             .then(|| self.parse_block_expr(false));
+        if body.is_some() {
+            end = self.t[self.i.saturating_sub(1)].span.hi;
+        }
         SecondaryCtor {
             annotations,
             annotation_args,
             params,
             delegation,
             body,
-            span: Span::new(keyword.lo, self.t[self.i.saturating_sub(1)].span.hi),
+            span: Span::new(keyword.lo, end),
             is_actual: modifiers.iter().any(|modifier| modifier == "actual"),
-            declaration_span: Span::new(start, self.t[self.i.saturating_sub(1)].span.hi),
+            declaration_span: Span::new(start, end),
             // The debug-line post-pass rewrites these to their lines, the way it rewrites every
             // other declaration's; the delegation carries its OFFSET until then.
             decl_line: 0,
