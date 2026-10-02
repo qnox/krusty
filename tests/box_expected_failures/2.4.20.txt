@@ -105,7 +105,6 @@ reified/extensionLambda.kt
 reified/innerObject.kt
 reified/lambda.kt
 reified/lambdaNameClash.kt
-reified/safecast.kt
 sam/constructors/sameWrapperClass.kt
 secondaryConstructors/localClasses.kt
 typeErasure/funWithReifiedTypeParameterContextParameterAndExtensionReceiverInsideClass.kt
