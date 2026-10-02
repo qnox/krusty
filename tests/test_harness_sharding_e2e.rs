@@ -774,8 +774,12 @@ fn ci_runs_every_prebuilt_conformance_test_in_each_version_lane() {
         .map(|offset| matrix + offset)
         .expect("each version lane runs every non-box conformance test");
     let release = workflow
-        .find("needs: [ci, klib-semantics, conformance, versions, build-release]")
-        .expect("release waits on the combined conformance matrix");
+        .find(
+            "needs: [ci, klib-semantics, conformance, build-gradle-plugin, gradle, versions, build-release]",
+        )
+        .expect(
+            "release waits on combined conformance plus the exact tested Gradle artifact and matrix",
+        );
     assert!(
         matrix < box_run && box_run < regressions && regressions < release,
         "one matrix lane runs box then non-box tests before release"
