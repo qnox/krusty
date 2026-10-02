@@ -6243,17 +6243,26 @@ where
 
 fn declaration_specificity_params(candidate: &FunctionInfo) -> Vec<Ty> {
     let signature = candidate.semantic_signature();
-    signature
+    let mut params = signature
         .params
         .iter()
         .skip(candidate.context_count.min(signature.params.len()))
         .map(|parameter| ty_subst(*parameter, &GSigBinds::new()))
-        .collect()
+        .collect::<Vec<_>>();
+    let vararg = candidate
+        .call_sig
+        .vararg_index
+        .and_then(|index| index.checked_sub(candidate.context_count));
+    if let Some(index) = vararg {
+        if let Some(element) = params.get(index).and_then(|array| array.array_read_elem()) {
+            params[index] = element;
+        }
+    }
+    params
 }
 
 /// Pick the best overload whose logical value parameters accept `args`, in Kotlin applicability order:
-/// exact, then `Any`-widened / function-arity, then a prefix under-application (omitted trailing params
-/// must be optional), then a trailing-lambda call that omits leading DEFAULTED params (`m.withLock { … }`).
+/// exact, then widened or arity fits, then an omitted-default prefix, then a trailing lambda.
 pub(crate) fn best_by_args<'a>(
     lib: &dyn SemanticPlatform,
     src: &dyn SymbolSource,
@@ -6295,9 +6304,6 @@ fn best_by_args_with_ties<'a>(
     }
 }
 
-/// Select within one declaration-priority tier. Applicability and specificity deliberately know
-/// nothing about `@LowPriorityInOverloadResolution`; the outer tiering step invokes this same selector
-/// first for ordinary declarations and only then for low-priority declarations.
 fn best_by_args_at_priority_with_ties<'a>(
     lib: &dyn SemanticPlatform,
     src: &dyn SymbolSource,
@@ -6314,10 +6320,6 @@ fn best_by_args_at_priority_with_ties<'a>(
                 arg_fits_platform(lib, p, &function) || semantic_arg_assignable(src, p, &function)
             })
     };
-    // The DEFAULT-omitting passes accept a reference SUBTYPE / value-class-underlying argument (a
-    // `joinToString(separator: CharSequence = …)` call with a `String`), matching the assignability the
-    // exact-arity subtype pass in `select_overload` applies — the exact/`Any`-widened passes above stay
-    // stricter so an exact call still prefers its precise overload.
     let fits = |_position: usize, p: &Ty, arg: &CallArgKind| {
         if arg.is_omitted_default() {
             return true;
@@ -6381,8 +6383,6 @@ fn best_by_args_at_priority_with_ties<'a>(
         parameter_at_least_as_specific(src, left, right, CallArgKind::Typed(Ty::Error))
     };
 
-    // Expected-result inference can make unrelated overloads applicable. Equal mapped parameter
-    // types keep the non-vararg; incomparable parameter types stay ambiguous.
     if args.iter().any(CallArgKind::is_expected_type_callable) {
         match overload_selection::select_equally_specific(
             cands
