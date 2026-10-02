@@ -282,10 +282,14 @@ pub(super) fn eligible_points(
         return None;
     }
     let plain_call = |call: ExprId| {
-        matches!(
+        // A suspend function value is `InvokeFunction`: the continuation is appended and the
+        // invoke is marked like any other suspension the transformer takes.
+        let direct = matches!(
             ir.exprs[call as usize],
-            IrExpr::Call { .. } | IrExpr::MethodCall { .. }
-        ) && !ir.intrinsic_suspension_points.contains_key(&call)
+            IrExpr::Call { .. } | IrExpr::MethodCall { .. } | IrExpr::InvokeFunction { .. }
+        );
+        direct
+            && !ir.intrinsic_suspension_points.contains_key(&call)
             // A boxed result arrives as the box on either path, which the call's own unbox
             // consumes; a carrier result arrives boxed only on resume, which the IR machine handles.
             && !matches!(

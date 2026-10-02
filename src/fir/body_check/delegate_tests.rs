@@ -72,12 +72,82 @@ fn reified_enum_delegate_anonymous_object_uses_the_enclosing_formal_identity() {
 }
 
 #[test]
+fn inline_delegate_convention_records_its_exact_reified_parameter() {
+    let (body, _index) = checked_function_body(
+        "class Delegate<T, R>(val value: T)\n\
+         inline operator fun <T, reified R> Delegate<T, R>.getValue(\n\
+             owner: Any?, property: Any?\n\
+         ): T = value\n\
+         inline fun <T, reified R> read(value: T): T {\n\
+             val local by Delegate<T, R>(value)\n\
+             return local\n\
+         }\n",
+        "read",
+    );
+
+    let [plan] = body.local_delegate_plans() else {
+        panic!("the local delegated property records one semantic plan")
+    };
+    assert!(matches!(
+        plan.get_value.substitutions.as_ref(),
+        [
+            FirTypeSubstitution { reified: false, .. },
+            FirTypeSubstitution { reified: true, .. }
+        ]
+    ));
+}
+
+#[test]
 fn covariant_extension_receiver_widens_from_a_nullable_lambda_result() {
     assert_production_frontend_accepts(
         "class Holder {\n\
              val map: Map<String, String> = mapOf(\"value\" to \"set\")\n\
              val value: String? by map.withDefault { null }\n\
          }\n",
+    );
+}
+
+#[test]
+fn delegate_member_substitution_names_its_receiver_class_parameter() {
+    let (body, index) = checked_function_body(
+        "class Unrelated<T>\n\
+         class Delegate<T>(val value: T) {\n\
+             operator fun getValue(owner: Any?, property: Any?): T = value\n\
+         }\n\
+         fun read(value: String): String {\n\
+             val local by Delegate(value)\n\
+             return local\n\
+         }\n",
+        "read",
+    );
+
+    let [plan] = body.local_delegate_plans() else {
+        panic!("the local delegated property records one semantic plan")
+    };
+    let callable = index
+        .callable(
+            plan.get_value
+                .target
+                .module()
+                .expect("module delegate operator"),
+        )
+        .expect("selected callable header");
+    let owner = index
+        .declaration_anchor(callable.declaration)
+        .and_then(|anchor| anchor.owner)
+        .expect("the selected member's receiver declaration");
+    assert_eq!(index.declaration_name(owner), Some("Delegate"));
+    let parameter = index
+        .type_parameter(owner, 0)
+        .expect("receiver type parameter");
+    assert_eq!(
+        plan.get_value.substitutions.as_ref(),
+        &[FirTypeSubstitution {
+            parameter: parameter.into(),
+            reified: false,
+            value: ResolvedTy::new(Ty::String).unwrap(),
+            additional_bounds: Box::new([]),
+        }],
     );
 }
 

@@ -4418,6 +4418,77 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the body is read from (`MapsKt__MapsKt`), and that is the method the in-place read follows.
   Tests: `tests/reified_class_regeneration_e2e.rs`, `tests/classpath_reified_inline_toplevel_e2e.rs`.
 
+- **An escaping lambda inside `inline fun <reified T>` specializes `T` at the call that creates it.**
+  `func = { it as? T }` stores a closure, so the body is not spliced into the caller. The
+  declaration's implementation keeps the reified marker. Each call copies that implementation,
+  including an implementation nested inside it, and substitutes the call's reified type arguments.
+  The trigger is a runtime use of a reified parameter: a type operation, `typeOf<T>()`, a
+  forwarded reified call, or a checked substitution whose declaration-owned type-parameter ordinal
+  is reified. Substitution presence alone is not a runtime capability: an ordinary type parameter
+  stays erased even when the same lambda also uses a reified sibling. Providers normalize the exact
+  sparse ordinal set from source, Kotlin metadata, or KLIB into the selected callable; FIR and
+  common IR carry that flag on each substitution. Static signatures may still take the full
+  substitution map, while runtime operations take only entries marked reified.
+  The copy keeps the source lambda's origin and records exact semantic provenance: its executable
+  caller enclosure, checked inline-callee identity, source-rendering names, and nested specialized
+  parent. Common IR records no JVM owner, implementation spelling, or physical ordinal. Each target
+  groups and names artifacts from those identities. On the JVM, an indy caller stays on its method
+  owner and uses the realized lifted-lambda method segment; a class-realized caller nests the copy
+  under its generated class and physical `invoke` or selected SAM method. Accessors, constructors,
+  initializers, defaults, suspend machines, and companion-block functions likewise derive their
+  physical owner and segment only after JVM placement is final. The declaration's own lambda body
+  remains unchanged. A nested lambda at the call site names the specialized parent, not the
+  source parent the declaration's lambda enclosed. A nested declaration closure that uses the
+  reified parameter is a class too
+  (`defineNested$1$nested$1`), not an invokedynamic; the call site still receives its own
+  specialized class. Each of those classes is a `FunctionN` whose `invoke` holds the lambda body.
+  The file facade does not keep an implementation method for it. The copy is named from the
+  caller's final placement (`caller$$inlined$callee$N`) only after lifted names exist; until then
+  it has a private identity so it cannot collide with the declaration class.
+  A local delegated property keeps the checker-selected declaration accessor plan across those
+  copies. Kotlin emits that convention helper with the declaration's erased signature and reuses
+  it across call-site type substitutions; common lowering therefore specializes the copied access
+  expression's recorded facts, but does not clone or mutate the declaration plan. The JVM emits
+  a non-lambda helper exactly once at its declaration owner, with the declaration's reflection
+  metadata. Inline copies call its public synthetic accessor. A cross-file copy retains a typed,
+  non-emitting prototype through generic and
+  value-class representation; JVM-only facts bind its exact declaration facade or classifier to
+  the private-static access boundary. No helper or owner is recovered by source spelling.
+  A delegate inside a lambda instead belongs to that exact source lambda. The JVM realizes the
+  retained source closure and each reified specialized copy as an owned class; each has its own
+  private `invoke$lambda-N` helper and reflection table. No outer-declaration access bridge is
+  emitted for them. Physical table ownership is separate from reflection identity: each table's
+  property reference still names the original lexical classifier/facade, property name and
+  declaration ordinal, including in regenerated copies. JVM-only placement facts bind each copied
+  reference operand to its closure table without changing the semantic reference or its metadata.
+  A regenerated closure preserves a source type-variable's physical return
+  slot (`Object` for an unbounded parameter), while its generic signature records the specialized
+  result; no concrete-return method or extra erased bridge is invented.
+  Reified operations are normalized by their checked declaration-qualified type-parameter
+  identities in reified declarations and the exact recorded lambda-method domain, including after
+  a lambda node becomes a class value. Closure realization preserves implementation identities
+  and their owned nested/helper methods across that boundary; an anonymous object's ordinary
+  generic members are not in this domain merely because they use the same semantic parameter.
+  The enum-bound anonymous delegate negative control executes its erased cast without a marker
+  (`erased_anonymous_delegate_member_is_not_a_reified_closure_method`).
+  A singleton closure whose owned methods retain typed reified operations emits
+  `needClassReification()` before creating its instance; a concrete specialized copy does not.
+  Common lowering records the nearest source lambda identity and containing checked inline
+  declaration identity/visibility, retaining them through nested local functions. Inline
+  property accessors publish the same provenance. The JVM consumes that recorded exposure when
+  exporting helpers; it does not rediscover an inline owner by walking declarations or source names.
+  JVM naming keeps ordinary local delegates in the normal lambda numbering sequence. The distinct
+  inline-declaration helper spelling is selected only for the exact delegated-helper lifting site
+  carrying that recorded inline exposure, not for every local delegate or every private accessor.
+  The checked convention's substitutions include its receiver classifier's type parameters as
+  well as callable parameters. The selected declaration's lexical scope fixes their stable
+  identities: a callable parameter shadows the enclosing parameter, and an unrelated declaration
+  with the same spelling cannot contribute a binding.
+  Tests: `fir_lower::inlining::escaping_reified_lambda`, `tests/escaping_reified_lambda_e2e.rs`,
+  `tests/reified_local_delegate_e2e.rs`,
+  boxes `nullCheckOptimization/kt22410.kt`, `reified/lambda.kt`, `reified/extensionLambda.kt`,
+  `reified/lambdaNameClash.kt`, `basics/k42000_1.kt`, `basics/k42000_crossmodule.kt`.
+
 - **A named argument binds by LABEL, including when it skips a defaulted parameter.** A classpath call
   that names a parameter and omits an earlier one (`mockk(relaxed = true)`, `runTest(timeout = …)`) was
   reported as `unresolved function`. The label→slot mapping was computed and then discarded: the
@@ -8450,7 +8521,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   goes through its `access$` accessor, like any nested class's. A captured value class is a field
   and constructor parameter of its carrier type, and never hides the constructor behind the
   `DefaultConstructorMarker` accessor (see the next entry). A lambda passed to an inline
-  function, a library one included, is spliced and gets no class. A value class over a primitive
+  function, a library one included, is spliced and gets no class. A constructor-reference adapter
+  stored by a property or static initializer (`val default: Token by lazy(::Token)`) is the
+  lowering of that reference, not a source lambda with its own origin, so it stays on the enclosing
+  function's body walk and is not recorded as an unrealized lambda class. A value class over a primitive
   or a nullable type keeps the indy lambda; a type parameter is nullable when a bound is, or when it
   has none, and a dependency's value class reads that from its metadata's type-parameter bounds
   (`Wrap<T>(val a: T)` keeps indy). A lambda passed to a same-file inline function's `noinline`
@@ -12155,7 +12229,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Local/anonymous objects and companions keep instance fields (companion static hoisting to the
   outer class is a separate, upcoming relayout).
 
-- **An inline property accessor is spliced at the use.** `val <reified T> T.foo: Int inline get() { T::class }` and `inline var <reified T> T.bar` are not calls to the erased accessors. `inline` on the property marks every accessor inline, the same as writing it on `get` and `set`. The checker records the accessor's stable declaration and callable identities, that it is inline, and the use's type arguments (each parameter's semantic name and whether it is reified). The callable identity retains and materializes the selected checked body even when the declaration and use are in different source files. A package accessor copied into the caller publishes the layout its template functions already describe, so a local class inside that accessor still has an enclosure; a member template keeps the member's own enclosure and does not invent a second layout. Expansion consumes that record: it does not look the accessor or its type parameters up again, and a recorded accessor that cannot be expanded is a lowering failure. The accessor body is cloned into the read or write after the accessor function exists, and the recorded type arguments specialize that copy, so `T::class` is the call site's class (`Token`, not the erased `Object`). A member or enum-entry property binds its type parameters on the accessor scope with the same reified mark a top-level property uses, so `object Host { inline val <reified T> T.tag get() = T::class }` names that parameter instead of reporting `unresolved reference 'T'`. A nested inline accessor in that copy is expanded with the same arguments. The expanded use is no longer a splice site, so a later clone of the accessor does not try to expand the block again. The accessor method itself stays, with its reified marker, for a caller that does not inline it. A `return` in the accessor becomes the property operation's value. The receiver and, for a write, the new value are evaluated once into locals of the splice. Test: `tests/inline_reified_property_e2e.rs`.
+- **An inline property accessor is spliced at the use.** `val <reified T> T.foo: Int inline get() { T::class }` and `inline var <reified T> T.bar` are not calls to the erased accessors. `inline` on the property marks every accessor inline, the same as writing it on `get` and `set`. The checker records the accessor's stable declaration and callable identities, that it is inline, and the use's type arguments (each parameter's semantic name and whether it is reified). The stable property header publishes the parsed `reified` modifier on that type parameter; the splice copies the published flag and does not recover it from the parameter's spelling. The callable identity retains and materializes the selected checked body even when the declaration and use are in different source files. A package accessor copied into the caller publishes the layout its template functions already describe, so a local class inside that accessor still has an enclosure; a member template keeps the member's own enclosure and does not invent a second layout. Expansion consumes that record: it does not look the accessor or its type parameters up again, and a recorded accessor that cannot be expanded is a lowering failure. The accessor body is cloned into the read or write after the accessor function exists, and the recorded type arguments specialize that copy, so `T::class` is the call site's class (`Token`, not the erased `Object`). A member or enum-entry property binds its type parameters on the accessor scope with the same reified mark a top-level property uses, so `object Host { inline val <reified T> T.tag get() = T::class }` names that parameter instead of reporting `unresolved reference 'T'`. A nested inline accessor in that copy is expanded with the same arguments. The expanded use is no longer a splice site, so a later clone of the accessor does not try to expand the block again. The accessor method itself stays, with its reified marker, for a caller that does not inline it. A `return` in the accessor becomes the property operation's value. The receiver and, for a write, the new value are evaluated once into locals of the splice. A function-valued reference such as `String::kind` is one of those uses: the checker publishes the selected getter splice and its type arguments on the reference, and the generated adapter reads the property through that record, so `T::class` inside the getter is the call-site class rather than the erased accessor's `Object`. Test: `tests/inline_reified_property_e2e.rs`.
 
 - **Reified inline functions emit real erased methods with reification markers.** A `<reified T>`
   inline fun whose reified-parameter uses are all CLASS LITERALS (`T::class`/`T::class.java`) now

@@ -52,6 +52,7 @@ pub(super) struct MachineOutputs<'b> {
         &'b mut crate::jvm::default_call_operands::DefaultCallOperands,
     pub(super) suspended_result_returns: &'b mut SuspendedResultReturns,
     pub(super) intrinsic_probe_continuations: &'b mut IntrinsicProbeContinuations,
+    pub(super) specialized_lambda_classes: &'b mut super::SpecializedLambdaClasses,
 }
 
 /// The function an IR state machine is built for: its body, whether it returns `Unit`, the

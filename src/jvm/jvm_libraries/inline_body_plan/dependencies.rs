@@ -171,6 +171,11 @@ impl JvmLibraries {
         let Some(source_name) = facts.source_name.clone() else {
             return InlineDependency::Rejected;
         };
+        let reified_type_parameter_ordinals = facts
+            .call_sig
+            .reified_type_parameter_ordinals
+            .clone()
+            .into_boxed_slice();
         let Some(signature) = facts.generic_sig else {
             return InlineDependency::Rejected;
         };
@@ -199,6 +204,7 @@ impl JvmLibraries {
             declared_ret: facts.declared_ret,
             context_count: facts.context_count,
             contract: facts.contract,
+            reified_type_parameter_ordinals,
             generic_sig: Some(Box::new(signature.clone())),
             declared_params: Some(params.clone().into_boxed_slice()),
             signature: candidate.signature,

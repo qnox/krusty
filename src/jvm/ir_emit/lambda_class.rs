@@ -30,7 +30,7 @@ pub(super) fn emit_lambda_class(
     if let Some(signature) = &signature {
         cw.set_signature(signature);
     }
-    cw.set_access(0x0010 | 0x0020); // FINAL | SUPER
+    cw.set_access(0x0010 | 0x0020 | u16::from(lambda.public_inline)); // FINAL | SUPER | publication
     if let Some((owner, method)) = class_enclosure(ir, env.override_results, c, facade) {
         match method {
             Some((name, descriptor)) => cw.set_enclosing_method(&owner, &name, &descriptor),
@@ -39,6 +39,7 @@ pub(super) fn emit_lambda_class(
     }
     env.inner_classes.register(&mut cw);
     cw.add_interface(&jvm_function_interface(arity));
+    delegated_property_array::declare(env, c.fq_name, &mut cw);
 
     // Each captured value's field, typed by the value's declared type: a shared cell is a generic
     // `Ref$ObjectRef<T>`, whose `Signature` the field and the constructor carry.
@@ -112,14 +113,25 @@ pub(super) fn emit_lambda_class(
         .collect::<Vec<_>>();
     let locals =
         function_reference_invoke::reference_constructor_locals(&mut cw, &class, &parameters);
-    finish_code_sig::<0x0000>(
-        &mut cw,
-        "<init>",
-        &constructor,
-        &mut code,
-        words,
-        constructor_signature.as_deref(),
-    );
+    if lambda.public_inline {
+        finish_code_sig::<0x0001>(
+            &mut cw,
+            "<init>",
+            &constructor,
+            &mut code,
+            words,
+            constructor_signature.as_deref(),
+        );
+    } else {
+        finish_code_sig::<0x0000>(
+            &mut cw,
+            "<init>",
+            &constructor,
+            &mut code,
+            words,
+            constructor_signature.as_deref(),
+        );
+    }
     cw.set_method_debug("<init>", &constructor, None, &locals);
     for capture in &captures {
         cw.add_field_late_sig(
@@ -142,6 +154,20 @@ pub(super) fn emit_lambda_class(
         true,
         env,
     );
+    for &method in &c.methods {
+        if method != lambda.invoke {
+            emit_method(
+                ir,
+                method,
+                StaticOwner::Class(c.fq_name),
+                &class,
+                facade,
+                &mut cw,
+                false,
+                env,
+            );
+        }
+    }
     function_reference_invoke::emit_reference_invoke_bridge(
         ir,
         &mut cw,
@@ -151,11 +177,77 @@ pub(super) fn emit_lambda_class(
         lambda.invoke,
         arity,
     );
+    if captures.is_empty() || delegated_property_array::exists(env, c.fq_name) {
+        emit_initialization(ir, c, &class, facade, env, &mut cw, captures.is_empty());
+    }
     if captures.is_empty() {
-        emit_singleton_instance_clinit(&mut cw, &class);
         add_singleton_instance_field(&mut cw, &class);
     }
-    finish_local_synthetic_class(cw, env)
+    if lambda.public_inline {
+        cw.set_kotlin_metadata(
+            3,
+            &[2, 4, 0],
+            super::metadata_policy::synthetic_class_xi(super::metadata_policy::SYNTHETIC_PUBLIC),
+            &[],
+            &[],
+        );
+        env.run.finish_class(cw)
+    } else {
+        finish_local_synthetic_class(cw, env)
+    }
+}
+
+fn emit_initialization(
+    ir: &IrFile,
+    class: &IrClass,
+    internal: &str,
+    facade: &str,
+    env: &EmitEnv<'_>,
+    writer: &mut ClassWriter,
+    singleton: bool,
+) {
+    writer.seed_utf8("<clinit>");
+    writer.seed_utf8("()V");
+    let mut emitter = Emitter::new(
+        ir,
+        writer,
+        env,
+        Some(StaticOwner::Class(class.fq_name)),
+        internal,
+        facade,
+        Ty::Unit,
+        std::iter::empty(),
+    );
+    let mut code = CodeBuilder::new(0);
+    emitter.emit_delegated_property_array(env, class.fq_name, internal, &mut code);
+    if singleton {
+        // Retained typed operations still require class reification. A concrete call-site copy
+        // contains ordinary specialized operations and therefore has no declaration marker.
+        if class.methods.iter().any(|&method| {
+            ir.functions[method as usize]
+                .body
+                .is_some_and(|body| body_has_reified_markers(ir, body))
+        }) {
+            let marker = emitter.cw.methodref(
+                "kotlin/jvm/internal/Intrinsics",
+                "needClassReification",
+                "()V",
+            );
+            code.invokestatic(marker, 0, 0);
+        }
+        let classifier = emitter.cw.class_ref(internal);
+        let constructor = emitter.cw.methodref(internal, "<init>", "()V");
+        let field = emitter
+            .cw
+            .fieldref(internal, "INSTANCE", &format!("L{internal};"));
+        code.new_obj(classifier);
+        code.dup();
+        code.invokespecial(constructor, 0, 0);
+        code.putstatic(field, 1);
+    }
+    code.ret_void();
+    let locals = emitter.frame.max();
+    finish_code::<0x0008>(emitter.cw, "<clinit>", "()V", &mut code, locals);
 }
 
 /// A captured value's field, as the constructor and `invoke` spell it.

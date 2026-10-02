@@ -255,6 +255,11 @@ impl MemberExtensionFunctionCandidate {
             physical_ret: self.physical_ret,
             inline: self.inline,
             inline_body_plan: self.inline_body_plan.clone(),
+            reified_type_parameter_ordinals: self
+                .call_sig
+                .reified_type_parameter_ordinals
+                .clone()
+                .into_boxed_slice(),
             suspend: self.suspend,
             declared_ret: self.declared_ret,
             overridden_results: self.overridden_results.clone(),

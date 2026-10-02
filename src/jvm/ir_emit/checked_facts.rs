@@ -32,4 +32,5 @@ pub(crate) struct CheckedEmitFacts<'a> {
         &'a crate::jvm::property_references::PropertyReferenceRealizations,
     pub(crate) default_call_operands: &'a crate::jvm::default_call_operands::DefaultCallOperands,
     pub(crate) sam_wrapper_realizations: &'a crate::jvm::sam_wrappers::SamWrapperRealizations,
+    pub(crate) local_delegate_access: &'a crate::jvm::local_delegate_accessors::HelperAccess,
 }

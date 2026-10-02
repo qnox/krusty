@@ -48,6 +48,8 @@ pub(crate) struct BackendPassFacts {
     /// Physical returns that preserve `COROUTINE_SUSPENDED` and otherwise answer `Unit`.
     suspended_result_returns: crate::jvm::suspend::SuspendedResultReturns,
     intrinsic_probe_continuations: crate::jvm::suspend::IntrinsicProbeContinuations,
+    /// Suspend-lambda classes whose physical names depend on final caller placement.
+    specialized_suspend_lambda_classes: crate::jvm::suspend::SpecializedLambdaClasses,
     default_call_operands: crate::jvm::default_call_operands::DefaultCallOperands,
     bridge_adaptations: crate::jvm::bridge_adaptations::BridgeAdaptations,
     /// The bridges that take `FunctionN.invoke`'s packed argument array.
@@ -61,6 +63,8 @@ pub(crate) struct BackendPassFacts {
     property_reference_realizations: crate::jvm::property_references::PropertyReferenceRealizations,
     /// Physical constructions selected for Kotlin function-value SAM wrappers.
     sam_wrapper_realizations: crate::jvm::sam_wrappers::SamWrapperRealizations,
+    local_delegate_access: crate::jvm::local_delegate_accessors::HelperAccess,
+    lambda_methods: crate::jvm::lambda_classes::LambdaMethods,
 }
 
 /// THE post-lowering, pre-emit JVM pass pipeline — the single definition every consumer (the real
@@ -131,6 +135,7 @@ pub(crate) fn run_backend_passes(
     callables: &mut crate::backend::CheckedBackendCallables,
     classpath: &crate::jvm::classpath::Classpath,
     stems: &[String],
+    lambda_modes: crate::jvm::ir_emit::LambdaModes,
     facts: &mut BackendPassFacts,
 ) -> Result<(), SkipReason> {
     crate::plugins::run_enabled(
@@ -153,6 +158,7 @@ pub(crate) fn run_backend_passes(
         callables,
         classpath,
         Some(stems),
+        lambda_modes,
         facts,
     )
 }
@@ -164,6 +170,7 @@ fn run_backend_passes_after_plugins(
     callables: &crate::backend::CheckedBackendCallables,
     classpath: &crate::jvm::classpath::Classpath,
     stems: Option<&[String]>,
+    lambda_modes: crate::jvm::ir_emit::LambdaModes,
     facts: &mut BackendPassFacts,
 ) -> Result<(), SkipReason> {
     let module_value_classes = classifiers.module().source_value_classes();
@@ -172,7 +179,7 @@ fn run_backend_passes_after_plugins(
     // the same JVM boundary as source super calls, never in the plugin itself or the emitter.
     // Every body of the file is lowered, so each lifting sequence is whole: name its callables
     // before any pass renders a debug name from them.
-    crate::jvm::lifted_names::number(ir);
+    crate::jvm::lifted_names::number(ir, &facts.local_delegate_access);
     crate::jvm::module_calls::realize_super_calls(ir, callables)
         .map_err(|_| SkipReason::SuperCalls)?;
     crate::jvm::annotation_constructions::lower_annotation_constructions(ir, facade);
@@ -196,7 +203,7 @@ fn run_backend_passes_after_plugins(
     crate::jvm::parameter_assertions::realize(ir);
     // Common IR retains source type-parameter identities and complete intersections. Select the JVM
     // class-bound erasure here, once, before any descriptor-sensitive backend pass runs.
-    crate::jvm::reified_operations::realize(ir);
+    crate::jvm::reified_operations::realize(ir, &facts.lambda_methods);
     // A null check over an erased call result reads the call's own slot, ahead of the coercion
     // that narrows it; erasure and call-result boundaries below rewrite that coercion.
     crate::jvm::result_null_checks::check_before_result_coercion(ir);
@@ -279,6 +286,7 @@ fn run_backend_passes_after_plugins(
         &mut facts.emit_time_machines,
         &mut facts.suspended_result_returns,
         &mut facts.intrinsic_probe_continuations,
+        &mut facts.specialized_suspend_lambda_classes,
         null_out_dead_spills,
     ) {
         return Err(SkipReason::Suspend);
@@ -286,11 +294,36 @@ fn run_backend_passes_after_plugins(
     crate::jvm::suspend::finalize_suspend_bridges(ir, &mut facts.bridge_adaptations);
     // After the suspend transform: the body moved onto the static is the finished state machine.
     crate::jvm::suspend_impls::lower_suspend_impls(ir);
-    crate::jvm::ir_emit::realize_lambda_impl_names(ir);
+    // Source lambda names are inputs to lifting. Fix them before reparenting so the lifted-name
+    // pass can retain the final caller-qualified path and ordinal.
+    crate::jvm::debug_local_names::realize_source_lambda_implementation_names(ir);
     crate::jvm::ir_emit::mark_must_inline_lambdas(ir);
     crate::jvm::ir_emit::reparent_lambda_impls(ir);
     // After reparenting: a lifted name is distinct only within the class the method lands in.
     crate::jvm::lifted_names::realize(ir, &facts.override_results);
+    // A specialized suspend lambda is already a real class when suspend lowering completes, but
+    // its JVM name depends on the caller's final placement and lifted spelling. Realize that name
+    // only now and keep the coroutine-emission facts keyed by the same physical identity.
+    facts.specialized_suspend_lambda_classes.realize(
+        ir,
+        facade,
+        lambda_modes,
+        &mut facts.emit_time_machines,
+    );
+    // A specialized reified lambda is already a function class. Its `$$inlined$` name depends on
+    // the caller's lifted spelling, which exists only now.
+    let closure_names =
+        crate::jvm::lambda_classes::rename_specialized_reified_classes(ir, facade, lambda_modes);
+    facts
+        .property_reference_realizations
+        .remap_delegated_owners(&closure_names);
+    // With placement and lifted caller names final, realize JVM-only implementation spellings.
+    crate::jvm::debug_local_names::realize_lambda_implementation_names(
+        ir,
+        facade,
+        lambda_modes,
+        &facts.specialized_suspend_lambda_classes,
+    );
     // Every type the emitter will test or cast against is final now: carry each referenced
     // classifier's checked role into the IR, where type operations read it.
     ir.publish_classifier_roles(classifiers);
@@ -697,8 +730,7 @@ impl JvmBackend {
         &self,
         file: crate::backend::CheckedIrFile<'_>,
         property_realizations: crate::jvm::property_realizations::PropertyRealizations,
-        property_reference_realizations: crate::jvm::property_references::PropertyReferenceRealizations,
-        default_call_operands: crate::jvm::default_call_operands::DefaultCallOperands,
+        mut pass_facts: BackendPassFacts,
         state: &mut JvmState,
         diags: &mut DiagSink,
     ) -> Vec<Artifact> {
@@ -715,11 +747,6 @@ impl JvmBackend {
         let package = ir.package.clone().unwrap_or_default();
         let facade_name = file_class_name(stem, ir.package.as_deref());
         let facade_class = crate::types::type_name(&facade_name);
-        let mut pass_facts = BackendPassFacts {
-            default_call_operands,
-            property_reference_realizations,
-            ..BackendPassFacts::default()
-        };
         if let Err(reason) = run_backend_passes(
             &mut ir,
             &facade_name,
@@ -731,6 +758,7 @@ impl JvmBackend {
             &mut callables,
             &self.cp,
             stems,
+            self.lambda_modes,
             &mut pass_facts,
         ) {
             report_backend_pass_failure(reason, diags);
@@ -837,6 +865,7 @@ impl JvmBackend {
                 property_reference_realizations: &pass_facts.property_reference_realizations,
                 default_call_operands: &pass_facts.default_call_operands,
                 sam_wrapper_realizations: &pass_facts.sam_wrapper_realizations,
+                local_delegate_access: &pass_facts.local_delegate_access,
             },
             &emit_opts,
             &run,
@@ -957,29 +986,50 @@ impl Backend for JvmBackend {
         }
         // A lambda the metafactory cannot adapt is a class of its own; decided before any lambda
         // is numbered, as kotlinc numbers only the lambdas it lifts.
-        if self.lambda_modes.lambdas == crate::jvm::ir_emit::LambdaMode::Indy {
-            crate::jvm::lambda_classes::realize(&mut file.ir, &file.classifiers);
-        }
-        if crate::jvm::local_delegate_accessors::realize(
+        let current_source = crate::ir::IrModuleSource {
+            source: file.source,
+            package: facade_class.namespace(),
+        };
+        let delegate_closures =
+            crate::jvm::local_delegate_closures::Requirements::collect(&file.ir);
+        let mut lambda_methods = match crate::jvm::lambda_classes::realize(
             &mut file.ir,
-            crate::ir::IrModuleSource {
-                source: file.source,
-                package: facade_class.namespace(),
-            },
-        )
-        .is_err()
-        {
-            diags.error(
-                crate::diag::Span::new(0, 0),
-                "internal error: invalid JVM local delegated-property accessor plan",
-            );
-            return Vec::new();
-        }
+            &file.classifiers,
+            &facade,
+            &delegate_closures,
+            current_source,
+            self.lambda_modes.lambdas == crate::jvm::ir_emit::LambdaMode::Indy,
+        ) {
+            Ok(methods) => methods,
+            Err(()) => {
+                diags.error(
+                    crate::diag::Span::new(0, 0),
+                    "internal error: invalid declaration-owned delegate closure realization",
+                );
+                return Vec::new();
+            }
+        };
+        let local_delegate_access = match crate::jvm::local_delegate_accessors::realize(
+            &mut file.ir,
+            current_source,
+            file.stems,
+            &file.classifiers,
+        ) {
+            Ok(access) => access,
+            Err(()) => {
+                diags.error(
+                    crate::diag::Span::new(0, 0),
+                    "internal error: invalid JVM local delegated-property accessor plan",
+                );
+                return Vec::new();
+            }
+        };
         let mut property_reference_realizations = match crate::jvm::property_references::realize(
             &mut file.ir,
             file.stems,
             &file.callables,
             &facade,
+            &local_delegate_access,
         ) {
             Ok(realizations) => realizations,
             Err(target) => {
@@ -992,6 +1042,7 @@ impl Backend for JvmBackend {
                 return Vec::new();
             }
         };
+        lambda_methods.include_owned_methods(&file.ir);
         // A checked annotation constructor names the semantic annotation declaration. The JVM
         // realizes it as a generated concrete implementation before ordinary dependency
         // constructors are assigned physical descriptors/default stubs.
@@ -1043,8 +1094,13 @@ impl Backend for JvmBackend {
         self.emit_streamed_ir(
             file,
             property_realizations,
-            property_reference_realizations,
-            default_call_operands,
+            BackendPassFacts {
+                property_reference_realizations,
+                default_call_operands,
+                local_delegate_access,
+                lambda_methods,
+                ..BackendPassFacts::default()
+            },
             state,
             diags,
         )

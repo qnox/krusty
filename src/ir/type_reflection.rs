@@ -108,6 +108,28 @@ impl IrFile {
         );
     }
 
+    pub(crate) fn copy_lambda_type_parameters(
+        &mut self,
+        source: u32,
+        target: u32,
+        bindings: &HashMap<String, Ty>,
+    ) {
+        let Some(mut parameters) = self
+            .type_reflection
+            .lambda_type_parameters
+            .get(&source)
+            .cloned()
+        else {
+            return;
+        };
+        for parameter in &mut parameters {
+            for (bound, _) in &mut parameter.bounds {
+                *bound = crate::types::ty_subst_keep_unbound(*bound, bindings);
+            }
+        }
+        self.record_lambda_type_parameters(target, parameters);
+    }
+
     /// The type parameters `lambda`'s function type names, directly or through their bounds.
     pub(crate) fn lambda_type_parameters(&self, lambda: u32) -> &[IrTypeParameter] {
         self.type_reflection

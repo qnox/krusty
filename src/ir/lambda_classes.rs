@@ -15,6 +15,8 @@ use super::*;
 /// makes kotlinc use its receiver-parameter convention.
 #[derive(Clone, Debug)]
 pub struct IrLambdaClass {
+    /// A checked public inline declaration exposes this closure to callers in other packages.
+    pub public_inline: bool,
     pub invoke: FunId,
     /// The lambda's function type: the class's `FunctionN` and its generic supertype.
     pub function_type: Ty,

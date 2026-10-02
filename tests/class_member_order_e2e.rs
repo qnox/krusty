@@ -146,6 +146,28 @@ fn lifted_local_functions_finish_postfix_before_lambdas() {
 }
 
 #[test]
+fn a_specialized_escaping_lambda_keeps_the_callers_member_order() {
+    assert_same_member_order(
+        "SpecializedEscapingLambdaOrder",
+        "interface Item\n\
+         class Token : Item\n\
+         var check: (Item) -> Boolean = { false }\n\
+         inline fun <reified T : Item> install() { check = { it is T } }\n\
+         fun caller(): Boolean {\n\
+         \x20   val before = { true }\n\
+         \x20   fun local(): Boolean = before()\n\
+         \x20   install<Token>()\n\
+         \x20   val after = { false }\n\
+         \x20   return local() && check(Token()) && !after()\n\
+         }\n\
+         fun later(): Boolean {\n\
+         \x20   val neighbor = { true }\n\
+         \x20   return neighbor()\n\
+         }\n",
+    );
+}
+
+#[test]
 fn a_facade_appends_private_function_bridges_after_its_members() {
     assert_same_member_order(
         "BridgeOrder",

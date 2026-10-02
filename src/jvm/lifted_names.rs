@@ -7,6 +7,8 @@
 //! taken in the sequence. `N` counts the lambdas and name-clashing local functions of the sequence
 //! in source order, including lambdas that are spliced at inline call sites and so never become a
 //! method. A suspend lambda becomes a class of its own and takes no number.
+//! An inline declaration's delegated-property helper uses `lambda-N`; ordinary delegated locals
+//! keep the same numbering and segment shape as other lambdas.
 //!
 //! Every lambda numbers what it contains on its own, local functions nested in it included, and
 //! spells a lambda among them as the bare number: `one$lambda$0$0`, `one$lambda$0$lf$1`. A local
@@ -19,7 +21,16 @@ use crate::ir::{IrFile, IrLiftingSequence};
 /// Number every lifting sequence of the file and record kotlinc's lifted name of each function
 /// lowered from a lambda or local function. A callable inside one that is not lifted (the body of a
 /// suspend lambda) gets none.
-pub(crate) fn number(ir: &mut IrFile) {
+pub(crate) fn number(
+    ir: &mut IrFile,
+    helper_access: &super::local_delegate_accessors::HelperAccess,
+) {
+    let inline_delegate_sites = ir
+        .lifted_functions
+        .iter()
+        .filter(|(function, _)| helper_access.uses_inline_delegate_name(**function))
+        .filter_map(|(_, (sequence, site))| site.path.last().map(|step| (sequence, step.position)))
+        .collect::<HashSet<_>>();
     let mut segments = HashMap::<(&IrLiftingSequence, u32), String>::new();
     for (sequence, entries) in &ir.lifting_sequences {
         let mut scopes = HashMap::<Option<u32>, (u32, HashSet<&str>)>::new();
@@ -35,10 +46,10 @@ pub(crate) fn number(ir: &mut IrFile) {
                         entry.name.is_none(),
                         "an unnamed lifting role gained a spelling"
                     );
-                    match entry.scope {
-                        None => format!("lambda${}", take(next)),
-                        Some(_) => take(next).to_string(),
-                    }
+                    let inline_delegate = entry.kind
+                        == crate::lifting_provenance::LiftingCallableKind::LocalDelegatedPropertyAccessor
+                        && inline_delegate_sites.contains(&(sequence, position));
+                    unnamed_segment(entry.scope, inline_delegate, next)
                 }
                 crate::lifting_provenance::LiftingCallableKind::LocalFunction => {
                     let name = entry
@@ -59,8 +70,11 @@ pub(crate) fn number(ir: &mut IrFile) {
         .lifted_functions
         .iter()
         .filter_map(|(&function, (sequence, site))| {
-            let mut name = container_segment(&site.container);
-            for step in site.path.iter() {
+            let (mut name, start) = match helper_access.lambda_path_start(function) {
+                Some(start) => ("invoke".to_owned(), start),
+                None => (container_segment(&site.container), 0),
+            };
+            for step in &site.path[start..] {
                 name.push('$');
                 name.push_str(segments.get(&(sequence, step.position))?);
             }
@@ -97,6 +111,11 @@ pub(crate) fn realize(
         let mut holders = HashMap::<(Option<usize>, &str, &str), Vec<u32>>::new();
         for (index, function) in ir.functions.iter().enumerate() {
             let id = index as u32;
+            // Foreign inline templates and typed helper prototypes have a declaration owner in
+            // another file. They cannot collide with members emitted by this facade.
+            if ir.inline_only_fns.contains(&id) {
+                continue;
+            }
             let name = renames
                 .get(&id)
                 .map_or(function.name.as_str(), String::as_str);
@@ -144,9 +163,30 @@ fn take(next: &mut u32) -> u32 {
     *next - 1
 }
 
+fn unnamed_segment(scope: Option<u32>, inline_delegate: bool, next: &mut u32) -> String {
+    let number = take(next);
+    if inline_delegate {
+        format!("lambda-{number}")
+    } else if scope.is_some() {
+        number.to_string()
+    } else {
+        format!("lambda${number}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::container_segment;
+    use super::{container_segment, unnamed_segment};
+
+    #[test]
+    fn ordinary_unnamed_callables_and_inline_delegates_keep_distinct_segments() {
+        let mut next = 0;
+        assert_eq!(unnamed_segment(None, false, &mut next), "lambda$0");
+        assert_eq!(unnamed_segment(Some(0), false, &mut next), "1");
+        assert_eq!(unnamed_segment(None, true, &mut next), "lambda-2");
+        assert_eq!(unnamed_segment(Some(0), true, &mut next), "lambda-3");
+        assert_eq!(next, 4);
+    }
 
     #[test]
     fn special_container_names_take_underscores() {

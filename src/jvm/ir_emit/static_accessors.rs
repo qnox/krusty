@@ -156,10 +156,16 @@ pub(super) fn emission_contexts(
     contexts
 }
 
-/// Whether code reaches a private static `function` through its owner's accessor: exactly when
-/// the code is emitted into another class than the owner.
-pub(super) fn routes_through_accessor(ir: &IrFile, emitted_by_owner: bool, function: u32) -> bool {
-    !emitted_by_owner && ir.method_visibility(function).is_private()
+/// Whether code reaches a private static `function` through its owner's accessor: another class
+/// needs access, and an inline declaration's delegated helper exports the same boundary to copies.
+pub(super) fn routes_through_accessor(
+    ir: &IrFile,
+    helper_access: &crate::jvm::local_delegate_accessors::HelperAccess,
+    emitted_by_owner: bool,
+    function: u32,
+) -> bool {
+    (!emitted_by_owner || helper_access.requires_accessor(function))
+        && ir.method_visibility(function).is_private()
 }
 
 /// The constant naming static method `name` of `owner`: an interface's through an
@@ -196,6 +202,7 @@ pub(super) fn plan(
         property_realizations: env.property_realizations,
         protected_calls: &protected_calls,
         protected: RefCell::default(),
+        helper_access: env.local_delegate_access,
     };
     let mut carriers: HashMap<TypeName, Vec<Use>> = HashMap::new();
     for context in contexts {
@@ -223,6 +230,17 @@ pub(super) fn plan(
         })
         .collect::<HashMap<_, _>>();
     let mut uses = Vec::new();
+    // An inline declaration exports its private helper even when this module has no caller in
+    // another class: compiled clients must have the same public synthetic access boundary.
+    uses.extend(
+        env.local_delegate_access
+            .exported()
+            .map(|(function, owner)| Use {
+                line: ir.fn_decl_lines.get(&function).copied().unwrap_or(0),
+                owner: StaticOwner::of(owner),
+                accessor: StaticAccessor::Function(function),
+            }),
+    );
     for context in contexts {
         let owner = context.class.map(|index| ir.classes[index].fq_name);
         match owner.and_then(|owner| carriers.get(&owner).map(|uses| (owner, uses))) {
@@ -282,9 +300,9 @@ fn synthesized_carrier_uses(walk: &Walk, env: &EmitEnv, class: &IrClass) -> Vec<
             )
     }) {
         let owner = StaticOwner::of(reference.call_owner);
-        if let Some(target) = function_reference_target(ir, reference)
-            .filter(|target| routes_through_accessor(ir, context == owner, *target))
-        {
+        if let Some(target) = function_reference_target(ir, reference).filter(|target| {
+            routes_through_accessor(ir, env.local_delegate_access, context == owner, *target)
+        }) {
             uses.push(Use {
                 line: 0,
                 owner,
@@ -398,6 +416,7 @@ struct Walk<'a> {
     protected_calls: &'a HashMap<crate::ir::ExprId, ProtectedMemberAccessBridge>,
     /// Each protected-member accessor found, once per owner and signature.
     protected: RefCell<Vec<ProtectedMemberAccessBridge>>,
+    helper_access: &'a crate::jvm::local_delegate_accessors::HelperAccess,
 }
 
 impl Walk<'_> {
@@ -471,7 +490,7 @@ impl Walk<'_> {
             };
             let needed = match accessor {
                 StaticAccessor::Function(function) => {
-                    routes_through_accessor(ir, context == owner, function)
+                    routes_through_accessor(ir, self.helper_access, context == owner, function)
                 }
                 StaticAccessor::Getter(_)
                 | StaticAccessor::Setter(_)
@@ -497,7 +516,9 @@ impl Walk<'_> {
             IrExpr::Call {
                 callee: Callee::Local(function),
                 ..
-            } if !self.class_member_fids.contains(function) => {
+            } if !self.class_member_fids.contains(function)
+                && self.helper_access.foreign_owner(*function).is_none() =>
+            {
                 Some((StaticOwner::Facade, StaticAccessor::Function(*function)))
             }
             IrExpr::Call {

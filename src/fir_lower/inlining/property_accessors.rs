@@ -14,8 +14,7 @@ use crate::types::{stored_value_ty, ty_subst_keep_unbound, Ty};
 
 use super::super::{FirFileLoweringFailure, InlineAccessorFailure as InlineFail};
 use super::{
-    mark_subtree, produce_sole_tail_return, rebase_values, specialize_dependency_substitutions,
-    specialize_expression_facts, specialize_types, value_indices,
+    mark_subtree, produce_sole_tail_return, rebase_values, specialize_inline_copy, value_indices,
 };
 
 /// Splice `inline` property accessors at the uses the checker recorded.
@@ -220,15 +219,9 @@ fn expand_inline_accessor(
     let mut returns = Vec::new();
     for &(source, copy) in &copies {
         ir.mark_inline_copy(copy);
-        specialize_expression_facts(ir, copy, &bindings);
+        specialize_inline_copy(ir, copy, &bindings, &reified_bindings)
+            .ok_or_else(|| failure(accessor, InlineFail::MissingCopy))?;
         carry_nested_splice(ir, source, copy, &bindings);
-        let Some(expression) = ir.exprs.get_mut(copy as usize) else {
-            return Err(failure(accessor, InlineFail::MissingCopy));
-        };
-        specialize_types(expression, &bindings);
-        if let Some(expression) = ir.exprs.get_mut(copy as usize) {
-            specialize_dependency_substitutions(expression, &reified_bindings);
-        }
         if protected.contains(&source) {
             continue;
         }

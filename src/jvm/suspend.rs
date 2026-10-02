@@ -57,12 +57,16 @@ use live_scopes::{
 };
 mod safe_coroutine_points;
 use safe_coroutine_points::realize_safe_coroutine_points;
+mod residual_trace;
+use residual_trace::{trace_residual_parents, trace_residual_suspension};
 mod spill_layout;
 use spill_layout::{
     is_rematerialized_null, kind_positions, rematerialized_nulls, spill_field_ty, spill_order,
     suspension_points_in_order, SpillLayout,
 };
+mod specialized_lambda_classes;
 mod statement_normalization;
+pub(crate) use specialized_lambda_classes::SpecializedLambdaClasses;
 mod suspend_lambda;
 mod tail_forward;
 mod value_class_results;
@@ -157,51 +161,6 @@ fn suspend_parameter_ty(ir: &IrFile, function: u32, parameter: usize, semantic: 
         .unwrap_or(semantic)
 }
 
-/// Trace a residual suspending expression as an id-labelled tree. This is intentionally kept next to
-/// the suspend pass rather than in the generic IR printer: it is only useful when normalization leaves
-/// a suspension below a statement shape the state-machine flattener does not model.
-fn trace_residual_suspension(ir: &IrFile, expression: ExprId, depth: usize) {
-    crate::trace_compiler!(
-        "suspend",
-        "flatten residual {}{expression}: {:?}",
-        "  ".repeat(depth),
-        ir.exprs[expression as usize]
-    );
-    if depth >= 12 {
-        return;
-    }
-    let mut children = Vec::new();
-    crate::ir::for_each_child(&ir.exprs, expression, &mut |child| children.push(child));
-    for child in children {
-        trace_residual_suspension(ir, child, depth + 1);
-    }
-}
-
-fn trace_residual_parents(ir: &IrFile, expression: ExprId) {
-    fn walk(ir: &IrFile, child: ExprId, depth: usize, seen: &mut HashSet<ExprId>) {
-        if depth >= 10 || !seen.insert(child) {
-            return;
-        }
-        for (parent, node) in ir.exprs.iter().enumerate() {
-            let mut contains = false;
-            for_each_child(&ir.exprs, parent as ExprId, &mut |candidate| {
-                contains = contains || candidate == child;
-            });
-            if contains {
-                crate::trace_compiler!(
-                    "suspend",
-                    "flatten parent {}{}: {:?}",
-                    "  ".repeat(depth),
-                    parent,
-                    node
-                );
-                walk(ir, parent as ExprId, depth + 1, seen);
-            }
-        }
-    }
-    walk(ir, expression, 0, &mut HashSet::new());
-}
-
 /// Rewrite every `suspend fun` in `ir` to the JVM CPS ABI. `facade` is the file's facade class internal
 /// name (e.g. `SKt`) — the continuation class for `bar` is `SKt$bar$1`. Returns `false` (skip the whole
 /// file, never miscompile) on any suspend shape this pass can't yet transform.
@@ -214,6 +173,7 @@ pub(crate) fn lower_suspend(
     emit_time_machines: &mut EmitTimeMachines,
     suspended_result_returns: &mut SuspendedResultReturns,
     intrinsic_probe_continuations: &mut IntrinsicProbeContinuations,
+    specialized_lambda_classes: &mut SpecializedLambdaClasses,
     null_out_dead_spills: bool,
 ) -> bool {
     realize_safe_coroutine_points(ir);
@@ -222,6 +182,7 @@ pub(crate) fn lower_suspend(
         default_call_operands,
         suspended_result_returns,
         intrinsic_probe_continuations,
+        specialized_lambda_classes,
     };
     let suspend_set: HashSet<u32> = ir.suspend_funs.iter().copied().collect();
     // Snapshot every function's *declared* (pre-CPS) return type, so hoisted suspension temps are typed
@@ -1756,6 +1717,7 @@ fn build_state_machine(
         default_call_operands,
         suspended_result_returns,
         intrinsic_probe_continuations,
+        specialized_lambda_classes: _,
     } = outputs;
     crate::trace_compiler!(
         "suspend",

@@ -261,6 +261,22 @@ fn inline_extension_property_accessor_sees_its_reified_type_parameter() {
             .get(),
         Ty::String
     );
+    let FirExprKind::PropertyRead {
+        target:
+            FirPropertyTarget::Module {
+                inline_splice: Some(splice),
+                ..
+            },
+        ..
+    } = &body
+        .expr(root_expression(&body))
+        .expect("inline extension property read")
+        .kind
+    else {
+        panic!("inline property read keeps its exact accessor splice")
+    };
+    assert_eq!(splice.substitutions.len(), 1);
+    assert!(splice.substitutions[0].reified);
 }
 
 #[test]

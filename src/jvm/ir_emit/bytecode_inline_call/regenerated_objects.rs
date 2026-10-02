@@ -130,7 +130,11 @@ impl CallObjects<'_> {
     /// kotlinc's `TypeParameterMappings` writes for it (`mapTypeParameter`).
     fn type_arguments(&self, site: &RegenerationSite<'_>) -> Option<Vec<(String, String)>> {
         let formatter = JvmSignatureFormatter::with_symbols(self.ir, site.symbols, self.run);
-        let Some(arguments) = self.ir.reified_call_subst.get(&self.call_expression) else {
+        let Some(arguments) = self
+            .ir
+            .inline_call_type_arguments
+            .get(&self.call_expression)
+        else {
             return Some(Vec::new());
         };
         arguments
@@ -146,6 +150,7 @@ impl AnonymousObjects for CallObjects<'_> {
         class: &str,
         constructor_desc: &str,
         lambdas: &[ObjectLambda<'_>],
+        prior_classes: &[(String, String)],
     ) -> Result<RegeneratedObject, InlineError> {
         let unsupported =
             |reason| InlineError::Regeneration(RegenerationError::Unsupported(reason));
@@ -187,6 +192,7 @@ impl AnonymousObjects for CallObjects<'_> {
                 public_inline_scope: false,
             },
             type_arguments: &type_arguments,
+            prior_classes,
             major: self.major,
             metadata_version: &METADATA_VERSION,
             lambdas,
@@ -209,7 +215,11 @@ impl AnonymousObjects for CallObjects<'_> {
         })
     }
 
-    fn regenerate_singleton(&mut self, class: &str) -> Result<RegeneratedObject, InlineError> {
+    fn regenerate_singleton(
+        &mut self,
+        class: &str,
+        prior_classes: &[(String, String)],
+    ) -> Result<RegeneratedObject, InlineError> {
         let unsupported =
             |reason| InlineError::Regeneration(RegenerationError::Unsupported(reason));
         let bytes = self.bodies.class_file(class).ok_or(unsupported(
@@ -228,6 +238,6 @@ impl AnonymousObjects for CallObjects<'_> {
             return Err(unsupported("more than one constructor"));
         }
         let descriptor = constructor.desc.clone();
-        self.regenerate(class, &descriptor, &[])
+        self.regenerate(class, &descriptor, &[], prior_classes)
     }
 }

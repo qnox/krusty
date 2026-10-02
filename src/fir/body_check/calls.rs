@@ -3,49 +3,9 @@
 use super::inline_body_plan::publish as publish_inline_body_plan;
 use super::*;
 
-pub(super) struct MemberExtensionFirTarget {
-    pub(super) target: FirCallTarget,
-    pub(super) substitutions: Box<[FirTypeSubstitution]>,
-    /// Source-visible semantic parameters. The external target separately inserts its extension
-    /// receiver into the provider parameter list.
-    pub(super) parameters: Vec<Ty>,
-    pub(super) extension_parameter: Option<u32>,
-}
-
-struct ExternalCallTarget<'a> {
-    declaration: ExternalCallableId,
-    receiver: Option<Ty>,
-    declared_receiver: Option<Ty>,
-    parameters: Vec<Ty>,
-    result: Ty,
-    declared_result: Option<Ty>,
-    overridden_results: &'a [Ty],
-    suspend: bool,
-    can_inline: bool,
-    inline_plan: Option<&'a crate::libraries::InlineBodyPlan>,
-    inline_receiver_parameter: Option<usize>,
-}
-
-/// One already-selected operator target. Context parameters stay separate while source operands
-/// are mapped, then join the value parameters in the checked call's semantic parameter list.
-pub(super) struct SelectedOperatorTarget {
-    pub(super) target: FirCallTarget,
-    pub(super) extension: bool,
-    pub(super) context_parameters: Box<[ResolvedTy]>,
-    pub(super) value_parameters: Box<[ResolvedTy]>,
-    pub(super) vararg_index: Option<usize>,
-    pub(super) context_arguments: Vec<Option<crate::resolve::ResolvedContextArgument>>,
-}
-
-impl SelectedOperatorTarget {
-    pub(super) fn parameter_types(&self) -> Box<[ResolvedTy]> {
-        self.context_parameters
-            .iter()
-            .chain(self.value_parameters.iter())
-            .copied()
-            .collect()
-    }
-}
+mod targets;
+use targets::ExternalCallTarget;
+pub(super) use targets::{MemberExtensionFirTarget, SelectedOperatorTarget};
 
 use crate::resolve::ResolvedCall;
 
@@ -652,6 +612,9 @@ impl BodyFirChecker<'_> {
                     can_inline: member.inline.can_inline(),
                     inline_plan: member.inline_body_plan.as_deref(),
                     inline_receiver_parameter: None,
+                    reified_type_parameter_ordinals: &member
+                        .call_sig
+                        .reified_type_parameter_ordinals,
                 },
             )?
         };
@@ -921,6 +884,9 @@ impl BodyFirChecker<'_> {
                         can_inline: extension.callable.inline.can_inline(),
                         inline_plan,
                         inline_receiver_parameter: None,
+                        reified_type_parameter_ordinals: &extension
+                            .callable
+                            .reified_type_parameter_ordinals,
                     },
                 )?;
                 let FirCallTarget::External {
@@ -1374,6 +1340,15 @@ impl BodyFirChecker<'_> {
                                 BodyCheckFailureKind::MissingStableCallTarget,
                             )
                         })?;
+                let header = self
+                    .index
+                    .type_parameter_header(parameter)
+                    .ok_or_else(|| {
+                        self.failure(
+                            self.file.expr_span(expression),
+                            BodyCheckFailureKind::MissingStableCallTarget,
+                        )
+                    })?;
                 let value = argument.ok_or_else(|| {
                     self.failure(
                         self.file.expr_span(expression),
@@ -1382,6 +1357,7 @@ impl BodyFirChecker<'_> {
                 })?;
                 Ok(FirTypeSubstitution {
                     parameter: parameter.into(),
+                    reified: header.flags.is_reified(),
                     value: ResolvedTy::new(value).map_err(|error| {
                         self.failure(
                             self.file.expr_span(expression),
@@ -1424,6 +1400,7 @@ impl BodyFirChecker<'_> {
                 can_inline: callable.inline.can_inline(),
                 inline_plan,
                 inline_receiver_parameter,
+                reified_type_parameter_ordinals: &callable.reified_type_parameter_ordinals,
             },
         )?;
         let FirCallTarget::External {
@@ -1458,6 +1435,7 @@ impl BodyFirChecker<'_> {
             ret,
             inline,
             inline_body_plan,
+            reified_type_parameter_ordinals,
             suspend,
             declared_ret,
             overridden_results,
@@ -1548,6 +1526,7 @@ impl BodyFirChecker<'_> {
                 can_inline: inline.can_inline(),
                 inline_plan: inline_body_plan.as_deref(),
                 inline_receiver_parameter: None,
+                reified_type_parameter_ordinals,
             },
         )?;
         let extension_parameter = u32::try_from(extension_parameter).map_err(|_| {
@@ -1618,6 +1597,7 @@ impl BodyFirChecker<'_> {
             can_inline,
             inline_plan,
             inline_receiver_parameter,
+            reified_type_parameter_ordinals,
         } = call;
         let resolved = |ty| {
             ResolvedTy::new(ty).map_err(|error| {
@@ -1667,6 +1647,7 @@ impl BodyFirChecker<'_> {
                         callable: declaration,
                         ordinal,
                     },
+                    reified: reified_type_parameter_ordinals.contains(&ordinal),
                     value: resolved(value)?,
                     additional_bounds,
                 })
@@ -2333,6 +2314,10 @@ impl BodyFirChecker<'_> {
                 can_inline: selected.member.inline.can_inline(),
                 inline_plan: selected.member.inline_body_plan.as_deref(),
                 inline_receiver_parameter: None,
+                reified_type_parameter_ordinals: &selected
+                    .member
+                    .call_sig
+                    .reified_type_parameter_ordinals,
             },
         )?;
         let FirCallTarget::External {

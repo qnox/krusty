@@ -31,6 +31,7 @@ impl super::Classpath {
                 visibility: function.visibility,
                 is_inline: function.is_inline,
                 has_reified_type_params: function.has_reified_type_params,
+                reified_type_parameter_ordinals: function.reified_type_parameter_ordinals.clone(),
                 is_suspend: function.is_suspend,
                 is_operator: function.is_operator,
                 is_infix: function.is_infix,

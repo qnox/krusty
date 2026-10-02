@@ -68,6 +68,9 @@ struct FunctionExtras {
     context_parameter_kinds: Vec<ContextParameterKind>,
     /// Function formals carrying Kotlin's internal `@OnlyInputTypes` inference policy.
     only_input_type_formals: Vec<String>,
+    /// Declaration type parameters carrying Kotlin's `reified` modifier, in generic-signature
+    /// order. Keeping the complete bitmap preserves mixed ordinary/reified declarations.
+    reified_type_parameter_ordinals: Vec<u32>,
     /// Compiler-known strict-equality parameter refinement decoded from fields 9/10.
     equality_bound: Option<Ty>,
 }
@@ -87,6 +90,7 @@ pub(super) struct DecodedFunction {
     pub equality_bound: Option<Ty>,
     pub return_value_status: ReturnValueStatus,
     pub only_input_type_formals: Vec<String>,
+    pub reified_type_parameter_ordinals: Vec<u32>,
     pub context_params: Vec<MetaValueParam>,
     pub context_parameter_kinds: Vec<ContextParameterKind>,
     pub annotations: Vec<TypeName>,
@@ -96,11 +100,13 @@ fn pack_extras(
     context_params: Vec<MetaValueParam>,
     context_parameter_kinds: Vec<ContextParameterKind>,
     only_input_type_formals: Vec<String>,
+    reified_type_parameter_ordinals: Vec<u32>,
     equality_bound: Option<Ty>,
 ) -> Option<Box<FunctionExtras>> {
     if context_params.is_empty()
         && context_parameter_kinds.is_empty()
         && only_input_type_formals.is_empty()
+        && reified_type_parameter_ordinals.is_empty()
         && equality_bound.is_none()
     {
         None
@@ -109,6 +115,7 @@ fn pack_extras(
             context_params,
             context_parameter_kinds,
             only_input_type_formals,
+            reified_type_parameter_ordinals,
             equality_bound,
         }))
     }
@@ -133,6 +140,7 @@ impl MetaFn {
                 decoded.context_params,
                 decoded.context_parameter_kinds,
                 decoded.only_input_type_formals,
+                decoded.reified_type_parameter_ordinals,
                 decoded.equality_bound,
             ),
         }
@@ -213,6 +221,13 @@ impl MetaFn {
         }
     }
 
+    pub fn reified_type_parameter_ordinals(&self) -> &[u32] {
+        match &self.extras {
+            Some(extras) => extras.reified_type_parameter_ordinals.as_slice(),
+            None => &[],
+        }
+    }
+
     pub fn equality_bound(&self) -> Option<Ty> {
         self.extras
             .as_ref()
@@ -273,6 +288,7 @@ impl MetaFn {
         }
         sig.platform_nullable_params = parameters.iter().map(|p| p.nullable()).collect();
         sig.only_input_type_formals = self.only_input_type_formals().to_vec();
+        sig.reified_type_parameter_ordinals = self.reified_type_parameter_ordinals().to_vec();
         sig.no_infer_params = parameters
             .iter()
             .map(|parameter| parameter.no_infer())
@@ -322,6 +338,7 @@ mod tests {
             equality_bound: None,
             return_value_status: ReturnValueStatus::Unspecified,
             only_input_type_formals: Vec::new(),
+            reified_type_parameter_ordinals: Vec::new(),
             context_params: Vec::new(),
             context_parameter_kinds: Vec::new(),
             annotations: Vec::new(),
@@ -335,7 +352,7 @@ mod tests {
         assert!(function.context_parameter_kinds().is_empty());
         assert!(function.only_input_type_formals().is_empty());
         assert_eq!(function.equality_bound(), None);
-        // Three empty vectors and an `Option<Ty>` used to sit on every function. The side
+        // Four empty vectors and an `Option<Ty>` used to sit on every function. The side
         // record is one pointer. Pin the size so those fields cannot move back onto `MetaFn`.
         assert_eq!(size_of::<MetaFn>(), 296);
     }
@@ -353,6 +370,7 @@ mod tests {
         }];
         decoded.context_parameter_kinds = vec![ContextParameterKind::Named];
         decoded.only_input_type_formals = vec!["T".to_string()];
+        decoded.reified_type_parameter_ordinals = vec![1];
         decoded.equality_bound = Some(equality_bound);
         let function = MetaFn::from_decoded(decoded);
         assert_eq!(function.context_params().len(), 1);
@@ -362,6 +380,7 @@ mod tests {
             &[ContextParameterKind::Named]
         );
         assert_eq!(function.only_input_type_formals(), &["T".to_string()]);
+        assert_eq!(function.reified_type_parameter_ordinals(), &[1]);
         assert_eq!(function.equality_bound(), Some(equality_bound));
         assert_eq!(function.context_count(), 1);
     }

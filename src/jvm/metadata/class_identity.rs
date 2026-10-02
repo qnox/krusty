@@ -2,6 +2,35 @@
 
 use super::*;
 
+pub(super) fn class_kind(flags: u64) -> TypeKind {
+    match (flags >> 6) & 0x7 {
+        1 => TypeKind::Interface,
+        2 => TypeKind::Enum,
+        4 => TypeKind::Annotation,
+        5 | 6 => TypeKind::Object,
+        _ => TypeKind::Class,
+    }
+}
+
+/// Kotlin `Class.flags`. The protobuf default is PUBLIC FINAL (`6`); decode the word once through
+/// this boundary helper so every individual class flag uses identical wire-format defaulting.
+pub(super) fn class_flags(ctx: &MetaCtx<'_>) -> u64 {
+    let mut flags = 6u64;
+    let mut pb = Pb::new(ctx.msg);
+    while !pb.at_end() {
+        let Some(tag) = pb.varint() else { break };
+        match (tag >> 3, tag & 7) {
+            (1, 0) => flags = pb.varint().unwrap_or(6),
+            (_, wire) => {
+                if pb.skip(wire).is_none() {
+                    break;
+                }
+            }
+        }
+    }
+    flags
+}
+
 /// `Class.fq_name` (field 3) as a Kotlin qualified name. Metadata spells a class name with `/`
 /// between package segments and `.` between classes (`lib/Outer.Nested`); the qualified name dots
 /// both, and neither character can occur inside a JVM identifier.

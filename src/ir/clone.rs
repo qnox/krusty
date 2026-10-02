@@ -5,7 +5,8 @@
 
 use std::collections::HashMap;
 
-use super::{ExprId, IrCheckedArgument, IrCheckedOperation, IrExpr, IrFile};
+use super::{ExprId, FunId, IrCheckedArgument, IrCheckedOperation, IrExpr, IrFile, IrFunction};
+use crate::types::{ty_subst_keep_unbound, Ty};
 
 /// Clone `root` and every reachable expression, preserving sparse semantic/source facts. Returns
 /// the new root and the complete old-to-new identity map.
@@ -337,6 +338,8 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     ir.copy_inline_copy_mark(source, target);
     copy_map!(fir_origins);
     copy_map!(expression_owners);
+    copy_map!(callable_reference_provenance);
+    copy_map!(callable_reference_enclosures);
     copy_map!(checked_return_depths);
     copy_map!(annotation_constructions);
     copy_map!(generated_secondary_constructor_calls);
@@ -356,6 +359,7 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     copy_map!(short_circuits);
     copy_map!(physical_types);
     copy_map!(reified_call_subst);
+    copy_map!(inline_call_type_arguments);
     copy_map!(ext_call_source_receiver);
     copy_map!(dispatch_classes);
     copy_map!(call_declared_ret);
@@ -432,5 +436,308 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     }
     if ir.module_inline_calls.contains(&source) {
         ir.module_inline_calls.insert(target);
+    }
+}
+
+/// Copy one lambda implementation and the facts that belong to that implementation.
+///
+/// This is not a general function clone. Declaration identity stays on `source`: the callable map,
+/// the facade slot, and the inline-declaration sets. Target realization tables stay empty so a
+/// later backend pass records the copy itself. `specialization` is the expansion that created the
+/// copy. Classes that already list `source` are read from [`IrFile::class_method_owners`].
+pub(crate) fn clone_function_implementation(
+    ir: &mut IrFile,
+    source: FunId,
+    shape: IrFunction,
+    bindings: &HashMap<String, Ty>,
+    specialization: super::IrSpecializedFunction,
+) -> FunId {
+    let owners = ir
+        .class_method_owners
+        .get(&source)
+        .cloned()
+        .unwrap_or_default();
+    let target = ir.add_fun(shape);
+    ir.specialized_functions.insert(
+        target,
+        super::IrSpecializedFunction {
+            source,
+            ..specialization
+        },
+    );
+    copy_function_implementation_facts(ir, source, target, bindings);
+    for class in owners {
+        ir.classes[class as usize].methods.push(target);
+        ir.class_method_owners
+            .entry(target)
+            .or_default()
+            .push(class);
+    }
+    target
+}
+
+fn copy_function_implementation_facts(
+    ir: &mut IrFile,
+    source: FunId,
+    target: FunId,
+    bindings: &HashMap<String, Ty>,
+) {
+    macro_rules! copy_map {
+        ($field:ident) => {
+            if let Some(value) = ir.$field.get(&source).cloned() {
+                ir.$field.insert(target, value);
+            }
+        };
+    }
+    macro_rules! copy_set {
+        ($field:ident) => {
+            if ir.$field.contains(&source) {
+                ir.$field.insert(target);
+            }
+        };
+    }
+
+    ir.set_method_visibility(target, ir.method_visibility(source));
+    copy_map!(fn_source_names);
+    copy_map!(fn_params);
+    copy_map!(fn_param_declared_nullable);
+    copy_map!(fn_declared_spellings);
+    copy_map!(fn_context_counts);
+    copy_map!(fn_param_annotations);
+    copy_map!(fn_param_no_infer);
+    copy_map!(fn_return_value_statuses);
+    copy_map!(fn_varargs);
+    copy_map!(fn_decl_lines);
+    copy_map!(fn_close_lines);
+    copy_map!(fn_sig_lines);
+    copy_map!(fn_signature_offsets);
+    copy_map!(fn_source_order);
+    copy_map!(fn_continuation_ordinal);
+    copy_set!(fn_debug_locals);
+    copy_map!(lambda_own_params_from);
+    copy_map!(lambda_enclosures);
+    copy_map!(lambda_sam_signature);
+    if let Some((parameters, result)) = ir.lambda_sam_signature.get_mut(&target) {
+        for parameter in parameters.iter_mut() {
+            *parameter = ty_subst_keep_unbound(*parameter, bindings);
+        }
+        *result = ty_subst_keep_unbound(*result, bindings);
+    }
+    copy_map!(lifted_functions);
+    copy_map!(lifted_names);
+    copy_map!(function_annotations);
+    copy_map!(member_semantic_sigs);
+    if let Some((parameters, result)) = ir.member_semantic_sigs.get_mut(&target) {
+        for parameter in parameters.iter_mut() {
+            *parameter = ty_subst_keep_unbound(*parameter, bindings);
+        }
+        *result = ty_subst_keep_unbound(*result, bindings);
+    }
+    copy_map!(signatures);
+    if let Some(signature) = ir.signatures.get_mut(&target) {
+        for parameter in &mut signature.params {
+            *parameter = ty_subst_keep_unbound(*parameter, bindings);
+        }
+        if let Some(result) = signature.ret.as_mut() {
+            *result = ty_subst_keep_unbound(*result, bindings);
+        }
+        for supertype in &mut signature.supers {
+            *supertype = ty_subst_keep_unbound(*supertype, bindings);
+        }
+        for parameter in &mut signature.type_params {
+            for (bound, _) in &mut parameter.bounds {
+                *bound = ty_subst_keep_unbound(*bound, bindings);
+            }
+        }
+    }
+    copy_map!(suspend_declared_sigs);
+    if let Some((parameters, result)) = ir.suspend_declared_sigs.get_mut(&target) {
+        for parameter in parameters.iter_mut() {
+            *parameter = ty_subst_keep_unbound(*parameter, bindings);
+        }
+        *result = ty_subst_keep_unbound(*result, bindings);
+    }
+    copy_map!(value_class_suspend_returns);
+    copy_set!(extension_receiver_fns);
+    copy_set!(function_typed_parameter_fns);
+    copy_set!(operator_fns);
+    copy_set!(infix_fns);
+    copy_set!(tailrec_fns);
+    copy_set!(open_methods);
+    copy_set!(must_inline_lambdas);
+    copy_set!(synthetic_methods);
+    copy_set!(bridge_methods);
+    copy_set!(deprecated_methods);
+    copy_set!(inline_only_fns);
+    copy_set!(unlooped_tailrec);
+    if let Some(owner) = ir.class_static_local_functions.get(&source).copied() {
+        ir.class_static_local_functions.insert(target, owner);
+    }
+    copy_set!(serialization_cache_methods);
+    if ir.suspend_funs.contains(&source) {
+        ir.suspend_funs.push(target);
+    }
+    ir.copy_lambda_type_parameters(source, target, bindings);
+    // A specialization is another implementation of the same source lambda. Identity, ordinals, and
+    // class provenance stay on that source record; [`super::IrSpecializedFunction`] is the generated
+    // copy's identity.
+    if let Some(origin) = ir.lambda_origins.get(&source).cloned() {
+        ir.lambda_origins.insert(target, origin);
+    }
+    let captures = ir
+        .shared_capture_parameters
+        .iter()
+        .filter(|((function, _), _)| *function == source)
+        .map(|((_, ordinal), ty)| (*ordinal, *ty))
+        .collect::<Vec<_>>();
+    for (ordinal, ty) in captures {
+        ir.shared_capture_parameters
+            .insert((target, ordinal), ty_subst_keep_unbound(ty, bindings));
+    }
+    // Left on the source. These name the declaration, not one specialized implementation of it:
+    // `checked_callable_functions`, `top_level_function_fids`, `public_inline_functions`,
+    // `top_level_inline_functions`, `inline_fns`, `foreign_inline_templates`,
+    // `function_reference_access_bridges`, and `interface_delegation_forwarders`.
+    // JVM realization tables (`jvm_*`, `lambda_sam_jvm_signature`, `lambda_class_names`,
+    // `generated_static_facts`, `vc_declared_sigs`, `default_stub_boxed_params`) stay empty so the
+    // target pass that owns them records the copy.
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::test_support::blank_class;
+    use super::super::{
+        IrEnclosure, IrFile, IrFunction, IrGenericSig, IrSpecializedFunction, IrTypeParameter,
+    };
+    use super::{clone_expression_dag, clone_function_implementation};
+    use crate::types::{Ty, Visibility};
+
+    fn function(name: &str, parameter: Ty) -> IrFunction {
+        IrFunction {
+            name: name.to_string(),
+            params: vec![parameter],
+            ret: Ty::obj("kotlin/Any"),
+            body: None,
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: Vec::new(),
+        }
+    }
+
+    fn signature(parameter: Ty) -> IrGenericSig {
+        IrGenericSig {
+            type_params: vec![IrTypeParameter {
+                name: "T".to_string(),
+                semantic_name: "T".to_string(),
+                bounds: vec![(Ty::obj("kotlin/Any"), false)],
+                variance: Default::default(),
+                reified: true,
+            }],
+            params: vec![parameter],
+            ret: Some(parameter),
+            supers: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn expression_clone_keeps_full_inline_arguments_distinct_from_reified_arguments() {
+        let mut ir = IrFile::default();
+        let source = ir.add_expr(super::super::IrExpr::UnitInstance);
+        let full = vec![("T".to_string(), Ty::String), ("R".to_string(), Ty::Int)];
+        let reified = vec![("R".to_string(), Ty::Int)];
+        ir.inline_call_type_arguments.insert(source, full.clone());
+        ir.reified_call_subst.insert(source, reified.clone());
+
+        let (target, copies) = clone_expression_dag(&mut ir, source);
+
+        assert_eq!(copies, std::collections::HashMap::from([(source, target)]));
+        assert_eq!(ir.inline_call_type_arguments.len(), 2);
+        assert_eq!(ir.inline_call_type_arguments.get(&source), Some(&full));
+        assert_eq!(ir.inline_call_type_arguments.get(&target), Some(&full));
+        assert_eq!(ir.reified_call_subst.len(), 2);
+        assert_eq!(ir.reified_call_subst.get(&source), Some(&reified));
+        assert_eq!(ir.reified_call_subst.get(&target), Some(&reified));
+    }
+
+    #[test]
+    fn clone_function_implementation_copies_facts_and_keeps_the_declaration() {
+        let mut ir = IrFile::default();
+        let parameter = Ty::ty_param("T", Ty::obj("kotlin/Any"));
+        let source = ir.add_fun(function("check", parameter));
+        ir.set_method_visibility(source, Visibility::Private);
+        ir.fn_decl_lines.insert(source, 4);
+        ir.inline_fns.insert(source);
+        ir.signatures.insert(source, signature(parameter));
+        ir.record_lambda_type_parameters(source, vec![signature(parameter).type_params[0].clone()]);
+        let class = ir.add_class(blank_class("Holder"));
+        ir.classes[class as usize].methods.push(source);
+        ir.note_class_method(class, source);
+        let caller = ir.add_fun(function("box", Ty::obj("kotlin/Int")));
+        let specialized = Ty::obj("sample/Token");
+        let bindings = std::collections::HashMap::from([("T".to_string(), specialized)]);
+
+        let first = clone_function_implementation(
+            &mut ir,
+            source,
+            function("check", specialized),
+            &bindings,
+            IrSpecializedFunction {
+                source: caller,
+                caller_declaration: crate::fir::DeclarationId::from_raw(7),
+                caller: Some(IrEnclosure::Function(caller)),
+                caller_is_default: false,
+                caller_source_name: "box".to_string(),
+                inline_callee: crate::fir::CallableId::from_raw(11),
+                inline_callee_source_name: "defineFunc".to_string(),
+                parent: None,
+            },
+        );
+        let second = clone_function_implementation(
+            &mut ir,
+            source,
+            function("check", specialized),
+            &bindings,
+            IrSpecializedFunction {
+                source,
+                caller_declaration: crate::fir::DeclarationId::from_raw(7),
+                caller: Some(IrEnclosure::Function(caller)),
+                caller_is_default: false,
+                caller_source_name: "box".to_string(),
+                inline_callee: crate::fir::CallableId::from_raw(11),
+                inline_callee_source_name: "defineFunc".to_string(),
+                parent: None,
+            },
+        );
+
+        assert_ne!(first, source);
+        assert_ne!(second, first);
+        assert_eq!(ir.functions[source as usize].params, vec![parameter]);
+        assert_eq!(ir.functions[first as usize].params, vec![specialized]);
+        assert_eq!(ir.method_visibility(first), Visibility::Private);
+        assert_eq!(ir.fn_decl_lines.get(&first), Some(&4));
+        assert!(ir.inline_fns.contains(&source));
+        assert!(!ir.inline_fns.contains(&first));
+        assert!(!ir.specialized_functions.contains_key(&source));
+        assert_eq!(
+            ir.classes[class as usize].methods,
+            vec![source, first, second]
+        );
+        assert_eq!(ir.signatures[&source].params, vec![parameter]);
+        assert_eq!(ir.signatures[&source].ret, Some(parameter));
+        assert_eq!(ir.signatures[&first].params, vec![specialized]);
+        assert_eq!(ir.signatures[&first].ret, Some(specialized));
+        assert_eq!(ir.lambda_type_parameters(first).len(), 1);
+        assert_eq!(
+            ir.lambda_type_parameters(first)[0].bounds[0].0,
+            Ty::obj("kotlin/Any")
+        );
+        let recorded = &ir.specialized_functions[&first];
+        assert_eq!(recorded.source, source);
+        assert_eq!(recorded.caller, Some(IrEnclosure::Function(caller)));
+        assert_eq!(recorded.inline_callee, crate::fir::CallableId::from_raw(11));
+        assert_eq!(recorded.inline_callee_source_name, "defineFunc");
+        assert_eq!(recorded.parent, None);
+        assert_eq!(ir.specialized_functions[&second].parent, None);
+        assert_eq!(ir.class_method_owners.get(&first), Some(&vec![class]));
     }
 }

@@ -338,7 +338,7 @@ pub(super) fn realize(
         })?;
         let physical_name = callable.physical_name().to_string();
         let kind = callable.kind;
-        publish_reified_substitutions(ir, expression, target, &callable, &substitutions);
+        publish_inline_substitutions(ir, expression, target, &callable, &substitutions);
         let declared_params = callable.declared_params.clone();
         let inline_modifiers = callable.inline_modifiers.clone();
         let member_realization = callable.member_realization;
@@ -1275,9 +1275,9 @@ fn external_constructor_descriptor(
 }
 
 /// Translate checked provider-parameter ordinals into the metadata names consumed by the JVM
-/// bytecode inliner. The values and declaration identity were fixed in FIR; this backend step only
-/// exposes the physical formal spelling carried by the selected dependency declaration.
-fn publish_reified_substitutions(
+/// bytecode inliner. Every argument specializes regenerated generic classes; the reified subset
+/// additionally specializes runtime marker operations.
+fn publish_inline_substitutions(
     ir: &mut IrFile,
     expression: crate::ir::ExprId,
     target: ExternalCallableId,
@@ -1306,11 +1306,24 @@ fn publish_reified_substitutions(
             signature
                 .formals
                 .get(ordinal as usize)
-                .map(|name| (name.clone(), substitution.value))
+                .map(|name| (name.clone(), substitution.value, substitution.reified))
         })
         .collect::<Vec<_>>();
     if !bindings.is_empty() {
-        ir.reified_call_subst.insert(expression, bindings);
+        ir.inline_call_type_arguments.insert(
+            expression,
+            bindings
+                .iter()
+                .map(|(name, value, _)| (name.clone(), *value))
+                .collect(),
+        );
+        let reified = bindings
+            .into_iter()
+            .filter_map(|(name, value, reified)| reified.then_some((name, value)))
+            .collect::<Vec<_>>();
+        if !reified.is_empty() {
+            ir.reified_call_subst.insert(expression, reified);
+        }
     }
 }
 

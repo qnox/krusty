@@ -844,6 +844,11 @@ impl super::IrFile {
                 *substitution = ty(*substitution, names);
             }
         }
+        for substitutions in self.inline_call_type_arguments.values_mut() {
+            for (_, substitution) in substitutions {
+                *substitution = ty(*substitution, names);
+            }
+        }
         for result in self.value_class_suspend_returns.values_mut() {
             value_class_suspend_result(result, names);
         }
@@ -943,6 +948,13 @@ impl super::IrFile {
                 .iter_mut()
                 .for_each(|value| name(value, names));
         }
+        self.callable_reference_names
+            .values_mut()
+            .for_each(|value| name(value, names));
+        self.lambda_class_names
+            .values_mut()
+            .for_each(|value| name(value, names));
+        remap_keyed(&mut self.declaration_paths, names);
 
         remap_keyed(&mut self.referenced_module_classifiers, names);
         remap_keyed(&mut self.classifier_hierarchies, names);
