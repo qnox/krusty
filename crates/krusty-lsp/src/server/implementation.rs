@@ -25,8 +25,7 @@ use super::super::{
     MAX_WORKSPACE_SYMBOL_WIRE_BYTES, SEMANTIC_TOKEN_MODIFIERS, SEMANTIC_TOKEN_TYPES,
 };
 use super::diagnostic_page::{
-    limit_diagnostic_items, partial_result_token, wire_diagnostic_message,
-    workspace_diagnostic_messages,
+    limit_diagnostic_items, wire_diagnostic_message, workspace_diagnostic_messages,
 };
 pub use super::line_index::{byte_offset_to_position, position_to_byte_offset, Position};
 use super::line_index::{position_to_byte_offset_with_budget, LineIndex};
@@ -5653,7 +5652,7 @@ mod tests {
         assert!(published.ends_with('…'));
         assert!(serialized_value_fits(
             &messages[1],
-            super::super::diagnostic_page::DIAGNOSTIC_PAGE_BYTES
+            super::super::response_page::RESPONSE_PAGE_BYTES
         ));
         assert!(service.pending_analysis_requests.is_empty());
         assert_eq!(service.pending_analysis_request_bytes, 0);

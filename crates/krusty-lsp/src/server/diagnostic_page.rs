@@ -1,6 +1,6 @@
 //! Bounded diagnostic payloads.
 //!
-//! A workspace report that fits in one [`DIAGNOSTIC_PAGE_BYTES`] frame is the JSON-RPC result.
+//! A workspace report that fits in one [`RESPONSE_PAGE_BYTES`] frame is the JSON-RPC result.
 //! A client that sends a `partialResultToken` and a report that does not fit receives every page
 //! through `$/progress`, and the final result is an empty item list. A report that still does
 //! not fit, including one file that cannot fit a frame, is server-cancelled. A refresh is not
@@ -8,10 +8,9 @@
 
 use serde_json::{json, Value};
 
-/// One `textDocument/publishDiagnostics` list, `textDocument/diagnostic` report, or
-/// workspace-diagnostic progress page. Zed's workspace pull resets its timeout on each
-/// `$/progress` page and merges the pages, so several of these beat one response it cannot render.
-pub(super) const DIAGNOSTIC_PAGE_BYTES: usize = 256 * 1024;
+use super::response_page::{
+    json_len, limit_text, paged_array_messages, server_cancelled, RESPONSE_PAGE_BYTES,
+};
 
 /// Room for the workspace-report envelope (`uri`, `resultId`, `kind`) around one file's items,
 /// so a single file still occupies one page.
@@ -19,7 +18,7 @@ const DIAGNOSTIC_REPORT_OVERHEAD_BYTES: usize = 4 * 1024;
 
 /// Diagnostic items inside one file. The workspace page budget includes the report envelope.
 pub(super) const DIAGNOSTIC_ITEMS_PAGE_BYTES: usize =
-    DIAGNOSTIC_PAGE_BYTES - DIAGNOSTIC_REPORT_OVERHEAD_BYTES;
+    RESPONSE_PAGE_BYTES - DIAGNOSTIC_REPORT_OVERHEAD_BYTES;
 
 /// One diagnostic's `message` on the wire. The analysis store may retain a longer compiler
 /// message; the editor payload does not.
@@ -28,37 +27,12 @@ pub(super) const DIAGNOSTIC_MESSAGE_WIRE_BYTES: usize = 8 * 1024;
 pub(super) const DIAGNOSTIC_OMISSION_MESSAGE: &str =
     "Additional diagnostics omitted (response page limit).";
 
-const SERVER_CANCELLED: i32 = -32802;
-
 pub(super) fn wire_diagnostic_message(message: &str) -> std::borrow::Cow<'_, str> {
-    if message.len() <= DIAGNOSTIC_MESSAGE_WIRE_BYTES {
-        return std::borrow::Cow::Borrowed(message);
-    }
-    let ellipsis = "…";
-    let mut end = DIAGNOSTIC_MESSAGE_WIRE_BYTES.saturating_sub(ellipsis.len());
-    while end > 0 && !message.is_char_boundary(end) {
-        end -= 1;
-    }
-    let mut truncated = String::with_capacity(end.saturating_add(ellipsis.len()));
-    truncated.push_str(&message[..end]);
-    truncated.push_str(ellipsis);
-    std::borrow::Cow::Owned(truncated)
+    limit_text(message, DIAGNOSTIC_MESSAGE_WIRE_BYTES)
 }
 
 pub(super) fn limit_diagnostic_items(items: Vec<Value>) -> Vec<Value> {
     fit_json_array(items, DIAGNOSTIC_ITEMS_PAGE_BYTES, true)
-}
-
-/// `partialResultToken` when it is a string or integer. Any other JSON shape is invalid params.
-pub(super) fn partial_result_token(params: &Value) -> Result<Option<Value>, ()> {
-    match params.get("partialResultToken") {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::String(text)) => Ok(Some(Value::String(text.clone()))),
-        Some(Value::Number(number)) if number.is_i64() || number.is_u64() => {
-            Ok(Some(Value::Number(number.clone())))
-        }
-        Some(_) => Err(()),
-    }
 }
 
 pub(super) fn workspace_diagnostic_messages(
@@ -66,86 +40,10 @@ pub(super) fn workspace_diagnostic_messages(
     items: Vec<Value>,
     token: Option<&Value>,
 ) -> Vec<Value> {
-    let Some(result_budget) = items_budget(&result_report(&id, &[])) else {
-        return vec![too_large(&id)];
-    };
-    if fits_one(&items, result_budget) {
-        return vec![result_report(&id, &items)];
-    }
-    let Some(token) = token else {
-        return vec![too_large(&id)];
-    };
-    let Some(progress_budget) = items_budget(&progress_report(token, &[])) else {
-        return vec![too_large(&id)];
-    };
-    match pack_reports(items, progress_budget) {
-        Ok(pages) => {
-            let mut messages = Vec::with_capacity(pages.len().saturating_add(1));
-            for page in pages {
-                messages.push(progress_report(token, &page));
-            }
-            messages.push(result_report(&id, &[]));
-            messages
-        }
-        Err(()) => vec![too_large(&id)],
-    }
+    paged_array_messages(id, items, token, result_report, progress_report, too_large)
 }
 
-fn fits_one(items: &[Value], budget: usize) -> bool {
-    if budget < 2 {
-        return items.is_empty();
-    }
-    let mut used = 2usize;
-    for item in items {
-        let len = json_len(item);
-        if len.saturating_add(2) > budget {
-            return false;
-        }
-        let separator = usize::from(used > 2);
-        if used.saturating_add(separator).saturating_add(len) > budget {
-            return false;
-        }
-        used = used.saturating_add(separator).saturating_add(len);
-    }
-    true
-}
-
-fn pack_reports(items: Vec<Value>, budget: usize) -> Result<Vec<Vec<Value>>, ()> {
-    if budget < 2 {
-        return Err(());
-    }
-    let mut pages = Vec::new();
-    let mut page = Vec::new();
-    let mut used = 2usize;
-    for item in items {
-        let len = json_len(&item);
-        if len.saturating_add(2) > budget {
-            return Err(());
-        }
-        let separator = usize::from(!page.is_empty());
-        if used.saturating_add(separator).saturating_add(len) > budget {
-            pages.push(std::mem::take(&mut page));
-            used = 2;
-        }
-        let separator = usize::from(!page.is_empty());
-        used = used.saturating_add(separator).saturating_add(len);
-        page.push(item);
-    }
-    if pages.is_empty() || !page.is_empty() {
-        pages.push(page);
-    }
-    Ok(pages)
-}
-
-fn items_budget(empty_frame: &Value) -> Option<usize> {
-    let frame = json_len(empty_frame);
-    if frame > DIAGNOSTIC_PAGE_BYTES {
-        return None;
-    }
-    Some(DIAGNOSTIC_PAGE_BYTES - frame + 2)
-}
-
-fn result_report(id: &Value, items: &[Value]) -> Value {
+fn result_report(id: &Value, items: Vec<Value>) -> Value {
     json!({
         "jsonrpc": "2.0",
         "id": id,
@@ -153,7 +51,7 @@ fn result_report(id: &Value, items: &[Value]) -> Value {
     })
 }
 
-fn progress_report(token: &Value, items: &[Value]) -> Value {
+fn progress_report(token: &Value, items: Vec<Value>) -> Value {
     json!({
         "jsonrpc": "2.0",
         "method": "$/progress",
@@ -165,28 +63,11 @@ fn progress_report(token: &Value, items: &[Value]) -> Value {
 }
 
 fn too_large(id: &Value) -> Value {
-    let message = json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "error": {
-            "code": SERVER_CANCELLED,
-            "message": "workspace diagnostic report exceeds the bounded non-streaming response limit",
-            "data": {"retriggerRequest": false}
-        }
-    });
-    if json_len(&message) <= super::implementation::MAX_MESSAGE_BYTES {
-        message
-    } else {
-        json!({
-            "jsonrpc": "2.0",
-            "id": Value::Null,
-            "error": {
-                "code": SERVER_CANCELLED,
-                "message": "workspace diagnostic report exceeds the bounded non-streaming response limit",
-                "data": {"retriggerRequest": false}
-            }
-        })
-    }
+    server_cancelled(
+        id,
+        "workspace diagnostic report exceeds the bounded non-streaming response limit",
+        Some(json!({"retriggerRequest": false})),
+    )
 }
 
 fn omission_diagnostic() -> Value {
@@ -242,12 +123,6 @@ fn json_array_len_with_marker(item_lens: &[usize], marker_len: usize) -> usize {
     lengths.extend_from_slice(item_lens);
     lengths.push(marker_len);
     json_array_len(&lengths)
-}
-
-fn json_len(value: &Value) -> usize {
-    serde_json::to_vec(value)
-        .map(|encoded| encoded.len())
-        .unwrap_or(usize::MAX)
 }
 
 #[cfg(test)]
@@ -309,7 +184,7 @@ mod tests {
         for message in messages {
             let encoded = serde_json::to_vec(message).unwrap();
             assert!(
-                encoded.len() <= DIAGNOSTIC_PAGE_BYTES,
+                encoded.len() <= RESPONSE_PAGE_BYTES,
                 "frame is {} bytes",
                 encoded.len()
             );
@@ -318,6 +193,8 @@ mod tests {
 
     #[test]
     fn partial_result_token_accepts_string_and_integer_only() {
+        use super::super::response_page::partial_result_token;
+
         assert_eq!(partial_result_token(&json!({})).unwrap(), None);
         assert_eq!(
             partial_result_token(&json!({"partialResultToken": null})).unwrap(),
@@ -380,7 +257,7 @@ mod tests {
             .collect();
         let messages = workspace_diagnostic_messages(json!(3), items, None);
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0]["error"]["code"], SERVER_CANCELLED);
+        assert_eq!(messages[0]["error"]["code"], -32802);
         assert_eq!(messages[0]["error"]["data"]["retriggerRequest"], false);
         assert!(messages[0].get("result").is_none());
         assert!(messages[0].get("method").is_none());
@@ -388,19 +265,19 @@ mod tests {
 
     #[test]
     fn one_report_that_does_not_fit_a_frame_is_not_sent() {
-        let huge = full_item("file:///w/Huge.kt", &"m".repeat(DIAGNOSTIC_PAGE_BYTES));
+        let huge = full_item("file:///w/Huge.kt", &"m".repeat(RESPONSE_PAGE_BYTES));
         let messages = workspace_diagnostic_messages(json!(1), vec![huge], Some(&json!("tok")));
-        assert_eq!(messages[0]["error"]["code"], SERVER_CANCELLED);
+        assert_eq!(messages[0]["error"]["code"], -32802);
         let encoded = serde_json::to_vec(&messages[0]).unwrap();
         assert!(!encoded.windows(4).any(|window| window == b"Huge"));
     }
 
     #[test]
     fn a_large_request_id_is_charged_in_the_frame() {
-        let id = Value::String("i".repeat(DIAGNOSTIC_PAGE_BYTES));
+        let id = Value::String("i".repeat(RESPONSE_PAGE_BYTES));
         let messages =
             workspace_diagnostic_messages(id, vec![unchanged_item("file:///w/A.kt")], None);
-        assert_eq!(messages[0]["error"]["code"], SERVER_CANCELLED);
+        assert_eq!(messages[0]["error"]["code"], -32802);
         assert!(
             serde_json::to_vec(&messages[0]).unwrap().len()
                 <= super::super::implementation::MAX_MESSAGE_BYTES
@@ -488,7 +365,7 @@ mod tests {
             "params": {}
         }));
         assert_eq!(refused.messages.len(), 1);
-        assert_eq!(refused.messages[0]["error"]["code"], SERVER_CANCELLED);
+        assert_eq!(refused.messages[0]["error"]["code"], -32802);
         assert!(refused
             .messages
             .iter()
