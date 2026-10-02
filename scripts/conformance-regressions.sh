@@ -40,7 +40,10 @@ if [ -z "${KRUSTY_BIN:-}" ]; then
   fi
 fi
 
-threads="$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
+# nproc is GNU coreutils; getconf is POSIX (and on macOS lives in /usr/bin, which minimal PATHs
+# keep, unlike /usr/sbin/sysctl). tests/test_harness_sharding_e2e.rs mirrors this probe verbatim in
+# regression_threads() and asserts the resulting count — keep the two pipelines identical.
+threads="$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu)"
 [ "$threads" -gt 4 ] && threads=4
 
 set +e
