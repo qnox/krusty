@@ -7163,6 +7163,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   unresolved reference. Verified against kotlinc 2.4.20
   (`extensionProperties/accessorForPrivateSetter.kt`). Test:
   `tests/private_member_extension_accessor_e2e.rs`.
+- **A protected member-extension property read is gated on the dispatch receiver, not the extension
+  receiver.** Kotlin's protected rule constrains only the implicit dispatch receiver (`this` or the
+  `with(...)` receiver supplying the member's owner); the extension receiver of `recv.prop` is an
+  ordinary argument. Read selection therefore probes `receiver_property_accessible` with the
+  selected property's dispatch-receiver type (`PropertyReadSelection::access_receiver`), so
+  `compute.observable` inside the declaring class reads a protected member of `this` and compiles,
+  while a read from an unrelated class still reports
+  `cannot access 'x': it is protected in 'A'`. Tests:
+  `tests/member_extension_property_e2e.rs::protected_member_extension_property_read_in_declaring_class`,
+  `::protected_member_extension_property_read_in_subclass`,
+  `::protected_member_extension_property_read_from_unrelated_class_is_rejected`.
 - **A value class's private member reached from its companion calls `access$<name>-impl`.** The member
   is realized as a `private static <name>-impl` over the carrier, so the companion's call is already
   static when the backend sees it; value-class lowering records the exact function each such call

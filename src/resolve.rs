@@ -14559,7 +14559,11 @@ impl<'a> Checker<'a> {
             Ok(Some(selection)) => {
                 if let Some((visibility, owner)) = selection.access() {
                     if visibility != Visibility::Public
-                        && !self.receiver_property_accessible(visibility, owner, rt)
+                        && !self.receiver_property_accessible(
+                            visibility,
+                            owner,
+                            selection.access_receiver(rt),
+                        )
                     {
                         if report_diagnostics {
                             self.report_inaccessible_property(
@@ -14772,7 +14776,7 @@ impl<'a> Checker<'a> {
         if let Ok(Some(selection)) = self.select_property_read(scope, rt, name) {
             let access = selection.access();
             let inaccessible = access.is_some_and(|(visibility, owner)| {
-                !self.receiver_property_accessible(visibility, owner, rt)
+                !self.receiver_property_accessible(visibility, owner, selection.access_receiver(rt))
             });
             crate::trace_compiler!(
                 "name_type",

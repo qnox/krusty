@@ -32,6 +32,17 @@ impl PropertyReadSelection {
         }
     }
 
+    /// The receiver type Kotlin's non-public member rule probes. A member extension lives on the
+    /// implicit dispatch receiver — the extension receiver is an ordinary argument — so its gate
+    /// checks the dispatch type, never the expression receiver (`f.observable` inside the
+    /// declaring class reads a `protected` member of `this`, not of `f`).
+    pub(super) fn access_receiver(&self, receiver: Ty) -> Ty {
+        match self {
+            Self::MemberExtension(property) => property.dispatch_receiver.ty,
+            Self::Member(_) | Self::Extension(..) => receiver,
+        }
+    }
+
     pub(super) fn external_property(&self) -> Option<crate::fir::ExternalPropertyId> {
         match self {
             Self::Member(member) => member
