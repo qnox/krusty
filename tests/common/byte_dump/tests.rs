@@ -579,14 +579,16 @@ fn a_missing_plugin_or_classpath_entry_is_not_an_empty_fingerprint() {
     let empty_cp = root.join("empty-cp.jar");
     std::fs::write(&empty_cp, b"").unwrap();
     assert_eq!(
-        classpath_content_fingerprint(std::slice::from_ref(&missing_cp)).unwrap_err(),
+        classpath_content_fingerprint_with_platform(std::slice::from_ref(&missing_cp), None, None,)
+            .unwrap_err(),
         format!(
             "unreadable classpath entry {}: No such file or directory (os error 2)",
             missing_cp.display()
         )
     );
     assert_eq!(
-        classpath_content_fingerprint(std::slice::from_ref(&empty_cp)).unwrap(),
+        classpath_content_fingerprint_with_platform(std::slice::from_ref(&empty_cp), None, None,)
+            .unwrap(),
         format!("file:{:032x}", fingerprint_parts(&[b""]))
     );
 
@@ -977,6 +979,135 @@ fn selected_toolchain_entries_have_content_derived_stable_identities() {
         let _ = std::fs::remove_dir_all(install.root);
     }
     let _ = std::fs::remove_dir_all(missing_release);
+}
+
+#[test]
+fn empty_classpath_replay_is_scoped_to_exact_selected_toolchain_bytes() {
+    struct Install {
+        root: PathBuf,
+        lib: PathBuf,
+        modules: PathBuf,
+    }
+
+    fn install(label: &str, compiler_byte: u8, modules_byte: u8) -> Install {
+        let root = temp_root(label);
+        let lib = root.join("kotlinc/lib");
+        std::fs::create_dir_all(&lib).unwrap();
+        std::fs::write(lib.join("kotlin-compiler.jar"), vec![compiler_byte; 1024]).unwrap();
+
+        let jdk = root.join("jdk");
+        let modules = jdk.join("lib/modules");
+        std::fs::create_dir_all(modules.parent().unwrap()).unwrap();
+        std::fs::write(
+            jdk.join("release"),
+            b"JAVA_VERSION=\"21.0.1\"\nIMPLEMENTOR=\"A\"\n",
+        )
+        .unwrap();
+        std::fs::write(&modules, vec![modules_byte; 4096]).unwrap();
+        Install { root, lib, modules }
+    }
+
+    fn inputs(install: &Install) -> u128 {
+        class_dump_inputs_with_platform(
+            "fun box() = \"OK\"",
+            "default",
+            &[],
+            &[],
+            Some(&install.lib),
+            Some(&install.modules),
+        )
+        .fingerprint
+    }
+
+    let selected = install("empty-cp-selected", 1, 2);
+    let equal = install("empty-cp-equal", 1, 2);
+    let compiler_patch = install("empty-cp-compiler-patch", 9, 2);
+    let jdk_patch = install("empty-cp-jdk-patch", 1, 9);
+    let selected_inputs = inputs(&selected);
+    let equal_inputs = inputs(&equal);
+    let compiler_patch_inputs = inputs(&compiler_patch);
+    let jdk_patch_inputs = inputs(&jdk_patch);
+
+    assert_eq!(
+        selected_inputs, equal_inputs,
+        "equal ambient toolchain bytes have a location-independent empty-classpath key"
+    );
+    assert_ne!(
+        selected_inputs, compiler_patch_inputs,
+        "patched compiler bytes invalidate an empty-classpath lookup"
+    );
+    assert_ne!(
+        selected_inputs, jdk_patch_inputs,
+        "patched JDK bytes invalidate an empty-classpath lookup"
+    );
+
+    let unrelated_root = temp_root("ambient-toolchain-unrelated-cp");
+    let unrelated = unrelated_root.join("dependency.jar");
+    std::fs::write(&unrelated, b"same arbitrary dependency").unwrap();
+    let unrelated_inputs = |install: &Install| {
+        class_dump_inputs_with_platform(
+            "fun box() = \"OK\"",
+            "default",
+            &[],
+            std::slice::from_ref(&unrelated),
+            Some(&install.lib),
+            Some(&install.modules),
+        )
+    };
+    assert_ne!(
+        unrelated_inputs(&selected).fingerprint,
+        unrelated_inputs(&compiler_patch).fingerprint,
+        "an unrelated classpath does not erase the ambient compiler identity"
+    );
+    assert_ne!(
+        unrelated_inputs(&selected).fingerprint,
+        unrelated_inputs(&jdk_patch).fingerprint,
+        "an unrelated classpath does not erase the ambient JDK identity"
+    );
+    assert_eq!(
+        selected_content_hash_count(&selected.lib),
+        1,
+        "empty and unrelated classpaths share the memoized compiler identity"
+    );
+    assert_eq!(
+        selected_content_hash_count(&selected.modules),
+        1,
+        "empty and unrelated classpaths share the memoized JDK identity"
+    );
+
+    let archive = temp_root("empty-cp-replay");
+    let release = version("2.4.20");
+    let key = "case|EmptyClasspath|default|plain";
+    store_files(
+        &archive,
+        "mod",
+        key,
+        release,
+        selected_inputs,
+        &files(b"selected-toolchain"),
+    );
+    flush_archive(&archive);
+    assert_eq!(
+        load_files(&archive, "mod", key, release, equal_inputs)
+            .unwrap()
+            .get("pkg/A")
+            .unwrap(),
+        b"selected-toolchain"
+    );
+    assert!(
+        load_files(&archive, "mod", key, release, compiler_patch_inputs).is_none(),
+        "an empty-classpath replay must miss after a compiler patch"
+    );
+    assert!(
+        load_files(&archive, "mod", key, release, jdk_patch_inputs).is_none(),
+        "an empty-classpath replay must miss after a JDK patch"
+    );
+
+    for install in [selected, equal, compiler_patch, jdk_patch] {
+        let _ = std::fs::remove_dir_all(install.root);
+    }
+    let _ = std::fs::remove_dir_all(unrelated_root);
+    let _ = std::fs::remove_dir_all(archive);
 }
 
 #[test]
