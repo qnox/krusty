@@ -3,7 +3,7 @@
 //! declaration with the same shape but no matching catalog declaration never acquires a role.
 
 use crate::libraries::{CompilerIntrinsic, FunctionInfo, GenericSig};
-use crate::types::{Ty, TypeName};
+use crate::types::{type_name, Ty, TypeName};
 
 use super::{builtin_erased, BuiltinPackageFunction};
 
@@ -116,22 +116,26 @@ impl super::Classpath {
                     && function.vararg.is_some() == candidate.call_sig.vararg
             })
             .and_then(|function| function.compiler_intrinsic)
-            .or_else(|| {
-                // `Double`/`Float` `rangeTo` and `rangeUntil` are `RangesKt` metadata, not records in
-                // the `.kotlin_builtins` fragment. The kotlin.ranges catalog still owns that signature.
-                if package != crate::types::wk::kotlin_ranges_package() {
-                    return None;
-                }
-                floating_range_membership(
-                    candidate.flags.operator,
-                    candidate.flags.suspend,
-                    candidate.flags.infix,
-                    candidate.context_count,
-                    candidate.call_sig.vararg,
-                    signature,
-                )
-            })
+            .or_else(|| catalog_floating_range_role(candidate))
     }
+}
+
+/// `Double`/`Float` `rangeTo` and `rangeUntil` are metadata on the public ranges facade, not
+/// `.kotlin_builtins` records. The role belongs to that facade declaration. A same-package
+/// declaration with another owner does not join it.
+fn catalog_floating_range_role(candidate: &FunctionInfo) -> Option<CompilerIntrinsic> {
+    if candidate.callable.owner != type_name("kotlin/ranges/RangesKt") {
+        return None;
+    }
+    let signature = candidate.generic_sig.as_ref()?;
+    floating_range_membership(
+        candidate.flags.operator,
+        candidate.flags.suspend,
+        candidate.flags.infix,
+        candidate.context_count,
+        candidate.call_sig.vararg,
+        signature,
+    )
 }
 
 #[cfg(test)]
@@ -270,7 +274,32 @@ mod tests {
                 "rangeTo",
                 &function,
             ),
-            Some(CompilerIntrinsic::FloatingRangeMembership)
+            None,
+            "a different owner in another package stays unmarked"
+        );
+        let same_package = LibraryCallable::library(
+            "kotlin/ranges/Example",
+            "rangeTo",
+            vec![Ty::Double, Ty::Double],
+            result,
+            result,
+            "(DD)Lkotlin/ranges/ClosedFloatingPointRange;",
+        );
+        let mut same_package = FunctionInfo::plain(
+            crate::libraries::FnKind::Extension,
+            Some(Ty::Double),
+            same_package,
+        );
+        same_package.flags.operator = true;
+        same_package.generic_sig = function.generic_sig.clone();
+        assert_eq!(
+            classpath.builtin_package_function_role(
+                crate::types::wk::kotlin_ranges_package(),
+                "rangeTo",
+                &same_package,
+            ),
+            None,
+            "the same package and signature on another owner stay unmarked"
         );
     }
 
