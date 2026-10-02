@@ -66,9 +66,9 @@ use field_nullability::{
 mod discarding;
 mod diverging_value_type;
 mod enclosure;
-mod enum_entries_call;
 mod enum_entry_subclass;
 mod enum_metadata;
+mod enum_reflection_call;
 mod explicit_backing_fields;
 mod field_read;
 mod field_visibility;
@@ -8982,57 +8982,7 @@ impl<'a> Emitter<'a> {
                         self.emit_enum_entries(*classifier, code);
                     }
                     crate::ir::IrIntrinsic::EnumValueOf { classifier } => {
-                        // `enumValueOf<E>` is the stdlib's reified INLINE template, so what follows
-                        // is an expansion of it rather than a call on this line. kotlinc marks the
-                        // call site here and lets the argument's own line join it at the same
-                        // offset; the `Enum.valueOf` this ends with belongs to the expansion.
-                        self.mark_inline_call_site_line(e, code);
-                        match classifier.non_null() {
-                            Ty::TyParam(identity, _) => {
-                                // `enumValueOf` is not `@InlineOnly`, so kotlinc's inliner stores
-                                // its argument once, into the parameter's slot, before the body
-                                // runs; the body then reads that slot.
-                                self.emit_value(args[0], code);
-                                let argument =
-                                    self.frame.enter_temp(TempRole::InlineArgument, Ty::String);
-                                let name = argument.slot();
-                                store(Ty::String, name, code);
-                                let lease = self.lease_frame_temporary(argument, Ty::String);
-                                // Kotlin's public inline template keeps the reified classifier as
-                                // the standard mode-5 marker plus a null Class placeholder. A
-                                // consuming compiler replaces that placeholder at the call site.
-                                code.push_int(5, self.cw);
-                                code.push_string(
-                                    crate::types::type_parameter_source_name(identity),
-                                    self.cw,
-                                );
-                                let marker = self.cw.methodref(
-                                    "kotlin/jvm/internal/Intrinsics",
-                                    "reifiedOperationMarker",
-                                    "(ILjava/lang/String;)V",
-                                );
-                                code.invokestatic(marker, 2, 0);
-                                code.aconst_null();
-                                load(Ty::String, name, code);
-                                self.release_temporary(lease);
-                                let method = self.cw.methodref(
-                                    "java/lang/Enum",
-                                    "valueOf",
-                                    "(Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/Enum;",
-                                );
-                                code.invokestatic(method, 2, 1);
-                            }
-                            Ty::Obj(classifier, _) => {
-                                self.emit_value(args[0], code);
-                                let owner = classifier.render();
-                                let descriptor = format!("(Ljava/lang/String;)L{owner};");
-                                let method = self.cw.methodref(&owner, "valueOf", &descriptor);
-                                code.invokestatic(method, 1, 1);
-                            }
-                            classifier => unreachable!(
-                                "checked enumValueOf classifier is enum or reified: {classifier:?}"
-                            ),
-                        }
+                        self.emit_enum_value_of(e, *classifier, args[0], code);
                     }
                     crate::ir::IrIntrinsic::PrimitiveCompare { operand, .. } => {
                         let receiver = dispatch_receiver
