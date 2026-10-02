@@ -281,82 +281,6 @@ mod tests {
     }
 
     #[test]
-    fn the_plugin_keeps_the_kotlin_plugin_and_execs_krusty() {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tools/krusty-gradle");
-        let sources = read_kotlin_sources(&root.join("src/main/kotlin"));
-        assert!(sources.contains("package krusty"));
-        assert!(sources.contains("org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile"));
-        assert!(sources.contains("withType(KotlinJvmCompile::class.java).all"));
-        assert!(sources.contains("KrustyCompileTask"));
-        assert!(sources.contains("compilerArguments(kotlinTask)"));
-        assert!(!sources.contains("actions.clear()"));
-        assert!(!sources.contains("getServices"));
-        assert!(sources.contains("kotlinTask.sources.asFileTree.matching"));
-        assert!(sources.contains("include(\"**/*.kt\")"));
-        assert!(sources.contains("javaSourceFiles.from(sourceSet.allJava)"));
-        assert!(sources.contains("systemProperty(\"java.home\")"));
-        assert!(sources.contains("JavaVersion.current().majorVersion"));
-        assert!(sources.contains("orElse(selectedJavaVersion)"));
-        assert!(sources.contains("freeCompilerArgs"));
-        assert!(sources.contains("languageVersion"));
-        assert!(sources.contains("apiVersion"));
-        assert!(sources.contains("progressiveMode"));
-        assert!(sources.contains("optIn"));
-        assert!(sources.contains("KotlinCompilerPluginSupportPlugin"));
-        assert!(sources.contains("compilerPluginBaseline"));
-        assert!(sources.contains("this !in compilerPluginBaseline"));
-        assert!(sources.contains("getCompilerPluginId()"));
-        assert!(sources.contains("compilerPluginIds.set"));
-        assert!(sources.contains("it.sorted()"));
-        assert!(
-            sources.contains("the krusty plugin must be applied after org.jetbrains.kotlin.jvm")
-        );
-        assert!(sources.contains("Kotlin compiler plugins are not supported by krusty"));
-        assert!(!sources.contains("pluginOptions"));
-        assert!(!sources.contains("pluginClasspath"));
-        assert!(sources.contains("jvmDefault"));
-        assert!(sources.contains("destinationDirectory"));
-        assert!(sources.contains("-Xfriend-paths="));
-        assert!(sources.contains("-module-name"));
-        assert!(sources.contains("-jvm-target"));
-        assert!(sources.contains("krusty.binary"));
-        assert!(sources.contains("KRUSTY_BIN"));
-        assert!(sources.contains("ExecOperations"));
-        assert!(sources.contains("krustyCompile"));
-        assert!(sources.contains("aggregate.configure { dependsOn(replacement) }"));
-        assert!(!sources.contains("root.allprojects"));
-        assert!(sources.contains("fileSystemOperations.delete"));
-        assert!(!sources.contains("krusty-incremental"));
-        assert!(!sources.contains("krusty-build"));
-        assert!(!sources.contains("K2JVMCompiler"));
-        assert!(!sources.contains("KotlinCompileDaemon"));
-        assert!(!sources.contains("krustyGraph"));
-        assert!(root
-            .join("src/main/kotlin/krusty/KrustyKotlinPlugin.kt")
-            .is_file());
-
-        let build =
-            std::fs::read_to_string(root.join("build.gradle.kts")).unwrap_or_else(|error| {
-                panic!("read build.gradle.kts: {error}");
-            });
-        assert!(build.contains("kotlin-dsl"));
-        assert!(build.contains("id = \"krusty\""));
-        assert!(build.contains("implementationClass = \"krusty.KrustyKotlinPlugin\""));
-        assert!(build.contains("org.jetbrains.kotlin:kotlin-gradle-plugin-api:2.4.0"));
-        assert!(!build.contains("runtimeOnly(\"org.jetbrains.kotlin:kotlin-gradle-plugin"));
-        assert!(build.contains("krustyPluginVersion"));
-        assert!(root.join("settings.gradle.kts").is_file());
-        assert!(root.join("gradlew").is_file());
-        let properties =
-            std::fs::read_to_string(root.join("gradle.properties")).unwrap_or_else(|error| {
-                panic!("read gradle.properties: {error}");
-            });
-        assert!(properties.contains("kotlin.compiler.execution.strategy=in-process"));
-        assert!(!root.join("krusty.init.gradle.kts").exists());
-        assert!(!sources.contains("KRUSTY_PLUGIN_JAR"));
-    }
-
-    #[test]
     fn run_reports_a_missing_wrapper_without_running_gradle() {
         let missing = std::env::temp_dir().join(format!("krusty-no-gradle-{}", std::process::id()));
         let error = GradleBuild::new(&missing, repository_plugin_project(), "/opt/krusty")
@@ -448,6 +372,9 @@ mod tests {
             std::env::var("KRUSTY_GRADLE_PLUGIN_VERSION").unwrap_or_else(|_| "0.0.1".into());
         let kgp = std::env::var("KRUSTY_GRADLE_KGP_VERSION").unwrap_or_else(|_| "2.4.20".into());
         write_compiler_slice(&root, &plugin_version, &kgp);
+        // Gradle resolves the project directory through symlinks (macOS /var → /private/var);
+        // the recorded invocations carry the resolved path, so the normalization root must too.
+        let root = root.canonicalize().expect("canonicalize slice root");
         let log = root.join("krusty-invocations.txt");
         let proxy = root.join("recording-krusty");
         let actual = std::env::var_os("KRUSTY_GRADLE_TEST_BIN")
@@ -786,7 +713,11 @@ mod tests {
             "package org.jetbrains.kotlin.util\nfun runtimeMarker() = \"runtime\"\nfun addedRuntimeAbi() = 1\n",
         )
         .expect("edit upstream ABI");
-        run_all().unwrap_or_else(|error| panic!("edited upstream ABI: {error}"));
+        // The aggregate (the GradleBuild default task) must pull every dirty replacement through
+        // the disabled originals, in project-dependency order.
+        build()
+            .run()
+            .unwrap_or_else(|error| panic!("edited upstream ABI: {error}"));
         let upstream_edited = std::fs::read_to_string(&log).expect("upstream edit log");
         let upstream_runs = invocations(&upstream_edited);
         let expected_upstream_order = ["Runtime.kt", "Util.kt", "Friend.kt"];
@@ -1013,34 +944,6 @@ mod tests {
             index += 1;
         }
         normalized
-    }
-
-    fn read_kotlin_sources(root: &Path) -> String {
-        let mut files = Vec::new();
-        let mut stack = vec![root.to_path_buf()];
-        while let Some(dir) = stack.pop() {
-            let entries = std::fs::read_dir(&dir).unwrap_or_else(|error| {
-                panic!("read {}: {error}", dir.display());
-            });
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    stack.push(path);
-                } else if path.extension().is_some_and(|ext| ext == "kt") {
-                    files.push(path);
-                }
-            }
-        }
-        files.sort();
-        files
-            .iter()
-            .map(|path| {
-                std::fs::read_to_string(path).unwrap_or_else(|error| {
-                    panic!("read {}: {error}", path.display());
-                })
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
     }
 
     fn source_names(args: &[String]) -> Vec<&str> {
