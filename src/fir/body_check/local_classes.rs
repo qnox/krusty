@@ -504,6 +504,7 @@ impl BodyFirChecker<'_> {
                 depth: source.depth,
                 path: capture_path.clone(),
                 ty: receiver_ty,
+                receiver: FirCapturedReceiver::Enclosing,
             });
         let receiver = self.body.add_expr(FirExpr {
             origin,
@@ -619,7 +620,7 @@ impl BodyFirChecker<'_> {
         if self.body.local_callable().is_none() || receiver_depth < self.owned_receiver_count {
             return Ok(None);
         }
-        let (enclosing_depth, depth, path) = self
+        let (enclosing_depth, depth, path, receiver) = self
             .enclosing_receiver_capture(receiver_depth as usize)
             .ok_or_else(|| self.failure(None, BodyCheckFailureKind::UnsupportedCallShape))?;
         let current = depth == 0;
@@ -631,6 +632,7 @@ impl BodyFirChecker<'_> {
                 depth,
                 path: path.clone(),
                 ty,
+                receiver,
             });
         Ok(Some(FirLocalClassCaptureSource::CapturedImplicitReceiver {
             enclosing_depth,

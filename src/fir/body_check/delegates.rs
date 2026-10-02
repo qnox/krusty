@@ -84,6 +84,7 @@ impl BodyFirChecker<'_> {
             .delegate_getvalue(delegate)
             .ok_or_else(|| self.failure(span, BodyCheckFailureKind::MissingStableCallTarget))?;
         let get_value = self.delegate_call_target(delegate, delegate_ty, get_value)?;
+        let get_value_dispatch = self.local_delegate_dispatch_parameter(&get_value)?;
         let set_value = if mutable {
             let target = self
                 .info
@@ -93,6 +94,11 @@ impl BodyFirChecker<'_> {
         } else {
             None
         };
+        let set_value_dispatch = set_value
+            .as_ref()
+            .map(|call| self.local_delegate_dispatch_parameter(call))
+            .transpose()?
+            .flatten();
 
         let declaration = self.allocate_local_delegated_property();
         let mut initializer = self.expression(delegate)?;
@@ -155,7 +161,9 @@ impl BodyFirChecker<'_> {
                 property_type: property_ty,
                 reference,
                 get_value: get_value.clone(),
+                get_value_dispatch,
                 set_value: set_value.clone(),
+                set_value_dispatch,
                 accessor_sites: accessor_sites.into_boxed_slice(),
                 line: self
                     .file
@@ -664,6 +672,31 @@ impl BodyFirChecker<'_> {
     ) -> Result<FirDelegateCall, BodyCheckFailure> {
         let span = self.file.expr_span(expression);
         selected_delegate_call(self.index, span, receiver, target)
+    }
+
+    fn local_delegate_dispatch_parameter(
+        &self,
+        call: &FirDelegateCall,
+    ) -> Result<Option<FirLocalDelegateDispatchParameter>, BodyCheckFailure> {
+        let Some(dispatch) = call.dispatch_receiver.as_ref() else {
+            return Ok(None);
+        };
+        Ok(match dispatch {
+            FirDelegateDispatchReceiver::Scoped { depth, .. } => {
+                let receiver =
+                    self.receiver_capture_at_depth(*depth as usize)
+                        .ok_or_else(|| {
+                            self.failure(None, BodyCheckFailureKind::UnsupportedCallShape)
+                        })?;
+                Some(FirLocalDelegateDispatchParameter::ImplicitReceiver(
+                    receiver,
+                ))
+            }
+            FirDelegateDispatchReceiver::ContextBinding { name, .. } => Some(
+                FirLocalDelegateDispatchParameter::ContextValue(name.clone()),
+            ),
+            FirDelegateDispatchReceiver::Singleton { .. } => None,
+        })
     }
 }
 

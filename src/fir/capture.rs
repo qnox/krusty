@@ -70,4 +70,15 @@ pub struct FirImplicitReceiverCapture {
     /// capture site; nested forwarding retains it unchanged and never repeats classifier lookup.
     pub path: Box<[DeclarationId]>,
     pub ty: ResolvedTy,
+    /// What the selected receiver was in the source scope that declared it. Forwarding through
+    /// nested lifted callables preserves this provenance verbatim; lowering never reconstructs it
+    /// from receiver coordinates or declaration spellings.
+    pub receiver: super::FirCapturedReceiver,
+}
+
+impl FirImplicitReceiverCapture {
+    pub(super) fn storage_payload_bytes(&self) -> usize {
+        self.path.len() * std::mem::size_of::<DeclarationId>()
+            + self.receiver.storage_payload_bytes()
+    }
 }

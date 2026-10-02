@@ -126,3 +126,21 @@ fn nullable_value_class_lambdas_stay_boxed_like_the_reference_compiler() {
     let differences = classes.differences();
     assert!(differences.is_empty(), "{}", differences.join("\n\n"));
 }
+
+/// A value-class parameter forces this lambda to a class. Its two captured implicit receivers keep
+/// distinct semantic origins and therefore distinct fields, while kotlinc names both constructor
+/// locals `$receiver`.
+#[test]
+fn a_forced_lambda_class_preserves_each_captured_receiver() {
+    let source = r#"
+@JvmInline
+value class Tag(val value: String)
+
+class Receiver(val name: String)
+
+class Host(val prefix: String) {
+    fun Receiver.make(): (Tag) -> String = { prefix + name + it.value }
+}
+"#;
+    common::assert_classes_identical_to_kotlinc("ForcedReceiverLambda", source, &["Host$make$1"]);
+}

@@ -7,7 +7,28 @@
 
 use std::collections::HashMap;
 
-use super::{BodyOwnerId, DelegateStorage, FirDelegateCall, FirExprId, FirLiftingSite, ResolvedTy};
+use super::{
+    BodyOwnerId, DelegateStorage, FirCapturedReceiver, FirDelegateCall, FirExprId, FirLiftingSite,
+    ResolvedTy,
+};
+
+/// Source-semantic identity of the dispatch value a lifted local-delegate accessor receives.
+/// The checker records this while its receiver tower and local bindings are still available;
+/// common lowering and targets must not reconstruct it from a type or a source spelling.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum FirLocalDelegateDispatchParameter {
+    ImplicitReceiver(FirCapturedReceiver),
+    ContextValue(Box<str>),
+}
+
+impl FirLocalDelegateDispatchParameter {
+    pub(super) fn storage_payload_bytes(&self) -> usize {
+        match self {
+            Self::ImplicitReceiver(receiver) => receiver.storage_payload_bytes(),
+            Self::ContextValue(name) => name.len(),
+        }
+    }
+}
 
 /// Checked binding shared by every read and write of one local delegated property.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -39,7 +60,9 @@ pub(crate) struct FirLocalDelegatePlan {
     /// Lowering gives every convention operand its own IR node rather than sharing this use.
     pub(crate) reference: FirExprId,
     pub(crate) get_value: FirDelegateCall,
+    pub(crate) get_value_dispatch: Option<FirLocalDelegateDispatchParameter>,
     pub(crate) set_value: Option<FirDelegateCall>,
+    pub(crate) set_value_dispatch: Option<FirLocalDelegateDispatchParameter>,
     pub(crate) accessor_sites: Box<[FirLiftingSite]>,
     pub(crate) line: u32,
 }

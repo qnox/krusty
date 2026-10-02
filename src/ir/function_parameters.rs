@@ -246,6 +246,8 @@ pub struct FnParamInfo {
     /// Parallel to `identities`. Empty when the declaration did not publish an expansion mode;
     /// expansion then declines instead of guessing splice or copy.
     pub expansion_modes: Vec<crate::types::InlineExpansionMode>,
+    /// What each captured implicit receiver is, by its `CapturedReceiver` ordinal.
+    pub captured_receivers: Vec<super::IrCapturedReceiver>,
 }
 
 impl FnParamInfo {
@@ -257,6 +259,7 @@ impl FnParamInfo {
             defaults_inherited: false,
             inline_modifiers: Vec::new(),
             expansion_modes: Vec::new(),
+            captured_receivers: Vec::new(),
         }
     }
 
@@ -268,6 +271,7 @@ impl FnParamInfo {
             defaults_inherited: false,
             inline_modifiers: Vec::new(),
             expansion_modes: Vec::new(),
+            captured_receivers: Vec::new(),
         }
     }
 

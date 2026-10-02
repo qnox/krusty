@@ -102,7 +102,7 @@ pub(super) fn emit_lambda_class(
         .iter()
         .enumerate()
         .map(|(index, capture)| {
-            let name = if lambda.receiver_capture == Some(index as u32) {
+            let name = if lambda.receiver_captures.contains(&(index as u32)) {
                 "$receiver"
             } else {
                 capture.name

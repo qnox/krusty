@@ -231,6 +231,15 @@ fn member_extension_delegate_keeps_its_independent_dispatch_receiver() {
     assert_eq!(selected_name(&plan.get_value, &index), Some("getValue"));
     assert!(plan.get_value.extension);
     assert!(plan.get_value.dispatch_receiver.is_some());
+    assert_eq!(
+        plan.get_value_dispatch,
+        Some(
+            crate::fir::FirLocalDelegateDispatchParameter::ImplicitReceiver(
+                crate::fir::FirCapturedReceiver::Enclosing,
+            )
+        ),
+        "the accessor plan retains the source role of its selected dispatch receiver"
+    );
     let accesses = expressions(&body)
         .filter_map(|expression| match &expression.kind {
             FirExprKind::LocalDelegateAccess {

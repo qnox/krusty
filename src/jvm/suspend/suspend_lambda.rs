@@ -32,7 +32,7 @@ const SUSPEND_LAMBDA: &str = "kotlin/coroutines/jvm/internal/SuspendLambda";
 struct Capture {
     name: String,
     ty: Ty,
-    /// Whether it is the enclosing class's `this`.
+    /// Whether its constructor parameter uses kotlinc's `$receiver` spelling.
     receiver: bool,
 }
 
@@ -268,7 +268,8 @@ fn layout(
     site: &Site,
 ) -> Option<(Vec<Capture>, Vec<Parameter>)> {
     let function = &ir.functions[fid as usize];
-    let identities = &ir.fn_params.get(&fid)?.identities;
+    let parameter_info = ir.fn_params.get(&fid)?;
+    let identities = &parameter_info.identities;
     let own_from = site.captures.len();
     if ir.lambda_own_params_from.get(&fid).copied() != Some(own_from as u32)
         || identities.len() != function.params.len()
@@ -281,7 +282,16 @@ fn layout(
             IrParameterRole::CapturedValue { .. } => {
                 (format!("${}", identity.source_name.as_ref()?), false)
             }
-            IrParameterRole::CapturedReceiver { ordinal: 0 } => ("this$0".to_string(), true),
+            IrParameterRole::CapturedReceiver { ordinal } => {
+                let receiver = parameter_info.captured_receivers.get(ordinal as usize)?;
+                (
+                    crate::jvm::capture_names::lifted_receiver_name(
+                        &parameter_info.captured_receivers,
+                        ordinal as usize,
+                    ),
+                    crate::jvm::capture_names::uses_receiver_constructor_parameter(receiver),
+                )
+            }
             _ => return None,
         };
         let ty = match ir.shared_capture_parameters.get(&(fid, parameter as u32)) {

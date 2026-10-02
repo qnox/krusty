@@ -4,7 +4,7 @@
 //! operands semantic. It deliberately does not create a function: helper placement, spelling and
 //! parameter ABI belong to the target that elects to use one.
 
-use super::{ExprId, IrParameterIdentity, IrTypeParameter};
+use super::{ExprId, IrCapturedReceiver, IrParameterIdentity, IrTypeParameter};
 use crate::types::Ty;
 
 #[derive(Clone, Debug)]
@@ -15,6 +15,8 @@ pub(crate) struct IrLocalDelegateAccessorPlan {
     /// Type parameters named by this static helper's semantic signature. A lifted helper cannot
     /// refer to its lexical class's type parameters directly, so it redeclares the exact shape.
     pub(crate) type_parameters: Vec<IrTypeParameter>,
+    /// Checked source identities for `CapturedReceiver` parameter roles, in role-ordinal order.
+    pub(crate) captured_receivers: Vec<IrCapturedReceiver>,
     pub(crate) result: Ty,
     pub(crate) source_order: u32,
     pub(crate) site: crate::fir::FirLiftingSite,

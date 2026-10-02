@@ -71,6 +71,10 @@ Reverse-engineered from kotlinc for `class Point(val x: Int, var y: String)` (se
   `@ExtensionFunctionType` annotation on `ValueParameter.type` (`f3`) says the parameter is a RECEIVER
   function type. A consumer that decodes constructor records for names/defaults only will bind a lambda
   argument with no implicit `this`. krusty therefore decodes `f3` here as well as in `Function`.
+  A context function type (`context(A, B) () -> R`) is the same `FunctionN` with
+  `@ContextFunctionTypeParams(count = N)` on the type (`Annotation` field 100, argument `count` as
+  a zigzag int). An anonymous context parameter's metadata name is `<unused var>`, not the source
+  `_`. Test: `tests/captured_receiver_names_e2e.rs`.
 - `Property`: `f2 = name`, `f3 = return_type` (`Type`), `f11 = flags` (emitted as **1798** only for a
   `var`; `val` ⇒ 0, omitted), `f100 = JvmPropertySignature` `{f1 = field (empty ⇒ derived backing
   field), f3 = getter JvmMethodSignature, f4 = setter (var only)}`.
