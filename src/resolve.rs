@@ -28362,6 +28362,15 @@ enum class EntryChoice {
     }
 
     #[test]
+    fn floating_membership_without_a_selected_range_operator_fails_closed() {
+        let (errors, _) = check("fun f(x: Double): Boolean = x in 1.0..2.0");
+        assert_eq!(
+            errors,
+            ["operator 'rangeTo' cannot be applied to 'Double' and 'Double'"]
+        );
+    }
+
+    #[test]
     fn non_unit_lambda_still_requires_an_exhaustive_trailing_when() {
         let (errors, _) = check(
             "fun consumeInt(block: () -> Int): Int = block()\n\

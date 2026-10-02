@@ -453,10 +453,27 @@ impl<'a> Checker<'a> {
                         end_ty: et,
                         value_ty: vt,
                     };
-                    if let Some(resolved) =
-                        self.shadowed_floating_range_membership(scope, &operands)
-                    {
-                        return self.set(e, resolved);
+                    match self.select_floating_range_membership(scope, &operands) {
+                        FloatingRangeMembershipSelection::ExactIntrinsic => {}
+                        FloatingRangeMembershipSelection::Ordinary {
+                            range_ty,
+                            range_call,
+                        } => {
+                            let resolved =
+                                self.finish_range_contains(scope, &operands, range_ty, range_call);
+                            return self.set(e, resolved);
+                        }
+                        FloatingRangeMembershipSelection::Unresolved => {
+                            self.diags.error(
+                                self.span(e),
+                                format!(
+                                    "operator 'rangeTo' cannot be applied to '{}' and '{}'",
+                                    st.source_name(),
+                                    et.source_name()
+                                ),
+                            );
+                            return self.set(e, Ty::Error);
+                        }
                     }
                 }
                 let comparison = range_st.range_counter_type().unwrap_or(range_st);
@@ -505,14 +522,15 @@ impl<'a> Checker<'a> {
         self.set(e, t)
     }
 
-    /// `None` when `rangeTo` is the stdlib floating membership (or is absent): the caller keeps the
-    /// comparison. `Some` when a nearer operator was selected, including a failed `contains`.
-    fn shadowed_floating_range_membership(
+    /// Select the range constructor before deciding whether membership may become a comparison.
+    /// Only the exact selected common role authorizes the intrinsic; absence remains a frontend
+    /// failure, while every ordinary declaration continues through its selected `contains` call.
+    fn select_floating_range_membership(
         &mut self,
         scope: &CheckerScope<'_>,
         operands: &InRangeOperands,
-    ) -> Option<Ty> {
-        let (range_ty, range_call) = self.operator_call_ret(
+    ) -> FloatingRangeMembershipSelection {
+        let Some((range_ty, range_call)) = self.operator_call_ret(
             scope,
             operands.expression,
             operands.start_ty,
@@ -521,16 +539,21 @@ impl<'a> Checker<'a> {
             &[operands.end],
             self.span(operands.expression),
             None,
-        )?;
+        ) else {
+            return FloatingRangeMembershipSelection::Unresolved;
+        };
         if matches!(
             &range_call,
             ResolvedCall::Extension(extension)
                 if extension.callable.compiler_intrinsic
                     == Some(crate::libraries::CompilerIntrinsic::FloatingRangeMembership)
         ) {
-            return None;
+            return FloatingRangeMembershipSelection::ExactIntrinsic;
         }
-        Some(self.finish_range_contains(scope, operands, range_ty, range_call))
+        FloatingRangeMembershipSelection::Ordinary {
+            range_ty,
+            range_call,
+        }
     }
 
     /// Record `rangeTo` + `contains` when both resolve. `None` leaves the caller's diagnostic in place.
@@ -598,4 +621,13 @@ struct InRangeOperands {
     start_ty: Ty,
     end_ty: Ty,
     value_ty: Ty,
+}
+
+enum FloatingRangeMembershipSelection {
+    ExactIntrinsic,
+    Ordinary {
+        range_ty: Ty,
+        range_call: ResolvedCall,
+    },
+    Unresolved,
 }

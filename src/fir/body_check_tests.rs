@@ -1418,8 +1418,28 @@ fn custom_in_range_keeps_both_selected_convention_calls() {
 }
 
 #[test]
-fn floating_point_membership_carries_its_checked_comparison_type() {
-    let analysis = checked_analysis("fun test(value: Double): Boolean = value in 1.0..3.0\n");
+fn exact_selected_floating_range_role_carries_its_checked_comparison_type() {
+    let (Some(stdlib), Some(jdk)) = (
+        crate::toolchain::stdlib_jar(),
+        crate::toolchain::jdk_modules(),
+    ) else {
+        return;
+    };
+    let libraries = crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+        crate::jvm::classpath::Classpath::new(vec![stdlib, jdk]),
+    ))
+    .expect("stdlib provider");
+    let mut diagnostics = DiagSink::new();
+    let analysis = crate::frontend::analyze_source_set_with_features(
+        &[
+            SourceInput::kotlin("fun test(value: Double): Boolean = value in 1.0..3.0\n")
+                .with_file_stem("Body"),
+        ],
+        Box::new(libraries),
+        &LangFeatures::new(),
+        &mut diagnostics,
+    );
+    assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
     let file = &analysis.files[0];
     let function = file
         .decls
