@@ -89,6 +89,25 @@ pub(super) fn select_fixed_or_more_specific_vararg<'a>(
 /// other. Incomparable parameter types stay ambiguous. A library pair stays in
 /// the set when only one candidate is a vararg, so equal shapes such as
 /// `listOf(element)` and `listOf(vararg)` still reach that tie-break.
+/// Integer adaptation has chosen these maxima. Equal shapes still prefer the
+/// declaration without a vararg; incomparable adapted shapes stay ambiguous.
+pub(super) fn non_vararg_among<'a>(
+    candidates: &[(&'a FunctionInfo, Vec<Ty>)],
+    tied: &[&'a FunctionInfo],
+    src: &dyn crate::symbol_source::SymbolSource,
+) -> CandidateSelectionWithTies<&'a FunctionInfo> {
+    select_equally_specific(
+        candidates
+            .iter()
+            .filter(|(candidate, _)| tied.iter().any(|tied| std::ptr::eq(*tied, *candidate)))
+            .map(|(candidate, params)| (params.clone(), *candidate))
+            .collect(),
+        |_, left, right| {
+            super::parameter_at_least_as_specific(src, left, right, CallArgKind::Typed(Ty::Error))
+        },
+    )
+}
+
 pub(super) fn select_equally_specific<'a>(
     shapes: Vec<(Vec<Ty>, &'a FunctionInfo)>,
     at_least_as_specific: impl Fn(usize, Ty, Ty) -> bool,

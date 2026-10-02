@@ -1228,7 +1228,7 @@ fn vararg_parameter_shape_at(
     Some(expanded)
 }
 
-fn parameter_at_least_as_specific(
+pub(super) fn parameter_at_least_as_specific(
     src: &dyn SymbolSource,
     left: Ty,
     right: Ty,
@@ -6373,23 +6373,7 @@ fn best_by_args_at_priority_with_ties<'a>(
             return CandidateSelectionWithTies::Selected(candidate);
         }
         CandidateSelectionWithTies::Ambiguous(candidates) => {
-            // Integer adaptation determines the maximal declarations, but an equal fixed and
-            // vararg element shape still uses Kotlin's ordinary non-vararg tie-break. Keep
-            // incomparable adapted maxima ambiguous.
-            return overload_selection::select_equally_specific(
-                cands
-                    .iter()
-                    .filter(|(candidate, _)| {
-                        candidates
-                            .iter()
-                            .any(|tied| std::ptr::eq(*tied, *candidate))
-                    })
-                    .map(|(candidate, params)| (params.clone(), *candidate))
-                    .collect(),
-                |_, left, right| {
-                    parameter_at_least_as_specific(src, left, right, CallArgKind::Typed(Ty::Error))
-                },
-            );
+            return overload_selection::non_vararg_among(cands, &candidates, src);
         }
         CandidateSelectionWithTies::None => {}
     }
