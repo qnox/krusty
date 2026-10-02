@@ -103,9 +103,13 @@ Build correctness rests on these contracts:
   or server-specific feature. Within the LSP package, `compiler_analysis` is the only module allowed
   to inspect checked frontend data; protocol/session modules consume compact snapshot contracts.
 - The LSP supervisor never runs the compiler in its own long-lived process. It sends source sets to
-  a compiler worker that is restarted after 64 analyses, or sooner when that process's resident
-  set exceeds 1 GiB. This bounds growth from the compiler's process-lifetime name/type interners
-  while amortizing JVM classpath initialization across edits.
+  a compiler worker that is restarted after 64 analyses, or sooner when a Linux `VmRSS` sample
+  shows that process above the supervisor's ceiling (default 1 GiB). The sample is taken before a
+  request. It is not a host or cgroup budget: a tighter limit can still OOM-kill the child, and one
+  request can grow past the ceiling before the next sample. Those deaths use the existing crash
+  restart. An unreadable sample, including every non-Linux process, leaves the worker in place.
+  The ceiling bounds retained growth from the compiler's process-lifetime name/type interners
+  between requests, while JVM classpath initialization stays amortized across edits.
   The request also carries the bounded set of enabled language-feature names derived from project
   compilation arguments and explicit LSP flags; per-source directives are applied inside the worker.
   The worker is not a second server-CLI consumer: `exec` carries only its private mode marker and
