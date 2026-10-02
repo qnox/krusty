@@ -4352,6 +4352,64 @@ method being present for Java interop. That test also pins the library's JVM tar
 concatenation compiles to `invokedynamic` only from target 9, so on a lower target the concatenating
 body contains none and krusty splices it.
 
+## Native linker — krusty's own static ELF linker  ◐
+
+`src/native/linker/` links a program's relocatable objects with the prebuilt runtime into a static
+ELF executable, so a user's build needs no system linker (zero-toolchain cross-compilation). It is
+deliberately much less than a general linker; each limit below is a decision, not an omission.
+
+- **Fixed base, two segments.** The image is linked at `0x400000`: one read+execute `PT_LOAD`
+  (ELF header, program headers, every `.text`, then every read-only data section) and one
+  read+write `PT_LOAD` (every `.data`, then `.bss` as memory past the file), starting on the next
+  multiple of the architecture's maximum page size (`Arch::max_page_size` in
+  `src/native/target_contract.rs`: 4 KiB on x86_64 and riscv64, 64 KiB on AArch64) in the file and
+  in memory, so file offset and address stay congruent and no kernel page size puts both segments
+  in one page. Both segments are aligned to that size. No PIC, GOT, PLT, dynamic section or section
+  headers. The whole image must fit the 4 GiB the small code models address.
+- **Read-only data shares the executable segment.** A separate read-only segment is cheap to add
+  when the runtime holds something worth protecting; until then `.rodata` is readable and
+  executable.
+- **No relaxation.** Every instruction stays where the assembler put it. RISC-V `RELAX`/`ALIGN` are
+  accepted as no-ops (the runtime is built with `-mno-relax`), and section alignment is honoured up
+  to the maximum page size; a larger or non-power-of-two alignment is an error (and `build.rs`
+  refuses a runtime object that asks for one, so the target is reported unavailable at build time).
+- **RISC-V ABI is checked, and `e_flags` merged** (`src/native/linker/abi.rs`). Every input must
+  say `lp64d` (`EF_RISCV_FLOAT_ABI_DOUBLE`) with `EF_RISCV_RVE`, `EF_RISCV_RV64ILP32` and every
+  reserved or vendor bit clear; `.riscv.attributes` must say a 16-byte stack and an `rv64i…` ISA,
+  and no two inputs may use the A6C and A7 atomic ABIs. The output is `lp64d` plus the union of
+  the inputs' `EF_RISCV_RVC` and `EF_RISCV_TSO` (0x5 against the runtime). x86_64 and AArch64
+  define no flags and use 0.
+- **Relocations** implemented: x86_64 `64`, `PC32`, `PLT32` (PC-relative to S: no PLT), `32`, `32S`;
+  AArch64 `ABS64`, `PREL32`, `ADR_PREL_PG_HI21`, `ADD_ABS_LO12_NC`, `LDST{8,16,32,64,128}_ABS_LO12_NC`
+  (a target not aligned to the access size is refused, as `ld.lld` does), `CALL26`, `JUMP26`;
+  RISC-V `64`, `32`, `BRANCH`, `JAL`, `CALL`/`CALL_PLT`, `PCREL_HI20` + `PCREL_LO12_I/S` (paired by
+  the `auipc` address), `HI20`, `LO12_I/S`, `RVC_BRANCH`, `RVC_JUMP`. Every field is range-checked;
+  a `hi20` is checked as `value + 0x800`, the quantity that has to fit.
+- **Symbols.** Globals resolve by name — a strong definition over any weak one, for every
+  reference including the weak definer's own; an undefined weak reference is 0; two strong
+  definitions are an error. `SHN_ABS` symbols resolve to their value; symbols in empty sections are
+  placed. Thread-local storage and `SHN_COMMON` symbols are reported as unsupported (the runtime is
+  built `-fno-common` and has no TLS), and so is any other loadable section kind it does not place
+  (notes and `.eh_frame` are dropped: nothing reads them).
+- **`SHT_RELA` only.** An object with an `SHT_REL` or `SHT_CREL` table is refused
+  (`UnsupportedRelocationTable`): their addends are implicit in the patched bytes or encoded, and
+  reading `REL` as `RELA` would take every addend as 0. The x86_64, AArch64 and RISC-V psABIs
+  specify `RELA`, and nothing krusty links emits anything else.
+- **Inputs are checked, never trusted.** Every object must be a 64-bit little-endian `ET_REL` for
+  the target's `e_machine`, else a `ForeignObject`/`Parse` error; a relocation or symbol offset
+  outside its section, or a relocation in `.bss`, is a `Parse` error — never a panic or a write into
+  a neighbouring section.
+- `runtime_symbols(target)` lists what the prebuilt runtime defines, for the code generator to keep
+  Kotlin names clear of it.
+- Tests: `src/native/linker/{elf,relocate,abi}.rs` link objects built in Rust (`object`'s ELF
+  writer, a dev-dependency, with each object's real `e_flags`) and assert the exact program headers
+  per architecture, the patched bytes of every relocation kind on each architecture (expected
+  encodings cross-checked with `llvm-mc`), the merged RISC-V `e_flags`, and each error above; no C
+  toolchain needed. `src/native/linker/mod.rs` links against the real prebuilt runtime for every
+  target in `NativeTarget::ALL` and runs the result for every target the host can run: its own
+  natively, any other under a `qemu-<arch>` user-mode emulator found on `PATH` (a host without one
+  links but does not run those). A build without the runtime skips them, except under `CI`.
+
 ## Byte-identical box conformance, item 1 — local-class naming  ◐
 
 Goal: every box test passes AND writes the same class files as kotlinc. The first mechanism is how
