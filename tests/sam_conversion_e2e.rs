@@ -140,6 +140,19 @@ fn a_direct_fun_interface_overload_is_chosen_over_sam_adaptation() {
 fn a_direct_generic_call_keeps_the_nominal_argument_type() {
     const SRC: &str = "interface Mark\n\
         fun interface Adapter { fun onStart(scope: Mark) }\n\
+        class Impl : (Mark) -> Unit {\n\
+            override fun invoke(value: Mark) {}\n\
+            fun implOnlyMember(): String = \"OK\"\n\
+        }\n\
+        fun <T> take(value: T): T = value\n\
+        fun box(): String = take(Impl()).implOnlyMember()\n";
+    common::expect_box_same_as_kotlinc(SRC, "DirectGenericNominalArgument");
+}
+
+#[test]
+fn a_bounded_generic_overload_keeps_the_nominal_argument_type_beside_sam() {
+    const SRC: &str = "interface Mark\n\
+        fun interface Adapter { fun onStart(scope: Mark) }\n\
         open class Impl : (Mark) -> Unit {\n\
             override fun invoke(value: Mark) {}\n\
             fun implOnlyMember(): String = \"OK\"\n\
@@ -147,7 +160,7 @@ fn a_direct_generic_call_keeps_the_nominal_argument_type() {
         fun <T : Impl> take(value: T): T = value\n\
         fun take(adapter: Adapter): Adapter = adapter\n\
         fun box(): String = take(Impl()).implOnlyMember()\n";
-    common::expect_box_same_as_kotlinc(SRC, "DirectGenericNominalArgument");
+    common::expect_box_same_as_kotlinc(SRC, "BoundedGenericNominalArgumentBesideSam");
 }
 
 #[test]
