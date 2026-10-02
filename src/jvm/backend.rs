@@ -1024,6 +1024,7 @@ impl Backend for JvmBackend {
         }
         if let Err(error) = crate::jvm::external_calls::realize(
             &mut file.ir,
+            &file.classifiers,
             &self.cp,
             &file.callables,
             &mut default_call_operands,

@@ -14,10 +14,16 @@ use arguments::{
 
 pub(super) fn realize(
     ir: &mut IrFile,
+    classifiers: &dyn crate::backend::BackendClassifierSource,
     classpath: &Classpath,
     callables: &crate::backend::CheckedBackendCallables,
     default_call_operands: &mut DefaultCallOperands,
 ) -> Result<(), ExternalRealizationError> {
+    // Body-local, anonymous, and backend-generated receivers are complete only in this file's
+    // common IR. Freeze them before mutating call nodes and combine them with the stable
+    // module/dependency snapshot for every dispatch-owner decision below.
+    let dispatch_classifiers =
+        crate::jvm::member_dispatch::CheckedDispatchClassifiers::new(ir, classifiers);
     let expression_count = ir.exprs.len();
     for index in 0..expression_count {
         let expression = u32::try_from(index).expect("too many common IR expressions");
@@ -946,12 +952,19 @@ pub(super) fn realize(
                             inline: callable.inline,
                         };
                     } else {
-                        let (owner, interface) = call_site_owner(
-                            classpath,
+                        let (owner, interface) = crate::jvm::member_dispatch::virtual_owner(
+                            &dispatch_classifiers,
                             callable.physical_owner,
                             callable.owner_is_interface,
+                            ir.dispatch_classes.get(&expression).copied(),
                             ir.ext_call_source_receiver.get(&expression).copied(),
-                        );
+                        )
+                        .map_err(|missing| {
+                            ExternalDependencyTarget::DispatchClassifier {
+                                target,
+                                classifier: missing.0,
+                            }
+                        })?;
                         *callee = Callee::Virtual {
                             owner,
                             name: callable.name,
@@ -1030,12 +1043,17 @@ pub(super) fn realize(
                             }
                         }
                         None => {
-                            let (owner, interface) = call_site_owner(
-                                classpath,
+                            let (owner, interface) = crate::jvm::member_dispatch::virtual_owner(
+                                &dispatch_classifiers,
                                 callable.physical_owner,
                                 callable.owner_is_interface,
-                                receiver,
-                            );
+                                ir.dispatch_classes.get(&expression).copied(),
+                                ir.ext_call_source_receiver.get(&expression).copied(),
+                            )
+                            .map_err(|missing| ExternalDependencyTarget::DispatchClassifier {
+                                target,
+                                classifier: missing.0,
+                            })?;
                             Callee::Virtual {
                                 owner,
                                 name: callable.name,
@@ -1063,12 +1081,17 @@ pub(super) fn realize(
                             }
                         }
                         None => {
-                            let (owner, interface) = call_site_owner(
-                                classpath,
+                            let (owner, interface) = crate::jvm::member_dispatch::virtual_owner(
+                                &dispatch_classifiers,
                                 callable.physical_owner,
                                 callable.owner_is_interface,
-                                receiver,
-                            );
+                                ir.dispatch_classes.get(&expression).copied(),
+                                ir.ext_call_source_receiver.get(&expression).copied(),
+                            )
+                            .map_err(|missing| ExternalDependencyTarget::DispatchClassifier {
+                                target,
+                                classifier: missing.0,
+                            })?;
                             Callee::Virtual {
                                 owner,
                                 name: callable.name,
@@ -1170,11 +1193,6 @@ fn primitive_hash_code(receiver: crate::types::Ty) -> Option<(crate::types::Type
     Some((wrapper, descriptor))
 }
 
-/// The class a virtual call names. kotlinc calls an inherited member through the dispatch
-/// receiver's own class, whose fake override FIR2IR selects (`IntRange.getFirst`, not
-/// `IntProgression.getFirst`), unless that class does not inherit the member or an interface
-/// receiver reaches a class member (`toString` on an interface stays `Object.toString`). A class
-/// the call site cannot name (a package-private JDK base) never becomes the owner.
 /// The unboxed element operation a primitive iterator's `next()` is invoked through, with the
 /// element type it returns.
 ///
@@ -1229,52 +1247,6 @@ fn array_member_helper(
     descriptor.push(')');
     descriptor.push_str(&erased(result));
     classpath.static_array_member_realization(name, &descriptor)
-}
-
-fn call_site_owner(
-    classpath: &Classpath,
-    declared: crate::types::TypeName,
-    declared_is_interface: bool,
-    receiver: Option<crate::types::Ty>,
-) -> (crate::types::TypeName, bool) {
-    let declaration = (declared, declared_is_interface);
-    let Some(receiver) = receiver
-        .and_then(|receiver| receiver.non_null().obj_internal())
-        .and_then(|receiver| classpath.find_name(receiver))
-    else {
-        return declaration;
-    };
-    let receiver_is_interface = receiver.access & crate::jvm::classfile::ACC_INTERFACE != 0;
-    if receiver.this_class == declared
-        || receiver.access & crate::jvm::classfile::ACC_PUBLIC == 0
-        || (receiver_is_interface && !declared_is_interface)
-        || !inherits_from(classpath, receiver.this_class, declared)
-    {
-        return declaration;
-    }
-    (receiver.this_class, receiver_is_interface)
-}
-
-fn inherits_from(
-    classpath: &Classpath,
-    class: crate::types::TypeName,
-    ancestor: crate::types::TypeName,
-) -> bool {
-    let mut pending = vec![class];
-    let mut seen = std::collections::HashSet::new();
-    while let Some(current) = pending.pop() {
-        if current == ancestor {
-            return true;
-        }
-        if !seen.insert(current) {
-            continue;
-        }
-        if let Some(info) = classpath.find_name(current) {
-            pending.extend(info.super_class);
-            pending.extend(info.interfaces.iter_ids());
-        }
-    }
-    false
 }
 
 fn external_constructor_descriptor(

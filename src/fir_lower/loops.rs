@@ -262,18 +262,21 @@ impl BodyLowering<'_> {
             return Err(FirLoweringFailure::UnsupportedProgressionMember);
         };
         let receiver_value = self.ir.add_expr(self.ir.expr(value).clone());
-        self.external_property_access(
-            *property,
-            dispatch.clone(),
-            *receiver,
-            parameters,
-            *result,
-            *extension_receiver_parameter,
-            Some(receiver_value),
-            None,
-            &[],
-            false,
-        )
+        self.external_property_access(super::source_calls::ExternalPropertyRequest {
+            target: *property,
+            dispatch: dispatch.clone(),
+            receiver_ty: *receiver,
+            parameters: parameters,
+            result: *result,
+            extension_receiver_parameter: *extension_receiver_parameter,
+            dispatch_receiver: super::source_calls::DispatchOperand {
+                receiver: Some(receiver_value),
+                class: Self::static_class(*receiver),
+            },
+            extension_receiver: None,
+            arguments: &[],
+            write: false,
+        })
         .ok_or(FirLoweringFailure::UnsupportedExternalProperty(*property))
     }
 
@@ -501,7 +504,7 @@ impl BodyLowering<'_> {
             crate::fir::FirCallTarget::Module(target) => self
                 .same_file_call(
                     *target,
-                    dispatch_receiver,
+                    super::source_calls::DispatchOperand::plain(dispatch_receiver),
                     extension_receiver,
                     &arguments,
                     &context_parameter_types,
@@ -538,6 +541,7 @@ impl BodyLowering<'_> {
                     substitutions: &[],
                     extension_receiver_parameter: *extension_receiver_parameter,
                     dispatch_receiver,
+                    dispatch_class: Self::static_class(*receiver),
                     extension_receiver,
                     arguments: &arguments,
                 })

@@ -719,6 +719,10 @@ impl IrFile {
             self.ext_call_source_receiver.values().copied(),
         )?;
         reject_all(
+            "member dispatch class",
+            self.dispatch_classes.values().copied().map(Ty::obj_name),
+        )?;
+        reject_all(
             "declared call result",
             self.call_declared_ret.values().copied(),
         )?;

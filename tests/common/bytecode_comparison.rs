@@ -522,24 +522,38 @@ pub fn assert_class_code_matches_kotlinc(
 /// Compile `src` (file `<stem>.kt`, module `main`) with kotlinc and krusty, and assert each class in
 /// `classes` is byte-identical to kotlinc's.
 pub fn assert_classes_identical_to_kotlinc(stem: &str, src: &str, classes: &[&str]) {
+    assert_classes_identical_to_kotlinc_against(stem, src, classes, &[]);
+}
+
+/// [`assert_classes_identical_to_kotlinc`] with `libraries` on both compilers' classpath.
+pub fn assert_classes_identical_to_kotlinc_against(
+    stem: &str,
+    src: &str,
+    classes: &[&str],
+    libraries: &[std::path::PathBuf],
+) {
     let dir = super::common_core::scratch_dir().expect("scratch directory");
     let reference_dir = dir.join("ref");
     std::fs::create_dir_all(&reference_dir).expect("reference output directory");
     let source = dir.join(format!("{stem}.kt"));
     std::fs::write(&source, src).expect("write fixture");
-    let (code, stderr) = super::common_core::kotlinc_compile(&[
+    let mut arguments = vec![
         "-d".to_string(),
         reference_dir.to_string_lossy().into_owned(),
-        source.to_string_lossy().into_owned(),
-    ])
-    .expect("reference kotlinc is provisioned");
+    ];
+    if !libraries.is_empty() {
+        let classpath = std::env::join_paths(libraries).expect("classpath");
+        arguments.push("-cp".to_string());
+        arguments.push(classpath.to_string_lossy().into_owned());
+    }
+    arguments.push(source.to_string_lossy().into_owned());
+    let (code, stderr) =
+        super::common_core::kotlinc_compile(&arguments).expect("reference kotlinc is provisioned");
     assert_eq!(code, 0, "kotlinc failed: {stderr}");
+    let mut classpath = vec![super::common_core::stdlib_jar()];
+    classpath.extend_from_slice(libraries);
     let krusty = super::common_core::compile_in_process_metadata_cp_module_target(
-        src,
-        stem,
-        &[super::common_core::stdlib_jar()],
-        "main",
-        None,
+        src, stem, &classpath, "main", None,
     )
     .expect("krusty compiles the fixture");
     let mut differences = Vec::new();

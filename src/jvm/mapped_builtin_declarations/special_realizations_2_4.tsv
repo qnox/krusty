@@ -7,6 +7,8 @@ kotlin/collections/Map	size	()I	property	java/util/Map	size
 kotlin/collections/Map	values	()Ljava/util/Collection;	property	java/util/Map	values
 kotlin/collections/Map	keys	()Ljava/util/Set;	property	java/util/Map	keySet
 kotlin/collections/Map	entries	()Ljava/util/Set;	property	java/util/Map	entrySet
+kotlin/Enum	name	()Ljava/lang/String;	property	java/lang/Enum	name
+kotlin/Enum	ordinal	()I	property	java/lang/Enum	ordinal
 kotlin/collections/MutableList	removeAt	(I)Ljava/lang/Object;	function	java/util/List	remove
 kotlin/CharSequence	length	()I	property	java/lang/CharSequence	length
 kotlin/CharSequence	get	(I)C	function	java/lang/CharSequence	charAt

@@ -6,6 +6,10 @@ use crate::fir::{ExternalCallableId, ExternalPropertyId};
 pub(in crate::jvm) enum ExternalDependencyTarget {
     Callable(ExternalCallableId),
     Property(ExternalPropertyId),
+    DispatchClassifier {
+        target: ExternalCallableId,
+        classifier: crate::types::TypeName,
+    },
 }
 
 impl From<ExternalCallableId> for ExternalDependencyTarget {
@@ -19,6 +23,12 @@ impl std::fmt::Display for ExternalDependencyTarget {
         match self {
             Self::Callable(target) => write!(formatter, "callable {}", target.raw()),
             Self::Property(target) => write!(formatter, "property {}", target.raw()),
+            Self::DispatchClassifier { target, classifier } => write!(
+                formatter,
+                "callable {} dispatch classifier {}",
+                target.raw(),
+                classifier
+            ),
         }
     }
 }
@@ -43,6 +53,7 @@ pub(super) fn copy_call_facts(
     copy!(logical_types);
     copy!(physical_types);
     copy!(ext_call_source_receiver);
+    copy!(dispatch_classes);
     copy!(call_declared_ret);
     copy!(call_declared_params);
     copy!(static_extension_receivers);

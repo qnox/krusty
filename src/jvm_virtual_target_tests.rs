@@ -76,6 +76,7 @@ class Other {
         &mut ir,
         &["Library", "Consumer"],
         &Classpath::new(Vec::new()),
+        &crate::libraries::EmptySymbolSource,
     );
     let level = module_property(&ir, "Box", "level");
     let other = module_property(&ir, "Other", "level");
@@ -130,7 +131,9 @@ fn a_dependency_member_dispatch_keeps_the_selected_declaration() {
         })
         .collect::<Vec<_>>();
     selected.sort();
-    realize_calls(&mut ir, &["Dependency"], &classpath);
+    let realization_symbols = crate::jvm::jvm_libraries::JvmLibraries::new(classpath.clone())
+        .expect("JVM provider initialization");
+    realize_calls(&mut ir, &["Dependency"], &classpath, &realization_symbols);
     let calls = virtual_calls(&ir);
     let mut realized = calls
         .iter()

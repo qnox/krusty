@@ -28,6 +28,7 @@ mod metadata_indexes;
 mod method_bodies;
 mod method_body_cache;
 mod package_facades;
+mod property_access;
 mod property_identity;
 #[cfg(test)]
 mod test_support;
@@ -45,6 +46,7 @@ use self::metadata_indexes::{
 use self::method_body_cache::{
     global_entry_body_cache, global_entry_class_bodies_cache, BodyCache, ClassBodiesCache,
 };
+use self::property_access::*;
 use self::value_class_erasure::{
     meta_descriptor_position, meta_param_exact, metadata_carrier_matches,
     metadata_value_class_bound_carrier, metadata_value_class_underlying, value_class_param_types,
@@ -5124,258 +5126,6 @@ fn finish_package_tree(tree: &mut PackageTree) {
     tree.incomplete_entries.sort_unstable();
 }
 
-/// A companion property realized as a `@JvmField` PUBLIC static field hoisted onto the companion's
-/// OUTER class: the companion class file carries neither the accessor nor the field, so the
-/// declaration walks above find nothing. kotlinc's layout puts the field on the owner; answer with
-/// it when the owner actually declares a matching public static field (non-final for a write).
-fn companion_owner_field_access(
-    classpath: &Classpath,
-    owner: TypeName,
-    property: &str,
-    writable: bool,
-) -> Option<super::inline::PropertyAccess> {
-    // Gate on the SIGNAL, not the name shape: the nested class itself must DECLARE `property` in
-    // its `@Metadata`, and the accessor that record names must be ABSENT from the class file — the
-    // exact residue a `@JvmField` companion property leaves behind (the reader derives a
-    // conventional accessor name when the signature is omitted, so `MetaProp::getter` presence
-    // alone cannot discriminate). An arbitrary `$`-named owner, a Java nested class, or a property
-    // whose accessor really exists never reaches the outer-field probe.
-    let companion = classpath.find_name(owner)?;
-    let declared = super::metadata::class_properties(&companion)
-        .iter()
-        .find(|p| p.name == property && !p.is_extension)?;
-    let accessor = if writable {
-        declared.setter.as_ref()
-    } else {
-        declared.getter.as_ref()
-    };
-    let accessor_realized = accessor.is_some_and(|sig| {
-        companion
-            .methods
-            .iter()
-            .any(|m| m.name == sig.name && m.descriptor == sig.desc)
-    });
-    if accessor_realized {
-        return None;
-    }
-    // A `@JvmField` companion property is stored on the enclosing class. Only a `$` nesting is that
-    // layout; a dotted builtin such as `Map.Entry` is not a companion field owner.
-    if !owner.segment_ref().contains('$') {
-        return None;
-    }
-    let outer = owner.nested_owner()?;
-    let ci = classpath.find_name(outer)?;
-    let field = ci.fields.iter().find(|f| {
-        f.name == property
-            && f.access & super::classreader::ACC_PUBLIC != 0
-            && f.access & super::classreader::ACC_STATIC != 0
-            && (!writable || f.access & 0x0010 == 0) // a write needs a non-final field
-    })?;
-    Some(super::inline::PropertyAccess::Field {
-        owner: outer,
-        name: field.name.clone(),
-        descriptor: field.descriptor.clone(),
-        is_static: true,
-    })
-}
-
-/// Conventional JVM getter for a builtin property that has no declaration-owned special
-/// realization. Special properties are resolved through `Classpath::mapped_builtin_realization`
-/// before this fallback is reached.
-fn ordinary_builtin_property_jvm_name(owner: TypeName, property: &str) -> String {
-    if owner.matches("kotlin/Enum") && matches!(property, "name" | "ordinal") {
-        property.to_string()
-    } else {
-        crate::jvm::names::property_getter_name(property)
-    }
-}
-
-/// Resolve one target realization over the owner's supertype closure. Reads and writes must walk the
-/// exact same breadth-first order so the nearest declaration wins consistently; keeping that traversal
-/// here prevents the two operations from drifting as new classpath shapes are added.
-fn inherited_property_access(
-    classpath: &Classpath,
-    owner: TypeName,
-    property: &str,
-    declared_access: fn(&ClassInfo, &str) -> Option<super::inline::PropertyAccess>,
-) -> Option<super::inline::PropertyAccess> {
-    let mut queue = std::collections::VecDeque::new();
-    let mut seen = std::collections::HashSet::new();
-    queue.push_back(super::jvm_class_map::to_jvm_type_name(owner));
-    while let Some(current) = queue.pop_front() {
-        if !seen.insert(current) {
-            continue;
-        }
-        let Some(class) = classpath.find_name(current) else {
-            continue;
-        };
-        if let Some(access) = declared_access(&class, property) {
-            return Some(access);
-        }
-        queue.extend(class.super_class);
-        queue.extend(class.interfaces.iter_ids());
-    }
-    None
-}
-
-/// The write analogue of [`class_property_read_access`]: the setter `@Metadata` names for `property`, else
-/// the bean setter of a Java class, else a public non-final field. `None` for a read-only property.
-fn class_property_write_access(
-    ci: &ClassInfo,
-    property: &str,
-) -> Option<super::inline::PropertyAccess> {
-    use super::inline::PropertyAccess;
-    let owner = ci.this_class;
-    let setter = |method: &super::classreader::MethodSig| PropertyAccess::Accessor {
-        owner,
-        name: method.name.clone(),
-        descriptor: method.descriptor.clone(),
-        is_static: method.is_static(),
-        is_interface: ci.is_interface(),
-    };
-    // The bean getter's return descriptor, when this class declares one. A matching one-argument
-    // `setX` is the setter whatever it returns; without a getter, only a `void` setter remains,
-    // which is the shape a metadata-less fallback used before a getter was known.
-    let getter_return = [
-        crate::names::property_getter_name(property),
-        format!("is{}", capitalize(property)),
-    ]
-    .into_iter()
-    .find_map(|name| {
-        ci.methods.iter().find_map(|method| {
-            let (parameters, ret) = super::names::parse_method_descriptor(&method.descriptor)?;
-            (method.name == name && parameters.is_empty() && ret != "V").then_some(ret)
-        })
-    });
-    let one_arg = |name: &str| {
-        ci.methods
-            .iter()
-            .find(|method| {
-                method.name == name
-                    && super::names::parse_method_descriptor(&method.descriptor).is_some_and(
-                        |(parameters, ret)| {
-                            parameters.len() == 1
-                                && match getter_return {
-                                    Some(expected) => parameters[0] == expected,
-                                    None => ret == "V",
-                                }
-                        },
-                    )
-            })
-            .cloned()
-    };
-    if let Some(declared) = super::metadata::class_properties(ci)
-        .iter()
-        .find(|p| p.name == property && !p.is_extension)
-    {
-        if let Some(method) = declared.setter.as_ref().and_then(|setter| {
-            ci.methods
-                .iter()
-                .find(|m| m.name == setter.name && m.descriptor == setter.desc)
-        }) {
-            return Some(setter(method));
-        }
-    } else if let Some(method) = one_arg(&crate::names::property_setter_name(property)) {
-        return Some(setter(&method));
-    }
-    let field = ci.fields.iter().find(|f| {
-        f.name == property
-            && f.access & super::classreader::ACC_PUBLIC != 0
-            && f.access & 0x0010 == 0 // not ACC_FINAL
-    })?;
-    Some(PropertyAccess::Field {
-        owner,
-        name: field.name.clone(),
-        descriptor: field.descriptor.clone(),
-        is_static: field.access & super::classreader::ACC_STATIC != 0,
-    })
-}
-
-/// The realization of property `property` DECLARED by `ci` itself (no supertype walk). `@Metadata`'s
-/// `JvmPropertySignature` names the accessor and/or backing field authoritatively — never a `getX` guess —
-/// and the class file's access flags say whether it takes a receiver. An accessor is preferred over a
-/// field: a private backing field is unreadable from outside, and a computed property has no field at all.
-fn class_property_read_access(
-    ci: &ClassInfo,
-    property: &str,
-) -> Option<super::inline::PropertyAccess> {
-    use super::inline::PropertyAccess;
-    let owner = ci.this_class;
-    let accessor = |method: &super::classreader::MethodSig| PropertyAccess::Accessor {
-        owner,
-        name: method.name.clone(),
-        descriptor: method.descriptor.clone(),
-        is_static: method.is_static(),
-        is_interface: ci.is_interface(),
-    };
-    let zero_arg = |name: &str| {
-        ci.methods
-            .iter()
-            .find(|m| m.name == name && m.descriptor.starts_with("()") && m.descriptor != "()V")
-            .cloned()
-    };
-    // A Kotlin class: `@Metadata` names the accessor exactly (`@JvmName`, value-class mangling, and the
-    // `@JvmStatic` case where it is a static of this class).
-    if let Some(declared) = super::metadata::class_properties(ci)
-        .iter()
-        .find(|p| p.name == property && !p.is_extension)
-    {
-        if let Some(method) = declared.getter.as_ref().and_then(|getter| {
-            ci.methods
-                .iter()
-                .find(|m| m.name == getter.name && m.descriptor == getter.desc)
-        }) {
-            return Some(accessor(method));
-        }
-    } else {
-        // A Java class has no property declarations. Pair a method with a special builtin property
-        // only by its exact physical owner/name/descriptor; an unrelated `keySet(): Set` must not
-        // acquire the Kotlin `keys` property merely because its spelling happens to match.
-        if let Some(method) = ci.methods.iter().find(|method| {
-            super::mapped_builtin_declarations::is_property_realization(
-                ci.this_class,
-                property,
-                &method.name,
-                &method.descriptor,
-            )
-        }) {
-            return Some(accessor(method));
-        }
-        // Ordinary JavaBean properties keep their accessor convention.
-        for candidate in [
-            crate::names::property_getter_name(property),
-            format!("is{}", capitalize(property)),
-            // A zero-arg method read under its own name. Kotlin has no synthetic property for this, but
-            // krusty's checker admits it, so the realization has to exist or the read would emit nothing.
-            property.to_string(),
-        ] {
-            if let Some(method) = zero_arg(&candidate) {
-                return Some(accessor(&method));
-            }
-        }
-    }
-    // No accessor method: the property is realized as a plain field (`@JvmField`, a `const val`, or a
-    // public Java field surfaced as a Kotlin property).
-    let field = ci
-        .fields
-        .iter()
-        .find(|f| f.name == property && f.access & super::classreader::ACC_PUBLIC != 0)?;
-    Some(PropertyAccess::Field {
-        owner,
-        name: field.name.clone(),
-        descriptor: field.descriptor.clone(),
-        is_static: field.access & super::classreader::ACC_STATIC != 0,
-    })
-}
-
-fn capitalize(name: &str) -> String {
-    let mut chars = name.chars();
-    match chars.next() {
-        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-        None => String::new(),
-    }
-}
-
 fn descriptor_parts(desc: &str) -> Option<(Option<String>, String)> {
     let params = desc.strip_prefix('(')?;
     let ret = params.find(')')?;
@@ -7565,20 +7315,6 @@ mod fq_tests {
         assert!(
             !cp.has_package(TypeName::ROOT, "p"),
             "package gone after clear"
-        );
-    }
-
-    #[test]
-    fn enum_builtin_properties_use_their_plain_jvm_methods() {
-        let owner = type_name("kotlin/Enum");
-        assert_eq!(ordinary_builtin_property_jvm_name(owner, "name"), "name");
-        assert_eq!(
-            ordinary_builtin_property_jvm_name(owner, "ordinal"),
-            "ordinal"
-        );
-        assert_eq!(
-            ordinary_builtin_property_jvm_name(owner, "declaringClass"),
-            "getDeclaringClass"
         );
     }
 }

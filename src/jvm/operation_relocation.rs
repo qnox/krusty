@@ -41,6 +41,7 @@ pub(super) fn clone_below_representation_wrapper(ir: &mut IrFile, source: ExprId
     // representation wrapper, so leaving a copy there would both orphan the real call and let a
     // later consumer mistake the wrapper for the operation that owns the provider decision.
     move_fact!(ext_call_source_receiver);
+    move_fact!(dispatch_classes);
     move_fact!(semantic_call_roles);
     move_fact!(call_declared_ret);
     move_fact!(call_declared_params);
