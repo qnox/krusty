@@ -115,14 +115,14 @@ impl Emitter<'_> {
                 descriptor,
                 is_static,
             } => {
-                let jt = ty_from_field_descriptor(&descriptor);
+                let slot = crate::jvm::physical_type::field_slot(&descriptor);
                 let lateinit = self.is_lateinit_field(owner, &name);
                 let owner = owner.render();
                 let fref = self.cw.fieldref(&owner, &name, &descriptor);
                 if is_static {
-                    code.getstatic(fref, slot_words(jt) as i32);
+                    code.getstatic(fref, slot.words());
                 } else {
-                    code.getfield(fref, slot_words(jt) as i32);
+                    code.getfield(fref, slot.words());
                 }
                 // A `lateinit var` read throws while the field is still null, wherever it is read from.
                 if lateinit {
@@ -138,7 +138,7 @@ impl Emitter<'_> {
                     code.invokestatic(m, 1, 0);
                     self.bind(lbl, code);
                 }
-                jt
+                (slot.ty, slot.reference)
             }
             PropertyAccess::Accessor {
                 owner,
@@ -148,10 +148,11 @@ impl Emitter<'_> {
                 is_interface,
             } => {
                 let owner = owner.render();
-                // A `void` accessor (a `Unit` property) leaves NOTHING on the stack — `descriptor_ret_words`
-                // is the authority on that, since `ty_from_descriptor_ret` maps `V` to a 1-word `Unit` for
-                // type flow. Nothing is left, so there is nothing to bridge.
-                let words = descriptor_ret_words(&descriptor);
+                // A `void` accessor (a `Unit` property) leaves NOTHING on the stack. The descriptor's
+                // own slot width is the authority: `V` is zero words, and a class descriptor is one
+                // reference word even when its classifier is an unsigned scalar.
+                let slot = crate::jvm::physical_type::method_return_slot(&descriptor);
+                let words = slot.words();
                 let m = if is_interface {
                     self.cw.interface_methodref(&owner, &name, &descriptor)
                 } else {
@@ -172,7 +173,7 @@ impl Emitter<'_> {
                 if words == 0 {
                     return;
                 }
-                ty_from_descriptor_ret(&descriptor)
+                (slot.ty, slot.reference)
             }
             PropertyAccess::AccessBridge {
                 owner,
@@ -184,12 +185,13 @@ impl Emitter<'_> {
                 // The bridge's arguments are already on the stack: the receiver when it takes one,
                 // and nothing when the field is a named object's static.
                 let owner = owner.render();
-                let words = descriptor_ret_words(&descriptor);
+                let slot = crate::jvm::physical_type::method_return_slot(&descriptor);
+                let words = slot.words();
                 let (parameters, _) = crate::jvm::names::parse_method_descriptor(&descriptor)
                     .expect("a planned property access bridge has a valid JVM descriptor");
                 let arguments = parameters
                     .iter()
-                    .map(|parameter| slot_words(ty_from_field_descriptor(parameter)) as i32)
+                    .map(|parameter| crate::jvm::physical_type::field_slot(parameter).words())
                     .sum();
                 let m = self.cw.methodref(&owner, &name, &descriptor);
                 self.mark_dispatch_line(operation, code);
@@ -213,22 +215,19 @@ impl Emitter<'_> {
                     code.invokestatic(throw_uninitialized, 1, 0);
                     self.bind(initialized, code);
                 }
-                ty_from_descriptor_ret(&descriptor)
+                (slot.ty, slot.reference)
             }
         };
         // The realization's result is the PHYSICAL one — erased to `Object` for a type parameter, a bare
         // primitive for an `Int` property. The node's `ty` is the logical Kotlin type the read has at this
-        // site (`Int?` in a safe-call chain). Bridge the two exactly as any other physical result is
-        // bridged: box, unbox, or narrow.
+        // site (`Int?` in a safe-call chain). `reference_slot` is the descriptor category, so a class
+        // descriptor is not boxed again just because its classifier is also a semantic scalar.
+        let (physical, reference_slot) = physical;
         let logical = ir_ty_to_jvm(&stored_value_ty(*ty));
         let value_class = self.is_value_class_ty(ty);
-        if !value_class
-            && physical.is_jvm_scalar()
-            && !logical.is_jvm_scalar()
-            && logical.is_reference()
-        {
+        if !value_class && !reference_slot && logical.is_reference() && !logical.is_jvm_scalar() {
             box_prim_free(self.cw, code, semantic_scalar_adapter(*ty, physical));
-        } else if !value_class && !physical.is_jvm_scalar() && logical.is_jvm_scalar() {
+        } else if !value_class && reference_slot && logical.is_jvm_scalar() {
             // `ty` is the substituted semantic result and `logical` its JVM carrier. Choosing the
             // adapter from `logical` alone turns `UInt` into `Integer`; retain the semantic type until
             // after the `Object` boundary has been bridged.
@@ -258,4 +257,24 @@ impl Emitter<'_> {
             self.narrow_on_stack(physical, *ty, code);
         }
     }
+}
+
+/// Physical type a property write stores. A class descriptor is a reference slot even when its
+/// classifier is a semantic scalar; the checked property type supplies that reference.
+pub(super) fn property_store_slot(access: &crate::jvm::inline::PropertyAccess, checked: Ty) -> Ty {
+    use crate::jvm::inline::PropertyAccess;
+    let descriptor = match access {
+        PropertyAccess::Field { descriptor, .. } => Some(descriptor.as_str()),
+        PropertyAccess::Accessor { descriptor, .. } => {
+            crate::jvm::names::parse_method_descriptor(descriptor)
+                .and_then(|(params, _)| params.first().copied())
+        }
+        PropertyAccess::AccessBridge { descriptor, .. } => {
+            crate::jvm::names::parse_method_descriptor(descriptor)
+                .and_then(|(params, _)| params.last().copied())
+        }
+    };
+    descriptor
+        .map(|descriptor| crate::jvm::physical_type::operand_slot_ty(descriptor, Some(checked)))
+        .unwrap_or_else(|| ir_ty_to_jvm(&checked))
 }

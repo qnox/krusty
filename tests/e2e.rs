@@ -1317,6 +1317,8 @@ mod nested_receiver_lambda_captures_e2e;
 mod nothing_type_argument_signature_e2e;
 #[path = "nullable_double_type_param_equality_e2e.rs"]
 mod nullable_double_type_param_equality_e2e;
+#[path = "nullable_uint_property_e2e.rs"]
+mod nullable_uint_property_e2e;
 #[path = "primitive_hash_code_e2e.rs"]
 mod primitive_hash_code_e2e;
 #[path = "result_generic_override_argument_e2e.rs"]

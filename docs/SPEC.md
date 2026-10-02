@@ -1511,7 +1511,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **Nullability is a first-class fact on `Ty`** (`Ty::Nullable(&Ty)`, `types.rs`), not faked as the
   boxed JVM wrapper. `Int?` is `Nullable(Int)` (a Kotlin-level type), and the boxing to a JVM reference
   (`Int?` → `Ljava/lang/Integer;`, `UInt?` → `Lkotlin/UInt;`, a nullable reference → its own descriptor)
-  lives only in `Ty::descriptor()` — the backend boundary. `Ty::nullable` is idempotent (no `T??`) and
+  lives only in `Ty::descriptor()` — the backend boundary. A JVM class descriptor is a reference
+  slot for every classifier, including `Lkotlin/UInt;`. A class-array descriptor such as
+  `[Lkotlin/UInt;` stays a reference array: the element is not passed through `Ty::array`, which
+  would select the specialized `UIntArray` (`[I`). A primitive-array descriptor `[I` stays that
+  specialized array. Ordinary class and array descriptors retain their exact physical identity;
+  the checked type participates only where a scalar class descriptor cannot otherwise be
+  distinguished from its unboxed carrier. Constructor arguments, including ones spilled to
+  temporaries and reloaded, use that operand type. The parse does not invent common semantic
+  nullability and does not special-case unsigned names: the checked type decides whether an
+  ambiguous scalar class reference is boxed or unboxed. A getter that already returned the box is
+  not boxed again, and `toString` unboxes it once.
+  Tests: `jvm::physical_type::tests::every_class_descriptor_is_a_reference_slot_without_semantic_nullability`,
+  `jvm::physical_type::tests::a_boxed_unsigned_array_is_not_the_primitive_array`,
+  `tests/nullable_uint_property_e2e.rs`, box `unsignedTypes/kt43286.kt`. `Ty::nullable` is
+  idempotent (no `T??`) and
   collapses degenerate inputs (`Null?` = `Null`, `Error?` = `Error`); `Nothing?` is kept (it is the type
   of the `null` literal). Tests: `types::tests` (representation + descriptor boxing). The legacy
   wrapper-masquerade tables (`resolve::nullable_prim_wrapper`/`prim_of_wrapper`) are being retired onto

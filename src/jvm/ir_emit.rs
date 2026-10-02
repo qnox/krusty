@@ -8352,19 +8352,7 @@ impl<'a> Emitter<'a> {
             return;
         }
         // The assigned value is bridged to what the realization stores, the mirror of the read's bridge.
-        let target = match &access {
-            PropertyAccess::Field { descriptor, .. } => ty_from_field_descriptor(descriptor),
-            PropertyAccess::Accessor { descriptor, .. } => {
-                crate::jvm::names::parse_method_descriptor(descriptor)
-                    .and_then(|(params, _)| params.first().map(|p| ty_from_field_descriptor(p)))
-                    .unwrap_or_else(|| ir_ty_to_jvm(operation.ty))
-            }
-            PropertyAccess::AccessBridge { descriptor, .. } => {
-                crate::jvm::names::parse_method_descriptor(descriptor)
-                    .and_then(|(params, _)| params.last().map(|p| ty_from_field_descriptor(p)))
-                    .unwrap_or_else(|| ir_ty_to_jvm(operation.ty))
-            }
-        };
+        let target = property_access::property_store_slot(&access, *operation.ty);
         if let Some(temps) = &spilled {
             let (slot, value_ty, _) = temps[1];
             load(value_ty, slot, code);
@@ -8400,12 +8388,12 @@ impl<'a> Emitter<'a> {
                 is_static,
             } => {
                 let owner = owner.render();
-                let jt = ty_from_field_descriptor(&descriptor);
+                let words = crate::jvm::physical_type::field_slot(&descriptor).words();
                 let fref = self.cw.fieldref(&owner, &name, &descriptor);
                 if is_static {
-                    code.putstatic(fref, slot_words(jt) as i32);
+                    code.putstatic(fref, words);
                 } else {
-                    code.putfield(fref, slot_words(jt) as i32);
+                    code.putfield(fref, words);
                 }
             }
             PropertyAccess::Accessor {
@@ -8911,8 +8899,7 @@ impl<'a> Emitter<'a> {
                             source_parameter_count,
                         )
                     };
-                let physical_params =
-                    parse_descriptor_params(&desc).expect("constructor descriptor must be valid");
+                let physical_params = self.constructor_physical_params(e, &desc);
                 let aw = physical_params.iter().map(|t| slot_words(*t) as i32).sum();
                 if args.iter().any(|&a| self.spills_operand_prefix(a)) {
                     // An argument that enters a handler, suspends, or leaves for a loop target can't
@@ -11345,27 +11332,12 @@ fn descriptor_ret_words(desc: &str) -> i32 {
 
 /// Parse a single JVM field/type descriptor into a `Ty`.
 ///
-/// Suspend operand materialization also consumes exact field descriptors already present in IR. Keep
-/// that pass on this canonical parser instead of growing a second primitive/object/array branch table.
+/// The physical-type boundary owns descriptor parsing. Consumers that still need a `Ty` project it
+/// from that slot instead of maintaining another primitive/object/array table here. In particular,
+/// this preserves the reference element category of `[Lkotlin/UInt;` rather than rebuilding it as
+/// the specialized primitive `UIntArray` (`[I`).
 pub(crate) fn ty_from_field_descriptor(d: &str) -> Ty {
-    match d.as_bytes().first() {
-        Some(b'I') => Ty::Int,
-        Some(b'J') => Ty::Long,
-        Some(b'Z') => Ty::Boolean,
-        Some(b'B') => Ty::Byte,
-        Some(b'C') => Ty::Char,
-        Some(b'S') => Ty::Short,
-        Some(b'F') => Ty::Float,
-        Some(b'D') => Ty::Double,
-        Some(b'V') => Ty::Unit,
-        Some(b'L') => Ty::obj(
-            d.strip_prefix('L')
-                .and_then(|s| s.strip_suffix(';'))
-                .unwrap_or(d),
-        ),
-        Some(b'[') => Ty::array(ty_from_field_descriptor(&d[1..])),
-        _ => Ty::Error,
-    }
+    super::physical_type::field_slot(d).ty
 }
 
 /// `(opcode, value-words)` for an array element load (`Xaload`).
@@ -11646,6 +11618,21 @@ mod invariant_tests {
     use crate::jvm::classreader::MethodCode;
     use crate::jvm::inline::MethodBodies;
     use crate::types::Ty;
+
+    #[test]
+    fn descriptor_ty_consumers_preserve_reference_array_elements() {
+        for descriptor in ["[Lfixture/Token;", "[Lkotlin/UInt;", "[[I"] {
+            let ty = ty_from_field_descriptor(descriptor);
+            assert_eq!(type_descriptor(ty), descriptor, "{descriptor}");
+        }
+
+        let (params, result) =
+            parse_physical_method_desc("([Lfixture/Token;[Lkotlin/UInt;)[Lkotlin/UInt;")
+                .expect("valid physical method descriptor");
+        assert_eq!(type_descriptor(params[0]), "[Lfixture/Token;");
+        assert_eq!(type_descriptor(params[1]), "[Lkotlin/UInt;");
+        assert_eq!(type_descriptor(result), "[Lkotlin/UInt;");
+    }
 
     pub(super) struct NoBodies;
     impl MethodBodies for NoBodies {
