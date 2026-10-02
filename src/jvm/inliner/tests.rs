@@ -35,6 +35,7 @@ impl AnonymousObjects for NoObjects {
         _class: &str,
         _desc: &str,
         _lambdas: &[ObjectLambda<'_>],
+        _prior_classes: &[(String, String)],
     ) -> Result<RegeneratedObject, InlineError> {
         panic!("a body without anonymous objects regenerates none")
     }
@@ -674,6 +675,7 @@ impl AnonymousObjects for NumberingObjects {
         class: &str,
         desc: &str,
         _lambdas: &[ObjectLambda<'_>],
+        _prior_classes: &[(String, String)],
     ) -> Result<RegeneratedObject, InlineError> {
         self.asked.push((class.to_string(), desc.to_string()));
         let n = self.asked.len();
@@ -684,7 +686,11 @@ impl AnonymousObjects for NumberingObjects {
         })
     }
 
-    fn regenerate_singleton(&mut self, class: &str) -> Result<RegeneratedObject, InlineError> {
+    fn regenerate_singleton(
+        &mut self,
+        class: &str,
+        _prior_classes: &[(String, String)],
+    ) -> Result<RegeneratedObject, InlineError> {
         self.singletons.push(class.to_string());
         let n = self.singletons.len();
         Ok(RegeneratedObject {

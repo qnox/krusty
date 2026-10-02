@@ -705,3 +705,58 @@ fun box(): String {\n\
     );
     let _ = std::fs::remove_dir_all(library);
 }
+
+#[test]
+fn a_dependency_member_extension_keeps_its_value_receiver_and_reified_lambda() {
+    let library_source = "\
+package external_reified_value\n\
+interface Item\n\
+interface Selected : Item\n\
+object ReceiverItem : Selected\n\
+object CandidateItem : Selected\n\
+object StoredItem : Item\n\
+object OtherItem : Item\n\
+@JvmInline value class Carrier(val item: Item)\n\
+var check: (Item) -> Item? = { null }\n\
+open class Host(val enabled: Boolean) {\n\
+    inline fun <T : Item, reified R : Item> Carrier.install(value: T) {\n\
+        val receiver = item\n\
+        val stored = object { val value: T = value }\n\
+        check = { candidate ->\n\
+            if (enabled && receiver is R && candidate is R) stored.value else null\n\
+        }\n\
+    }\n\
+}\n\
+fun installedCorrectly(): Boolean =\n\
+    check(CandidateItem) === StoredItem && check(OtherItem) == null\n";
+    let source = "\
+import external_reified_value.*\n\
+class ConsumerHost : Host(true) {\n\
+    fun install() { Carrier(ReceiverItem).install<Item, Selected>(StoredItem) }\n\
+}\n\
+fun box(): String {\n\
+    ConsumerHost().install()\n\
+    return if (installedCorrectly()) \"OK\" else \"Fail\"\n\
+}\n";
+    let Some(library) = common::kotlinc_library(library_source) else {
+        eprintln!("skipping: reference kotlinc unavailable");
+        return;
+    };
+    let reference =
+        common::kotlinc_box_result_with_classpath(source, std::slice::from_ref(&library));
+    assert_eq!(reference, "OK", "kotlinc fixture must succeed");
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let classpath = [library.clone(), stdlib];
+    assert_eq!(
+        common::expect_box_run(
+            source,
+            "ExternalReifiedValueMemberExtension",
+            &classpath,
+            Some(jdk.as_path()),
+        ),
+        reference,
+        "krusty and kotlinc box results differ",
+    );
+    let _ = std::fs::remove_dir_all(library);
+}
