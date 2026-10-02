@@ -134,7 +134,7 @@ impl Emitter<'_> {
             return;
         }
         if let Some(&line) = self.ir.expr_source_lines.get(&block) {
-            code.inlined_line(u16::try_from(line).unwrap_or(u16::MAX));
+            self.mark_expression_line(block, line, code);
         }
         code.nop();
     }

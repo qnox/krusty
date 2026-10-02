@@ -5,7 +5,7 @@ use crate::jvm::classfile::CodeBuilder;
 use crate::jvm::suspend::SuspendedResultReturn;
 
 use super::frame_map::TempRole;
-use super::{debug_lines, emit_return, load, slot_words, store, Emitter};
+use super::{emit_return, load, slot_words, store, Emitter};
 
 impl Emitter<'_> {
     /// Emit the active `finally` bodies down to `floor`, inner to outer, before a control transfer.
@@ -137,11 +137,11 @@ impl Emitter<'_> {
             // `nop` ahead of the transfer and restores it again at the physical return, exactly as
             // a value return's own expression and reload do.
             if !self.return_finalizers.is_empty() {
-                debug_lines::mark_return(self.ir, returned, code);
+                self.mark_return(returned, code);
                 code.nop();
             }
             if self.emit_return_finalizers(code) {
-                debug_lines::mark_return(self.ir, returned, code);
+                self.mark_return(returned, code);
                 code.ret_void();
             }
             self.reopen_finally_segments(code);
@@ -165,7 +165,7 @@ impl Emitter<'_> {
         let words = slot_words(ret);
         if self.return_finalizers.is_empty() || words == 0 {
             if self.emit_return_finalizers(code) {
-                debug_lines::mark_return(self.ir, returned, code);
+                self.mark_return(returned, code);
                 emit_return(ret, code);
             }
             self.reopen_finally_segments(code);
@@ -190,7 +190,7 @@ impl Emitter<'_> {
         }
         self.release_temporary(parked);
         if survives {
-            debug_lines::mark_return(self.ir, returned, code);
+            self.mark_return(returned, code);
             emit_return(ret, code);
         }
         self.reopen_finally_segments(code);

@@ -25,24 +25,6 @@ pub(super) fn begin_expression(ir: &IrFile, expression: ExprId, code: &mut CodeB
     }
 }
 
-/// Mark the actual return instruction after any active `finally` blocks have run.
-///
-/// An implicit expression-body return uses the body's closing line. An explicit return uses its own
-/// source line, which matters when a finalizer changed the line in effect before control comes back
-/// to the pending return. A `return` written as a statement carries that line in the statement map
-/// rather than the per-expression one, so both are consulted.
-pub(super) fn mark_return(ir: &IrFile, returned: ExprId, code: &mut CodeBuilder) {
-    if let Some(line) = ir
-        .implicit_return_end_line(returned)
-        .or_else(|| ir.expr_source_lines.get(&returned).copied())
-        .or_else(|| ir.expr_lines.get(&returned).copied())
-    {
-        if line != 0 {
-            code.mark_line(line);
-        }
-    }
-}
-
 /// Mark a loop's own line at control lowering generated for it: a `for` loop's update and exit
 /// test, and the bottom condition of its `do…while` shape.
 ///
@@ -99,6 +81,24 @@ pub(super) fn mark_block_exit(ir: &IrFile, block: ExprId, code: &mut CodeBuilder
 }
 
 impl Emitter<'_> {
+    /// Mark the actual return instruction after any active `finally` blocks have run.
+    ///
+    /// An implicit expression-body return uses the body's closing line. An explicit return uses
+    /// its own source line, which matters when a finalizer changed the line in effect before
+    /// control comes back to the pending return. A copied inline return keeps that semantic line,
+    /// while this JVM boundary maps it through the enclosing class's source map like every other
+    /// copied expression.
+    pub(super) fn mark_return(&mut self, returned: ExprId, code: &mut CodeBuilder) {
+        if let Some(line) = self
+            .ir
+            .implicit_return_end_line(returned)
+            .or_else(|| self.ir.expr_source_lines.get(&returned).copied())
+            .or_else(|| self.ir.expr_lines.get(&returned).copied())
+        {
+            self.mark_expression_line(returned, line, code);
+        }
+    }
+
     /// Mark one expression line, mapping a same-file inline copy through the class's SMAP. Common
     /// IR supplies the semantic declaration owner and call line; this boundary chooses JVM source
     /// paths and output line numbers.

@@ -173,6 +173,27 @@ fn retained_inline_local_delegate_materializes_its_sibling_inline_convention() {
         "retained inline local delegate convention dependency",
     );
     let pair = common::ModuleClassPair::compile(&sources, "ForceOutOfOrder");
-    let (reference, krusty) = pair.method_code("ForceOutOfOrder", "callInline");
-    assert_eq!(krusty, reference);
+    let body = krusty::jvm::classreader::read_method_code(
+        &pair.krusty,
+        "callInline",
+        "()Ljava/lang/String;",
+    )
+    .expect("consumer inline call body");
+    let calls = krusty::jvm::inline::disassemble(&body.code)
+        .expect("consumer inline call instructions")
+        .iter()
+        .filter_map(|instruction| krusty::jvm::inline::invoked_method(instruction, &body.source_cp))
+        .map(|(owner, name, descriptor, _)| {
+            (owner.to_owned(), name.to_owned(), descriptor.to_owned())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        calls,
+        vec![(
+            "kotlin/jvm/functions/Function0".to_string(),
+            "invoke".to_string(),
+            "()Ljava/lang/Object;".to_string(),
+        )],
+        "the retained template must contain the materialized lambda invocation, with neither the original inline call nor its local-delegate convention call left over",
+    );
 }
