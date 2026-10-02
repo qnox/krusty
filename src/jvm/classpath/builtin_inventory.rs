@@ -2,12 +2,10 @@
 //! `.kotlin_builtins` records and the `kotlin.ranges.RangesKt` file facade are those catalogs.
 //! A classfile or KLIB declaration with the same shape does not acquire a catalog role.
 
-use std::collections::HashMap;
-
 use crate::libraries::{CompilerIntrinsic, FunctionInfo, GenericSig};
-use crate::types::{type_name, Ty, TypeName};
+use crate::types::{Ty, TypeName};
 
-use super::{builtin_bounds, builtin_erased, builtin_ty, BuiltinPackageFunction};
+use super::{builtin_erased, BuiltinPackageFunction};
 
 fn floating_range_membership(
     operator: bool,
@@ -123,7 +121,8 @@ mod tests {
     use crate::symbol_source::{SymbolNamespace, SymbolSource};
     use crate::types::{type_name, Ty};
 
-    use super::{builtin_bounds, builtin_ty, function_role, published_floating_range_membership};
+    use super::super::{builtin_bounds, builtin_ty};
+    use super::{function_role, published_floating_range_membership};
 
     fn floating_range_builtin() -> super::super::super::metadata::BuiltinFunction {
         let element = super::super::super::metadata::BuiltinTy::class("kotlin/Double");
