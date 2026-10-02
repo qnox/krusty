@@ -5,8 +5,8 @@ use std::collections::{HashMap, HashSet};
 
 use crate::backend::BackendClassifierSource;
 use crate::ir::{
-    Callee, ClassId, IrBinOp, IrClass, IrConst, IrDataClassMemberRole, IrExpr, IrField, IrFile,
-    IrTypeOp,
+    Callee, ClassId, ExprId, IrBinOp, IrClass, IrConst, IrDataClassMemberRole, IrExpr, IrField,
+    IrFile, IrTypeOp,
 };
 use crate::jvm::array_representation::prim_newarray_atype;
 use crate::jvm::classfile::{
@@ -6961,8 +6961,9 @@ struct Emitter<'a> {
     /// carries its own line leaves that line in effect; the instruction that CONSUMES the operand
     /// belongs to the statement, and kotlinc marks it back to this line.
     statement_line: Option<u32>,
-    /// The source line of the comparison being emitted, which its jump carries.
-    comparison_line: Option<u32>,
+    /// The comparison being emitted and its source line. The jump carries that line, mapped when
+    /// the comparison is a copied inline expression.
+    comparison_line: Option<(ExprId, u32)>,
     /// Whether this method records source-local debug entries.
     record_locals: bool,
     /// The source class whose primary-constructor property initializers and `init` blocks are

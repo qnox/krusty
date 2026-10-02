@@ -10083,7 +10083,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   condition's offsets, so common lowering gives both the condition's source line (kotlinc's
   `visitGetValue` marks a read's line); a `when` laid out as a `tableswitch`/`lookupswitch` loads
   its subject once with no condition's line, as kotlinc's `SwitchGenerator` does. A comparison with
-  no line of its own still returns to the enclosing statement's line. Test: `tests/comparison_jump_line_e2e.rs`.
+  no line of its own still returns to the enclosing statement's line. A comparison copied from an
+  inline function carries that source line after the JVM source map, the same way its operands do,
+  so a jump the constant folder removes shares their output line instead of remaining as its own
+  `nop`. Tests: `tests/comparison_jump_line_e2e.rs`, `tests/constant_conditions_e2e.rs`.
 
 - **A primitive iterator's `next()` calls its unboxed element operation** (kotlinc's
   `IteratorNext` intrinsic): a call of `next()` declared by a `kotlin.collections` primitive
