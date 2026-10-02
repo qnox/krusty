@@ -2100,6 +2100,60 @@ fn cross_source_inline_call_consumes_retained_fir_as_a_non_emitted_template() {
 }
 
 #[test]
+fn retained_inline_local_delegate_materializes_its_inline_convention_dependency() {
+    let ir = lower_source_from_set(
+        &[
+            (
+                "inline operator fun String.getValue(owner: Any?, property: Any): String = this\n\
+                 object C {\n\
+                 \x20   inline fun inlineFun(): String {\n\
+                 \x20       val value by \"OK\"\n\
+                 \x20       return value\n\
+                 \x20   }\n\
+                 }",
+                "Library",
+            ),
+            ("fun use(): String = C.inlineFun()", "Consumer"),
+        ],
+        1,
+    );
+
+    let template_functions = ir
+        .foreign_inline_templates
+        .iter()
+        .copied()
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(template_functions.len(), 2);
+    let mut template_names = template_functions
+        .iter()
+        .map(|function| ir.functions[*function as usize].name.as_str())
+        .collect::<Vec<_>>();
+    template_names.sort_unstable();
+    assert_eq!(template_names, ["getValue", "inlineFun"]);
+    assert!(template_functions
+        .iter()
+        .all(|function| ir.functions[*function as usize].body.is_some()));
+
+    let template_targets = ir
+        .checked_callable_functions
+        .iter()
+        .filter_map(|(&target, function)| template_functions.contains(function).then_some(target))
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(template_targets.len(), 2);
+    assert!(ir.exprs.iter().all(|expression| !matches!(
+        expression,
+        IrExpr::Call {
+            callee: Callee::Module { target, .. }
+                | Callee::CrossFile {
+                    module_target: Some(target),
+                    ..
+                },
+            ..
+        } if template_targets.contains(target)
+    )));
+}
+
+#[test]
 fn nested_generic_inline_expansion_specializes_its_result_storage() {
     let ir = lower_source_from_set(
         &[

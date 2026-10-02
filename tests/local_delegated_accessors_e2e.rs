@@ -143,3 +143,36 @@ fn provider_and_inline_accessor_property_reference_uses_do_not_alias() {
         &["IndependentLocalDelegateReferencesKt"],
     );
 }
+
+#[test]
+fn retained_inline_local_delegate_materializes_its_sibling_inline_convention() {
+    let sources = [
+        (
+            "Library.kt",
+            "import kotlin.reflect.KProperty\n\
+             inline operator fun String.getValue(owner: Any?, property: KProperty<*>): String =\n\
+             \x20   property.name + this\n\
+             object C {\n\
+             \x20   inline fun inlineFun() = {\n\
+             \x20       val O by \"K\"\n\
+             \x20       O\n\
+             \x20   }.let { it() }\n\
+             }",
+        ),
+        (
+            "Main.kt",
+            "object ForceOutOfOrder {\n\
+             \x20   fun callInline() = C.inlineFun()\n\
+             }\n\
+             fun box(): String = ForceOutOfOrder.callInline()",
+        ),
+    ];
+
+    common::expect_box_ok_files_with_stdlib(
+        &sources,
+        "retained inline local delegate convention dependency",
+    );
+    let pair = common::ModuleClassPair::compile(&sources, "ForceOutOfOrder");
+    let (reference, krusty) = pair.method_code("ForceOutOfOrder", "callInline");
+    assert_eq!(krusty, reference);
+}

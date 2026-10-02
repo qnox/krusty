@@ -2581,6 +2581,17 @@ impl FirBody {
         &self,
         callables: &mut std::collections::HashSet<CallableId>,
     ) {
+        // A local delegated-property convention is a selected semantic call even though its use
+        // is represented by `LocalDelegateAccess`, not by an expression-level `FirCall`. Retained
+        // inline bodies must publish these dependencies before their accessor plans are lowered in
+        // another source; otherwise a selected inline convention has no common-IR template there.
+        for plan in &self.local_delegate_plans {
+            for call in std::iter::once(&plan.get_value).chain(plan.set_value.iter()) {
+                if let Some(callable) = call.target.module() {
+                    callables.insert(callable);
+                }
+            }
+        }
         for expression in &self.expressions {
             match &expression.kind {
                 FirExprKind::Call(call)
