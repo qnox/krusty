@@ -1,7 +1,7 @@
 use crate::integer_constant::IntegerConstant;
 use crate::libraries::{GenericSig, SemanticPlatform};
 use crate::symbol_source::SymbolSource;
-use crate::types::Ty;
+use crate::types::{Ty, TypeName};
 
 use super::{infer_generic_return_bindings, semantic_arg_assignable, GSigBinds};
 
@@ -139,12 +139,51 @@ impl CallArgKind {
     /// Keeping this distinction here prevents each top-level/member/static selection path from
     /// independently deciding whether to feed `KFunctionN` or `(P) -> R` into the generic solver.
     pub(crate) fn inference_type(&self, source: &dyn SymbolSource, parameter: Ty) -> Ty {
-        if super::semantic_sam_signature(source, parameter).is_some() {
+        if let Some(sam) = super::semantic_sam_signature(source, parameter) {
+            // A solved application is the exact interface: `Worker<TokenA>` does not instantiate
+            // `Worker<TokenB>`. An unsolved `Worker<T>` has no application yet, so any
+            // instantiation of that classifier is this value's constraint rather than its
+            // function supertype.
+            let nominal = self.ty();
+            let already = if parameter.mentions_ty_param() {
+                self.nominal_implements_classifier(source, sam.internal)
+            } else {
+                !matches!(nominal.non_null(), Ty::Error | Ty::Pending | Ty::Fun(_))
+                    && !nominal.mentions_pending()
+                    && semantic_arg_assignable(source, &parameter, &nominal)
+            };
+            if already {
+                return nominal;
+            }
             self.function_type()
                 .unwrap_or_else(|| self.type_for(parameter))
         } else {
             self.type_for(parameter)
         }
+    }
+
+    /// Whether this argument's nominal type is the fun interface `target`, or a subtype of it.
+    fn nominal_implements_classifier(&self, source: &dyn SymbolSource, target: TypeName) -> bool {
+        let start = self.ty().non_null();
+        if matches!(start, Ty::Error | Ty::Pending | Ty::Fun(_)) || start.mentions_pending() {
+            return false;
+        }
+        let mut pending = vec![start];
+        let mut seen = Vec::new();
+        while let Some(ty) = pending.pop() {
+            let ty = ty.non_null();
+            if seen.contains(&ty) {
+                continue;
+            }
+            seen.push(ty);
+            if let Ty::Obj(name, _) = ty {
+                if name == target {
+                    return true;
+                }
+            }
+            pending.extend(super::direct_supertypes(source, ty));
+        }
+        false
     }
 
     pub(crate) fn is_spread(&self) -> bool {
