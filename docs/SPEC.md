@@ -4437,7 +4437,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   under its generated class and physical `invoke` or selected SAM method. Accessors, constructors,
   initializers, defaults, suspend machines, and companion-block functions likewise derive their
   physical owner and segment only after JVM placement is final. The declaration's own lambda body
-  remains unchanged.
+  remains unchanged. A nested declaration closure that uses the reified parameter is a class too
+  (`defineNested$1$nested$1`), not an invokedynamic; the call site still receives its own
+  specialized class.
   A local-delegate accessor inside that copy becomes a new helper only when its body or signature
   names the expansion's type arguments. An accessor that does not, such as an ordinary `getValue`,
   stays the original helper, so the declaration lambda and the call-site copy do not emit two

@@ -261,7 +261,7 @@ fn a_nested_escaping_lambda_is_specialized_too() {
                 .contains(*function))
             .count(),
         2,
-        "the outer and nested source closures both need runtime-reified classes"
+        "the outer and nested source closures are runtime-reified classes"
     );
     assert!(
         call.iter()

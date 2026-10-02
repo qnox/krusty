@@ -180,11 +180,18 @@ Known gaps, both byte differences in the function's own method (the continuation
 * The lambdas taken are the shapes steps 2 and 3 take: plain-call suspension points outside any
   `try`, no spliced inline body, no assigned capture, not an argument an inline call consumes.
   A call to a same-file member suspend function is a plain call, whether its receiver is explicit,
-  `this`, or the lambda's own extension receiver. Invoking a suspend function value is not a plain
-  call yet. The rest keep the lifted function with an IR-machine continuation.
+  `this`, or the lambda's own extension receiver. Invoking a suspend function value is a plain
+  call too: the continuation is appended and `FunctionN.invoke` is marked like a direct call.
+  The rest keep the lifted function with an IR-machine continuation.
+  An inline or specialized suspend lambda is public: the class, its constructor, and its
+  `InnerClasses` row carry `ACC_PUBLIC`. A lambda outside an inline declaration stays
+  package-private. A specialized copy enclosed by the call-site method is referenced from that
+  method without an `InnerClasses` row on the facade; the class itself and classes it encloses
+  still list the row.
 * A lambda with no suspension point is taken too: kotlinc's transformer still builds its
-  single-state `tableswitch`. Its site is the one `Lambda` node a function body reaches; the
-  arena keeps stale copies a body rebuild left behind, which name no site. Lambdas are taken
+  single-state `tableswitch`. Its site is the one `Lambda` node a function body or a static
+  property initializer (`<clinit>`) reaches; the arena keeps stale copies a body rebuild left
+  behind, which name no site. Lambdas are taken
   innermost first, so an enclosing lambda sees a nested class already built as an object. One
   whose nested lambda stays a plain lambda (too wide for a numbered function type) still keeps
   its lifted function, and that plain lambda's class takes the naming walk's name where it

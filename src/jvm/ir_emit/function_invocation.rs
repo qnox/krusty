@@ -121,7 +121,8 @@ impl Emitter<'_> {
                 .interface_methodref(&iface, "invoke", &jvm_function_invoke_descriptor(n as u8));
         // A function VALUE's invocation is a dispatch like any other: after the operands
         // have each marked their own line, the call's own line returns at the `invoke`.
-        self.mark_dispatch_line(e, code);
+        // A transformed suspension also takes the markers a direct suspend call takes.
+        self.mark_call_start(e, code);
         code.invokeinterface(m, if high_arity { 1 } else { n as i32 }, 1);
     }
 

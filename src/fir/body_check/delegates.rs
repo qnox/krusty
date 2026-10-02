@@ -832,6 +832,7 @@ fn selected_delegate_call(
                     .ok_or_else(|| failure(BodyCheckFailureKind::MissingStableCallTarget))?;
                 let substitutions = delegate_substitutions(
                     index,
+                    *declaration,
                     span,
                     std::iter::once((*declared_receiver, *applied_receiver))
                         .chain(declared_params.iter().copied().zip(params.iter().copied()))
@@ -915,6 +916,7 @@ fn selected_delegate_call(
                     .map(|generic| {
                         delegate_substitutions(
                             index,
+                            *declaration,
                             span,
                             generic
                                 .receiver
@@ -1020,6 +1022,7 @@ fn selected_delegate_call(
                     .ok_or_else(|| failure(BodyCheckFailureKind::MissingStableCallTarget))?;
                 let substitutions = delegate_substitutions(
                     index,
+                    *declaration,
                     span,
                     callable
                         .shape
@@ -1090,6 +1093,7 @@ fn selected_delegate_call(
 /// declaration shape followed by its selected shape; this is not another applicability pass.
 fn delegate_substitutions(
     index: &ResolvedModuleIndex,
+    declaration: DeclarationId,
     span: Option<crate::diag::Span>,
     shapes: impl IntoIterator<Item = (Ty, Ty)>,
 ) -> Result<Box<[FirTypeSubstitution]>, BodyCheckFailure> {
@@ -1098,11 +1102,16 @@ fn delegate_substitutions(
         crate::symbol_resolver::unify_inferred_ty(declared, selected, &mut bindings);
     }
     let failure = |kind| BodyCheckFailure { span, kind };
+    // The callee and its receiver classifier can publish the same semantic name. The operator
+    // body mentions the callee's parameter, so a same-named class parameter must not win.
     let mut substitutions = bindings
         .into_iter()
         .map(|(name, value)| {
-            let parameter = index
-                .type_parameter_by_semantic_name(&name)
+            let parameter = (0..)
+                .map_while(|ordinal| index.type_parameter(declaration, ordinal))
+                .find(|parameter| {
+                    index.type_parameter_semantic_name(*parameter) == Some(name.as_str())
+                })
                 .ok_or_else(|| failure(BodyCheckFailureKind::MissingStableCallTarget))?;
             let header = index
                 .type_parameter_header(parameter)

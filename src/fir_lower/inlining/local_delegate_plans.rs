@@ -18,6 +18,11 @@ pub(super) fn specialize_inline_copy(
     runtime: &HashMap<String, Ty>,
     local_delegate_plans: &mut HashMap<u32, u32>,
 ) -> Option<()> {
+    // An expansion that substitutes nothing keeps the declaration's accessor plan. Cloning it
+    // would publish a second plan for the same checked local property.
+    if bindings.is_empty() && runtime.is_empty() {
+        return Some(());
+    }
     super::specialize_recorded_facts(ir, expression, bindings, runtime);
     {
         let expression = ir.exprs.get_mut(expression as usize)?;
