@@ -119,6 +119,7 @@ impl ResolvedSuperCall {
             return None;
         }
         let realization = callable.member_realization;
+        let physical_name = callable.physical_name().to_string();
         let physical_owner = match realization {
             crate::libraries::MemberRealization::Dispatch => owner,
             crate::libraries::MemberRealization::Direct { .. } => callable.owner,
@@ -128,7 +129,7 @@ impl ResolvedSuperCall {
         Some(Self {
             receiver,
             owner: physical_owner,
-            name: callable.name,
+            name: physical_name,
             params: callable.params,
             physical_params: callable.physical_params,
             ret: callable.ret,

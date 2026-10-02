@@ -160,7 +160,8 @@ fn result_get_or_null_resolves_as_nullable_metadata_member() {
         .and_then(Symbol::call)
         .expect("getOrNull resolves on Result via value-class @Metadata");
     assert_eq!(m.member.owner_name().as_deref(), Some("kotlin/Result"));
-    assert_eq!(m.member.name, "getOrNull-impl");
+    assert_eq!(m.member.name, "getOrNull");
+    assert_eq!(m.member.physical_name.as_deref(), Some("getOrNull-impl"));
     assert_eq!(
         m.member.descriptor,
         "(Ljava/lang/Object;)Ljava/lang/Object;"

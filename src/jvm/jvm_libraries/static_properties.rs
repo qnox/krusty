@@ -211,14 +211,16 @@ impl JvmLibraries {
 
     fn register_external_static_field(&self, field: &mut JvmStaticField) {
         let descriptor = field.descriptor.clone();
+        let source_name = field.name.clone();
         let mut declaration = LibraryCallable::library(
             field.owner,
-            field.name.clone(),
+            source_name.clone(),
             Vec::new(),
             field.ty,
             field.ty.platform_lower_bound(),
             descriptor,
         );
+        declaration.physical_name = (field.name != source_name).then(|| field.name.clone());
         declaration.external_identity = Some(self.cp.intern_external_callable(
             &declaration,
             crate::libraries::ExternalCallableKind::StaticFieldRead,
@@ -272,24 +274,30 @@ impl JvmLibraries {
         field: &JvmStaticField,
     ) -> (LibraryCallable, Option<LibraryCallable>) {
         let descriptor = field.descriptor.clone();
+        let getter_source_name = field.name.clone();
         let mut getter = LibraryCallable::library(
             field.owner,
-            field.name.clone(),
+            getter_source_name.clone(),
             Vec::new(),
             field.ty,
             field.ty.platform_lower_bound(),
             descriptor.clone(),
         );
+        getter.physical_name = (field.name != getter_source_name).then(|| field.name.clone());
         getter.external_identity = field.external_identity;
         let setter = (!field.is_final).then(|| {
+            let setter_source_name = field.name.clone();
+            let setter_physical_name =
+                (field.name != setter_source_name).then(|| field.name.clone());
             let mut setter = LibraryCallable::library(
                 field.owner,
-                field.name.clone(),
+                setter_source_name,
                 vec![field.ty.platform_lower_bound()],
                 Ty::Unit,
                 Ty::Unit,
                 descriptor,
             );
+            setter.physical_name = setter_physical_name;
             setter.params = vec![field.ty];
             setter.external_identity = Some(self.cp.intern_external_callable(
                 &setter,
@@ -440,14 +448,17 @@ impl JvmLibraries {
         if !getter_method.public && property_intrinsic.is_none() && !mp.visibility.is_public() {
             return None;
         }
+        let getter_source_name = crate::names::property_getter_name(name);
         let mut getter = LibraryCallable::library(
             getter_method.owner,
-            getter_sig.name,
+            getter_source_name.clone(),
             gparams,
             property_ty,
             gret,
             getter_sig.desc,
         );
+        getter.physical_name =
+            (getter_sig.name != getter_source_name).then(|| getter_sig.name.clone());
         getter.params = semantic_context.iter().copied().chain(receiver).collect();
         getter.source_receiver = receiver;
         getter.context_count = context_count;
@@ -463,14 +474,17 @@ impl JvmLibraries {
             if !setter_method.public {
                 return None;
             }
+            let setter_source_name = crate::names::property_setter_name(name);
             let mut setter = LibraryCallable::library(
                 setter_method.owner,
-                setter_sig.name,
+                setter_source_name.clone(),
                 sparams,
                 Ty::Unit,
                 sret,
                 setter_sig.desc,
             );
+            setter.physical_name =
+                (setter_sig.name != setter_source_name).then(|| setter_sig.name.clone());
             setter.params = semantic_context
                 .iter()
                 .copied()

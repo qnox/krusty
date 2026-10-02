@@ -609,9 +609,9 @@ impl JvmLibraries {
         if collection_transform_lambda_parameter(callable, parameter_slots).is_none() {
             return CollectionTransformDecode::NotRecognized;
         }
-        let Some(body) = self
-            .cp
-            .method_code_name(callable.owner, &callable.name, body_descriptor)
+        let Some(body) =
+            self.cp
+                .method_code_name(callable.owner, callable.physical_name(), body_descriptor)
         else {
             return CollectionTransformDecode::Unavailable;
         };
@@ -716,7 +716,7 @@ mod tests {
         let descriptor = callable.descriptor.clone();
         let body = libraries
             .cp
-            .method_code_name(callable.owner, &callable.name, &descriptor)
+            .method_code_name(callable.owner, callable.physical_name(), &descriptor)
             .expect("stdlib Iterable.map body");
         let instructions = inline::disassemble(&body.code).expect("valid Iterable.map bytecode");
         (callable, descriptor, body, instructions)

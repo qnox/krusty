@@ -361,7 +361,11 @@ mod tests {
             .expect("stdlib must declare receiver-less runCatching");
         let body = libraries
             .cp
-            .method_code_name(callable.owner, &callable.name, &callable.descriptor)
+            .method_code_name(
+                callable.owner,
+                callable.physical_name(),
+                &callable.descriptor,
+            )
             .expect("runCatching must retain its declaration body");
         let instructions = inline::disassemble(&body.code).expect("disassemble runCatching");
         let invoke_sites = inline::function_invoke_sites(&instructions, &body.source_cp);

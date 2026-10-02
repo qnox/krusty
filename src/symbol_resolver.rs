@@ -35,6 +35,7 @@ mod receiver_mro;
 mod sam;
 mod scope_level_callables;
 mod selected_call_instantiation;
+pub(crate) use selected_call_instantiation::selected_default_callable;
 pub(crate) mod selected_constructor;
 pub(crate) use selected_constructor::SelectedConstructorDeclaration;
 mod source_view;
@@ -1436,31 +1437,6 @@ fn default_literal_ty(value: &crate::libraries::DefaultValue) -> Option<Ty> {
         DefaultValue::Str(_) => Ty::String,
         DefaultValue::Null | DefaultValue::Object(_) => return None,
     })
-}
-
-/// Materialize the default-argument bridge attached to the already-selected declaration. The bridge
-/// is realization data only: semantic parameters, generic signature, visibility, and overload identity
-/// remain those of `base`; no synthetic name is re-entered into resolution.
-pub(crate) fn selected_default_callable(base: &FunctionInfo) -> Option<LibraryCallable> {
-    let Some(realization) = base.callable.default_realization.as_deref() else {
-        crate::trace_compiler!(
-            "default_semantics",
-            "selected callable has no default realization: {}.{}{}",
-            base.callable.owner.render(),
-            base.callable.name,
-            base.callable.descriptor,
-        );
-        return None;
-    };
-    let mut callable = base.callable.clone();
-    callable.owner = realization.owner;
-    callable.name = realization.name.clone();
-    callable.descriptor = realization.descriptor.clone();
-    callable.physical_params = realization.real_params.clone();
-    callable.physical_ret = realization.ret;
-    callable.suspend = realization.suspend;
-    callable.default_call = true;
-    Some(callable)
 }
 
 /// Record the vararg slot/element on a `$default` callable so the lowerer packs loose trailing
@@ -3284,7 +3260,7 @@ impl<'a> SymbolResolver<'a> {
                         .as_deref()
                         .is_some_and(|realization| {
                             realization.owner == callable.owner
-                                && realization.name == callable.name
+                                && realization.name == callable.physical_name()
                                 && realization.descriptor == callable.descriptor
                         }))
         })?;
@@ -3999,7 +3975,7 @@ impl<'a> SymbolResolver<'a> {
                 "resolve",
                 "extension defaulted ($default) {name} recv={receiver:?} args={args:?} -> {}.{}{} ret={ret_ty:?}",
                 c.owner.render(),
-                c.name,
+                c.physical_name(),
                 c.descriptor
             );
             let mut c = callable_with_return(&c, ret_ty, true);
@@ -4172,7 +4148,7 @@ impl<'a> SymbolResolver<'a> {
                 "resolve",
                 "extension defaulted slots ($default) {name} recv={receiver:?} slots={slots:?} -> {}.{}{} ret={ret_ty:?}",
                 c.owner.render(),
-                c.name,
+                c.physical_name(),
                 c.descriptor
             );
             let mut callable = callable_with_return(&c, ret_ty, true);
@@ -4338,14 +4314,14 @@ impl<'a> SymbolResolver<'a> {
             // krusty models `$default` with only the real parameters, so exact JVM spelling plus the
             // logical parameter vector identifies its base without reconstructing a descriptor from
             // lossy `Ty` values (`Byte`/`Short` both appear as `Int`).
-            let base_spelling = c.name.strip_suffix("$default");
+            let base_spelling = c.physical_name().strip_suffix("$default");
             let base = base_spelling.and_then(|spelling| {
                 base_records
                     .iter()
                     .flat_map(|record| record.callables.functions())
                     .filter(|candidate| candidate.kind == FnKind::TopLevel)
                     .find(|candidate| {
-                        candidate.callable.name == spelling
+                        candidate.callable.physical_name() == spelling
                             && candidate.callable.params.as_slice() == c.params.as_slice()
                     })
             })?;
@@ -4354,7 +4330,7 @@ impl<'a> SymbolResolver<'a> {
             crate::trace_compiler!(
                 "default_semantics",
                 "name={name} bridge={} base={} type_args={type_args:?} bridge_generic={:?} base_generic={:?}",
-                c.name,
+                c.physical_name(),
                 base.callable.name,
                 o.generic_sig,
                 base.generic_sig,
@@ -4511,7 +4487,7 @@ impl<'a> SymbolResolver<'a> {
             .flat_map(|record| record.callables.functions())
             .filter(|candidate| candidate.kind == FnKind::TopLevel)
         {
-            let spelling = base.callable.name.clone();
+            let spelling = base.callable.physical_name().to_string();
             if spelling == name || !seen_spellings.insert(spelling.clone()) {
                 continue;
             }
@@ -4969,6 +4945,7 @@ impl ResolvedMember {
             callable.ret,
             callable.descriptor,
         );
+        member.physical_name = callable.physical_name;
         member.external_identity = callable.external_identity;
         member.external_property_identity = callable.external_property_identity;
         member.physical_params = callable.physical_params.clone();
@@ -7907,7 +7884,8 @@ mod tests {
         let realized = selected_default_callable(&base).expect("default realization");
 
         assert_eq!(realized.owner, crate::types::type_name("demo/Defaults"));
-        assert_eq!(realized.name, "realized$default");
+        assert_eq!(realized.name, "maybe");
+        assert_eq!(realized.physical_name(), "realized$default");
         assert_eq!(
             realized.descriptor,
             "(ILjava/lang/Object;)Ljava/lang/String;"
@@ -8164,7 +8142,8 @@ mod tests {
             external_default_provider: None,
             external_property_identity: None,
             owner: "kotlin/UIntKt".into(),
-            name: "make$default".to_string(),
+            name: "make".to_string(),
+            physical_name: Some("make$default".to_string()),
             reflection_name: None,
             compiler_intrinsic: None,
             semantic_role: None,
@@ -8214,7 +8193,7 @@ mod tests {
     fn attach_default_target(base: &mut FunctionInfo, bridge: &FunctionInfo) {
         base.callable.default_realization = Some(Box::new(DefaultCallRealization {
             owner: bridge.callable.owner,
-            name: bridge.callable.name.clone(),
+            name: bridge.callable.physical_name().to_string(),
             descriptor: bridge.callable.descriptor.clone(),
             declaration_owner: bridge.callable.owner,
             real_params: base.callable.physical_params.clone(),
@@ -8793,7 +8772,7 @@ mod tests {
 
         let bridge = top_level_default_uint_info();
         let mut base = bridge.clone();
-        base.callable.name = "make".to_string();
+        base.callable.physical_name = None;
         base.callable.default_call = false;
         attach_default_target(&mut base, &bridge);
         let source = DefaultSource { bridge, base };
@@ -8846,18 +8825,19 @@ mod tests {
         let parameter = Ty::ty_param("T", nullable_any);
         let mut callable = LibraryCallable::library(
             "demo/AssertionsKt",
-            "same$default",
+            "same",
             vec![any, any, Ty::nullable(Ty::String)],
             Ty::Unit,
             Ty::Unit,
             "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/String;)V",
         );
+        callable.physical_name = Some("same$default".to_string());
         callable.default_call = true;
         let mut bridge = FunctionInfo::plain(FnKind::TopLevel, None, callable);
         bridge.call_sig.required = 2;
         bridge.call_sig.param_defaults = vec![false, false, true];
         let mut base = bridge.clone();
-        base.callable.name = "same".to_string();
+        base.callable.physical_name = None;
         base.callable.default_call = false;
         attach_default_target(&mut base, &bridge);
         base.generic_sig = Some(GenericSig {

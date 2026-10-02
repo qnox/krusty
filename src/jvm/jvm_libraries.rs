@@ -54,94 +54,6 @@ fn effective_class_access(class: &super::classreader::ClassInfo) -> u16 {
         .unwrap_or(class.access)
 }
 
-/// Give every metadata-declared constructor the classifier parameters it can infer, independently
-/// of how the JVM realizes that declaration. Value classes use `constructor-impl` rather than a
-/// directly callable `<init>`, while ordinary and marker-backed constructors do have `<init>`
-/// methods; that representation distinction must not change their source-level generic signature.
-fn classifier_constructor_generic_sig(
-    parameters: &crate::types::TypeParameters<Vec<Vec<Ty>>>,
-    owner: TypeName,
-    value_parameters: &[Ty],
-) -> Option<GenericSig> {
-    if parameters.type_params.is_empty() {
-        return None;
-    }
-    let arguments = parameters
-        .type_params
-        .iter()
-        .enumerate()
-        .map(|(index, formal)| {
-            let bound = parameters
-                .type_param_bounds
-                .get(index)
-                .and_then(|bounds| bounds.first())
-                .copied()
-                .unwrap_or_else(|| Ty::obj("kotlin/Any"));
-            Ty::ty_param(formal, bound)
-        })
-        .collect::<Vec<_>>();
-    Some(GenericSig {
-        formals: parameters.type_params.clone(),
-        formal_bounds: parameters.type_param_bounds.clone(),
-        receiver: None,
-        params: value_parameters.to_vec(),
-        ret: Ty::obj_args_name(owner, &arguments),
-        return_policy: GenericReturnPolicy::Exact,
-    })
-}
-
-/// A mapped Kotlin classifier and its JVM realization may use different source names for the same
-/// owner type parameters (`Iterator<T>` in builtins versus `java.util.Iterator<E>` in the class
-/// file). Java members admitted into the mapped Kotlin scope must use the Kotlin classifier's
-/// parameter identities before they leave this provider. Otherwise core can apply `Iterator<String>`
-/// only to declarations written in terms of `T`, while a visible Java default such as
-/// `forEachRemaining(Consumer<? super E>)` leaks the unrelated physical `E` into checked signatures.
-fn align_mapped_owner_type_parameters(
-    members: &mut [LibraryMember],
-    physical: &[String],
-    semantic: &[String],
-    semantic_bounds: &[Vec<Ty>],
-) {
-    if physical.len() != semantic.len() || physical == semantic {
-        return;
-    }
-    let owner_bindings = physical
-        .iter()
-        .zip(semantic)
-        .enumerate()
-        .map(|(index, (physical, semantic))| {
-            let bound = semantic_bounds
-                .get(index)
-                .and_then(|bounds| bounds.first())
-                .copied()
-                .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
-            (physical.clone(), Ty::ty_param(semantic, bound))
-        })
-        .collect::<std::collections::HashMap<_, _>>();
-    for member in members {
-        let Some(signature) = &mut member.generic_sig else {
-            continue;
-        };
-        let mut bindings = owner_bindings.clone();
-        for formal in &signature.formals {
-            // A method formal shadows an identically named owner formal.
-            bindings.remove(formal);
-        }
-        signature.receiver = signature
-            .receiver
-            .map(|receiver| ty_subst_keep_unbound(receiver, &bindings));
-        for parameter in &mut signature.params {
-            *parameter = ty_subst_keep_unbound(*parameter, &bindings);
-        }
-        signature.ret = ty_subst_keep_unbound(signature.ret, &bindings);
-        for bounds in &mut signature.formal_bounds {
-            for bound in bounds {
-                *bound = ty_subst_keep_unbound(*bound, &bindings);
-            }
-        }
-    }
-}
-
 /// The JVM platform's contribution to Kotlin's default imports. The language-level `kotlin.*` set is
 /// composed with this list in the import-level builder and in the seed filter, so neither list is duplicated.
 const PLATFORM_DEFAULT_IMPORT_PACKAGES: &[&str] = &["java.lang", "kotlin.jvm"];
@@ -714,6 +626,7 @@ impl JvmLibraries {
                 // from the candidate set entirely.
                 continue;
             }
+            let source_name = meta.source_name.clone().unwrap_or_else(|| name.to_string());
             let suspend = meta.suspend;
             // A `suspend fun`'s physical method appends a `Continuation` parameter and erases the
             // return to `Object`; present the LOGICAL signature (drop the continuation) so a normal
@@ -825,10 +738,11 @@ impl JvmLibraries {
                 declared_params,
                 declared_ret,
                 // Selected by its Kotlin name, which reflection names (see the extension path).
-                reflection_name: Some(name.to_string()),
+                reflection_name: Some(source_name.clone()),
+                physical_name: (c.name != source_name).then(|| c.name.clone()),
                 ..LibraryCallable::library(
                     c.owner,
-                    c.name.clone(),
+                    source_name,
                     params,
                     ret,
                     physical_ret,
@@ -1084,9 +998,12 @@ impl JvmLibraries {
                 context_count: function.context_count(),
                 generic_sig: generic_sig.clone().map(Box::new),
                 singleton_dispatch: Some(Box::new(singleton.clone())),
+                physical_name: (function.jvm_name != function.kotlin_name)
+                    .then(|| function.jvm_name.clone()),
+                reflection_name: Some(function.kotlin_name.clone()),
                 ..LibraryCallable::library(
                     owner,
-                    function.jvm_name.clone(),
+                    function.kotlin_name.clone(),
                     params,
                     ret,
                     physical_ret,
@@ -1157,7 +1074,8 @@ impl JvmLibraries {
                 },
                 |gsig| gsig.ret,
             );
-            let accessor = |jvm_name: &str,
+            let accessor = |source_name: String,
+                            jvm_name: &str,
                             desc: &str,
                             params: Vec<Ty>,
                             ret: Ty,
@@ -1166,14 +1084,8 @@ impl JvmLibraries {
                 LibraryCallable {
                     inline,
                     singleton_dispatch: Some(Box::new(singleton.clone())),
-                    ..LibraryCallable::library(
-                        owner,
-                        jvm_name.to_string(),
-                        params,
-                        ret,
-                        physical,
-                        desc,
-                    )
+                    physical_name: (source_name != jvm_name).then(|| jvm_name.to_string()),
+                    ..LibraryCallable::library(owner, source_name, params, ret, physical, desc)
                 }
             };
             let setter = property.setter.as_ref().and_then(|setter_sig| {
@@ -1182,6 +1094,7 @@ impl JvmLibraries {
                 let (params, ret) = parse_method_desc(&setter_sig.desc)?;
                 (params.len() == 2 && ret == Ty::Unit).then(|| {
                     accessor(
+                        crate::names::property_setter_name(&property.name),
                         &setter_sig.name,
                         &setter_sig.desc,
                         params,
@@ -1216,6 +1129,7 @@ impl JvmLibraries {
                 context_param_names: Vec::new(),
                 context_parameter_identities: Vec::new(),
                 getter: accessor(
+                    crate::names::property_getter_name(&property.name),
                     &getter_sig.name,
                     &getter_sig.desc,
                     getter_params,
@@ -1841,7 +1755,7 @@ impl JvmLibraries {
                     }
                     member.physical_params =
                         physical_params[physical_source_start..physical_source_end].to_vec();
-                    member.generic_sig = classifier_constructor_generic_sig(
+                    member.generic_sig = classifier_facts::classifier_constructor_generic_sig(
                         &ci.meta.class_type_parameters,
                         internal_name,
                         &member.params,
@@ -2332,7 +2246,7 @@ impl JvmLibraries {
                     String::new(),
                 );
                 constructor.owner = Some(internal_name);
-                constructor.generic_sig = classifier_constructor_generic_sig(
+                constructor.generic_sig = classifier_facts::classifier_constructor_generic_sig(
                     &ci.meta.class_type_parameters,
                     internal_name,
                     &constructor.params,
@@ -2505,7 +2419,7 @@ impl JvmLibraries {
                     .and_then(parse_class_gsig)
                     .map(|(formals, _, _)| formals)
                     .unwrap_or_default();
-                align_mapped_owner_type_parameters(
+                classifier_facts::align_mapped_owner_type_parameters(
                     &mut members,
                     &physical_type_params,
                     &type_params,
@@ -3632,7 +3546,7 @@ impl JvmLibraries {
         mapped_members: &[MappedBuiltinMember],
         function_renames: &[MappedBuiltinMember],
     ) -> crate::libraries::Callables {
-        let functions = self.member_functions_with_renames(recv, name, function_renames);
+        let mut functions = self.member_functions_with_renames(recv, name, function_renames);
         // Exact declarations on this classifier. The resolver owns the one inheritance walk.
         let Some(internal) = recv.kotlin_class_internal() else {
             return crate::libraries::Callables::from_parts(functions, PropertySet::default());
@@ -3705,14 +3619,18 @@ impl JvmLibraries {
                         .or_else(|| mp.receiver_class.map(kotlin_type_name_to_ty))
                         .unwrap_or(physical_receiver);
                     let ty = property_signature.map_or(ty, |signature| signature.ret);
+                    let getter_source_name = crate::names::property_getter_name(&mp.name);
+                    let getter_physical_name = getter.name.clone();
                     let mut getter = LibraryCallable::library(
                         cn,
-                        getter.name,
+                        getter_source_name.clone(),
                         getter_params.clone(),
                         ty,
                         getter_ret,
                         getter.desc,
                     );
+                    getter.physical_name = (getter_physical_name != getter_source_name)
+                        .then_some(getter_physical_name);
                     let semantic_context = property_signature
                         .map(|signature| signature.params.clone())
                         .unwrap_or_else(|| getter_params[..context_count].to_vec());
@@ -3739,14 +3657,17 @@ impl JvmLibraries {
                         {
                             return None;
                         }
+                        let setter_source_name = crate::names::property_setter_name(&mp.name);
                         let mut callable = LibraryCallable::library(
                             cn,
-                            setter.name,
+                            setter_source_name.clone(),
                             physical_params,
                             Ty::Unit,
                             physical_ret,
                             setter.desc,
                         );
+                        callable.physical_name =
+                            (setter.name != setter_source_name).then(|| setter.name.clone());
                         callable.params = semantic_context
                             .iter()
                             .copied()
@@ -3827,14 +3748,18 @@ impl JvmLibraries {
                 let semantic_context = property_signature
                     .map(|signature| signature.params.clone())
                     .unwrap_or_else(|| getter_params.clone());
+                let getter_source_name = crate::names::property_getter_name(&mp.name);
+                let getter_physical_name = getter.name.clone();
                 let mut getter = LibraryCallable::library(
                     cn,
-                    getter.name,
+                    getter_source_name.clone(),
                     getter_params,
                     ret_ty,
                     getter_ret,
                     getter.desc,
                 );
+                getter.physical_name =
+                    (getter_physical_name != getter_source_name).then_some(getter_physical_name);
                 getter.params = semantic_context.clone();
                 // The property declaration's generic signature owns classifier parameters too
                 // (`Base<T>.value: T?`). `specialize_property` reads that relation from the getter,
@@ -3845,8 +3770,12 @@ impl JvmLibraries {
                 getter.owner_is_interface = ci.is_interface();
                 getter.is_abstract = mp.is_abstract;
                 getter.inline = property_accessor_inline(getter_public);
-                getter.nonvirtual_realization =
-                    interface_holder_method(&self.cp, cn, &getter.name, &getter.descriptor);
+                getter.nonvirtual_realization = interface_holder_method(
+                    &self.cp,
+                    cn,
+                    getter.physical_name(),
+                    &getter.descriptor,
+                );
                 let getter_signature = self
                     .member_functions(recv, &getter.name)
                     .overloads
@@ -3873,14 +3802,16 @@ impl JvmLibraries {
                     if physical_params.len() != context_count + 1 || physical_ret != Ty::Unit {
                         return None;
                     }
+                    let setter_source_name = crate::names::property_setter_name(&mp.name);
                     let mut setter = LibraryCallable::library(
                         cn,
-                        s.name,
+                        setter_source_name.clone(),
                         physical_params,
                         Ty::Unit,
                         physical_ret,
                         s.desc,
                     );
+                    setter.physical_name = (s.name != setter_source_name).then(|| s.name.clone());
                     setter.params = semantic_context
                         .iter()
                         .copied()
@@ -3889,8 +3820,12 @@ impl JvmLibraries {
                     setter.context_count = context_count;
                     setter.owner_is_interface = ci.is_interface();
                     setter.is_abstract = mp.is_abstract;
-                    setter.nonvirtual_realization =
-                        interface_holder_method(&self.cp, cn, &setter.name, &setter.descriptor);
+                    setter.nonvirtual_realization = interface_holder_method(
+                        &self.cp,
+                        cn,
+                        setter.physical_name(),
+                        &setter.descriptor,
+                    );
                     Some(setter)
                 });
                 overloads.push(PropertyInfo {
@@ -3979,27 +3914,35 @@ impl JvmLibraries {
                 } else {
                     Visibility::PackagePrivate
                 };
+                let getter_source_name = name.to_string();
+                let getter_physical_name =
+                    (field.name != getter_source_name).then(|| field.name.clone());
                 let mut getter = LibraryCallable::library(
                     cn,
-                    field.name.clone(),
+                    getter_source_name,
                     Vec::new(),
                     field_ty,
                     erased_ty,
                     field.descriptor.clone(),
                 );
+                getter.physical_name = getter_physical_name;
                 getter.external_identity = Some(self.cp.intern_external_callable(
                     &getter,
                     super::classpath::ExternalCallableKind::InstanceFieldRead,
                 ));
                 let setter = (field.access & 0x0010 == 0).then(|| {
+                    let setter_source_name = name.to_string();
+                    let setter_physical_name =
+                        (field.name != setter_source_name).then(|| field.name.clone());
                     let mut setter = LibraryCallable::library(
                         cn,
-                        field.name.clone(),
+                        setter_source_name,
                         vec![erased_ty],
                         Ty::Unit,
                         Ty::Unit,
                         field.descriptor.clone(),
                     );
+                    setter.physical_name = setter_physical_name;
                     setter.params = vec![field_ty];
                     setter.external_identity = Some(self.cp.intern_external_callable(
                         &setter,
@@ -4052,7 +3995,7 @@ impl JvmLibraries {
             if let Some(function) = functions.overloads.iter().find(|function| {
                 function.callable.params.is_empty()
                     && mapped_property.as_ref().is_none_or(|mapping| {
-                        function.callable.name == mapping.physical_name
+                        function.callable.physical_name() == mapping.physical_name
                             && function.callable.descriptor == mapping.descriptor
                     })
             }) {
@@ -4185,6 +4128,15 @@ impl JvmLibraries {
                     });
                 }
             }
+        }
+        if let Some(mapping) = mapped_property {
+            // A mapped builtin property and its JVM getter are one property declaration, not a
+            // second source function. Keep the exact realization above, but do not publish the
+            // accessor again in the function namespace (or interface delegation would forward both).
+            functions.overloads.retain(|function| {
+                function.callable.physical_name() != mapping.physical_name
+                    || function.callable.descriptor != mapping.descriptor
+            });
         }
         self.register_external_callables(crate::libraries::Callables::from_parts(
             functions,
@@ -4608,7 +4560,15 @@ impl JvmLibraries {
                     // recoverable from the spelling, so the provider publishes both, as a
                     // classifier member does (`LibraryCallable::classifier_member`).
                     reflection_name: Some(mf.kotlin_name.clone()),
-                    ..LibraryCallable::library(facade, jvm_name, params, ret, pret, descriptor)
+                    physical_name: (jvm_name != mf.kotlin_name).then(|| jvm_name.clone()),
+                    ..LibraryCallable::library(
+                        facade,
+                        mf.kotlin_name.clone(),
+                        params,
+                        ret,
+                        pret,
+                        descriptor,
+                    )
                 };
                 callable.physical_params = physical_params;
                 if call_sig.param_defaults.iter().any(|default| *default) {
@@ -4809,7 +4769,7 @@ impl JvmLibraries {
         &self,
         callable: &LibraryCallable,
     ) -> Option<crate::libraries::DefaultCallRealization> {
-        let bridge_name = format!("{}$default", callable.name);
+        let bridge_name = format!("{}$default", callable.physical_name());
         let (base_params, _) = parse_method_desc(&callable.descriptor)?;
         let is_continuation = |ty: Ty| {
             ty.obj_internal()
@@ -5190,6 +5150,7 @@ impl JvmLibraries {
                             collection_barrier_role(builtin_cn, scope_name, &params, ret);
                         let callable = LibraryCallable {
                             reflection_name: Some(m.name.clone()),
+                            physical_name: m.physical_name.clone(),
                             inline: m.inline,
                             suspend,
                             context_count: m.context_count,
@@ -5218,7 +5179,7 @@ impl JvmLibraries {
                             nonvirtual_realization: m.nonvirtual_realization.clone(),
                             ..LibraryCallable::library(
                                 physical_owner,
-                                m.physical_name.clone().unwrap_or_else(|| m.name.clone()),
+                                m.name.clone(),
                                 params,
                                 ret,
                                 m.physical_ret,
@@ -5907,7 +5868,7 @@ mod tests {
             .iter()
             .any(|function| {
                 function.flags.operator
-                    && function.callable.reflection_name.as_deref() == Some("get")
+                    && function.callable.name == "get"
                     && function.callable.params.len() == 1
             });
         assert!(operator_get, "realized charAt must be operator get");

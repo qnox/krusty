@@ -63,18 +63,15 @@ impl FunctionInfo {
     /// declaration facts; this conversion copies them once into the selected-call handle so import
     /// scope and qualified syntax cannot grow separate reconstruction paths.
     pub fn classifier_member(kind: FnKind, owner: TypeName, member: LibraryMember) -> Self {
-        let physical_name = member
-            .physical_name
-            .clone()
-            .unwrap_or_else(|| member.name.clone());
         let mut callable = LibraryCallable::library(
             member.owner.unwrap_or(owner),
-            physical_name,
+            member.name.clone(),
             member.params.clone(),
             member.ret,
             member.physical_ret,
             member.descriptor.clone(),
         );
+        callable.physical_name = member.physical_name.clone();
         callable.signature = member.signature.clone();
         callable.physical_params = member.physical_params.clone();
         callable.physical_parameter_plan = member.physical_parameter_plan.clone();
@@ -151,5 +148,37 @@ impl FunctionInfo {
         candidate.ret = ReturnInfo::new(false, Some(result));
         candidate.bound_inner_constructor = Some(BoundInnerConstructor { inner, outer });
         Some(candidate)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classifier_member_round_trip_keeps_source_and_physical_names_separate() {
+        let mut declaration = LibraryMember::new(
+            "sourceName".to_string(),
+            vec![Ty::Int],
+            Ty::Int,
+            "(I)I".to_string(),
+        );
+        declaration.physical_name = Some("platformName".to_string());
+
+        let candidate = FunctionInfo::classifier_member(
+            FnKind::Member,
+            crate::types::type_name("fixture/Owner"),
+            declaration,
+        );
+        assert_eq!(candidate.callable.name, "sourceName");
+        assert_eq!(candidate.callable.physical_name(), "platformName");
+        assert_eq!(
+            candidate.callable.reflection_name.as_deref(),
+            Some("sourceName")
+        );
+        let selected = candidate.member_with_return(Ty::Int);
+
+        assert_eq!(selected.name, "sourceName");
+        assert_eq!(selected.physical_name.as_deref(), Some("platformName"));
     }
 }

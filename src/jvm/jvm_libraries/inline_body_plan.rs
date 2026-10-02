@@ -717,7 +717,7 @@ impl JvmLibraries {
             .map(|signature| (signature.receiver, signature.ret));
         let cache_input = crate::jvm::classpath::InlinePlanCacheInput {
             owner: callable.owner,
-            name: &callable.name,
+            name: callable.physical_name(),
             body_descriptor,
             physical_parameters: &callable.physical_params,
             context_count: callable.context_count,
@@ -776,13 +776,13 @@ impl JvmLibraries {
         if *decode_unavailable {
             return None;
         }
-        let inline_name = format!("{}$$forInline", callable.name);
+        let inline_name = format!("{}$$forInline", callable.physical_name());
         let Some(body) = self
             .cp
             .method_code_name(callable.owner, &inline_name, body_descriptor)
             .or_else(|| {
                 self.cp
-                    .method_code_name(callable.owner, &callable.name, body_descriptor)
+                    .method_code_name(callable.owner, callable.physical_name(), body_descriptor)
             })
         else {
             *decode_unavailable = true;
