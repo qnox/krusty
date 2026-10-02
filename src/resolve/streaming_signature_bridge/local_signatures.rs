@@ -975,16 +975,24 @@ fn publish_checked_local_signatures_selected(
         let type_arguments = (0..type_argument_count)
             .map(|ordinal| index.type_parameter(declaration, ordinal as u32))
             .collect::<Option<Vec<_>>>();
-        if index.classifier_type_arguments(declaration).is_some() {
-            continue;
-        } else if let Some(type_arguments) = type_arguments {
-            index.publish_classifier_type_arguments(
-                declaration,
-                u32::try_from(class.type_parameters.type_params.len())
-                    .expect("too many own local classifier type parameters"),
-                type_arguments,
-            );
-        } else if type_argument_count != 0 {
+        if index.classifier_type_arguments(declaration).is_none() {
+            if let Some(type_arguments) = type_arguments {
+                index.publish_classifier_type_arguments(
+                    declaration,
+                    u32::try_from(class.type_parameters.type_params.len())
+                        .expect("too many own local classifier type parameters"),
+                    type_arguments,
+                );
+            } else if type_argument_count != 0 {
+                failed.push(declaration);
+                continue;
+            }
+        }
+        // A signature default checks its local classifiers before Pass 2. The header published
+        // above is not enough: lowering the retained default refuses a classifier that has no
+        // applied hierarchy, and an anonymous object extending a local class in that default
+        // dispatches through this edge.
+        if !publish_checked_classifier_hierarchy(index, platform, source, declaration) {
             failed.push(declaration);
         }
     }
