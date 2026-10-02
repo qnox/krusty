@@ -124,12 +124,13 @@ impl BodyFirChecker<'_> {
             let Ty::Fun(function) = signature.non_null() else {
                 return Err(self.failure(span, BodyCheckFailureKind::UnsupportedCallShape));
             };
+            let source_suspend = sam.suspend;
             let mut resolved = |ty| {
                 ResolvedTy::new(ty).map_err(|error| {
                     self.failure(span, BodyCheckFailureKind::UnpublishableType(error))
                 })
             };
-            let conversion = self.published_sam_conversion(span, &sam, false)?;
+            let conversion = self.published_sam_conversion(span, &sam, false, source_suspend)?;
             let parameters = function
                 .params
                 .iter()

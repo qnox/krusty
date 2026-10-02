@@ -53,6 +53,8 @@ pub(super) enum TempRole {
     BooleanOperand,
     /// A vararg array under construction.
     VarargArray,
+    /// The packed argument array passed to high-arity `FunctionN.invoke`.
+    FunctionArguments,
     /// A `try` expression's result, parked across the finalizer.
     TryResult,
     /// A returned value, parked across the finalizers the `return` runs.

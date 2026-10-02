@@ -75,6 +75,7 @@ mod reified_arguments;
 mod reified_operations;
 mod result_null_checks;
 mod runtime_capabilities;
+mod sam_wrappers;
 mod shared_captures;
 pub mod source_map;
 mod string_constant;

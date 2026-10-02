@@ -668,19 +668,45 @@ fn sam_argument_records_a_primitive_result_over_a_non_primitive_one() {
         };
         let sam = body.sam_conversion(sam).expect("body-local SAM target");
         assert_eq!(sam.result.get(), Ty::Int);
-        sam.overrides_non_primitive_result
+        (
+            sam.overrides_non_primitive_result,
+            sam.overridden_non_primitive_results
+                .iter()
+                .map(|result| result.get())
+                .collect::<Vec<_>>(),
+        )
     };
-    assert!(overrides(
-        "interface Base { fun f(): Any }\n\
+    assert_eq!(
+        overrides(
+            "interface Base { fun f(): Any }\n\
          fun interface Child : Base { override fun f(): Int }\n\
          fun consume(child: Child): Int = 0\n\
          fun make(): Int = consume { 1 }\n",
-    ));
-    assert!(!overrides(
-        "fun interface Child { fun f(): Int }\n\
+        ),
+        (true, vec![Ty::obj("kotlin/Any")])
+    );
+    assert_eq!(
+        overrides(
+            "fun interface Child { fun f(): Int }\n\
          fun consume(child: Child): Int = 0\n\
          fun make(): Int = consume { 1 }\n",
-    ));
+        ),
+        (false, Vec::new())
+    );
+    let (generic, results) = overrides(
+        "interface Echo<T> { fun echo(x: T): T }\n\
+         fun interface Count : Echo<Int> { override fun echo(x: Int): Int }\n\
+         fun consume(count: Count): Int = 0\n\
+         fun make(): Int = consume { it }\n",
+    );
+    assert!(
+        generic,
+        "a type parameter specialized to Int is still a non-primitive override"
+    );
+    assert!(
+        results.len() == 1 && results[0].is_ty_param(),
+        "the overridden result stays the declared type parameter, got {results:?}"
+    );
 }
 
 #[test]

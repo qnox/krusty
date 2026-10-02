@@ -94,11 +94,21 @@ pub struct FirSamConversion {
     pub context_count: u32,
     pub has_receiver: bool,
     pub suspend: bool,
+    /// The converted value's own callable view is `suspend`. Distinct from [`Self::suspend`], which
+    /// is the selected interface method: a non-suspend value adapted to a suspend method keeps its
+    /// own `FunctionN`.
+    pub source_suspend: bool,
     /// The method's primitive result replaces a non-primitive result it overrides.
     pub overrides_non_primitive_result: bool,
+    /// Specialized semantic result contracts whose target bridges reach that primitive method.
+    pub overridden_non_primitive_results: Box<[ResolvedTy]>,
     /// A nullable function value converts conditionally: `null` remains `null`; only a non-null
     /// function object is wrapped as the selected SAM classifier.
     pub nullable: bool,
+    /// The interface is a Kotlin declaration, not a Java one.
+    pub kotlin_interface: bool,
+    /// Provider-normalized semantic identities parallel to `declared_parameters`.
+    pub parameter_identities: Box<[super::ResolvedParameterIdentity]>,
 }
 
 /// The abstract method a SAM conversion implements.

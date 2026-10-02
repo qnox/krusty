@@ -647,7 +647,7 @@ fn property_implementation(
 
 /// Bridge-signature erasure: a type parameter becomes its bound's storage type, a nullable keeps its
 /// wrapper. This is the shape a descriptor is written from, so it defines when two signatures COLLIDE.
-fn bridge_erasure(ty: Ty) -> Ty {
+pub(super) fn bridge_erasure(ty: Ty) -> Ty {
     match ty {
         // JVM method descriptors erase a type parameter whose first bound is another type
         // parameter to Object. The generic Signature still records `T : S`; recursively erasing

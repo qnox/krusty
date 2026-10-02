@@ -127,6 +127,13 @@ pub(super) fn box_primitive_override_results(
     callables: &crate::backend::CheckedBackendCallables,
 ) -> Result<OverrideResults, SkipReason> {
     let mut results = OverrideResults::default();
+    for class in &ir.classes {
+        if let Some(wrapper) = &class.sam_wrapper {
+            if wrapper.boxes_primitive_result {
+                results.boxed.insert(wrapper.method);
+            }
+        }
+    }
     for (class, declaration) in ir.classes.iter().enumerate() {
         // The classes whose override edges the bridge pass reads; see `derive_bridges`.
         if !declaration.is_source_declared && declaration.enum_entry_of.is_none() {
