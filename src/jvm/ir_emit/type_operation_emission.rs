@@ -27,21 +27,7 @@ impl Emitter<'_> {
         // A primitive-array value class records whether this operation names the box or the
         // carrier; those two classes share one descriptor, so the record decides.
         let jvm_ty = ir_ty_to_jvm(&type_operand);
-        let internal = self
-            .ir
-            .value_class_type_operations
-            .get(&expression)
-            .map(|operation| crate::jvm::value_classes::type_operation_internal_name(*operation))
-            .unwrap_or_else(|| {
-                if jvm_ty.is_jvm_scalar() {
-                    semantic_scalar_adapter(type_operand, jvm_ty)
-                        .boxed_ref()
-                        .map(crate::jvm::names::instanceof_internal_name)
-                        .unwrap_or_else(|| crate::jvm::names::instanceof_internal_name(jvm_ty))
-                } else {
-                    crate::jvm::names::instanceof_internal_name(jvm_ty)
-                }
-            });
+        let internal = self.type_operation_class_name(expression, type_operand);
         crate::trace_compiler!(
             "value_classes",
             "emit type op={op:?} arg={arg} {:?} arg_ty={:?} operand={type_operand:?} jvm={jvm_ty:?} internal={internal}",
@@ -172,6 +158,29 @@ impl Emitter<'_> {
             }
             IrTypeOp::SafeCast => {}
         }
+    }
+
+    /// Classfile name of an `instanceof` or `checkcast` for this type operation.
+    ///
+    /// Value position and a fused condition share this. A primitive-array value class's box and
+    /// carrier have one descriptor, so the recorded role is what distinguishes `kotlin/UIntArray`
+    /// from `[I`.
+    pub(super) fn type_operation_class_name(&self, expression: ExprId, type_operand: Ty) -> String {
+        let jvm_ty = ir_ty_to_jvm(&type_operand);
+        self.ir
+            .value_class_type_operations
+            .get(&expression)
+            .map(|operation| crate::jvm::value_classes::type_operation_internal_name(*operation))
+            .unwrap_or_else(|| {
+                if jvm_ty.is_jvm_scalar() {
+                    semantic_scalar_adapter(type_operand, jvm_ty)
+                        .boxed_ref()
+                        .map(crate::jvm::names::instanceof_internal_name)
+                        .unwrap_or_else(|| crate::jvm::names::instanceof_internal_name(jvm_ty))
+                } else {
+                    crate::jvm::names::instanceof_internal_name(jvm_ty)
+                }
+            })
     }
 
     /// `is T?` for a type the checker could not expand into `x == null || x is T`: a reified type

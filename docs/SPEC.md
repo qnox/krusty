@@ -3337,6 +3337,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `box-impl` is only the coercion to the supertype. `(UIntArray(1) as Any) is IntArray` is false.
   Tests: `tests/unsigned_arrays_e2e.rs`.
 
+- **An unsigned vararg is the carrier array; a nullable one is the boxed array.** `vararg us: UInt`
+  is `int...`. Each element is stored with `iastore`, and a spread of `UIntArray` passes that same
+  `int[]` — the array value class is not boxed first. A sole spread of an existing array is
+  `Arrays.copyOf` of the carrier (`copyOf(int[], int)`); a local is loaded twice, and any other
+  producer is stored once then loaded twice. A fresh array built only for that spread is the
+  argument itself. A spread mixed with other elements stores `IntSpreadBuilder` in a local and
+  calls `add` / `addSpread` on that class. `vararg us:
+  UInt?` is `kotlin.UInt...`. A non-null element is boxed once (`UInt.box-impl`); `null` is stored
+  as `null`. A fused `if (a !is UIntArray)` names the box, the same record a value-position `is`
+  reads, so the carrier is not tested with `instanceof [I` after `box-impl`. Tests:
+  `tests/unsigned_vararg_e2e.rs`.
+
   Still unmodeled, all of them REJECTED or skipped rather than miscompiled: `UIntRange` value iteration;
   and, for the narrow pair specifically, a `when` on a `UByte`/`UShort` subject (the arms-must-be-literals
   gate can't be satisfied — a bare `200u` arm types as `UInt`, and `200u.toUByte()` is not a literal),

@@ -76,4 +76,3 @@ secondaryConstructors/localClasses.kt
 typeErasure/funWithReifiedTypeParameterContextParameterAndExtensionReceiverInsideClass.kt
 unsignedTypes/implicitIntegerCoercionNamedArg.kt
 unsignedTypes/signedToUnsignedConversions.kt
-unsignedTypes/varargsOfUnsignedTypes.kt

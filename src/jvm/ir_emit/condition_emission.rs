@@ -157,31 +157,23 @@ impl Emitter<'_> {
         }
         // Fuse `x is T` / `x !is T` (a reference target) into `instanceof; if{ne,eq}` — no 0/1 boolean is
         // materialized (kotlinc's shape, e.g. a data class `equals`' `instanceof; ifne <ok>`).
-        let inst_fuse = if let IrExpr::TypeOp {
-            op: to,
-            arg,
-            type_operand,
-        } = self.ir.expr(cond)
-        {
-            // A nullable target materializes its null-accepting check as a value.
-            if matches!(to, IrTypeOp::InstanceOf | IrTypeOp::NotInstanceOf)
-                && !type_operand.is_nullable()
-            {
-                let jvm_ty = ir_ty_to_jvm(type_operand);
-                (!jvm_ty.is_jvm_scalar()).then(|| {
-                    (
-                        *to,
-                        *arg,
-                        *type_operand,
-                        crate::jvm::names::instanceof_internal_name(jvm_ty),
-                    )
-                })
-            } else {
-                None
-            }
-        } else {
-            None
+        // A nullable target materializes its null-accepting check as a value. Copy the operation
+        // out before naming its class: the recorded primitive-array role borrows the file.
+        let inst_fuse = match self.ir.expr(cond) {
+            IrExpr::TypeOp {
+                op: to @ (IrTypeOp::InstanceOf | IrTypeOp::NotInstanceOf),
+                arg,
+                type_operand,
+            } if !type_operand.is_nullable() => Some((*to, *arg, *type_operand)),
+            _ => None,
         };
+        let inst_fuse = inst_fuse.and_then(|(to, arg, type_operand)| {
+            let jvm_ty = ir_ty_to_jvm(&type_operand);
+            (!jvm_ty.is_jvm_scalar()).then(|| {
+                let internal = self.type_operation_class_name(cond, type_operand);
+                (to, arg, type_operand, internal)
+            })
+        });
         if let Some((to, arg, type_operand, internal)) = inst_fuse {
             let (physical_arg, semantic_arg) = self.emit_type_op_operand(arg, code);
             // `instanceof` takes a REFERENCE. A scalar operand is boxed first, exactly as the
