@@ -78,6 +78,32 @@ pub(super) struct JvmSignatureFormatter<'a> {
 }
 
 impl<'a> JvmSignatureFormatter<'a> {
+    pub(super) fn method_signature(
+        &self,
+        generic: &crate::ir::IrGenericSig,
+        function: &crate::ir::IrFunction,
+        vararg_index: Option<usize>,
+    ) -> Option<String> {
+        let mut signature = super::jvm_type_params(self, generic)?;
+        signature.push('(');
+        for (index, parameter) in generic.params.iter().enumerate() {
+            // A vararg element is a value parameter. `Array<In<E>>` suppresses the element's
+            // declaration-site wildcard; `vararg x: In<E>` keeps `In<? super E>`.
+            let rendered = if vararg_index == Some(index) {
+                self.vararg_element_ty(parameter, Wildcards::Declared)?
+            } else {
+                self.method_ty(parameter, Wildcards::Declared)?
+            };
+            signature.push_str(&rendered);
+        }
+        signature.push(')');
+        signature.push_str(&self.method_ty(
+            generic.ret.as_ref().unwrap_or(&function.ret),
+            Wildcards::Suppressed,
+        )?);
+        Some(signature)
+    }
+
     pub(super) fn new(ir: &'a IrFile, env: &'a EmitEnv<'_>) -> Self {
         Self {
             ir,
@@ -229,6 +255,12 @@ impl<'a> JvmSignatureFormatter<'a> {
             return None;
         };
         Some(variance)
+    }
+
+    pub(super) fn declaration_approximation(&self, ty: Ty) -> Option<Ty> {
+        crate::types::declaration_approximation(ty, &mut |owner, index| {
+            self.declaration_variance(owner, index)
+        })
     }
 
     fn classifier_is_closed(&self, owner: TypeName) -> Option<bool> {
@@ -414,10 +446,7 @@ impl<'a> JvmSignatureFormatter<'a> {
         match semantic {
             Ty::TyParam(..) | Ty::Fun(_) => self.ty_at(ty, wildcards),
             Ty::Intersection(_) => {
-                let approximated = crate::types::declaration_approximation(
-                    *semantic,
-                    &mut crate::types::variance_of,
-                );
+                let approximated = self.declaration_approximation(*semantic)?;
                 self.method_ty(&approximated, wildcards)
             }
             Ty::Obj(_, arguments) if !arguments.is_empty() => self.ty_at(ty, wildcards),
@@ -475,8 +504,7 @@ impl<'a> JvmSignatureFormatter<'a> {
             Ty::OutProjection(inner) => Some(format!("+{}", self.ty_at(inner, wildcards)?)),
             Ty::Fun(signature) => self.function_ty(signature, wildcards),
             Ty::Intersection(_) => {
-                let approximated =
-                    crate::types::declaration_approximation(*ty, &mut crate::types::variance_of);
+                let approximated = self.declaration_approximation(*ty)?;
                 self.ty_at(&approximated, wildcards)
             }
             // `kotlin.Array<E>` has no JVM class: its realization is the ARRAY type `[E`, and that is

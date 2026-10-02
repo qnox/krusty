@@ -146,20 +146,11 @@ fn argument_constraints(
         if actual == Ty::Error {
             continue;
         }
-        let whole_array = is_vararg
-            && !spread
-            && array_depth(actual) > 0
-            && array_depth(actual) == array_depth(declared);
-        actuals.push((parameter_index, actual, whole_array));
+        // The compact signature graph already maps every vararg input to the element slot.
+        // In particular, a positional array value is one element (`T = Array<String>`), while a
+        // spread's recorded `argument` is already its element type. Reclassifying either from the
+        // runtime array shape would lose that source mapping.
+        actuals.push((parameter_index, actual, false));
     }
     actuals
-}
-
-fn array_depth(mut ty: Ty) -> usize {
-    let mut depth = 0;
-    while let Some(element) = ty.non_null().array_elem() {
-        depth += 1;
-        ty = element;
-    }
-    depth
 }

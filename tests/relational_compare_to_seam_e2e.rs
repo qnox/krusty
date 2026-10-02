@@ -73,6 +73,33 @@ fn enum_and_string_relations_run_without_stdlib() {
 }
 
 #[test]
+fn an_override_inherits_the_operator_convention_it_does_not_repeat() {
+    // `Comparable.compareTo` and `Iterable.iterator` are `operator` on the supertype. An override
+    // may omit the modifier; member collection must keep the supertype declaration long enough for
+    // that convention to be copied. Dropping it as a signature duplicate makes `a <= b` and
+    // `for (x in items)` reject a program kotlinc accepts.
+    const SRC: &str = "class A(val x: Int) : Comparable<A> {\n\
+         override fun compareTo(other: A): Int = x.compareTo(other.x)\n\
+         }\n\
+         class Items : Iterable<Int> {\n\
+         override fun iterator(): Iterator<Int> = object : Iterator<Int> {\n\
+         private var left = 1\n\
+         override fun hasNext() = left > 0\n\
+         override fun next(): Int { left--; return 7 }\n\
+         }\n\
+         }\n\
+         fun box(): String {\n\
+         val a = A(1)\n\
+         val b = A(2)\n\
+         if (!(a <= b) || a >= b) return \"cmp\"\n\
+         var n = 0\n\
+         for (x in Items()) n += x\n\
+         return if (n == 7) \"OK\" else \"iter\"\n\
+         }\n";
+    common::expect_box_ok_with_stdlib(SRC, "InheritedOperator");
+}
+
+#[test]
 fn relation_with_non_comparable_right_operand_is_rejected() {
     // `String.compareTo` takes a `String`. A former fallback arm resolved the relation through the
     // ERASED `Comparable.compareTo(Object)` whenever the right operand was any reference, so

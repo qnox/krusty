@@ -19770,12 +19770,7 @@ impl<'a> Checker<'a> {
                 // therefore handled by their own rungs below before the imported-extension family.
                 let mut member_mapping_failure = None;
                 let mut extension_rung = None;
-                if rt == Ty::String
-                    || matches!(
-                        rt.non_null(),
-                        Ty::Obj(..) | Ty::TyParam(..) | Ty::Fun(..) | Ty::Intersection(_)
-                    )
-                {
+                if crate::symbol_resolver::supports_member_lookup(rt) {
                     match self.record_member_call_with_slots(
                         scope,
                         call,
@@ -25744,12 +25739,7 @@ impl<'a> Checker<'a> {
                 _ => Ty::Unit,
             };
             let semantic = inferred_declaration_ty(semantic);
-            if f.ret.is_none() && semantic == Ty::Nothing {
-                self.diags.error(
-                    f.name_span,
-                    "return type 'Nothing' needs to be specified explicitly.".to_string(),
-                );
-            }
+            self.report_inferred_nothing_return(f, semantic, false);
             let physical =
                 crate::symbol_resolver::ty_subst_keep_unbound(semantic, &semantic_erasure);
             (physical, semantic)
@@ -52546,12 +52536,7 @@ impl<'a> Checker<'a> {
         if infer_ret {
             self.check_operator_declaration(f, self.ret_ty);
         }
-        if f.ret.is_none() && matches!(f.body, FunBody::Expr(_)) && self.ret_ty == Ty::Nothing {
-            self.diags.error(
-                f.name_span,
-                "return type 'Nothing' needs to be specified explicitly.".to_string(),
-            );
-        }
+        self.report_inferred_nothing_return(f, self.ret_ty, false);
         if f.receiver.is_some() && companion_classifier.is_none() {
             self.extension_receiver_labels.pop();
             self.this_labels.pop();
@@ -57005,12 +56990,7 @@ impl<'a> Checker<'a> {
         if infer_ret {
             self.check_operator_declaration(f, self.ret_ty);
         }
-        if f.ret.is_none() && matches!(f.body, FunBody::Expr(_)) && self.ret_ty == Ty::Nothing {
-            self.diags.error(
-                f.name_span,
-                "return type 'Nothing' needs to be specified explicitly.".to_string(),
-            );
-        }
+        self.report_inferred_nothing_return(f, self.ret_ty, f.is_override());
         if f.receiver.is_some() {
             self.extension_receiver_labels.pop();
             self.this_labels.pop();
@@ -57020,30 +57000,6 @@ impl<'a> Checker<'a> {
         self.retire_type_parameter_owners(&owned_type_parameters);
         self.active_statement_suppressions
             .truncate(suppression_depth);
-    }
-
-    fn check_fun_body(&mut self, scope: &CheckerScope<'_>, f: &FunDecl) {
-        match &f.body {
-            FunBody::Expr(e) => {
-                let t = self.expr_declared(scope, *e, self.ret_ty);
-                let actual = self.recorded_expression_type_for_expected(scope, *e, t, self.ret_ty);
-                self.narrow_platform_value(self.ret_ty, *e, PlatformNarrowing::Declaration);
-                self.expect_assignable(self.ret_ty, actual, self.span(*e), "function body");
-            }
-            FunBody::Block(e) => {
-                let _ = self.expr_statement(scope, *e);
-                if !matches!(self.ret_ty, Ty::Unit | Ty::Nothing | Ty::Error)
-                    && !self.body_terminates(*e)
-                {
-                    self.diags.error(
-                        f.span,
-                        "a 'return' expression required in a function with a block body ('{...}')"
-                            .to_string(),
-                    );
-                }
-            }
-            FunBody::None => {}
-        }
     }
 
     fn obj_name_is_subtype(&self, sub: TypeName, sup: TypeName) -> bool {
@@ -63242,10 +63198,9 @@ impl<'a> Checker<'a> {
                                 .or_else(|| self.report_unmapped_labelled_call(e, a))
                                 .unwrap_or(Ty::Error),
                         }
-                    } else if matches!(
-                        recv,
-                        Ty::Obj(..) | Ty::TyParam(..) | Ty::Nothing | Ty::Intersection(_)
-                    ) {
+                    } else if recv == Ty::Nothing
+                        || crate::symbol_resolver::supports_member_lookup(recv)
+                    {
                         // `x?.Inner()` selects an inner classifier's constructor exactly as
                         // `x.Inner()` does: the member tower rung owns both families.
                         match self.record_member_call_with_slots(

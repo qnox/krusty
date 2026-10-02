@@ -744,10 +744,6 @@ impl JvmBackend {
             stems,
         } = file;
         let stem = &stems[source.raw() as usize];
-        let _intersection_variance = super::intersection_variance::Guard::install(
-            classifiers.module(),
-            std::rc::Rc::clone(&self.cp),
-        );
         let package = ir.package.clone().unwrap_or_default();
         let facade_name = file_class_name(stem, ir.package.as_deref());
         let facade_class = crate::types::type_name(&facade_name);
@@ -788,6 +784,7 @@ impl JvmBackend {
             &ir,
             (module_name, facade_locals),
             self.param_assertions,
+            &classifiers,
         );
         let has_facade_members = metadata.is_some();
         let inner_class_resolver =
@@ -1132,6 +1129,7 @@ pub fn facade_package_metadata_from_ir(
     ir: &crate::ir::IrFile,
     (module_name, locals): (&str, &[LocalPropertyMeta]),
     param_assertions: bool,
+    symbols: &dyn crate::backend::BackendClassifierSource,
 ) -> Option<crate::jvm::ir_emit::KotlinMetadata> {
     let functions = ir
         .package_functions
@@ -1366,12 +1364,20 @@ pub fn facade_package_metadata_from_ir(
             decl_order: alias.source_order as usize,
         })
         .collect::<Vec<_>>();
+    let approximate = |ty| {
+        crate::types::declaration_approximation(ty, &mut |classifier, index| {
+            symbols
+                .classifier(classifier)
+                .and_then(|declaration| declaration.type_param_variances.get(index).copied())
+        })
+    };
     build_facade_metadata(
         functions,
         properties,
         aliases,
         (module_name, locals),
         param_assertions,
+        Some(&approximate),
     )
 }
 
@@ -1430,15 +1436,18 @@ fn build_facade_metadata(
     aliases: Vec<crate::metadata::builder::TypeAliasMeta>,
     (module_name, locals): (&str, &[LocalPropertyMeta]),
     param_assertions: bool,
+    intersection_approximation: Option<&dyn Fn(crate::types::Ty) -> Option<crate::types::Ty>>,
 ) -> Option<crate::jvm::ir_emit::KotlinMetadata> {
     (!functions.is_empty() || !properties.is_empty() || !aliases.is_empty()).then(|| {
-        let (d1_bytes, d2) = crate::metadata::builder::build_package(
-            &functions,
-            &properties,
-            &aliases,
-            ((module_name != "main").then_some(module_name), locals),
-            param_assertions,
-        );
+        let (d1_bytes, d2) =
+            crate::metadata::builder::build_package_with_intersection_approximation(
+                &functions,
+                &properties,
+                &aliases,
+                ((module_name != "main").then_some(module_name), locals),
+                param_assertions,
+                intersection_approximation,
+            );
         crate::jvm::ir_emit::KotlinMetadata {
             k: 2,
             mv: vec![2, 4, 0],
@@ -1454,6 +1463,17 @@ mod tests {
     use super::*;
     use crate::diag::DiagSink;
     use crate::frontend::{collect_signatures, parse_source_with_detected_features};
+
+    struct NoClassifierFacts;
+
+    impl crate::backend::BackendClassifierSource for NoClassifierFacts {
+        fn classifier(
+            &self,
+            _classifier: crate::types::TypeName,
+        ) -> Option<std::sync::Arc<crate::backend::BackendClassifierFact>> {
+            None
+        }
+    }
 
     /// Every caller supplies a logical source stem, but module/corpus callers can retain directories
     /// that the CLI has already stripped. The shared constructor must own that normalization so all
@@ -1661,8 +1681,9 @@ mod tests {
             source_order: 0,
         });
 
-        let metadata = facade_package_metadata_from_ir(&ir, ("main", &[]), true)
-            .expect("a package property requires facade metadata");
+        let metadata =
+            facade_package_metadata_from_ir(&ir, ("main", &[]), true, &NoClassifierFacts)
+                .expect("a package property requires facade metadata");
         let decoded = crate::jvm::metadata::decode_metadata(
             &metadata.d1,
             &metadata.d2,

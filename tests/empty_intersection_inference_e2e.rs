@@ -157,6 +157,23 @@ fun box(): String {\n\
 }
 
 #[test]
+fn unrelated_same_signature_defaults_follow_kotlinc_intersection_selection() {
+    // The two declarations have the same call shape, but their default expressions and stable
+    // owners are distinct. Intersection member collection must carry both identities into the
+    // ordinary override/default machinery; Kotlin 2.4.20 accepts the resulting synthetic member.
+    const SRC: &str = "\
+interface Left { fun choose(value: Int = 1): String }\n\
+interface Right { fun choose(value: Int = 2): String }\n\
+class In<in K>\n\
+fun <E> intersect(vararg x: In<E>): E = null as E\n\
+fun check() {\n\
+    val value = intersect(In<Left>(), In<Right>())\n\
+    value.choose()\n\
+}\n";
+    common::assert_errors_match_kotlinc(&[("IntersectionDefaultAmbiguity.kt", SRC)], &[]);
+}
+
+#[test]
 fn a_public_intersection_matches_kotlinc_abi_and_metadata() {
     let source = format!(
         "{SHAPES}\n\
@@ -186,4 +203,35 @@ val prop get() = intersect(In<Left>(), In<Right>())\n"
         common::raw_kotlin_metadata(&comparison.reference_bytes),
         "intersection declaration metadata"
     );
+}
+
+#[test]
+fn an_override_may_infer_nothing_from_its_expression_body() {
+    const SRC: &str = "\
+interface Flags { fun enabled(): Boolean }\n\
+class Off : Flags {\n\
+    override fun enabled() = throw RuntimeException(\"off\")\n\
+}\n\
+fun box(): String =\n\
+    try { Off().enabled(); \"called\" }\n\
+    catch (e: RuntimeException) { if (e.message == \"off\") \"OK\" else \"msg\" }\n";
+    common::expect_box_same_as_kotlinc(SRC, "OverrideNothingBody");
+}
+
+#[test]
+fn a_class_keeps_both_supertype_properties_for_the_accessor_bridge() {
+    const SRC: &str = "\
+open class A<T> { var size: T = 56 as T }\n\
+interface C { var size: Int }\n\
+class B : C, A<Int>()\n\
+fun box(): String {\n\
+    val b = B()\n\
+    if (b.size != 56) return \"init\"\n\
+    b.size = 55\n\
+    val c: C = b\n\
+    if (c.size != 55) return \"iface\"\n\
+    c.size = 57\n\
+    return if (b.size == 57) \"OK\" else \"write\"\n\
+}\n";
+    common::expect_box_same_as_kotlinc(SRC, "SupertypePropertyBridge");
 }

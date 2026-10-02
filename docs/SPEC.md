@@ -2794,13 +2794,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   bottom beside a non-null component is `Nothing`; beside only nullable components it is
   `Nothing?`. Member lookup unions every component, so a value of `Left & Right` can
   call members and properties and form callable references from either interface.
+  That union does not discard a supertype member an override still needs: an override
+  that omits `operator` inherits it from `Comparable.compareTo` or `Iterable.iterator`.
   A public declaration approximates the intersection: unrelated classifiers become
   `Any` (`Any?` when the intersection admits null); a shared classifier keeps that
   classifier and approximates its arguments from their variance. The JVM carrier is
   that shared erased class, otherwise `java/lang/Object`. This is separate from a
   type-parameter bound whose class bound already has a value-class carrier. An
   expression-body function whose inferred return is `Nothing` (`Nothing?` beside a
-  non-null bound) must state that return explicitly. Tests:
+  non-null bound) must state that return explicitly, unless it overrides a declaration:
+  `override fun enabled() = throw ...` keeps the inherited result and may still infer
+  `Nothing` for its own body. Tests:
   `tests/empty_intersection_inference_e2e.rs`.
 - **A tail-call-forwarded suspend fn boxes its EARLY returns.** The tail-forward shape (no state machine,
   `$completion` threaded to the callee, callee's `Object` result `areturn`ed verbatim) also admits bodies

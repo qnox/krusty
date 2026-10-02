@@ -4,7 +4,6 @@
 //! shape. Diagnostic spelling is not an identity. Nullability stays on the intersection when
 //! every component admits null, so `Left? & Right?` is not the non-null type `Left & Right`.
 
-use std::cell::Cell;
 use std::cmp::Ordering;
 
 use super::{intern_tys, Ty, TypeName, TypeVariance};
@@ -217,28 +216,28 @@ fn slice_cmp(left: &[Ty], right: &[Ty], cmp: fn(Ty, Ty) -> Ordering) -> Ordering
 /// differs across components is a star.
 pub(crate) fn declaration_approximation(
     ty: Ty,
-    variance_at: &mut dyn FnMut(TypeName, usize) -> TypeVariance,
-) -> Ty {
+    variance_at: &mut dyn FnMut(TypeName, usize) -> Option<TypeVariance>,
+) -> Option<Ty> {
     match ty {
         Ty::Nullable(inner) if matches!(*inner, Ty::Intersection(_)) => {
-            Ty::nullable(Ty::obj_name(super::wk::any()))
+            Some(Ty::nullable(Ty::obj_name(super::wk::any())))
         }
         Ty::Intersection(parts) => approximate_parts(parts, variance_at),
-        other => other,
+        other => Some(other),
     }
 }
 
 fn approximate_parts(
     parts: &[Ty],
-    variance_at: &mut dyn FnMut(TypeName, usize) -> TypeVariance,
-) -> Ty {
+    variance_at: &mut dyn FnMut(TypeName, usize) -> Option<TypeVariance>,
+) -> Option<Ty> {
     if parts.iter().all(|part| matches!(part, Ty::Fun(_))) {
         return approximate_functions(parts, variance_at);
     }
     if shared_classifier(parts).is_some() {
         return approximate_objects(parts, variance_at);
     }
-    Ty::obj_name(super::wk::any())
+    Some(Ty::obj_name(super::wk::any()))
 }
 
 fn shared_classifier(parts: &[Ty]) -> Option<(TypeName, usize)> {
@@ -253,13 +252,13 @@ fn shared_classifier(parts: &[Ty]) -> Option<(TypeName, usize)> {
 
 fn approximate_objects(
     parts: &[Ty],
-    variance_at: &mut dyn FnMut(TypeName, usize) -> TypeVariance,
-) -> Ty {
+    variance_at: &mut dyn FnMut(TypeName, usize) -> Option<TypeVariance>,
+) -> Option<Ty> {
     let Some((name, length)) = shared_classifier(parts) else {
-        return Ty::obj_name(super::wk::any());
+        return Some(Ty::obj_name(super::wk::any()));
     };
     if length == 0 {
-        return Ty::obj_name(name);
+        return Some(Ty::obj_name(name));
     }
     let mut arguments = Vec::with_capacity(length);
     for index in 0..length {
@@ -270,37 +269,39 @@ fn approximate_objects(
                 _ => None,
             })
             .collect::<Vec<_>>();
-        arguments.push(approximate_argument(name, index, &at_index, variance_at));
+        arguments.push(approximate_argument(name, index, &at_index, variance_at)?);
     }
-    Ty::obj_args_name(name, &arguments)
+    Some(Ty::obj_args_name(name, &arguments))
 }
 
 fn approximate_argument(
     classifier: TypeName,
     index: usize,
     arguments: &[Ty],
-    variance_at: &mut dyn FnMut(TypeName, usize) -> TypeVariance,
-) -> Ty {
+    variance_at: &mut dyn FnMut(TypeName, usize) -> Option<TypeVariance>,
+) -> Option<Ty> {
     if arguments.is_empty() {
-        return Ty::obj_name(super::wk::any());
+        return Some(Ty::obj_name(super::wk::any()));
     }
     if arguments
         .iter()
         .all(|argument| structural_cmp(*argument, arguments[0]) == Ordering::Equal)
     {
-        return arguments[0];
+        return Some(arguments[0]);
     }
-    match variance_at(classifier, index) {
+    match variance_at(classifier, index)? {
         TypeVariance::Out => covariant_join(arguments, variance_at),
-        TypeVariance::Invariant => Ty::out_projection(covariant_join(arguments, variance_at)),
-        TypeVariance::In => Ty::star_projection(Ty::nullable(Ty::obj_name(super::wk::any()))),
+        TypeVariance::Invariant => covariant_join(arguments, variance_at).map(Ty::out_projection),
+        TypeVariance::In => Some(Ty::star_projection(Ty::nullable(Ty::obj_name(
+            super::wk::any(),
+        )))),
     }
 }
 
 fn approximate_functions(
     parts: &[Ty],
-    variance_at: &mut dyn FnMut(TypeName, usize) -> TypeVariance,
-) -> Ty {
+    variance_at: &mut dyn FnMut(TypeName, usize) -> Option<TypeVariance>,
+) -> Option<Ty> {
     let signatures = parts
         .iter()
         .filter_map(|part| match part {
@@ -309,7 +310,7 @@ fn approximate_functions(
         })
         .collect::<Vec<_>>();
     let Some(first) = signatures.first().copied() else {
-        return Ty::obj_name(super::wk::any());
+        return Some(Ty::obj_name(super::wk::any()));
     };
     if signatures.iter().any(|signature| {
         signature.params.len() != first.params.len()
@@ -317,7 +318,7 @@ fn approximate_functions(
             || signature.has_receiver != first.has_receiver
             || signature.context_count != first.context_count
     }) {
-        return Ty::obj_name(super::wk::any());
+        return Some(Ty::obj_name(super::wk::any()));
     }
     let mut params = Vec::with_capacity(first.params.len());
     for index in 0..first.params.len() {
@@ -340,19 +341,19 @@ fn approximate_functions(
         .iter()
         .map(|signature| signature.ret)
         .collect::<Vec<_>>();
-    Ty::fun_with_shape(
+    Some(Ty::fun_with_shape(
         params,
-        covariant_join(&returns, variance_at),
+        covariant_join(&returns, variance_at)?,
         first.context_count,
         first.has_receiver,
         first.suspend,
-    )
+    ))
 }
 
 fn covariant_join(
     types: &[Ty],
-    variance_at: &mut dyn FnMut(TypeName, usize) -> TypeVariance,
-) -> Ty {
+    variance_at: &mut dyn FnMut(TypeName, usize) -> Option<TypeVariance>,
+) -> Option<Ty> {
     let mut unique = Vec::new();
     for ty in types.iter().copied() {
         if !unique
@@ -363,65 +364,44 @@ fn covariant_join(
         }
     }
     match unique.as_slice() {
-        [] => Ty::obj_name(super::wk::any()),
-        [one] => *one,
+        [] => Some(Ty::obj_name(super::wk::any())),
+        [one] => Some(*one),
         many if shared_classifier(many).is_some() => approximate_objects(many, variance_at),
         many if many.iter().all(|ty| matches!(ty, Ty::Fun(_))) => {
             approximate_functions(many, variance_at)
         }
         many if many.iter().all(|ty| ty.is_nullable()) => {
             let cores = many.iter().map(|ty| ty.non_null()).collect::<Vec<_>>();
-            Ty::nullable(covariant_join(&cores, variance_at))
+            covariant_join(&cores, variance_at).map(Ty::nullable)
         }
-        _ => Ty::obj_name(super::wk::any()),
+        _ => Some(Ty::obj_name(super::wk::any())),
     }
-}
-
-type VarianceLookup = fn(TypeName, usize) -> TypeVariance;
-
-thread_local! {
-    static VARIANCE: Cell<VarianceLookup> = Cell::new(invariant_variance);
-}
-
-fn invariant_variance(_classifier: TypeName, _index: usize) -> TypeVariance {
-    TypeVariance::Invariant
-}
-
-pub(crate) fn variance_of(classifier: TypeName, index: usize) -> TypeVariance {
-    VARIANCE.with(|cell| cell.get()(classifier, index))
-}
-
-pub(crate) struct VarianceScope {
-    previous: VarianceLookup,
-}
-
-impl Drop for VarianceScope {
-    fn drop(&mut self) {
-        VARIANCE.with(|cell| cell.set(self.previous));
-    }
-}
-
-/// Install the classifier-variance lookup used while a backend encodes an intersection.
-pub(crate) fn enter_variance(lookup: VarianceLookup) -> VarianceScope {
-    VARIANCE.with(|cell| VarianceScope {
-        previous: cell.replace(lookup),
-    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::{declaration_approximation, Ty, TypeVariance};
 
-    fn out_variance(_classifier: crate::types::TypeName, _index: usize) -> TypeVariance {
-        TypeVariance::Out
+    fn out_variance(_classifier: crate::types::TypeName, _index: usize) -> Option<TypeVariance> {
+        Some(TypeVariance::Out)
     }
 
-    fn invariant_variance(_classifier: crate::types::TypeName, _index: usize) -> TypeVariance {
-        TypeVariance::Invariant
+    fn invariant_variance(
+        _classifier: crate::types::TypeName,
+        _index: usize,
+    ) -> Option<TypeVariance> {
+        Some(TypeVariance::Invariant)
     }
 
-    fn in_variance(_classifier: crate::types::TypeName, _index: usize) -> TypeVariance {
-        TypeVariance::In
+    fn in_variance(_classifier: crate::types::TypeName, _index: usize) -> Option<TypeVariance> {
+        Some(TypeVariance::In)
+    }
+
+    fn missing_variance(
+        _classifier: crate::types::TypeName,
+        _index: usize,
+    ) -> Option<TypeVariance> {
+        None
     }
 
     #[test]
@@ -517,7 +497,7 @@ mod tests {
         ]);
         assert_eq!(
             declaration_approximation(intersection, &mut out_variance),
-            Ty::nullable(Ty::obj("kotlin/Any"))
+            Some(Ty::nullable(Ty::obj("kotlin/Any")))
         );
     }
 
@@ -526,7 +506,7 @@ mod tests {
         let intersection = Ty::intersection(&[Ty::obj("demo/Left"), Ty::obj("demo/Right")]);
         assert_eq!(
             declaration_approximation(intersection, &mut invariant_variance),
-            Ty::obj("kotlin/Any")
+            Some(Ty::obj("kotlin/Any"))
         );
     }
 
@@ -537,7 +517,10 @@ mod tests {
         let lists = Ty::intersection(&[list_int, list_string]);
         assert_eq!(
             declaration_approximation(lists, &mut out_variance),
-            Ty::obj_args("kotlin/collections/List", &[Ty::obj("kotlin/Any")])
+            Some(Ty::obj_args(
+                "kotlin/collections/List",
+                &[Ty::obj("kotlin/Any")]
+            ))
         );
 
         let inv_int = Ty::obj_args("demo/Inv", &[Ty::Int]);
@@ -545,14 +528,17 @@ mod tests {
         let invariant = Ty::intersection(&[inv_int, inv_string]);
         assert_eq!(
             declaration_approximation(invariant, &mut invariant_variance),
-            Ty::obj_args("demo/Inv", &[Ty::out_projection(Ty::obj("kotlin/Any"))])
+            Some(Ty::obj_args(
+                "demo/Inv",
+                &[Ty::out_projection(Ty::obj("kotlin/Any"))]
+            ))
         );
 
         let inn_int = Ty::obj_args("demo/Inn", &[Ty::Int]);
         let inn_string = Ty::obj_args("demo/Inn", &[Ty::String]);
         let contravariant = Ty::intersection(&[inn_int, inn_string]);
         match declaration_approximation(contravariant, &mut in_variance) {
-            Ty::Obj(name, arguments) => {
+            Some(Ty::Obj(name, arguments)) => {
                 assert!(name.matches("demo/Inn"));
                 assert!(matches!(arguments, [Ty::StarProjection(_)]));
             }
@@ -561,11 +547,24 @@ mod tests {
     }
 
     #[test]
+    fn a_shared_generic_classifier_requires_recorded_variance() {
+        let box_int = Ty::obj_args("demo/Box", &[Ty::Int]);
+        let box_string = Ty::obj_args("demo/Box", &[Ty::String]);
+        assert_eq!(
+            declaration_approximation(
+                Ty::intersection(&[box_int, box_string]),
+                &mut missing_variance,
+            ),
+            None
+        );
+    }
+
+    #[test]
     fn differing_function_parameters_publish_a_star() {
         let left = Ty::fun(vec![Ty::Int], Ty::String);
         let right = Ty::fun(vec![Ty::String], Ty::String);
         match declaration_approximation(Ty::intersection(&[left, right]), &mut out_variance) {
-            Ty::Fun(signature) => {
+            Some(Ty::Fun(signature)) => {
                 assert!(matches!(
                     signature.params.as_slice(),
                     [Ty::StarProjection(_)]

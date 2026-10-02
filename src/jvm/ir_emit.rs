@@ -152,6 +152,8 @@ use primary_constructor_parameters::{
 use try_emission::ProtectedRegion;
 mod class_metadata;
 use class_metadata::build_class_metadata;
+#[cfg(test)]
+use class_metadata::build_class_metadata_with_facts;
 mod constructor_delegation_arguments;
 mod secondary_constructor;
 mod static_accessors;
@@ -2807,9 +2809,7 @@ fn emit_class(
     // the same debug tables, so it is seeded like any class with a computed record.
     let byte_parity = !is_coroutine_state_machine(c)
         && opts.emit_class_metadata
-        && (c.is_anonymous_object
-            || build_class_metadata(ir, env.override_results, c, opts, env.local_delegated())
-                .is_some());
+        && (c.is_anonymous_object || build_class_metadata(ir, c, opts, env).is_some());
     let pool_seed = || PlainClassPoolSeed {
         ir,
         class: c,
@@ -3518,7 +3518,7 @@ fn emit_class(
     cw.set_class_annotations(&super::value_classes::class_file_annotations(c));
     // A cross-module provider's `@Metadata` wins; otherwise compute one from the IR (bounded shapes).
     let computed = (class_meta.is_none() && opts.emit_class_metadata)
-        .then(|| build_class_metadata(ir, env.override_results, c, opts, env.local_delegated()))
+        .then(|| build_class_metadata(ir, c, opts, env))
         .flatten();
     // Debug tables + nullability annotations (opt-in with metadata) for any class that qualified for a
     // computed `@Metadata` — including data classes (their synthesized methods get a LocalVariableTable
@@ -3788,7 +3788,7 @@ fn emit_annotation_class(
     cw.set_class_annotations(&user_annotations);
     cw.set_runtime_annotations(&mirrors);
     let computed = (class_meta.is_none() && opts.emit_class_metadata)
-        .then(|| build_class_metadata(ir, env.override_results, c, opts, env.local_delegated()))
+        .then(|| build_class_metadata(ir, c, opts, env))
         .flatten();
     if let Some(m) = class_meta.or(computed.as_ref()) {
         cw.set_kotlin_metadata(m.k, &m.mv, m.xi, &m.d1, &m.d2);
@@ -4141,7 +4141,7 @@ fn emit_interface_class(
     // An interface is a VIEW of the same `IrClass` every other kind is — compute its `@Metadata` (and
     // therefore its debug tables/annotations) through the shared path, exactly like `emit_class`.
     let computed = (class_meta.is_none() && opts.emit_class_metadata)
-        .then(|| build_class_metadata(ir, env.override_results, c, opts, env.local_delegated()))
+        .then(|| build_class_metadata(ir, c, opts, env))
         .flatten();
     if computed.is_some() {
         attach_synth_debug_tables(ir, c, &mut cw, opts.param_assertions, None, &[], &[]);
@@ -4890,7 +4890,7 @@ fn emit_enum_class(
     // annotations) through the shared path, exactly like `emit_class` and `emit_interface_class`.
     let class_metadata = opts
         .emit_class_metadata
-        .then(|| build_class_metadata(ir, env.override_results, c, opts, env.local_delegated()))
+        .then(|| build_class_metadata(ir, c, opts, env))
         .flatten();
     if class_metadata.is_some() {
         attach_synth_debug_tables(
@@ -6087,30 +6087,6 @@ fn emit_method_inner_with_holder(
     function_annotations::emit_recorded(ir, e.cw, fid, &f.name, &desc);
 }
 
-fn jvm_method_signature(
-    formatter: &JvmSignatureFormatter<'_>,
-    g: &crate::ir::IrGenericSig,
-    f: &crate::ir::IrFunction,
-    vararg_index: Option<usize>,
-) -> Option<String> {
-    let mut s = jvm_type_params(formatter, g)?;
-    s.push('(');
-    for (index, parameter) in g.params.iter().enumerate() {
-        // A vararg element is a value parameter. `Array<In<E>>` suppresses the element's
-        // declaration-site wildcard; `vararg x: In<E>` keeps `In<? super E>`.
-        let rendered = if vararg_index == Some(index) {
-            formatter.vararg_element_ty(parameter, Wildcards::Declared)?
-        } else {
-            formatter.method_ty(parameter, Wildcards::Declared)?
-        };
-        s.push_str(&rendered);
-    }
-    s.push(')');
-    let ret = g.ret.as_ref().unwrap_or(&f.ret);
-    s.push_str(&formatter.method_ty(ret, Wildcards::Suppressed)?);
-    Some(s)
-}
-
 /// Format a class's generic shape into a JVM class `Signature` (`<T:Ljava/lang/Object;>Ljava/lang/Object;`).
 fn jvm_class_signature(
     formatter: &JvmSignatureFormatter<'_>,
@@ -6257,7 +6233,7 @@ fn method_signature_shape(
     if let Some(generic) = ir.signatures.get(&fid) {
         let generic = value_class_signatures::physical_generic_signature(ir, fid, f, generic);
         let vararg_index = ir.fn_varargs.get(&fid).map(|vararg| vararg.index);
-        return jvm_method_signature(formatter, &generic, f, vararg_index);
+        return formatter.method_signature(&generic, f, vararg_index);
     }
     if let (Some((params, ret)), Some(_)) = (
         ir.member_semantic_sigs.get(&fid),
@@ -11250,12 +11226,14 @@ mod invariant_tests {
         // are not declarations in Kotlin metadata.
         ir.add_class(crate::plugins::synthetic_class("demo/Outer$Impl3"));
 
-        let metadata = build_class_metadata(
+        let metadata = build_class_metadata_with_facts(
             &ir,
             &crate::jvm::override_results::OverrideResults::default(),
             &ir.classes[outer_id as usize],
             &EmitOptions::default(),
             &LocalDelegatedProperties::default(),
+            &NoClassifiers,
+            &EmitRun::default(),
         )
         .expect("plain source class metadata");
         assert!(metadata.d2.iter().any(|entry| entry == "Node2"));

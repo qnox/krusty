@@ -28,6 +28,7 @@ mod generic_inference;
 mod hierarchy_projection;
 mod lambda_call_shape;
 mod member_hierarchy;
+mod member_property_selection;
 mod member_specialization;
 mod overload_selection;
 mod qualified_classifiers;
@@ -48,7 +49,7 @@ pub(crate) use generic_inference::*;
 pub(crate) use hierarchy_projection::{
     applied_hierarchy, apply_subtype_arguments_from_supertype, classifier_bindings,
     classifier_companion_instance, classifier_value_receiver, direct_supertypes,
-    inherited_classifier_shape, member_scope_receiver, with_implicit_any,
+    inherited_classifier_shape, member_scope_receiver, supports_member_lookup, with_implicit_any,
     ClassifierCompanionInstance, SupertypeProjectionCache,
 };
 use hierarchy_projection::{
@@ -2137,8 +2138,7 @@ impl<'a> SymbolResolver<'a> {
         // implied; checked FIR retains the original bottom-typed expression.
         let member_scope_receiver = member_scope_receiver(receiver);
         let members = if !member_scope_receiver.is_nullable()
-            && (member_scope_receiver.kotlin_class_internal().is_some()
-                || matches!(member_scope_receiver, Ty::Fun(_) | Ty::Intersection(_)))
+            && supports_member_lookup(member_scope_receiver)
         {
             members_in_hierarchy(&self.src, member_scope_receiver, name)
         } else {
@@ -2742,184 +2742,6 @@ impl<'a> SymbolResolver<'a> {
         internal: TypeName,
     ) -> Option<std::sync::Arc<crate::libraries::LibraryType>> {
         self.src.classifier(internal)
-    }
-
-    /// The declared type of the member property `name` on `recv` — the property itself, with no accessor
-    /// in the answer. A property is a declaration, not a method: whether the target realizes reading it
-    /// through a method at all is not a resolution question, so a read must not be made to depend on
-    /// finding one. Returns the selected declaration owner and its interface shape beside the logical
-    /// property type so lowering does not rediscover either from a source-specific table. Nearest
-    /// declaration wins, as for any member.
-    ///
-    /// Provider-normalized declarations take precedence over Java synthetic bean properties.
-    /// Applicability still belongs to the use site because protected access depends on both the
-    /// lexical class and receiver type.
-    pub fn select_member_property(&self, recv: Ty, name: &str) -> Option<SelectedMemberProperty> {
-        self.select_member_property_applicable_where(recv, name, |property| {
-            (property.context_count == 0).then_some((true, 0))
-        })
-    }
-
-    pub(crate) fn select_member_property_where(
-        &self,
-        recv: Ty,
-        name: &str,
-    ) -> Option<SelectedMemberProperty> {
-        self.select_member_property_applicable_where(recv, name, |property| {
-            (property.context_count == 0).then_some((true, 0))
-        })
-    }
-
-    pub(crate) fn select_member_property_applicable_where(
-        &self,
-        recv: Ty,
-        name: &str,
-        property_applicable: impl Fn(&crate::libraries::PropertyInfo) -> Option<(bool, usize)>,
-    ) -> Option<SelectedMemberProperty> {
-        if recv.is_nullable()
-            || (!matches!(recv.non_null(), Ty::Intersection(_))
-                && recv.kotlin_class_internal().is_none())
-        {
-            return None;
-        }
-        // Walk normalized property declarations one classifier rung at a time. Providers have already
-        // converted any target storage form into PropertyInfo plus opaque accessor identities.
-        let mut queue = std::collections::VecDeque::from([(recv, 0u32)]);
-        let mut seen = std::collections::HashSet::new();
-        let mut nearer: Vec<(std::sync::Arc<crate::libraries::LibraryType>, Ty)> = Vec::new();
-        let mut synthetic_fallback: Option<(SelectedMemberProperty, bool)> = None;
-        let mut inaccessible_declaration: Option<SelectedMemberProperty> = None;
-        while let Some((current, depth)) = queue.pop_front() {
-            if let Some(parts) = hierarchy_projection::intersection_components(current) {
-                queue.extend(parts.iter().copied().map(|part| (part, depth)));
-                continue;
-            }
-            let Some(internal) = current.kotlin_class_internal() else {
-                continue;
-            };
-            if !seen.insert(internal) {
-                continue;
-            }
-            let Some(shape) = self.src.classifier(internal) else {
-                continue;
-            };
-            let (_, mut local_properties) =
-                declared_callables(&self.src, &shape, current, name).into_parts();
-            local_properties.overloads.extend(
-                self.lib
-                    .inherited_accessor_properties(&self.src, current, name)
-                    .overloads,
-            );
-            if depth > 0 {
-                // A private property is not inherited. Keep a direct private declaration for an
-                // exact accessibility diagnostic, but do not let a supertype's declaration block
-                // a later lexical receiver rung.
-                local_properties
-                    .overloads
-                    .retain(|property| member_is_inheritable(property.visibility));
-            }
-            crate::trace_compiler!(
-                "resolve",
-                "member property rung receiver={recv:?} current={current:?} owner={internal} name={name} properties={:?}",
-                local_properties
-                    .overloads
-                    .iter()
-                    .map(|property| (property.owner, property.kind, property.context_count))
-                    .collect::<Vec<_>>(),
-            );
-            let local_property = local_properties
-                .overloads
-                .into_iter()
-                .filter(|property| property.kind == PropKind::Member && property.receiver_rank == 0)
-                .filter_map(|property| {
-                    property_applicable(&property).map(|priority| (priority, property))
-                })
-                .max_by_key(|(priority, property)| (*priority, !property.accessor_derived()));
-            if let Some(((accessible, _), mut property)) = local_property {
-                crate::trace_compiler!(
-                    "resolve",
-                    "member property candidate receiver={current:?} owner={} name={name} getter={} classifier_formals={:?} declared={:?}",
-                    property.owner,
-                    property.getter.name,
-                    shape.type_params,
-                    property.ty,
-                );
-                // `declared_callables` has already applied `current` to this declaration. Applying
-                // the classifier bindings again is not idempotent: after `Content<T>.value` becomes
-                // a caller-owned type parameter, a second substitution sees that scoped parameter
-                // as unbound and erases it to `Any`.
-                let declared_ty = property.ty;
-                let ty = nearer
-                    .iter()
-                    .find_map(|(shape, applied)| {
-                        declared_callables(
-                            &self.src,
-                            shape.as_ref(),
-                            *applied,
-                            &property.getter.name,
-                        )
-                        .into_parts()
-                        .0
-                        .overloads
-                        .into_iter()
-                        .find(|function| function.semantic_params().is_empty())
-                        .map(|function| function.callable.ret)
-                    })
-                    .unwrap_or(declared_ty);
-                property.ty = ty;
-                property.getter.ret = ty;
-                crate::trace_compiler!(
-                    "resolve",
-                    "member property selected receiver={current:?} owner={} name={name} ty={ty:?} visibility={:?}",
-                    property.owner,
-                    property.visibility,
-                );
-                let interface = self
-                    .src
-                    .classifier(property.owner)
-                    .is_some_and(|owner| owner.is_interface());
-                let accessor_derived = property.accessor_derived();
-                let selected = SelectedMemberProperty {
-                    owner: property.owner,
-                    ty,
-                    interface,
-                    visibility: property.visibility,
-                    property: Some(property),
-                };
-                if accessor_derived {
-                    synthetic_fallback.get_or_insert((selected, accessible));
-                } else if accessible {
-                    return Some(selected);
-                } else if synthetic_fallback
-                    .as_ref()
-                    .is_some_and(|(_, accessible)| *accessible)
-                {
-                    return synthetic_fallback.map(|(property, _)| property);
-                } else {
-                    // An inaccessible Java declaration is not inherited at this use site and
-                    // therefore cannot hide an accessible semantic property from a supertype
-                    // (`HashMap.size`'s package-private storage vs `Map.size`). Keep it only as the
-                    // diagnostic target if no accessible declaration is found above.
-                    inaccessible_declaration.get_or_insert(selected);
-                }
-            }
-            if shape.hidden_member_properties.contains(name) {
-                return synthetic_fallback
-                    .filter(|(_, accessible)| *accessible)
-                    .map(|(property, _)| property)
-                    .or(inaccessible_declaration);
-            }
-            nearer.push((shape, current));
-            queue.extend(
-                direct_supertypes(&self.src, current)
-                    .into_iter()
-                    .map(|supertype| (supertype, depth + 1)),
-            );
-        }
-        synthetic_fallback
-            .filter(|(_, accessible)| *accessible)
-            .map(|(property, _)| property)
-            .or(inaccessible_declaration)
     }
 
     /// Resolve a name on a receiver to the thing it DENOTES — a member, a property, a companion/instance

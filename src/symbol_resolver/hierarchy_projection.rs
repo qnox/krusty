@@ -99,6 +99,16 @@ pub(crate) fn member_scope_receiver(receiver: Ty) -> Ty {
     }
 }
 
+/// Whether a non-null semantic type owns a classifier/function/intersection member scope. This is
+/// the shared structural gate for member inventory; it does not perform lookup or reinterpret a
+/// failed receiver through another origin.
+pub(crate) fn supports_member_lookup(receiver: Ty) -> bool {
+    matches!(
+        receiver.non_null(),
+        Ty::String | Ty::Obj(..) | Ty::TyParam(..) | Ty::Fun(..) | Ty::Intersection(_)
+    )
+}
+
 /// Lookup for a classifier inherited through a supertype's nested-class scope. Providers expose the
 /// declaration record only; core applies structural nesting and access rules.
 pub(crate) fn inherited_classifier_shape(

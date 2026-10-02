@@ -2,9 +2,7 @@
 //! shapes. Backend-specific names and descriptors are kept out of this module.
 
 mod intersection;
-pub(crate) use intersection::{
-    declaration_approximation, enter_variance, variance_of, VarianceScope,
-};
+pub(crate) use intersection::declaration_approximation;
 mod interning;
 mod spelling;
 mod substitute;
