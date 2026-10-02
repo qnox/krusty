@@ -125,6 +125,7 @@ impl AsyncResponseDelivery {
         let Some(stream) = self.stream.as_mut() else {
             return Ok(());
         };
+        cancel_from_pending(stream, pending);
         while pending.len() < MAX_INPUTS_BUFFERED_DURING_DIAGNOSTIC_STREAM {
             match incoming.try_recv() {
                 Ok(event) => retain_or_cancel(stream, pending, event),
@@ -156,20 +157,35 @@ impl AsyncResponseDelivery {
     }
 }
 
+fn cancel_from_pending(stream: &mut WorkspaceDiagnosticStream, pending: &mut VecDeque<Incoming>) {
+    let Some(index) = pending
+        .iter()
+        .position(|event| is_matching_cancellation(stream, event))
+    else {
+        return;
+    };
+    pending.remove(index);
+    stream.cancel();
+}
+
 fn retain_or_cancel(
     stream: &mut WorkspaceDiagnosticStream,
     pending: &mut VecDeque<Incoming>,
     event: Incoming,
 ) {
-    if let Incoming::Message(message) = &event {
-        if message.get("method").and_then(Value::as_str) == Some("$/cancelRequest")
-            && message.pointer("/params/id") == Some(stream.request_id())
-        {
-            stream.cancel();
-            return;
-        }
+    if is_matching_cancellation(stream, &event) {
+        stream.cancel();
+        return;
     }
     pending.push_back(event);
+}
+
+fn is_matching_cancellation(stream: &WorkspaceDiagnosticStream, event: &Incoming) -> bool {
+    let Incoming::Message(message) = event else {
+        return false;
+    };
+    message.get("method").and_then(Value::as_str) == Some("$/cancelRequest")
+        && message.pointer("/params/id") == Some(stream.request_id())
 }
 
 #[cfg(test)]
@@ -364,6 +380,74 @@ mod tests {
                     }
                 })
             ]
+        );
+    }
+
+    #[test]
+    fn a_buffered_matching_cancel_precedes_the_next_page_and_keeps_other_events() {
+        use crate::server::output_queue::SharedWriter;
+
+        let id = json!("workspace/diagnostic/buffered");
+        let token = json!("workspace/diagnostic/progress");
+        let items = (0..80)
+            .map(|index| json!({"index": index, "payload": "m".repeat(8 * 1024)}))
+            .collect::<Vec<_>>();
+        let WorkspaceDiagnosticResponse::Stream(stream) =
+            workspace_diagnostic_response(id.clone(), items, Some(&token))
+        else {
+            panic!("oversized bounded response must stream");
+        };
+        let (inner, captured) = SharedWriter::recording();
+        let mut writer = OutputQueue::spawn(inner).expect("output queue");
+        let mut delivery = AsyncResponseDelivery::default();
+        assert_eq!(
+            delivery
+                .accept(&mut writer, Dispatch::diagnostic_stream(stream))
+                .unwrap(),
+            None
+        );
+
+        let normal = json!({
+            "jsonrpc": "2.0",
+            "method": "workspace/didChangeConfiguration",
+            "params": {"settings": {}}
+        });
+        let mut pending = VecDeque::from([
+            Incoming::Message(normal.clone()),
+            Incoming::Message(json!({
+                "jsonrpc": "2.0",
+                "method": "$/cancelRequest",
+                "params": {"id": id}
+            })),
+        ]);
+        let (_sender, incoming) = mpsc::channel();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while delivery.is_active() {
+            assert!(
+                Instant::now() < deadline,
+                "buffered cancellation did not reach its terminal"
+            );
+            delivery
+                .advance(&mut writer, &incoming, &mut pending)
+                .unwrap();
+        }
+
+        assert_eq!(pending.len(), 1);
+        let Some(Incoming::Message(retained)) = pending.pop_front() else {
+            panic!("the unrelated buffered event must remain queued");
+        };
+        assert_eq!(retained, normal);
+        assert_eq!(writer.finish(Ok(0)).unwrap(), 0);
+        assert_eq!(
+            decode_frames(&captured.lock().expect("captured output")),
+            vec![json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": {
+                    "code": -32800,
+                    "message": "request cancelled"
+                }
+            })]
         );
     }
 }
