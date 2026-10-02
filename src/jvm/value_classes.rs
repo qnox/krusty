@@ -1900,7 +1900,6 @@ pub(crate) fn lower_value_classes(
             },
             /// Constructing a value class with defaulted params omitted.
             VcCtorDefault(default_constructions::DefaultConstruction),
-            FunctionInvoke(function_invocation::Plan),
         }
         if let IrExpr::Call {
             callee: Callee::Virtual { owner, name, .. },
@@ -1931,21 +1930,18 @@ pub(crate) fn lower_value_classes(
                 );
             }
         }
-        let function_invoke = function_invocation::plan(
-            &function_invocation::Lookup {
-                functions: &ir.functions,
-                classes: &ir.classes,
-                class_index: &cls_by_name,
-                logical_types: &ir.logical_types,
-                suspend_calls: &ir.suspend_calls,
-                module_value_classes,
-                under: &under,
-                callable_under: &callable_under,
-                repr_ctx: &repr_ctx,
-            },
+        // A value-class callee still shaped as a function-value call has no selected member.
+        // Do not invent `invoke-impl` from a name and an arity, and do not box it.
+        if function_invocation::missing_member_implementation(
+            &ir.logical_types,
+            &ir.suspend_calls,
+            &under,
+            &repr_ctx,
             id,
             &ir.exprs[i],
-        );
+        ) {
+            return false;
+        }
         let rw = match &ir.exprs[i] {
             // `new X(args)` → `X.constructor-impl(args): U`. The return is the underlying `U`; the
             // PARAMETER types come from the actual constructor arguments (a secondary constructor's
@@ -2364,9 +2360,7 @@ pub(crate) fn lower_value_classes(
             }
             _ => None,
         };
-        let rw = rw.or_else(|| function_invoke.map(Rw::FunctionInvoke));
         let rewrite = match rw {
-            Some(Rw::FunctionInvoke(plan)) => Some(function_invocation::apply(ir, id, plan)),
             Some(Rw::Ctor(e)) => Some(e),
             Some(Rw::BoxedValue { expr, owner }) => {
                 ir.physical_types.insert(id, Ty::obj_name(owner));

@@ -266,4 +266,105 @@ value class ValueClass(private val s: Int) : (Int) -> String {\n\
         common::compile_and_run_files_with_stdlib(&sources).as_deref(),
         Some("OK")
     );
+    assert_same_method(&sources, "BoxKt", "box");
+}
+
+/// Two `invoke` members of one arity lower to the same static name and a different descriptor.
+/// Declaration order must not choose the target.
+#[test]
+fn same_arity_invoke_overloads_keep_the_selected_descriptor_in_either_order() {
+    const INT_FIRST: &str = "@JvmInline\n\
+value class IntFirst(val s: Int) : (String) -> String {\n\
+    operator fun invoke(n: Int): String = \"i$n\"\n\
+    override fun invoke(text: String): String = \"s$text\"\n\
+}\n\
+fun intFirst(): String = IntFirst(1)(2) + IntFirst(1)(\"a\")\n";
+    const STRING_FIRST: &str = "@JvmInline\n\
+value class StringFirst(val s: Int) : (Int) -> String {\n\
+    override fun invoke(n: Int): String = \"i$n\"\n\
+    operator fun invoke(text: String): String = \"s$text\"\n\
+}\n\
+fun stringFirst(): String = StringFirst(1)(2) + StringFirst(1)(\"a\")\n";
+    let src = format!("{INT_FIRST}\n{STRING_FIRST}\nfun box(): String {{\n    val seen = intFirst() + stringFirst()\n    return if (seen == \"i2sa\" + \"i2sa\") \"OK\" else seen\n}}\n");
+    common::expect_box_same_as_kotlinc(&src, "ValueClassInvokeOverloads");
+    assert_same_method(
+        &[("ValueClassInvokeOverloads.kt", src.as_str())],
+        "ValueClassInvokeOverloadsKt",
+        "intFirst",
+    );
+    assert_same_method(
+        &[("ValueClassInvokeOverloads.kt", src.as_str())],
+        "ValueClassInvokeOverloadsKt",
+        "stringFirst",
+    );
+}
+
+#[test]
+fn a_generic_value_class_invoke_uses_the_substituted_member() {
+    const SRC: &str = "@JvmInline\n\
+value class Box<T : Any>(val value: T) : (T) -> String {\n\
+    override fun invoke(item: T): String = value.toString() + item.toString()\n\
+}\n\
+fun box(): String = if (Box(\"O\")(\"K\") == \"OK\") \"OK\" else Box(\"O\")(\"K\")\n";
+    common::expect_box_same_as_kotlinc(SRC, "GenericValueClassInvoke");
+    assert_same_method(
+        &[("GenericValueClassInvoke.kt", SRC)],
+        "GenericValueClassInvokeKt",
+        "box",
+    );
+}
+
+#[test]
+fn direct_narrowed_and_function_typed_value_class_calls_match_kotlinc() {
+    const SRC: &str = "@JvmInline\n\
+value class ValueClass(val s: Int) : (Int) -> String {\n\
+    override fun invoke(p: Int): String = \"${s}${p}\"\n\
+}\n\
+fun direct(): String = ValueClass(1)(2)\n\
+fun narrowed(v: ValueClass?): String = v!!(3)\n\
+fun typed(): String {\n\
+    val f: (Int) -> String = ValueClass(4)\n\
+    return f(5)\n\
+}\n\
+fun box(): String {\n\
+    val seen = direct() + narrowed(ValueClass(1)) + typed()\n\
+    return if (seen == \"121345\") \"OK\" else seen\n\
+}\n";
+    common::expect_box_same_as_kotlinc(SRC, "ValueClassInvokeAbi");
+    let sources = [("ValueClassInvokeAbi.kt", SRC)];
+    assert_same_method(&sources, "ValueClassInvokeAbiKt", "direct");
+    assert_same_method(&sources, "ValueClassInvokeAbiKt", "narrowed-d8IPsTA");
+    assert_same_method(&sources, "ValueClassInvokeAbiKt", "typed");
+}
+
+#[test]
+fn a_compiled_dependency_value_class_invoke_uses_the_static_member() {
+    const LIB: &str = "package lib\n\
+@JvmInline\n\
+value class ValueClass(val s: Int) : (Int) -> String {\n\
+    override fun invoke(p: Int): String = \"${s}${p}\"\n\
+}\n";
+    const CALLER: &str = "import lib.ValueClass\n\
+fun box(): String = if (ValueClass(1)(2) == \"12\") \"OK\" else ValueClass(1)(2)\n";
+    let lib =
+        common::kotlinc_lib_out(&[("Lib.kt", LIB)]).expect("reference kotlinc is provisioned");
+    let pair = common::ModuleClassPair::compile_with_classpath(
+        &[("DependencyValueClassInvoke.kt", CALLER)],
+        &[lib],
+        "DependencyValueClassInvokeKt",
+    );
+    let (kotlinc, krusty) = pair.method_code("DependencyValueClassInvokeKt", "box");
+    assert_eq!(
+        krusty, kotlinc,
+        "DependencyValueClassInvokeKt.box instructions differ\n--- kotlinc ---\n{kotlinc}--- krusty ---\n{krusty}"
+    );
+}
+
+fn assert_same_method(sources: &[(&str, &str)], class: &str, method: &str) {
+    let pair = common::ModuleClassPair::compile(sources, class);
+    let (kotlinc, krusty) = pair.method_code(class, method);
+    assert_eq!(
+        krusty, kotlinc,
+        "{class}.{method} instructions differ\n--- kotlinc ---\n{kotlinc}--- krusty ---\n{krusty}"
+    );
 }
