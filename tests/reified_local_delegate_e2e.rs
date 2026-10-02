@@ -5,6 +5,23 @@
 
 use super::common;
 
+#[test]
+fn a_generic_receiver_delegate_keeps_its_own_parameter_scope() {
+    common::expect_box_same_as_kotlinc(
+        "class Unrelated<T>\n\
+         open class Storage<T>(val value: T) {\n\
+             operator fun getValue(owner: Any?, property: Any?): T = value\n\
+         }\n\
+         class Container<R>(value: R) : Storage<R>(value)\n\
+         fun read(value: String): String {\n\
+             val local by Container(value)\n\
+             return local\n\
+         }\n\
+         fun box(): String = read(\"OK\")\n",
+        "GenericReceiverDelegateScope",
+    );
+}
+
 const REUSED_GENERIC_PLAN: &str = "import kotlin.reflect.KProperty
 interface Root
 class Token : Root

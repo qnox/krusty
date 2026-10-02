@@ -1102,16 +1102,13 @@ fn delegate_substitutions(
         crate::symbol_resolver::unify_inferred_ty(declared, selected, &mut bindings);
     }
     let failure = |kind| BodyCheckFailure { span, kind };
-    // The callee and its receiver classifier can publish the same semantic name. The operator
-    // body mentions the callee's parameter, so a same-named class parameter must not win.
+    // The selected operator's type variables include both its own parameters and those of its
+    // receiver's declaration. Bind against that lexical scope, preserving callable shadowing.
     let mut substitutions = bindings
         .into_iter()
         .map(|(name, value)| {
-            let parameter = (0..)
-                .map_while(|ordinal| index.type_parameter(declaration, ordinal))
-                .find(|parameter| {
-                    index.type_parameter_semantic_name(*parameter) == Some(name.as_str())
-                })
+            let parameter = index
+                .type_parameter_in_declaration_scope(declaration, &name)
                 .ok_or_else(|| failure(BodyCheckFailureKind::MissingStableCallTarget))?;
             let header = index
                 .type_parameter_header(parameter)

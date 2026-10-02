@@ -107,6 +107,50 @@ fn covariant_extension_receiver_widens_from_a_nullable_lambda_result() {
     );
 }
 
+#[test]
+fn delegate_member_substitution_names_its_receiver_class_parameter() {
+    let (body, index) = checked_function_body(
+        "class Unrelated<T>\n\
+         class Delegate<T>(val value: T) {\n\
+             operator fun getValue(owner: Any?, property: Any?): T = value\n\
+         }\n\
+         fun read(value: String): String {\n\
+             val local by Delegate(value)\n\
+             return local\n\
+         }\n",
+        "read",
+    );
+
+    let [plan] = body.local_delegate_plans() else {
+        panic!("the local delegated property records one semantic plan")
+    };
+    let callable = index
+        .callable(
+            plan.get_value
+                .target
+                .module()
+                .expect("module delegate operator"),
+        )
+        .expect("selected callable header");
+    let owner = index
+        .declaration_anchor(callable.declaration)
+        .and_then(|anchor| anchor.owner)
+        .expect("the selected member's receiver declaration");
+    assert_eq!(index.declaration_name(owner), Some("Delegate"));
+    let parameter = index
+        .type_parameter(owner, 0)
+        .expect("receiver type parameter");
+    assert_eq!(
+        plan.get_value.substitutions.as_ref(),
+        &[FirTypeSubstitution {
+            parameter: parameter.into(),
+            reified: false,
+            value: ResolvedTy::new(Ty::String).unwrap(),
+            additional_bounds: Box::new([]),
+        }],
+    );
+}
+
 fn selected_name<'i>(
     call: &FirDelegateCall,
     index: &'i crate::fir::ResolvedModuleIndex,

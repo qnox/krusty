@@ -207,6 +207,29 @@ impl ResolvedModuleIndex {
         })
     }
 
+    /// Bind a selected declaration's normalized type-variable identity to its stable parameter.
+    /// The declaration and its lexical owners form one scope tower: callable parameters shadow
+    /// enclosing classifier/function parameters, while an unrelated declaration never participates.
+    pub(crate) fn type_parameter_in_declaration_scope(
+        &self,
+        declaration: DeclarationId,
+        semantic_name: &str,
+    ) -> Option<TypeParameterId> {
+        let scopes = std::iter::successors(Some(declaration), |&owner| {
+            self.declaration_anchor(owner)
+                .and_then(|anchor| anchor.owner)
+        });
+        for scope in scopes {
+            let parameters = (0..).map_while(|ordinal| self.type_parameter(scope, ordinal));
+            for parameter in parameters {
+                if self.type_parameter_semantic_name(parameter) == Some(semantic_name) {
+                    return Some(parameter);
+                }
+            }
+        }
+        None
+    }
+
     pub(super) fn type_parameter_storage_payload_bytes(&self) -> usize {
         self.type_parameters.len()
             * (std::mem::size_of::<(DeclarationId, u32)>() + std::mem::size_of::<TypeParameterId>())

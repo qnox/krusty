@@ -4451,6 +4451,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   expression's recorded facts, but does not clone or mutate the declaration plan. The JVM may
   rehome the same plan when an inline copy is emitted under another physical owner, and owns the
   resulting erased helper identity.
+  The checked convention's substitutions include its receiver classifier's type parameters as
+  well as callable parameters. The selected declaration's lexical scope fixes their stable
+  identities: a callable parameter shadows the enclosing parameter, and an unrelated declaration
+  with the same spelling cannot contribute a binding.
   Tests: `fir_lower::inlining::escaping_reified_lambda`, `tests/escaping_reified_lambda_e2e.rs`,
   `tests/reified_local_delegate_e2e.rs`,
   boxes `nullCheckOptimization/kt22410.kt`, `reified/lambda.kt`, `reified/extensionLambda.kt`,
