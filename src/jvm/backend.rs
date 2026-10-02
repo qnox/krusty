@@ -64,6 +64,7 @@ pub(crate) struct BackendPassFacts {
     /// Physical constructions selected for Kotlin function-value SAM wrappers.
     sam_wrapper_realizations: crate::jvm::sam_wrappers::SamWrapperRealizations,
     local_delegate_access: crate::jvm::local_delegate_accessors::HelperAccess,
+    lambda_methods: crate::jvm::lambda_classes::LambdaMethods,
 }
 
 /// THE post-lowering, pre-emit JVM pass pipeline — the single definition every consumer (the real
@@ -202,7 +203,7 @@ fn run_backend_passes_after_plugins(
     crate::jvm::parameter_assertions::realize(ir);
     // Common IR retains source type-parameter identities and complete intersections. Select the JVM
     // class-bound erasure here, once, before any descriptor-sensitive backend pass runs.
-    crate::jvm::reified_operations::realize(ir);
+    crate::jvm::reified_operations::realize(ir, &facts.lambda_methods);
     // A null check over an erased call result reads the call's own slot, ahead of the coercion
     // that narrows it; erasure and call-result boundaries below rewrite that coercion.
     crate::jvm::result_null_checks::check_before_result_coercion(ir);
@@ -729,9 +730,7 @@ impl JvmBackend {
         &self,
         file: crate::backend::CheckedIrFile<'_>,
         property_realizations: crate::jvm::property_realizations::PropertyRealizations,
-        property_reference_realizations: crate::jvm::property_references::PropertyReferenceRealizations,
-        default_call_operands: crate::jvm::default_call_operands::DefaultCallOperands,
-        local_delegate_access: crate::jvm::local_delegate_accessors::HelperAccess,
+        mut pass_facts: BackendPassFacts,
         state: &mut JvmState,
         diags: &mut DiagSink,
     ) -> Vec<Artifact> {
@@ -748,12 +747,6 @@ impl JvmBackend {
         let package = ir.package.clone().unwrap_or_default();
         let facade_name = file_class_name(stem, ir.package.as_deref());
         let facade_class = crate::types::type_name(&facade_name);
-        let mut pass_facts = BackendPassFacts {
-            default_call_operands,
-            property_reference_realizations,
-            local_delegate_access,
-            ..BackendPassFacts::default()
-        };
         if let Err(reason) = run_backend_passes(
             &mut ir,
             &facade_name,
@@ -999,22 +992,23 @@ impl Backend for JvmBackend {
         };
         let delegate_closures =
             crate::jvm::local_delegate_closures::Requirements::collect(&file.ir);
-        if crate::jvm::lambda_classes::realize(
+        let mut lambda_methods = match crate::jvm::lambda_classes::realize(
             &mut file.ir,
             &file.classifiers,
             &facade,
             &delegate_closures,
             current_source,
             self.lambda_modes.lambdas == crate::jvm::ir_emit::LambdaMode::Indy,
-        )
-        .is_err()
-        {
-            diags.error(
-                crate::diag::Span::new(0, 0),
-                "internal error: invalid declaration-owned delegate closure realization",
-            );
-            return Vec::new();
-        }
+        ) {
+            Ok(methods) => methods,
+            Err(()) => {
+                diags.error(
+                    crate::diag::Span::new(0, 0),
+                    "internal error: invalid declaration-owned delegate closure realization",
+                );
+                return Vec::new();
+            }
+        };
         let local_delegate_access = match crate::jvm::local_delegate_accessors::realize(
             &mut file.ir,
             current_source,
@@ -1048,6 +1042,7 @@ impl Backend for JvmBackend {
                 return Vec::new();
             }
         };
+        lambda_methods.include_owned_methods(&file.ir);
         // A checked annotation constructor names the semantic annotation declaration. The JVM
         // realizes it as a generated concrete implementation before ordinary dependency
         // constructors are assigned physical descriptors/default stubs.
@@ -1099,9 +1094,13 @@ impl Backend for JvmBackend {
         self.emit_streamed_ir(
             file,
             property_realizations,
-            property_reference_realizations,
-            default_call_operands,
-            local_delegate_access,
+            BackendPassFacts {
+                property_reference_realizations,
+                default_call_operands,
+                local_delegate_access,
+                lambda_methods,
+                ..BackendPassFacts::default()
+            },
             state,
             diags,
         )

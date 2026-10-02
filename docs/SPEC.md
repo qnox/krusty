@@ -4465,7 +4465,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   slot (`Object` for an unbounded parameter), while its generic signature records the specialized
   result; no concrete-return method or extra erased bridge is invented.
   Reified operations are normalized by their checked declaration-qualified type-parameter
-  identities in every realized method, including after a lambda node becomes a class value.
+  identities in reified declarations and the exact recorded lambda-method domain, including after
+  a lambda node becomes a class value. Closure realization preserves implementation identities
+  and their owned nested/helper methods across that boundary; an anonymous object's ordinary
+  generic members are not in this domain merely because they use the same semantic parameter.
+  The enum-bound anonymous delegate negative control executes its erased cast without a marker
+  (`erased_anonymous_delegate_member_is_not_a_reified_closure_method`).
   A singleton closure whose owned methods retain typed reified operations emits
   `needClassReification()` before creating its instance; a concrete specialized copy does not.
   Common lowering records the nearest source lambda identity and containing checked inline

@@ -66,6 +66,27 @@ fn same_file_nested_lambda_local_function_and_inline_accessor_delegates_execute(
 }
 
 #[test]
+fn erased_anonymous_delegate_member_is_not_a_reified_closure_method() {
+    // The anonymous object's member shares the inline declaration's semantic T, but its runtime
+    // implementation casts through the generic Enum bound rather than a reification marker.
+    common::expect_box_same_as_kotlinc(
+        "import kotlin.properties.ReadWriteProperty
+import kotlin.reflect.KProperty
+enum class EnumSetting { OK }
+inline fun <reified T : Enum<T>> makeEnumDelegate() = object : ReadWriteProperty<Any?, T?> {
+    override fun getValue(thisRef: Any?, property: KProperty<*>): T? = EnumSetting.OK as T?
+    override fun setValue(thisRef: Any?, property: KProperty<*>, value: T?) {}
+}
+class EnumDelegateOwner {
+    var setting: EnumSetting? by makeEnumDelegate()
+}
+fun box(): String = EnumDelegateOwner().setting.toString()
+",
+        "ErasedEnumDelegateMember",
+    );
+}
+
+#[test]
 fn cross_file_nested_delegates_match_private_closure_and_direct_export_abi() {
     let sources = [
         ("NestedDeclarations.kt", DECLARATIONS),

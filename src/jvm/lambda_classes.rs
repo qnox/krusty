@@ -18,6 +18,62 @@
 use crate::ir::{ClassId, ExprId, FunId, IrCtorArg, IrExpr, IrField, IrFile, IrParameterRole};
 use crate::types::{Ty, TypeName};
 
+/// Exact implementation identities retained across closure-class realization. Reification may
+/// normalize these bodies, but not unrelated member methods capturing the same generic parameter.
+#[derive(Default)]
+pub(super) struct LambdaMethods {
+    functions: std::collections::HashSet<FunId>,
+}
+
+impl LambdaMethods {
+    fn collect(ir: &IrFile) -> Self {
+        let mut functions = ir
+            .lambda_origins
+            .keys()
+            .copied()
+            .collect::<std::collections::HashSet<_>>();
+        functions.extend(ir.runtime_reified_lambda_implementations.iter().copied());
+        let enclosing_lambdas = functions
+            .iter()
+            .filter_map(|function| {
+                let (sequence, site) = ir.lifted_functions.get(function)?;
+                Some((sequence.clone(), site.path.last()?.position))
+            })
+            .collect::<std::collections::HashSet<_>>();
+        functions.extend(
+            ir.lifted_functions
+                .iter()
+                .filter_map(|(&function, (sequence, site))| {
+                    site.path
+                        .iter()
+                        .any(|step| enclosing_lambdas.contains(&(sequence.clone(), step.position)))
+                        .then_some(function)
+                }),
+        );
+        Self { functions }
+    }
+
+    /// Helpers appended by the delegate realization belong to the exact owned closure class.
+    pub(super) fn include_owned_methods(&mut self, ir: &IrFile) {
+        for class in &ir.classes {
+            if class.lambda.is_some() {
+                self.functions.extend(class.methods.iter().copied());
+            }
+        }
+    }
+
+    pub(super) fn functions(&self) -> impl Iterator<Item = FunId> + '_ {
+        self.functions.iter().copied()
+    }
+
+    #[cfg(test)]
+    pub(super) fn for_test(functions: impl IntoIterator<Item = FunId>) -> Self {
+        Self {
+            functions: functions.into_iter().collect(),
+        }
+    }
+}
+
 /// The expression that builds a lambda value, and the class it is named as when the lambda
 /// compiles to a class of its own.
 pub(super) struct Site {
@@ -188,7 +244,8 @@ pub(super) fn realize(
     delegates: &super::local_delegate_closures::Requirements,
     current_source: crate::ir::IrModuleSource,
     adapt_factory: bool,
-) -> Result<(), ()> {
+) -> Result<LambdaMethods, ()> {
+    let methods = LambdaMethods::collect(ir);
     let mut lambdas = ir
         .exprs
         .iter()
@@ -293,7 +350,7 @@ pub(super) fn realize(
             }
         }
     }
-    Ok(())
+    Ok(methods)
 }
 
 /// Several inline copies may construct the same retained declaration closure. They have one
@@ -693,4 +750,86 @@ fn become_invoke(ir: &mut IrFile, fid: FunId, class: ClassId, captured: usize, r
     ir.jvm_nullability_unannotated_methods.insert(fid);
     ir.classes[class as usize].methods.push(fid);
     ir.note_class_method(class, fid);
+}
+
+#[cfg(test)]
+mod method_domain_tests {
+    use super::*;
+    use crate::fir::{FirLiftingSite, FirLiftingStep, SourceFileId};
+    use crate::ir::IrLiftingSequence;
+    use crate::lifting_provenance::LiftingCallableKind;
+
+    #[test]
+    fn keeps_exact_nested_coordinates_after_source_provenance_is_consumed() {
+        let mut ir = IrFile::default();
+        let sequence = IrLiftingSequence {
+            source: SourceFileId::from_raw(0),
+            owner: "Owner".into(),
+            container: "declaration".into(),
+        };
+        let lambda = FirLiftingStep {
+            kind: LiftingCallableKind::Lambda,
+            name: None,
+            position: 3,
+        };
+        let local = FirLiftingStep {
+            kind: LiftingCallableKind::LocalFunction,
+            name: Some("local".into()),
+            position: 4,
+        };
+        for (function, path) in [
+            (7, vec![lambda.clone()]),
+            (8, vec![lambda, local.clone()]),
+            (9, vec![local]),
+        ] {
+            ir.lifted_functions.insert(
+                function,
+                (
+                    sequence.clone(),
+                    FirLiftingSite {
+                        owner: sequence.owner.clone(),
+                        container: sequence.container.clone(),
+                        path: path.into_boxed_slice(),
+                        lifted: true,
+                    },
+                ),
+            );
+        }
+        ir.runtime_reified_lambda_implementations.insert(7);
+        let methods = LambdaMethods::collect(&ir);
+        ir.lifted_functions.clear();
+        ir.runtime_reified_lambda_implementations.clear();
+        assert_eq!(
+            methods
+                .functions()
+                .collect::<std::collections::HashSet<_>>(),
+            [7, 8].into_iter().collect()
+        );
+    }
+
+    #[test]
+    fn appends_owned_helpers_without_ordinary_object_members() {
+        let mut ir = IrFile::default();
+        let mut closure = crate::ir::IrClass::synthetic(crate::types::type_name("Closure"));
+        closure.lambda = Some(crate::ir::IrLambdaClass {
+            public_inline: false,
+            invoke: 3,
+            function_type: Ty::fun(vec![], Ty::Unit),
+            receiver_captures: vec![],
+            bridge: crate::ir::IrInvokeBridge::logical(vec![], Ty::Unit),
+        });
+        closure.methods = vec![3, 4];
+        ir.classes.push(closure);
+        let mut ordinary = crate::ir::IrClass::synthetic(crate::types::type_name("OrdinaryObject"));
+        ordinary.methods = vec![5];
+        ir.classes.push(ordinary);
+        let mut methods = LambdaMethods::default();
+        methods.include_owned_methods(&ir);
+        assert_eq!(
+            methods
+                .functions()
+                .collect::<std::collections::HashSet<_>>(),
+            [3, 4].into_iter().collect()
+        );
+    }
 }
