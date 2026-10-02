@@ -3241,7 +3241,7 @@ pub const SEMANTIC_TOKEN_MODIFIERS: [&str; 10] = [
 ///
 /// An array keeps the in-memory entry at 16 bytes and also serializes to compact JSON arrays on the
 /// worker wire instead of repeating five object-field names per source token.
-type SemanticTokenEntry = [u32; 4];
+pub(crate) type SemanticTokenEntry = [u32; 4];
 
 #[derive(Clone, Copy)]
 pub struct SemanticTokenRange {
@@ -3257,7 +3257,7 @@ pub struct SemanticTokenRange {
 /// encode directly from this array without retaining the AST or rescanning source text.
 #[derive(Clone, Default, Deserialize, Serialize)]
 pub struct SemanticTokenIndex {
-    entries: Vec<SemanticTokenEntry>,
+    pub(crate) entries: Vec<SemanticTokenEntry>,
 }
 
 impl SemanticTokenIndex {
