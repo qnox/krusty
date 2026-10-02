@@ -550,15 +550,15 @@ mod tests {
                 file: 0,
             })
             .collect();
-        let messages = service.apply_analysis_batch(AnalysisBatch {
-            analyzed: vec![("file:///a.kt".into(), 1)],
-            analyses: vec![DocumentAnalysis {
+        let messages = service.apply_analysis_batch(AnalysisBatch::from_versions(
+            vec![("file:///a.kt".into(), 1)],
+            vec![DocumentAnalysis {
                 diagnostics,
                 ..DocumentAnalysis::empty()
             }],
-            support_documents: Vec::new(),
-            pending: false,
-        });
+            Vec::new(),
+            false,
+        ));
         let published = messages
             .iter()
             .find(|message| message["method"] == "textDocument/publishDiagnostics")

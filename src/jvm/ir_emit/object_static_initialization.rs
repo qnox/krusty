@@ -139,7 +139,15 @@ pub(super) fn emit(
                     emitter.emit(statement, &mut clinit);
                 }
             }
-            None => emitter.emit(init_body, &mut clinit),
+            // A block with `init` statements marks its own lines as it goes; keep them.
+            None => {
+                let first = clinit.line_marks().len();
+                emitter.render_initializer_boundaries = true;
+                emitter.emit(init_body, &mut clinit);
+                emitter.render_initializer_boundaries = false;
+                let marks = clinit.line_marks()[first..].iter();
+                clinit_line_entries.extend(marks.map(|&(pc, line)| (pc, u32::from(line))));
+            }
         }
         clinit_line_entries.dedup_by_key(|(_, line)| *line);
         if !c.is_source_declared && c.decl_line != 0 && c.decl_end_line != 0 {
@@ -156,6 +164,9 @@ pub(super) fn emit(
         if property.line != 0
             && clinit_line_entries.last().map(|&(_, line)| line) != Some(property.line)
         {
+            // Through the builder, so a line the source body left occupied at this offset (an
+            // `init` block's closing `}`) keeps its entry behind a `nop`.
+            clinit.mark_line(property.line);
             clinit_line_entries.push((clinit.bytes.len() as u16, property.line));
         }
         emitter.emit_static_initializer_store(fq_name, index, init, &mut clinit);

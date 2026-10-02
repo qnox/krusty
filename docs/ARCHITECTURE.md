@@ -130,6 +130,15 @@ Build correctness rests on these contracts:
   `crates/krusty-lsp` workspace package. The compiler's dependency graph has no server dependency
   or server-specific feature. Within the LSP package, `compiler_analysis` is the only module allowed
   to inspect checked frontend data; protocol/session modules consume compact snapshot contracts.
+- The supervisor accepts kotlin-lsp's stdio launch subset, not its general CLI. `--stdio` is
+  optional: with no transport flag the server still speaks stdio, while official kotlin-lsp
+  defaults to a socket. `--version`, socket listen/connect, `--client`, and `--multi-client` are
+  unsupported; a launch that selects socket mode without `--stdio` is rejected so the process does
+  not claim a port it is not listening on. `--system-path` is that system's directory, and Krusty's
+  dependency cache is the owned child `<path>/krusty/deps` (startup collection never treats the
+  system directory itself as the cache root). `--log-level` and `--log-category`, and the
+  `KOTLIN_LSP_LOG_LEVEL` / `KOTLIN_LSP_LOG_CATEGORIES` defaults, are validated and then discarded:
+  the server has no logging owner that applies them.
 - The LSP supervisor never runs the compiler in its own long-lived process. It sends source sets to
   a compiler worker that is restarted after 64 analyses, or sooner when a Linux `VmRSS` sample
   shows that process above the supervisor's ceiling (default 1 GiB). The sample is taken before a

@@ -41,6 +41,26 @@ const ANALYSIS_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const READINESS_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const WORKER_READY: &[u8] = b"ready";
 
+/// Classpath override and whether the worker should skip navigation indexes.
+///
+/// Indexing sets `diagnostics_only` so closed files do not pay for hover, tokens, and navigation
+/// the index store discards. Interactive analysis leaves the flag false and still passes the
+/// module classpath.
+#[derive(Copy, Clone)]
+pub struct WorkerAnalysisOptions<'a> {
+    pub classpath: Option<&'a [PathBuf]>,
+    pub diagnostics_only: bool,
+}
+
+impl WorkerAnalysisOptions<'static> {
+    fn full() -> Self {
+        Self {
+            classpath: None,
+            diagnostics_only: false,
+        }
+    }
+}
+
 #[derive(Serialize)]
 struct AnalysisRequest<'a, J> {
     sources: &'a [&'a str],
@@ -50,6 +70,10 @@ struct AnalysisRequest<'a, J> {
     language_features: &'a [&'a str],
     java_sources: &'a [J],
     classpath: Option<&'a [PathBuf]>,
+    /// Background indexing publishes diagnostics only. Navigation indexes for those files are built
+    /// and then discarded, so the worker skips them and keeps the response to the diagnostic list.
+    #[serde(default, skip_serializing_if = "is_false")]
+    diagnostics_only: bool,
 }
 
 #[derive(Deserialize)]
@@ -66,6 +90,13 @@ struct OwnedAnalysisRequest {
     java_sources: Vec<String>,
     #[serde(default)]
     classpath: Option<Vec<PathBuf>>,
+    /// Absent means a full analysis. Older supervisors, and every interactive request, omit it.
+    #[serde(default)]
+    diagnostics_only: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Deserialize)]
@@ -355,7 +386,7 @@ fn encode_request<J: AsRef<str> + Serialize>(
     inferred_count: usize,
     features: &LangFeatures,
     java_sources: &[J],
-    classpath: Option<&[PathBuf]>,
+    options: WorkerAnalysisOptions<'_>,
 ) -> io::Result<Vec<u8>> {
     if !source_set_fits(
         inputs
@@ -390,7 +421,8 @@ fn encode_request<J: AsRef<str> + Serialize>(
             inferred_count,
             language_features: &language_features,
             java_sources,
-            classpath,
+            classpath: options.classpath,
+            diagnostics_only: options.diagnostics_only,
         },
     )
     .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
@@ -469,6 +501,7 @@ fn encode_dump_request(
             language_features: &language_features,
             java_sources: target.java_sources,
             classpath: target.classpath,
+            diagnostics_only: false,
         },
         target: target.target,
         label: target.label,
@@ -614,7 +647,7 @@ impl WorkerProcess {
         inferred_count: usize,
         language_features: &LangFeatures,
         java_sources: &[J],
-        classpath: Option<&[PathBuf]>,
+        options: WorkerAnalysisOptions<'_>,
     ) -> io::Result<Vec<DocumentAnalysis>> {
         let request = encode_request(
             inputs,
@@ -622,7 +655,7 @@ impl WorkerProcess {
             inferred_count,
             language_features,
             java_sources,
-            classpath,
+            options,
         )?;
         write_framed(&mut self.stdin, &request)?;
         drop(request);
@@ -771,7 +804,7 @@ impl AnalysisWorker {
                 inferred_count,
                 &features,
                 java_sources,
-                None,
+                WorkerAnalysisOptions::full(),
             )
         })
     }
@@ -783,7 +816,7 @@ impl AnalysisWorker {
         inferred_count: usize,
         java_sources: &[J],
         language_arguments: &[String],
-        classpath: Option<&[PathBuf]>,
+        options: WorkerAnalysisOptions<'_>,
     ) -> io::Result<Vec<DocumentAnalysis>> {
         let mut features = LangFeatures::new();
         for argument in language_arguments {
@@ -796,7 +829,7 @@ impl AnalysisWorker {
                 inferred_count,
                 &features,
                 java_sources,
-                classpath,
+                options,
             )
         })
     }
@@ -1095,62 +1128,80 @@ pub fn run_analysis_worker<R: BufRead, W: Write>(
             platform,
             &language_features,
         );
-        let highlight_symbols =
-            HighlightSymbols::from_source_set(&source_set.files, &source_set.symbols);
-        let mut definition_symbols = DefinitionSymbols::from_source_set(
-            &sources,
-            &source_set.files,
-            &source_set.symbols,
-            crate::analysis::MAX_SOURCE_SET_NAVIGATION_ENTRIES,
-        );
-        crate::analysis::register_java_declarations(
-            &mut definition_symbols,
-            &sources,
-            &java_documents,
-        );
-        let completion_symbols =
-            CompletionSymbols::from_source_set_prefix(&source_set.files, inferred_count);
-        let signature_help_symbols =
-            SignatureHelpSymbols::from_source_set(&sources, &source_set.files, &source_set.symbols);
-        let workspace_symbols = WorkspaceSymbolIndex::from_source_set(&sources, &source_set.files);
-        let indexes = SourceSetIndexes::new(
-            &source_set.symbols,
-            &highlight_symbols,
-            &definition_symbols,
-            &completion_symbols,
-            &signature_help_symbols,
-        );
-        let mut budgets = AnalysisBudgets::new();
-        let pending = source_set
-            .files
-            .into_iter()
-            .zip(&sources)
-            .enumerate()
-            .take(request.result_count)
-            .map(|(file_index, (file, source))| {
-                DocumentAnalysis::from_file_analysis(
-                    source,
-                    file,
-                    file_index as u32,
-                    &indexes,
-                    &mut budgets,
-                )
-            })
-            .collect();
-        let implementation_relations =
-            compact_implementation_relations(definition_symbols.implementation_relations());
-        let mut analyses = finalize_navigation(pending, &mut budgets);
-        crate::analysis::apply_java_navigation(
-            &mut analyses,
-            &sources,
-            &java_documents,
-            &definition_symbols,
-            &mut budgets,
-        );
-        if let Some(first) = analyses.first_mut() {
-            first.workspace_symbols = workspace_symbols;
-        }
-        crate::retain_analysis_wire_budget(&mut analyses, MAX_WORKER_MESSAGE_BYTES);
+        let (analyses, implementation_relations) = if request.diagnostics_only {
+            // The compiler still checks the file. Hover, tokens, and navigation are what the index
+            // store throws away, and they dominate the worker response for a chunk of closed files.
+            let mut analyses = source_set
+                .files
+                .into_iter()
+                .take(request.result_count)
+                .map(|file| DocumentAnalysis::with_diagnostics(file.diagnostics))
+                .collect::<Vec<_>>();
+            crate::retain_analysis_wire_budget(&mut analyses, MAX_WORKER_MESSAGE_BYTES);
+            (analyses, Vec::new())
+        } else {
+            let highlight_symbols =
+                HighlightSymbols::from_source_set(&source_set.files, &source_set.symbols);
+            let mut definition_symbols = DefinitionSymbols::from_source_set(
+                &sources,
+                &source_set.files,
+                &source_set.symbols,
+                crate::analysis::MAX_SOURCE_SET_NAVIGATION_ENTRIES,
+            );
+            crate::analysis::register_java_declarations(
+                &mut definition_symbols,
+                &sources,
+                &java_documents,
+            );
+            let completion_symbols =
+                CompletionSymbols::from_source_set_prefix(&source_set.files, inferred_count);
+            let signature_help_symbols = SignatureHelpSymbols::from_source_set(
+                &sources,
+                &source_set.files,
+                &source_set.symbols,
+            );
+            let workspace_symbols =
+                WorkspaceSymbolIndex::from_source_set(&sources, &source_set.files);
+            let indexes = SourceSetIndexes::new(
+                &source_set.symbols,
+                &highlight_symbols,
+                &definition_symbols,
+                &completion_symbols,
+                &signature_help_symbols,
+            );
+            let mut budgets = AnalysisBudgets::new();
+            let pending = source_set
+                .files
+                .into_iter()
+                .zip(&sources)
+                .enumerate()
+                .take(request.result_count)
+                .map(|(file_index, (file, source))| {
+                    DocumentAnalysis::from_file_analysis(
+                        source,
+                        file,
+                        file_index as u32,
+                        &indexes,
+                        &mut budgets,
+                    )
+                })
+                .collect();
+            let implementation_relations =
+                compact_implementation_relations(definition_symbols.implementation_relations());
+            let mut analyses = finalize_navigation(pending, &mut budgets);
+            crate::analysis::apply_java_navigation(
+                &mut analyses,
+                &sources,
+                &java_documents,
+                &definition_symbols,
+                &mut budgets,
+            );
+            if let Some(first) = analyses.first_mut() {
+                first.workspace_symbols = workspace_symbols;
+            }
+            crate::retain_analysis_wire_budget(&mut analyses, MAX_WORKER_MESSAGE_BYTES);
+            (analyses, implementation_relations)
+        };
         let mut analyses = analyses
             .into_iter()
             .map(AnalysisResponse::from)
@@ -1357,7 +1408,15 @@ mod tests {
             },
         ];
         let inputs = [SourceInput::kotlin("fun main() {}")];
-        let encoded = encode_request(&inputs, 1, 1, &LangFeatures::new(), &java, None).unwrap();
+        let encoded = encode_request(
+            &inputs,
+            1,
+            1,
+            &LangFeatures::new(),
+            &java,
+            WorkerAnalysisOptions::full(),
+        )
+        .unwrap();
         assert_eq!(visits.load(Ordering::Relaxed), java.len());
         let text = String::from_utf8(encoded).unwrap();
         assert!(text.contains("class A {}"));
@@ -1528,15 +1587,29 @@ mod tests {
         assert!(!source_set_fits([MAX_SOURCE_SET_BYTES, 1]));
         let inputs = [SourceInput::kotlin("fun use() = 1")];
         assert_eq!(
-            encode_request(&inputs, 1, 0, &LangFeatures::new(), &[] as &[&str], None)
-                .unwrap_err()
-                .kind(),
+            encode_request(
+                &inputs,
+                1,
+                0,
+                &LangFeatures::new(),
+                &[] as &[&str],
+                WorkerAnalysisOptions::full(),
+            )
+            .unwrap_err()
+            .kind(),
             io::ErrorKind::InvalidInput
         );
         assert_eq!(
-            encode_request(&inputs, 0, 2, &LangFeatures::new(), &[] as &[&str], None)
-                .unwrap_err()
-                .kind(),
+            encode_request(
+                &inputs,
+                0,
+                2,
+                &LangFeatures::new(),
+                &[] as &[&str],
+                WorkerAnalysisOptions::full(),
+            )
+            .unwrap_err()
+            .kind(),
             io::ErrorKind::InvalidInput
         );
         assert_eq!(
@@ -1546,7 +1619,7 @@ mod tests {
                 1,
                 &LangFeatures::new(),
                 &[String::from_utf8(vec![b'x'; MAX_SOURCE_SET_BYTES]).unwrap()],
-                None,
+                WorkerAnalysisOptions::full(),
             )
             .unwrap_err()
             .kind(),
@@ -1573,8 +1646,15 @@ mod tests {
         std::fs::create_dir(&directory).expect("create classpath directory");
 
         let inputs = [SourceInput::kotlin("fun use() = 1")];
-        let request =
-            encode_request(&inputs, 1, 1, &LangFeatures::new(), &[] as &[&str], None).unwrap();
+        let request = encode_request(
+            &inputs,
+            1,
+            1,
+            &LangFeatures::new(),
+            &[] as &[&str],
+            WorkerAnalysisOptions::full(),
+        )
+        .unwrap();
         let mut framed = Vec::new();
         write_framed(&mut framed, &request).unwrap();
         let generated = directory.join("generated");
@@ -1635,7 +1715,10 @@ mod tests {
             1,
             &LangFeatures::new(),
             &[] as &[&str],
-            Some(&classpath),
+            WorkerAnalysisOptions {
+                classpath: Some(&classpath),
+                diagnostics_only: false,
+            },
         )
         .unwrap();
         let dump = encode_dump_request(
@@ -2013,6 +2096,7 @@ mod tests {
         assert_eq!(dump.analysis.java_sources, java_sources);
         assert_eq!(dump.analysis.classpath.as_deref(), Some(&classpath[..]));
         assert_eq!(dump.analysis.result_count, 1);
+        assert!(!dump.analysis.diagnostics_only);
         assert_eq!(dump.analysis.inferred_count, Some(2));
         let mut module_features = LangFeatures::new();
         for argument in &language_arguments {
@@ -2215,6 +2299,7 @@ mod tests {
             language_features: &[],
             java_sources: &[] as &[&str],
             classpath: None,
+            diagnostics_only: false,
         })
         .unwrap();
         let mut input = Vec::new();
@@ -2241,6 +2326,79 @@ mod tests {
     }
 
     #[test]
+    fn worker_protocol_diagnostics_only_keeps_errors_and_skips_navigation() {
+        let omitted: OwnedAnalysisRequest =
+            serde_json::from_str(r#"{"sources":["fun answer(): Int = 42"],"result_count":1}"#)
+                .unwrap();
+        assert!(!omitted.diagnostics_only);
+
+        let sources = ["fun answer(): Int = 42\nfun broken(value: Missing) = value\n"];
+        let request = serde_json::to_vec(&AnalysisRequest {
+            sources: &sources,
+            source_kinds: &[0],
+            result_count: 1,
+            inferred_count: 1,
+            language_features: &[],
+            java_sources: &[] as &[&str],
+            classpath: None,
+            diagnostics_only: true,
+        })
+        .unwrap();
+        let mut input = Vec::new();
+        write_framed(&mut input, &request).unwrap();
+        let mut output = Vec::new();
+        run_analysis_worker(&mut Cursor::new(input), &mut output, Vec::new()).unwrap();
+
+        let diagnostics_only_bytes = output.len();
+        let analysis = decode_worker_output(output)
+            .into_iter()
+            .last()
+            .unwrap()
+            .into_document_analysis();
+        assert_eq!(analysis.diagnostics.len(), 1);
+        let diagnostic = &analysis.diagnostics[0];
+        assert_eq!(diagnostic.file, 0);
+        assert_eq!(diagnostic.span, Span::new(41, 48));
+        assert_eq!(diagnostic.severity, Severity::Error);
+        assert_eq!(diagnostic.kind, DiagnosticKind::Compiler);
+        assert_eq!(diagnostic.msg, "unresolved reference 'Missing'.");
+        assert!(analysis.library_definitions.is_empty());
+        assert!(analysis.implementation_relations.is_empty());
+        assert_eq!(analysis.hover.entry_count(), 0);
+        assert_eq!(analysis.completion.entry_count(), 0);
+        assert_eq!(analysis.signature_help.entry_count(), 0);
+        assert_eq!(analysis.semantic_tokens.entry_count(), 0);
+        assert_eq!(analysis.definitions.entry_count(), 0);
+        assert_eq!(analysis.type_definitions.entry_count(), 0);
+        assert_eq!(analysis.implementations.entry_count(), 0);
+        assert_eq!(analysis.document_symbols.entry_count(), 0);
+        assert_eq!(analysis.folding_ranges.entry_count(), 0);
+        assert_eq!(analysis.workspace_symbols.entry_count(), 0);
+
+        let full = serde_json::to_vec(&AnalysisRequest {
+            sources: &sources,
+            source_kinds: &[0],
+            result_count: 1,
+            inferred_count: 1,
+            language_features: &[],
+            java_sources: &[] as &[&str],
+            classpath: None,
+            diagnostics_only: false,
+        })
+        .unwrap();
+        let mut full_input = Vec::new();
+        write_framed(&mut full_input, &full).unwrap();
+        let mut full_output = Vec::new();
+        run_analysis_worker(&mut Cursor::new(full_input), &mut full_output, Vec::new()).unwrap();
+        assert!(
+            diagnostics_only_bytes < full_output.len(),
+            "diagnostics-only indexing must not serialize the navigation indexes, {} vs {}",
+            diagnostics_only_bytes,
+            full_output.len()
+        );
+    }
+
+    #[test]
     fn worker_request_classpath_overrides_the_session_classpath() {
         let directory = std::env::temp_dir().join(format!(
             "krusty-worker-module-classpath-{}",
@@ -2262,6 +2420,7 @@ mod tests {
             language_features: &[],
             java_sources: &[] as &[&str],
             classpath: Some(&[]),
+            diagnostics_only: false,
         })
         .unwrap();
         let mut input = Vec::new();
@@ -2380,6 +2539,7 @@ mod tests {
             language_features: &[],
             java_sources,
             classpath,
+            diagnostics_only: false,
         })
         .unwrap();
         write_framed(input, &request).unwrap();
@@ -2432,6 +2592,7 @@ mod tests {
             language_features: &[],
             java_sources: &[] as &[&str],
             classpath: None,
+            diagnostics_only: false,
         })
         .unwrap();
         let mut input = Vec::new();
@@ -2464,6 +2625,7 @@ mod tests {
             language_features: &[],
             java_sources: &java_sources,
             classpath: None,
+            diagnostics_only: false,
         })
         .unwrap();
         let mut input = Vec::new();
@@ -2523,6 +2685,7 @@ fun combine(entries: Array<Entry>): String {
             language_features: &["NameBasedDestructuring"],
             java_sources: &[] as &[&str],
             classpath: None,
+            diagnostics_only: false,
         })
         .unwrap();
         let mut input = Vec::new();
@@ -2547,6 +2710,7 @@ fun combine(entries: Array<Entry>): String {
             language_features: &[],
             java_sources: &[] as &[&str],
             classpath: None,
+            diagnostics_only: false,
         })
         .unwrap();
         let mut input = Vec::new();

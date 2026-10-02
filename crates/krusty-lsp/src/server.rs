@@ -1,3 +1,4 @@
+mod analyzed_document;
 mod diagnostic_page;
 mod engine;
 mod implementation;

@@ -83,9 +83,17 @@ rm -f "$coverage_target"/*.profraw target/coverage/*.profdata target/coverage/*.
 # builds at opt-level 1 with gate-matching checks: the e2e suite runs krusty in-process for every
 # dependency-lib fixture, and instrumenting that at `dev` made the coverage run dominate CI.
 "${coverage_cargo[@]}" build --profile coverage -p krusty-cli
+"${coverage_cargo[@]}" build --profile coverage -p krusty-lsp --bin krusty-lsp
 export KRUSTY_BIN="$coverage_target/coverage/krusty"
+# Bin unit tests exec the supervisor. `cargo test --bin` builds the harness only, so publish the
+# uplifted binary the same way integration tests do.
+export KRUSTY_LSP_BIN="$coverage_target/coverage/krusty-lsp"
 if [ ! -x "$KRUSTY_BIN" ]; then
   echo "coverage: compiler binary missing after workspace build: $KRUSTY_BIN" >&2
+  exit 1
+fi
+if [ ! -x "$KRUSTY_LSP_BIN" ]; then
+  echo "coverage: language server binary missing after workspace build: $KRUSTY_LSP_BIN" >&2
   exit 1
 fi
 mapfile -t bins < <(
