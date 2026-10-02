@@ -3116,6 +3116,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   OUT OF SCOPE (documented residuals): inline-function SMAP line mapping, `LocalVariableTable` for
   top-level fns (next slice), the loop-head extra StackMapTable `same` frame.
   `tests/lnt_parity_e2e.rs` (6 full-byte + 3 javap-level pins).
+- **An `init` block opens on `init` and closes on `}`.** Each of those lines is its own
+  `LineNumberTable` entry, with a `nop` when no instruction of the block sits on that line. A
+  property assigned inside the block is marked on the assignment statement, including the receiver
+  load; the property's declaration line is only the fallback when that store has no statement line.
+  `tests/init_block_lines_e2e.rs`.
 - **A `for` loop's generated control carries the loop's line.** kotlinc's `ForLoopsLowering` builds
   a `for` loop's update, exit test and the bottom condition of its `do…while` shape at the loop's
   offsets, and codegen marks them like any other expression, so after the body the `for` line comes
