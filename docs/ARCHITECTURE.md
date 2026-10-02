@@ -48,9 +48,10 @@ boundary.
   process adapter. LSP compiler analysis is an internal module—not a single-consumer workspace
   package—and architecture guards keep it isolated from the long-lived protocol/session modules.
 - **Shared process-independent policy** stays in the compiler library when it is genuinely a compiler
-  concern. For example, JVM classpath code resolves a JDK home to `lib/modules`; each executable
-  independently decides how its own arguments select that home. There is no command-layer “common”
-  crate until both executable packages share a stable command abstraction rather than a few flags.
+  concern. For example, JVM classpath code resolves a JDK home to `lib/modules` (or a pre-jimage
+  JDK's `jre/lib/rt.jar`); each executable independently decides how its own arguments select that
+  home. There is no command-layer “common” crate until both executable packages share a stable
+  command abstraction rather than a few flags.
 
 ## Build-layer boundary
 

@@ -41,7 +41,8 @@ pub struct Options {
     /// `-version` / `-help` requested (handled before compiling).
     pub print_version: bool,
     pub print_help: bool,
-    /// `-jdk-home <dir>`: the JDK whose `lib/modules` (java.base etc.) seeds the bootclasspath.
+    /// `-jdk-home <dir>`: the JDK whose bootclasspath (`lib/modules` on JDK 9+, `jre/lib/rt.jar`
+    /// on JDK 8) seeds the compile classpath.
     pub jdk_home: Option<PathBuf>,
     /// `-no-stdlib`: do not add the Kotlin standard library to the compile classpath.
     pub no_stdlib: bool,
@@ -1051,6 +1052,33 @@ mod tests {
         let inventory =
             JvmCompilationInputInventory::from_explicit_classpath_and_jdk(&[], Some(&root));
         assert_eq!(actual, vec![modules]);
+        assert_eq!(
+            actual,
+            inventory.effective_classpath(),
+            "the CLI must pass exactly the inventory's selected classpath roots"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A JDK 8 home has no `lib/modules`; its bootclasspath is `jre/lib/rt.jar`. The CLI must
+    /// still route through the shared inventory so its selection and the provider's agree.
+    #[test]
+    fn effective_classpath_falls_back_to_a_jdk8_rt_jar() {
+        let root = scratch("jdk8_inventory");
+        std::fs::create_dir_all(root.join("jre/lib")).unwrap();
+        let rt_jar = root.join("jre/lib/rt.jar");
+        empty_jar(&rt_jar);
+
+        let options = parse_args(&[
+            "-no-stdlib",
+            "-jdk-home",
+            root.to_str().expect("UTF-8 scratch path"),
+            "f.kt",
+        ]);
+        let actual = options.effective_classpath().unwrap();
+        let inventory =
+            JvmCompilationInputInventory::from_explicit_classpath_and_jdk(&[], Some(&root));
+        assert_eq!(actual, vec![rt_jar]);
         assert_eq!(
             actual,
             inventory.effective_classpath(),

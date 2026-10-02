@@ -71,7 +71,8 @@ use crate::name_tree::{NameId, NameTree};
 use crate::symbol_source::SymbolNamespace;
 use crate::types::{type_name, type_name_from, Ty, TypeName, TypeNameList};
 
-/// Resolve a JDK home to its `lib/modules` boot classpath.
+/// Resolve a JDK home to its bootclasspath root: `lib/modules` on JDK 9+, or `jre/lib/rt.jar`
+/// on JDK 8 and earlier.
 ///
 /// An explicit home takes precedence over `JAVA_HOME`. Missing or invalid homes are a no-op so
 /// callers can combine this with an explicit classpath without making environment setup mandatory.
