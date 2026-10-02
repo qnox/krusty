@@ -526,12 +526,9 @@ mod tests {
         push_varint((6 << 3) | 1, &mut common);
         common.extend(member_id.to_le_bytes());
         let encoded = bytes_field(1, &common);
-        decode_public_id_signature(
-            &encoded,
-            &["kotlin", "ranges", name].map(str::to_string),
-        )
-        .expect("valid public identity")
-        .expect("public identity")
+        decode_public_id_signature(&encoded, &["kotlin", "ranges", name].map(str::to_string))
+            .expect("valid public identity")
+            .expect("public identity")
     }
 
     fn floating_range_candidate(role: &super::CommonPackageFunctionRole) -> FunctionInfo {
@@ -556,16 +553,12 @@ mod tests {
     fn floating_range_role_requires_the_exact_common_declaration_identity() {
         const DOUBLE_RANGE_TO: u64 = 692_997_638_542_153_957;
         const DOUBLE_RANGE_UNTIL: u64 = 742_649_461_109_916_381;
-        let exact = common_package_function_role(floating_range_identity(
-            "rangeTo",
-            DOUBLE_RANGE_TO,
-        ))
-            .expect("the exact common identity owns the role");
-        let open = common_package_function_role(floating_range_identity(
-            "rangeUntil",
-            DOUBLE_RANGE_UNTIL,
-        ))
-        .expect("the exact open-end identity owns the role");
+        let exact =
+            common_package_function_role(floating_range_identity("rangeTo", DOUBLE_RANGE_TO))
+                .expect("the exact common identity owns the role");
+        let open =
+            common_package_function_role(floating_range_identity("rangeUntil", DOUBLE_RANGE_UNTIL))
+                .expect("the exact open-end identity owns the role");
         assert_eq!(open.name, "rangeUntil");
         assert_eq!(
             open.generic_sig.ret,
@@ -594,11 +587,9 @@ mod tests {
     #[test]
     fn floating_range_role_requires_the_paired_jvm_dependency() {
         const DOUBLE_RANGE_TO: u64 = 692_997_638_542_153_957;
-        let exact = common_package_function_role(floating_range_identity(
-            "rangeTo",
-            DOUBLE_RANGE_TO,
-        ))
-            .expect("the exact common identity owns the role");
+        let exact =
+            common_package_function_role(floating_range_identity("rangeTo", DOUBLE_RANGE_TO))
+                .expect("the exact common identity owns the role");
         let candidate = floating_range_candidate(&exact);
         let index = CommonExpectationIndex {
             package_function_roles: vec![exact],

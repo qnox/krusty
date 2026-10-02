@@ -118,7 +118,7 @@ mod loop_flow;
 mod member_extension_selection;
 mod member_overload_clash;
 mod operator_calls;
-use operator_calls::range_operator;
+use operator_calls::{range_operator, ResolvedInRangeComparison};
 mod overload_diagnostics;
 mod override_plans;
 mod plugin_class_checks;
@@ -10226,12 +10226,6 @@ pub enum ResolvedCall {
     LocalFunction(Box<ResolvedLocalFunctionCall>),
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct ResolvedInRangeComparison {
-    pub(crate) comparison: Ty,
-    pub(crate) provenance: crate::fir::FirRangeComparisonProvenance,
-}
-
 impl ResolvedCall {
     fn library_extension(callable: crate::libraries::LibraryCallable) -> Self {
         Self::Extension(Box::new(ResolvedExtensionCall::library(callable)))
@@ -10275,33 +10269,18 @@ impl ResolvedCall {
         }
     }
 
-    /// Provider realization attached to this exact selected declaration. For top-level and
-    /// extension declarations the intrinsic marker is stored separately from ordinary dispatch in
-    /// the normalized callable, so fold both fields into the one realization consumers inspect.
-    pub(crate) fn provider_realization(&self) -> Option<crate::libraries::MemberRealization> {
+    /// Compiler implementation attached to this exact selected declaration, when it has one.
+    /// Constant evaluation and FIR construction consume the same provider-normalized fact; neither
+    /// phase infers builtin behavior from a callable spelling or receiver type.
+    pub(crate) fn compiler_intrinsic(&self) -> Option<crate::libraries::CompilerIntrinsic> {
         let realization = match self {
             Self::Member(resolved) => resolved.member.realization,
-            Self::TopLevel(call) => call
-                .callable
-                .compiler_intrinsic
-                .map(crate::libraries::MemberRealization::Intrinsic)
-                .unwrap_or(call.callable.member_realization),
+            Self::TopLevel(call) => call.callable.member_realization,
             Self::Companion(member) => member.realization,
-            Self::Extension(extension) => extension
-                .callable
-                .compiler_intrinsic
-                .map(crate::libraries::MemberRealization::Intrinsic)
-                .unwrap_or(extension.callable.member_realization),
+            Self::Extension(extension) => extension.callable.member_realization,
             Self::MemberExtension { .. } | Self::LocalFunction(_) => return None,
         };
-        Some(realization)
-    }
-
-    /// Compiler implementation attached to this exact selected declaration, when it has one.
-    /// Constant evaluation and FIR construction consume the provider-normalized realization;
-    /// neither phase recovers builtin behavior from the callable spelling or receiver type.
-    pub(crate) fn compiler_intrinsic(&self) -> Option<crate::libraries::CompilerIntrinsic> {
-        match self.provider_realization()? {
+        match realization {
             crate::libraries::MemberRealization::Intrinsic(intrinsic) => Some(intrinsic),
             crate::libraries::MemberRealization::Dispatch
             | crate::libraries::MemberRealization::Direct { .. }

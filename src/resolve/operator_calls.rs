@@ -420,11 +420,9 @@ impl<'a> Checker<'a> {
             let et = self.expr(scope, end);
             let operands = InRangeOperands {
                 expression: e,
-                end,
                 value,
                 kind,
                 start_ty: st,
-                end_ty: et,
                 value_ty: vt,
             };
             let convention = range_operator(kind);
@@ -568,7 +566,7 @@ fn selected_range_comparison_provenance(
     use crate::fir::FirRangeComparisonProvenance as Provenance;
     use crate::libraries::{CompilerIntrinsic, MemberRealization};
 
-    match (kind, range_call.provider_realization()?) {
+    match (kind, range_call.range_provider_realization()?) {
         (RangeKind::Through, MemberRealization::RangeConstruction { open_end: false }) => {
             Some(Provenance::RangeConstruction { open_end: false })
         }
@@ -587,6 +585,36 @@ fn selected_range_comparison_provenance(
         ) => Some(Provenance::FloatingRangeMembership),
         _ => None,
     }
+}
+
+impl ResolvedCall {
+    /// Provider realization attached to this exact selected range declaration. Normalized library
+    /// extensions carry compiler intrinsics beside their ordinary dispatch realization, so fold
+    /// those provider fields before deciding whether membership may bypass `contains`.
+    fn range_provider_realization(&self) -> Option<crate::libraries::MemberRealization> {
+        let realization = match self {
+            Self::Member(resolved) => resolved.member.realization,
+            Self::TopLevel(call) => call
+                .callable
+                .compiler_intrinsic
+                .map(crate::libraries::MemberRealization::Intrinsic)
+                .unwrap_or(call.callable.member_realization),
+            Self::Companion(member) => member.realization,
+            Self::Extension(extension) => extension
+                .callable
+                .compiler_intrinsic
+                .map(crate::libraries::MemberRealization::Intrinsic)
+                .unwrap_or(extension.callable.member_realization),
+            Self::MemberExtension { .. } | Self::LocalFunction(_) => return None,
+        };
+        Some(realization)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ResolvedInRangeComparison {
+    pub(crate) comparison: Ty,
+    pub(crate) provenance: crate::fir::FirRangeComparisonProvenance,
 }
 
 struct InRangeOperands {

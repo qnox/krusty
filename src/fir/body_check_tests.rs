@@ -1495,7 +1495,24 @@ fn mixed_open_end_membership_selects_range_until() {
 
 #[test]
 fn uniform_open_end_double_membership_stays_a_comparison() {
-    let analysis = checked_analysis("fun test(value: Double): Boolean = value in 1.0..<3.0\n");
+    let Some(stdlib) = crate::toolchain::stdlib_jar() else {
+        return;
+    };
+    let libraries = crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+        crate::jvm::classpath::Classpath::new(vec![stdlib]),
+    ))
+    .expect("stdlib provider");
+    let mut diagnostics = DiagSink::new();
+    let analysis = crate::frontend::analyze_source_set_with_features(
+        &[
+            SourceInput::kotlin("fun test(value: Double): Boolean = value in 1.0..<3.0\n")
+                .with_file_stem("Body"),
+        ],
+        Box::new(libraries),
+        &LangFeatures::new(),
+        &mut diagnostics,
+    );
+    assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
     let file = &analysis.files[0];
     let info = analysis.types[0].as_ref().expect("checked file");
     let in_range = file
