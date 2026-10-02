@@ -50,6 +50,8 @@ pub enum FirFileLoweringFailure {
     },
     MissingResultType(DeclarationId),
     ResultTypeMismatch(DeclarationId),
+    /// A checked anonymous initializer did not publish its exact lowered root block identity.
+    MissingInitializerRootBlock(DeclarationId),
     DuplicateBody(CallableId),
     DuplicateNonCallableBody(DeclarationId),
     InlineBodyOwnerMismatch(CallableId),
