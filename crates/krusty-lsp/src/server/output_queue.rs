@@ -8,15 +8,20 @@
 //! frames are not discarded to make room.
 
 use std::io::{self, Write};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
 use super::implementation::MAX_MESSAGE_BYTES;
 
-const OUTPUT_CHANNEL_FRAMES: usize = 32;
+/// Frames the writer thread can hold before `pending` stops being delivered.
+///
+/// A flush that finds this channel full leaves the frame in `pending` and returns success.
+/// That frame is not written until a later flush can `try_send` it. Shutdown drops `pending`
+/// when the channel is still full, so a burst is delivered in full only when it fits here.
+pub(super) const OUTPUT_CHANNEL_FRAMES: usize = 32;
 const OUTPUT_DRAIN_GRACE: Duration = Duration::from_secs(2);
 
 const fn decimal_digits(mut value: usize) -> usize {
@@ -74,6 +79,21 @@ impl OutputQueue {
     where
         W: Write + Send + 'static,
     {
+        Self::spawn_limited_held(inner, channel_frames, staged_limit, drain_grace, None)
+    }
+
+    /// `hold` blocks the writer before it receives. The flag is set once the thread is waiting.
+    /// Tests fill the channel while no frame has been taken. Production passes `None`.
+    fn spawn_limited_held<W>(
+        inner: W,
+        channel_frames: usize,
+        staged_limit: usize,
+        drain_grace: Duration,
+        hold: Option<Arc<(Mutex<bool>, Condvar, AtomicBool)>>,
+    ) -> io::Result<Self>
+    where
+        W: Write + Send + 'static,
+    {
         // Other modules' tests spawn queues in parallel. Refusing them while this module parks
         // a writer would flake. Production still refuses a second writer; the check is tested
         // through `reclaim_finished_writer`.
@@ -89,6 +109,14 @@ impl OutputQueue {
         let held_for_writer = Arc::clone(&held);
         let error_for_writer = Arc::clone(&writer_error);
         let join = std::thread::spawn(move || {
+            if let Some(hold) = hold {
+                let (lock, cv, waiting) = &*hold;
+                let mut open = lock.lock().expect("writer hold");
+                waiting.store(true, Ordering::SeqCst);
+                while !*open {
+                    open = cv.wait(open).expect("writer hold");
+                }
+            }
             let mut inner = inner;
             while let Ok(frame) = rx.recv() {
                 let write = inner.write_all(&frame).and_then(|()| inner.flush());
@@ -187,6 +215,19 @@ impl OutputQueue {
                 Err(io::Error::new(io::ErrorKind::BrokenPipe, message))
             }
         }
+    }
+
+    /// Whether the preceding frame has reached the underlying writer.
+    ///
+    /// A paged response waits for this boundary before constructing and accepting its next frame,
+    /// keeping the transport queue bounded and giving the input loop a cancellation point.
+    pub(super) fn is_idle(&mut self) -> io::Result<bool> {
+        self.poll_writer_failure()?;
+        self.pump()?;
+        self.poll_writer_failure()?;
+        Ok(self.current.is_empty()
+            && self.pending.is_empty()
+            && self.held.load(Ordering::SeqCst) == 0)
     }
 
     pub(super) fn finish(&mut self, outcome: io::Result<i32>) -> io::Result<i32> {
@@ -590,5 +631,38 @@ mod tests {
 
         open_gate(&gate);
         reclaim_stuck_writer();
+    }
+
+    #[test]
+    fn a_full_channel_is_delivered_and_the_pending_frame_is_not() {
+        let _lock = TEST_LOCK.lock().expect("test lock");
+        let hold = Arc::new((Mutex::new(false), Condvar::new(), AtomicBool::new(false)));
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let mut queue = OutputQueue::spawn_limited_held(
+            SharedWriter(Arc::clone(&captured)),
+            2,
+            64,
+            Duration::from_millis(50),
+            Some(Arc::clone(&hold)),
+        )
+        .unwrap();
+        wait_until(|| hold.2.load(Ordering::SeqCst));
+        queue.write_all(b"A").unwrap();
+        queue.flush().unwrap();
+        queue.write_all(b"B").unwrap();
+        queue.flush().unwrap();
+        queue.write_all(b"C").unwrap();
+        queue.flush().unwrap();
+
+        let error = queue.shutdown().unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+
+        {
+            let (lock, cv, _) = &*hold;
+            *lock.lock().expect("release hold") = true;
+            cv.notify_all();
+        }
+        reclaim_stuck_writer();
+        assert_eq!(&captured.lock().expect("captured")[..], b"AB");
     }
 }
