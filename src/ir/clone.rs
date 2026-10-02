@@ -359,6 +359,7 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     copy_map!(short_circuits);
     copy_map!(physical_types);
     copy_map!(reified_call_subst);
+    copy_map!(inline_call_type_arguments);
     copy_map!(ext_call_source_receiver);
     copy_map!(dispatch_classes);
     copy_map!(call_declared_ret);
@@ -608,7 +609,7 @@ mod tests {
     use super::super::{
         IrEnclosure, IrFile, IrFunction, IrGenericSig, IrSpecializedFunction, IrTypeParameter,
     };
-    use super::clone_function_implementation;
+    use super::{clone_expression_dag, clone_function_implementation};
     use crate::types::{Ty, Visibility};
 
     fn function(name: &str, parameter: Ty) -> IrFunction {
@@ -636,6 +637,26 @@ mod tests {
             ret: Some(parameter),
             supers: Vec::new(),
         }
+    }
+
+    #[test]
+    fn expression_clone_keeps_full_inline_arguments_distinct_from_reified_arguments() {
+        let mut ir = IrFile::default();
+        let source = ir.add_expr(super::super::IrExpr::UnitInstance);
+        let full = vec![("T".to_string(), Ty::String), ("R".to_string(), Ty::Int)];
+        let reified = vec![("R".to_string(), Ty::Int)];
+        ir.inline_call_type_arguments.insert(source, full.clone());
+        ir.reified_call_subst.insert(source, reified.clone());
+
+        let (target, copies) = clone_expression_dag(&mut ir, source);
+
+        assert_eq!(copies, std::collections::HashMap::from([(source, target)]));
+        assert_eq!(ir.inline_call_type_arguments.len(), 2);
+        assert_eq!(ir.inline_call_type_arguments.get(&source), Some(&full));
+        assert_eq!(ir.inline_call_type_arguments.get(&target), Some(&full));
+        assert_eq!(ir.reified_call_subst.len(), 2);
+        assert_eq!(ir.reified_call_subst.get(&source), Some(&reified));
+        assert_eq!(ir.reified_call_subst.get(&target), Some(&reified));
     }
 
     #[test]

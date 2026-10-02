@@ -1341,12 +1341,9 @@ impl BodyFirChecker<'_> {
                 .ok_or_else(|| {
                     self.failure(span, BodyCheckFailureKind::MissingStablePropertyTarget)
                 })?;
-            let header = self.index.type_parameter_header(parameter).ok_or_else(|| {
-                self.failure(span, BodyCheckFailureKind::MissingStablePropertyTarget)
-            })?;
             recorded.push(crate::fir::FirInlineTypeSubstitution {
                 name: Box::from(name),
-                reified: header.flags.is_reified(),
+                reified: substitution.reified,
                 value: substitution.value,
             });
         }

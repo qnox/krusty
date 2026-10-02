@@ -12,20 +12,26 @@ const DELEGATE: &str = "class Delegate(val value: String) {
 }
 ";
 
+fn plan_reference(ir: &IrFile, plan: u32) -> (String, LocalDelegatedPropertyId) {
+    let plan = &ir.local_delegate_plans[plan as usize];
+    let mut pending = vec![plan.getter.body];
+    let mut reference = None;
+    while let Some(expression) = pending.pop() {
+        if let IrExpr::LocalPropertyReference(value) = ir.expr(expression) {
+            assert!(reference.is_none(), "one reference per accessor template");
+            reference = Some((value.name.to_string(), value.declaration));
+        }
+        for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+    }
+    reference.expect("local delegate getter reference")
+}
+
 fn plan_references(ir: &IrFile) -> Vec<(String, LocalDelegatedPropertyId)> {
-    ir.local_delegate_plans
-        .iter()
-        .map(|plan| {
-            let mut pending = vec![plan.getter.body];
-            let mut reference = None;
-            while let Some(expression) = pending.pop() {
-                if let IrExpr::LocalPropertyReference(value) = ir.expr(expression) {
-                    assert!(reference.is_none(), "one reference per accessor template");
-                    reference = Some((value.name.to_string(), value.declaration));
-                }
-                for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
-            }
-            reference.expect("local delegate getter reference")
+    (0..ir.local_delegate_plans.len())
+        .filter_map(|plan| {
+            let plan = u32::try_from(plan).ok()?;
+            (!ir.inline_local_delegate_plan_copies.contains(&plan))
+                .then(|| plan_reference(ir, plan))
         })
         .collect()
 }
@@ -220,7 +226,13 @@ fn two_inline_copies_keep_the_checked_declaration_identity() {
             .map(|(_, plans)| plans.as_slice())
             .unwrap_or_else(|| panic!("{name} must carry an inlined local delegate access"))
     };
-    assert_eq!(plans("first"), &[0]);
-    assert_eq!(plans("second"), &[0]);
+    assert_eq!(
+        ir.inline_local_delegate_plan_copies,
+        std::collections::HashSet::from([1, 2])
+    );
+    assert_eq!(plans("first"), &[1]);
+    assert_eq!(plans("second"), &[2]);
+    assert_eq!(plan_reference(&ir, 1), (name.clone(), *declaration));
+    assert_eq!(plan_reference(&ir, 2), (name.clone(), *declaration));
     assert_eq!(declaration.ordinal(), 0);
 }

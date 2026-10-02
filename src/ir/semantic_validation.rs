@@ -715,6 +715,13 @@ impl IrFile {
                 .map(|(_, ty)| *ty),
         )?;
         reject_all(
+            "inline call type argument",
+            self.inline_call_type_arguments
+                .values()
+                .flatten()
+                .map(|(_, ty)| *ty),
+        )?;
+        reject_all(
             "extension call receiver",
             self.ext_call_source_receiver.values().copied(),
         )?;

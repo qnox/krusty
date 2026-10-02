@@ -59,6 +59,7 @@ pub(super) fn copy_call_facts(
     copy!(static_extension_receivers);
     copy!(call_inline_modifiers);
     copy!(reified_call_subst);
+    copy!(inline_call_type_arguments);
     if let Some(value) = ir.declaration_argument_boundaries.remove(&source) {
         ir.declaration_argument_boundaries.insert(target, value);
     }

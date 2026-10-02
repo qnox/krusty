@@ -2229,6 +2229,10 @@ pub struct IrFile {
     /// declaration keeps the callee's `reifiedOperationMarker` for the host's caller to specialize.
     /// This is the classpath analogue of the IR inliner's same-file `reified_subst`.
     pub reified_call_subst: std::collections::HashMap<u32, Vec<(String, Ty)>>,
+    /// Call `ExprId` → every checked type argument of a classpath inline declaration, under the
+    /// dependency metadata's formal name. JVM anonymous-object regeneration specializes generic
+    /// class signatures with this full map; runtime reified operations use the narrower map above.
+    pub(crate) inline_call_type_arguments: std::collections::HashMap<u32, Vec<(String, Ty)>>,
     /// Exact methods the serialization child cache generated: its factories and accessor.
     ///
     /// kotlinc's member order for a `@Serializable` class puts the deserialization `<init>`

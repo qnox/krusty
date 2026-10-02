@@ -130,7 +130,11 @@ impl CallObjects<'_> {
     /// kotlinc's `TypeParameterMappings` writes for it (`mapTypeParameter`).
     fn type_arguments(&self, site: &RegenerationSite<'_>) -> Option<Vec<(String, String)>> {
         let formatter = JvmSignatureFormatter::with_symbols(self.ir, site.symbols, self.run);
-        let Some(arguments) = self.ir.reified_call_subst.get(&self.call_expression) else {
+        let Some(arguments) = self
+            .ir
+            .inline_call_type_arguments
+            .get(&self.call_expression)
+        else {
             return Some(Vec::new());
         };
         arguments

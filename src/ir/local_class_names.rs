@@ -844,6 +844,11 @@ impl super::IrFile {
                 *substitution = ty(*substitution, names);
             }
         }
+        for substitutions in self.inline_call_type_arguments.values_mut() {
+            for (_, substitution) in substitutions {
+                *substitution = ty(*substitution, names);
+            }
+        }
         for result in self.value_class_suspend_returns.values_mut() {
             value_class_suspend_result(result, names);
         }

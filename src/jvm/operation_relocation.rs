@@ -34,6 +34,7 @@ pub(super) fn clone_below_representation_wrapper(ir: &mut IrFile, source: ExprId
     move_fact!(value_class_suspend_calls);
     move_fact!(intrinsic_suspension_points);
     move_fact!(reified_call_subst);
+    move_fact!(inline_call_type_arguments);
     move_fact!(construction_declared_params);
     move_fact!(construction_targets);
     move_fact!(synthesized_accessor_calls);
@@ -68,12 +69,19 @@ mod tests {
         let source = ir.add_expr(IrExpr::UnitInstance);
         let substitutions = vec![("T".to_owned(), Ty::String)];
         ir.reified_call_subst.insert(source, substitutions.clone());
+        ir.inline_call_type_arguments
+            .insert(source, substitutions.clone());
         ir.logical_types.insert(source, Ty::String);
 
         let target = clone_below_representation_wrapper(&mut ir, source);
 
         assert!(!ir.reified_call_subst.contains_key(&source));
         assert_eq!(ir.reified_call_subst.get(&target), Some(&substitutions));
+        assert!(!ir.inline_call_type_arguments.contains_key(&source));
+        assert_eq!(
+            ir.inline_call_type_arguments.get(&target),
+            Some(&substitutions)
+        );
         assert_eq!(ir.logical_types.get(&source), Some(&Ty::String));
         assert_eq!(ir.logical_types.get(&target), Some(&Ty::String));
     }
