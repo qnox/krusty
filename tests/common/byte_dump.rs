@@ -36,9 +36,9 @@
 
 mod fingerprint;
 
+pub use fingerprint::class_dump_inputs;
 pub(crate) use fingerprint::fingerprint_parts;
-use fingerprint::{basename, classpath_content_fingerprint, normalize_invocation_flag};
-pub use fingerprint::{class_dump_inputs, ClassDumpInputs};
+use fingerprint::{basename, classpath_content_fingerprint, fnv64, normalize_invocation_flag};
 #[cfg(test)]
 use fingerprint::{
     classpath_content_fingerprint_with_platform, hash_tree, normalize_args,

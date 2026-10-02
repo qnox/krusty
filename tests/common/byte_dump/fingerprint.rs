@@ -147,7 +147,7 @@ pub(crate) fn fingerprint_parts(parts: &[&[u8]]) -> u128 {
     ((high as u128) << 64) | low as u128
 }
 
-fn fnv64(mut hash: u64, bytes: &[u8]) -> u64 {
+pub(super) fn fnv64(mut hash: u64, bytes: &[u8]) -> u64 {
     for byte in bytes {
         hash = (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3);
     }
