@@ -66,6 +66,7 @@ use field_nullability::{
 mod discarding;
 mod diverging_value_type;
 mod enclosure;
+mod enum_entries_call;
 mod enum_entry_subclass;
 mod enum_metadata;
 mod explicit_backing_fields;
@@ -8976,6 +8977,9 @@ impl<'a> Emitter<'a> {
                     | crate::ir::IrIntrinsic::EnumName
                     | crate::ir::IrIntrinsic::NullableAnyToString) => {
                         self.emit_builtin_member(e, op, dispatch_receiver.unwrap(), args, code)
+                    }
+                    crate::ir::IrIntrinsic::EnumEntries { classifier } => {
+                        self.emit_enum_entries(*classifier, code);
                     }
                     crate::ir::IrIntrinsic::EnumValueOf { classifier } => {
                         // `enumValueOf<E>` is the stdlib's reified INLINE template, so what follows

@@ -2618,8 +2618,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the checker requires an enum type argument and types the result as `E` / `Array<E>` /
   `EnumEntries<E>`. The synthetic registry emits `E.valueOf(name)` / `E.values()` /
   `E.getEntries()`, including through an expanded reified inline function. The zero-argument
-  `enumEntries` declaration's stdlib body only throws; its one-argument overloads stay ordinary
-  calls (`tests/enum_entries_intrinsic_e2e.rs`). A reified inline function returning `T` (e.g. a
+  `enumEntries` declaration's stdlib body only throws; a same-named declaration with parameters
+  stays an ordinary call. Direct and reified calls emit `E.getEntries()`
+  (`tests/enum_entries_intrinsic_e2e.rs`). A reified inline function returning `T` (e.g. a
   `safeEnumValueOf` wrapper) is checked inside the body against T's erased bound (`Enum`): the
   expansion's result slot is typed by that erased return and the expansion's value is cast back to
   the call-site type (the `checkcast` kotlinc emits after a reified call), keeping branch-merge

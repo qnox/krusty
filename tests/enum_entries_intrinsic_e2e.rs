@@ -1,5 +1,5 @@
 //! The zero-argument `kotlin.enums.enumEntries<E>()` has a throwing stdlib body. kotlinc replaces
-//! it with `E.getEntries()`. The one-argument overloads stay ordinary calls.
+//! it with `E.getEntries()`, including when a reified inline function forwards its type parameter.
 use super::common::{self, compare_with_kotlinc_plugin, method_instructions};
 
 const LISTED: &str = "\
@@ -52,19 +52,4 @@ inline fun <reified T : Enum<T>> listed(): String = enumEntries<T>().toString()\
 \n\
 fun box(): String = if (listed<Color>() == \"[RED, GREEN]\") \"OK\" else listed<Color>()\n";
     common::expect_box_same_as_kotlinc(src, "EnumEntriesReified");
-}
-
-#[test]
-fn enum_entries_array_overload_stays_ordinary() {
-    let src = "\
-import kotlin.enums.enumEntries\n\
-\n\
-enum class Color { RED, GREEN }\n\
-\n\
-@OptIn(ExperimentalStdlibApi::class)\n\
-fun box(): String {\n\
-    val listed = enumEntries(arrayOf(Color.RED, Color.GREEN))\n\
-    return if (listed.toString() == \"[RED, GREEN]\") \"OK\" else listed.toString()\n\
-}\n";
-    common::expect_box_same_as_kotlinc(src, "EnumEntriesArrayOverload");
 }

@@ -656,6 +656,39 @@ mod tests {
         );
     }
 
+    fn enum_entries<'a>(params: &'a [Ty], ret: Ty) -> BuiltinFunctionDeclaration<'a> {
+        BuiltinFunctionDeclaration {
+            package: type_name("kotlin/enums"),
+            name: "enumEntries",
+            kind: FnKind::TopLevel,
+            receiver: None,
+            params,
+            ret,
+            context_count: 0,
+            type_parameter_count: 1,
+            vararg: None,
+            is_suspend: false,
+            is_operator: false,
+            is_infix: false,
+        }
+    }
+
+    #[test]
+    fn enum_entries_realization_is_only_the_zero_argument_declaration() {
+        let parameter = Ty::ty_param("T", Ty::obj("kotlin/Enum"));
+        let result = Ty::obj_args("kotlin/enums/EnumEntries", &[parameter]);
+        assert_eq!(
+            function_realization(enum_entries(&[], result)),
+            Some(CompilerIntrinsic::EnumEntries)
+        );
+        let array = [Ty::array(parameter)];
+        assert_eq!(
+            function_realization(enum_entries(&array, result)),
+            None,
+            "the array overload is an ordinary function"
+        );
+    }
+
     #[test]
     fn type_of_requires_the_exact_reflection_declaration_shape() {
         let declaration = |package, result| BuiltinFunctionDeclaration {

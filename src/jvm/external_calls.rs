@@ -785,6 +785,19 @@ pub(super) fn realize(
                     classifier: semantic_ret,
                 })
             }
+            Some(crate::libraries::CompilerIntrinsic::EnumEntries) => {
+                let classifier = substitutions.iter().find_map(|substitution| {
+                    matches!(
+                        substitution.parameter,
+                        crate::fir::FirTypeParameterRef::External { callable, ordinal: 0 }
+                            if callable == target
+                    )
+                    .then_some(substitution.value)
+                });
+                Some(crate::ir::IrIntrinsic::EnumEntries {
+                    classifier: classifier.ok_or(target)?,
+                })
+            }
             // The declaration's only type parameter is the whole operand. Its checked value keeps
             // nullability and projections, which the runtime `KType` has to reproduce.
             Some(crate::libraries::CompilerIntrinsic::TypeOf) => {
@@ -817,7 +830,6 @@ pub(super) fn realize(
                 | crate::libraries::CompilerIntrinsic::SuspendCoroutine
                 | crate::libraries::CompilerIntrinsic::SuspendCoroutineUninterceptedOrReturn
                 | crate::libraries::CompilerIntrinsic::EnumValues
-                | crate::libraries::CompilerIntrinsic::EnumEntries
                 | crate::libraries::CompilerIntrinsic::EnumName
                 | crate::libraries::CompilerIntrinsic::IsEmpty
                 | crate::libraries::CompilerIntrinsic::IsNotEmpty

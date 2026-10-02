@@ -1409,6 +1409,9 @@ fn specialize_intrinsic(operation: &mut IrIntrinsic, bindings: &HashMap<String, 
         | IrIntrinsic::EnumValueOf {
             classifier: operand,
         }
+        | IrIntrinsic::EnumEntries {
+            classifier: operand,
+        }
         | IrIntrinsic::GeneratedPropertyEquals { ty: operand }
         | IrIntrinsic::Ieee754Equals { operand }
         | IrIntrinsic::GeneratedPropertyHash { ty: operand }
