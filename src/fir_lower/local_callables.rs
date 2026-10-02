@@ -1094,6 +1094,7 @@ impl BodyLowering<'_> {
         );
         nested.enclosure = declaration_enclosure;
         nested.expansion_enclosure = expansion_enclosure;
+        nested.inline_declaration = self.inline_declaration;
         nested.control_path = self.control_path.clone();
         nested.control_path.push(
             body.local_callable()

@@ -113,10 +113,7 @@ pub(crate) fn realize(
                 })
             })
             .transpose()?;
-        let exported = matches!(
-            plan.declaration_enclosure,
-            Some(crate::ir::IrEnclosure::Function(function)) if ir.inline_fns.contains(&function)
-        );
+        let exported = plan.inline_declaration.is_some();
         let getter = realize_accessor(
             ir,
             &plan.storage_name,

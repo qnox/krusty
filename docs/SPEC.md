@@ -4454,6 +4454,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   in the caller. A cross-file copy retains a typed, non-emitting prototype through generic and
   value-class representation; JVM-only facts bind its exact declaration facade or classifier to
   the private-static access boundary. No helper or owner is recovered by source spelling.
+  Common lowering records the containing checked inline declaration identity and retains it through
+  nested callable scopes, independently of their own lambda/local-function enclosure. Inline
+  property accessors publish the same provenance. The JVM consumes that recorded exposure when
+  exporting helpers; it does not rediscover an inline owner by walking declarations or source names.
   The checked convention's substitutions include its receiver classifier's type parameters as
   well as callable parameters. The selected declaration's lexical scope fixes their stable
   identities: a callable parameter shadows the enclosing parameter, and an unrelated declaration

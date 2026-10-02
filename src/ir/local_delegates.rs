@@ -25,9 +25,9 @@ pub(crate) struct IrLocalDelegateAccessorPlan {
 
 #[derive(Clone, Debug)]
 pub(crate) struct IrLocalDelegatePlan {
-    /// Exact executable scope containing the source declaration. Targets use its recorded inline
-    /// role when deciding whether a declaration-owned helper needs an external access boundary.
-    pub(crate) declaration_enclosure: Option<super::IrEnclosure>,
+    /// The checked inline declaration whose copied body exposes this property, retained through
+    /// nested local functions and lambdas. Targets must not rediscover it from containment.
+    pub(crate) inline_declaration: Option<crate::fir::DeclarationId>,
     /// Lexical declaration identity and source order of the property. Inline copies retain this
     /// identity rather than creating another declaration at the caller.
     pub(crate) reference: super::IrLocalPropertyReference,

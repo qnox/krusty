@@ -183,6 +183,10 @@ pub(crate) fn lower_body_with_context(
     );
     let root_is_default = body.is_default_fragment();
     lowering.expansion_enclosure = root_enclosure(index, lowering.ir, declaration);
+    lowering.inline_declaration = index
+        .declaration_header(declaration)
+        .filter(|header| header.flags.has(crate::fir::DeclarationFlags::INLINE))
+        .map(|_| declaration);
     if !root_is_default {
         lowering.enclosure = lowering.expansion_enclosure;
     }
@@ -315,6 +319,8 @@ struct BodyLowering<'a> {
     /// The declaration whose body or default fragment contains an inline expansion. Unlike
     /// `enclosure`, this retains a default fragment's lexical callable/constructor identity.
     expansion_enclosure: Option<crate::ir::IrEnclosure>,
+    /// Checked source inline declaration whose body copies this nested callable and its locals.
+    inline_declaration: Option<crate::fir::DeclarationId>,
     /// Whether the expression currently being lowered belongs to a default-argument fragment.
     in_default_argument: bool,
     /// The checked block this body's root evaluates, when it is one, and the block it lowered to.
@@ -534,6 +540,7 @@ impl<'a> BodyLowering<'a> {
             control_path: Vec::new(),
             enclosure: None,
             expansion_enclosure: None,
+            inline_declaration: None,
             in_default_argument: body.is_default_fragment(),
             expression_depth: 0,
             root_block: root_scope_block(body),

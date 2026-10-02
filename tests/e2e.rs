@@ -1638,6 +1638,8 @@ mod library_function_reference_class_e2e;
 mod loop_backedge_narrowing_e2e;
 #[path = "nested_data_class_tostring_recipe_e2e.rs"]
 mod nested_data_class_tostring_recipe_e2e;
+#[path = "nested_inline_delegate_e2e.rs"]
+mod nested_inline_delegate_e2e;
 #[path = "nullable_sam_e2e.rs"]
 mod nullable_sam_e2e;
 #[path = "operator_expected_result_seeding_e2e.rs"]

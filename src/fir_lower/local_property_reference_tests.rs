@@ -263,3 +263,44 @@ fn generic_inline_copies_keep_one_declaration_plan_across_substitutions() {
     assert_eq!(plans("exact"), &[0]);
     assert_eq!(plans("erased"), &[0]);
 }
+
+#[test]
+fn nested_delegate_plans_retain_the_containing_checked_inline_declaration() {
+    let ir = lower_single_source(
+        &format!(
+            "{DELEGATE}
+            inline fun nested(): String {{
+                val first = {{ val firstValue by Delegate(\"a\"); firstValue }}
+                val second = {{ val secondValue by Delegate(\"b\"); secondValue }}
+                return first() + second()
+            }}
+            inline val propertyValue: String
+                get() {{ val accessorValue by Delegate(\"c\"); return accessorValue }}
+            fun ordinary(): String {{
+                fun localReader(): String {{
+                    val ordinaryValue by Delegate(\"d\")
+                    return ordinaryValue
+                }}
+                return localReader()
+            }}"
+        ),
+        "NestedInlineDeclarationProvenance",
+    );
+    let plans = &ir.local_delegate_plans;
+    assert_eq!(plans.len(), 4);
+    let declarations = plan_references(&ir)
+        .into_iter()
+        .zip(plans)
+        .map(|((name, _), plan)| (name, plan.inline_declaration))
+        .collect::<std::collections::HashMap<_, _>>();
+    assert_eq!(
+        declarations.len(),
+        4,
+        "one declaration record for each distinct fixture property"
+    );
+    let declaration = declarations["firstValue"].expect("checked inline function");
+    assert_eq!(declarations["secondValue"], Some(declaration));
+    let accessor = declarations["accessorValue"].expect("checked inline accessor");
+    assert_ne!(accessor, declaration);
+    assert_eq!(declarations["ordinaryValue"], None);
+}
