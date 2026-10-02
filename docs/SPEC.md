@@ -848,7 +848,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   that one source-ordered `<clinit>` after the instance store. A read of a property with a
   declared getter, and a later assignment of a property with a declared setter, call that
   accessor through `access$get…` / `access$set…`, reloading the companion instance from the
-  outer field at the call. The accessor body and the declaration
+  outer field at the call. The function is the declaration's getter or setter, recorded
+  against the property operation's stable identity when the initializer moves. A missing
+  realization is not filled from the property's name. The accessor body and the declaration
   initializer store use the hoisted field (`access$…$cp` from the companion, `putstatic` from
   `<clinit>`). A delegate initializer's lambda is a private static method of the outer class,
   the class whose `<clinit>` evaluates it. The companion constructor

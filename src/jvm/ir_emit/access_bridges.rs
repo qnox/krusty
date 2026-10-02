@@ -271,37 +271,15 @@ pub(super) fn cross_owner_member_calls(
                 IrExpr::PropertyRead {
                     owner,
                     receiver,
-                    name,
+                    operation,
                     ..
-                } => ir
-                    .jvm_member_targets
-                    .get(&expression)
-                    .map(|&function| {
-                        let class = ir.class_id_by_name(*owner);
-                        (
-                            class.expect("a realized member's owner is in this file"),
-                            function,
-                            *receiver,
-                        )
-                    })
-                    .or_else(|| declared_private_accessor(ir, *owner, name, *receiver, false)),
+                } => realized_property_accessor(ir, expression, *operation, *owner, *receiver),
                 IrExpr::PropertyWrite {
                     owner,
                     receiver,
-                    name,
+                    operation,
                     ..
-                } => ir
-                    .jvm_member_targets
-                    .get(&expression)
-                    .map(|&function| {
-                        let class = ir.class_id_by_name(*owner);
-                        (
-                            class.expect("a realized member's owner is in this file"),
-                            function,
-                            *receiver,
-                        )
-                    })
-                    .or_else(|| declared_private_accessor(ir, *owner, name, *receiver, true)),
+                } => realized_property_accessor(ir, expression, *operation, *owner, *receiver),
                 _ => None,
             };
             if let Some((class, target, receiver)) = local_target {
@@ -703,33 +681,24 @@ pub(super) fn protected_property_access(
     }
 }
 
-/// A property read or write whose accessor is a private method of a class in this file.
+/// The getter or setter recorded for this property operation.
 ///
-/// Checked member accesses stay [`IrExpr::PropertyRead`] / [`IrExpr::PropertyWrite`] and do not
-/// carry a `jvm_member_targets` entry. The accessor identity is the declaration's getter or
-/// setter. Only a private one needs a bridge; a public accessor is an ordinary call.
-fn declared_private_accessor(
+/// The record is the declaration's function, attached when the operation is realized or when a
+/// companion initializer moves onto another class. A missing record stays missing: the accessor
+/// is not chosen by scanning the owner's properties for the source spelling.
+fn realized_property_accessor(
     ir: &IrFile,
+    expression: crate::ir::ExprId,
+    operation: Option<u32>,
     owner: crate::types::TypeName,
-    name: &str,
     receiver: Option<crate::ir::ExprId>,
-    write: bool,
 ) -> Option<(crate::ir::ClassId, u32, Option<crate::ir::ExprId>)> {
+    let function = ir
+        .jvm_member_targets
+        .get(&operation.unwrap_or(expression))
+        .copied()?;
     let class = ir.class_id_by_name(owner)?;
-    let function = ir.classes[class as usize]
-        .properties
-        .iter()
-        .find(|property| property.name == name)
-        .and_then(|property| {
-            if write {
-                property.setter
-            } else {
-                property.getter
-            }
-        })?;
-    ir.method_visibility(function)
-        .is_private()
-        .then_some((class, function, receiver))
+    Some((class, function, receiver))
 }
 
 /// How another class reaches a private accessor through `access$<name>`: a static value-class

@@ -126,7 +126,10 @@ fn receiver_is_inert(ir: &IrFile, class: ClassId, field: u32) -> bool {
 }
 
 /// Realize the JVM's companion-property storage layout from semantic common IR.
-pub fn lower_companion_properties(ir: &mut IrFile) {
+pub(crate) fn lower_companion_properties(
+    ir: &mut IrFile,
+    realizations: &crate::jvm::property_realizations::PropertyRealizations,
+) {
     // A companion `const val` remains declared by the companion in common IR and metadata, while
     // the JVM stores its public static final field on the outer class. Select that physical owner by
     // exact class/static identities here; no declaration is rebound from its spelling.
@@ -331,7 +334,7 @@ pub fn lower_companion_properties(ir: &mut IrFile) {
         }
     }
     if candidates.is_empty() {
-        schedule_class_companion_initializers(ir);
+        schedule_class_companion_initializers(ir, realizations);
         return;
     }
 
@@ -656,7 +659,7 @@ pub fn lower_companion_properties(ir: &mut IrFile) {
             }
         }
     }
-    schedule_class_companion_initializers(ir);
+    schedule_class_companion_initializers(ir, realizations);
 }
 
 /// A class companion's initializer runs in the enclosing class `<clinit>`, after that class has
@@ -666,7 +669,10 @@ pub fn lower_companion_properties(ir: &mut IrFile) {
 /// Interface companions keep object storage and run their initializer in their own `<clinit>`.
 /// Enum companions stay on the enum's existing `<clinit>` order. A named object's companion stays
 /// with that object's initializer.
-fn schedule_class_companion_initializers(ir: &mut IrFile) {
+fn schedule_class_companion_initializers(
+    ir: &mut IrFile,
+    realizations: &crate::jvm::property_realizations::PropertyRealizations,
+) {
     let mut scheduled = Vec::new();
     for index in 0..ir.classes.len() {
         if !outer_runs_companion_initializer(&ir.classes[index]) {
@@ -705,6 +711,9 @@ fn schedule_class_companion_initializers(ir: &mut IrFile) {
         // `<clinit>` has no `this`. Each use of the companion instance reloads the outer field.
         // A single local would be `astore`/`aload`, which is not kotlinc's `<clinit>`.
         reload_companion_instance(ir, owner, companion, body);
+        // The moved body calls the companion's private accessors. The property operation
+        // already carries its declaration identity; record that accessor on the operation.
+        record_moved_initializer_accessors(ir, body, realizations);
         ir.set_companion_clinit_body(owner, body);
         ir.classes[companion as usize].init_body = None;
     }
@@ -739,6 +748,109 @@ fn reload_companion_instance(
         }
         crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
     }
+}
+
+/// Bind a private getter or setter to the property operation that calls it.
+///
+/// Realization has already replaced the checked operation with a property read or write and
+/// kept the operation id. That id selects the declaration. Bridge collection reads the
+/// accessor stored here. A missing realization or accessor stays missing.
+fn record_moved_initializer_accessors(
+    ir: &mut IrFile,
+    body: ExprId,
+    realizations: &crate::jvm::property_realizations::PropertyRealizations,
+) {
+    let mut pending = vec![body];
+    let mut seen = HashSet::new();
+    while let Some(expression) = pending.pop() {
+        if !seen.insert(expression) {
+            continue;
+        }
+        let lambda = match ir.expr(expression) {
+            IrExpr::Lambda { impl_fn, .. } => Some(*impl_fn),
+            _ => None,
+        };
+        if let Some(function) = lambda {
+            if let Some(nested) = ir
+                .functions
+                .get(function as usize)
+                .and_then(|function| function.body)
+            {
+                pending.push(nested);
+            }
+        }
+        if let Some((operation, target, read)) = moved_property_use(ir, expression, realizations) {
+            if let Some(function) = private_declared_accessor(ir, target, read) {
+                ir.jvm_member_targets.insert(operation, function);
+            }
+        }
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+    }
+}
+
+/// The declaration a moved property read or write already selected.
+///
+/// A property read carries the operation id realization recorded. A checked operation that
+/// has not been realized yet still carries the property id itself. Neither shape is recovered
+/// from the property's source spelling.
+fn moved_property_use(
+    ir: &IrFile,
+    expression: ExprId,
+    realizations: &crate::jvm::property_realizations::PropertyRealizations,
+) -> Option<(ExprId, crate::fir::PropertyId, bool)> {
+    match ir.expr(expression) {
+        IrExpr::PropertyRead { operation, .. } => {
+            let operation = operation.unwrap_or(expression);
+            Some((operation, local_property(realizations, operation)?, true))
+        }
+        IrExpr::PropertyWrite { operation, .. } => {
+            let operation = operation.unwrap_or(expression);
+            Some((operation, local_property(realizations, operation)?, false))
+        }
+        IrExpr::Checked(crate::ir::IrCheckedOperation::PropertyRead { target, .. }) => {
+            Some((expression, *target, true))
+        }
+        IrExpr::Checked(crate::ir::IrCheckedOperation::PropertyWrite { target, .. }) => {
+            Some((expression, *target, false))
+        }
+        _ => None,
+    }
+}
+
+fn local_property(
+    realizations: &crate::jvm::property_realizations::PropertyRealizations,
+    operation: ExprId,
+) -> Option<crate::fir::PropertyId> {
+    match realizations.get(operation)? {
+        crate::jvm::property_realizations::PropertyRealization::Local(target) => Some(*target),
+        crate::jvm::property_realizations::PropertyRealization::Physical(_) => None,
+    }
+}
+
+fn private_declared_accessor(
+    ir: &IrFile,
+    target: crate::fir::PropertyId,
+    read: bool,
+) -> Option<u32> {
+    let crate::ir::IrLocalPropertyLayout::Member {
+        class, property, ..
+    } = ir.local_property_layouts.get(&target)?
+    else {
+        return None;
+    };
+    let declaration = ir
+        .classes
+        .get(*class as usize)?
+        .properties
+        .get(*property as usize)?;
+    let function = if read {
+        declaration.getter
+    } else {
+        declaration.setter
+    }?;
+    ir.method_visibility(function)
+        .is_private()
+        .then_some(function)
 }
 
 fn move_initializer_lambdas(
