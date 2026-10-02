@@ -300,12 +300,10 @@ pub(super) fn enum_member_schedule(ir: &IrFile, class: &IrClass) -> EnumMemberSc
     }
 }
 
+/// Whether a lifted function implements a lambda, rather than a local function or a local delegated
+/// property's accessor (which, like a lambda, has no source name of its own).
 fn is_lifted_lambda(ir: &IrFile, function: u32) -> bool {
-    ir.lifted_functions[&function]
-        .1
-        .path
-        .last()
-        .is_none_or(|step| step.name.is_none())
+    ir.lambda_origins.contains_key(&function)
 }
 
 /// Reorder the functions lowered from lambdas and local functions inside `members` into kotlinc's
@@ -324,14 +322,28 @@ pub(super) fn order_lifted_functions(ir: &IrFile, members: &mut [u32]) {
     if slots.len() < 2 {
         return;
     }
-    // Sequences keep the order in which their first function was registered: lowering registers
-    // each declaration's lifted functions together, in declaration order.
+    // Lowering normally registers each declaration's lifted functions together, in declaration
+    // order. A target-realized helper can arrive later, after another member's lambda has already
+    // registered its sequence, so restore the recorded member order when all sequences are from
+    // this source. Keep registration order across sources: their source-order domains are local.
     let mut sequences = Vec::new();
     for &slot in &slots {
         let (sequence, _) = &ir.lifted_functions[&members[slot]];
         if !sequences.contains(&sequence) {
             sequences.push(sequence);
         }
+    }
+    if sequences.first().is_some_and(|first| {
+        sequences
+            .iter()
+            .all(|sequence| sequence.source == first.source)
+    }) {
+        sequences.sort_by_key(|sequence| {
+            ir.lifting_sequence_source_order
+                .get(*sequence)
+                .copied()
+                .unwrap_or(u32::MAX)
+        });
     }
     let sequence_rank = |sequence| sequences.iter().position(|&s| s == sequence);
     let site = |function: &u32| &ir.lifted_functions[function];

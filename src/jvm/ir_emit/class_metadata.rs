@@ -12,6 +12,7 @@ pub(super) fn build_class_metadata(
     override_results: &crate::jvm::override_results::OverrideResults,
     c: &crate::ir::IrClass,
     opts: &EmitOptions,
+    locals: &crate::jvm::property_references::local_delegated_properties::LocalDelegatedProperties,
 ) -> Option<KotlinMetadata> {
     use crate::metadata::class_builder::{
         build_class, ClassTail, FnMeta, PropMeta, COMPONENT_FN_FLAGS, EQUALS_FN_FLAGS,
@@ -1348,6 +1349,7 @@ pub(super) fn build_class_metadata(
             supertypes: &supertypes,
             annotations: &metadata_annotations,
             primary_ctor_annotations: &primary_ctor_annotations(c),
+            local_properties: locals.of(c.fq_name_id()),
             local_classifiers: &local_classifiers,
             enum_entry_bodies: &super::super::local_classifiers::enum_entry_bodies(ir),
             is_enum: c.is_enum,

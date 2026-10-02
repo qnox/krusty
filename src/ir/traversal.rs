@@ -213,6 +213,11 @@ pub fn for_each_child(exprs: &[IrExpr], e: ExprId, f: &mut impl FnMut(ExprId)) {
         }
         IrExpr::PluginPlaceholder { exprs: kids, .. } => kids.iter().for_each(|&k| f(k)),
         IrExpr::KClassLiteral { value, .. } => value.iter().for_each(|&value| f(value)),
+        IrExpr::LocalDelegateAccess(access) => {
+            f(access.delegate);
+            access.dispatch_receiver.iter().for_each(|&value| f(value));
+            access.value.iter().for_each(|&value| f(value));
+        }
         IrExpr::Const(_)
         | IrExpr::ClassConst { .. }
         | IrExpr::LocalPropertyReference(_)

@@ -623,7 +623,7 @@ impl Emitter<'_> {
 
         // Like any call, an inline call states its line once its arguments are evaluated; that line
         // is the call site the body's lines are mapped against.
-        debug_lines::mark_expression_start(self.ir, call_expression, code);
+        self.mark_expression_start(call_expression, code);
         let caller_line = code.current_line();
         let call_line = caller_line.unwrap_or(1);
         let claimable = self.claimable_lines();

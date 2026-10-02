@@ -42,8 +42,15 @@ impl Emitter<'_> {
         // which discards that `when` the same way. A discarded `Unit` is nothing at all.
         if !self.machine_suspensions.contains(&expression) {
             match node {
-                // kotlinc never materializes a discarded `Unit`.
-                IrExpr::UnitInstance => return,
+                // A copied inline body's terminal `Unit` carries its mapped closing line on a
+                // `nop`, even though the value itself is not materialized.
+                IrExpr::UnitInstance => {
+                    if self.has_retained_mapped_inline_unit_line(expression) {
+                        self.mark_expression_start(expression, code);
+                        code.nop();
+                    }
+                    return;
+                }
                 IrExpr::When { branches } => {
                     self.emit_when(expression, branches, true, code);
                     return;

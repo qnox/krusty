@@ -1008,7 +1008,7 @@ pub(super) fn compact(file: &mut File) {
         .into_iter()
         .filter_map(|(old, site)| statements.get(&old).copied().map(|new| (new, site)))
         .collect();
-    file.local_delegate_lifting_sites = std::mem::take(&mut file.local_delegate_lifting_sites)
+    file.local_delegates = std::mem::take(&mut file.local_delegates)
         .into_iter()
         .filter_map(|(old, sites)| statements.get(&old).copied().map(|new| (new, sites)))
         .collect();

@@ -54,6 +54,9 @@ mod jvm_static_realization;
 mod lambda_classes;
 mod lifting;
 mod local_class_names;
+mod local_delegates;
+pub use local_delegates::IrLocalDelegateAccess;
+pub(crate) use local_delegates::{IrLocalDelegateAccessorPlan, IrLocalDelegatePlan};
 mod local_property_references;
 mod module_records;
 mod operators;
@@ -402,6 +405,9 @@ pub enum IrExpr {
     },
     /// Backend-neutral reflection value passed to local delegated-property conventions.
     LocalPropertyReference(IrLocalPropertyReference),
+    /// One checked local delegated-property access. Its selected call template and source lifting
+    /// provenance live in `IrFile::local_delegate_plans`; a target chooses the physical helper.
+    LocalDelegateAccess(IrLocalDelegateAccess),
     /// Checked Kotlin singleton value. Its classifier is the semantic identity selected by the
     /// frontend; a backend decides how that singleton is stored on its target platform.
     SingletonValue {
@@ -1488,6 +1494,13 @@ pub struct IrFile {
     /// Guards the active-unit metadata handoff when a source is checked in several body groups.
     pub(crate) file_annotations_attached: bool,
     pub functions: Vec<IrFunction>,
+    /// Target-neutral selected-call templates for local delegated properties. These are semantic
+    /// plans, not function declarations: a backend may realize them without repeating resolution.
+    pub(crate) local_delegate_plans: Vec<IrLocalDelegatePlan>,
+    /// Stable declaration identity to the file-wide plan arena. Nested callables access the
+    /// declaring property's plan without copying it or manufacturing another helper.
+    pub(crate) local_delegate_plan_ids:
+        std::collections::HashMap<crate::fir::LocalDelegatedPropertyId, u32>,
     /// JVM `$suspendImpl` body carriers (an interface member's, or an overridable class member's),
     /// keyed by carrier function id, with the exact owner and source-declaration function id. The JVM signature/default-stub boundaries consume
     /// these identities; they must not recover either one from the generated `$suspendImpl`
@@ -1554,6 +1567,10 @@ pub struct IrFile {
         IrLiftingSequence,
         std::collections::BTreeMap<u32, IrLiftingEntry>,
     >,
+    /// Earliest declaring-member order for each logical lifting sequence. Overloads with the same
+    /// source name share one sequence (and therefore one `$lambda$N` counter), while this separate
+    /// fact lets a target restore declaration order when it realizes a helper later.
+    pub(crate) lifting_sequence_source_order: std::collections::HashMap<IrLiftingSequence, u32>,
     /// The sequence and lifting site of each function lowered from a lambda or local function.
     pub(crate) lifted_functions:
         std::collections::HashMap<FunId, (IrLiftingSequence, crate::fir::FirLiftingSite)>,

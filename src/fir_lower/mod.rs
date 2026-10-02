@@ -48,8 +48,10 @@ mod inline_returns;
 mod inlining;
 mod interface_delegation;
 mod local_callables;
+mod local_delegates;
 #[cfg(test)]
 mod local_property_reference_tests;
+mod local_property_references;
 mod loops;
 mod module_declarations;
 mod package_declarations;
@@ -179,6 +181,7 @@ pub(crate) fn lower_body_with_context(
         local_callables.realizations.clone(),
     );
     lowering.enclosure = root_enclosure(&body, index, lowering.ir, declaration);
+    lowering.prepare_local_delegate_plans()?;
     lowering.prepare_local_functions()?;
     lowering.realize_local_functions()?;
     let defaults = body

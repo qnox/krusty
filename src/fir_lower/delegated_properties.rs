@@ -2,8 +2,9 @@
 //!
 //! A delegated property is two generated things: a static (or field) holding the delegate, and a
 //! pair of accessors that call the delegate's `getValue`/`setValue` operators, passing the
-//! property's own reference. Where that reference is stored is the backend's choice. The operator is resolved by the checker; what this module owns
-//! is the handoff — which value reaches which slot, and at what SEMANTIC type.
+//! property's own reference, whose storage is the backend's choice. The operator is resolved by the
+//! checker; what this module owns is the handoff — which value reaches which slot, and at what
+//! SEMANTIC type.
 //!
 //! Every value crossing into or out of the operator is adapted here, against the type the checker
 //! recorded for the other side and nothing else: the delegate into the operator's receiver slot,
@@ -747,6 +748,18 @@ fn delegated_call(
     receiver: ExprId,
     arguments: Vec<(ExprId, Ty)>,
 ) -> Result<ExprId, FirFileLoweringFailure> {
+    delegated_call_with_dispatch(index, ir, property, call, receiver, None, arguments)
+}
+
+pub(super) fn delegated_call_with_dispatch(
+    index: &ResolvedModuleIndex,
+    ir: &mut IrFile,
+    property: DeclarationId,
+    call: &FirDelegateCall,
+    receiver: ExprId,
+    selected_dispatch: Option<ExprId>,
+    arguments: Vec<(ExprId, Ty)>,
+) -> Result<ExprId, FirFileLoweringFailure> {
     match &call.target {
         FirCallTarget::Module(target) => {
             let callable =
@@ -762,23 +775,26 @@ fn delegated_call(
                 materialize_delegated_arguments(ir, arguments, &call.declared_parameters)?;
             let owner = index.enclosing_classifier(callable.declaration);
             if let Some(dispatch) = &call.dispatch_receiver {
-                let dispatch = match dispatch {
-                    FirDelegateDispatchReceiver::Scoped {
-                        current: true,
-                        depth: 0,
-                        ..
-                    } => ir.add_expr(IrExpr::GetValue(0)),
-                    FirDelegateDispatchReceiver::Singleton { classifier, .. } => {
-                        ir.add_expr(IrExpr::SingletonValue {
-                            classifier: *classifier,
-                        })
-                    }
-                    FirDelegateDispatchReceiver::Scoped { .. }
-                    | FirDelegateDispatchReceiver::ContextBinding { .. } => {
-                        return Err(FirFileLoweringFailure::UnsupportedPropertyShape(
-                            callable.declaration,
-                        ));
-                    }
+                let dispatch = match selected_dispatch {
+                    Some(dispatch) => dispatch,
+                    None => match dispatch {
+                        FirDelegateDispatchReceiver::Scoped {
+                            current: true,
+                            depth: 0,
+                            ..
+                        } => ir.add_expr(IrExpr::GetValue(0)),
+                        FirDelegateDispatchReceiver::Singleton { classifier, .. } => {
+                            ir.add_expr(IrExpr::SingletonValue {
+                                classifier: *classifier,
+                            })
+                        }
+                        FirDelegateDispatchReceiver::Scoped { .. }
+                        | FirDelegateDispatchReceiver::ContextBinding { .. } => {
+                            return Err(FirFileLoweringFailure::UnsupportedPropertyShape(
+                                callable.declaration,
+                            ));
+                        }
+                    },
                 };
                 let owner = owner.ok_or(FirFileLoweringFailure::MissingCallable(
                     callable.declaration,
@@ -980,21 +996,24 @@ fn delegated_call(
             let mut arguments =
                 materialize_delegated_arguments(ir, arguments, &call.declared_parameters)?;
             let dispatch_receiver = if let Some(dispatch) = &call.dispatch_receiver {
-                let dispatch = match dispatch {
-                    FirDelegateDispatchReceiver::Scoped {
-                        current: true,
-                        depth: 0,
-                        ..
-                    } => ir.add_expr(IrExpr::GetValue(0)),
-                    FirDelegateDispatchReceiver::Singleton { classifier, .. } => {
-                        ir.add_expr(IrExpr::SingletonValue {
-                            classifier: *classifier,
-                        })
-                    }
-                    FirDelegateDispatchReceiver::Scoped { .. }
-                    | FirDelegateDispatchReceiver::ContextBinding { .. } => {
-                        return Err(FirFileLoweringFailure::UnsupportedPropertyShape(property));
-                    }
+                let dispatch = match selected_dispatch {
+                    Some(dispatch) => dispatch,
+                    None => match dispatch {
+                        FirDelegateDispatchReceiver::Scoped {
+                            current: true,
+                            depth: 0,
+                            ..
+                        } => ir.add_expr(IrExpr::GetValue(0)),
+                        FirDelegateDispatchReceiver::Singleton { classifier, .. } => {
+                            ir.add_expr(IrExpr::SingletonValue {
+                                classifier: *classifier,
+                            })
+                        }
+                        FirDelegateDispatchReceiver::Scoped { .. }
+                        | FirDelegateDispatchReceiver::ContextBinding { .. } => {
+                            return Err(FirFileLoweringFailure::UnsupportedPropertyShape(property));
+                        }
+                    },
                 };
                 let parameter = extension_receiver_parameter
                     .ok_or(FirFileLoweringFailure::UnsupportedPropertyShape(property))?

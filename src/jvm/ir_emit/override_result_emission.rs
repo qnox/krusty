@@ -11,8 +11,8 @@ use super::inline_call::parse_descriptor_params;
 use super::scalar_coercion::{box_prim_free, unbox_prim_from};
 use super::signature_formatter::JvmSignatureFormatter;
 use super::{
-    debug_lines, discard, ir_method_desc, ir_ty_to_jvm, jvm_declared_ty, jvm_is_erased_top,
-    method_descriptor, method_signature, type_descriptor, CodeBuilder, Emitter,
+    discard, ir_method_desc, ir_ty_to_jvm, jvm_declared_ty, jvm_is_erased_top, method_descriptor,
+    method_signature, type_descriptor, CodeBuilder, Emitter,
 };
 use crate::ir::{ExprId, IrExpr, IrFile, IrTypeOp};
 use crate::jvm::override_results::OverrideResults;
@@ -154,7 +154,7 @@ impl Emitter<'_> {
     ) -> Option<Ty> {
         let primitive = self.boxed_call_result(e)?;
         let node = self.ir.expr(e).clone();
-        debug_lines::mark_expression_start(self.ir, e, code);
+        self.mark_expression_start(e, code);
         self.emit_physical_value_node(e, &node, code);
         Some(jvm_declared_ty(&Ty::nullable(primitive)))
     }
