@@ -4474,20 +4474,20 @@ where
 
     let engine = AnalysisEngine::spawn(analyze, engine_events);
     let backend = EngineBackend::new(engine, false);
-    let stdout = io::stdout();
-    let mut writer = stdout.lock();
     let service = LspService::with_backend(backend).with_dev(dev);
-    run_async_loop(service, &mut writer, incoming)
+    run_async_loop(service, io::stdout(), incoming)
 }
 
-fn run_async_loop<W>(
+pub(super) fn run_async_loop<W>(
     mut service: LspService<EngineBackend>,
-    writer: &mut W,
+    writer: W,
     incoming: Receiver<Incoming>,
 ) -> io::Result<i32>
 where
-    W: Write,
+    W: Write + Send + 'static,
 {
+    let mut writer = super::output_queue::OutputQueue::spawn(writer)?;
+    let writer = &mut writer;
     let mut pending = VecDeque::new();
     let mut input_dispatches_since_maintenance = 0usize;
     let outcome = loop {
@@ -4548,7 +4548,7 @@ where
         &incoming,
         ENGINE_SHUTDOWN_GRACE,
     );
-    outcome
+    writer.finish(outcome)
 }
 
 /// Disconnect the analysis command queue and wait at most `grace` for its thread to unwind.
@@ -5289,8 +5289,7 @@ mod tests {
 
         sender.send(Incoming::Eof).unwrap();
 
-        let mut out: Vec<u8> = Vec::new();
-        let code = run_async_loop(service, &mut out, incoming).unwrap();
+        let code = run_async_loop(service, Vec::new(), incoming).unwrap();
 
         assert_eq!(code, 0);
         assert!(
@@ -5324,10 +5323,11 @@ mod tests {
             .unwrap();
         sender.send(Incoming::Eof).unwrap();
 
-        let mut out: Vec<u8> = Vec::new();
-        let code = run_async_loop(service, &mut out, incoming).unwrap();
+        let (writer, out) = crate::server::output_queue::SharedWriter::recording();
+        let code = run_async_loop(service, writer, incoming).unwrap();
         assert_eq!(code, 0);
 
+        let out = out.lock().expect("shutdown output");
         let messages = decode_messages(&out);
         assert!(
             messages
@@ -5384,8 +5384,7 @@ mod tests {
 
         let service = LspService::with_backend(EngineBackend::new(engine, false));
 
-        let mut out: Vec<u8> = Vec::new();
-        let code = run_async_loop(service, &mut out, incoming).unwrap();
+        let code = run_async_loop(service, Vec::new(), incoming).unwrap();
 
         assert_eq!(code, 0);
         assert!(
