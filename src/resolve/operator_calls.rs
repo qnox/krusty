@@ -12,6 +12,23 @@
 
 use super::*;
 
+/// The synthetic-call key for a range syntax, paired with the declaration name `RangeKind` owns.
+/// Membership, range expressions, and loops share the key so a mixed operand such as
+/// `3f in 1.0..<3.0` is not rewritten through the wrong operator. Membership always selects this
+/// declaration before its exact provider realization may authorize a direct comparison.
+#[derive(Clone, Copy)]
+pub(super) struct RangeConvention {
+    pub(super) key: SyntheticOperatorCall,
+    pub(super) name: &'static str,
+}
+
+pub(super) fn range_operator(kind: crate::ast::RangeKind) -> RangeConvention {
+    let name = kind.operator_name();
+    let key =
+        SyntheticOperatorCall::from_name(name).expect("range syntax names a synthetic operator");
+    RangeConvention { key, name }
+}
+
 impl<'a> Checker<'a> {
     pub(super) fn operator_call_ret(
         &mut self,
@@ -401,6 +418,35 @@ impl<'a> Checker<'a> {
             let vt = self.expr(scope, value);
             let st = self.expr(scope, start);
             let et = self.expr(scope, end);
+            let operands = InRangeOperands {
+                expression: e,
+                value,
+                kind,
+                start_ty: st,
+                value_ty: vt,
+            };
+            let convention = range_operator(kind);
+            let Some((range_ty, range_call)) = self.operator_call_ret(
+                scope,
+                e,
+                st,
+                convention.name,
+                &[et],
+                &[end],
+                self.span(e),
+                None,
+            ) else {
+                self.diags.error(
+                    self.span(e),
+                    format!(
+                        "operator '{}' cannot be applied to '{}' and '{}'",
+                        convention.name,
+                        st.source_name(),
+                        et.source_name()
+                    ),
+                );
+                return self.set(e, Ty::Error);
+            };
             // Built-in range overload selection uses a type parameter's declared upper bound. The
             // original symbolic type remains attached to each expression; these three values are
             // only the classifiers participating in `rangeTo`/`contains` selection.
@@ -433,146 +479,44 @@ impl<'a> Checker<'a> {
             let range_vt = range_operand(vt);
             let range_st = range_operand(st);
             let range_et = range_operand(et);
+            let comparison_provenance = selected_range_comparison_provenance(kind, &range_call);
             // Require uniform operand types — the lowering emits direct same-type comparisons, so a
             // mixed range (Int value, Long bounds) would need promotion that isn't modeled yet.
-            if prim(&range_vt) && range_vt == range_st && range_st == range_et {
-                // `Double`/`Float` `in a..b` is a comparison only for the stdlib floating range.
-                // A nearer `operator fun Double.rangeTo` is an ordinary `rangeTo` + `contains`.
-                // Integral ranges stay comparisons: their `rangeTo` members are range constructions,
-                // and probing them would re-check every counted membership.
-                if matches!(st, Ty::Double | Ty::Float)
-                    && st == et
-                    && st == vt
-                    && kind == crate::ast::RangeKind::Through
+            let comparison =
+                if prim(&range_vt) && range_vt == range_st && range_st == range_et {
+                    Some(range_st.range_counter_type().unwrap_or(range_st))
+                } else if prim(&range_st)
+                    && range_st == range_et
+                    && self.in_range_widened_value(vt, range_st)
                 {
-                    let operands = InRangeOperands {
-                        expression: e,
-                        end,
-                        value,
-                        start_ty: st,
-                        end_ty: et,
-                        value_ty: vt,
-                    };
-                    match self.select_floating_range_membership(scope, &operands) {
-                        FloatingRangeMembershipSelection::ExactIntrinsic => {}
-                        FloatingRangeMembershipSelection::Ordinary {
-                            range_ty,
-                            range_call,
-                        } => {
-                            let resolved =
-                                self.finish_range_contains(scope, &operands, range_ty, range_call);
-                            return self.set(e, resolved);
-                        }
-                        FloatingRangeMembershipSelection::Unresolved => {
-                            self.diags.error(
-                                self.span(e),
-                                format!(
-                                    "operator 'rangeTo' cannot be applied to '{}' and '{}'",
-                                    st.source_name(),
-                                    et.source_name()
-                                ),
-                            );
-                            return self.set(e, Ty::Error);
-                        }
-                    }
-                }
-                let comparison = range_st.range_counter_type().unwrap_or(range_st);
-                self.resolved_in_range_comparisons.insert(e, comparison);
-                Ty::Boolean
-            } else if prim(&range_st)
-                && range_st == range_et
-                && self.in_range_widened_value(vt, range_st)
-            {
-                // A WIDENED value over a primitive range: `when (x: Any) { in 4..10 -> … }`. kotlinc
-                // lowers it to `CollectionsKt.contains(4..10, x)`, which is true exactly when `x` is a
-                // BOXED element of the range — so it stays a comparison chain, guarded by the
-                // `instanceof` the boxed element type implies.
-                let comparison = range_st
-                    .range_counter_type()
-                    .expect("widened direct membership is restricted to counted primitive ranges");
-                self.resolved_in_range_comparisons.insert(e, comparison);
+                    // A WIDENED value over a primitive range: `when (x: Any) { in 4..10 -> … }`. kotlinc
+                    // lowers it to `CollectionsKt.contains(4..10, x)`, which is true exactly when `x` is a
+                    // BOXED element of the range — so it stays a comparison chain, guarded by the
+                    // `instanceof` the boxed element type implies.
+                    Some(range_st.range_counter_type().expect(
+                        "widened direct membership is restricted to counted primitive ranges",
+                    ))
+                } else {
+                    None
+                };
+            if let (Some(comparison), Some(provenance)) = (comparison, comparison_provenance) {
+                self.resolved_in_range_comparisons.insert(
+                    e,
+                    ResolvedInRangeComparison {
+                        comparison,
+                        provenance,
+                    },
+                );
                 Ty::Boolean
             } else {
                 // Every non-direct-comparison range desugars through the ordinary declarations
                 // `a.rangeTo(b).contains(x)`. This includes reference operators AND mixed unsigned
                 // membership (`UByte in UIntRange`, `UInt in ULongRange`), whose `contains` overloads
                 // live in stdlib metadata. Scalar storage is irrelevant to source applicability.
-                let operands = InRangeOperands {
-                    expression: e,
-                    end,
-                    value,
-                    start_ty: st,
-                    end_ty: et,
-                    value_ty: vt,
-                };
-                if let Some(resolved) = self.record_range_contains(scope, &operands) {
-                    return self.set(e, resolved);
-                }
-                self.diags.error(
-                    self.span(e),
-                    format!(
-                        "operator 'contains' cannot be applied to range '{}' and '{}'",
-                        st.source_name(),
-                        vt.source_name()
-                    ),
-                );
-                Ty::Error
+                self.finish_range_contains(scope, &operands, range_ty, range_call)
             }
         };
         self.set(e, t)
-    }
-
-    /// Select the range constructor before deciding whether membership may become a comparison.
-    /// Only the exact selected common role authorizes the intrinsic; absence remains a frontend
-    /// failure, while every ordinary declaration continues through its selected `contains` call.
-    fn select_floating_range_membership(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        operands: &InRangeOperands,
-    ) -> FloatingRangeMembershipSelection {
-        let Some((range_ty, range_call)) = self.operator_call_ret(
-            scope,
-            operands.expression,
-            operands.start_ty,
-            "rangeTo",
-            &[operands.end_ty],
-            &[operands.end],
-            self.span(operands.expression),
-            None,
-        ) else {
-            return FloatingRangeMembershipSelection::Unresolved;
-        };
-        if matches!(
-            &range_call,
-            ResolvedCall::Extension(extension)
-                if extension.callable.compiler_intrinsic
-                    == Some(crate::libraries::CompilerIntrinsic::FloatingRangeMembership)
-        ) {
-            return FloatingRangeMembershipSelection::ExactIntrinsic;
-        }
-        FloatingRangeMembershipSelection::Ordinary {
-            range_ty,
-            range_call,
-        }
-    }
-
-    /// Record `rangeTo` + `contains` when both resolve. `None` leaves the caller's diagnostic in place.
-    fn record_range_contains(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        operands: &InRangeOperands,
-    ) -> Option<Ty> {
-        let (range_ty, range_call) = self.operator_call_ret(
-            scope,
-            operands.expression,
-            operands.start_ty,
-            "rangeTo",
-            &[operands.end_ty],
-            &[operands.end],
-            self.span(operands.expression),
-            None,
-        )?;
-        Some(self.finish_range_contains(scope, operands, range_ty, range_call))
     }
 
     fn finish_range_contains(
@@ -596,14 +540,14 @@ impl<'a> Checker<'a> {
                 self.span(operands.expression),
                 format!(
                     "operator 'contains' cannot be applied to range '{}' and '{}'",
-                    operands.start_ty.source_name(),
+                    range_ty.source_name(),
                     operands.value_ty.source_name()
                 ),
             );
             return Ty::Error;
         };
         self.resolved_operator_calls.insert(
-            (operands.expression, SyntheticOperatorCall::RangeTo),
+            (operands.expression, range_operator(operands.kind).key),
             range_call,
         );
         self.resolved_operator_calls.insert(
@@ -614,20 +558,69 @@ impl<'a> Checker<'a> {
     }
 }
 
-struct InRangeOperands {
-    expression: ExprId,
-    end: ExprId,
-    value: ExprId,
-    start_ty: Ty,
-    end_ty: Ty,
-    value_ty: Ty,
+fn selected_range_comparison_provenance(
+    kind: crate::ast::RangeKind,
+    range_call: &ResolvedCall,
+) -> Option<crate::fir::FirRangeComparisonProvenance> {
+    use crate::ast::RangeKind;
+    use crate::fir::FirRangeComparisonProvenance as Provenance;
+    use crate::libraries::{CompilerIntrinsic, MemberRealization};
+
+    match (kind, range_call.range_provider_realization()?) {
+        (RangeKind::Through, MemberRealization::RangeConstruction { open_end: false }) => {
+            Some(Provenance::RangeConstruction { open_end: false })
+        }
+        (RangeKind::OpenEnd, MemberRealization::RangeConstruction { open_end: true }) => {
+            Some(Provenance::RangeConstruction { open_end: true })
+        }
+        (RangeKind::Until, MemberRealization::Intrinsic(CompilerIntrinsic::RangeUntil)) => {
+            Some(Provenance::RangeUntil)
+        }
+        (RangeKind::DownTo, MemberRealization::Intrinsic(CompilerIntrinsic::RangeDownTo)) => {
+            Some(Provenance::RangeDownTo)
+        }
+        (
+            RangeKind::Through | RangeKind::OpenEnd,
+            MemberRealization::Intrinsic(CompilerIntrinsic::FloatingRangeMembership),
+        ) => Some(Provenance::FloatingRangeMembership),
+        _ => None,
+    }
 }
 
-enum FloatingRangeMembershipSelection {
-    ExactIntrinsic,
-    Ordinary {
-        range_ty: Ty,
-        range_call: ResolvedCall,
-    },
-    Unresolved,
+impl ResolvedCall {
+    /// Provider realization attached to this exact selected range declaration. Normalized library
+    /// extensions carry compiler intrinsics beside their ordinary dispatch realization, so fold
+    /// those provider fields before deciding whether membership may bypass `contains`.
+    fn range_provider_realization(&self) -> Option<crate::libraries::MemberRealization> {
+        let realization = match self {
+            Self::Member(resolved) => resolved.member.realization,
+            Self::TopLevel(call) => call
+                .callable
+                .compiler_intrinsic
+                .map(crate::libraries::MemberRealization::Intrinsic)
+                .unwrap_or(call.callable.member_realization),
+            Self::Companion(member) => member.realization,
+            Self::Extension(extension) => extension
+                .callable
+                .compiler_intrinsic
+                .map(crate::libraries::MemberRealization::Intrinsic)
+                .unwrap_or(extension.callable.member_realization),
+            Self::MemberExtension { .. } | Self::LocalFunction(_) => return None,
+        };
+        Some(realization)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ResolvedInRangeComparison {
+    pub(crate) comparison: Ty,
+    pub(crate) provenance: crate::fir::FirRangeComparisonProvenance,
+}
+
+struct InRangeOperands {
+    expression: ExprId,
+    value: ExprId,
+    kind: crate::ast::RangeKind,
+    start_ty: Ty,
+    value_ty: Ty,
 }
