@@ -14,9 +14,11 @@ use super::output_queue::OutputQueue;
 const DIAGNOSTIC_STREAM_DRAIN_POLL: Duration = Duration::from_millis(1);
 const MAX_INPUTS_BUFFERED_DURING_DIAGNOSTIC_STREAM: usize = 32;
 /// Once the normal pending deque is full, retain at most one production input-channel's worth of
-/// additional events while looking for a cancellation. The aggregate retained-input bound is
-/// therefore `MAX_INPUTS_BUFFERED_DURING_DIAGNOSTIC_STREAM + INPUT_QUEUE_CAPACITY`.
-const MAX_INPUTS_DEFERRED_DURING_DIAGNOSTIC_STREAM: usize = INPUT_QUEUE_CAPACITY;
+/// additional events while looking for a cancellation. This is one aggregate bound across
+/// consecutive streams: events restored by an earlier stream already consume the next stream's
+/// capacity.
+const MAX_INPUTS_RETAINED_DURING_DIAGNOSTIC_STREAM: usize =
+    MAX_INPUTS_BUFFERED_DURING_DIAGNOSTIC_STREAM + INPUT_QUEUE_CAPACITY;
 
 pub struct Dispatch {
     pub messages: Vec<Value>,
@@ -188,6 +190,10 @@ fn observe_incoming(
     pending: &mut VecDeque<Incoming>,
 ) {
     cancel_from_pending(stream, pending);
+    if retained_inputs(pending, deferred) >= MAX_INPUTS_RETAINED_DURING_DIAGNOSTIC_STREAM {
+        stream.cancel_for_delivery_backlog();
+        return;
+    }
     loop {
         match incoming.try_recv() {
             Ok(event) => {
@@ -195,12 +201,16 @@ fn observe_incoming(
                     stream.cancel();
                     break;
                 }
-                if pending.len() < MAX_INPUTS_BUFFERED_DURING_DIAGNOSTIC_STREAM {
+                if deferred.is_empty()
+                    && pending.len() < MAX_INPUTS_BUFFERED_DURING_DIAGNOSTIC_STREAM
+                {
                     pending.push_back(event);
-                    continue;
+                } else {
+                    deferred.push_back(event);
                 }
-                deferred.push_back(event);
-                if deferred.len() == MAX_INPUTS_DEFERRED_DURING_DIAGNOSTIC_STREAM {
+                if retained_inputs(pending, deferred)
+                    >= MAX_INPUTS_RETAINED_DURING_DIAGNOSTIC_STREAM
+                {
                     stream.cancel_for_delivery_backlog();
                     break;
                 }
@@ -212,6 +222,10 @@ fn observe_incoming(
             }
         }
     }
+}
+
+fn retained_inputs(pending: &VecDeque<Incoming>, deferred: &VecDeque<Incoming>) -> usize {
+    pending.len().saturating_add(deferred.len())
 }
 
 fn cancel_from_pending(stream: &mut WorkspaceDiagnosticStream, pending: &mut VecDeque<Incoming>) {
@@ -726,8 +740,7 @@ mod tests {
             .unwrap();
         wait_until_idle(&mut writer);
 
-        let expected_events = (0..MAX_INPUTS_BUFFERED_DURING_DIAGNOSTIC_STREAM
-            + MAX_INPUTS_DEFERRED_DURING_DIAGNOSTIC_STREAM)
+        let expected_events = (0..MAX_INPUTS_RETAINED_DURING_DIAGNOSTIC_STREAM)
             .map(configuration_event)
             .collect::<Vec<_>>();
         pending.extend(
@@ -775,6 +788,161 @@ mod tests {
                 json!({
                     "jsonrpc": "2.0",
                     "id": id,
+                    "error": {
+                        "code": -32802,
+                        "message": "workspace diagnostic delivery input queue is full",
+                        "data": {"retriggerRequest": false}
+                    }
+                })
+            ]
+        );
+    }
+
+    #[test]
+    fn chained_streams_share_one_retained_input_bound() {
+        use crate::server::output_queue::SharedWriter;
+
+        let first_id = json!("workspace/diagnostic/first");
+        let second_id = json!("workspace/diagnostic/second");
+        let first_token = json!("workspace/diagnostic/first-progress");
+        let second_token = json!("workspace/diagnostic/second-progress");
+        let items = (0..80)
+            .map(|index| json!({"index": index, "payload": "m".repeat(8 * 1024)}))
+            .collect::<Vec<_>>();
+        let WorkspaceDiagnosticResponse::Stream(first) =
+            workspace_diagnostic_response(first_id.clone(), items.clone(), Some(&first_token))
+        else {
+            panic!("oversized bounded response must stream");
+        };
+        let (inner, captured) = SharedWriter::recording();
+        let mut writer = OutputQueue::spawn(inner).expect("output queue");
+        let mut delivery = AsyncResponseDelivery::default();
+        assert_eq!(
+            delivery
+                .accept(&mut writer, Dispatch::diagnostic_stream(first))
+                .unwrap(),
+            None
+        );
+
+        let (_empty_sender, empty_incoming) = mpsc::sync_channel(INPUT_QUEUE_CAPACITY);
+        let mut pending = VecDeque::new();
+        delivery
+            .advance(&mut writer, &empty_incoming, &mut pending)
+            .unwrap();
+        wait_until_idle(&mut writer);
+
+        let second_request = json!({
+            "jsonrpc": "2.0",
+            "id": second_id,
+            "method": "workspace/diagnostic",
+            "params": {"partialResultToken": second_token}
+        });
+        let mut expected_retained = vec![second_request.clone()];
+        expected_retained
+            .extend((1..MAX_INPUTS_BUFFERED_DURING_DIAGNOSTIC_STREAM).map(configuration_event));
+        pending.extend(expected_retained.iter().cloned().map(Incoming::Message));
+        let first_deferred = (MAX_INPUTS_BUFFERED_DURING_DIAGNOSTIC_STREAM
+            ..MAX_INPUTS_RETAINED_DURING_DIAGNOSTIC_STREAM)
+            .map(configuration_event)
+            .collect::<Vec<_>>();
+        expected_retained.extend(first_deferred.iter().cloned());
+        let (first_sender, first_incoming) = mpsc::sync_channel(INPUT_QUEUE_CAPACITY);
+        for event in first_deferred {
+            first_sender.send(Incoming::Message(event)).unwrap();
+        }
+        let first_deadline = Instant::now() + Duration::from_secs(2);
+        while delivery.is_active() {
+            assert!(
+                Instant::now() < first_deadline,
+                "the first saturated stream did not reach its terminal"
+            );
+            delivery
+                .advance(&mut writer, &first_incoming, &mut pending)
+                .unwrap();
+        }
+        assert_eq!(pending.len(), MAX_INPUTS_RETAINED_DURING_DIAGNOSTIC_STREAM);
+
+        let Some(Incoming::Message(next_request)) = pending.pop_front() else {
+            panic!("the next retained event must be the second diagnostic request");
+        };
+        assert_eq!(next_request, second_request);
+        expected_retained.remove(0);
+        let WorkspaceDiagnosticResponse::Stream(second) =
+            workspace_diagnostic_response(second_id.clone(), items.clone(), Some(&second_token))
+        else {
+            panic!("the second oversized bounded response must stream");
+        };
+        assert_eq!(
+            delivery
+                .accept(&mut writer, Dispatch::diagnostic_stream(second))
+                .unwrap(),
+            None
+        );
+
+        let second_lookahead = (MAX_INPUTS_RETAINED_DURING_DIAGNOSTIC_STREAM
+            ..MAX_INPUTS_RETAINED_DURING_DIAGNOSTIC_STREAM + INPUT_QUEUE_CAPACITY)
+            .map(configuration_event)
+            .collect::<Vec<_>>();
+        expected_retained.push(second_lookahead[0].clone());
+        let (second_sender, second_incoming) = mpsc::sync_channel(INPUT_QUEUE_CAPACITY);
+        for event in &second_lookahead {
+            second_sender
+                .send(Incoming::Message(event.clone()))
+                .unwrap();
+        }
+        let second_deadline = Instant::now() + Duration::from_secs(2);
+        while delivery.is_active() {
+            assert!(
+                Instant::now() < second_deadline,
+                "the chained stream did not fail closed"
+            );
+            delivery
+                .advance(&mut writer, &second_incoming, &mut pending)
+                .unwrap();
+        }
+
+        let retained = pending
+            .iter()
+            .map(|event| match event {
+                Incoming::Message(message) => message.clone(),
+                _ => panic!("only messages were queued"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(retained, expected_retained);
+        assert_eq!(retained.len(), MAX_INPUTS_RETAINED_DURING_DIAGNOSTIC_STREAM);
+        let unread = second_incoming
+            .try_iter()
+            .map(|event| match event {
+                Incoming::Message(message) => message,
+                _ => panic!("only messages were queued"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(unread, second_lookahead[1..]);
+
+        assert_eq!(writer.finish(Ok(0)).unwrap(), 0);
+        assert_eq!(
+            decode_frames(&captured.lock().expect("captured output")),
+            vec![
+                json!({
+                    "jsonrpc": "2.0",
+                    "method": "$/progress",
+                    "params": {
+                        "token": first_token,
+                        "value": {"items": &items[..31]}
+                    }
+                }),
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": first_id,
+                    "error": {
+                        "code": -32802,
+                        "message": "workspace diagnostic delivery input queue is full",
+                        "data": {"retriggerRequest": false}
+                    }
+                }),
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": second_id,
                     "error": {
                         "code": -32802,
                         "message": "workspace diagnostic delivery input queue is full",
