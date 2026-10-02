@@ -85,6 +85,7 @@ fn external_reflection(
         .reflection_name
         .clone()
         .unwrap_or_else(|| callable.name.clone());
+    let physical_name = callable.physical_name().to_string();
     let descriptor = if callable.descriptor.is_empty() {
         // A compiler-implemented declaration has no JVM method; its signature is the one its
         // declaration maps to. That includes a member the provider realizes as a compiler
@@ -115,18 +116,18 @@ fn external_reflection(
         {
             (
                 Some(crate::types::wk::kotlin_intrinsics_reflection_owner()),
-                callable.name.as_str(),
+                physical_name.as_str(),
                 false,
             )
         }
         ExternalCallableKind::TopLevel | ExternalCallableKind::Extension => {
-            (Some(callable.physical_owner), callable.name.as_str(), true)
+            (Some(callable.physical_owner), physical_name.as_str(), true)
         }
         ExternalCallableKind::Member => (
             receiver.and_then(Ty::kotlin_class_internal),
             crate::jvm::names::mapped_builtin_virtual_name(
                 callable.physical_owner,
-                &callable.name,
+                &physical_name,
                 &descriptor,
             ),
             false,

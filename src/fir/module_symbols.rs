@@ -560,6 +560,7 @@ impl<'a> StreamedModuleSymbols<'a> {
             external_property_identity: None,
             owner: TypeName::ROOT,
             name: name.to_owned(),
+            physical_name: None,
             reflection_name: Some(name.to_owned()),
             compiler_intrinsic: None,
             semantic_role: None,

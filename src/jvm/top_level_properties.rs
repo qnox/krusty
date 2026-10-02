@@ -48,14 +48,17 @@ pub(super) fn merge_metadata_const(
     // There is no JVM getter method. Model the semantic zero-argument property read with the exact
     // provider-owned static-field identity, so any consumer that needs a runtime handle cannot invent
     // an accessor name or descriptor. Ordinary value reads consume `compile_time_constant` first.
+    let getter_source_name = source_name.to_string();
+    let getter_physical_name = (field.name != source_name).then(|| field.name.clone());
     let mut getter = LibraryCallable::library(
         field.owner,
-        source_name,
+        getter_source_name,
         Vec::new(),
         ty,
         field.ty,
         field.descriptor.clone(),
     );
+    getter.physical_name = getter_physical_name;
     getter.external_identity = field.external_identity;
     properties.push(PropertyInfo {
         return_value_status: None,

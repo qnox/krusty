@@ -193,7 +193,7 @@ impl BackendMemberFact {
         let callable = &function.callable;
         Self {
             name: BackendMemberName::Declared(callable.name.as_str().into()),
-            physical_name: None,
+            physical_name: callable.physical_name.as_deref().map(Into::into),
             owner: Some(callable.owner),
             physical_params: callable.physical_params.clone().into_boxed_slice(),
             params: callable.params.clone().into_boxed_slice(),

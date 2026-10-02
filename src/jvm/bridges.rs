@@ -130,7 +130,7 @@ fn external_method_name(
     let callable = callables.callable(target).ok_or(SkipReason::Bridges)?;
     Ok(crate::jvm::names::mapped_builtin_virtual_name(
         callable.physical_owner,
-        &callable.name,
+        callable.physical_name(),
         &callable.descriptor,
     )
     .to_owned())

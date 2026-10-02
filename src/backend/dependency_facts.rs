@@ -28,9 +28,10 @@ use crate::types::{InlineParameterModifier, Ty, TypeName};
 /// reinterpretation. None of it is recovered from a spelling.
 #[derive(Clone, Debug)]
 pub struct BackendCallableFact {
-    /// Kotlin declaration spelling and optional callable-reflection spelling published for this
-    /// exact identity. Neither is lookup input at this boundary.
+    /// Kotlin declaration spelling, target realization spelling, and optional callable-reflection
+    /// spelling published for this exact identity. None is lookup input at this boundary.
     pub name: String,
+    pub physical_name: Option<String>,
     pub reflection_name: Option<String>,
     /// Target owner selected by the provider. This is a physical realization fact (a facade or a
     /// mapped platform class), not the declaration's semantic Kotlin owner.
@@ -56,6 +57,12 @@ pub struct BackendCallableFact {
     pub default_realization: Option<Box<DefaultCallRealization>>,
     pub nonvirtual_realization: Option<Box<NonvirtualCallRealization>>,
     pub generic_sig: Option<Box<GenericSig>>,
+}
+
+impl BackendCallableFact {
+    pub fn physical_name(&self) -> &str {
+        self.physical_name.as_deref().unwrap_or(&self.name)
+    }
 }
 
 /// What the provider normalized for one selected dependency property.
@@ -187,6 +194,7 @@ impl CheckedBackendCallables {
                 let callable = realization.callable;
                 slot.insert(BackendCallableFact {
                     name: callable.name,
+                    physical_name: callable.physical_name,
                     reflection_name: callable.reflection_name,
                     physical_owner: callable.owner,
                     kind: realization.kind,

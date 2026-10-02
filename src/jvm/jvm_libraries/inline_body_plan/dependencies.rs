@@ -122,7 +122,7 @@ impl JvmLibraries {
             .filter(|function| {
                 function.kind == FnKind::TopLevel
                     && function.callable.owner == owner
-                    && function.callable.name == name
+                    && function.callable.physical_name() == name
                     && function.callable.descriptor == descriptor
             });
         let Some(function) = matches.next() else {
@@ -168,6 +168,9 @@ impl JvmLibraries {
         {
             return InlineDependency::Rejected;
         }
+        let Some(source_name) = facts.source_name.clone() else {
+            return InlineDependency::Rejected;
+        };
         let Some(signature) = facts.generic_sig else {
             return InlineDependency::Rejected;
         };
@@ -199,9 +202,11 @@ impl JvmLibraries {
             generic_sig: Some(Box::new(signature.clone())),
             declared_params: Some(params.clone().into_boxed_slice()),
             signature: candidate.signature,
+            physical_name: (source_name != name).then(|| name.to_owned()),
+            reflection_name: Some(source_name.clone()),
             ..LibraryCallable::library(
                 owner,
-                name.to_owned(),
+                source_name,
                 params,
                 ret,
                 physical_ret,

@@ -21,7 +21,7 @@ impl Classpath {
                         .any(|property| {
                             property.is_inline_underlying
                                 && property.getter.as_ref().is_some_and(|accessor| {
-                                    accessor.name == callable.name
+                                    accessor.name == callable.physical_name()
                                         && accessor.desc == callable.descriptor
                                 })
                         })

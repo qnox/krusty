@@ -13,6 +13,31 @@
 
 use super::*;
 
+/// Materialize the default-argument bridge attached to the already-selected declaration. The bridge
+/// is realization data only: semantic parameters, generic signature, visibility, and overload identity
+/// remain those of `base`; no synthetic name is re-entered into resolution.
+pub(crate) fn selected_default_callable(base: &FunctionInfo) -> Option<LibraryCallable> {
+    let Some(realization) = base.callable.default_realization.as_deref() else {
+        crate::trace_compiler!(
+            "default_semantics",
+            "selected callable has no default realization: {}.{}{}",
+            base.callable.owner.render(),
+            base.callable.name,
+            base.callable.descriptor,
+        );
+        return None;
+    };
+    let mut callable = base.callable.clone();
+    callable.owner = realization.owner;
+    callable.physical_name = (realization.name != callable.name).then(|| realization.name.clone());
+    callable.descriptor = realization.descriptor.clone();
+    callable.physical_params = realization.real_params.clone();
+    callable.physical_ret = realization.ret;
+    callable.suspend = realization.suspend;
+    callable.default_call = true;
+    Some(callable)
+}
+
 impl<'a> SymbolResolver<'a> {
     /// Delegate conventions additionally need the receiver application inferred by their ordinary
     /// value arguments. For example, `D("K")` may initially have the raw type `D<>`, while

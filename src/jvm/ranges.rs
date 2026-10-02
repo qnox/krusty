@@ -333,10 +333,11 @@ fn illegal_step(ir: &mut IrFile, cause: ExprId, step: ExprId) -> IrExpr {
 }
 
 fn static_call(callable: crate::libraries::LibraryCallable, start: ExprId, end: ExprId) -> IrExpr {
+    let physical_name = callable.physical_name().to_string();
     IrExpr::Call {
         callee: Callee::Static {
             owner: callable.owner,
-            name: callable.name,
+            name: physical_name,
             descriptor: callable.descriptor,
             inline: callable.inline,
         },

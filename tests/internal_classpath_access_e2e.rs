@@ -194,6 +194,39 @@ fn friend_classpath_grants_internal_top_level_property_visibility() {
 }
 
 #[test]
+fn same_package_dependency_internal_member_still_requires_a_friend_module() {
+    let fixture = Fixture::new();
+    let source = "package lib\n\
+                  fun use(value: Visible): Int = value.hiddenMember(1)\n";
+
+    assert_eq!(
+        fixture.diagnostics(source),
+        ["cannot access 'hiddenMember': it is internal in 'lib/Visible'"]
+    );
+    assert_eq!(fixture.friend_diagnostics(source), Vec::<String>::new());
+}
+
+#[test]
+fn streamed_checker_allows_internal_members_across_packages_in_one_module() {
+    let diagnostics = common::module_front_end_diagnostics(&[
+        (
+            "Owner",
+            "package first\n\
+             class Owner { internal fun hidden(): Int = 1 }\n",
+        ),
+        (
+            "Use",
+            "package second\n\
+             import first.Owner\n\
+             fun use(owner: Owner): Int = owner.hidden()\n",
+        ),
+    ])
+    .expect("frontend toolchain");
+
+    assert_eq!(diagnostics, Vec::<String>::new());
+}
+
+#[test]
 fn classifier_access_diagnostics_follow_resolution_scope() {
     let fixture = Fixture::new();
 

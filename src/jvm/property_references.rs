@@ -561,7 +561,7 @@ fn external_property(
             } else {
                 call_owner
             },
-            name: realization.name.clone(),
+            name: realization.physical_name().to_string(),
             ty,
             is_static,
         })
@@ -583,7 +583,7 @@ fn external_property(
     let getter_name = if field_realization {
         crate::names::property_getter_name(&name)
     } else {
-        callable.name.clone()
+        callable.physical_name().to_string()
     };
     // The provider decoded this declaration edge from the metadata's stable string-table
     // identities and attached it to the exact external property selected by FIR. Do not compare
@@ -596,7 +596,9 @@ fn external_property(
             prop_name: name.to_string(),
             getter_name: getter_name.clone(),
             getter_descriptor: Some(descriptor),
-            setter_name: setter.as_ref().map(|(_, setter)| setter.name.clone()),
+            setter_name: setter
+                .as_ref()
+                .map(|(_, setter)| setter.physical_name().to_string()),
             setter_descriptor: setter.as_ref().map(|(_, setter)| {
                 if field_realization {
                     crate::jvm::names::method_descriptor(&setter.physical_params, Ty::Unit)

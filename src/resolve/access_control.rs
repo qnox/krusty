@@ -2,6 +2,21 @@
 
 use super::*;
 
+/// Whether the current compilation module declares `classifier` as an ordinary classifier.
+///
+/// This deliberately reads the module provider alone, not the federated resolver: dependency
+/// classifiers stay visible for diagnostics but must not acquire same-module `internal` access.
+/// The declaration facet is authoritative even while a streamed local classifier's full shape is
+/// deferred, and its explicit `Ordinary` tag prevents a source typealias from claiming its target.
+fn module_declares_classifier(module: &dyn SymbolSource, classifier: TypeName) -> bool {
+    let (namespace, name) = crate::symbol_source::SymbolNamespace::classifier_key(classifier);
+    matches!(
+        module.symbols(namespace, name).classifier_declaration.as_ref(),
+        Some(crate::libraries::ClassifierDeclaration::Ordinary(declared))
+            if *declared == classifier
+    )
+}
+
 impl<'a> Checker<'a> {
     /// Whether a member of `owner` with visibility `vis` is accessible from the CURRENT site (the class
     /// being checked, `scope.this_ty()`), by Kotlin's rules. `internal` is accessible only when its
@@ -20,19 +35,7 @@ impl<'a> Checker<'a> {
         match vis {
             Visibility::Public => true,
             Visibility::Internal => {
-                let module_owned = match self.resolved_index {
-                    // The finalized module index contains only this compilation module. A
-                    // dependency-source fallback is deliberately exposed through the semantic
-                    // provider instead, so mere resolver visibility cannot grant `internal`
-                    // access across that module boundary.
-                    Some(index) => index.classifier_declaration(owner).is_some(),
-                    // The legacy whole-source checker has no stable index; its module symbol
-                    // table remains the only way to identify a same-compilation owner.
-                    None => self
-                        .module
-                        .legacy_symbols()
-                        .is_some_and(|symbols| symbols.class_by_type_name(owner).is_some()),
-                };
+                let module_owned = module_declares_classifier(&self.module, owner);
                 let friend = self.libraries.internal_accessible(owner);
                 module_owned || friend
             }
@@ -110,5 +113,33 @@ impl<'a> Checker<'a> {
                         || self.obj_name_is_subtype(access_classifier, owner))
                         && self.receiver_is_assignable(receiver, Ty::obj_name(access_classifier))
                 })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// The pre-finalization checker carries `ModuleSymbols`, not a resolved index. Its normalized
+    /// declaration record must still prove that an internal member belongs to this compilation.
+    #[test]
+    fn legacy_checker_uses_module_identity_for_internal_members() {
+        let source = "package first\n\
+                      class Owner { internal fun hidden(): Int = 1 }\n\
+                      fun use(owner: Owner): Int = owner.hidden()";
+        let mut diagnostics = crate::diag::DiagSink::new();
+        let tokens = crate::lexer::lex(source, &mut diagnostics);
+        let file = crate::parser::parse(source, &tokens, &mut diagnostics);
+        let files = vec![file];
+        let mut symbols = super::super::collect_signatures(&files, &mut diagnostics);
+
+        let _ = super::super::check_file(&files[0], &mut symbols, &mut diagnostics);
+
+        assert_eq!(
+            diagnostics
+                .diags
+                .iter()
+                .map(|diagnostic| diagnostic.msg.as_str())
+                .collect::<Vec<_>>(),
+            Vec::<&str>::new()
+        );
     }
 }

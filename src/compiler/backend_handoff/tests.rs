@@ -288,6 +288,7 @@ impl Backend for FactRecorder {
                 .expect("the provider answers for its own callable identity");
             let declaration = realization.callable;
             assert_eq!(fact.name, declaration.name);
+            assert_eq!(fact.physical_name, declaration.physical_name);
             assert_eq!(fact.reflection_name, declaration.reflection_name);
             assert_eq!(fact.physical_owner, declaration.owner);
             assert_eq!(fact.kind, realization.kind);
@@ -490,7 +491,7 @@ fn assert_default_realization(
 }
 
 fn fact_name(fact: &BackendCallableFact) -> &str {
-    fact.reflection_name.as_deref().unwrap_or(&fact.name)
+    &fact.name
 }
 
 fn assert_named(
@@ -742,6 +743,8 @@ fn a_plugin_added_dependency_super_call_is_frozen_once() {
         Ty::Int,
         "()I",
     );
+    declaration.physical_name = Some("value-platform".to_string());
+    declaration.reflection_name = Some("value-reflected".to_string());
     declaration.owner_is_interface = true;
     declaration.nonvirtual_realization = Some(Box::new(holder.clone()));
     let realization = crate::libraries::ExternalCallableRealization {
@@ -756,14 +759,13 @@ fn a_plugin_added_dependency_super_call_is_frozen_once() {
         })
         .expect("the plugin-selected identity has a provider record");
     assert_eq!(queries.get(), 1);
-    assert_eq!(
-        facts
-            .callable(target)
-            .expect("the plugin-selected identity is frozen")
-            .nonvirtual_realization
-            .as_deref(),
-        Some(&holder)
-    );
+    let frozen = facts
+        .callable(target)
+        .expect("the plugin-selected identity is frozen");
+    assert_eq!(frozen.name, "value");
+    assert_eq!(frozen.physical_name.as_deref(), Some("value-platform"));
+    assert_eq!(frozen.reflection_name.as_deref(), Some("value-reflected"));
+    assert_eq!(frozen.nonvirtual_realization.as_deref(), Some(&holder));
 
     facts
         .freeze_plugin_super_callables(&ir, |_| {

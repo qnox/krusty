@@ -145,8 +145,11 @@ fn a_dependency_member_dispatch_keeps_the_selected_declaration() {
             };
             let declaration = classpath.external_callable(*target).expect("realized");
             assert_eq!(
-                (declaration.callable.owner, &declaration.callable.name),
-                (*owner, name)
+                (
+                    declaration.callable.owner,
+                    declaration.callable.physical_name()
+                ),
+                (*owner, name.as_str())
             );
             *target
         })
