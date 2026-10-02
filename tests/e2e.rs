@@ -2288,6 +2288,8 @@ mod vararg_constructor_property_e2e;
 mod vararg_e2e;
 #[path = "vararg_element_default_e2e.rs"]
 mod vararg_element_default_e2e;
+#[path = "vararg_element_specificity_e2e.rs"]
+mod vararg_element_specificity_e2e;
 #[path = "vararg_elements_before_named_e2e.rs"]
 mod vararg_elements_before_named_e2e;
 #[path = "vararg_extension_overload_e2e.rs"]

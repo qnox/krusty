@@ -250,10 +250,26 @@ impl CallArgKind {
     /// lambda participates like every other typed expression.
     ///
     pub(crate) fn contributes_type_to_inference(&self) -> bool {
-        !self.is_expected_type_callable()
+        if self.is_omitted_default() {
+            return false;
+        }
+        // `listOf(value)` and `xs.map { B(it) }` already fixed their result. That result is a
+        // constraint on the enclosing call. `emptySet()` and `ArrayList()` did not: only the
+        // enclosing expectation may finish them.
+        if self.is_expected_type_callable() {
+            return self.result_is_input_constrained();
+        }
+        !self.is_lambda_literal() || (!self.ty().mentions_error() && !self.ty().mentions_pending())
+    }
+
+    /// A value argument whose type is known before the enclosing candidate is chosen.
+    ///
+    /// An unresolved lambda is still shaped by the parameter. A nested call contributes only when
+    /// its own inputs fixed the result; a result-only producer stays postponed.
+    pub(crate) fn supplies_fixed_argument_type(&self) -> bool {
+        !self.is_lambda_literal()
             && !self.is_omitted_default()
-            && (!self.is_lambda_literal()
-                || (!self.ty().mentions_error() && !self.ty().mentions_pending()))
+            && (!self.is_expected_type_callable() || self.result_is_input_constrained())
     }
 
     pub(crate) fn adapts_integer_literal_to(&self, parameter: Ty) -> bool {
@@ -319,11 +335,36 @@ impl CallArgKind {
         }
         !self.result_is_input_constrained() && self.binds_result_to(src, parameter)
     }
+
+    /// Whether a constructor parameter may complete this nested call without replacing a
+    /// concrete result established by the nested call's own inputs.
+    ///
+    /// A concrete expectation cannot rebind `listOf(1, 2)` from `List<Int>` to
+    /// `Collection<String>`. A still-symbolic parameter such as `List<P>` may finish the
+    /// result. Result-only producers remain freely contextual.
+    pub(crate) fn may_bind_result_during_overload_selection(&self, parameter: Ty) -> bool {
+        !self.result_is_input_constrained() || parameter.mentions_ty_param()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn expected_type_call(provisional: Ty, params: Vec<Ty>) -> CallArgKind {
+        let formal = Ty::ty_param("T", Ty::obj("kotlin/Any"));
+        CallArgKind::ExpectedTypeCallable {
+            provisional,
+            generic_sig: std::sync::Arc::new(GenericSig {
+                formals: vec!["T".to_owned()],
+                formal_bounds: vec![Vec::new()],
+                receiver: None,
+                params,
+                ret: Ty::obj_args("fixture/Box", &[formal]),
+                return_policy: Default::default(),
+            }),
+        }
+    }
 
     #[test]
     fn integer_literal_uses_concrete_contextual_parameter_type() {
@@ -336,5 +377,23 @@ mod tests {
     fn out_of_range_integer_literal_keeps_ordinary_type() {
         let literal = CallArgKind::integer_literal(Ty::Int, 256);
         assert_eq!(literal.type_for(Ty::Byte), Ty::Int);
+    }
+
+    #[test]
+    fn input_constrained_result_carries_a_recorded_provisional_shape() {
+        let formal = Ty::ty_param("T", Ty::obj("kotlin/Any"));
+        let call = expected_type_call(Ty::obj_args("fixture/Box", &[Ty::Int]), vec![formal]);
+
+        assert!(call.result_is_input_constrained());
+    }
+
+    #[test]
+    fn result_only_producer_has_no_recorded_provisional_shape() {
+        let call = expected_type_call(
+            Ty::obj_args("fixture/Box", &[Ty::ty_param("T", Ty::obj("kotlin/Any"))]),
+            Vec::new(),
+        );
+
+        assert!(!call.result_is_input_constrained());
     }
 }
