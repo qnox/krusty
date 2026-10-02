@@ -41,15 +41,15 @@ use crate::server::engine::{
 use crate::server::status::StatusReporter;
 use crate::uri::{file_uri_to_path, path_to_file_uri};
 use crate::worker::{source_set_fits, MAX_SOURCE_SET_BYTES};
+
+mod analysis_batch_application;
 use krusty::diag::{Diagnostic, DiagnosticKind, Severity};
 
 pub const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_HEADER_BYTES: usize = 8 * 1024;
 const INPUT_QUEUE_CAPACITY: usize = 4;
 const MAX_INPUT_DISPATCHES_BEFORE_MAINTENANCE: usize = 32;
-/// How long shutdown waits for the analysis thread to notice the disconnect before
-/// abandoning it. Without a bound, one wedged analysis keeps the process — and its
-/// worker child — alive indefinitely after the client is gone.
+/// How long shutdown waits for the analysis thread before abandoning a wedged worker.
 const ENGINE_SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 const MAX_OPEN_DOCUMENTS: usize = 256;
 const MAX_OPEN_SOURCE_BYTES: usize = MAX_RETAINED_ANALYSIS_BYTES;
@@ -571,7 +571,7 @@ impl<A: Analysis> AnalysisBackend for InlineBackend<A> {
         self.0.document_admission().accepts(documents)
     }
 
-    fn submit(&mut self, job: AnalysisJob) -> Option<AnalysisBatch> {
+    fn submit(&mut self, mut job: AnalysisJob) -> Option<AnalysisBatch> {
         debug_assert!(self.0.analysis_ready());
         Some(job.run(&mut self.0))
     }
@@ -1259,173 +1259,6 @@ where
         Some(job)
     }
 
-    fn apply_analysis_batch(&mut self, batch: AnalysisBatch) -> Vec<Value> {
-        self.analysis_in_flight = false;
-        let resubmit = std::mem::take(&mut self.resubmit_pending);
-        let changed = std::mem::take(&mut self.changed_identities);
-        let fresh = batch
-            .analyzed
-            .iter()
-            .map(|(uri, analyzed_version)| {
-                !changed.contains(uri)
-                    && self
-                        .documents
-                        .get(uri)
-                        .is_some_and(|open| open.version == *analyzed_version)
-            })
-            .collect::<Vec<_>>();
-        if fresh.iter().any(|fresh| !fresh) {
-            self.analysis_dirty = true;
-        }
-        if !fresh.is_empty() && !fresh.iter().any(|fresh| *fresh) {
-            return Vec::new();
-        }
-        let batch_is_fresh = fresh.iter().all(|fresh| *fresh);
-        let uris = batch
-            .analyzed
-            .iter()
-            .zip(&fresh)
-            .filter(|(_, fresh)| **fresh)
-            .map(|((uri, _), _)| uri.clone())
-            .collect::<Vec<_>>();
-        if batch.pending {
-            let current_uris = self
-                .analyzed_uris()
-                .into_iter()
-                .map(str::to_owned)
-                .collect::<Vec<_>>();
-            self.schedule_analysis_retry(&current_uris);
-            return Vec::new();
-        }
-        let mut diagnostic_budget = DiagnosticBudget::default();
-        if batch.analyses.len() != batch.analyzed.len() {
-            if !batch_is_fresh {
-                self.analysis_dirty = true;
-                return Vec::new();
-            }
-            self.source_set.clear();
-            self.workspace_symbols = WorkspaceSymbolIndex::default();
-            for uri in &uris {
-                let open = self
-                    .documents
-                    .get_mut(uri)
-                    .expect("batch freshness checked before applying");
-                open.clear_analysis();
-                open.diagnostics = DiagnosticIndex::from_diagnostics(
-                    vec![Diagnostic {
-                        span: krusty::diag::Span::new(0, 0),
-                        editor_span: None,
-                        identity: None,
-                        severity: Severity::Error,
-                        kind: DiagnosticKind::Compiler,
-                        msg: "analysis worker returned an incomplete source set".to_string(),
-                        file: 0,
-                    }],
-                    &open.text,
-                    &mut diagnostic_budget,
-                );
-            }
-            if resubmit {
-                self.analysis_dirty = true;
-            }
-            let mut messages = uris
-                .into_iter()
-                .filter_map(|uri| {
-                    let open = &self.documents[&uri];
-                    self.publish(&uri, Some(open.version), &open.diagnostics)
-                })
-                .collect::<Vec<_>>();
-            messages.extend(self.diagnostic_refresh());
-            if !resubmit {
-                messages.extend(self.complete_pending_analysis_requests());
-            }
-            return messages;
-        }
-        self.analysis_retry_at = None;
-        self.analysis_retry_backoff = Duration::ZERO;
-        let push = self.pushes_diagnostics();
-        let mut messages = Vec::with_capacity(batch.analyses.len());
-        let mut analyzed_documents = Vec::with_capacity(batch.analyzed.len());
-        let mut workspace_symbols = WorkspaceSymbolIndex::default();
-        for ((analysis, (uri, _analyzed_version)), fresh) in
-            batch.analyses.into_iter().zip(batch.analyzed).zip(fresh)
-        {
-            if !fresh {
-                continue;
-            }
-            let DocumentAnalysis {
-                diagnostics,
-                hover,
-                completion,
-                signature_help,
-                semantic_tokens,
-                definitions,
-                type_definitions,
-                implementations,
-                library_definitions,
-                document_symbols,
-                workspace_symbols: document_workspace_symbols,
-                folding_ranges,
-                implementation_relations: _,
-            } = analysis;
-            if batch_is_fresh {
-                workspace_symbols.merge_from(document_workspace_symbols);
-            }
-            let open = self
-                .documents
-                .get_mut(&uri)
-                .expect("batch freshness checked before applying");
-            open.hover = hover;
-            open.completion = completion;
-            open.signature_help = signature_help;
-            open.semantic_tokens = semantic_tokens;
-            open.library_definitions = library_definitions;
-            open.document_symbols = document_symbols;
-            open.folding_ranges = folding_ranges;
-            if batch_is_fresh {
-                open.definitions = definitions;
-                open.type_definitions = type_definitions;
-                open.implementations = implementations;
-            }
-            open.diagnostics =
-                DiagnosticIndex::from_diagnostics(diagnostics, &open.text, &mut diagnostic_budget);
-            if push {
-                messages.push(publish_diagnostics(
-                    &uri,
-                    Some(open.version),
-                    &open.diagnostics,
-                ));
-            }
-            if batch_is_fresh {
-                analyzed_documents.push((uri, open.text.clone()));
-            }
-        }
-        if batch_is_fresh {
-            self.source_set = analyzed_documents
-                .into_iter()
-                .chain(batch.support_documents)
-                .collect();
-            // The builder numbers entries by their position in the analyzed source set; this is the
-            // first place that knows which document each position was. After binding the index
-            // names its own files and no longer depends on the source set being retained.
-            let uris = self
-                .source_set
-                .iter()
-                .map(|(uri, _)| uri.as_str())
-                .collect::<Vec<_>>();
-            workspace_symbols.assign_uris(&uris);
-            self.workspace_symbols = workspace_symbols;
-        }
-        messages.extend(self.diagnostic_refresh());
-        if resubmit {
-            self.analysis_dirty = true;
-        }
-        if !self.analysis_dirty {
-            messages.extend(self.complete_pending_analysis_requests());
-        }
-        messages
-    }
-
     pub(crate) fn apply_index_batch(&mut self, batch: IndexBatch) -> Vec<Value> {
         let IndexBatch {
             generation,
@@ -1973,6 +1806,16 @@ where
     pub(crate) fn force_initialized_for_test(&mut self) {
         self.initialized = true;
         self.client_initialized = true;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_text_for_test(&self, uri: &str) -> Option<&str> {
+        Some(self.documents.get(uri)?.text.as_str())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn source_set_for_test(&self) -> &[(String, String)] {
+        &self.source_set
     }
 
     #[cfg(test)]
@@ -4899,12 +4742,12 @@ mod tests {
             jobs[0].documents[0].2
         };
 
-        let batch = AnalysisBatch {
-            analyzed: vec![("file:///a.kt".into(), version)],
-            analyses: vec![DocumentAnalysis::empty()],
-            support_documents: Vec::new(),
-            pending: false,
-        };
+        let batch = AnalysisBatch::from_versions(
+            vec![("file:///a.kt".into(), version)],
+            vec![DocumentAnalysis::empty()],
+            Vec::new(),
+            false,
+        );
         step_async(
             &mut service,
             &mut out,
@@ -4989,12 +4832,12 @@ mod tests {
             .dispatch_pending_analysis()
             .expect("initial analysis job");
 
-        let messages = service.apply_analysis_batch(AnalysisBatch {
-            analyzed: vec![("file:///a.kt".into(), 1)],
-            analyses: Vec::new(),
-            support_documents: Vec::new(),
-            pending: true,
-        });
+        let messages = service.apply_analysis_batch(AnalysisBatch::from_versions(
+            vec![("file:///a.kt".into(), 1)],
+            Vec::new(),
+            Vec::new(),
+            true,
+        ));
         assert!(messages.is_empty());
         assert!(service.analysis_retry_at.is_some());
         assert!(!service.analysis_dirty_for_test());
@@ -5650,9 +5493,9 @@ mod tests {
         assert_eq!(service.pending_analysis_requests.len(), 1);
 
         let maximum_message = "x".repeat(MAX_SOURCE_SET_DIAGNOSTIC_TEXT_BYTES);
-        let batch = AnalysisBatch {
-            analyzed: vec![("file:///a.kt".into(), 1)],
-            analyses: vec![DocumentAnalysis::with_diagnostics(vec![Diagnostic {
+        let batch = AnalysisBatch::from_versions(
+            vec![("file:///a.kt".into(), 1)],
+            vec![DocumentAnalysis::with_diagnostics(vec![Diagnostic {
                 span: krusty::diag::Span::new(0, 3),
                 editor_span: None,
                 identity: None,
@@ -5661,9 +5504,9 @@ mod tests {
                 msg: maximum_message,
                 file: 0,
             }])],
-            support_documents: Vec::new(),
-            pending: false,
-        };
+            Vec::new(),
+            false,
+        );
         let messages = service.apply_analysis_batch(batch);
         assert_eq!(
             messages.len(),
@@ -5740,12 +5583,12 @@ mod tests {
         }));
         assert!(pending.messages.is_empty());
 
-        let messages = service.apply_analysis_batch(AnalysisBatch {
-            analyzed: vec![(uri.into(), 1)],
-            analyses: crate::analysis::analyze_for_lsp(&[source]),
-            support_documents: Vec::new(),
-            pending: false,
-        });
+        let messages = service.apply_analysis_batch(AnalysisBatch::from_versions(
+            vec![(uri.into(), 1)],
+            crate::analysis::analyze_for_lsp(&[source]),
+            Vec::new(),
+            false,
+        ));
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[1]["id"], "tokens");
         assert!(messages[1]["result"]["data"]
@@ -5784,12 +5627,12 @@ mod tests {
 
         let mut analyses = crate::analysis::analyze_for_lsp(&[open_source, support_source]);
         analyses.truncate(1);
-        let messages = service.apply_analysis_batch(AnalysisBatch {
-            analyzed: vec![(open_uri.into(), 1)],
+        let messages = service.apply_analysis_batch(AnalysisBatch::from_versions(
+            vec![(open_uri.into(), 1)],
             analyses,
-            support_documents: vec![(support_uri.into(), support_source.into())],
-            pending: false,
-        });
+            vec![(support_uri.into(), support_source.into())],
+            false,
+        ));
 
         assert_eq!(messages.len(), 2, "one publish plus one symbol response");
         assert_eq!(
@@ -6277,12 +6120,12 @@ mod tests {
         service.open_document_for_test(open_uri, open_source, 1);
 
         // The live index is rebuilt from each batch; the project index must not be.
-        let _ = service.apply_analysis_batch(AnalysisBatch {
-            analyzed: vec![(open_uri.into(), 1)],
-            analyses: crate::analysis::analyze_for_lsp(&[open_source]),
-            support_documents: Vec::new(),
-            pending: false,
-        });
+        let _ = service.apply_analysis_batch(AnalysisBatch::from_versions(
+            vec![(open_uri.into(), 1)],
+            crate::analysis::analyze_for_lsp(&[open_source]),
+            Vec::new(),
+            false,
+        ));
 
         let swept = service.handle(json!({
             "jsonrpc": "2.0",
@@ -6322,12 +6165,12 @@ mod tests {
             )]),
         });
         service.open_document_for_test(uri, edited, 1);
-        let _ = service.apply_analysis_batch(AnalysisBatch {
-            analyzed: vec![(uri.into(), 1)],
-            analyses: crate::analysis::analyze_for_lsp(&[edited]),
-            support_documents: Vec::new(),
-            pending: false,
-        });
+        let _ = service.apply_analysis_batch(AnalysisBatch::from_versions(
+            vec![(uri.into(), 1)],
+            crate::analysis::analyze_for_lsp(&[edited]),
+            Vec::new(),
+            false,
+        ));
 
         let renamed = service.handle(json!({
             "jsonrpc": "2.0",
@@ -6367,12 +6210,12 @@ mod tests {
             symbols: crate::analysis::WorkspaceSymbolIndex::from_disk_sources(&[(uri, disk)]),
         });
         service.open_document_for_test(uri, buffer, 1);
-        let _ = service.apply_analysis_batch(AnalysisBatch {
-            analyzed: vec![(uri.into(), 1)],
-            analyses: crate::analysis::analyze_for_lsp(&[buffer]),
-            support_documents: Vec::new(),
-            pending: false,
-        });
+        let _ = service.apply_analysis_batch(AnalysisBatch::from_versions(
+            vec![(uri.into(), 1)],
+            crate::analysis::analyze_for_lsp(&[buffer]),
+            Vec::new(),
+            false,
+        ));
         service
     }
 
@@ -6451,12 +6294,12 @@ mod tests {
             symbols: crate::analysis::WorkspaceSymbolIndex::from_disk_sources(&[(uri, source)]),
         });
         service.open_document_for_test(uri, source, 1);
-        let _ = service.apply_analysis_batch(AnalysisBatch {
-            analyzed: vec![(uri.into(), 1)],
-            analyses: crate::analysis::analyze_for_lsp(&[source]),
-            support_documents: Vec::new(),
-            pending: false,
-        });
+        let _ = service.apply_analysis_batch(AnalysisBatch::from_versions(
+            vec![(uri.into(), 1)],
+            crate::analysis::analyze_for_lsp(&[source]),
+            Vec::new(),
+            false,
+        ));
 
         let _ = service.handle_deferred(json!({
             "jsonrpc": "2.0",
@@ -6508,12 +6351,12 @@ mod tests {
         }));
         assert!(pending.messages.is_empty());
 
-        let messages = service.apply_analysis_batch(AnalysisBatch {
-            analyzed: vec![(uri.into(), 1)],
-            analyses: crate::analysis::analyze_for_lsp(&[source]),
-            support_documents: Vec::new(),
-            pending: false,
-        });
+        let messages = service.apply_analysis_batch(AnalysisBatch::from_versions(
+            vec![(uri.into(), 1)],
+            crate::analysis::analyze_for_lsp(&[source]),
+            Vec::new(),
+            false,
+        ));
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[1]["id"], "definition");
         assert!(messages[1]["result"]
@@ -6550,12 +6393,12 @@ mod tests {
         );
         assert_eq!(dev_service.pending_analysis_requests.len(), 1);
 
-        let messages = dev_service.apply_analysis_batch(AnalysisBatch {
-            analyzed: vec![(uri.into(), 1)],
-            analyses: vec![DocumentAnalysis::empty()],
-            support_documents: Vec::new(),
-            pending: false,
-        });
+        let messages = dev_service.apply_analysis_batch(AnalysisBatch::from_versions(
+            vec![(uri.into(), 1)],
+            vec![DocumentAnalysis::empty()],
+            Vec::new(),
+            false,
+        ));
         assert_eq!(messages.len(), 2, "one diagnostic publish plus the action");
         assert_eq!(messages[1]["id"], 7);
         assert_eq!(
@@ -6791,12 +6634,12 @@ mod tests {
 
         let mut a_analysis = analysis_with_diagnostic("current");
         a_analysis.definitions = DefinitionIndex::wire_saturation_fixture(2);
-        let batch = AnalysisBatch {
-            analyzed: vec![("file:///a.kt".into(), 1), ("file:///b.kt".into(), 1)],
-            analyses: vec![a_analysis, DocumentAnalysis::empty()],
-            support_documents: Vec::new(),
-            pending: false,
-        };
+        let batch = AnalysisBatch::from_versions(
+            vec![("file:///a.kt".into(), 1), ("file:///b.kt".into(), 1)],
+            vec![a_analysis, DocumentAnalysis::empty()],
+            Vec::new(),
+            false,
+        );
         let messages = service.apply_analysis_batch(batch);
         let published = messages
             .iter()
@@ -6846,12 +6689,12 @@ mod tests {
             "params": {"textDocument": {"uri": "file:///b.kt"}},
         }));
 
-        let messages = service.apply_analysis_batch(AnalysisBatch {
-            analyzed: vec![("file:///a.kt".into(), 1), ("file:///b.kt".into(), 1)],
-            analyses: vec![DocumentAnalysis::empty(), DocumentAnalysis::empty()],
-            support_documents: Vec::new(),
-            pending: false,
-        });
+        let messages = service.apply_analysis_batch(AnalysisBatch::from_versions(
+            vec![("file:///a.kt".into(), 1), ("file:///b.kt".into(), 1)],
+            vec![DocumentAnalysis::empty(), DocumentAnalysis::empty()],
+            Vec::new(),
+            false,
+        ));
         let published = messages
             .iter()
             .filter(|message| message["method"] == "textDocument/publishDiagnostics")
@@ -6883,24 +6726,24 @@ mod tests {
             .is_empty());
 
         service.open_document_for_test("file:///a.kt", "new", 2);
-        let stale = service.apply_analysis_batch(AnalysisBatch {
-            analyzed: vec![("file:///a.kt".into(), 1)],
-            analyses: vec![DocumentAnalysis::empty()],
-            support_documents: Vec::new(),
-            pending: false,
-        });
+        let stale = service.apply_analysis_batch(AnalysisBatch::from_versions(
+            vec![("file:///a.kt".into(), 1)],
+            vec![DocumentAnalysis::empty()],
+            Vec::new(),
+            false,
+        ));
         assert!(stale.is_empty());
         assert_eq!(service.pending_analysis_requests.len(), 1);
 
         let _current_job = service
             .dispatch_pending_analysis()
             .expect("current-version analysis");
-        let current = service.apply_analysis_batch(AnalysisBatch {
-            analyzed: vec![("file:///a.kt".into(), 2)],
-            analyses: vec![DocumentAnalysis::empty()],
-            support_documents: Vec::new(),
-            pending: false,
-        });
+        let current = service.apply_analysis_batch(AnalysisBatch::from_versions(
+            vec![("file:///a.kt".into(), 2)],
+            vec![DocumentAnalysis::empty()],
+            Vec::new(),
+            false,
+        ));
         assert_eq!(current.len(), 2, "publish plus the queued pull response");
         assert_eq!(current[1]["id"], 7);
         assert!(service.pending_analysis_requests.is_empty());
@@ -6936,12 +6779,12 @@ mod tests {
 
         service.open_document_for_test("file:///a.kt", "v2", 2);
 
-        let batch = AnalysisBatch {
-            analyzed: vec![("file:///a.kt".into(), 1)],
-            analyses: vec![DocumentAnalysis::empty()],
-            support_documents: Vec::new(),
-            pending: false,
-        };
+        let batch = AnalysisBatch::from_versions(
+            vec![("file:///a.kt".into(), 1)],
+            vec![DocumentAnalysis::empty()],
+            Vec::new(),
+            false,
+        );
         let messages = service.apply_analysis_batch(batch);
         assert!(messages.is_empty());
         assert!(service.analysis_dirty_for_test());
@@ -6957,12 +6800,12 @@ mod tests {
         service.force_initialized_for_test();
         service.open_document_for_test("file:///a.kt", "v1", 1);
         service.take_analysis_job();
-        let batch = AnalysisBatch {
-            analyzed: vec![("file:///a.kt".into(), 1)],
-            analyses: vec![DocumentAnalysis::empty()],
-            support_documents: Vec::new(),
-            pending: false,
-        };
+        let batch = AnalysisBatch::from_versions(
+            vec![("file:///a.kt".into(), 1)],
+            vec![DocumentAnalysis::empty()],
+            Vec::new(),
+            false,
+        );
         let messages = service.apply_analysis_batch(batch);
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0]["method"], "textDocument/publishDiagnostics");
@@ -6979,12 +6822,12 @@ mod tests {
         service.force_initialized_for_test();
         service.open_document_for_test("file:///a.kt", "fun a() {}", 1);
         service.take_analysis_job();
-        service.apply_analysis_batch(AnalysisBatch {
-            analyzed: vec![("file:///a.kt".into(), 1)],
-            analyses: vec![analysis_with_diagnostic("boom")],
-            support_documents: Vec::new(),
-            pending: false,
-        });
+        service.apply_analysis_batch(AnalysisBatch::from_versions(
+            vec![("file:///a.kt".into(), 1)],
+            vec![analysis_with_diagnostic("boom")],
+            Vec::new(),
+            false,
+        ));
 
         let first = service.pull_diagnostics(
             Some(json!(1)),
@@ -7006,12 +6849,12 @@ mod tests {
             json!({"textDocument": {"uri": "file:///a.kt"}, "previousResultId": result_id.clone()}),
         );
         assert!(pending.messages.is_empty());
-        let completed = service.apply_analysis_batch(AnalysisBatch {
-            analyzed: vec![("file:///a.kt".into(), 1)],
-            analyses: vec![analysis_with_diagnostic("boom")],
-            support_documents: Vec::new(),
-            pending: false,
-        });
+        let completed = service.apply_analysis_batch(AnalysisBatch::from_versions(
+            vec![("file:///a.kt".into(), 1)],
+            vec![analysis_with_diagnostic("boom")],
+            Vec::new(),
+            false,
+        ));
         let response = completed
             .iter()
             .find(|message| message["id"] == 2)
@@ -7034,12 +6877,12 @@ mod tests {
         service.force_initialized_for_test();
         service.open_document_for_test("file:///a.kt", "fun a() {}", 1);
         service.take_analysis_job();
-        service.apply_analysis_batch(AnalysisBatch {
-            analyzed: vec![("file:///a.kt".into(), 1)],
-            analyses: vec![analysis_with_diagnostic("before")],
-            support_documents: Vec::new(),
-            pending: false,
-        });
+        service.apply_analysis_batch(AnalysisBatch::from_versions(
+            vec![("file:///a.kt".into(), 1)],
+            vec![analysis_with_diagnostic("before")],
+            Vec::new(),
+            false,
+        ));
         let initial = service.pull_diagnostics(
             Some(json!(1)),
             json!({"textDocument": {"uri": "file:///a.kt"}}),
@@ -7053,12 +6896,12 @@ mod tests {
         service
             .dispatch_pending_analysis()
             .expect("replacement diagnostic analysis");
-        service.apply_analysis_batch(AnalysisBatch {
-            analyzed: vec![("file:///a.kt".into(), 1)],
-            analyses: vec![analysis_with_diagnostic("after")],
-            support_documents: Vec::new(),
-            pending: false,
-        });
+        service.apply_analysis_batch(AnalysisBatch::from_versions(
+            vec![("file:///a.kt".into(), 1)],
+            vec![analysis_with_diagnostic("after")],
+            Vec::new(),
+            false,
+        ));
 
         let report = service.pull_diagnostics(
             Some(json!(2)),
@@ -7095,12 +6938,12 @@ mod tests {
         service.open_document_for_test("file:///a.kt", "v1", 1);
         service.take_analysis_job();
 
-        let messages = service.apply_analysis_batch(AnalysisBatch {
-            analyzed: vec![("file:///a.kt".into(), 1)],
-            analyses: vec![DocumentAnalysis::empty()],
-            support_documents: Vec::new(),
-            pending: false,
-        });
+        let messages = service.apply_analysis_batch(AnalysisBatch::from_versions(
+            vec![("file:///a.kt".into(), 1)],
+            vec![DocumentAnalysis::empty()],
+            Vec::new(),
+            false,
+        ));
         assert!(
             !messages
                 .iter()
@@ -7156,9 +6999,9 @@ mod tests {
         );
         service.take_analysis_job();
 
-        let messages = service.apply_analysis_batch(AnalysisBatch {
-            analyzed: vec![("file:///a.kt".into(), 1)],
-            analyses: vec![DocumentAnalysis {
+        let messages = service.apply_analysis_batch(AnalysisBatch::from_versions(
+            vec![("file:///a.kt".into(), 1)],
+            vec![DocumentAnalysis {
                 diagnostics: vec![Diagnostic {
                     span: krusty::diag::Span::new(0, 1),
                     editor_span: None,
@@ -7170,9 +7013,9 @@ mod tests {
                 }],
                 ..DocumentAnalysis::empty()
             }],
-            support_documents: Vec::new(),
-            pending: false,
-        });
+            Vec::new(),
+            false,
+        ));
         assert!(
             !messages
                 .iter()
@@ -7222,9 +7065,9 @@ mod tests {
         service.open_document_for_test("file:///a.kt", "x", 1);
         service.take_analysis_job();
 
-        let messages = service.apply_analysis_batch(AnalysisBatch {
-            analyzed: vec![("file:///a.kt".into(), 1)],
-            analyses: vec![DocumentAnalysis {
+        let messages = service.apply_analysis_batch(AnalysisBatch::from_versions(
+            vec![("file:///a.kt".into(), 1)],
+            vec![DocumentAnalysis {
                 diagnostics: vec![Diagnostic {
                     span: krusty::diag::Span::new(0, 1),
                     editor_span: None,
@@ -7236,9 +7079,9 @@ mod tests {
                 }],
                 ..DocumentAnalysis::empty()
             }],
-            support_documents: Vec::new(),
-            pending: false,
-        });
+            Vec::new(),
+            false,
+        ));
         assert!(
             !messages
                 .iter()
@@ -7326,12 +7169,12 @@ mod tests {
         );
         service.take_analysis_job();
 
-        let messages = service.apply_analysis_batch(AnalysisBatch {
-            analyzed: vec![("file:///a.kt".into(), 1)],
-            analyses: vec![DocumentAnalysis::empty()],
-            support_documents: Vec::new(),
-            pending: false,
-        });
+        let messages = service.apply_analysis_batch(AnalysisBatch::from_versions(
+            vec![("file:///a.kt".into(), 1)],
+            vec![DocumentAnalysis::empty()],
+            Vec::new(),
+            false,
+        ));
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0]["method"], "textDocument/publishDiagnostics");
     }
@@ -7355,12 +7198,12 @@ mod tests {
         assert!(second.is_none(), "in-flight → coalesced");
         assert!(service.resubmit_pending_for_test());
 
-        let batch = AnalysisBatch {
-            analyzed: vec![("file:///a.kt".into(), 1)],
-            analyses: vec![DocumentAnalysis::empty()],
-            support_documents: Vec::new(),
-            pending: false,
-        };
+        let batch = AnalysisBatch::from_versions(
+            vec![("file:///a.kt".into(), 1)],
+            vec![DocumentAnalysis::empty()],
+            Vec::new(),
+            false,
+        );
         let _ = service.apply_analysis_batch(batch);
         assert!(!service.analysis_in_flight_for_test());
         let third = service.dispatch_pending_analysis();
@@ -7388,12 +7231,12 @@ mod tests {
 
         service.open_document_for_test("file:///a.kt", "v2", 2);
 
-        let batch = AnalysisBatch {
-            analyzed: vec![("file:///a.kt".into(), 1)],
-            analyses: vec![DocumentAnalysis::empty()],
-            support_documents: Vec::new(),
-            pending: false,
-        };
+        let batch = AnalysisBatch::from_versions(
+            vec![("file:///a.kt".into(), 1)],
+            vec![DocumentAnalysis::empty()],
+            Vec::new(),
+            false,
+        );
         let _ = service.apply_analysis_batch(batch);
 
         assert!(!service.resubmit_pending_for_test());
@@ -7734,7 +7577,8 @@ mod tests {
             open_uris: vec!["file:///a.kt".into()],
         });
         let batch = batch.expect("inline backend is synchronous");
-        assert_eq!(batch.analyzed, vec![("file:///a.kt".to_string(), 1)]);
+        assert_eq!(batch.versions(), vec![("file:///a.kt".to_string(), 1)]);
+        assert_eq!(batch.documents()[0].text(), Some("fun a(){}"));
     }
 
     #[test]

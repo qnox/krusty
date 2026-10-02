@@ -42,12 +42,12 @@ fn close_reopen_with_reused_version_discards_in_flight_batch() {
     );
     service.did_open(None, did_open("file:///a.kt", "new", 1), true);
 
-    let stale_batch = AnalysisBatch {
-        analyzed: vec![("file:///a.kt".into(), 1)],
-        analyses: vec![with_diagnostic()],
-        support_documents: Vec::new(),
-        pending: false,
-    };
+    let stale_batch = AnalysisBatch::from_versions(
+        vec![("file:///a.kt".into(), 1)],
+        vec![with_diagnostic()],
+        Vec::new(),
+        false,
+    );
     let messages = service.apply_analysis_batch(stale_batch);
     assert!(
         messages.is_empty(),
@@ -122,12 +122,12 @@ fn close_reopen_with_reused_version_discards_in_flight_batch() {
     assert_ne!(hashes[0], hashes[1], "reopen hashes the replacement text");
     assert_eq!(hashes[1], hashes[2], "the reopened job is stable");
 
-    let fresh_batch = AnalysisBatch {
-        analyzed: vec![("file:///a.kt".into(), 1)],
-        analyses: vec![with_diagnostic()],
-        support_documents: Vec::new(),
-        pending: false,
-    };
+    let fresh_batch = AnalysisBatch::from_versions(
+        vec![("file:///a.kt".into(), 1)],
+        vec![with_diagnostic()],
+        Vec::new(),
+        false,
+    );
     let messages = service.apply_analysis_batch(fresh_batch);
     assert_eq!(messages.len(), 1, "fresh batch is applied");
     assert_eq!(messages[0]["method"], "textDocument/publishDiagnostics");

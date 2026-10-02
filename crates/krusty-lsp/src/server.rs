@@ -1,3 +1,4 @@
+mod analyzed_document;
 mod engine;
 mod implementation;
 mod line_index;

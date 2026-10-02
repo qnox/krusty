@@ -7,10 +7,10 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use super::super::{
-    workspace_index_uri_bytes, DependencyCandidate, DependencySymbolIndex, DocumentAnalysis,
-    IndexedFile, LocatedDependency, MaterializedDefinition, WorkspaceSymbolIndex,
-    MAX_WORKSPACE_INDEX_FILES,
+    workspace_index_uri_bytes, DependencyCandidate, DependencySymbolIndex, IndexedFile,
+    LocatedDependency, MaterializedDefinition, WorkspaceSymbolIndex, MAX_WORKSPACE_INDEX_FILES,
 };
+pub use super::analyzed_document::AnalysisBatch;
 use super::implementation::{
     Analysis, AnalysisBackend, DocumentAdmission, Incoming, ProjectFeedback,
 };
@@ -117,8 +117,9 @@ pub struct AnalysisJob {
 impl AnalysisJob {
     /// Install this job's document lifetimes, then analyze. Both the threaded engine and
     /// `InlineBackend` enter here, so an interactive analysis cannot hash open buffers without
-    /// the lifetime that identifies them.
-    pub fn run<A: Analysis>(&self, analyze: &mut A) -> AnalysisBatch {
+    /// the lifetime that identifies them. The completion owns each document's text, so the
+    /// navigation snapshot does not copy the live buffer again.
+    pub fn run<A: Analysis>(&mut self, analyze: &mut A) -> AnalysisBatch {
         let docs = self
             .documents
             .iter()
@@ -136,25 +137,14 @@ impl AnalysisJob {
             .collect::<Vec<_>>();
         let _versions = crate::open_document_digest::OpenDocumentVersions::install(&versions);
         let (analyses, support_documents) = analyze.analyze_open_documents(&docs, &open);
+        let pending = analyze.analysis_pending();
         drop(_versions);
-        AnalysisBatch {
-            analyzed: self
-                .documents
-                .iter()
-                .map(|(uri, _, version, _)| (uri.clone(), *version))
-                .collect(),
-            analyses,
-            support_documents,
-            pending: analyze.analysis_pending(),
-        }
+        let documents = std::mem::take(&mut self.documents)
+            .into_iter()
+            .map(|(uri, text, version, _lifetime)| (uri, text, version))
+            .collect();
+        AnalysisBatch::from_job(documents, analyses, support_documents, pending)
     }
-}
-
-pub struct AnalysisBatch {
-    pub analyzed: Vec<(String, i64)>,
-    pub analyses: Vec<DocumentAnalysis>,
-    pub support_documents: Vec<(String, String)>,
-    pub pending: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1127,8 +1117,7 @@ fn run<A: Analysis>(
                     break;
                 }
             }
-            Some(EngineCommand::Analyze(job)) => {
-                let open = job.open_uris.iter().map(String::as_str).collect::<Vec<_>>();
+            Some(EngineCommand::Analyze(mut job)) => {
                 let batch = job.run(&mut analyze);
                 if events
                     .send(Incoming::Engine(EngineEvent::AnalysisComplete(batch)))
@@ -1143,6 +1132,7 @@ fn run<A: Analysis>(
                 // further interactive work is waiting. Enumerating a large workspace ahead of the
                 // first open document delayed its diagnostics past two minutes on a 64k-file tree.
                 if !commands.interactive_pending() {
+                    let open = job.open_uris.iter().map(String::as_str).collect::<Vec<_>>();
                     let neighborhood = analyze.neighborhood_index_candidates(&open);
                     if !neighborhood.is_empty() {
                         commands.enqueue(EngineCommand::Index(IndexJob {
@@ -1410,6 +1400,7 @@ fn send_status(events: &SyncSender<Incoming>, status: ServerStatus) -> Result<()
 mod tests {
     use super::super::super::IndexOutcome;
     use super::*;
+    use crate::DocumentAnalysis;
 
     #[test]
     fn command_queue_bounds_project_change_bursts() {
@@ -1533,14 +1524,15 @@ mod tests {
         };
         assert_eq!(job.documents[0].2, 3);
 
-        let batch = AnalysisBatch {
-            analyzed: vec![("file:///a.kt".into(), 3)],
-            analyses: vec![DocumentAnalysis::empty()],
-            support_documents: Vec::new(),
-            pending: false,
-        };
-        assert_eq!(batch.analyzed[0].1, 3);
-        assert_eq!(batch.analyses.len(), 1);
+        let batch = AnalysisBatch::from_job(
+            vec![("file:///a.kt".into(), "fun a(){}".into(), 3)],
+            vec![DocumentAnalysis::empty()],
+            Vec::new(),
+            false,
+        );
+        assert_eq!(batch.documents()[0].version(), 3);
+        assert_eq!(batch.documents()[0].text(), Some("fun a(){}"));
+        assert!(batch.is_complete());
     }
 
     #[test]
@@ -1567,8 +1559,9 @@ mod tests {
         for _ in 0..4 {
             match rx.recv().unwrap() {
                 Incoming::Engine(EngineEvent::AnalysisComplete(batch)) => {
-                    assert_eq!(batch.analyzed, vec![("file:///a.kt".to_string(), 2)]);
-                    assert_eq!(batch.analyses.len(), 1);
+                    assert_eq!(batch.versions(), vec![("file:///a.kt".to_string(), 2)]);
+                    assert_eq!(batch.documents()[0].text(), Some("fun a(){}"));
+                    assert!(batch.is_complete());
                     found = true;
                     break;
                 }
@@ -1686,7 +1679,7 @@ mod tests {
         loop {
             match rx.recv_timeout(std::time::Duration::from_secs(2)) {
                 Ok(Incoming::Engine(EngineEvent::AnalysisComplete(batch))) => {
-                    support = Some(batch.support_documents);
+                    support = Some(batch.support_documents().to_vec());
                     break;
                 }
                 Ok(_) => {}
