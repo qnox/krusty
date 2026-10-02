@@ -12,6 +12,12 @@
 //! program, as it does on exhausted memory, is instead expected to exit with the runtime's failure
 //! status and exactly the runtime's message; anything the driver prints itself fails the test.
 //!
+//! A driver whose expected answers are Kotlin's prints them as a transcript instead of comparing
+//! them with values copied into C, and the harness compares that transcript with the one the Kotlin
+//! program beside it (`<driver>.kt`) answers under the reference kotlinc
+//! (`run_driver_against_kotlin`). Where the native runtime answers differently from the JVM on
+//! purpose, the test declares the line (`run_driver_against_kotlin_with`, `Divergence`).
+//!
 //! The drivers need a C compiler for the host. CI has one and must run them; a local build without
 //! clang is told why they did not run rather than failing on a missing tool.
 
@@ -101,6 +107,11 @@ fn build_and_run(driver: &str) -> Option<Output> {
             // Runtime descriptors name the fields they define and intentionally leave the rest
             // zero-initialized. Keep every other warning an error.
             "-Wno-missing-field-initializers",
+            // Signed overflow is undefined in C, and Kotlin's `Int` and `Long` wrap or raise; a
+            // driver that drives a runtime counter past its maximum must see an overflow the
+            // runtime left signed, so every one traps (SIGILL) instead of wrapping quietly.
+            "-fsanitize=signed-integer-overflow",
+            "-fsanitize-trap=signed-integer-overflow",
         ])
         .args((!RUNTIME_COMPLETE).then_some("-Wl,--unresolved-symbols=ignore-all"))
         .args(if RUNTIME_COMPLETE {
@@ -157,6 +168,180 @@ fn run_payload_driver(driver: &str) -> Option<Vec<u8>> {
         String::from_utf8_lossy(&output.stderr)
     );
     Some(stdout[..stdout.len() - b"OK\n".len()].to_vec())
+}
+
+/// Run `driver` against Kotlin: the program `tests/native_runtime/<driver>.kt` answers, in its
+/// `box()`, the transcript of what the driver observes (one observation per line, each ending in a
+/// newline), and the driver prints its own transcript before its `OK` (`transcript.h`). The program
+/// is compiled by the reference kotlinc and run on the shared JVM through the persistent harness
+/// (`common::kotlinc_box_result`); it must compile and answer whole lines, and the driver must
+/// succeed exactly as `run_payload_driver` requires. The two transcripts must then be identical, so
+/// every answer the driver prints is Kotlin's by execution, not a value copied into C. The driver's
+/// own checks of what Kotlin has no counterpart for still end it on failure.
+fn run_driver_against_kotlin(driver: &str) {
+    run_driver_against_kotlin_with(driver, &[]);
+}
+
+/// Which of the native runtime's rules a line the JVM answers differently follows. The runtime
+/// BEHAVES as Kotlin/Native does -- which exception type is thrown, a class's identity and names,
+/// what an `is` answers, iteration order, a collection's semantics, the order of the calls it makes
+/// into the program -- and SAYS what the JVM says -- an exception's message, a diagnostic's wording
+/// -- wherever that is cheap. A JVM message is therefore no divergence; the first two are, and the
+/// third marks where the runtime does not yet keep the rule.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Rule {
+    /// The runtime behaves as Kotlin/Native does, and the JVM behaves otherwise.
+    NativeBehaviour,
+    /// The runtime keeps Kotlin/Native's message, because the JVM's is not cheap to reproduce.
+    NativeMessage,
+    /// A known gap: the runtime answers as neither platform does, because Kotlin/Native's answer
+    /// needs a call into the program the runtime cannot make yet. The declaration says, beside it,
+    /// what Kotlin/Native answers and what closing the gap needs.
+    NotYetNative,
+}
+
+/// A line of a driver's transcript on which the native runtime answers differently from the JVM,
+/// by one of the runtime's rules: kotlinc's program must answer exactly `jvm` there, and the driver
+/// exactly `native`. Each declaration cites, beside it, where the Kotlin/Native answer comes from,
+/// since no Kotlin/Native compiler runs here.
+#[derive(Clone, Copy, Debug)]
+struct Divergence {
+    rule: Rule,
+    jvm: &'static str,
+    native: &'static str,
+}
+
+impl Divergence {
+    const fn native_behaviour(jvm: &'static str, native: &'static str) -> Self {
+        Divergence {
+            rule: Rule::NativeBehaviour,
+            jvm,
+            native,
+        }
+    }
+
+    const fn native_message(jvm: &'static str, native: &'static str) -> Self {
+        Divergence {
+            rule: Rule::NativeMessage,
+            jvm,
+            native,
+        }
+    }
+
+    const fn not_yet_native(jvm: &'static str, native: &'static str) -> Self {
+        Divergence {
+            rule: Rule::NotYetNative,
+            jvm,
+            native,
+        }
+    }
+}
+
+/// `run_driver_against_kotlin`, for a driver some of whose lines the native runtime answers
+/// differently from the JVM on purpose. Each such line is declared: kotlinc's program must answer
+/// exactly the declared JVM line and the driver exactly the declared native line, at the same place
+/// in the two transcripts, so the oracle still checks the JVM's side and the driver's side is
+/// pinned. Every other line must be identical; an undeclared difference fails, and so does a
+/// declared one that no longer occurs, so a declaration cannot outlive the difference it explains.
+fn run_driver_against_kotlin_with(driver: &str, divergences: &[Divergence]) {
+    for divergence in divergences {
+        assert!(
+            divergence.jvm != divergence.native && !divergence.jvm.contains('\n'),
+            "{driver}: a divergence must be one line that differs: {divergence:?}"
+        );
+    }
+    let Some(native) = run_payload_driver(driver) else {
+        return;
+    };
+    let program = driver_dir().join(format!("{driver}.kt"));
+    let source = fs::read_to_string(&program)
+        .unwrap_or_else(|error| panic!("{driver}: read {}: {error}", program.display()));
+    let kotlin = common::kotlinc_box_result(&source);
+    assert!(
+        !kotlin.starts_with("ERROR:") && kotlin.ends_with('\n'),
+        "{driver}: the Kotlin program must run and answer whole lines, got {kotlin:?}"
+    );
+    let native = String::from_utf8(native)
+        .unwrap_or_else(|error| panic!("{driver}: the native transcript is not UTF-8: {error}"));
+    if let Some(difference) = transcript_difference(&kotlin, &native, divergences) {
+        panic!(
+            "{driver}: the native transcript differs from Kotlin's: {difference}\n\
+             Kotlin:\n{kotlin}native:\n{native}"
+        );
+    }
+}
+
+/// Where the native transcript departs from Kotlin's other than as `divergences` declare, or a
+/// declared divergence that occurs on no line; `None` when the two agree line for line.
+fn transcript_difference(kotlin: &str, native: &str, divergences: &[Divergence]) -> Option<String> {
+    let mut kotlin_lines = kotlin.split_inclusive('\n');
+    let mut native_lines = native.split_inclusive('\n');
+    let mut occurs = vec![false; divergences.len()];
+    for line in 1.. {
+        match (kotlin_lines.next(), native_lines.next()) {
+            (None, None) => break,
+            (Some(expected), Some(actual)) if expected == actual => {}
+            (Some(expected), Some(actual)) => {
+                let declared = divergences.iter().position(|divergence| {
+                    expected.strip_suffix('\n') == Some(divergence.jvm)
+                        && actual.strip_suffix('\n') == Some(divergence.native)
+                });
+                match declared {
+                    Some(at) => occurs[at] = true,
+                    None => {
+                        return Some(format!(
+                            "line {line}: Kotlin {expected:?}, native {actual:?}, and no \
+                             divergence declares it"
+                        ))
+                    }
+                }
+            }
+            (expected, actual) => {
+                return Some(format!(
+                    "line {line}: Kotlin {:?}, native {:?}",
+                    expected.unwrap_or("<end>"),
+                    actual.unwrap_or("<end>")
+                ));
+            }
+        }
+    }
+    let stale = &divergences[occurs.iter().position(|occurs| !occurs)?];
+    Some(format!(
+        "the declared {:?} divergence, Kotlin {:?} and native {:?}, occurs on no line",
+        stale.rule, stale.jvm, stale.native
+    ))
+}
+
+#[test]
+fn a_transcript_differs_only_where_a_divergence_declares_it() {
+    assert_eq!(transcript_difference("a\nb\n", "a\nb\n", &[]), None);
+    assert_eq!(
+        transcript_difference("a\nb\n", "a\nc\n", &[]).as_deref(),
+        Some("line 2: Kotlin \"b\\n\", native \"c\\n\", and no divergence declares it")
+    );
+    assert_eq!(
+        transcript_difference("a\n", "a\nb\n", &[]).as_deref(),
+        Some("line 2: Kotlin \"<end>\", native \"b\\n\"")
+    );
+    assert_eq!(
+        transcript_difference("a\n", "a", &[]).as_deref(),
+        Some("line 1: Kotlin \"a\\n\", native \"a\", and no divergence declares it")
+    );
+    let declared = [Divergence::native_behaviour("b", "c")];
+    assert_eq!(transcript_difference("a\nb\n", "a\nc\n", &declared), None);
+    assert_eq!(
+        transcript_difference("a\nb\n", "a\nd\n", &declared).as_deref(),
+        Some("line 2: Kotlin \"b\\n\", native \"d\\n\", and no divergence declares it")
+    );
+    assert_eq!(
+        transcript_difference("a\nb\n", "a\nb\n", &declared).as_deref(),
+        Some(concat!(
+            "the declared NativeBehaviour divergence, Kotlin \"b\" and native \"c\", ",
+            "occurs on no line"
+        ))
+    );
+    let message = [Divergence::native_message("x: 1", "x: one")];
+    assert_eq!(transcript_difference("x: 1\n", "x: one\n", &message), None);
 }
 
 /// Run `driver`, which must end the way the runtime ends a program it cannot continue
@@ -245,12 +430,82 @@ fn an_array_too_large_for_the_allocator_is_out_of_memory() {
 
 #[test]
 fn a_negative_string_index_is_out_of_bounds() {
-    run_driver("string_get_negative_index");
+    // Kotlin/Native's type: its runtime reads a `String` in `KString.cpp`
+    // (`boundsCheckedIteratorAt`, `Kotlin_String_subSequence`, JetBrains/kotlin v2.4.10,
+    // kotlin-native/runtime/src/main/cpp), which calls `ThrowArrayIndexOutOfBoundsException`, and
+    // `RuntimeUtils.kt` throws `ArrayIndexOutOfBoundsException()`. The message is the JVM's.
+    run_driver_against_kotlin_with(
+        "string_get_negative_index",
+        &[
+            Divergence::native_behaviour(
+                "\"abc\"[-1]: threw StringIndexOutOfBoundsException: Index -1 out of bounds \
+                 for length 3",
+                "\"abc\"[-1]: threw ArrayIndexOutOfBoundsException: Index -1 out of bounds for \
+                 length 3",
+            ),
+            Divergence::native_behaviour(
+                "\"abc\"[-100]: threw StringIndexOutOfBoundsException: Index -100 out of \
+                 bounds for length 3",
+                "\"abc\"[-100]: threw ArrayIndexOutOfBoundsException: Index -100 out of bounds \
+                 for length 3",
+            ),
+            Divergence::native_behaviour(
+                "\"abc\"[-2147483648]: threw StringIndexOutOfBoundsException: Index \
+                 -2147483648 out of bounds for length 3",
+                "\"abc\"[-2147483648]: threw ArrayIndexOutOfBoundsException: Index -2147483648 \
+                 out of bounds for length 3",
+            ),
+            Divergence::native_behaviour(
+                "\"abc\"[3]: threw StringIndexOutOfBoundsException: Index 3 out of bounds for \
+                 length 3",
+                "\"abc\"[3]: threw ArrayIndexOutOfBoundsException: Index 3 out of bounds for \
+                 length 3",
+            ),
+        ],
+    );
 }
 
 #[test]
 fn a_substring_outside_the_text_is_out_of_bounds() {
-    run_driver("string_substring_bounds");
+    // Kotlin/Native's type: its runtime reads a `String` in `KString.cpp`
+    // (`boundsCheckedIteratorAt`, `Kotlin_String_subSequence`, JetBrains/kotlin v2.4.10,
+    // kotlin-native/runtime/src/main/cpp), which calls `ThrowArrayIndexOutOfBoundsException`, and
+    // `RuntimeUtils.kt` throws `ArrayIndexOutOfBoundsException()`. The message is the JVM's.
+    run_driver_against_kotlin_with(
+        "string_substring_bounds",
+        &[
+            Divergence::native_behaviour(
+                "substring(-1, 2): threw StringIndexOutOfBoundsException: Range [-1, 2) out of \
+                 bounds for length 3",
+                "substring(-1, 2): threw ArrayIndexOutOfBoundsException: Range [-1, 2) out of \
+                 bounds for length 3",
+            ),
+            Divergence::native_behaviour(
+                "substring(-1): threw StringIndexOutOfBoundsException: Range [-1, 3) out of \
+                 bounds for length 3",
+                "substring(-1): threw ArrayIndexOutOfBoundsException: Range [-1, 3) out of \
+                 bounds for length 3",
+            ),
+            Divergence::native_behaviour(
+                "substring(2, 1): threw StringIndexOutOfBoundsException: Range [2, 1) out of \
+                 bounds for length 3",
+                "substring(2, 1): threw ArrayIndexOutOfBoundsException: Range [2, 1) out of \
+                 bounds for length 3",
+            ),
+            Divergence::native_behaviour(
+                "substring(2, 10): threw StringIndexOutOfBoundsException: Range [2, 10) out of \
+                 bounds for length 3",
+                "substring(2, 10): threw ArrayIndexOutOfBoundsException: Range [2, 10) out of \
+                 bounds for length 3",
+            ),
+            Divergence::native_behaviour(
+                "substring(4): threw StringIndexOutOfBoundsException: Range [4, 3) out of \
+                 bounds for length 3",
+                "substring(4): threw ArrayIndexOutOfBoundsException: Range [4, 3) out of \
+                 bounds for length 3",
+            ),
+        ],
+    );
 }
 
 #[test]
@@ -320,7 +575,26 @@ fn an_append_line_whose_to_string_throws_leaves_the_builder_alone() {
 
 #[test]
 fn a_negative_builder_capacity_throws_illegal_argument_exception() {
-    run_driver("builder_negative_capacity");
+    // Kotlin/Native's type: 2.4.10's stdlib (the distribution's linux_x64 static cache) compiles
+    // `StringBuilder(capacity)` to `AllocArrayInstance(CharArray, capacity)`, which calls
+    // `ThrowIllegalArgumentException` for a negative size. The message is the JVM's.
+    run_driver_against_kotlin_with(
+        "builder_negative_capacity",
+        &[
+            Divergence::native_behaviour(
+                "StringBuilder(-1): threw NegativeArraySizeException: -1",
+                "StringBuilder(-1): threw IllegalArgumentException: -1",
+            ),
+            Divergence::native_behaviour(
+                "StringBuilder(-42): threw NegativeArraySizeException: -42",
+                "StringBuilder(-42): threw IllegalArgumentException: -42",
+            ),
+            Divergence::native_behaviour(
+                "StringBuilder(-2147483648): threw NegativeArraySizeException: -2147483648",
+                "StringBuilder(-2147483648): threw IllegalArgumentException: -2147483648",
+            ),
+        ],
+    );
 }
 
 #[test]
@@ -411,12 +685,12 @@ fn a_builder_appends_copies_and_sets_its_length() {
 
 #[test]
 fn a_ulong_progression_across_two_to_the_63_contains_its_members() {
-    run_driver("range_contains_unsigned");
+    run_driver_against_kotlin("range_contains_unsigned");
 }
 
 #[test]
 fn a_progression_renders_compares_and_hashes_with_its_step() {
-    run_driver("range_progression_members");
+    run_driver_against_kotlin("range_progression_members");
 }
 
 #[test]
@@ -426,32 +700,32 @@ fn a_range_of_a_program_comparable_orders_by_its_compare_to() {
 
 #[test]
 fn an_empty_unsigned_until_is_the_declared_empty_range() {
-    run_driver("range_unsigned_until_empty");
+    run_driver_against_kotlin("range_unsigned_until_empty");
 }
 
 #[test]
 fn a_ulong_walk_across_two_to_the_63_steps_without_signed_overflow() {
-    run_driver("range_iterator_ulong_crosses_sign");
+    run_driver_against_kotlin("range_iterator_ulong_crosses_sign");
 }
 
 #[test]
 fn a_spread_copy_that_does_not_fit_throws_and_writes_nothing() {
-    run_driver("array_copy_into_bounds");
+    run_driver_against_kotlin("array_copy_into_bounds");
 }
 
 #[test]
 fn a_range_a_progression_and_their_iterators_are_kotlins_classes() {
-    run_driver("range_class_identity");
+    run_driver_against_kotlin("range_class_identity");
 }
 
 #[test]
 fn a_comparable_ranges_members_call_the_program_in_kotlins_order_and_stop_at_a_throw() {
-    run_driver("comparable_range_members");
+    run_driver_against_kotlin("comparable_range_members");
 }
 
 #[test]
 fn a_floating_point_range_compares_by_ieee_and_answers_its_members_as_kotlin_does() {
-    run_driver("floating_range");
+    run_driver_against_kotlin("floating_range");
 }
 
 #[test]
@@ -460,6 +734,11 @@ fn a_spread_of_something_other_than_the_varargs_array_kind_fails() {
         "array_copy_into_not_an_array",
         "krusty: a spread of a value that is not an array of the vararg's kind\n",
     );
+}
+
+#[test]
+fn range_behavior_matches_an_executable_kotlinc_oracle() {
+    run_driver_against_kotlin("range_kotlinc_oracle");
 }
 
 #[test]
@@ -479,27 +758,332 @@ fn a_reversal_of_something_other_than_a_range_fails() {
 }
 
 #[test]
-fn range_behavior_matches_an_executable_kotlinc_oracle() {
-    const KOTLIN_ORACLE: &str = "fun bit(value: Boolean) = if (value) \"1\" else \"0\"\n\
-fun box(): String {\n\
-    val stepped = 1..10 step 2\n\
-    val reversed = (1..9 step 3).reversed()\n\
-    val progression = 1..3 step 1\n\
-    val range = 1..3\n\
-    val unsigned = Long.MAX_VALUE.toULong() - 1uL..Long.MAX_VALUE.toULong() + 5uL step 3\n\
-    return bit(stepped.first == 1) + bit(stepped.last == 9) +\n\
-        bit(reversed.first == 7) + bit(reversed.last == 1) +\n\
-        bit(progression == range) + bit(range != progression) +\n\
-        bit(Long.MAX_VALUE.toULong() + 2uL in unsigned)\n\
-}\n";
-    let Some(native) = run_payload_driver("range_kotlinc_oracle") else {
-        return;
-    };
-    let native = String::from_utf8(native).expect("the native range transcript is ASCII");
-    assert_eq!(
-        native,
-        common::kotlinc_box_result(KOTLIN_ORACLE),
-        "the native range transcript differs from the same program run by kotlinc"
+fn mapping_the_full_long_range_is_too_long_to_collect() {
+    run_driver_expecting_failure(
+        "range_map_full_span",
+        "krusty: a range too long to collect\n",
+    );
+}
+
+#[test]
+fn a_list_write_out_of_bounds_raises_and_leaves_the_list_alone() {
+    run_driver("mutable_list_bounds");
+}
+
+#[test]
+fn a_list_read_out_of_bounds_raises_and_answers_nothing() {
+    run_driver("list_read_bounds");
+}
+
+#[test]
+fn a_list_added_to_itself_doubles() {
+    run_driver("list_add_all_self");
+}
+
+#[test]
+fn a_list_modified_during_for_each_ends_the_walk() {
+    run_driver("walk_modified_during_for_each");
+}
+
+#[test]
+fn a_throwing_lambda_ends_the_walk_that_called_it() {
+    run_driver("walk_stops_on_throw");
+}
+
+#[test]
+fn an_exhausted_iterator_raises_what_kotlin_raises_through_either_protocol() {
+    // Reading text past its end raises Kotlin/Native's class with the JVM's message. A `String`'s
+    // is `ArrayIndexOutOfBoundsException`, as in `a_negative_string_index_is_out_of_bounds`; a
+    // `StringBuilder`'s is `IndexOutOfBoundsException`, because Kotlin/Native 2.4.10's
+    // `StringBuilder#get` calls `AbstractList.Companion#checkElementIndex` (disassembly of the
+    // distribution's linux_x64 stdlib cache), which throws it
+    // (libraries/stdlib/src/kotlin/collections/AbstractList.kt).
+    run_driver_against_kotlin_with(
+        "iterator_exhausted",
+        &[
+            Divergence::native_behaviour(
+                "\"a\" general threw StringIndexOutOfBoundsException: Index 1 out of bounds \
+                 for length 1",
+                "\"a\" general threw ArrayIndexOutOfBoundsException: Index 1 out of bounds for \
+                 length 1",
+            ),
+            Divergence::native_behaviour(
+                "\"a\" general again threw StringIndexOutOfBoundsException: Index 2 out of \
+                 bounds for length 1",
+                "\"a\" general again threw ArrayIndexOutOfBoundsException: Index 2 out of \
+                 bounds for length 1",
+            ),
+            Divergence::native_behaviour(
+                "\"a\" narrow threw StringIndexOutOfBoundsException: Index 1 out of bounds for \
+                 length 1",
+                "\"a\" narrow threw ArrayIndexOutOfBoundsException: Index 1 out of bounds for \
+                 length 1",
+            ),
+            Divergence::native_behaviour(
+                "\"a\" narrow again threw StringIndexOutOfBoundsException: Index 2 out of \
+                 bounds for length 1",
+                "\"a\" narrow again threw ArrayIndexOutOfBoundsException: Index 2 out of \
+                 bounds for length 1",
+            ),
+            Divergence::native_behaviour(
+                "\"\" general threw StringIndexOutOfBoundsException: Index 0 out of bounds for \
+                 length 0",
+                "\"\" general threw ArrayIndexOutOfBoundsException: Index 0 out of bounds for \
+                 length 0",
+            ),
+            Divergence::native_behaviour(
+                "\"\" narrow threw StringIndexOutOfBoundsException: Index 0 out of bounds for \
+                 length 0",
+                "\"\" narrow threw ArrayIndexOutOfBoundsException: Index 0 out of bounds for \
+                 length 0",
+            ),
+            Divergence::native_behaviour(
+                "StringBuilder(\"a\") general threw StringIndexOutOfBoundsException: Index 1 \
+                 out of bounds for length 1",
+                "StringBuilder(\"a\") general threw IndexOutOfBoundsException: Index 1 out of \
+                 bounds for length 1",
+            ),
+            Divergence::native_behaviour(
+                "StringBuilder(\"a\") general again threw StringIndexOutOfBoundsException: \
+                 Index 2 out of bounds for length 1",
+                "StringBuilder(\"a\") general again threw IndexOutOfBoundsException: Index 2 \
+                 out of bounds for length 1",
+            ),
+            Divergence::native_behaviour(
+                "StringBuilder(\"a\") narrow threw StringIndexOutOfBoundsException: Index 1 \
+                 out of bounds for length 1",
+                "StringBuilder(\"a\") narrow threw IndexOutOfBoundsException: Index 1 out of \
+                 bounds for length 1",
+            ),
+            Divergence::native_behaviour(
+                "StringBuilder(\"a\") narrow again threw StringIndexOutOfBoundsException: \
+                 Index 2 out of bounds for length 1",
+                "StringBuilder(\"a\") narrow again threw IndexOutOfBoundsException: Index 2 \
+                 out of bounds for length 1",
+            ),
+        ],
+    );
+}
+
+#[test]
+fn an_indexed_value_hash_code_wraps() {
+    run_driver("indexed_value_hash_overflow");
+}
+
+#[test]
+fn an_array_list_of_negative_capacity_raises() {
+    run_driver_against_kotlin("array_list_negative_capacity");
+}
+
+#[test]
+fn walking_a_string_is_linear_and_yields_its_utf16_units() {
+    run_driver("string_iterator_linear");
+}
+
+#[test]
+fn a_programs_own_text_is_asked_its_length_once_per_step() {
+    run_driver("program_text_walk_asks_length_once_per_step");
+}
+
+#[test]
+fn a_list_grown_past_the_largest_capacity_is_out_of_memory() {
+    run_driver_expecting_failure("mutable_list_growth_overflow", "krusty: out of memory\n");
+}
+
+#[test]
+fn an_element_member_that_throws_ends_the_walk_that_called_it() {
+    run_driver("list_stops_on_throwing_element");
+}
+
+#[test]
+fn a_list_is_the_collection_interfaces_and_equals_a_program_list() {
+    // `listOf(1, 2)` is Kotlin/Native's `Array.asList`, an anonymous read-only `AbstractList` that
+    // is no `MutableList` and has no simple name
+    // (kotlin-native/runtime/src/main/kotlin/generated/_ArraysNative.kt, JetBrains/kotlin v2.4.10;
+    // `listOf(vararg)` calls it, per the disassembly of the distribution's linux_x64 stdlib cache).
+    //
+    // Known gaps: Kotlin/Native's `AbstractList.equals` is `orderedEquals`
+    // (libraries/stdlib/src/kotlin/collections/AbstractList.kt), which compares the two `size`s
+    // first and then walks the other list with `iterator()` and `next()` alone -- `iterator next
+    // eq(1) next eq(2)` for `P(1, 2)`, and no call at all for `P(1, 2, 3)` or `P(1)` -- and
+    // `EmptyList.equals` asks `isEmpty()`. The runtime reaches a program's collection only through
+    // the `iterator()`, `hasNext()` and `next()` its descriptor records, so it walks the list
+    // instead; closing the gap needs the compiler to record `size` (and `isEmpty`) as well. The
+    // growable list has the same gap without a declaration, because the runtime answers there as
+    // the JVM does: Kotlin/Native's `ArrayList.equals` compares `size` and then `get(i)`
+    // (libraries/stdlib/native-wasm/src/kotlin/collections/ArrayList.kt).
+    run_driver_against_kotlin_with(
+        "list_identity",
+        &[
+            Divergence::native_behaviour(
+                "listOf: true true true true true true true",
+                "listOf: true true true true false false false",
+            ),
+            Divergence::native_behaviour(
+                "listOf::class.simpleName ArrayList",
+                "listOf::class.simpleName null",
+            ),
+            Divergence::not_yet_native(
+                "listOf(1, 2) == P(1, 2) true | hasNext next eq(1) hasNext next eq(2) hasNext ",
+                "listOf(1, 2) == P(1, 2) true | iterator hasNext next eq(1) hasNext next eq(2) \
+                 hasNext ",
+            ),
+            Divergence::not_yet_native(
+                "listOf(1, 2) == P(1, 2, 3) false | hasNext next eq(1) hasNext next eq(2) \
+                 hasNext ",
+                "listOf(1, 2) == P(1, 2, 3) false | iterator hasNext next eq(1) hasNext next \
+                 eq(2) hasNext ",
+            ),
+            Divergence::not_yet_native(
+                "listOf(1, 2) == P(1) false | hasNext next eq(1) hasNext ",
+                "listOf(1, 2) == P(1) false | iterator hasNext next eq(1) hasNext ",
+            ),
+            Divergence::not_yet_native(
+                "listOf(1, 2) == P(1, 3) false | hasNext next eq(1) hasNext next eq(2) ",
+                "listOf(1, 2) == P(1, 3) false | iterator hasNext next eq(1) hasNext next \
+                 eq(2) ",
+            ),
+            Divergence::not_yet_native(
+                "listOf() == P() true | ",
+                "listOf() == P() true | iterator hasNext ",
+            ),
+        ],
+    );
+}
+
+#[test]
+fn a_walk_stops_at_a_throwing_iterator_or_has_next_of_the_program() {
+    run_driver_against_kotlin("walk_polls_program_calls");
+}
+
+#[test]
+fn a_list_modification_count_wraps_and_is_still_noticed() {
+    run_driver("list_modification_count_wraps");
+}
+
+#[test]
+fn a_walk_count_past_the_largest_int_raises_kotlins_overflow() {
+    run_driver_against_kotlin("walk_count_overflow");
+}
+
+#[test]
+fn a_walk_index_past_the_largest_int_raises_kotlins_overflow() {
+    run_driver_against_kotlin("walk_index_overflow");
+}
+
+#[test]
+fn an_indexed_value_or_none_stops_at_the_programs_throwing_call() {
+    run_driver("member_stops_at_throw");
+}
+
+#[test]
+fn a_builder_map_sees_its_length_change_and_a_self_list_renders() {
+    run_driver_against_kotlin("builder_map_and_self_list");
+}
+
+#[test]
+fn the_list_walk_and_array_entry_points_answer_as_kotlin_does() {
+    run_driver_against_kotlin("list_api_answers");
+}
+
+#[test]
+fn a_map_or_for_each_over_a_list_its_lambda_changes_stops_where_kotlins_iterator_does() {
+    // Kotlin/Native's `ArrayList` iterator answers `hasNext()` as `index < list.length`
+    // (`ArrayList.kt`, `Itr.hasNext`, JetBrains/kotlin v2.4.10,
+    // libraries/stdlib/native-wasm/src/kotlin/collections), so a walk whose last element removed an
+    // element ends there; the JVM's answers `cursor != size` and its next `next()` throws.
+    run_driver_against_kotlin_with(
+        "map_mutated_source",
+        &[
+            Divergence::native_behaviour(
+                "map removing the last at the last of [1, 2]: threw \
+                 ConcurrentModificationException: null [1]",
+                "map removing the last at the last of [1, 2]: [10, 20] [1]",
+            ),
+            Divergence::native_behaviour(
+                "forEach removing the last at the last of [1, 2]: threw \
+                 ConcurrentModificationException: null [1]",
+                "forEach removing the last at the last of [1, 2]: kotlin.Unit [1]",
+            ),
+        ],
+    );
+}
+
+#[test]
+fn an_iterator_is_an_iterator_and_an_arrays_is_its_kinds_iterator() {
+    // Kotlin/Native's classes: `kotlin.ArrayIterator` and `kotlin.IntArrayIterator` and kin
+    // (kotlin-native/runtime/src/main/kotlin/kotlin/Arrays.kt, JetBrains/kotlin v2.4.10), the
+    // anonymous iterator of `Array.asList`, which `listOf(1, 2)` answers
+    // (kotlin-native/runtime/src/main/kotlin/generated/_ArraysNative.kt), and `ArrayList`'s `Itr`
+    // (libraries/stdlib/native-wasm/src/kotlin/collections/ArrayList.kt).
+    run_driver_against_kotlin_with(
+        "iterator_identity",
+        &[
+            Divergence::native_behaviour(
+                "arrayOf(1).iterator(): kotlin.jvm.internal.ArrayIterator super=kotlin.Any is \
+                 Iterator",
+                "arrayOf(1).iterator(): kotlin.ArrayIterator super=kotlin.Any is Iterator",
+            ),
+            Divergence::native_behaviour(
+                "BooleanArray(1).iterator(): kotlin.jvm.internal.ArrayBooleanIterator \
+                 super=kotlin.collections.BooleanIterator is Iterator BooleanIterator",
+                "BooleanArray(1).iterator(): kotlin.BooleanArrayIterator \
+                 super=kotlin.collections.BooleanIterator is Iterator BooleanIterator",
+            ),
+            Divergence::native_behaviour(
+                "ByteArray(1).iterator(): kotlin.jvm.internal.ArrayByteIterator \
+                 super=kotlin.collections.ByteIterator is Iterator ByteIterator",
+                "ByteArray(1).iterator(): kotlin.ByteArrayIterator \
+                 super=kotlin.collections.ByteIterator is Iterator ByteIterator",
+            ),
+            Divergence::native_behaviour(
+                "CharArray(1).iterator(): kotlin.jvm.internal.ArrayCharIterator \
+                 super=kotlin.collections.CharIterator is Iterator CharIterator",
+                "CharArray(1).iterator(): kotlin.CharArrayIterator \
+                 super=kotlin.collections.CharIterator is Iterator CharIterator",
+            ),
+            Divergence::native_behaviour(
+                "ShortArray(1).iterator(): kotlin.jvm.internal.ArrayShortIterator \
+                 super=kotlin.collections.ShortIterator is Iterator ShortIterator",
+                "ShortArray(1).iterator(): kotlin.ShortArrayIterator \
+                 super=kotlin.collections.ShortIterator is Iterator ShortIterator",
+            ),
+            Divergence::native_behaviour(
+                "IntArray(1).iterator(): kotlin.jvm.internal.ArrayIntIterator \
+                 super=kotlin.collections.IntIterator is Iterator IntIterator",
+                "IntArray(1).iterator(): kotlin.IntArrayIterator \
+                 super=kotlin.collections.IntIterator is Iterator IntIterator",
+            ),
+            Divergence::native_behaviour(
+                "LongArray(1).iterator(): kotlin.jvm.internal.ArrayLongIterator \
+                 super=kotlin.collections.LongIterator is Iterator LongIterator",
+                "LongArray(1).iterator(): kotlin.LongArrayIterator \
+                 super=kotlin.collections.LongIterator is Iterator LongIterator",
+            ),
+            Divergence::native_behaviour(
+                "FloatArray(1).iterator(): kotlin.jvm.internal.ArrayFloatIterator \
+                 super=kotlin.collections.FloatIterator is Iterator FloatIterator",
+                "FloatArray(1).iterator(): kotlin.FloatArrayIterator \
+                 super=kotlin.collections.FloatIterator is Iterator FloatIterator",
+            ),
+            Divergence::native_behaviour(
+                "DoubleArray(1).iterator(): kotlin.jvm.internal.ArrayDoubleIterator \
+                 super=kotlin.collections.DoubleIterator is Iterator DoubleIterator",
+                "DoubleArray(1).iterator(): kotlin.DoubleArrayIterator \
+                 super=kotlin.collections.DoubleIterator is Iterator DoubleIterator",
+            ),
+            Divergence::native_behaviour(
+                "listOf(1, 2).iterator(): java.util.Arrays.ArrayItr super=kotlin.Any is \
+                 Iterator",
+                "listOf(1, 2).iterator(): null super=kotlin.Any is Iterator",
+            ),
+            Divergence::native_behaviour(
+                "mutableListOf(1, 2).iterator(): java.util.ArrayList.Itr super=kotlin.Any is \
+                 Iterator",
+                "mutableListOf(1, 2).iterator(): kotlin.collections.ArrayList.Itr \
+                 super=kotlin.Any is Iterator",
+            ),
+        ],
     );
 }
 
@@ -549,11 +1133,13 @@ fn a_missing_runtime_compiler_leaves_the_native_target_unavailable() {
         String::from_utf8(output.stdout).expect("build-script stdout is UTF-8"),
         format!(
             "cargo:rerun-if-changed=src/native/runtime/krusty_rt.c\n\
+             cargo:rerun-if-changed=src/native/runtime/krusty_collections.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_fp.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_gc.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_start.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_sys.h\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_rt.h\n\
+             cargo:rerun-if-changed=src/native/runtime/krusty_internal.h\n\
              cargo:rerun-if-changed=build.rs\n\
              cargo:rerun-if-env-changed=KRUSTY_RUNTIME_CC\n\
              cargo:warning=native runtime: compiler `{}` was not found; no native target will be available. Install clang, or set KRUSTY_RUNTIME_CC.\n\
@@ -598,11 +1184,13 @@ fn a_failing_runtime_compiler_fails_the_build() {
     assert_eq!(
         String::from_utf8(output.stdout).expect("build-script stdout is UTF-8"),
         "cargo:rerun-if-changed=src/native/runtime/krusty_rt.c\n\
+         cargo:rerun-if-changed=src/native/runtime/krusty_collections.c\n\
          cargo:rerun-if-changed=src/native/runtime/krusty_fp.c\n\
          cargo:rerun-if-changed=src/native/runtime/krusty_gc.c\n\
          cargo:rerun-if-changed=src/native/runtime/krusty_start.c\n\
          cargo:rerun-if-changed=src/native/runtime/krusty_sys.h\n\
          cargo:rerun-if-changed=src/native/runtime/krusty_rt.h\n\
+         cargo:rerun-if-changed=src/native/runtime/krusty_internal.h\n\
          cargo:rerun-if-changed=build.rs\n\
          cargo:rerun-if-env-changed=KRUSTY_RUNTIME_CC\n"
     );

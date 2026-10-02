@@ -1482,9 +1482,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     `toString` throws: the other operand is not rendered and no text is built. A concatenation whose
     text would be longer than an array can hold ends the program as out of memory, as `repeat` does.
     The length is summed in 64 bits before either text is read: two lengths that each fit can wrap
-    together. Tests: `string_whitespace`, `string_plus_surrogates`, `string_surrogate_halves`,
-    `string_builder_receivers`, `string_plus_throwing_to_string`, `string_plus_overflow` under
-    `tests/native_runtime/`.
+    together. An index or `substring` bounds outside a `String` throw Kotlin/Native's
+    `ArrayIndexOutOfBoundsException` (its `KString.cpp`), and outside a `StringBuilder` its
+    `IndexOutOfBoundsException` (`AbstractList.checkElementIndex`), both with the JVM's message
+    (`Index 3 out of bounds for length 3`, `Range [-1, 2) out of bounds for length 3`); the JVM's
+    `StringIndexOutOfBoundsException` is a declared divergence. Tests: `string_whitespace`,
+    `string_plus_surrogates`, `string_surrogate_halves`, `string_builder_receivers`,
+    `string_plus_throwing_to_string`, `string_plus_overflow`, `string_get_negative_index`,
+    `string_substring_bounds` under `tests/native_runtime/`.
 - Non-null reference parameters of a visible (non-`private`) function/method are guarded at entry with
   `kotlin/jvm/internal/Intrinsics.checkNotNullParameter(param, "name")`, in declaration order — matching
   kotlinc. Primitives, nullable params (`String?`), and generic type parameters (`T`) are not guarded.
@@ -8887,7 +8892,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   own `toString`; when that throws, `append(value)` and `appendLine(value)` both stop with the
   exception pending and the builder exactly as it was — `appendLine` adds no newline after a value
   that never arrived. `StringBuilder(capacity)` treats a non-negative capacity as a hint, and a
-  NEGATIVE one throws `IllegalArgumentException` with no message, making no builder. This is
+  NEGATIVE one throws `IllegalArgumentException` with the capacity as its message, making no
+  builder. This is
   platform-defined: the common `expect` constructor documents no exception; Kotlin/JVM throws
   Java's `NegativeArraySizeException` with the capacity as message (`AbstractStringBuilder(int)`
   allocates `new byte[capacity]`; kotlinc 2.4.10 on JDK 21 prints `-1` for `StringBuilder(-1)`), a
@@ -8897,7 +8903,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   in the Kotlin/Native 2.4.10 distribution's linux_x64 stdlib cache, `StringBuilder(kotlin.Int)`
   calls `AllocArrayInstance(kclass:kotlin.CharArray, capacity)` with no check of its own, and
   `AllocArrayInstance` calls `ThrowIllegalArgumentException` for a negative size, which throws
-  `kotlin.IllegalArgumentException()` (read from the disassembly of `libstdlib-cache.a`).
+  `kotlin.IllegalArgumentException()` (read from the disassembly of `libstdlib-cache.a`). Its
+  message, under the runtime's rule for messages, is the JVM's: the capacity, `-1`. The exception
+  type is a declared divergence in `builder_negative_capacity`, compared with kotlinc otherwise.
   `StringBuilder(text)` over a `CharSequence` the program implements reads
   it through its own `length` and `get`; when either throws, no builder is made and nothing more of
   the sequence is read.
@@ -8974,6 +8982,29 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     half, as the JVM does — growth past the capacity, identity equality and self-append.
   Tests: `tests/native_runtime_e2e.rs` (`boxing`, `number_conversions`, `pair_members`, `delegates`,
   `builder_operations`, with `class_names` and `result_operations` above).
+- **A native runtime driver's Kotlin answers are checked against Kotlin when the test runs.** A
+  driver whose expected answers are Kotlin's prints what the runtime answered as a transcript, one
+  observation per line, and the harness (`run_driver_against_kotlin` in
+  `tests/native_runtime_e2e.rs`) requires it to equal what the program beside it,
+  `tests/native_runtime/<driver>.kt`, answers from `box()` when the reference kotlinc compiles it and
+  the JVM runs it. The program is the one home of the Kotlin being compared with; the driver keeps
+  its own checks of what Kotlin has no counterpart for (which exception is pending, the exact calls
+  into the program, the message a failure ends with). An answer the JVM cannot give within the
+  harness's limit stays pinned in the driver, with kotlinc's answer recorded in the program. From
+  the range tier on, every driver that cites kotlinc runs this way.
+  Tests: `tests/native_runtime_e2e.rs` (`a_transcript_differs_only_where_a_divergence_declares_it`,
+  and every driver registered with `run_driver_against_kotlin` or `run_driver_against_kotlin_with`).
+- **The native runtime behaves as Kotlin/Native and speaks as the JVM where that is cheap.** Where
+  the two platforms differ, the native runtime's behaviour is Kotlin/Native's: which exception type
+  is thrown, a class's identity and its qualified and simple names, what an `is` answers, iteration
+  order, a collection's implementation semantics, and the order of the `equals`/`hashCode` calls it
+  makes into the program. Its messages and diagnostics -- an exception's message text, the report of
+  an uncaught exception -- are the JVM's wherever reproducing them is cheap, and Kotlin/Native's
+  where the JVM's is not meaningful or not cheap (a `NullPointerException` message describing a Java
+  call). Every observable divergence from the JVM is declared in the test that observes it
+  (`Divergence` in `tests/native_runtime_e2e.rs`), with its rule and the Kotlin/Native source it
+  follows, and the harness checks both sides of it on every run.
+  Tests: `tests/native_runtime_e2e.rs` (every `run_driver_against_kotlin_with` declaration).
 - **Native integral ranges and progressions answer what Kotlin's classes answer.** The native
   runtime (`src/native/runtime/krusty_rt.c`) keeps a range and a progression in one struct, with a
   flag for which it is, because the two classes differ observably and the step cannot tell them
@@ -8988,22 +9019,28 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   misreports membership nor overflows; an empty unsigned `until` answers the declared `EMPTY`
   (`UInt.MAX_VALUE..0u`), not the signed types' `1..0`.
   Tests: `tests/native_runtime_e2e.rs` (`range_contains_unsigned`, `range_progression_members`,
-  `range_unsigned_until_empty`, `range_iterator_ulong_crosses_sign`).
+  `range_unsigned_until_empty`, `range_iterator_ulong_crosses_sign`, `range_kotlinc_oracle`), each
+  compared with its Kotlin program as below.
 - **A native range, a progression and their iterators are Kotlin's classes.** `..` and `until`
   answer `kotlin.ranges.IntRange` (and `LongRange`, `CharRange`, `UIntRange`, `ULongRange`), whose
   superclass is the element's progression; `step`, `downTo` and `reversed()` answer
   `kotlin.ranges.IntProgression` (and kin) itself, even for a step of one; and `iterator()` answers
   `kotlin.ranges.IntProgressionIterator` (and kin), a subclass of the abstract
   `kotlin.collections.IntIterator`/`LongIterator`/`CharIterator`, while the unsigned iterators
-  subclass only `Any` — as kotlinc 2.4.10 reports on the JVM for the program recorded in the driver.
+  subclass only `Any` — as the reference kotlinc reports on the JVM for `range_class_identity.kt`,
+  which the harness runs and compares line by line with what the driver prints.
   The two share one struct and vtable; the descriptor alone says which class an object is.
   Tests: `tests/native_runtime_e2e.rs` (`range_class_identity`, `range_progression_members`).
 - **`value in progression` is Kotlin's `Iterable.contains`, index overflow included.** A range
   (`IntRange` and kin) answers `in` with its own constant-time `contains`. A progression has no
   `contains`, so Kotlin's `in` walks it with an `Int` index and throws
   `ArithmeticException("Index overflow has happened.")` on reaching index 2^31 (checked with kotlinc
-  2.4.10: `0L in (Long.MIN_VALUE..Long.MAX_VALUE step 3)` throws, `(Long.MIN_VALUE + 3) in` it is
+  2.4.20: `0L in (Long.MIN_VALUE..Long.MAX_VALUE step 3)` throws, `(Long.MIN_VALUE + 3) in` it is
   `true`, `-5L in (0L..2147483648L step 1)` throws, `-1L in (0L..2147483647L step 1)` is `false`).
+  The harness asks kotlinc every question in `range_contains_unsigned.kt` on each run and compares
+  the driver's answers with it, except the questions whose walk reaches index 2^31: each costs the
+  JVM 5 to 13 seconds, past the harness's limit on one `box()`, so the driver pins those answers and
+  the program lists them.
   The native runtime answers the same in constant time: a member at walk index below 2^31 is found,
   a walk of at most 2^31 elements ends without one, and any other question throws. Membership in a
   `ULong` walk is reduced on the unsigned ring, so a short walk across 2^63 finds its members.
@@ -9015,7 +9052,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   their hashes differ (`1072693248`, `-1074790400`); a `Float` range never equals a `Double` one.
   `hashCode` is `31 * start.hashCode() + end.hashCode()` at the bound's own width, `-1` when empty,
   and `toString` renders each bound as its type does (`1.0E-5..1.0E10`, `-Infinity..Infinity`). All
-  as kotlinc 2.4.10 answers on the JVM for the program recorded in the driver.
+  as the reference kotlinc answers on the JVM for `floating_range.kt`, which the harness runs and
+  compares with the driver.
   Tests: `tests/native_runtime_e2e.rs` (`floating_range`).
 - **A native `a..b` over a `Comparable` orders by the element type's own `compareTo`.** The
   range (`kotlin.ranges.ComparableRange`) carries the comparison the generator chose where it built
@@ -9028,9 +9066,146 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `equals` is `isEmpty() && other.isEmpty() || start == other.start && endInclusive ==
   other.endInclusive` evaluated in Kotlin's order: `other.isEmpty()`, a call into `other`'s
   `compareTo`, happens only when this range is empty. The exact calls each member makes into the
-  program, and where it stops when one throws, are those kotlinc 2.4.10 makes on the JVM for the
-  program recorded in `comparable_range_members`.
+  program, and where it stops when one throws, are those the reference kotlinc makes on the JVM for
+  `comparable_range_members.kt`, which the harness runs and compares with the driver.
   Tests: `tests/native_runtime_e2e.rs` (`comparable_range_program_type`, `comparable_range_members`).
+- **Native runtime lists and walks raise the way Kotlin's do, and a raise ends the walk.** `kt_throw`
+  records the exception and comes back, so each runtime raise returns at once and each walk checks
+  for a pending exception after every `next`, every lambda it calls, and every element `equals`,
+  `hashCode` or `toString` it calls. That covers the lambda's own exception, an element member's,
+  and a `ConcurrentModificationException` from the list it walks. An element member that threw is
+  the last call into the program whatever placeholder it returned: a list's `indexOf`,
+  `lastIndexOf`, `contains`, `equals`, `hashCode` and `toString`, `joinToString`, and an array's
+  `contentEquals`, `contentHashCode` and `contentToString` ask no later element, and `remove` whose
+  comparison threw removes nothing. An out-of-bounds
+  `get`/`set`/`add(i, e)`/`removeAt` raises `IndexOutOfBoundsException` and leaves the list as it
+  was. `first()`/`last()` of an empty list, and `next()` on an exhausted array or string iterator,
+  raise `NoSuchElementException`. `ArrayList(-1)` raises `IllegalArgumentException` (both platforms'
+  type) with the JVM's message, `Illegal Capacity: -1`, compared with kotlinc's on every run
+  (`array_list_negative_capacity`). `xs.addAll(list)` appends the argument's elements as they were
+  when the call began, so `xs.addAll(xs)` doubles `xs`, as Kotlin's collection `addAll` does.
+  Collecting a range of 2^31 or more elements (up to the full 64-bit span) stops the program as too
+  long, where kotlinc runs out of memory. An `ArrayList` grown past what an `Int` capacity can
+  double to stops the program as out of memory, as the JVM's does, before any element is copied.
+  `IndexedValue.hashCode` wraps like Kotlin's `Int`. A string iterator is linear in the string's
+  length.
+  Tests: `tests/native_runtime_e2e.rs` (drivers under `tests/native_runtime/`).
+- **A native list is Kotlin's collection interfaces, and equals any `List`.** The growable list is
+  `kotlin.collections.ArrayList` and implements `MutableList`, `List`, `MutableCollection`,
+  `Collection`, `MutableIterable`, `Iterable` and `RandomAccess`, each an interface descriptor an
+  `is` names. The read-only list `listOf` answers is `List`, `Collection`, `Iterable` and
+  `RandomAccess` and not mutable, and publishes no class name: that is Kotlin/Native's answer for
+  `listOf(a, b)`, the anonymous read-only `AbstractList` of `Array.asList`, where the JVM's
+  `java.util.Arrays$ArrayList` is a `MutableList` to an `is` and is named `ArrayList` -- a declared
+  divergence. A list equals any `List` with equal elements in order, a program's own list class
+  included, and a merely `Iterable` object never. A call into the program that throws ends the
+  comparison. The runtime reaches a program's collection only through its `iterator()`, `hasNext`
+  and `next`, so both lists walk a program list as the JVM's `ArrayList.equals` does --
+  `iterator()`, `hasNext`, `next`, the element's `equals`, and a final `hasNext`. That is a known
+  gap in both: Kotlin/Native's `AbstractList.equals` compares the `size`s first and then walks with
+  `iterator()` and `next()` alone, `EmptyList.equals` asks `isEmpty()`, and `ArrayList.equals`
+  compares `size` and then `get(i)`; closing it needs the compiler to record those members in a
+  program collection's descriptor. The read-only list's lines are declared (`not_yet_native`); the
+  growable list's match the JVM, so the oracle cannot see its gap. Compared with kotlinc's answers
+  for `list_identity.kt` on every run.
+  Tests: `tests/native_runtime_e2e.rs` (`list_identity`).
+- **A native walk stops at the program's first throwing call, `iterator()` and `hasNext()`
+  included.** Every runtime walk over an `Iterable` — `map`, `forEach`, `any`/`all`/`none`,
+  `count`, `filter`, `first`/`firstOrNull`/`last`, `fold`, `forEachIndexed`, `toList`,
+  `reversed`, `sortedWith`, `indexOf`, `joinToString`, `plus`, `sumOf`, `withIndex`, `addAll` —
+  looks for a pending exception after the program's `iterator()`, after every `hasNext()` and
+  `next()`, and after every lambda or element member it calls, and makes no further call into the
+  program, whatever placeholder the throwing call answered; no later raise replaces that exception.
+  `Iterable.indexOf(x)` asks `x.equals(item)`, the argument's `equals`, as Kotlin's `element ==
+  item` does. The calls are compared with kotlinc's on the JVM for `walk_polls_program_calls.kt` on
+  every run.
+  `IndexedValue`'s `equals` (which asks the value only when the indices agree) and `hashCode`,
+  `none { }` and `none()` likewise stop at the program's throwing call and compute nothing from its
+  answer.
+  Tests: `tests/native_runtime_e2e.rs` (`walk_polls_program_calls`, `member_stops_at_throw`).
+- **An exhausted native iterator raises what Kotlin raises there, and never ends the program.**
+  Through the general (boxed) and the narrow (primitive) protocol alike: an array's `next()` raises
+  Kotlin/Native's `ArrayIterator`/`IntArrayIterator` exception, `NoSuchElementException`, with the
+  JVM's message, `Index 1 out of bounds for length 1` (Kotlin/Native's is the index alone); a
+  range's, a progression's, a list's and `withIndex()`'s raise `NoSuchElementException()`; a
+  `String`'s or `StringBuilder`'s raises what `text[length]` raises, because Kotlin's
+  `CharSequence.iterator()` is `get(index++)` with no check of its own: Kotlin/Native's class
+  (`ArrayIndexOutOfBoundsException` for a `String`, `IndexOutOfBoundsException` for a
+  `StringBuilder`, whose `get` calls `AbstractList.checkElementIndex`) with the JVM's message,
+  where kotlinc throws `StringIndexOutOfBoundsException` for both -- a declared divergence. The
+  index moves on before the read raises, so a second `next()` on `"a".iterator()` asks for index
+  2, where an array's asks for the same index again. Compared with kotlinc's answers for
+  `iterator_exhausted.kt` on every run.
+  Tests: `tests/native_runtime_e2e.rs` (`iterator_exhausted`).
+- **Native walk counters raise Kotlin's overflow, and no runtime counter overflows signed.** A walk
+  counting with an `Int` raises what Kotlin's `checkIndexOverflow`/`checkCountOverflow` raise when
+  the count passes `Int.MAX_VALUE`: `count()` and `count { }` raise `ArithmeticException("Count
+  overflow has happened.")` at the 2^31st counted element, and `indexOf`, `forEachIndexed` and
+  `withIndex()`'s iterator raise `ArithmeticException("Index overflow has happened.")` at index
+  2^31, before comparing, acting on or fetching that element. Every walk starts its counter at
+  `kt_walk_counter_origin` (zero) and checks it through the one helper `kt_counter_overflowed`, so
+  the drivers start the counters just below 2^31 and reach the checks in two elements. The JVM
+  needs seconds to walk 2^31 elements, past the box runner's 10-second limit on a loaded machine
+  (measured: a single `indexOf` over 2^31 + 1 timed out there), so those answers -- `count()` of
+  2^31 elements raises, of 2^31 - 1 is `Int.MAX_VALUE`, `indexOf` in 2^31 + 1 raises and in 2^31 is
+  -1, each having read every element -- are recorded in `walk_count_overflow.kt` and
+  `walk_index_overflow.kt` from kotlinc 2.4.20 and pinned in the drivers, with `count { }`,
+  `forEachIndexed` and `withIndex()`, which pass the same helper; the programs run short walks of
+  the same kinds, which are compared on every run. A list's modification count
+  wraps, as the JVM's `modCount` does, and an iterator made before the wrap still sees the change.
+  The driver harness builds with signed overflow trapping
+  (`-fsanitize=signed-integer-overflow -fsanitize-trap=...`), so a counter left signed fails its
+  driver with SIGILL.
+  Tests: `tests/native_runtime_e2e.rs` (`walk_count_overflow`, `walk_index_overflow`,
+  `list_modification_count_wraps`).
+- **A native walk over a builder asks its current length, and a list renders itself as
+  `(this Collection)`.** `map` over a `StringBuilder` steps as Kotlin's `CharSequence.iterator()`
+  does, asking the current length before each step, so a transform that appends to or shortens the
+  builder changes how many elements it yields (`StringBuilder("ab").map { if (sb.length < 4)
+  sb.append('z'); it }` is `[a, b, z, z]`); only an immutable `String` is sized ahead. A list's
+  `toString` renders an element that is the list itself as `(this Collection)`, Kotlin's
+  `AbstractCollection.toString`, rather than recursing. Both compared with kotlinc's answers on the
+  JVM for `builder_map_and_self_list.kt` on every run.
+  Tests: `tests/native_runtime_e2e.rs` (`builder_map_and_self_list`).
+- **A native `map` over a mutable collection walks its iterator, which answers `hasNext` as
+  `cursor < size`.** Kotlin's `map` sizes its result from the receiver but is a `for` loop over its
+  iterator, asking `hasNext()` before every element, so a transform that changes the receiver
+  structurally reaches a `next()` that raises `ConcurrentModificationException`: appending to
+  `mutableListOf(1)` while mapping it throws where a walk of the size taken first returned `[10]`.
+  Only a receiver the transform cannot change (a read-only list, an array, a `String`, a range) is
+  sized ahead. A list iterator answers `hasNext()` as Kotlin/Native's `ArrayList` iterator does,
+  `cursor < size`, so a walk whose last element removes an element ends there cleanly, where the
+  JVM's `ArrayList` (`cursor != size`) goes on to a `next()` that throws -- a declared divergence.
+  Compared with kotlinc's answers for `map_mutated_source.kt` on every run.
+  Tests: `tests/native_runtime_e2e.rs` (`map_mutated_source`).
+- **Every native iterator is an `Iterator`, and an array's is its kind's.** A progression's iterator
+  (`IntProgressionIterator` and kin, through the abstract `IntIterator` family, and the two
+  unsigned ones directly) implements `kotlin.collections.Iterator`, so `is Iterator<*>` holds. An
+  array's iterator is one class per array kind: a `BooleanArray`'s through a `DoubleArray`'s subclass
+  the abstract `BooleanIterator` through `DoubleIterator` (so `IntArray(1).iterator() is
+  IntIterator`), and an `Array<T>`'s and the unsigned arrays' subclass `Any` and implement
+  `Iterator`. The class names, superclasses and `is` answers are compared with kotlinc's for
+  `iterator_identity.kt` on every run. The unsigned arrays' and the progressions' class names agree
+  (`kotlin.UIntArray.Iterator`); the other arrays' are Kotlin/Native's, `kotlin.IntArrayIterator`
+  (and `kotlin.ArrayIterator` for an `Array<T>`), where the JVM's is
+  `kotlin.jvm.internal.ArrayIntIterator` -- a declared divergence. A list's iterator is
+  Kotlin/Native's too: `mutableListOf(1, 2).iterator()` is `kotlin.collections.ArrayList.Itr`
+  (the JVM's `java.util.ArrayList.Itr`), and `listOf(1, 2).iterator()` the anonymous iterator
+  Kotlin/Native's `Array.asList` makes, with no qualified name (the JVM's
+  `java.util.Arrays.ArrayItr`), both declared.
+  Tests: `tests/native_runtime_e2e.rs` (`iterator_identity`).
+- **The native list, walk and array entry points answer as Kotlin does on the ordinary path.**
+  `listOf`/`mutableListOf` and their members (`get`, `first`, `last`, `indexOf`, `lastIndexOf`,
+  `contains`, `add`, `add(i, e)`, `set`, `removeAt`, `remove`, `addAll`, `+=`, `sortWith`,
+  `clear`, `equals`, `hashCode`, `toString`), the `Iterable` walks (`map`, `filter`, `filterNot`,
+  `any`, `all`, `none`, `count`, `first`, `firstOrNull`, `last`, `fold`, `toList`, `reversed`,
+  `sortedWith`, `forEachIndexed`, `joinToString`, `plus`, the three `sumOf`, `withIndex`,
+  `isEmpty`), `IndexedValue`, the array members (`toList`, `reversed`, `reversedArray`, `isEmpty`,
+  `contentEquals`, `contentHashCode`, `contentToString`, `toTypedArray`) and walks over ranges,
+  progressions and strings answer what kotlinc answers on the JVM for `list_api_answers.kt`, which
+  the harness runs and compares with the driver.
+  Tests: `tests/native_runtime_e2e.rs` (`list_api_answers`).
+
 - **A file's program entry point is Kotlin's `main`, selected once by the frontend's rule.** A
   top-level function is a `main` entry point when it is named `main`, has no extension receiver, type
   parameters or context parameters, returns `Unit`, and takes nothing or one array whose elements

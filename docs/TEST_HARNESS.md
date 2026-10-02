@@ -391,6 +391,52 @@ Use the shared helpers in `tests/common`:
 These helpers compile in process where possible and reuse persistent JVM runners/servers inside a test
 binary. Per-test JVM startup is one of the easiest ways to degrade the suite.
 
+## Native Runtime Drivers
+
+`tests/native_runtime_e2e.rs` (in the `e2e` binary; filter `native_runtime`) builds each C driver under
+`tests/native_runtime/` with the host clang against the freestanding runtime and runs it. A driver
+succeeds with exactly `OK\n` on stdout and nothing on stderr (`run_driver`), or ends the way the
+runtime ends a program with exactly the runtime's message (`run_driver_expecting_failure`).
+
+A driver whose expected answers are Kotlin's does not copy them into C. It prints a transcript — one
+observation per line, runtime objects rendered through the runtime's own `toString` where that is the
+claim — before its `OK`, and `run_driver_against_kotlin` compares it with the Kotlin program beside
+it, `tests/native_runtime/<driver>.kt`. That program's `fun box(): String` builds the same lines;
+the harness compiles it with the persistent reference kotlinc and runs it on the shared JVM
+(`common::kotlinc_box_result`), requires it to succeed with whole lines, and fails on the first line
+where the two transcripts differ, printing both. `tests/native_runtime/transcript.h` holds the C side
+(`say`, `say_value`, `say_thrown`, …). Checks with no Kotlin counterpart — the pending exception's
+identity, the exact calls into a program stand-in, failure messages — stay `CHECK`s in the driver, and
+an answer the JVM cannot give within the box runner's 10-second limit stays pinned in the driver, with
+kotlinc's answer recorded in the program beside the question.
+
+The native runtime's rule for where it answers differently from the JVM: it BEHAVES as Kotlin/Native
+does — which exception type is thrown, a class's identity and names, what an `is` answers, iteration
+order, a collection's semantics, the order of the calls it makes into the program — and SAYS what
+the JVM says — an exception's message, a diagnostic's wording — wherever that is cheap, keeping
+Kotlin/Native's message where the JVM's is not (a message describing a Java call, say). Every line
+on which the two runtimes then answer differently is declared in the test, never left to a comment:
+`run_driver_against_kotlin_with(driver, &[Divergence::native_behaviour(jvm, native), …])`, or
+`Divergence::native_message` for a Kotlin/Native message kept, or `Divergence::not_yet_native` for a
+known gap, a line the runtime answers as neither platform does because Kotlin/Native's answer needs
+a call into the program the runtime cannot make yet (the declaration says what Kotlin/Native answers
+and what closing the gap needs). kotlinc's program must answer exactly the declared `jvm` line and
+the driver exactly the declared `native` line at the same place, so the oracle still checks the
+JVM's side; every other line must be identical; and an undeclared difference fails, as does a
+declared one that no longer occurs. No Kotlin/Native compiler runs here (the cached distribution
+holds its stdlib, not its compiler), so each declaration cites where its native answer comes from: a
+Kotlin/Native stdlib source (`JetBrains/kotlin` at the reference version's tag) or the disassembly
+of the distribution's stdlib cache.
+
+These drivers need the reference kotlinc like every other differential test: `just` provisions it, or
+point `KRUSTY_KOTLINC` at a provisioned dist when running the filter by hand, for example from a
+worktree:
+
+```sh
+KRUSTY_KOTLINC=/path/to/kotlinc/bin/kotlinc \
+CARGO_TARGET_DIR=/path/to/main/target cargo test --profile gate --test e2e native_runtime
+```
+
 ## Environment Overrides
 
 The harness usually sets these itself through `just`. Override them only when testing a specific local

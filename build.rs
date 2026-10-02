@@ -52,11 +52,12 @@ const COMMON_FLAGS: &[&str] = &[
 
 const SOURCES: &[&str] = &[
     "krusty_rt.c",
+    "krusty_collections.c",
     "krusty_fp.c",
     "krusty_gc.c",
     "krusty_start.c",
 ];
-const HEADERS: &[&str] = &["krusty_sys.h", "krusty_rt.h"];
+const HEADERS: &[&str] = &["krusty_sys.h", "krusty_rt.h", "krusty_internal.h"];
 
 fn main() {
     if let Err(error) = prebuild_runtime() {
