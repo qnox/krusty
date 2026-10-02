@@ -349,9 +349,8 @@ fn a_defaulted_enum_secondary_constructor_ledger_matches_kotlinc() {
 /// expression, or the delegation, or the class, for "the declaration" would put the entry on 4, on
 /// 5, or on 1, and each of those is visible here.
 ///
-/// The constructor is `private` for the same reason: a non-private one is entered through a
-/// `checkNotNullParameter` prologue krusty does not emit yet, which shifts every pc. That gap is
-/// pinned separately, below, so this ledger compares the lines rather than that.
+/// The constructor is `private` so no `checkNotNullParameter` prologue shifts its pcs; a
+/// non-private one is compared below.
 #[test]
 fn a_multiline_secondary_constructors_ledger_matches_kotlinc() {
     let (reference, ours) = javap_both(
@@ -381,14 +380,11 @@ fn a_multiline_secondary_constructors_ledger_matches_kotlinc() {
     );
 }
 
-/// A NON-private secondary constructor, where one difference remains and is pinned to its size.
-///
-/// kotlinc enters such a constructor through `Intrinsics.checkNotNullParameter` — six bytes krusty
-/// does not emit for a secondary constructor's parameters — so the single line entry sits at pc 6
-/// there and pc 0 here. The LINE is the same on both sides, which is this PR's fact; the pc is the
-/// parameter-assertion gap, and the synthetic overload, which has no such prologue, matches exactly.
+/// A NON-private secondary constructor: kotlinc enters it through `Intrinsics.checkNotNullParameter`,
+/// so its single line entry sits at pc 6, past that prologue, while the synthetic overload, which has
+/// no prologue, enters on pc 0.
 #[test]
-fn a_non_private_secondary_constructor_differs_only_by_its_missing_null_check() {
+fn a_non_private_secondary_constructors_ledger_matches_kotlinc() {
     let (reference, ours) = javap_both(
         "ProtectedSecondaryLedger",
         "open class Prot(val n: Int) {\n\
@@ -397,22 +393,17 @@ fn a_non_private_secondary_constructor_differs_only_by_its_missing_null_check() 
         "Prot",
     );
     assert_eq!(
+        constructor_ledger(&ours, "Prot"),
+        constructor_ledger(&reference, "Prot"),
+        "krusty's constructor surface is kotlinc's, entry for entry"
+    );
+    assert_eq!(
         constructor_ledger(&reference, "Prot"),
         vec![
             "public Prot(int); | descriptor (I)V | flags 0x0001 | line 1: 0".to_string(),
             "protected Prot(java.lang.String); | descriptor (Ljava/lang/String;)V | flags 0x0004 | line 2: 6".to_string(),
             "public Prot(java.lang.String, int, kotlin.jvm.internal.DefaultConstructorMarker); | descriptor (Ljava/lang/String;ILkotlin/jvm/internal/DefaultConstructorMarker;)V | flags 0x1001 | line 2: 0".to_string(),
         ],
-        "kotlinc's ledger"
-    );
-    assert_eq!(
-        constructor_ledger(&ours, "Prot"),
-        vec![
-            "public Prot(int); | descriptor (I)V | flags 0x0001 | line 1: 0".to_string(),
-            // Same line, pc 0 rather than 6: no `checkNotNullParameter` prologue precedes it.
-            "protected Prot(java.lang.String); | descriptor (Ljava/lang/String;)V | flags 0x0004 | line 2: 0".to_string(),
-            "public Prot(java.lang.String, int, kotlin.jvm.internal.DefaultConstructorMarker); | descriptor (Ljava/lang/String;ILkotlin/jvm/internal/DefaultConstructorMarker;)V | flags 0x1001 | line 2: 0".to_string(),
-        ],
-        "krusty's ledger: access flags and lines are kotlinc's; one pc is not"
+        "spelled out, so a reference change is visible here"
     );
 }

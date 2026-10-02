@@ -617,24 +617,6 @@ impl JvmDefaultMode {
     }
 }
 
-/// Drop every `Intrinsics.checkNotNullParameter` guard the lowering recorded.
-///
-/// `-Xno-param-assertions` removes the parameter null checks kotlinc emits at the entry of every
-/// function reachable from Java. Applied to the IR rather than at the emission site on purpose: the
-/// guards are also what the `LineNumberTable` and `LocalVariableTable` start offsets are computed
-/// from, so suppressing them at one site and not the other would emit debug tables pointing into the
-/// middle of the method.
-pub(crate) fn strip_param_assertions(ir: &mut IrFile) {
-    for function in &mut ir.functions {
-        function.param_checks.fill(None);
-    }
-    for class in &mut ir.classes {
-        for parameter in &mut class.ctor_args {
-            parameter.check = None;
-        }
-    }
-}
-
 /// Drop every `Intrinsics.checkNotNullExpressionValue` guard on a narrowed platform value.
 ///
 /// `-Xno-call-assertions` removes the null checks kotlinc emits where a Java call's `T!` result is
@@ -691,7 +673,7 @@ pub struct EmitOptions {
     /// Emit the `Intrinsics.checkNotNullParameter` guards (`-Xno-param-assertions` clears this).
     ///
     /// Most guards are recorded by lowering and removed from the IR before emission
-    /// ([`strip_param_assertions`]), which keeps them consistent with the debug-table offsets
+    /// ([`crate::jvm::parameter_assertions::strip`]), which keeps them consistent with the debug-table offsets
     /// measured past them. A PROPERTY SETTER's `<set-?>` guard has no IR record — it is derived here
     /// from the property's type — so those sites read this flag instead.
     pub param_assertions: bool,

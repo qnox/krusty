@@ -1270,6 +1270,11 @@ impl ClassWriter {
                 panic!("cannot compute JVM frames for {name}{desc}: {decline:?}")
             })
         });
+        let lvt = if name == "<init>" || name == "<clinit>" {
+            Vec::new()
+        } else {
+            self.local_table(code)
+        };
         self.methods.push(MethodInfo {
             access,
             name: n,
@@ -1294,34 +1299,7 @@ impl ClassWriter {
             } else {
                 code.line_marks().to_vec()
             },
-            lvt: if name == "<init>" || name == "<clinit>" {
-                Vec::new()
-            } else {
-                code.local_entries()
-                    .iter()
-                    // A `LocalVariableTable` `start_pc` must index the code array (JVMS §4.7.13) —
-                    // HotSpot's class-file parser rejects the whole class otherwise. A local DECLARED
-                    // in a region the emitter dropped as unreachable (`val y: Int = boom() ?: 1`) has
-                    // its start recorded past the last instruction and describes no live range, so it
-                    // goes with the code. An empty range stays until the method is written, as in
-                    // kotlinc (`prepareForEmitting`): the store before it is a named local's.
-                    .filter(|(start, len, ..)| {
-                        let start = usize::from(*start);
-                        let end =
-                            len.map_or(code.bytes.len(), |length| start + usize::from(length));
-                        start < code.bytes.len() && end <= code.bytes.len()
-                    })
-                    .map(|(start, len, slot, nm, ds)| {
-                        (
-                            self.cp.utf8(nm),
-                            self.cp.utf8(ds),
-                            *slot,
-                            Some(*start),
-                            *len,
-                        )
-                    })
-                    .collect()
-            },
+            lvt,
             visible_anns: Vec::new(),
             invisible_anns: Vec::new(),
             param_anns: Vec::new(),

@@ -153,6 +153,7 @@ mod tests {
             },
             synthetic: true,
             vc_params: false,
+            param_checks: Vec::new(),
         }
     }
 

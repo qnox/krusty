@@ -1,6 +1,6 @@
 //! A method's `LocalVariableTable` strings: when its names and descriptors intern.
 
-use super::{ClassWriter, CodeBuilder};
+use super::{ClassWriter, CodeBuilder, LvtEntry};
 
 impl CodeBuilder {
     /// How many `LocalVariableTable` entries the method has recorded so far.
@@ -22,6 +22,55 @@ impl CodeBuilder {
 }
 
 impl ClassWriter {
+    /// The `LocalVariableTable` a method's emission recorded, its strings interned.
+    pub(super) fn local_table(&mut self, code: &CodeBuilder) -> Vec<LvtEntry> {
+        code.local_entries()
+            .iter()
+            // A `LocalVariableTable` `start_pc` must index the code array (JVMS §4.7.13) —
+            // HotSpot's class-file parser rejects the whole class otherwise. A local DECLARED
+            // in a region the emitter dropped as unreachable (`val y: Int = boom() ?: 1`) has
+            // its start recorded past the last instruction and describes no live range, so it
+            // goes with the code. An empty range stays until the method is written, as in
+            // kotlinc (`prepareForEmitting`): the store before it is a named local's.
+            .filter(|(start, len, ..)| {
+                let start = usize::from(*start);
+                let end = len.map_or(code.bytes.len(), |length| start + usize::from(length));
+                start < code.bytes.len() && end <= code.bytes.len()
+            })
+            .map(|(start, len, slot, name, descriptor)| {
+                (
+                    self.cp.utf8(name),
+                    self.cp.utf8(descriptor),
+                    *slot,
+                    Some(*start),
+                    *len,
+                )
+            })
+            .collect()
+    }
+
+    /// Keep the tables a constructor's own emission recorded. `add_method` curates every `<init>`'s
+    /// line and local tables from its class's declarations; a declared secondary constructor's are
+    /// its body's, as for any method.
+    pub fn keep_method_debug(&mut self, name: &str, desc: &str, code: &CodeBuilder) {
+        let n = self
+            .cp
+            .lookup_utf8(name)
+            .expect("a just-emitted method retains its interned name");
+        let d = self
+            .cp
+            .lookup_utf8(desc)
+            .expect("a just-emitted method retains its interned descriptor");
+        let lvt = self.local_table(code);
+        let method = self
+            .methods
+            .iter_mut()
+            .find(|method| method.name == n && method.desc == d && method.code.is_some())
+            .expect("a just-emitted method must exist before retaining its debug tables");
+        method.lnt = code.line_marks().to_vec();
+        method.lvt = lvt;
+    }
+
     /// Intern a method's `LocalVariableTable` names and descriptors, in table order, once its body
     /// is complete. ASM visits the local variables after the instructions and before `visitMaxs`,
     /// so a nested block's local follows every constant of the method body, not the instruction

@@ -1686,7 +1686,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     of any function reachable from Java, including constructors that store a property. krusty honors
     it in three places, because a guard has three origins and each must agree or the class is
     malformed: the lowered guards are cleared from the IR before emission
-    (`jvm::ir_emit::strip_param_assertions`); a property SETTER's `<set-?>` guard, derived at emission
+    (`jvm::parameter_assertions::strip`); a property SETTER's `<set-?>` guard, derived at emission
     from the property type, is gated by `EmitOptions::param_assertions`; and the same option stops
     `ClassWriter` seeding the pool with the guard's `Methodref` and `String` constants. Every
     debug-table offset measured PAST a guard is gated too — the primary constructor's
@@ -11494,16 +11494,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     each masked parameter on that parameter's default, returns to the keyword for the branch, and
     delegates on the declaration's closing line; krusty's table is identical, pinned by a multiline
     ledger in `tests/enum_secondary_constructor_e2e.rs` whose three facts are on three lines.
-  - Still open: a NON-private secondary constructor's own single entry sits at pc 0 where kotlinc
-    puts it at pc 6. kotlinc enters such a constructor through an `Intrinsics.checkNotNullParameter`
-    guard per non-null reference parameter; krusty emits those only for PRIMARY constructor
-    parameters. The line is the same on both sides — only the prologue it follows differs — and the
-    synthetic overload, which has no such prologue, matches exactly. Pinned to that exact size by
-    `a_non_private_secondary_constructor_differs_only_by_its_missing_null_check`.
-  - Still open: the declared constructor's table is one entry even when its delegation spans lines,
-    where kotlinc marks each argument's own line and returns to the delegation's. That is
-    expression-line provenance for a constructor body, the same boundary as an ordinary call's
-    dispatch line, not a declaration fact.
+  - A source-reachable secondary constructor guards each non-null reference parameter with
+    `Intrinsics.checkNotNullParameter` before its delegation and publishes the matching parameter
+    nullability annotations. Private, enum, sealed, value-class-carrier, and generated constructors
+    emit no such guards. The guard is a typed `IrParameterCheck` fact; the JVM quotes the already
+    recorded source parameter identity and `-Xno-param-assertions` removes the fact before debug
+    offsets are finalized.
+  - A declared secondary constructor retains its own complete debug tables. Its `LineNumberTable`
+    starts on the delegation after the guard prologue, follows multiline delegation arguments and
+    body statements, and returns to the declaration's closing line. Its `LocalVariableTable` keeps
+    body locals live through the return, followed by `this` and the exact physical parameter list.
+    Repository-owned `Token`/`Envelope` fixtures compare the complete class set with kotlinc, both
+    with default assertions and with `-Xno-param-assertions`. Tests:
+    `tests/secondary_constructor_shape_e2e.rs`, `tests/no_assertions_flags_e2e.rs`, and
+    `tests/enum_secondary_constructor_e2e.rs`.
   - An enum declaring ONLY secondary constructors has no primary to emit: every entry names one of
     the secondaries, and registering the synthesized primary anyway collided with a no-argument
     secondary — both are `(String, int)V` — failing to load with `ClassFormatError: Duplicate
