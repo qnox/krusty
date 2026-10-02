@@ -1478,6 +1478,7 @@ fn mixed_open_end_membership_selects_range_until() {
         span: function.params[index].ty.span,
         context_kind: crate::types::ContextParameterKind::None,
         inline_modifier: crate::types::InlineParameterModifier::None,
+        name_binding: CheckedBodyParameterNameBinding::Lexical,
     };
     let parameters = [parameter(0), parameter(1), parameter(2)];
     let mut origins = OriginStore::default();
@@ -1566,6 +1567,7 @@ fn uniform_open_end_double_membership_stays_a_comparison() {
         span: function.params[0].ty.span,
         context_kind: crate::types::ContextParameterKind::None,
         inline_modifier: crate::types::InlineParameterModifier::None,
+        name_binding: CheckedBodyParameterNameBinding::Lexical,
     };
     let mut origins = OriginStore::default();
     let body = check_expression_body_with_parameters(
@@ -1640,6 +1642,7 @@ fn uniform_open_end_double_range_until_can_be_shadowed() {
         span: function.params[index].ty.span,
         context_kind: crate::types::ContextParameterKind::None,
         inline_modifier: crate::types::InlineParameterModifier::None,
+        name_binding: CheckedBodyParameterNameBinding::Lexical,
     };
     let parameters = [parameter(0), parameter(1), parameter(2)];
     let mut origins = OriginStore::default();
