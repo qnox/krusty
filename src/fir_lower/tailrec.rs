@@ -32,6 +32,7 @@ pub(super) fn finish_tailrec_body(
     collect_this_slots(ir, &roots, &mut frame);
     frame.next_slot.set(first_free_slot(ir, &roots, &frame));
     frame.fixed_temporaries = fixed_temporaries(ir, &roots);
+    frame.spill_inits = fixed_temporary_inits(ir, &roots, &frame.fixed_temporaries);
     let frame = &frame;
     if implicit_return {
         if unit {
@@ -217,7 +218,9 @@ fn tail_calls(ir: &IrFile, roots: &[ExprId], frame: &Frame, unit: bool) -> Vec<T
                 }
                 IrExpr::Call { .. } | IrExpr::MethodCall { .. } => {
                     self.children(expression);
-                    if let Some(edge) = edge.filter(|_| tail && self.is_self_call(expression)) {
+                    if let Some(edge) = edge.filter(|_| {
+                        tail && self.is_self_call(expression) && !self.step_suspends(expression)
+                    }) {
                         self.found.push(TailCall {
                             edge,
                             call: expression,
@@ -237,6 +240,18 @@ fn tail_calls(ir: &IrFile, roots: &[ExprId], frame: &Frame, unit: bool) -> Vec<T
                 } => {
                     let arg = *arg;
                     self.visit_held(arg, tail, edge);
+                }
+                // A PLATFORM-NARROWING not-null assertion (message: Some) wraps the value without
+                // consuming the tail position: a stepped call yields nothing to assert, and
+                // kotlinc likewise drops the check when it loops the call. An explicit source
+                // `!!` (message: None) is neither — kotlinc reports the call under it as not a
+                // tail call and runs the check on every frame, so it stays opaque here.
+                IrExpr::NotNullAssert {
+                    operand,
+                    message: Some(_),
+                } => {
+                    let operand = *operand;
+                    self.visit_held(operand, tail, edge);
                 }
                 IrExpr::Block { stmts, value } => {
                     let (stmts, value) = (stmts.clone(), *value);
@@ -281,6 +296,11 @@ fn tail_calls(ir: &IrFile, roots: &[ExprId], frame: &Frame, unit: bool) -> Vec<T
 
         fn is_self_call(&self, call: ExprId) -> bool {
             self.paths.get(&call) == Some(&1) && is_self_call(self.ir, call, self.frame)
+        }
+
+        /// See [`stepped_evaluation_suspends`].
+        fn step_suspends(&self, call: ExprId) -> bool {
+            stepped_evaluation_suspends(self.ir, call, self.frame)
         }
 
         fn children(&mut self, expression: ExprId) {
@@ -416,6 +436,37 @@ fn fixed_temporaries(ir: &IrFile, roots: &[ExprId]) -> std::collections::HashSet
     declared
 }
 
+/// The initializer behind each fixed temporary — the value the call lowering spilled into the
+/// slot. Only slots [`fixed_temporaries`] already proved the body never reassigns are keyed, so
+/// the initializer is what every read of the slot observes, wherever the read stands.
+fn fixed_temporary_inits(
+    ir: &IrFile,
+    roots: &[ExprId],
+    fixed: &std::collections::HashSet<u32>,
+) -> std::collections::HashMap<u32, ExprId> {
+    let mut inits = std::collections::HashMap::new();
+    let mut pending: Vec<ExprId> = roots.to_vec();
+    let mut seen = std::collections::HashSet::new();
+    while let Some(expression) = pending.pop() {
+        if !seen.insert(expression) {
+            continue;
+        }
+        if let IrExpr::Variable {
+            index,
+            init: Some(init),
+            named: false,
+            ..
+        } = ir.expr(expression)
+        {
+            if fixed.contains(index) {
+                inits.insert(*index, *init);
+            }
+        }
+        for_each_frame_child(ir, expression, &mut |child| pending.push(child));
+    }
+    inits
+}
+
 /// The first value slot nothing in the body uses, where a loop step's temporaries start.
 fn first_free_slot(ir: &IrFile, roots: &[ExprId], frame: &Frame) -> u32 {
     let parameters_end = frame.parameter_slot(frame.capture_prefix + frame.count);
@@ -536,6 +587,11 @@ pub(super) struct Frame {
     next_slot: std::cell::Cell<u32>,
     /// See [`fixed_temporaries`]. Filled by [`finish_tailrec_body`].
     fixed_temporaries: std::collections::HashSet<u32>,
+    /// The initializer behind each slot of [`Self::fixed_temporaries`] — the value the call
+    /// lowering spilled there. A self-call's operands are READS of these slots, so only through
+    /// this map can the sweep see what a step would actually re-evaluate. Filled by
+    /// [`finish_tailrec_body`].
+    spill_inits: std::collections::HashMap<u32, ExprId>,
 }
 
 impl Frame {
@@ -555,6 +611,7 @@ impl Frame {
             capture_prefix: 0,
             next_slot: std::cell::Cell::new(0),
             fixed_temporaries: std::collections::HashSet::new(),
+            spill_inits: std::collections::HashMap::new(),
         }
     }
 
@@ -673,6 +730,99 @@ fn is_self_call(ir: &IrFile, call: ExprId, frame: &Frame) -> bool {
         }
         _ => false,
     }
+}
+
+/// Whether the evaluation a loop step would REPEAT on every turn can suspend: the self-call's
+/// receiver and supplied arguments, plus each omitted parameter's default the step evaluates in
+/// its place.
+///
+/// A stepped call disappears, so its operand evaluation moves bodily into the loop turn: the
+/// spilled temporaries it reads stay as statements of the turn, and the step's own parameter
+/// stores follow them. A suspension in that region is one the JVM coroutine state machine would
+/// have to split a state around in the middle of the turn's argument reassignment, a shape it
+/// does not model — the resume lands past the reassignment the turn exists to perform. kotlinc
+/// draws the same line from its own side: it loops a `tailrec suspend` self-call whose operands
+/// are pure, and re-invokes through the continuation when a suspension sits among them
+/// (`EscKt$escape$1.invokeSuspend` ends in a real `invokestatic EscKt.escape(…); areturn`).
+///
+/// Declining costs the loop, never the answer: the call stays the call the program already had.
+/// A suspension OUTSIDE this region — a statement of its own earlier in the body — is not the
+/// step's business; the state machine handles those inside the loop.
+fn stepped_evaluation_suspends(ir: &IrFile, call: ExprId, frame: &Frame) -> bool {
+    let args = self_call_arguments(ir, call);
+    let defaults = ir.param_defaults(frame.function);
+    args.iter().enumerate().any(|(position, argument)| {
+        let operand = argument
+            .or_else(|| defaults.and_then(|defaults| defaults.get(position).copied().flatten()));
+        operand.is_some_and(|operand| evaluation_suspends(ir, operand, &frame.spill_inits))
+    }) || match ir.expr(call) {
+        IrExpr::Call {
+            dispatch_receiver, ..
+        } => dispatch_receiver
+            .is_some_and(|receiver| evaluation_suspends(ir, receiver, &frame.spill_inits)),
+        IrExpr::MethodCall { receiver, .. } => {
+            evaluation_suspends(ir, *receiver, &frame.spill_inits)
+        }
+        _ => false,
+    }
+}
+
+/// Whether evaluating `root` can suspend THIS function: a call to a suspend callable (same-file
+/// through [`IrFile::suspend_funs`], cross-unit through the per-expression
+/// [`IrFile::suspend_calls`]), or an intrinsic suspension point. These are the facts common
+/// lowering records at each call site as it lowers the body, so they are complete by the time the
+/// sweep runs and impose no declaration-order requirement.
+///
+/// A read of a spilled operand stands for the initializer the step re-evaluates, so the scan
+/// follows it through [`Frame::spill_inits`] — the same spill discipline [`collect_this_slots`]
+/// and [`is_self_call`] already rely on. A lambda's body is its own frame and cannot suspend the
+/// caller mid-step; only its captures, which this function evaluates, are descended into.
+fn evaluation_suspends(
+    ir: &IrFile,
+    root: ExprId,
+    spill_inits: &std::collections::HashMap<u32, ExprId>,
+) -> bool {
+    let mut pending = vec![root];
+    let mut seen = std::collections::HashSet::new();
+    while let Some(expression) = pending.pop() {
+        if !seen.insert(expression) {
+            continue;
+        }
+        if ir.suspend_calls.contains_key(&expression)
+            || ir.intrinsic_suspension_points.contains_key(&expression)
+        {
+            return true;
+        }
+        match ir.expr(expression) {
+            IrExpr::Call { callee, .. } => {
+                if callee
+                    .source_function()
+                    .is_some_and(|function| ir.suspend_funs.contains(&function))
+                {
+                    return true;
+                }
+            }
+            IrExpr::MethodCall { class, index, .. } => {
+                if ir
+                    .classes
+                    .get(*class as usize)
+                    .and_then(|class| class.methods.get(*index as usize))
+                    .is_some_and(|function| ir.suspend_funs.contains(function))
+                {
+                    return true;
+                }
+            }
+            IrExpr::GetValue(slot) => {
+                if let Some(&init) = spill_inits.get(slot) {
+                    pending.push(init);
+                }
+                continue;
+            }
+            _ => {}
+        }
+        for_each_frame_child(ir, expression, &mut |child| pending.push(child));
+    }
+    false
 }
 
 /// Whether each omitted parameter at `positions` has a default the loop step can evaluate itself.
@@ -1191,6 +1341,231 @@ mod tests {
         assert!(
             !seen.contains(&returned) && !seen.contains(&coerced) && !seen.contains(&call),
             "the step took the place of the return, its coercion and the call"
+        );
+    }
+
+    /// `return step(n)!!`-shaped: a platform-narrowing assertion wraps the self call when a
+    /// sibling branch yields a platform type. The assertion is as transparent as a coercion —
+    /// the step takes its place, and nothing remains to assert.
+    #[test]
+    fn a_self_call_under_a_not_null_assertion_replaces_its_return() {
+        let mut ir = file();
+        let argument = ir.add_expr(IrExpr::GetValue(0));
+        let call = ir.add_expr(IrExpr::Call {
+            callee: Callee::Local(FUNCTION),
+            dispatch_receiver: None,
+            args: vec![argument],
+        });
+        let asserted = ir.add_expr(IrExpr::NotNullAssert {
+            operand: call,
+            message: Some("step(n)".to_string()),
+        });
+        let returned = ir.add_expr(IrExpr::Return(Some(asserted)));
+        ir.checked_return_depths.insert(returned, 0);
+        let tail = ir.add_expr(IrExpr::Return(None));
+        let body = finish_tailrec_body(
+            &mut ir,
+            vec![returned, tail],
+            Frame::of_body(
+                FUNCTION,
+                crate::fir_lower::BodySlots {
+                    dispatch_receiver: None,
+                    first_parameter: 0,
+                },
+                1,
+            ),
+            false,
+            OriginId::from_raw(0),
+        )
+        .expect("the body has a tail");
+
+        assert!(steps(&ir), "the asserted self call is the loop step");
+        let mut reachable = vec![body];
+        let mut seen = std::collections::HashSet::new();
+        while let Some(expression) = reachable.pop() {
+            if seen.insert(expression) {
+                crate::ir::for_each_child(&ir.exprs, expression, &mut |child| {
+                    reachable.push(child)
+                });
+            }
+        }
+        assert!(
+            !seen.contains(&returned) && !seen.contains(&asserted) && !seen.contains(&call),
+            "the step took the place of the return, its assertion and the call"
+        );
+    }
+
+    /// An EXPLICIT `!!` (`message: None`) is not transparent: kotlinc reports the call under it as
+    /// not a tail call and runs the check on every frame, so the sweep leaves the shape alone.
+    #[test]
+    fn a_self_call_under_an_explicit_bang_bang_is_left_alone() {
+        let mut ir = file();
+        let argument = ir.add_expr(IrExpr::GetValue(0));
+        let call = ir.add_expr(IrExpr::Call {
+            callee: Callee::Local(FUNCTION),
+            dispatch_receiver: None,
+            args: vec![argument],
+        });
+        let asserted = ir.add_expr(IrExpr::NotNullAssert {
+            operand: call,
+            message: None,
+        });
+        let returned = ir.add_expr(IrExpr::Return(Some(asserted)));
+        ir.checked_return_depths.insert(returned, 0);
+        finish(&mut ir, vec![returned]);
+
+        assert!(!steps(&ir), "an explicit `!!` keeps its call a call");
+    }
+
+    /// The control for the suspend guards below: a self-call whose argument is read back from a
+    /// spilled operand still steps when nothing in that operand suspends. Without it, a "left
+    /// alone" below could be the sweep failing to follow the spill rather than the guard firing.
+    #[test]
+    fn a_self_call_on_a_spilled_pure_argument_still_steps() {
+        let mut ir = file();
+        let operand = ir.add_expr(IrExpr::GetValue(0));
+        let spill = ir.add_expr(IrExpr::Variable {
+            index: 1,
+            ty: Ty::Int,
+            init: Some(operand),
+            named: false,
+        });
+        let read = ir.add_expr(IrExpr::GetValue(1));
+        let call = ir.add_expr(IrExpr::Call {
+            callee: Callee::Local(FUNCTION),
+            dispatch_receiver: None,
+            args: vec![read],
+        });
+        let block = ir.add_expr(IrExpr::Block {
+            stmts: vec![spill],
+            value: Some(call),
+        });
+        let returned = ir.add_expr(IrExpr::Return(Some(block)));
+        ir.checked_return_depths.insert(returned, 0);
+        let tail = ir.add_expr(IrExpr::Return(None));
+        finish(&mut ir, vec![returned, tail]);
+
+        assert!(steps(&ir), "a pure spilled argument does not stop the step");
+    }
+
+    /// A `tailrec suspend fun` whose self-call's stepped argument evaluation SUSPENDS stays a
+    /// call. The spill is the shape the call lowering produces for exactly this case:
+    /// `{ t = escapeChar(c); return step(t) }`. kotlinc re-invokes this shape through the
+    /// continuation too, and krusty's state machine cannot resume into the middle of the turn's
+    /// argument reassignment — stepping it miscompiled at run time.
+    #[test]
+    fn a_self_call_whose_spilled_argument_suspends_stays_a_call() {
+        let mut ir = file();
+        let suspendee = ir.add_fun(IrFunction {
+            name: "escapeChar".to_string(),
+            params: Vec::new(),
+            ret: Ty::Int,
+            body: None,
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: Vec::new(),
+        });
+        ir.suspend_funs.push(suspendee);
+        let suspension = ir.add_expr(IrExpr::Call {
+            callee: Callee::Local(suspendee),
+            dispatch_receiver: None,
+            args: Vec::new(),
+        });
+        let spill = ir.add_expr(IrExpr::Variable {
+            index: 1,
+            ty: Ty::Int,
+            init: Some(suspension),
+            named: false,
+        });
+        let read = ir.add_expr(IrExpr::GetValue(1));
+        let call = ir.add_expr(IrExpr::Call {
+            callee: Callee::Local(FUNCTION),
+            dispatch_receiver: None,
+            args: vec![read],
+        });
+        let block = ir.add_expr(IrExpr::Block {
+            stmts: vec![spill],
+            value: Some(call),
+        });
+        let returned = ir.add_expr(IrExpr::Return(Some(block)));
+        ir.checked_return_depths.insert(returned, 0);
+        let tail = ir.add_expr(IrExpr::Return(None));
+        finish(&mut ir, vec![returned, tail]);
+
+        assert!(
+            !steps(&ir),
+            "a stepped argument that suspends keeps the call a call"
+        );
+    }
+
+    /// The same decline when the suspension is recorded per expression instead of by callee — a
+    /// CROSS-UNIT suspend call, whose callee has no local `FunId` for `suspend_funs` to hold. Its
+    /// `suspend_calls` entry is written as the call site lowers, before the sweep runs.
+    #[test]
+    fn a_self_call_whose_argument_suspends_across_a_unit_boundary_stays_a_call() {
+        let mut ir = file();
+        let suspension = ir.add_expr(IrExpr::Call {
+            callee: Callee::Local(FUNCTION),
+            dispatch_receiver: None,
+            args: Vec::new(),
+        });
+        ir.suspend_calls.insert(suspension, Ty::Int);
+        let nested = ir.add_expr(IrExpr::Call {
+            callee: Callee::Local(FUNCTION),
+            dispatch_receiver: None,
+            args: vec![suspension],
+        });
+        let returned = ir.add_expr(IrExpr::Return(Some(nested)));
+        ir.checked_return_depths.insert(returned, 0);
+        let tail = ir.add_expr(IrExpr::Return(None));
+        finish(&mut ir, vec![returned, tail]);
+
+        assert!(
+            !steps(&ir),
+            "a per-expression suspend record in the argument region keeps the call a call"
+        );
+    }
+
+    /// A suspension the body runs as its OWN statement is not the step's argument region: the
+    /// state machine handles a suspension inside the loop, so the self-call still steps.
+    #[test]
+    fn a_suspend_statement_before_the_tail_call_does_not_stop_the_step() {
+        let mut ir = file();
+        let suspendee = ir.add_fun(IrFunction {
+            name: "mark".to_string(),
+            params: Vec::new(),
+            ret: Ty::Int,
+            body: None,
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: Vec::new(),
+        });
+        ir.suspend_funs.push(suspendee);
+        let suspension = ir.add_expr(IrExpr::Call {
+            callee: Callee::Local(suspendee),
+            dispatch_receiver: None,
+            args: Vec::new(),
+        });
+        let named = ir.add_expr(IrExpr::Variable {
+            index: 1,
+            ty: Ty::Int,
+            init: Some(suspension),
+            named: true,
+        });
+        let argument = ir.add_expr(IrExpr::GetValue(0));
+        let call = ir.add_expr(IrExpr::Call {
+            callee: Callee::Local(FUNCTION),
+            dispatch_receiver: None,
+            args: vec![argument],
+        });
+        let returned = ir.add_expr(IrExpr::Return(Some(call)));
+        ir.checked_return_depths.insert(returned, 0);
+        let tail = ir.add_expr(IrExpr::Return(None));
+        finish(&mut ir, vec![named, returned, tail]);
+
+        assert!(
+            steps(&ir),
+            "a suspension outside the stepped argument region keeps the loop"
         );
     }
 

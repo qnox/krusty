@@ -25,7 +25,6 @@ coroutines/featureIntersection/callableReference/function/local/equalsHashCode.k
 coroutines/featureIntersection/inlineSuspendFinally.kt
 coroutines/featureIntersection/overrideInInlineClass.kt
 coroutines/featureIntersection/suspendFunctionIsAs.kt
-coroutines/featureIntersection/tailrec/realStringRepeat.kt
 coroutines/functionReference_Function_SuspendFunction_casts.kt
 coroutines/generate.kt
 coroutines/inlineClasses/direct/boxReturnValueOfSuspendFunctionReference.kt
@@ -40,7 +39,6 @@ coroutines/suspendFunctionAsCoroutine/superCallInterface.kt
 coroutines/suspendFunctionMethodReference.kt
 coroutines/tailCallOptimizations/crossinline.kt
 delegatedProperty/getDelegateWithoutReflection.kt
-diagnostics/functions/tailRecursion/realStringRepeat.kt
 enum/enumEntriesCompatibilityCheckPrioritized.kt
 extensionFunctions/extensionFunctionAsASupertypeOfValueClass.kt
 extensionFunctions/kt475.kt
