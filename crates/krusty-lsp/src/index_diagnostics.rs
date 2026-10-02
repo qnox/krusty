@@ -42,7 +42,11 @@ fn index_workspace_files_returns_exact_diagnostics_and_clears_the_latch() {
     assert_eq!(diagnostic.kind, DiagnosticKind::Compiler);
     assert_eq!(diagnostic.msg, "unresolved reference 'Missing'.");
 
-    let interactive = host.analyze(&["fun answer(): Int = 42\n"]);
+    let interactive_source = "fun answer(): Int = 42\n";
+    let interactive_documents = [(uri.as_str(), interactive_source)];
+    let interactive_uris = [uri.as_str()];
+    let (interactive, _support) =
+        host.analyze_open_documents(&interactive_documents, &interactive_uris);
     assert!(!host.index_diagnostics_only);
     assert_eq!(interactive.len(), 1);
     assert!(
