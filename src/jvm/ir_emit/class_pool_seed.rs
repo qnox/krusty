@@ -110,3 +110,14 @@ fn constructor_parameter_locals(c: &crate::ir::IrClass) -> Vec<(String, String)>
         })
         .collect()
 }
+
+/// Seed a synthesized accessor's `LocalVariableTable` receiver strings right after its body, where
+/// kotlinc interns them. The table itself is attached later with the class's other synthesized
+/// debug tables, which only a class with a declaration line gets; a primary constructor's tail has
+/// usually interned these strings already.
+pub(super) fn seed_accessor_locals(c: &crate::ir::IrClass, fq_name: &str, cw: &mut ClassWriter) {
+    if c.decl_line != 0 {
+        cw.seed_utf8("this");
+        cw.seed_utf8(&format!("L{fq_name};"));
+    }
+}
