@@ -6334,24 +6334,11 @@ fn best_by_args_at_priority_with_ties<'a>(
             || semantic_arg_assignable(src, p, &arg.ty())
             || (arg.ty() == Ty::Null && matches!(p.non_null(), Ty::TyParam(..)))
             || function_like_fits(p, arg)
-            // Preserve concrete evidence supplied by a nested call's own inputs, while allowing a
-            // still-symbolic enclosing parameter to participate in the same constraint system.
-            || arg.binds_overload_result_to(src, *p)
+            || arg.binds_result_to(src, *p)
     };
-    match overload_selection::select_equally_specific(
-        cands
-            .iter()
-            .filter_map(|(candidate, params)| {
-                let declared = declaration_specificity_params(candidate);
-                (params.as_slice() == arg_tys
-                    && (!args.is_empty() || declared.len() == params.len()))
-                .then(|| (declared, *candidate))
-            })
-            .collect(),
-        |_, left, right| {
-            parameter_at_least_as_specific(src, left, right, CallArgKind::Typed(Ty::Error))
-        },
-    ) {
+    match overload_selection::select_recorded_exact(cands, args, |_, left, right| {
+        parameter_at_least_as_specific(src, left, right, CallArgKind::Typed(Ty::Error))
+    }) {
         CandidateSelectionWithTies::Selected(candidate) => {
             return CandidateSelectionWithTies::Selected(candidate);
         }

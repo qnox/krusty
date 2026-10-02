@@ -280,22 +280,6 @@ impl CallArgKind {
         }
         !self.result_is_input_constrained() && self.binds_result_to(src, parameter)
     }
-
-    /// Whether overload applicability may use an enclosing parameter to complete this nested
-    /// call without replacing a concrete result established by the nested call's own inputs.
-    ///
-    /// A concrete expectation cannot rebind `listOf(1, 2)` from `List<Int>` to
-    /// `Collection<String>`. A still-symbolic parameter such as `List<P>`, however, participates
-    /// in the same constraint system as an input-constrained generic operator and may finish its
-    /// result. Result-only producers remain freely contextual.
-    fn may_bind_result_during_overload_selection(&self, parameter: Ty) -> bool {
-        !self.result_is_input_constrained() || parameter.mentions_ty_param()
-    }
-
-    pub(super) fn binds_overload_result_to(&self, src: &dyn SymbolSource, parameter: Ty) -> bool {
-        self.may_bind_result_during_overload_selection(parameter)
-            && self.binds_result_to(src, parameter)
-    }
 }
 
 #[cfg(test)]
@@ -331,24 +315,20 @@ mod tests {
     }
 
     #[test]
-    fn input_constrained_result_binds_only_to_a_symbolic_enclosing_parameter() {
+    fn input_constrained_result_carries_a_recorded_provisional_shape() {
         let formal = Ty::ty_param("T", Ty::obj("kotlin/Any"));
         let call = expected_type_call(Ty::obj_args("fixture/Box", &[Ty::Int]), vec![formal]);
-        let concrete = Ty::obj_args("fixture/Box", &[Ty::String]);
-        let symbolic = Ty::obj_args("fixture/Box", &[Ty::ty_param("P", Ty::obj("kotlin/Any"))]);
 
-        assert!(!call.may_bind_result_during_overload_selection(concrete));
-        assert!(call.may_bind_result_during_overload_selection(symbolic));
+        assert!(call.result_is_input_constrained());
     }
 
     #[test]
-    fn result_only_producer_may_bind_to_a_concrete_enclosing_parameter() {
+    fn result_only_producer_has_no_recorded_provisional_shape() {
         let call = expected_type_call(
             Ty::obj_args("fixture/Box", &[Ty::ty_param("T", Ty::obj("kotlin/Any"))]),
             Vec::new(),
         );
-        let concrete = Ty::obj_args("fixture/Box", &[Ty::String]);
 
-        assert!(call.may_bind_result_during_overload_selection(concrete));
+        assert!(!call.result_is_input_constrained());
     }
 }

@@ -12,6 +12,10 @@ class Leaf : Root()
 class Crate<out T> : Root()
 fun <T> crate(): Crate<T> = Crate<T>()
 
+interface Pool<out T>
+class Pooled<out T> : Pool<T>
+fun <T> pooled(value: T): Pooled<T> = Pooled<T>()
+
 class All<T> {
     fun equalRoot(vararg values: Root) = "vararg"
     fun equalRoot(value: Root) = "fixed"
@@ -33,6 +37,9 @@ class All<T> {
 
     fun defaults(value: Leaf = Leaf()) = "fixed"
     fun defaults(vararg value: Leaf) = "vararg"
+
+    fun recorded(value: Pooled<Leaf>) = "exact"
+    fun recorded(value: Pool<String>) = "contextual"
 }
 
 fun box(): String {
@@ -49,8 +56,9 @@ fun box(): String {
         all.two(crate(), crate()) + "/" +
         all.leading(typed, typed) + "/" +
         all.defaults() + "/" +
-        all.defaults(Leaf())
-    return if (actual == "fixed/fixed/vararg/vararg/vararg/vararg/vararg/vararg/vararg/fixed/fixed") {
+        all.defaults(Leaf()) + "/" +
+        all.recorded(pooled(Leaf()))
+    return if (actual == "fixed/fixed/vararg/vararg/vararg/vararg/vararg/vararg/vararg/fixed/fixed/exact") {
         "OK"
     } else {
         actual

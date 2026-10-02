@@ -89,6 +89,34 @@ pub(super) fn select_fixed_or_more_specific_vararg<'a>(
     select_equally_specific(fixed, at_least_as_specific)
 }
 
+/// Select an exact argument-for-parameter shape only from semantic types fixed by the argument's
+/// own inputs. A result-only contextual producer has no exact provisional type: its enclosing
+/// parameter shapes it, so it must reach the ordinary fixed/vararg declaration comparison.
+pub(super) fn select_recorded_exact<'a>(
+    candidates: &[(&'a FunctionInfo, Vec<Ty>)],
+    args: &[CallArgKind],
+    at_least_as_specific: impl Fn(usize, Ty, Ty) -> bool,
+) -> CandidateSelectionWithTies<&'a FunctionInfo> {
+    if args.iter().any(|argument| {
+        argument.is_expected_type_callable() && !argument.result_is_input_constrained()
+    }) {
+        return CandidateSelectionWithTies::None;
+    }
+    let actual = args.iter().map(CallArgKind::ty).collect::<Vec<_>>();
+    select_equally_specific(
+        candidates
+            .iter()
+            .filter_map(|(candidate, parameters)| {
+                let declared = super::declaration_specificity_params(candidate);
+                (parameters.as_slice() == actual
+                    && (!args.is_empty() || declared.len() == parameters.len()))
+                .then(|| (declared, *candidate))
+            })
+            .collect(),
+        at_least_as_specific,
+    )
+}
+
 /// Most-specific parameter shapes, then the non-vararg tie-break.
 ///
 /// The tie-break applies only when every maximal shape can forward to every
