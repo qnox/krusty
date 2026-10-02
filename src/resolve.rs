@@ -16626,55 +16626,47 @@ impl<'a> Checker<'a> {
             {
                 return None;
             }
-            let argument_kind = self.call_arg_kind(scope, argument);
-            // An input-constrained result already has a real type (`Pooled<Leaf>`, `List<Int>`),
-            // so the ordinary score applies. A result-only call such as `crate(): Crate<T>` has
-            // no fixed type: do not score its erased provisional (`Crate<Any> <: Root`) as a
-            // subtype, and do not rank the fit below that subtype either. An ordinary successful
-            // argument leaves both candidates tied so specificity can prefer the narrower vararg
-            // element.
-            (argument_kind.is_expected_type_callable()
-                && !argument_kind.result_is_input_constrained())
-            .then_some(1)
-            .or_else(|| self.member_argument_score(expected, semantic_actual))
-            .or_else(|| contextual_call_result.then_some(0))
-            .or_else(|| {
-                self.unbound_call_result_signature(argument)
-                    .is_some_and(|generic| {
-                        crate::symbol_resolver::infer_generic_return_bindings(
-                            generic,
-                            expected,
-                            |actual, bound| self.receiver_is_assignable(actual, bound),
-                        )
-                        .is_some()
-                    })
-                    .then_some(0)
-            })
-            .or_else(|| {
-                matches!(expected.non_null(), Ty::Fun(_))
-                    .then(|| {
-                        self.generic_function_constructor_arg_fits(expected, semantic_actual)
-                            .then_some(1)
-                    })
-                    .flatten()
-            })
-            .or_else(|| {
-                call_arg_kind(self.file, argument, semantic_actual)
-                    .adapts_integer_literal_to(expected)
-                    .then_some(1)
-            })
-            .or_else(|| {
-                self.implicit_integer_coercion_applies(
-                    argument,
-                    expected,
-                    call_sig
-                        .implicit_integer_coercion
-                        .get(parameter)
-                        .copied()
-                        .unwrap_or(false),
-                )
+            self.argument_uses_context_only_result(scope, argument)
                 .then_some(1)
-            })
+                .or_else(|| self.member_argument_score(expected, semantic_actual))
+                .or_else(|| contextual_call_result.then_some(0))
+                .or_else(|| {
+                    self.unbound_call_result_signature(argument)
+                        .is_some_and(|generic| {
+                            crate::symbol_resolver::infer_generic_return_bindings(
+                                generic,
+                                expected,
+                                |actual, bound| self.receiver_is_assignable(actual, bound),
+                            )
+                            .is_some()
+                        })
+                        .then_some(0)
+                })
+                .or_else(|| {
+                    matches!(expected.non_null(), Ty::Fun(_))
+                        .then(|| {
+                            self.generic_function_constructor_arg_fits(expected, semantic_actual)
+                                .then_some(1)
+                        })
+                        .flatten()
+                })
+                .or_else(|| {
+                    call_arg_kind(self.file, argument, semantic_actual)
+                        .adapts_integer_literal_to(expected)
+                        .then_some(1)
+                })
+                .or_else(|| {
+                    self.implicit_integer_coercion_applies(
+                        argument,
+                        expected,
+                        call_sig
+                            .implicit_integer_coercion
+                            .get(parameter)
+                            .copied()
+                            .unwrap_or(false),
+                    )
+                    .then_some(1)
+                })
         };
         // A not-yet-checked lambda slot (a plan's partial pass leaves it untyped): a function-type
         // or erased-top parameter binds the lambda without conversion; a JAVA SAM parameter only
@@ -49132,16 +49124,9 @@ impl<'a> Checker<'a> {
                     // conversion. Narrowing that predicate is a project-wide decision (the plain-call and
                     // classpath-constructor origins already take it), not one to fork here.
                     ConstructorParameterConstraint::Concrete => {
-                        // `listOf(1, 2)` is already `List<Int>`. Rebinding that result to
-                        // `Collection<String>` would make the unrelated constructor applicable
-                        // and leave the two tied. A still-open producer (`emptyList()`) and a
-                        // parameter that still mentions a type variable may bind from the
-                        // expectation.
-                        let kind = self.call_arg_kind(scope, argument);
                         self.receiver_is_assignable(actual, expected)
                             || expected.accepts_numeric(actual)
-                            || (kind.may_bind_result_during_overload_selection(expected)
-                                && self.call_result_can_bind_expected(argument, expected))
+                            || self.argument_result_may_bind_expected(scope, argument, expected)
                     }
                     ConstructorParameterConstraint::Inferred => true,
                     ConstructorParameterConstraint::GenericConstructed => {
