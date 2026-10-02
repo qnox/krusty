@@ -44,6 +44,15 @@ pub struct SamSignature {
     /// The method's primitive result replaces a non-primitive result of a declaration it
     /// overrides, at any depth (`override fun f(): Int` of `fun f(): Any`).
     pub(crate) overrides_non_primitive_result: bool,
+    /// Non-primitive results of the declarations this primitive method overrides, before the call
+    /// specializes them. A type parameter that the call binds to `Int` is still one of these: its
+    /// erasure is `Any`, so the override returns the wrapper. A target uses these contracts when
+    /// realizing its physical bridge descriptors.
+    pub(crate) overridden_non_primitive_results: Vec<Ty>,
+    /// The interface is a Kotlin declaration, not a Java one.
+    pub(crate) kotlin_interface: bool,
+    /// Provider-normalized semantic identities parallel to `declared_params`.
+    pub(crate) parameter_identities: Box<[crate::fir::ResolvedParameterIdentity]>,
 }
 
 /// One inherited declaration of an abstract-method candidate: its hierarchy depth, the member, its
@@ -64,9 +73,11 @@ pub(crate) fn semantic_sam_signature(
 ) -> Option<SamSignature> {
     let target = target.non_null();
     let internal = target.obj_internal()?;
-    if !source.classifier(internal)?.sam_eligible {
+    let target_classifier = source.classifier(internal)?;
+    if !target_classifier.sam_eligible {
         return None;
     }
+    let kotlin_interface = target_classifier.is_kotlin;
 
     let mut declarations: Vec<OverrideSlot> = Vec::new();
     for (applied, depth) in receiver_hierarchy(source, target) {
@@ -151,10 +162,21 @@ pub(crate) fn semantic_sam_signature(
             continue;
         }
         let (_, member, params, ret, declaration) = nearest.into_iter().next()?;
-        let overrides_non_primitive_result = is_primitive(declared_result(&member))
-            && overridden_results
+        let mut overridden_non_primitive_results = if is_primitive(declared_result(&member)) {
+            overridden_results
                 .into_iter()
-                .any(|result| !is_primitive(result));
+                .filter(|&result| !is_primitive(result))
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        let mut unique_results = Vec::new();
+        for result in overridden_non_primitive_results.drain(..) {
+            if !unique_results.contains(&result) {
+                unique_results.push(result);
+            }
+        }
+        let overrides_non_primitive_result = !unique_results.is_empty();
         if abstract_method
             .replace((
                 member,
@@ -162,13 +184,22 @@ pub(crate) fn semantic_sam_signature(
                 ret,
                 declaration,
                 overrides_non_primitive_result,
+                unique_results,
             ))
             .is_some()
         {
             return None;
         }
     }
-    let (sam, params, ret, declaration, overrides_non_primitive_result) = abstract_method?;
+    let (
+        sam,
+        params,
+        ret,
+        declaration,
+        overrides_non_primitive_result,
+        overridden_non_primitive_results,
+    ) = abstract_method?;
+    let parameter_identities = sam_parameter_identities(&sam)?;
     Some(SamSignature {
         internal,
         method: sam.name.clone(),
@@ -181,7 +212,28 @@ pub(crate) fn semantic_sam_signature(
         has_receiver: sam.is_member_extension(),
         suspend: sam.suspend(),
         overrides_non_primitive_result,
+        overridden_non_primitive_results,
+        kotlin_interface,
+        parameter_identities,
     })
+}
+
+/// One identity per physical parameter of the selected abstract method.
+///
+/// Provider normalization inserts a typed extension receiver and publishes context slots with
+/// their semantic roles. An unaligned list is an invalid declaration contract, not a reason to
+/// manufacture identities after selection.
+fn sam_parameter_identities(
+    sam: &LibraryMember,
+) -> Option<Box<[crate::fir::ResolvedParameterIdentity]>> {
+    let extension_position = (sam.is_member_extension()
+        && sam.params.len() == sam.call_sig.parameter_identities.len() + 1)
+        .then_some(sam.context_count);
+    sam.call_sig.physical_parameter_identities(
+        sam.params.len(),
+        sam.context_count,
+        extension_position,
+    )
 }
 
 /// The result a member is declared with, before any substitution.
@@ -296,5 +348,29 @@ fn is_public_object_method(member: &LibraryMember) -> bool {
                 || internal == crate::types::type_name("java/lang/Object")
         }),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sam_parameter_identities_reject_an_untyped_provider_context_slot() {
+        let mut member = LibraryMember::new(
+            "accept".to_string(),
+            vec![Ty::obj("sample/Context")],
+            Ty::Unit,
+            String::new(),
+        );
+        member.context_count = 1;
+        assert_eq!(sam_parameter_identities(&member), None);
+
+        member.call_sig.parameter_identities =
+            vec![crate::fir::ResolvedParameterIdentity::ContextValue {
+                ordinal: 0,
+                source_name: "context".into(),
+            }];
+        assert!(sam_parameter_identities(&member).is_some());
     }
 }

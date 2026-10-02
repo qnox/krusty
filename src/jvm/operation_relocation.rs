@@ -44,10 +44,12 @@ pub(super) fn clone_below_representation_wrapper(ir: &mut IrFile, source: ExprId
     move_fact!(semantic_call_roles);
     move_fact!(call_declared_ret);
     move_fact!(call_declared_params);
+    move_fact!(physical_call_parameters);
     move_fact!(module_member_accesses);
     move_fact!(static_extension_receivers);
     move_fact!(call_inline_modifiers);
     move_fact!(value_class_unbox_type_operation_edges);
+    ir.move_generated_operand_start(source, target);
 
     target
 }
@@ -95,6 +97,7 @@ mod tests {
         );
         ir.value_class_unbox_type_operation_edges
             .insert(source, unbox_receiver);
+        ir.mark_generated_operand_start(source);
 
         let target = clone_below_representation_wrapper(&mut ir, source);
 
@@ -126,5 +129,7 @@ mod tests {
         assert!(!ir
             .value_class_unbox_type_operation_edges
             .contains_key(&source));
+        assert!(!ir.starts_at_generated_operand(source));
+        assert!(ir.starts_at_generated_operand(target));
     }
 }

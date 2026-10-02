@@ -4883,8 +4883,8 @@ plugin-generated serializers) record no selection.
 ## Checked facts at the IR/backend boundary  ◐
 
 A backend emits from checked IR and the frozen facts beside it; it does not reconstruct a frontend
-decision from a spelling or query a symbol provider again. These are additive IR contracts that the
-JVM backend does not need to read, and that a program-producing backend (the native one) consumes.
+decision from a spelling. Dependency callables are frozen and consumed by the JVM realization
+passes; a dependency classifier is still answered through its provider during emission.
 - ✅ The program entry point: the resolver selects each source unit's Kotlin `main` once, where it
   classifies top-level conflicts (`fir::MainEntryShape`, preferring `main(args)` over a parameterless
   `main()`), and records it in the module index (`source_entry_point`); common lowering maps that
@@ -4896,6 +4896,28 @@ JVM backend does not need to read, and that a program-producing backend (the nat
   `main(args)` gets a second `main([Ljava/lang/String;)V` and panics in frame computation. Moving it
   to `entry_point` fixes both but changes JVM output, so it is a separate change checked against
   kotlinc.
+- ✅ Dependency callable facts (`CheckedIrFile::callables`, `backend/dependency_facts.rs`). At the
+  frontend/backend boundary (`compiler/backend_handoff.rs`) every `ExternalCallableId` the file's IR
+  references (its expressions, default providers, function and property override edges, dependency
+  primary and secondary super constructors, and delegate conventions) is copied from its provider
+  once. The record separates the provider-selected physical owner from declaration/reflection
+  spelling and carries the exact invocation, default-call, inline, generic, and representation facts
+  the JVM consumes. The table answers only for identities the IR holds. External calls,
+  constructors, callable references, and override bridges consume it without querying the classpath
+  callable table again.
+- ✅ Dependency property facts, one per `ExternalPropertyId` the IR references (dependency property
+  reads and writes, and property references): the provider-decoded Kotlin name, the getter and
+  setter identities (each with its own callable fact), the owner the provider published for the
+  getter, the getter declaration's exact result type, so a backend types a dependency property
+  read from the selected declaration rather than from its owner's or its own spelling, and whether
+  the provider normalized it as its value class's underlying storage property.
+- ☐ Freeze the referenced dependency classifier facts too. `CheckedBackendClassifiers` still holds
+  the provider (`&dyn SymbolSource`) and answers a dependency classifier by asking it during
+  emission (`backend/module_facts.rs`), so a backend is not yet provider-free; only callables and
+  properties are.
+- ☐ Publish a separate semantic Kotlin owner for dependency declarations. The frozen
+  `physical_owner` is deliberately the provider's target container (a mapped builtin's JVM class or
+  a top-level facade) and is consumed only as a realization fact.
 
 ## The SAM method on a conversion  ✅
 
@@ -4958,3 +4980,22 @@ The JVM backend keeps building a `PropertyReference0Impl` at each use. An inline
 delegate inlined twice into one body keeps one identity for both copies, as for any other checked
 node an inlined body copies. Tests: `fir/body_check/delegate_tests.rs`,
 `fir_lower/local_property_reference_tests.rs`.
+
+## Complete property layouts and capture holders  ✅
+
+Common IR proves two tables complete before it crosses into a backend
+(`IrFile::validate_complete_facts`, called at the end of common lowering beside
+`validate_determined_types`). Every property the file declares, and every checked property read,
+write or reference that is not realized from another file's module fact, has a
+`local_property_layouts` entry; a companion `const val` is top-level storage qualified by its
+companion. A holder reaches a parameter through a capture edge. A slot holds a shared holder when
+its frame declares it with `IrExpr::RefNew`, or when it is a parameter already recorded as one.
+A lambda capture, a same-file local or class-static call argument, and a callable-reference
+capture each name the receiving function and parameter ordinal, and each obliges that parameter
+to be recorded in `shared_capture_parameters`, whether or not the function reads the holder. A
+local function that only forwards the holder to an object constructor is covered by the call that
+passes it in. A parameter read or written through `IrExpr::RefGet`/`RefSet` must be recorded too. A backend therefore realizes a property from its layout and
+types a holder parameter from the record alone; it neither matches accessor or field spellings nor
+scans a body for holder operations. A missing entry fails lowering with
+`FirFileLoweringFailure::IncompleteFact`. Tests: `ir/semantic_validation/completeness_tests.rs`,
+`fir_lower/fact_completeness_tests.rs`.

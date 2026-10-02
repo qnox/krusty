@@ -127,6 +127,31 @@ pub(super) fn mark_block_exit(ir: &IrFile, block: ExprId, code: &mut CodeBuilder
 }
 
 impl Emitter<'_> {
+    /// Common IR identifies an operation whose source line owns its generated leading operand.
+    /// Retain that line at the operand's start so the positionless operand does not withdraw it and
+    /// move it to the later `invoke*`. Ordinary calls keep operand-then-dispatch marking.
+    pub(super) fn mark_generated_operand_start(
+        &self,
+        call: ExprId,
+        first_operand: Option<ExprId>,
+        code: &mut CodeBuilder,
+    ) {
+        if !self.ir.starts_at_generated_operand(call)
+            || !first_operand.is_some_and(|operand| self.ir.is_positionless(operand))
+        {
+            return;
+        }
+        if let Some(line) = self
+            .ir
+            .dispatch_line(call)
+            .or_else(|| self.ir.expr_source_lines.get(&call).copied())
+        {
+            if line != 0 {
+                code.mark_line_retained(line);
+            }
+        }
+    }
+
     /// Run `emit` as the emission of a `when` branch condition (kotlinc's `isInsideCondition`).
     pub(super) fn in_condition<R>(&mut self, emit: impl FnOnce(&mut Self) -> R) -> R {
         let outer = std::mem::replace(&mut self.inside_condition, true);

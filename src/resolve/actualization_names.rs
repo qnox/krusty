@@ -67,7 +67,10 @@ impl ResolverInputs<'_> {
             &self.module,
             scope,
         );
-        match resolver.qualified_classifier_binding_in_scope(spelling).0 {
+        match resolver
+            .qualified_type_classifier_binding_in_scope(spelling)
+            .0
+        {
             crate::symbol_resolver::CandidateSelection::Selected(classifier) => Some(classifier),
             crate::symbol_resolver::CandidateSelection::None
             | crate::symbol_resolver::CandidateSelection::Ambiguous => None,
@@ -174,14 +177,83 @@ fn resolver_inputs<'a>(
     }
 }
 
+/// The classifiers whose nested classifiers are in scope for a header type of `declaration`,
+/// innermost first: its enclosing classifiers. A classifier's own body is not in scope for its
+/// header (`class C : Base { interface Base }`), so the walk starts at the declaration's owner.
+fn lexical_classifier_owners(
+    headers: &crate::fir::StreamedHeaderModule,
+    declaration: crate::fir::DeclarationId,
+) -> Vec<TypeName> {
+    let mut owners = Vec::new();
+    let mut current = headers
+        .declarations
+        .anchor(declaration)
+        .and_then(|anchor| anchor.owner);
+    while let Some(owner) = current {
+        if let Some(stub) = headers
+            .stub(owner)
+            .filter(|stub| stub.kind == crate::fir::DeclarationKind::Classifier)
+        {
+            if let Some((_, identity)) = compact_classifier_identity(headers, stub) {
+                owners.push(identity);
+            }
+        }
+        current = headers
+            .declarations
+            .anchor(owner)
+            .and_then(|anchor| anchor.owner);
+    }
+    owners
+}
+
+/// A spelling whose complete path names a classifier nested in one of `owners`. An incomplete root
+/// remains only a candidate; selection continues at the next classifier-scope rung.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LexicalClassifierLookup {
+    NoRoot,
+    Resolved(TypeName),
+    UnresolvedSuffix,
+}
+
+fn lexically_nested_classifier(
+    declarations: &std::collections::HashSet<TypeName>,
+    owners: &[TypeName],
+    segments: &[&str],
+) -> LexicalClassifierLookup {
+    let Some((first, rest)) = segments.split_first() else {
+        return LexicalClassifierLookup::NoRoot;
+    };
+    let Some(root) = owners.iter().find_map(|owner| {
+        owner
+            .existing_nested_child(first)
+            .filter(|nested| declarations.contains(nested))
+    }) else {
+        return LexicalClassifierLookup::NoRoot;
+    };
+    match rest.iter().try_fold(root, |classifier, segment| {
+        classifier
+            .existing_nested_child(segment)
+            .filter(|nested| declarations.contains(nested))
+    }) {
+        Some(classifier) => LexicalClassifierLookup::Resolved(classifier),
+        None => LexicalClassifierLookup::UnresolvedSuffix,
+    }
+}
+
+struct TypeContext<'a> {
+    source: crate::fir::SourceFileId,
+    owners: &'a [TypeName],
+}
+
 fn bind_type(
     headers: &crate::fir::StreamedHeaderModule,
     resolver: &ResolverInputs<'_>,
     bindings: &mut crate::fir::ActualizationTypeBindings,
-    source: crate::fir::SourceFileId,
+    context: &TypeContext<'_>,
     syntax: crate::fir::HeaderTypeId,
     visited: &mut std::collections::HashSet<(crate::fir::SourceFileId, crate::fir::HeaderTypeId)>,
 ) {
+    let source = context.source;
     if !visited.insert((source, syntax)) {
         return;
     }
@@ -194,32 +266,41 @@ fn bind_type(
             abbreviated_argument,
         } => {
             if let Some(detail) = headers.syntax.classifier_type(detail) {
-                let spelling = headers
+                let segments = headers
                     .syntax
                     .type_path(detail.path)
                     .iter()
                     .filter_map(|segment| headers.lookup_names.get(*segment))
-                    .collect::<Vec<_>>()
-                    .join(".");
-                if let Some(classifier) = resolver.resolve(source, &spelling) {
+                    .collect::<Vec<_>>();
+                let classifier = match lexically_nested_classifier(
+                    resolver.module.declarations,
+                    context.owners,
+                    &segments,
+                ) {
+                    LexicalClassifierLookup::Resolved(classifier) => Some(classifier),
+                    LexicalClassifierLookup::NoRoot | LexicalClassifierLookup::UnresolvedSuffix => {
+                        resolver.resolve(source, &segments.join("."))
+                    }
+                };
+                if let Some(classifier) = classifier {
                     bindings.bind_type(source, syntax, classifier);
                 }
                 for &argument in headers.syntax.type_operands(detail.arguments) {
-                    bind_type(headers, resolver, bindings, source, argument, visited);
+                    bind_type(headers, resolver, bindings, context, argument, visited);
                 }
             }
             if let Some(argument) = abbreviated_argument {
-                bind_type(headers, resolver, bindings, source, argument, visited);
+                bind_type(headers, resolver, bindings, context, argument, visited);
             }
         }
         crate::fir::HeaderTypeKind::Function {
             parameters, result, ..
         } => {
             for &parameter in headers.syntax.type_operands(parameters) {
-                bind_type(headers, resolver, bindings, source, parameter, visited);
+                bind_type(headers, resolver, bindings, context, parameter, visited);
             }
             if let Some(result) = result {
-                bind_type(headers, resolver, bindings, source, result, visited);
+                bind_type(headers, resolver, bindings, context, result, visited);
             }
         }
     }
@@ -241,21 +322,35 @@ pub(crate) fn actualization_type_bindings(
     let resolver = resolver_inputs(headers, platform, &declarations);
     let mut bindings = crate::fir::ActualizationTypeBindings::default();
     let mut visited = std::collections::HashSet::new();
-    for stub in &headers.stubs {
-        if matches!(
+    let is_classifier = |stub: &&crate::fir::DeclarationStub| {
+        matches!(
             stub.kind,
             crate::fir::DeclarationKind::Classifier | crate::fir::DeclarationKind::TypeAlias
-        ) {
-            if let Some((_, identity)) = compact_classifier_identity(headers, stub) {
-                bindings.bind_declaration(stub.id, identity);
-            }
+        )
+    };
+    for stub in headers.stubs.iter().filter(is_classifier) {
+        if let Some((_, identity)) = compact_classifier_identity(headers, stub) {
+            bindings.bind_declaration(stub.id, identity);
         }
+    }
+    // A classifier's header roots include its primary constructor's parameter types, which the
+    // constructor also owns and which see the classifier's nested classifiers. Each type binds
+    // once, so members bind first, in their own scope, and a classifier then binds only what is
+    // its alone: supertypes and bounds, outside its body.
+    let (classifiers, members): (Vec<&crate::fir::DeclarationStub>, Vec<_>) =
+        headers.stubs.iter().partition(is_classifier);
+    for stub in members.into_iter().chain(classifiers) {
+        let owners = lexical_classifier_owners(headers, stub.id);
+        let context = TypeContext {
+            source: stub.source,
+            owners: &owners,
+        };
         for syntax in headers.syntax.declaration_type_roots(stub.id) {
             bind_type(
                 headers,
                 &resolver,
                 &mut bindings,
-                stub.source,
+                &context,
                 syntax,
                 &mut visited,
             );
@@ -286,6 +381,27 @@ pub(crate) fn resolve_actualization_classifier_for_test(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_selected_lexical_root_does_not_backtrack_after_an_unresolved_suffix() {
+        let owner = crate::types::type_name("sample/Outer");
+        let root = crate::types::type_name("sample/Outer$Root");
+        let leaf = crate::types::type_name("sample/Outer$Root$Leaf");
+        let declarations = [root, leaf].into_iter().collect();
+
+        assert_eq!(
+            lexically_nested_classifier(&declarations, &[owner], &["Root", "Leaf"]),
+            LexicalClassifierLookup::Resolved(leaf)
+        );
+        assert_eq!(
+            lexically_nested_classifier(&declarations, &[owner], &["Root", "Missing"]),
+            LexicalClassifierLookup::UnresolvedSuffix
+        );
+        assert_eq!(
+            lexically_nested_classifier(&declarations, &[owner], &["Other", "Leaf"]),
+            LexicalClassifierLookup::NoRoot
+        );
+    }
 
     struct DependencyClassifiers(std::collections::HashSet<TypeName>);
 

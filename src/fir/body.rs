@@ -94,11 +94,21 @@ pub struct FirSamConversion {
     pub context_count: u32,
     pub has_receiver: bool,
     pub suspend: bool,
+    /// The converted value's own callable view is `suspend`. Distinct from [`Self::suspend`], which
+    /// is the selected interface method: a non-suspend value adapted to a suspend method keeps its
+    /// own `FunctionN`.
+    pub source_suspend: bool,
     /// The method's primitive result replaces a non-primitive result it overrides.
     pub overrides_non_primitive_result: bool,
+    /// Specialized semantic result contracts whose target bridges reach that primitive method.
+    pub overridden_non_primitive_results: Box<[ResolvedTy]>,
     /// A nullable function value converts conditionally: `null` remains `null`; only a non-null
     /// function object is wrapped as the selected SAM classifier.
     pub nullable: bool,
+    /// The interface is a Kotlin declaration, not a Java one.
+    pub kotlin_interface: bool,
+    /// Provider-normalized semantic identities parallel to `declared_parameters`.
+    pub parameter_identities: Box<[super::ResolvedParameterIdentity]>,
 }
 
 /// The abstract method a SAM conversion implements.
@@ -228,7 +238,11 @@ pub enum FirIntrinsic {
     /// The selected stdlib coroutine primitive. Its function block is checked as an ordinary
     /// argument, but common lowering must inline that exact checked block against the current
     /// continuation rather than emit a call to the stdlib declaration's intrinsic-only stub.
-    SuspendCoroutineUninterceptedOrReturn,
+    /// `callee` is the selected declaration's source name: the spliced block opens an inline frame
+    /// named after it.
+    SuspendCoroutineUninterceptedOrReturn {
+        callee: Box<str>,
+    },
     /// The selected safe coroutine primitive. This is distinct from the unintercepted primitive:
     /// target realization must invoke the block with a one-shot safe, intercepted continuation and
     /// use that continuation's completed value or suspension sentinel as the call result.

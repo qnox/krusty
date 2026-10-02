@@ -637,3 +637,123 @@ fun box(): String {\n\
 }\n";
     common::expect_box_ok_with_stdlib(SRC, "kt2224");
 }
+
+const TWO_DELEGATES_SRC: &str = "interface Log { fun log(message: String) }\n\
+interface Store<T> { fun save(content: T) }\n\
+class Both(log: Log, store: Store<String>) : Log by log, Store<String> by store\n\
+fun box(): String = \"OK\"\n";
+
+/// kotlinc stores each delegate in its field in declaration order, first thing in the constructor.
+#[test]
+fn delegates_are_stored_in_declaration_order() {
+    let comparison = common::compare_with_kotlinc_plugin(
+        "TwoDelegates",
+        TWO_DELEGATES_SRC,
+        "Both",
+        &[common::stdlib_jar()],
+        "17",
+        &[],
+    )
+    .expect("reference kotlinc and javap are provisioned");
+    let header = "public Both(Log, Store<java.lang.String>);";
+    let constructor = common::method_block(&comparison.reference, header);
+    assert!(!constructor.is_empty(), "kotlinc declares {header}");
+    assert_eq!(
+        common::method_block(&comparison.krusty, header),
+        constructor
+    );
+}
+
+const CONTEXT_MEMBER_SRC: &str = "// LANGUAGE: +ContextParameters\n\
+interface Log { fun log(message: String): String }\n\
+interface Store<T> {\n\
+\x20   context(log: Log)\n\
+\x20   fun save(content: T): String\n\
+}\n\
+context(log: Log, store: Store<String>)\n\
+fun operation(): String = store.save(\"K\")\n\
+class Both(log: Log, store: Store<String>) : Log by log, Store<String> by store {\n\
+\x20   fun run(): String = operation()\n\
+}\n\
+class Prefix : Log { override fun log(message: String): String = \"O\" + message }\n\
+class Saver : Store<String> {\n\
+\x20   context(log: Log)\n\
+\x20   override fun save(content: String): String = log.log(content)\n\
+}\n\
+fun box(): String = Both(Prefix(), Saver()).run()\n";
+
+/// A delegated member with a context parameter forwards it as the leading argument, as the context
+/// value it is.
+#[test]
+fn a_context_parameter_member_is_delegated() {
+    let comparison = common::compare_with_kotlinc_plugin(
+        "ContextDelegation",
+        CONTEXT_MEMBER_SRC,
+        "Both",
+        &[common::stdlib_jar()],
+        "17",
+        &common::language_directives::kotlinc_args(CONTEXT_MEMBER_SRC),
+    )
+    .expect("reference kotlinc and javap are provisioned");
+    let marker = "save(Log, java.lang.String)";
+    // The instructions only: the scan would otherwise run on into the forwarder's debug tables and
+    // parameter annotations, whose rows carry no opcode.
+    let instructions = |disassembly: &str| {
+        common::method_instructions(disassembly, marker)
+            .into_iter()
+            .take_while(|row| !row.ends_with(": #"))
+            .collect::<Vec<_>>()
+    };
+    let forwarder = instructions(&comparison.reference);
+    assert!(!forwarder.is_empty(), "kotlinc declares {marker}");
+    assert_eq!(instructions(&comparison.krusty), forwarder);
+    common::expect_box_same_as_kotlinc(CONTEXT_MEMBER_SRC, "ContextDelegationRun");
+}
+
+const DELEGATION_MEMBERS_SRC: &str = "class Result\n\
+class Left\n\
+class Right\n\
+interface I {\n\
+\x20   fun m(): Result\n\
+\x20   fun b(x: Left): Result\n\
+\x20   fun b()\n\
+\x20   fun b(y: Right)\n\
+\x20   fun b(result: Result, left: Left)\n\
+\x20   val zp: Result\n\
+\x20   var ap: Left\n\
+}\n\
+interface K { fun c() }\n\
+class Final(i: I, k: K) : K by k, I by i {\n\
+\x20   val own = 1\n\
+\x20   fun z() = 2\n\
+\x20   fun a() = 3\n\
+}\n\
+abstract class Open(i: I) : I by i\n";
+
+/// kotlinc stores a delegate in a synthetic field, gives each forwarder its receiver and
+/// parameters as locals, and records the forwarders in `@Metadata` as open DELEGATION members after
+/// the class's own declarations: functions, then properties, each sorted by name, then return type,
+/// then value parameters.
+#[test]
+fn delegation_members_are_published_like_kotlinc() {
+    for class in ["Final", "Open"] {
+        common::assert_class_matches_kotlinc("DelegationMembers", DELEGATION_MEMBERS_SRC, class);
+    }
+}
+
+/// A class of another module implements an interface through its superclass's delegation: the
+/// forwarder the dependency's `@Metadata` records is the implementation.
+#[test]
+fn a_dependency_superclass_delegation_implements_the_interface() {
+    const LIB: &str = "object Mark\n\
+    interface A {\n\
+    \x20   fun foo(): Mark\n\
+    }\n\
+    abstract class B(a: A) : A by a\n";
+    const MAIN: &str = "class AImpl : A {\n\
+    \x20   override fun foo(): Mark = Mark\n\
+    }\n\
+    class C : B(AImpl())\n\
+    fun box(): String = if (C().foo() === Mark) \"OK\" else \"fail\"\n";
+    common::expect_box_ok_against("dependency_superclass_delegation", LIB, MAIN);
+}

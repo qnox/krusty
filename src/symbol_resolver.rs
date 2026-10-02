@@ -31,6 +31,7 @@ mod member_hierarchy;
 mod member_specialization;
 mod overload_selection;
 mod qualified_classifiers;
+mod receiver_mro;
 mod sam;
 mod scope_level_callables;
 mod selected_call_instantiation;
@@ -55,10 +56,10 @@ use hierarchy_projection::{
 pub use lambda_call_shape::LambdaCallShape;
 use member_hierarchy::declared_callables;
 pub(crate) use member_hierarchy::{
-    declared_member_callables, imported_object_member_symbols, inherited_nested_classifier_name,
-    lexical_enclosing_classifier_names, member_is_inheritable, members_in_hierarchy,
-    normalize_inherited_member_functions, override_input_shapes_match, specialize_member_function,
-    supertype_preorder, InheritedNestedClassifier, OverrideInputShape,
+    bound_inner_constructor_candidates, declared_member_callables, imported_object_member_symbols,
+    inherited_nested_classifier_name, lexical_enclosing_classifier_names, member_is_inheritable,
+    members_in_hierarchy, normalize_inherited_member_functions, override_input_shapes_match,
+    specialize_member_function, supertype_preorder, InheritedNestedClassifier, OverrideInputShape,
 };
 pub(crate) use member_specialization::{
     apply_property_bindings, instantiate_slot, specialize_inline_collection_transform,
@@ -75,6 +76,7 @@ use overload_selection::{
     unique_most_specific_with_conflicts, unique_most_specific_with_conflicts_and_ties,
 };
 pub(crate) use overload_selection::{CandidateSelectionWithTies, ReceiverFunctionSelection};
+pub(crate) use receiver_mro::{function_shape_matches, ReceiverMro};
 pub(crate) use sam::{semantic_sam_signature, SamMethodDeclaration, SamSignature};
 use scope_level_callables::{function_set_from_symbols, level_functions, level_properties};
 
@@ -1368,12 +1370,13 @@ pub(crate) fn ranked_extension_overloads_by_recv<'a>(
     receiver: Ty,
     fs: &'a FunctionSet,
 ) -> Vec<(u32, Ty, &'a FunctionInfo)> {
-    ranked_extension_candidates(src, receiver, fs.overloads.iter())
+    ranked_extension_candidates(src, receiver, &[], fs.overloads.iter())
 }
 
 fn ranked_extension_candidates<'a>(
     src: &dyn SymbolSource,
     receiver: Ty,
+    type_variables: &[String],
     overloads: impl Iterator<Item = &'a FunctionInfo>,
 ) -> Vec<(u32, Ty, &'a FunctionInfo)> {
     let candidates = overloads
@@ -1382,7 +1385,7 @@ fn ranked_extension_candidates<'a>(
     if candidates.is_empty() {
         return Vec::new();
     }
-    let mro = ReceiverMro::new(src, receiver);
+    let mro = ReceiverMro::new(src, receiver).with_type_variables(type_variables);
     let mut out: Vec<(u32, Ty, &FunctionInfo)> = candidates
         .into_iter()
         .filter_map(|o| {
@@ -1503,6 +1506,8 @@ pub struct SymbolResolver<'a> {
     access_package: Option<TypeName>,
     /// Current source file, for top-level `private` declarations in this compilation module.
     access_file: Option<u32>,
+    /// Type variables of the enclosing postponed calls; extension receivers match over them.
+    type_variables: &'a [String],
 }
 
 #[derive(Clone, Copy)]
@@ -1968,6 +1973,15 @@ impl<'a> SymbolResolver<'a> {
         }
     }
 
+    pub(crate) fn with_type_variables(mut self, type_variables: &'a [String]) -> Self {
+        self.type_variables = type_variables;
+        self
+    }
+
+    fn receiver_mro(&self, receiver: Ty) -> ReceiverMro {
+        ReceiverMro::new(&self.src, receiver).with_type_variables(self.type_variables)
+    }
+
     pub(crate) fn with_access_context(
         mut self,
         package: TypeName,
@@ -2083,7 +2097,7 @@ impl<'a> SymbolResolver<'a> {
         let mut work = vec![crate::types::type_name(internal)];
         let mut seen = std::collections::HashSet::new();
         while let Some(cur) = work.pop() {
-            if cur.matches("java/lang/Object") || cur.matches("kotlin/Any") || !seen.insert(cur) {
+            if cur == crate::types::wk::any() || !seen.insert(cur) {
                 continue;
             }
             let Some(t) = self.src.classifier(cur) else {
@@ -2180,6 +2194,7 @@ impl<'a> SymbolResolver<'a> {
                 let mut ranked = ranked_extension_candidates(
                     &self.src,
                     receiver,
+                    self.type_variables,
                     level_functions(&level.symbols),
                 );
                 self.retain_accessible_extensions(&mut ranked, &mut inaccessible_extensions, true);
@@ -2206,6 +2221,7 @@ impl<'a> SymbolResolver<'a> {
                 let mut extensions = ranked_extension_candidates(
                     &self.src,
                     receiver,
+                    self.type_variables,
                     level_functions(&level.symbols),
                 );
                 self.retain_accessible_extensions(
@@ -2338,6 +2354,7 @@ impl<'a> SymbolResolver<'a> {
             ExtCtx {
                 fn_scope: self.fn_scope,
                 source: &self.src,
+                type_variables: self.type_variables,
             },
             callables.functions(),
             IndexedConvention::Get,
@@ -2349,7 +2366,8 @@ impl<'a> SymbolResolver<'a> {
         let binding_receiver = selected
             .semantic_receiver()
             .and_then(|declared| {
-                ReceiverMro::new(&self.src, receiver).binding_receiver(&self.src, declared)
+                self.receiver_mro(receiver)
+                    .binding_receiver(&self.src, declared)
             })
             .unwrap_or(receiver);
         if selected.call_sig.vararg_index.is_none() {
@@ -2420,6 +2438,7 @@ impl<'a> SymbolResolver<'a> {
             ExtCtx {
                 fn_scope: self.fn_scope,
                 source: &self.src,
+                type_variables: self.type_variables,
             },
             callables.functions(),
             IndexedConvention::Set,
@@ -2445,7 +2464,8 @@ impl<'a> SymbolResolver<'a> {
         let binding_receiver = selected
             .semantic_receiver()
             .and_then(|declared| {
-                ReceiverMro::new(&self.src, receiver).binding_receiver(&self.src, declared)
+                self.receiver_mro(receiver)
+                    .binding_receiver(&self.src, declared)
             })
             .unwrap_or(receiver);
         if selected.call_sig.vararg_index.is_none() {
@@ -2523,7 +2543,8 @@ impl<'a> SymbolResolver<'a> {
                 let binding_receiver = candidate
                     .semantic_receiver()
                     .and_then(|declared| {
-                        ReceiverMro::new(&self.src, receiver).binding_receiver(&self.src, declared)
+                        self.receiver_mro(receiver)
+                            .binding_receiver(&self.src, declared)
                     })
                     .unwrap_or(receiver);
                 let parameters =
@@ -2680,7 +2701,7 @@ impl<'a> SymbolResolver<'a> {
         if properties.peek().is_none() {
             return Ok(None);
         }
-        let receiver_mro = ReceiverMro::new(&self.src, receiver);
+        let receiver_mro = self.receiver_mro(receiver);
         let mut candidates = properties
             .filter(|property| property.kind == PropKind::Extension)
             .filter(|property| source_property_visible(self.lib, property))
@@ -3311,6 +3332,7 @@ impl<'a> SymbolResolver<'a> {
                     ExtCtx {
                         fn_scope: self.fn_scope,
                         source: &self.src,
+                        type_variables: self.type_variables,
                     },
                     Some(callables.functions()),
                     &mut call_ambiguous,
@@ -3406,7 +3428,7 @@ impl<'a> SymbolResolver<'a> {
                     .cloned()
                     .collect::<Vec<_>>();
                 if callables.functions().iter().any(FunctionInfo::is_extension) {
-                    let recv_mro = ReceiverMro::new(&self.src, ty);
+                    let recv_mro = self.receiver_mro(ty);
                     overloads.extend(callables.functions().iter().cloned().filter_map(
                         |mut overload| {
                             if !overload.is_extension() {
@@ -4043,7 +4065,8 @@ impl<'a> SymbolResolver<'a> {
         overload
             .semantic_receiver()
             .and_then(|declared| {
-                ReceiverMro::new(&self.src, receiver).binding_receiver(&self.src, declared)
+                self.receiver_mro(receiver)
+                    .binding_receiver(&self.src, declared)
             })
             .unwrap_or(receiver)
     }
@@ -4948,6 +4971,7 @@ impl ResolvedMember {
         member.external_identity = callable.external_identity;
         member.external_property_identity = callable.external_property_identity;
         member.physical_params = callable.physical_params.clone();
+        member.physical_parameter_plan = callable.physical_parameter_plan.clone();
         member.owner = Some(callable.owner);
         member.physical_ret = callable.physical_ret;
         member.signature = callable.signature;
@@ -5124,6 +5148,7 @@ fn select_instance_info(
         ExtCtx {
             fn_scope: None,
             source,
+            type_variables: &[],
         },
     )
 }
@@ -5136,255 +5161,6 @@ fn select_instance_info(
 /// position reads `classifier` under level-precedence + within-level ambiguity; a call position flattens
 /// `callables` and runs overload resolution. The `fqn` is returned so a classifier caller can name the
 /// resolved internal (a non-alias classifier's internal name IS its fqn).
-/// The rung of `decl_recv` in `recv`'s SOURCE-type supertype closure (0 = same class), or `None` if the
-/// extension's declared receiver is neither `recv` nor a supertype of it. Uses `erased_recv` Kotlin-level
-/// keys + `resolve_type` supertypes — NO JVM descriptors — so `kotlin/UInt` ≠ `kotlin/Int` ≠ `kotlin/Result`
-/// are distinct by their class, a generic value-class receiver (`Result<T>`) binds a concrete one
-/// (`Result<String>` — `erased_recv` drops type arguments), and `UInt` never binds an `Int` extension.
-/// This source-identity walk replaces legacy descriptor-based platform ranking, whose value-class
-/// special-case existed only because erased `I`/`Object` descriptors tied distinct value classes together.
-/// Whether the declared receiver's type arguments are consistent with the actual receiver's, position by
-/// position, under Kotlin's COVARIANT reading of a receiver position: each actual argument must be
-/// assignable to the declared one (`ReceiverMro::rank` reaching from actual to declared). A declared
-/// argument that is a type variable or `Any`/`Object` is a wildcard (an `Iterable<T>` / erased
-/// `Iterable<Any>` extension binds any element). This rejects the `@JvmName` reduction variant whose
-/// element does not match (`Iterable<Byte>.averageOfByte` against a `List<Double>` — `Double` is not
-/// assignable to `Byte`) while accepting a nested-generic supertype (`Iterable<Iterable<T>>.flatten`
-/// against `List<List<Int>>` — `List<Int>` IS assignable to `Iterable<Any>`). The erased supertype walk
-/// in `ReceiverMro` alone keys on the outer class only, so it would tie the reduction variants.
-fn receiver_type_args_match(src: &dyn SymbolSource, decl_recv: Ty, recv: Ty) -> bool {
-    // Each actual argument must be assignable to the declared one under Kotlin's covariant receiver
-    // reading. A declared argument that is a type variable or erased `Any` is a WILDCARD — the metadata
-    // decode drops the nullability flag, so a `T?` receiver element reads as bare `Any`, and a nullable
-    // actual (`Int?`) must still match it (`is_assignable(Int?, Any)` is correctly `false` under strict
-    // Kotlin, but here `Any` stands for the erased variable, not the type `Any`).
-    let cx = crate::assignable::TyCtx::new();
-    let oracle = SourceOracle(src);
-    if decl_recv.mentions_ty_param() {
-        let mut bindings = GSigBinds::new();
-        unify_ty_from_symbols(src, decl_recv, recv, &mut bindings);
-        let specialized = ty_subst_keep_unbound(decl_recv, &bindings);
-        // A callee-owned receiver variable may bind to a still-symbolic variable owned by the
-        // caller: `Flow<Flow<T@flattenMerge>>` against `Flow<Flow<R@flatMapMerge>>`. The
-        // specialized shapes are then exactly equal even though the caller's `R` quite correctly
-        // remains a type parameter. Do not mistake that retained caller identity for an unbound
-        // callee formal.
-        if specialized == recv {
-            return true;
-        }
-        if !specialized.mentions_ty_param() {
-            return crate::assignable::is_assignable(&cx, &oracle, recv, specialized);
-        }
-    }
-    let erased_top = |t: Ty| {
-        let t = t.projection_inner().unwrap_or(t);
-        matches!(t.non_null(), Ty::Obj(n, _)
-            if crate::types::same(n, crate::types::wk::any())
-                || crate::types::same(n, crate::types::wk::java_object()))
-    };
-    // Only the DECLARED side's type variables are wildcards: they are the callee's own formals,
-    // bound by this very call. A type parameter in the ACTUAL receiver belongs to the caller and is
-    // a fixed type there; `Iterable<T>` for a caller's `T : Comparable<T>` is not an
-    // `Iterable<Double>`, so it is checked through its bounds like any other argument.
-    let declared_wildcard =
-        |t: Ty| t.projection_inner().unwrap_or(t).is_ty_param() || erased_top(t);
-    decl_recv
-        .type_args()
-        .iter()
-        .zip(recv.type_args().iter())
-        .all(|(&d, &r)| {
-            if declared_wildcard(d) || erased_top(r) {
-                return true;
-            }
-            match d {
-                Ty::InProjection(expected) => {
-                    crate::assignable::is_assignable(&cx, &oracle, *expected, r)
-                }
-                Ty::OutProjection(expected) => {
-                    crate::assignable::is_assignable(&cx, &oracle, r, *expected)
-                }
-                _ => crate::assignable::is_assignable(&cx, &oracle, r, d),
-            }
-        })
-}
-
-/// The receiver's erased supertype closure with its BFS rungs, computed ONCE per receiver and probed
-/// per candidate. Every rank query used to run a fresh supertype BFS (hash-set churn included) per
-/// candidate even though the receiver is FIXED across a call site's whole candidate set. The closure
-/// is small (a handful of supertypes), so a `Vec` probe beats hashing.
-pub(crate) struct ReceiverMro {
-    recv: Ty,
-    /// `(applied supertype, BFS rung)` in first-seen order.
-    /// Empty for a receiver with no class-name key (an array): such a receiver ranks only by exact
-    /// `Ty` equality or the universal `Any` fallback, exactly as the per-candidate BFS did.
-    ranks: Vec<(Ty, u32)>,
-}
-
-/// Whether two semantic function shapes form an applicable extension-receiver match. Declared
-/// type parameters are bound from the actual callable shape; erased tops remain wildcards. Kotlin
-/// receiver-function notation shares the same value representation and parameter list, so the
-/// `has_receiver` marker does not participate here.
-pub(crate) fn function_shape_matches(src: &dyn SymbolSource, actual: Ty, declared: Ty) -> bool {
-    let (Ty::Fun(actual), Ty::Fun(declared)) = (actual.non_null(), declared.non_null()) else {
-        return false;
-    };
-    let mut bindings = GSigBinds::new();
-    let component_matches = |declared: Ty, actual: Ty, bindings: &mut GSigBinds| {
-        if declared.is_erased_top() {
-            return true;
-        }
-        unify_ty_from_symbols(src, declared, actual, bindings);
-        ty_subst_keep_unbound(declared, bindings) == actual
-    };
-    actual.params.len() == declared.params.len()
-        && actual.suspend == declared.suspend
-        && declared
-            .params
-            .iter()
-            .zip(&actual.params)
-            .all(|(&declared, &actual)| component_matches(declared, actual, &mut bindings))
-        && component_matches(declared.ret, actual.ret, &mut bindings)
-}
-
-impl ReceiverMro {
-    pub(crate) fn new(src: &dyn SymbolSource, recv: Ty) -> ReceiverMro {
-        let mut ranks = Vec::new();
-        if let Some(internal) = recv.erased_recv().kotlin_class_internal() {
-            let root = if recv.non_null().obj_internal().is_some() {
-                recv.non_null()
-            } else {
-                Ty::obj_name(internal)
-            };
-            let mut frontier = vec![root];
-            let mut seen = std::collections::HashSet::new();
-            let mut rung = 0u32;
-            while !frontier.is_empty() {
-                let mut next = Vec::new();
-                for ty in frontier {
-                    let Some(internal) = ty.kotlin_class_internal() else {
-                        continue;
-                    };
-                    if !seen.insert(internal) {
-                        continue;
-                    }
-                    ranks.push((ty, rung));
-                    next.extend(direct_supertypes(src, ty));
-                }
-                frontier = next;
-                rung += 1;
-            }
-        }
-        ReceiverMro { recv, ranks }
-    }
-
-    /// Use the applied supertype unless its classpath signature erased every argument.
-    fn binding_receiver_for(&self, applied: Ty) -> Ty {
-        let applied_args = applied.type_args();
-        let recv_args = self.recv.type_args();
-        if !recv_args.is_empty()
-            && (applied_args.is_empty()
-                || (recv_args.len() == applied_args.len()
-                    && applied_args
-                        .iter()
-                        .all(|arg| arg.is_erased_top() || arg.is_ty_param())))
-        {
-            self.recv
-        } else {
-            applied
-        }
-    }
-
-    fn match_receiver(&self, src: &dyn SymbolSource, decl_recv: Ty) -> Option<(u32, Ty)> {
-        // A generic receiver may bind its parameter to a nullable type even though a bare T is not
-        // itself a nullable value occurrence. An explicit non-null upper bound closes that route.
-        let accepts_nullable = decl_recv.admits_null()
-            || matches!(decl_recv, Ty::TyParam(_, bound) if bound.upper_bound_admits_null());
-        // The null literal has no classifier hierarchy of its own, but it is a valid receiver for
-        // every nullable extension receiver. Candidate specificity is decided after this applicability
-        // rung; inventing a class key for `Null` would incorrectly make it a member of `Any`'s MRO.
-        if self.recv == Ty::Null || (self.recv.is_nullable() && self.recv.non_null() == Ty::Nothing)
-        {
-            return accepts_nullable.then_some((0, self.recv));
-        }
-        if self.recv.is_nullable() && !accepts_nullable {
-            return None;
-        }
-        // Function types have no classifier hierarchy to walk. A generic extension receiver such as
-        // `suspend () -> T` must nevertheless admit `suspend () -> Unit`; the later generic-binding
-        // pass binds `T`. Compare the semantic function shape here and treat only declared type
-        // parameters/erased tops as wildcards—no classifier-name or arity reconstruction is involved.
-        // Receiver-function notation is not a distinct function class: `A.() -> R` and `(A) -> R`
-        // have the same parameter list and values freely cross that notation boundary. Keep the flag
-        // for lambda binding, but do not make it part of extension-receiver applicability.
-        if function_shape_matches(src, self.recv, decl_recv) {
-            return Some((0, self.recv));
-        }
-        if declared_function_type(src, decl_recv)
-            .is_some_and(|declared| function_shape_matches(src, self.recv, declared))
-        {
-            return Some((0, self.recv));
-        }
-        // A nominal classifier may implement a function type directly or through an interface.
-        // Its member scope remains nominal, but extension applicability uses the exact callable
-        // supertype shape published by the provider. Bind generic receiver slots from that shape;
-        // returning the nominal receiver here loses `T` in `suspend () -> T` before selection.
-        if matches!(decl_recv.non_null(), Ty::Fun(_)) {
-            let callable = crate::symbol_resolver::classifier_callable_signature(src, self.recv)?;
-            if function_shape_matches(src, callable, decl_recv) {
-                let callable_rung = self
-                    .ranks
-                    .iter()
-                    .find_map(|(applied, rung)| {
-                        let internal = applied.kotlin_class_internal()?;
-                        src.classifier(internal)?
-                            .callable_signature
-                            .is_some()
-                            .then_some(rung.saturating_add(1))
-                    })
-                    .unwrap_or(1);
-                return Some((callable_rung, callable));
-            }
-        }
-        // Same source type — rung 0. Plain `Ty` equality (interned, NO erasure): the exact receiver an
-        // extension is declared on. This is the ONLY rank an ARRAY receiver (`IntArray.sum()`) can carry
-        // besides the universal `Any` — an array has no class-name key in the closure, and its
-        // element type must be matched exactly (an `IntArray` extension must not bind an `Array<String>`).
-        if self.recv.non_null() == decl_recv.non_null() {
-            return Some((0, self.recv));
-        }
-        let want = decl_recv.erased_recv().kotlin_class_internal();
-        if let Some(want) = want {
-            if let Some(&(applied, rung)) = self.ranks.iter().find(|(applied, _)| {
-                if applied.kotlin_class_internal() != Some(want) {
-                    return false;
-                }
-                let binding_receiver = self.binding_receiver_for(*applied);
-                receiver_type_args_match(src, decl_recv, binding_receiver)
-            }) {
-                let binding_receiver = if decl_recv.is_ty_param() || decl_recv.is_erased_top() {
-                    self.recv
-                } else {
-                    self.binding_receiver_for(applied)
-                };
-                return Some((rung, binding_receiver));
-            }
-        }
-        // A universal `Any`-receiver extension (`<T> T.let`) applies to every receiver — arrays included
-        // — at lowest precedence.
-        want.is_some_and(|n| n.matches("kotlin/Any"))
-            .then_some((u32::MAX - 1, self.recv))
-    }
-
-    pub(crate) fn rank(&self, src: &dyn SymbolSource, decl_recv: Ty) -> Option<u32> {
-        self.match_receiver(src, decl_recv).map(|(rank, _)| rank)
-    }
-
-    fn binding_receiver(&self, src: &dyn SymbolSource, decl_recv: Ty) -> Option<Ty> {
-        self.match_receiver(src, decl_recv)
-            .map(|(_, applied)| applied)
-    }
-}
-
 pub(crate) fn symbols_at_scope_level(
     src: &dyn SymbolSource,
     name: &str,
@@ -5564,6 +5340,7 @@ fn fn_in_scope(o: &FunctionInfo, fn_scope: Option<FunctionScopeRef<'_>>) -> bool
 struct ExtCtx<'a> {
     fn_scope: Option<FunctionScopeRef<'a>>,
     source: &'a dyn SymbolSource,
+    type_variables: &'a [String],
 }
 
 /// The single call-overload selector for a receiver call `recv.name(args)`. It is parameterized by
@@ -5810,6 +5587,7 @@ fn select_overload_tracking_with_functions(
             ranked_extension_candidates(
                 src,
                 recv,
+                ext.type_variables,
                 overloads
                     .iter()
                     .copied()
@@ -6755,7 +6533,7 @@ fn fun_return_compatible(
         || pr
             .non_null()
             .obj_internal()
-            .is_some_and(|n| n.matches("kotlin/Any"))
+            .is_some_and(|n| n == crate::types::wk::any())
         || (allow_unit_coercion && pr == Ty::Unit)
     {
         return true;
@@ -8421,6 +8199,7 @@ mod tests {
             plugin_expression: None,
             params: vec![Ty::Int],
             physical_params: vec![Ty::Int],
+            physical_parameter_plan: None,
             ret: Ty::Int,
             physical_ret: Ty::Int,
             descriptor: "(I)I".to_string(),

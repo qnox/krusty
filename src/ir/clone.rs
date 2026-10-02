@@ -315,7 +315,8 @@ fn remap_direct_children(expression: &mut IrExpr, mut map: impl FnMut(ExprId) ->
         | IrExpr::EnumEntries { .. }
         | IrExpr::ReifiedClassMarker { .. }
         | IrExpr::UnitInstance
-        | IrExpr::CurrentContinuation => {}
+        | IrExpr::CurrentContinuation
+        | IrExpr::InlineFrameMarker => {}
     }
 }
 
@@ -390,6 +391,32 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     }
     if ir.declaration_result_coercions.contains(&source) {
         ir.declaration_result_coercions.insert(target);
+    }
+    if let Some(boundaries) = ir.declaration_argument_boundaries.get(&source).cloned() {
+        let supplied = |expression: ExprId| match ir.expr(expression) {
+            IrExpr::Call { args, .. } => args.clone(),
+            IrExpr::MethodCall { args, .. } => args.iter().copied().flatten().collect(),
+            _ => Vec::new(),
+        };
+        let source_arguments = supplied(source);
+        let target_arguments = supplied(target);
+        let boundaries = boundaries
+            .iter()
+            .map(|boundary| {
+                let position = source_arguments
+                    .iter()
+                    .position(|argument| *argument == boundary.argument)
+                    .expect("recorded declaration argument belongs to cloned call");
+                let mut boundary = *boundary;
+                boundary.argument = target_arguments[position];
+                boundary
+            })
+            .collect::<Vec<_>>();
+        ir.declaration_argument_boundaries
+            .insert(target, boundaries.into_boxed_slice());
+    }
+    if let Some(parameters) = ir.physical_call_parameters.get(&source).cloned() {
+        ir.physical_call_parameters.insert(target, parameters);
     }
     if ir.elvis_safe_call_guards.contains(&source) {
         ir.elvis_safe_call_guards.insert(target);

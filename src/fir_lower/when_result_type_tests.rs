@@ -54,6 +54,16 @@ fn a_when_ending_in_an_open_else_if_is_unit() {
     );
 }
 
+#[test]
+fn a_safe_call_records_its_checked_nullable_bottom_result() {
+    assert_eq!(
+        when_types(
+            "class C { fun fail(): Nothing = null!! }\nfun f(value: C?): Nothing? = value?.fail()"
+        ),
+        [Some(Ty::nullable(Ty::Nothing))]
+    );
+}
+
 /// Whether each `when` in `function`'s file is recorded as a source `when`, innermost first.
 fn source_when_origins(function: &str) -> Vec<bool> {
     let ir = lower_single_source(&format!("{function}\n"), "WhenOrigins");

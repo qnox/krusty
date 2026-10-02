@@ -29,6 +29,10 @@ use crate::{
     WorkspaceSymbolIndex,
 };
 
+mod java_stub_memo;
+
+use java_stub_memo::JavaStubMemo;
+
 pub const DEFAULT_ANALYSES_PER_WORKER: usize = 64;
 const MAX_WORKER_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_SOURCE_SET_BYTES: usize = 32 * 1024 * 1024;
@@ -905,8 +909,11 @@ fn retain_implementation_relations_for_response(
 /// The launch classpath plus the most recent module classpath.
 ///
 /// A project analysis names its module classpath on every keystroke. Rebuilding that index walks
-/// every jar and the JDK image, so an unchanged path list keeps the classpath already prepared.
-/// `None` on the request is the launch classpath, not the most recent module list: an omitted
+/// every jar and the JDK image, so an unchanged path list keeps the classpath already prepared
+/// while its content snapshot still matches the files. A jar or class file replaced at the same
+/// path is a new classpath: Java stubs and resolution must see the new bytes. The launch classpath
+/// stays the snapshot captured when the worker started, so a request can refuse it after those files
+/// change. `None` on the request is the launch classpath, not the most recent module list: an omitted
 /// classpath and an explicit empty one are different.
 struct PreparedClasspath {
     launch_paths: Vec<PathBuf>,
@@ -966,6 +973,7 @@ fn analysis_worker_loop<R: BufRead, W: Write>(
 ) -> io::Result<()> {
     let mut prepared = PreparedClasspath::launch(classpath);
     let mut epoch = krusty::CompilationEpoch::start();
+    let mut java_stubs = JavaStubMemo::default();
     write_framed(writer, WORKER_READY)?;
     while let Some(body) = read_framed(reader, MAX_WORKER_MESSAGE_BYTES)? {
         // The previous iteration dropped its symbol table and pass-two symbols, then sealed the
@@ -1011,7 +1019,7 @@ fn analysis_worker_loop<R: BufRead, W: Write>(
                 continue;
             }
             OwnedWorkerRequest::Dump { dump } => {
-                let (dump, classpath) = render_dump_request(&mut prepared, dump);
+                let (dump, classpath) = render_dump_request(&mut prepared, &mut java_stubs, dump);
                 // A clean EOF makes the supervisor retry the request in a fresh worker.
                 // Neither the stable cache path nor its response may publish a stale snapshot.
                 if classpath.is_some_and(|classpath| !classpath.snapshot_is_current()) {
@@ -1079,7 +1087,7 @@ fn analysis_worker_loop<R: BufRead, W: Write>(
             language_features.enable(feature);
         }
         let classpath = prepared.for_request(request.classpath.as_deref());
-        let stub_overlay_set = set_java_stub_overlay(&classpath, &request.java_sources);
+        let stub_overlay_set = java_stubs.install(&classpath, &request.java_sources);
         let platform = JvmLibraries::new(classpath.clone());
         let source_set = compiler_analysis::analyze_source_inputs_prefix_with_features(
             &inputs,
@@ -1193,34 +1201,6 @@ pub fn run_configured_analysis_worker<R: BufRead, W: Write>(
     analysis_worker_loop(reader, writer, configuration.classpath, true)
 }
 
-/// Stub `java_sources` onto `classpath` so Kotlin sources resolve Java declarations that no compiled
-/// class covers. Returns whether an overlay was installed, so the caller knows to clear it.
-fn set_java_stub_overlay(classpath: &Classpath, java_sources: &[String]) -> bool {
-    if java_sources.is_empty() {
-        return false;
-    }
-    let java: Vec<(String, String)> = java_sources
-        .iter()
-        .map(|source| (String::new(), source.clone()))
-        .collect();
-    let resolve = |cand: &str| {
-        classpath
-            .find_name(krusty::types::type_name(cand))
-            .is_some()
-    };
-    match krusty::jvm::java_stub::stub_classes(
-        &java,
-        krusty::jvm::java_stub::StubMode::Lenient,
-        &resolve,
-    ) {
-        Some(stubs) => {
-            classpath.set_stub_overlay(stubs);
-            true
-        }
-        None => false,
-    }
-}
-
 /// Analyze the payload and render the target file without publishing it.
 ///
 /// The dump is `None` when the request cannot be interpreted. The classpath is `Some` only after
@@ -1230,6 +1210,7 @@ fn set_java_stub_overlay(classpath: &Classpath, java_sources: &[String]) -> bool
 /// document, so it is rendered into the IR section instead of discarding the dump.
 fn render_dump_request(
     prepared: &mut PreparedClasspath,
+    java_stubs: &mut JavaStubMemo,
     request: OwnedDumpRequest,
 ) -> (Option<UnpublishedDump>, Option<Rc<Classpath>>) {
     let sources = request.analysis.sources;
@@ -1279,7 +1260,7 @@ fn render_dump_request(
         .unwrap_or(sources.len())
         .max(result_count)
         .min(sources.len());
-    let stub_overlay_set = set_java_stub_overlay(&classpath, &request.analysis.java_sources);
+    let stub_overlay_set = java_stubs.install(&classpath, &request.analysis.java_sources);
     let platform = JvmLibraries::new(classpath.clone());
     let analysis = compiler_analysis::analyze_source_inputs_prefix_with_features(
         &inputs,
@@ -1338,6 +1319,7 @@ mod tests {
     use std::io::{BufRead, Cursor, Read};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use super::java_stub_memo::{java_stub_generations, reset_java_stub_generations};
     use super::*;
     use crate::analysis::MAX_SOURCE_SET_NAVIGATION_ENTRIES;
 
@@ -2647,5 +2629,117 @@ fun combine(entries: Array<Entry>): String {
             !diagnostics.iter().any(|d| d.message.contains("Widget")),
             "Widget resolved from stub: {diagnostics:?}"
         );
+    }
+
+    #[test]
+    fn unchanged_java_stubs_are_generated_once() {
+        reset_java_stub_generations();
+        let java = "package p; public class Widget {}".to_string();
+        let source = "fun use(w: p.Widget) {}";
+        let mut input = Vec::new();
+        write_analysis_request(&mut input, source, &[java.clone()], None);
+        write_analysis_request(&mut input, source, &[java.clone()], None);
+        write_analysis_request(&mut input, source, &[], None);
+        write_analysis_request(&mut input, source, &[java], None);
+        let mut output = Vec::new();
+
+        run_analysis_worker(&mut Cursor::new(input), &mut output, Vec::new()).unwrap();
+
+        assert_eq!(java_stub_generations(), 1);
+        let analyses = decode_worker_analyses(output, 4);
+        assert_eq!(diagnostic_messages(&analyses[0]), Vec::<&str>::new());
+        assert_eq!(diagnostic_messages(&analyses[1]), Vec::<&str>::new());
+        assert_eq!(
+            diagnostic_messages(&analyses[2]),
+            vec!["unresolved reference 'p'."]
+        );
+        assert_eq!(diagnostic_messages(&analyses[3]), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn a_java_source_change_rebuilds_stubs() {
+        reset_java_stub_generations();
+        let source = "fun use(w: p.Widget) {}";
+        let mut input = Vec::new();
+        write_analysis_request(
+            &mut input,
+            source,
+            &["package p; public class Widget {}".to_string()],
+            None,
+        );
+        write_analysis_request(
+            &mut input,
+            source,
+            &["package p; public class Gone {}".to_string()],
+            None,
+        );
+        let mut output = Vec::new();
+
+        run_analysis_worker(&mut Cursor::new(input), &mut output, Vec::new()).unwrap();
+
+        assert_eq!(java_stub_generations(), 2);
+        let analyses = decode_worker_analyses(output, 2);
+        assert_eq!(diagnostic_messages(&analyses[0]), Vec::<&str>::new());
+        assert_eq!(
+            diagnostic_messages(&analyses[1]),
+            vec!["unresolved reference 'Widget'."]
+        );
+    }
+
+    #[test]
+    fn unchanged_explicit_classpath_reuses_stubs_and_changed_contents_retry_fresh() {
+        reset_java_stub_generations();
+        let root = std::env::temp_dir().join(format!(
+            "krusty-worker-java-stub-contents-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        write_payload_class(&root);
+        let java = "package p; public class Widget { public q.Payload value() { return null; } }"
+            .to_string();
+        let source = "fun use(w: p.Widget) = w.value().token";
+        let classpath = [root.clone()];
+        let mut input = Vec::new();
+        write_analysis_request(&mut input, source, &[java.clone()], Some(&classpath));
+        write_analysis_request(&mut input, source, &[java.clone()], Some(&classpath));
+        let mutate_after = input.len() as u64;
+        write_analysis_request(&mut input, source, &[java.clone()], Some(&classpath));
+        let class_file = root.join("q/Payload.class");
+        let mut reader = MutateAfter {
+            inner: Cursor::new(input),
+            after: mutate_after,
+            mutation: Some(Box::new(move || {
+                std::fs::remove_file(class_file).expect("remove payload class");
+            })),
+        };
+        let mut output = Vec::new();
+
+        run_analysis_worker(&mut reader, &mut output, Vec::new()).unwrap();
+
+        assert_eq!(java_stub_generations(), 1);
+        let analyses = decode_worker_analyses(output, 2);
+        assert_eq!(diagnostic_messages(&analyses[0]), Vec::<&str>::new());
+        assert_eq!(diagnostic_messages(&analyses[1]), Vec::<&str>::new());
+
+        let mut retry = Vec::new();
+        write_analysis_request(&mut retry, source, &[java], Some(&classpath));
+        let mut retry_output = Vec::new();
+        run_analysis_worker(&mut Cursor::new(retry), &mut retry_output, Vec::new()).unwrap();
+
+        assert_eq!(java_stub_generations(), 2);
+        let analyses = decode_worker_analyses(retry_output, 1);
+        assert_eq!(
+            diagnostic_messages(&analyses[0]),
+            vec!["unresolved reference 'token' on receiver of type 'Any'."]
+        );
+        std::fs::remove_dir_all(root).expect("remove classpath directory");
+    }
+
+    fn write_payload_class(root: &Path) {
+        let package = root.join("q");
+        std::fs::create_dir_all(&package).expect("create payload package");
+        let mut class = krusty::jvm::classfile::ClassWriter::new("q/Payload", "java/lang/Object");
+        class.add_field(krusty::jvm::classfile::ACC_PUBLIC, "token", "I");
+        std::fs::write(package.join("Payload.class"), class.finish()).expect("write payload class");
     }
 }

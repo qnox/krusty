@@ -5,6 +5,7 @@ pub(crate) mod builtin_declaration;
 pub(crate) mod builtin_member_realization;
 pub(crate) mod builtin_top_level_realization;
 mod call_realization;
+mod classifier_callables;
 mod classifier_kind;
 mod classifier_role;
 mod compiler_intrinsic;
@@ -12,10 +13,14 @@ mod core_builtins;
 pub(crate) mod function_classifiers;
 mod generic_signature;
 mod inline_body;
+pub(crate) mod physical_parameter_plan;
 mod platform_contract;
 mod property_producer;
 pub use call_realization::{DefaultCallRealization, NonvirtualCallRealization};
+pub(crate) use classifier_callables::constructor_generic_signature;
+pub use classifier_callables::BoundInnerConstructor;
 pub use classifier_kind::TypeKind;
+pub use physical_parameter_plan::PhysicalParameterSlot;
 pub use platform_contract::{
     PlatformInitializationError, PlatformSourceHeaderInput, SourceHeaderError,
 };
@@ -266,6 +271,8 @@ pub struct LibraryMember {
     /// Declaration/ABI parameter types before call-site generic substitution. Resolution specializes
     /// [`Self::params`]; lowering consumes this stable parallel shape.
     pub physical_params: Vec<Ty>,
+    /// Named slots of [`Self::physical_params`]. A missing plan is not a source-parameter vector.
+    pub physical_parameter_plan: Option<Box<[PhysicalParameterSlot]>>,
     pub params: Vec<Ty>,
     pub ret: Ty,
     pub physical_ret: Ty,
@@ -744,6 +751,7 @@ pub struct SemanticSupertype {
 impl LibraryMember {
     pub fn new(name: String, params: Vec<Ty>, ret: Ty, descriptor: String) -> Self {
         let call_sig = CallSig::metadata_plain(params.len());
+        let parameter_plan = physical_parameter_plan::source_parameter_plan(params.len());
         LibraryMember {
             external_identity: None,
             external_default_provider: None,
@@ -753,6 +761,7 @@ impl LibraryMember {
             owner: None,
             physical_name: None,
             physical_params: params.clone(),
+            physical_parameter_plan: Some(parameter_plan),
             params,
             ret,
             physical_ret: ret,
@@ -909,6 +918,7 @@ impl LibraryCallable {
         physical_ret: Ty,
         descriptor: impl Into<String>,
     ) -> Self {
+        let parameter_plan = physical_parameter_plan::source_parameter_plan(params.len());
         LibraryCallable {
             external_identity: None,
             external_default_provider: None,
@@ -922,6 +932,7 @@ impl LibraryCallable {
             plugin_expression: None,
             inline_body_plan: None,
             physical_params: params.clone(),
+            physical_parameter_plan: Some(parameter_plan),
             params,
             ret,
             physical_ret,
@@ -969,6 +980,7 @@ impl LibraryCallable {
         );
         callable.reflection_name = Some("<init>".to_string());
         callable.physical_params = member.physical_params.clone();
+        callable.physical_parameter_plan = member.physical_parameter_plan.clone();
         callable.member_realization = member.realization;
         callable.default_realization = member.default_realization.clone();
         callable.external_default_provider = member.external_default_provider;
@@ -1050,6 +1062,8 @@ pub struct LibraryCallable {
     /// [`Self::params`], but it never changes this vector (`fun <T> id(x: T)` remains `Object`-erased
     /// when called as `id("x")`).
     pub physical_params: Vec<Ty>,
+    /// Named slots of [`Self::physical_params`]. A missing plan is not a source-parameter vector.
+    pub physical_parameter_plan: Option<Box<[PhysicalParameterSlot]>>,
     /// The *logical* return type — for a generic callable, the substituted type (`listOf<Int>` →
     /// `List<Int>`, `first()` → the element). The checker reports this.
     pub ret: Ty,
@@ -1894,6 +1908,11 @@ pub struct FunctionInfo {
     /// value. It travels on the same candidate structure so the checker can combine both facets and
     /// run overload selection once.
     pub implicit_classifier_callable: Option<ImplicitClassifierCallable>,
+    /// The `inner` classifier this candidate constructs when it is a constructor reached through a
+    /// value of the outer class (`outer.Inner(args)`). Kotlin places such a constructor in the
+    /// receiver's member level beside same-named member functions; selection runs once over both
+    /// and the constructor path then materializes the selected declaration.
+    pub bound_inner_constructor: Option<BoundInnerConstructor>,
     /// Annotation class identities declared on this callable. Consumers decide which annotations affect
     /// resolution/emission; the library layer only records their qualified identities.
     pub annotations: Vec<crate::types::TypeName>,
@@ -2118,76 +2137,9 @@ impl FunctionInfo {
             stable_declaration: None,
             source_member: None,
             implicit_classifier_callable: None,
+            bound_inner_constructor: None,
             annotations: Vec::new(),
         }
-    }
-
-    /// Normalize one callable exposed through a classifier (`Owner.name`) into the same candidate
-    /// structure used by package, module, and lexical sources. The classifier record owns the source
-    /// declaration facts; this conversion copies them once into the selected-call handle so import
-    /// scope and qualified syntax cannot grow separate reconstruction paths.
-    pub fn classifier_member(kind: FnKind, owner: TypeName, member: LibraryMember) -> Self {
-        let physical_name = member
-            .physical_name
-            .clone()
-            .unwrap_or_else(|| member.name.clone());
-        let mut callable = LibraryCallable::library(
-            member.owner.unwrap_or(owner),
-            physical_name,
-            member.params.clone(),
-            member.ret,
-            member.physical_ret,
-            member.descriptor.clone(),
-        );
-        callable.signature = member.signature.clone();
-        callable.physical_params = member.physical_params.clone();
-        callable.generic_sig = member.generic_sig.clone().map(Box::new);
-        callable.declared_params = member
-            .generic_sig
-            .as_ref()
-            .map(|signature| signature.parameters_with_receiver(member.context_count));
-        callable.inline_modifiers = member.call_sig.inline_modifiers.clone().into_boxed_slice();
-        callable.inline = member.inline;
-        callable.inline_body_plan = member.inline_body_plan.clone();
-        callable.suspend = member.suspend();
-        callable.owner_is_interface = member.is_interface();
-        callable.member_realization = member.realization;
-        callable.default_realization = member.default_realization.clone();
-        callable.external_default_provider = member.external_default_provider;
-        callable.nonvirtual_realization = member.nonvirtual_realization.clone();
-        callable.declared_ret = member.declared_ret;
-        callable.overridden_results = member.overridden_results.clone();
-        callable.context_count = member.context_count;
-        callable.contract = member.contract.clone();
-        callable.equality_bound = member.equality_bound;
-        callable.plugin_expression = member.plugin_expression;
-        callable.external_identity = member.external_identity;
-        callable.external_property_identity = member.external_property_identity;
-        callable.reflection_name = Some(member.name.clone());
-
-        let mut candidate = FunctionInfo::plain(kind, None, callable);
-        candidate.ret = ReturnInfo::new(member.ret_nullable(), member.declared_ret);
-        candidate.visibility = member.visibility;
-        candidate.generic_sig = member.generic_sig.clone();
-        candidate.call_sig = member.call_sig.clone();
-        candidate.context_count = member.context_count;
-        candidate.flags.inline = member.inline;
-        candidate.flags.reified = member.reified;
-        candidate.flags.suspend = member.suspend();
-        candidate.flags.operator = member.is_operator();
-        candidate.flags.infix = member.is_infix();
-        candidate.flags.is_abstract = member.is_abstract();
-        candidate.flags.is_final = member.is_final();
-        candidate.flags.inherited_by_delegation = member.inherited_by_delegation();
-        candidate.flags.return_value_status = member.return_value_status;
-        candidate.annotations = member.annotations.clone();
-        candidate.default_values = member.default_values.clone();
-        candidate.stable_declaration = member.stable_declaration;
-        candidate.source_member = member.source_member;
-        candidate.implicit_classifier_callable = member.implicit_classifier_callable;
-        candidate.associated_classifier = member.associated_classifier;
-        candidate.associated_access_owner = member.associated_access_owner;
-        candidate
     }
 
     /// The legacy public-only accessibility predicate (`visibility == Public`) — what the resolver's
@@ -2208,6 +2160,7 @@ impl FunctionInfo {
             self.callable.descriptor.clone(),
         );
         member.physical_params = self.callable.physical_params.clone();
+        member.physical_parameter_plan = self.callable.physical_parameter_plan.clone();
         member.owner = Some(self.callable.owner);
         member.physical_ret = self.callable.physical_ret;
         // Preserve the selected declaration's pre-substitution results when a generic `FunctionInfo`

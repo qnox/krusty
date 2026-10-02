@@ -36,6 +36,8 @@ mod erased_parameters;
 mod error;
 mod expression;
 mod external_references;
+#[cfg(test)]
+mod fact_completeness_tests;
 mod floating_equality;
 mod function_references;
 mod function_value_conversions;
@@ -122,37 +124,7 @@ fn callable_parameter_identity(
 pub(super) fn resolved_parameter_identity(
     identity: &crate::fir::ResolvedParameterIdentity,
 ) -> crate::ir::IrParameterIdentity {
-    use crate::fir::ResolvedParameterIdentity as Resolved;
-    use crate::ir::{
-        IrGeneratedParameterRole, IrParameterIdentity, IrParameterProvenance, IrParameterRole,
-    };
-
-    match identity {
-        Resolved::Source(name) => IrParameterIdentity::source(name.as_ref()),
-        Resolved::Unnamed { .. } => IrParameterIdentity {
-            source_name: None,
-            role: IrParameterRole::Value,
-            provenance: IrParameterProvenance::SourceDeclared,
-        },
-        Resolved::InterfaceDelegationValue { ordinal } => IrParameterIdentity::generated(
-            IrGeneratedParameterRole::InterfaceDelegationValue { ordinal: *ordinal },
-            None,
-        ),
-        Resolved::ContextValue { source_name, .. } => {
-            IrParameterIdentity::context_value(source_name.as_ref())
-        }
-        Resolved::AnonymousContextParameter { ordinal } => {
-            IrParameterIdentity::anonymous_context_parameter(*ordinal)
-        }
-        Resolved::LegacyContextReceiver { ordinal } => {
-            IrParameterIdentity::context_receiver(*ordinal)
-        }
-        Resolved::ExtensionReceiver => IrParameterIdentity::extension_receiver(),
-        Resolved::PropertySetterValue => IrParameterIdentity::property_setter_value(),
-        Resolved::SuspendCompletion => {
-            IrParameterIdentity::generated(IrGeneratedParameterRole::Continuation, None)
-        }
-    }
+    crate::ir::IrParameterIdentity::resolved(identity)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -621,7 +593,8 @@ impl<'a> BodyLowering<'a> {
         if !self.ir.classes[class as usize].methods.contains(&function) {
             self.ir.classes[class as usize].methods.push(function);
         }
-        self.ir.class_static_local_functions.insert(function);
+        let owner = self.ir.classes[class as usize].fq_name_id();
+        self.ir.class_static_local_functions.insert(function, owner);
     }
 
     /// Build the implementation body of a function-like reference after the frontend has selected

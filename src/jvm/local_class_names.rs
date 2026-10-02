@@ -201,6 +201,20 @@ pub(crate) fn realize(ir: &mut IrFile, facade: impl Fn(IrModuleSource) -> TypeNa
         .collect();
     ir.callable_reference_names = references;
     ir.declaration_paths = paths;
+    // A lambda spliced at an inline call writes no class, but its inline-depth marker is spelled
+    // after the one it would have been.
+    let lambdas = ir
+        .lambda_origins
+        .iter()
+        .filter_map(|(&function, origin)| {
+            let provenance = origin.class_provenance.as_ref()?;
+            Some((
+                function,
+                provenance_name(provenance, &facade, ir, &mut physical),
+            ))
+        })
+        .collect::<Vec<_>>();
+    ir.lambda_class_names = lambdas.into_iter().collect();
     let identities = physical
         .into_iter()
         .map(|(class, physical)| (ir.classes[class as usize].fq_name, physical))

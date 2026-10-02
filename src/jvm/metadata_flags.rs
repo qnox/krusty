@@ -53,8 +53,9 @@ pub(super) fn class_metadata_flags(ir: &IrFile, c: &crate::ir::IrClass) -> u64 {
     } else {
         0
     };
-    // A value class carries `@JvmInline`, which sets `hasAnnotations`.
-    let has_annotations = u64::from(c.is_value || !c.applied_annotations.is_empty());
+    // Only DECLARED annotations set `hasAnnotations`: the `@JvmInline` the class file implies for a
+    // legacy `inline class` is not one (kotlinc: `inline class W(val x: Int)` flags 134).
+    let has_annotations = u64::from(!c.applied_annotations.is_empty());
     has_annotations
         | (visibility << 1)
         | (modality << 4)
@@ -74,8 +75,8 @@ pub(super) fn class_metadata_flags(ir: &IrFile, c: &crate::ir::IrClass) -> u64 {
 /// (FINAL=0, OPEN=1, ABSTRACT=2) | bits6-7 memberKind (DECLARATION=0, DELEGATION=2,
 /// SYNTHESIZED=3) | bit8
 /// isOperator | bit9 isInfix.
-/// Used for a class's REAL declared members; the data/value-class synthesized sets keep their own
-/// (already kotlinc-verified) constants.
+/// Used for a class's REAL declared members and its interface-delegation forwarders; the
+/// data/value-class synthesized sets keep their own (already kotlinc-verified) constants.
 pub(super) fn function_flags(ir: &IrFile, fid: u32, f: &crate::ir::IrFunction) -> u64 {
     let visibility = declaration_visibility_bits(ir.method_visibility(fid));
     let modality: u64 = if f.body.is_none() {

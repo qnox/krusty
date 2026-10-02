@@ -10,13 +10,18 @@
 //! - `simple_name → internal_name` for every class in the classpath
 //! - Kotlin type aliases from `@kotlin.Metadata` `d2` arrays in `*TypeAliasesKt.class` files
 
+mod builtin_signatures;
 mod builtins_validation;
 mod candidate_union;
 mod catalog_availability;
 mod class_locations;
+pub mod content_snapshot;
 mod ct_sym_index;
 mod jimage_catalog;
 mod jimage_locations;
+use builtin_signatures::{
+    builtin_bounds, builtin_declared_return, builtin_descriptor, builtin_erased, builtin_ty,
+};
 mod mapped_builtin_realizations;
 mod metadata_indexes;
 mod method_bodies;
@@ -40,7 +45,9 @@ use self::method_body_cache::{
     global_entry_body_cache, global_entry_class_bodies_cache, BodyCache, ClassBodiesCache,
 };
 use self::value_class_erasure::{
-    metadata_value_class_underlying, value_class_param_types, value_class_return_type,
+    meta_descriptor_position, meta_param_exact, metadata_carrier_matches,
+    metadata_value_class_bound_carrier, metadata_value_class_underlying, value_class_param_types,
+    value_class_return_type,
 };
 
 use std::cell::{Cell, RefCell};
@@ -53,7 +60,6 @@ use crate::jvm::classreader::{parse_class, ClassBodies, ClassInfo, MethodCode, R
 use crate::jvm::compilation_inputs::{
     classify_classpath_entry, JvmClasspathEntryKind, JvmCompilationInputInventory,
 };
-use crate::jvm::names::type_descriptor;
 use crate::libraries::{CallSig, GenericSig, LibraryCallable, ReturnInfo};
 use crate::name_tree::{NameId, NameTree};
 use crate::symbol_source::SymbolNamespace;
@@ -256,56 +262,6 @@ fn meta_param_compat(
         true
     } else {
         ty_erases_to_object(*desc) && !desc.is_array()
-    }
-}
-
-fn meta_param_exact(
-    name: Option<TypeName>,
-    nullable: bool,
-    desc: &Ty,
-    value_underlying: &dyn Fn(TypeName) -> Option<Ty>,
-) -> bool {
-    let Some(name) = name else {
-        return ty_erases_to_object(*desc);
-    };
-    let ids = meta_ids();
-    if name == ids.array {
-        return matches!(desc, Ty::Obj(n, args)
-            if *n == ids.array && args.first().copied().is_some_and(ty_erases_to_object));
-    }
-    if let Some(width) = prim_array_width(name) {
-        return desc.obj_internal().and_then(prim_array_width) == Some(width);
-    }
-    if let Some(prim) = ids.prim.get(&name) {
-        if nullable {
-            return desc
-                .obj_internal()
-                .is_some_and(|actual| nullable_primitive_matches_descriptor(name, actual));
-        }
-        return match prim {
-            // An unsigned parameter is metadata-compatible with its own name and with the signed
-            // primitive it erases to (`UInt` <-> `Int`, `UByte` <-> `Byte`, …).
-            u if u.is_unsigned() => *desc == *u || Some(*desc) == u.scalar_value_repr(),
-            prim => desc == prim,
-        };
-    }
-    // A value class erases to its underlying — `runTest(timeout: Duration)` aligns its metadata against
-    // the erased `J` exactly only through it (unsigned underlyings normalize like the mapped builtins:
-    // `UInt` → `Int`). Decided BEFORE the by-descriptor arms below, or a REFERENCE underlying is judged
-    // by the arm for its erasure and rejected — see `meta_param_compat`.
-    if let Some(erased) = metadata_value_class_underlying(name, nullable, value_underlying) {
-        return erased.non_null() == desc.non_null();
-    }
-    if name == ids.unit {
-        *desc == Ty::Unit
-    } else if name == ids.nothing {
-        *desc == Ty::Nothing
-    } else if matches!(*desc, Ty::String) {
-        name == ids.string_kotlin || name == ids.string_java
-    } else {
-        desc.obj_internal().is_some_and(|desc_internal| {
-            crate::jvm::jvm_class_map::type_names_map_to_same_jvm_internal(desc_internal, name)
-        })
     }
 }
 
@@ -1199,63 +1155,6 @@ struct BuiltinConstructor {
     visibility: crate::types::Visibility,
 }
 
-/// The JVM erasure of a decoded builtin type: a type parameter erases to `Any` (`Object`), a class to
-/// itself with its type arguments dropped — exactly what a JVM descriptor records.
-fn builtin_erased(ty: Ty) -> Ty {
-    match ty {
-        // JVM erasure follows the primary declared bound (`<T : CharSequence>` erases to
-        // `CharSequence`), not unconditionally `Object`. Unbounded parameters already carry `Any?` as
-        // their bound, so the same recursive rule covers both cases and stays aligned with
-        // `names::type_descriptor` and bridge erasure.
-        Ty::TyParam(_, bound) => builtin_erased(*bound),
-        // Nullability is erased from reference classifiers, but not from scalar representation: a
-        // nullable scalar occupies its wrapper reference in a JVM descriptor.
-        Ty::Nullable(inner) | Ty::PlatformNullable(inner) => {
-            inner.boxed_ref().unwrap_or_else(|| builtin_erased(*inner))
-        }
-        Ty::Obj(name, args) if !args.is_empty() => Ty::obj_name(name),
-        other => other,
-    }
-}
-
-/// The JVM descriptor a builtin member's declared signature erases to.
-fn builtin_descriptor(sig: &GenericSig) -> String {
-    let params: String = sig
-        .params
-        .iter()
-        .map(|p| type_descriptor(builtin_erased(*p)))
-        .collect();
-    format!("({params}){}", type_descriptor(builtin_erased(sig.ret)))
-}
-
-/// A decoded `.kotlin_builtins` type as a semantic [`Ty`]. `bounds` supplies each in-scope type
-/// parameter's declared upper bound; an unlisted one is `Any?`, matching the `@Metadata`
-/// generic-signature decoder. JVM erasure is derived separately by [`builtin_erased`].
-pub(super) fn builtin_ty(t: &super::metadata::BuiltinTy, bounds: &HashMap<String, Ty>) -> Ty {
-    crate::metadata::semantic::semantic_ty(
-        &super::metadata::builtin_bridge::ty_to_common(t),
-        bounds,
-    )
-}
-
-/// The declared upper bound of each type parameter, keyed by name. Bounds are decoded with an EMPTY
-/// bound map so a recursive bound (`E : Comparable<E>`) terminates.
-pub(super) fn builtin_bounds(
-    params: &[super::metadata::BuiltinTypeParam],
-    inherited: &HashMap<String, Ty>,
-) -> HashMap<String, Ty> {
-    let mut out = inherited.clone();
-    for p in params {
-        let bound = p
-            .bounds
-            .first()
-            .map(|b| builtin_ty(b, &HashMap::new()))
-            .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
-        out.insert(p.name.clone(), bound);
-    }
-    out
-}
-
 impl BuiltinsFile {
     fn from_package(package: super::metadata::BuiltinPackage) -> Self {
         let mut file = BuiltinsFile::default();
@@ -1454,15 +1353,17 @@ fn function_parameter_erasure_matches(
 /// parameters first and the value parameters after them. Kotlin signs a context extension
 /// `(contexts…, receiver, values…)`, so only parameters PAST the context prefix are pushed along by
 /// the receiver.
-fn meta_descriptor_position(index: usize, context_count: usize, extension: bool) -> usize {
-    index + usize::from(extension && index >= context_count)
-}
-
+/// JVM carrier of a metadata type parameter whose class bound is a value class.
+///
+/// The signature parameter stays the type parameter, so it has no classifier of its own. A value-class
+/// class bound (`UInt` ahead of `Comparable<UInt>`) is what the descriptor erases to. Any other bound
+/// keeps the ordinary reference alignment.
 fn meta_callable_aligns(
     f: &super::metadata::MetaFn,
     desc_params: &[Ty],
     value_underlying: &dyn Fn(TypeName) -> Option<Ty>,
     classifier_arity: &dyn Fn(Ty) -> Option<usize>,
+    is_interface: &dyn Fn(TypeName) -> bool,
 ) -> Option<(usize, usize)> {
     let extension = f.is_extension();
     let context_count = f.context_count();
@@ -1496,6 +1397,20 @@ fn meta_callable_aligns(
                 if let Some(Ty::Fun(signature)) = signature_parameter.map(Ty::non_null) {
                     return function_parameter_erasure_matches(signature, *d, classifier_arity);
                 }
+                if let Some(carrier) = signature_parameter
+                    .zip(f.generic_sig.as_ref())
+                    .filter(|(parameter, _)| matches!(parameter.non_null(), Ty::TyParam(..)))
+                    .and_then(|(parameter, signature)| {
+                        metadata_value_class_bound_carrier(
+                            parameter,
+                            signature,
+                            is_interface,
+                            value_underlying,
+                        )
+                    })
+                {
+                    return metadata_carrier_matches(carrier, d, false, value_underlying);
+                }
                 let class = signature_parameter
                     .and_then(|parameter| parameter.non_null().obj_internal())
                     .or(m.ty);
@@ -1517,6 +1432,20 @@ fn meta_callable_aligns(
             if let Some(Ty::Fun(signature)) = signature_parameter.map(Ty::non_null) {
                 return function_parameter_erasure_matches(signature, **d, classifier_arity);
             }
+            if let Some(carrier) = signature_parameter
+                .zip(f.generic_sig.as_ref())
+                .filter(|(parameter, _)| matches!(parameter.non_null(), Ty::TyParam(..)))
+                .and_then(|(parameter, signature)| {
+                    metadata_value_class_bound_carrier(
+                        parameter,
+                        signature,
+                        is_interface,
+                        value_underlying,
+                    )
+                })
+            {
+                return metadata_carrier_matches(carrier, d, true, value_underlying);
+            }
             let class = signature_parameter
                 .and_then(|parameter| parameter.non_null().obj_internal())
                 .or(m.ty);
@@ -1537,12 +1466,18 @@ fn aligned_meta_index(
     desc_ret: &Ty,
     value_underlying: &dyn Fn(TypeName) -> Option<Ty>,
     classifier_arity: &dyn Fn(Ty) -> Option<usize>,
+    is_interface: &dyn Fn(TypeName) -> bool,
 ) -> Option<(usize, usize)> {
     meta.fns_named(fn_name)
         .filter_map(|i| {
             let f = meta.fn_at(i as usize);
-            let alignment =
-                meta_callable_aligns(f, desc_params, value_underlying, classifier_arity);
+            let alignment = meta_callable_aligns(
+                f,
+                desc_params,
+                value_underlying,
+                classifier_arity,
+                is_interface,
+            );
             crate::trace_compiler!(
                 "resolve",
                 "metadata alignment {fn_name} desc={desc_params:?} candidate_value_classes={:?} candidate_signature={:?} alignment={alignment:?}",
@@ -1566,6 +1501,7 @@ fn aligned_meta_callable<'a>(
     desc_ret: &Ty,
     value_underlying: &dyn Fn(TypeName) -> Option<Ty>,
     classifier_arity: &dyn Fn(Ty) -> Option<usize>,
+    is_interface: &dyn Fn(TypeName) -> bool,
 ) -> Option<(usize, &'a super::metadata::MetaFn)> {
     aligned_meta_index(
         meta,
@@ -1574,6 +1510,7 @@ fn aligned_meta_callable<'a>(
         desc_ret,
         value_underlying,
         classifier_arity,
+        is_interface,
     )
     .map(|(end, i)| (end, meta.fn_at(i)))
 }
@@ -2494,6 +2431,10 @@ impl Classpath {
                 desc_ret,
                 value_underlying,
                 &|ty| self.function_classifier_arity(ty),
+                &|name| {
+                    self.find_name(name)
+                        .is_some_and(|class| class.is_interface())
+                },
             )
             .map(|(_, idx)| meta.fn_at(idx))
             .and_then(|f| f.generic_sig.clone())
@@ -2548,6 +2489,10 @@ impl Classpath {
             desc_ret,
             value_underlying,
             &|ty| self.function_classifier_arity(ty),
+            &|name| {
+                self.find_name(name)
+                    .is_some_and(|class| class.is_interface())
+            },
         ) else {
             return MetadataCallFacts::fallback(if extension {
                 CallSig::default()
@@ -3933,7 +3878,7 @@ impl Classpath {
             let jvm = super::jvm_class_map::to_jvm_type_name(internal);
             let mut cur = self.find_name(jvm).and_then(|class| class.super_class);
             while let Some(superclass) = cur {
-                if superclass.matches("java/lang/Object") {
+                if superclass == crate::types::wk::java_object() {
                     break;
                 }
                 if let Some(body) =
@@ -5528,31 +5473,6 @@ mod fq_tests {
             &chars,
             no_underlying,
         ));
-    }
-
-    #[test]
-    fn builtin_type_parameter_erasure_follows_its_primary_bound() {
-        let bounded = Ty::ty_param("T", Ty::obj("kotlin/CharSequence"));
-        assert_eq!(
-            builtin_erased(bounded),
-            Ty::obj("kotlin/CharSequence"),
-            "a decoded builtins signature must use the same bound erasure as JVM descriptors"
-        );
-        let unbounded = Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")));
-        assert_eq!(builtin_erased(unbounded), Ty::obj("kotlin/Any"));
-    }
-
-    #[test]
-    fn builtin_erasure_preserves_nullable_scalar_storage() {
-        assert_eq!(
-            builtin_erased(Ty::nullable(Ty::Int)),
-            Ty::obj("java/lang/Integer")
-        );
-        assert_eq!(
-            builtin_erased(Ty::nullable(Ty::UInt)),
-            Ty::obj("kotlin/UInt")
-        );
-        assert_eq!(builtin_erased(Ty::nullable(Ty::String)), Ty::String);
     }
 
     #[test]

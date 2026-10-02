@@ -3,6 +3,10 @@
 use super::*;
 
 mod cast_narrowing;
+mod constructor_expectations;
+mod scoped_constraint_frames;
+
+pub(super) use constructor_expectations::ReceiverLevelCall;
 
 /// Remove solver-local projection captures from an inferred declaration result. A capture is
 /// readable through its upper bound at the result root; inside a generic argument it is exposed as
@@ -693,7 +697,7 @@ impl ProductionSignatureSemantics<'_> {
                         include_scope_owner_body,
                     );
                     let spelling = self
-                        .qualified_classifier_binding(lookup_scope, &failed.name)
+                        .qualified_type_classifier_binding(lookup_scope, &failed.name)
                         .1
                         .unwrap_or_else(|| failed.name.clone());
                     Err(self.record_unresolved_reference_at(
@@ -725,7 +729,7 @@ impl ProductionSignatureSemantics<'_> {
             .clone()
         })?;
         let spelling = self
-            .qualified_classifier_binding(lookup_scope, &failed.name)
+            .qualified_type_classifier_binding(lookup_scope, &failed.name)
             .1
             .unwrap_or_else(|| failed.name.clone());
         Err(self.record_unresolved_reference_at(
@@ -933,239 +937,6 @@ impl ProductionSignatureSemantics<'_> {
         crate::fir::ResolvedTy::new(member.ret)
             .map(Some)
             .map_err(|_| Self::failure())
-    }
-}
-
-impl ProductionSignatureSemantics<'_> {
-    pub(super) fn active_scoped_constraint_frame(
-        &self,
-        declaration: crate::fir::DeclarationId,
-    ) -> Option<(crate::fir::DeclarationId, usize)> {
-        let constraints = self.scoped_constraints.borrow();
-        let inputs = self.scoped_constraint_inputs.borrow();
-        let mut current = Some(declaration);
-        while let Some(declaration) = current {
-            if let (Some(constraint_stack), Some(input_stack)) =
-                (constraints.get(&declaration), inputs.get(&declaration))
-            {
-                if let Some(index) =
-                    input_stack
-                        .iter()
-                        .enumerate()
-                        .rev()
-                        .find_map(|(index, inputs)| {
-                            (constraint_stack.get(index).is_some()
-                                && inputs.iter().any(|input| input.mentions_ty_param()))
-                            .then_some(index)
-                        })
-                {
-                    return Some((declaration, index));
-                }
-            }
-            current = self.declaration_semantic_parent(declaration);
-        }
-        None
-    }
-
-    fn push_scoped_receiver(&self, declaration: crate::fir::DeclarationId, receiver: Ty) {
-        self.scoped_receivers
-            .borrow_mut()
-            .entry(declaration)
-            .or_default()
-            .push(receiver);
-    }
-
-    fn pop_scoped_receiver(&self, declaration: crate::fir::DeclarationId) {
-        let mut receivers = self.scoped_receivers.borrow_mut();
-        let remove = receivers.get_mut(&declaration).is_some_and(|stack| {
-            stack.pop();
-            stack.is_empty()
-        });
-        if remove {
-            receivers.remove(&declaration);
-        }
-    }
-
-    fn push_scoped_constraint_frame(
-        &self,
-        declaration: crate::fir::DeclarationId,
-        inputs: Vec<Ty>,
-    ) {
-        self.scoped_constraint_inputs
-            .borrow_mut()
-            .entry(declaration)
-            .or_default()
-            .push(inputs);
-        self.scoped_constraints
-            .borrow_mut()
-            .entry(declaration)
-            .or_default()
-            .push(crate::symbol_resolver::GSigBinds::new());
-    }
-
-    fn pop_scoped_constraint_frame(&self, declaration: crate::fir::DeclarationId) {
-        let mut semantic_ancestors = Vec::new();
-        let mut ancestor = self.declaration_semantic_parent(declaration);
-        while let Some(current) = ancestor {
-            semantic_ancestors.push(current);
-            ancestor = self.declaration_semantic_parent(current);
-        }
-        let mut inputs = self.scoped_constraint_inputs.borrow_mut();
-        let remove_inputs = inputs.get_mut(&declaration).is_some_and(|stack| {
-            stack.pop();
-            stack.is_empty()
-        });
-        if remove_inputs {
-            inputs.remove(&declaration);
-        }
-        drop(inputs);
-
-        let completed = {
-            let mut all = self.scoped_constraints.borrow_mut();
-            let (completed, remove) = all
-                .get_mut(&declaration)
-                .map(|stack| (stack.pop(), stack.is_empty()))
-                .unwrap_or((None, false));
-            if remove {
-                all.remove(&declaration);
-            }
-            completed
-        };
-        let Some(completed) = completed else {
-            return;
-        };
-        let mut all = self.scoped_constraints.borrow_mut();
-        let active_parent = all
-            .get(&declaration)
-            .and_then(|stack| stack.last())
-            .is_some()
-            .then_some(declaration)
-            .or_else(|| {
-                semantic_ancestors
-                    .into_iter()
-                    .find(|ancestor| all.get(ancestor).and_then(|stack| stack.last()).is_some())
-            });
-        if let Some(parent) = active_parent
-            .and_then(|parent| all.get_mut(&parent))
-            .and_then(|stack| stack.last_mut())
-        {
-            Self::merge_scoped_constraints(parent, completed.clone());
-            drop(all);
-            let mut finished = self.completed_scoped_constraints.borrow_mut();
-            let target = finished.entry(declaration).or_default();
-            Self::merge_scoped_constraints(target, completed);
-            return;
-        }
-        drop(all);
-        let mut finished = self.completed_scoped_constraints.borrow_mut();
-        let target = finished.entry(declaration).or_default();
-        Self::merge_scoped_constraints(target, completed);
-    }
-
-    /// Contextual shapes contributed by one already-resolved classifier constructor. Both bare
-    /// classifier calls and receiver-bound inner-class calls use this operation; only the step that
-    /// resolves `internal` differs between those scope-tower rungs.
-    fn constructor_call_argument_expectations(
-        &self,
-        scope: crate::fir::SignatureScope,
-        internal: crate::types::TypeName,
-        arguments: &[crate::fir::SigCallArgumentProbe<'_>],
-        type_arguments: &[Ty],
-        trailing_lambda: bool,
-    ) -> Result<Box<[Option<crate::fir::ResolvedTy>]>, crate::fir::DiagnosticId> {
-        let (parameters, slots) = self.with_resolver(scope, |resolver| {
-            let source_probes = arguments
-                .iter()
-                .map(Self::probe_argument_kind)
-                .collect::<Vec<_>>();
-            let source_indices = (0..arguments.len()).collect::<Vec<_>>();
-            let names = arguments
-                .iter()
-                .map(|argument| match argument {
-                    crate::fir::SigCallArgumentProbe::Typed(argument) => {
-                        argument.name.map(str::to_owned)
-                    }
-                    crate::fir::SigCallArgumentProbe::PostponedLambda { name, .. }
-                    | crate::fir::SigCallArgumentProbe::PostponedCallableReference {
-                        name, ..
-                    } => name.map(str::to_owned),
-                })
-                .collect::<Vec<_>>();
-            let selected = ((!trailing_lambda && names.iter().all(Option::is_none))
-                .then(|| {
-                    resolver.select_constructor_declaration_with_type_arguments(
-                        internal,
-                        &source_probes,
-                        type_arguments,
-                    )
-                })
-                .flatten())
-            .or_else(|| {
-                // A callable reference is postponed until its expected reflective
-                // property/function shape is known. If applicability cannot run before that
-                // materialization, a single declaration-owned source argument map supplies the
-                // expectation without selecting between distinct constructor shapes.
-                let classifier = resolver.classifier(internal)?;
-                let mut candidates = classifier.constructors.iter().filter(|candidate| {
-                    crate::libraries::map_call_args(
-                        &source_indices,
-                        Some(&names),
-                        &candidate.call_sig.param_names,
-                        candidate.params.len(),
-                        candidate.call_sig.required,
-                        &candidate.call_sig.param_defaults,
-                        candidate.call_sig.vararg_index,
-                        trailing_lambda,
-                    )
-                    .is_ok()
-                });
-                let mut selected = candidates.next()?.clone();
-                if candidates.next().is_some() {
-                    return None;
-                }
-                selected.owner.get_or_insert(internal);
-                Some(crate::symbol_resolver::selected_constructor::capture(
-                    selected,
-                    &classifier,
-                ))
-            })?;
-            let declaration = &selected.declaration;
-            let slots = crate::libraries::map_call_args(
-                &source_indices,
-                Some(&names),
-                &declaration.call_sig.param_names,
-                declaration.params.len(),
-                declaration.call_sig.required,
-                &declaration.call_sig.param_defaults,
-                declaration.call_sig.vararg_index,
-                trailing_lambda,
-            )
-            .ok()?;
-            let mapped_probes = slots
-                .iter()
-                .map(|source| {
-                    source
-                        .and_then(|source| source_probes.get(source).cloned())
-                        .unwrap_or(crate::symbol_resolver::CallArgKind::OmittedDefault)
-                })
-                .collect::<Vec<_>>();
-            let parameters = resolver
-                .specialized_constructor_parameter_types(
-                    internal,
-                    declaration,
-                    &mapped_probes,
-                    type_arguments,
-                )
-                .into_iter()
-                .map(|parameter| {
-                    resolver
-                        .functional_expectation(parameter)
-                        .unwrap_or(parameter)
-                })
-                .collect::<Vec<_>>();
-            Some((parameters, slots))
-        })?;
-        Ok(Self::postponed_expectations(arguments, &slots, &parameters))
     }
 }
 
@@ -1858,24 +1629,11 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 {
                     return crate::fir::ResolvedTy::new(parameter).map_err(|_| Self::failure());
                 }
-                // Lexically nested classifiers occupy a nearer scope-tower level than imports.
-                // `Resolver::classifier_in_scope` receives the file/import scope but not the
-                // transient source-containment chain used by this compact signature graph, so add
-                // that one semantic tier explicitly. This is what makes a named companion object
-                // (`companion object B`) usable as the value receiver in `B.p`.
-                let classifier =
-                    if let Some(classifier) = self.lexically_nested_classifier(scope, spelling) {
-                        classifier
-                    } else {
-                        self.with_resolver(scope, |resolver| {
-                            let crate::symbol_resolver::CandidateSelection::Selected(classifier) =
-                                resolver.classifier_in_scope(spelling)
-                            else {
-                                return None;
-                            };
-                            Some(classifier)
-                        })?
-                    };
+                // The authoritative classifier operation owns lexical declaration, inherited,
+                // and file/import scope priority, including enum-entry-owned nested declarations.
+                let classifier = self
+                    .qualified_classifier(scope, spelling)
+                    .ok_or_else(Self::failure)?;
                 let Some(value) = self.classifier_value_type(classifier) else {
                     crate::trace_compiler!(
                         "signature",
@@ -2157,6 +1915,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 }
                 crate::resolve::implicit_rungs::ImplicitRung::Receiver(receiver) => receiver,
             };
+            let selected_constructor = std::cell::Cell::new(false);
             if let Ok((
                 result,
                 member,
@@ -2166,11 +1925,9 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 postponed_bindings,
                 extension_parameters,
             )) = self.with_resolver(scope, |resolver| {
-                let (mut functions, properties) =
-                    resolver.receiver_callables(receiver, spelling).into_parts();
-                functions.overloads = self
-                    .implicit_context_candidates(scope, std::mem::take(&mut functions.overloads));
-                let callables = crate::libraries::Callables::from_parts(functions, properties);
+                let callables = self
+                    .receiver_member_level(scope, resolver, receiver, spelling)
+                    .ok()?;
                 let (selected_arguments, selected_argument_types) =
                     Self::mapped_call_arguments(callables.functions(), arguments, trailing_lambda)?;
                 let projected = self.project_postponed_callables(
@@ -2205,6 +1962,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     return None;
                 };
                 let postponed_bindings = projected.selected_bindings(&selected);
+                selected_constructor.set(selected.bound_inner_constructor.is_some());
                 if selected.kind == crate::libraries::FnKind::Member {
                     let mut member = selected.member_with_return(result);
                     member.params = parameters.clone();
@@ -2229,6 +1987,15 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 ))
             }) {
                 self.commit_postponed_bindings(scope, postponed_bindings);
+                if let Some(member) = member.as_ref().filter(|_| selected_constructor.get()) {
+                    return self.selected_inner_constructor_result(
+                        scope,
+                        receiver,
+                        member,
+                        &selected_argument_types,
+                        &resolved_type_arguments,
+                    );
+                }
                 if let Some(parameters) = extension_parameters {
                     self.record_scoped_argument_constraints(
                         scope,
@@ -2424,15 +2191,6 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 }
                 return crate::fir::ResolvedTy::new(result).map_err(|_| Self::failure());
             }
-            if let Some(result) = self.bound_inner_constructor_result(
-                scope,
-                receiver,
-                spelling,
-                arguments,
-                &resolved_type_arguments,
-            )? {
-                return Ok(result);
-            }
         }
         for classifier in self.lexical_class_names(scope) {
             // The enclosing classifier itself is in lexical type scope. Inside its companion,
@@ -2499,7 +2257,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         }
         let source_alias =
             self.applied_source_alias_expansion(scope, spelling, &resolved_type_arguments);
-        let nested_classifier = self.bound_or_nested_classifier(scope, spelling, classifier);
+        let scoped_classifier = self.bound_or_scoped_classifier(scope, spelling, classifier);
         let selected = self.with_resolver(scope, |resolver| {
             let include_invisible = self.table.declaration_suppresses_visibility(scope.owner);
             let candidates = if include_invisible {
@@ -2708,7 +2466,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             // A lexically nested classifier is a nearer type-scope rung than file imports. Use
             // the same ordering as value/type lookup instead of letting an imported same-named
             // classifier shadow `class Outer { class Nested; fun f() = Nested() }`.
-            let internal = match nested_classifier {
+            let internal = match scoped_classifier {
                 Some(internal) => internal,
                 None => match resolver.classifier_in_scope(spelling) {
                     crate::symbol_resolver::CandidateSelection::Selected(internal) => internal,
@@ -3259,20 +3017,11 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 // arguments, then use the shared argument mapper to place a trailing/named lambda.
                 // This supplies `Delegate<A> { value -> ... }` with `(A) -> R` before the lambda is
                 // materialized; no compact-graph overload engine is introduced here.
-                let lexical_classifier = self
-                    .qualified_classifier(scope, spelling)
-                    .or_else(|| self.lexically_nested_classifier(scope, spelling));
-                let constructor = lexical_classifier.or_else(|| {
-                    self.with_resolver(scope, |resolver| {
-                        match resolver.classifier_in_scope(spelling) {
-                            crate::symbol_resolver::CandidateSelection::Selected(internal) => {
-                                Some(internal)
-                            }
-                            crate::symbol_resolver::CandidateSelection::Ambiguous
-                            | crate::symbol_resolver::CandidateSelection::None => None,
-                        }
-                    })
-                    .ok()
+                let constructor = self.qualified_classifier(scope, spelling);
+                // An inner classifier whose outer receiver also declares same-named member
+                // functions is selected on that receiver's member level below, over both families.
+                let constructor = constructor.filter(|internal| {
+                    !self.implicit_member_level_owns_constructors(scope, *internal, spelling)
                 });
                 if let Some(internal) = constructor {
                     if let Ok(expectations) = self.constructor_call_argument_expectations(
@@ -3360,30 +3109,6 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                             spelling,
                             arguments,
                             type_arguments,
-                            trailing_lambda,
-                        ) {
-                            return Ok(expectations);
-                        }
-                    }
-                    // A bare inherited inner-class construction (`class C : A { fun f() =
-                    // B(arg) }`) is bound to the same implicit receiver rung as `this.B(arg)`.
-                    // Ordinary member functions at that rung were tried above; only then consult
-                    // the classifier facet and reuse the constructor expectation operation.
-                    for receiver in self
-                        .implicit_receivers(scope)
-                        .into_iter()
-                        .chain(self.enclosing_lexical_singleton_receivers(scope))
-                    {
-                        let Some(internal) =
-                            self.bound_inner_classifier(scope, receiver, spelling)?
-                        else {
-                            continue;
-                        };
-                        if let Ok(expectations) = self.constructor_call_argument_expectations(
-                            scope,
-                            internal,
-                            arguments,
-                            &resolved_type_arguments,
                             trailing_lambda,
                         ) {
                             return Ok(expectations);
@@ -4405,16 +4130,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             return Ok(true);
         }
 
-        let classifier = self.lexically_nested_classifier(scope, root).or_else(|| {
-            self.with_resolver(scope, |resolver| match resolver.classifier_in_scope(root) {
-                crate::symbol_resolver::CandidateSelection::Selected(classifier) => {
-                    Some(classifier)
-                }
-                crate::symbol_resolver::CandidateSelection::Ambiguous
-                | crate::symbol_resolver::CandidateSelection::None => None,
-            })
-            .ok()
-        });
+        let classifier = self.qualified_classifier(scope, root);
         let Some(classifier) = classifier else {
             crate::trace_compiler!(
                 "callable_ref",
@@ -4522,6 +4238,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 .ok()
                 .flatten()
         }) {
+            self.commit_postponed_property_receiver(scope, &property, receiver.get());
             if let Some(signature) =
                 self.demanded_source_signature(None, property.stable_declaration, demand)?
             {
@@ -4670,12 +4387,12 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 }
             }
         }
+        let selected_constructor = std::cell::Cell::new(false);
         let selected = self.with_resolver(scope, |resolver| {
-            let (mut functions, properties) = resolver
-                .receiver_callables(receiver.get(), spelling)
+            let (mut functions, properties) = self
+                .receiver_member_level(scope, resolver, receiver.get(), spelling)
+                .ok()?
                 .into_parts();
-            functions.overloads =
-                self.implicit_context_candidates(scope, std::mem::take(&mut functions.overloads));
             // Selection sees the arguments one per parameter SLOT, with an omitted defaulted slot
             // as `OmittedDefault`, so a sibling overload that has NO default there looked just as
             // applicable and `Instant.fromEpochSeconds(0)` — `(Long, Int = 0)` beside
@@ -4743,6 +4460,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 selected.source_key,
             );
             let postponed_bindings = projected.selected_bindings(&selected);
+            selected_constructor.set(selected.bound_inner_constructor.is_some());
             if selected.kind == crate::libraries::FnKind::Member {
                 let mut member = selected.member_with_return(result);
                 member.params = parameters;
@@ -4777,6 +4495,20 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 extension_parameters,
             )) => {
                 self.commit_postponed_bindings(scope, postponed_bindings);
+                if let Some(member) = member.as_ref().filter(|_| selected_constructor.get()) {
+                    return self
+                        .selected_inner_constructor_result(
+                            scope,
+                            receiver.get(),
+                            member,
+                            &argument_types,
+                            &type_arguments,
+                        )
+                        .map(|ty| crate::fir::ResolvedMemberCall {
+                            ty: Some(ty),
+                            declaration: None,
+                        });
+                }
                 if let Some(parameters) = extension_parameters {
                     // An extension's selected value parameters can still contain active builder
                     // variables supplied by its receiver. Feed the typed arguments back into that
@@ -4880,18 +4612,6 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                             declaration,
                         })
                         .map_err(|_| Self::failure());
-                }
-                if let Some(result) = self.bound_inner_constructor_result(
-                    scope,
-                    receiver.get(),
-                    spelling,
-                    arguments,
-                    &type_arguments,
-                )? {
-                    return Ok(crate::fir::ResolvedMemberCall {
-                        ty: Some(result),
-                        declaration: None,
-                    });
                 }
                 if ordinary_argument_types.is_empty() {
                     if matches!(spelling, "inc" | "dec") {
@@ -5102,27 +4822,16 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             .iter()
             .map(|argument| argument.get())
             .collect::<Vec<_>>();
-        let (parameters, slots): (Vec<Ty>, Vec<Option<usize>>) =
-            self.with_resolver(scope, |resolver| {
-                let (mut functions, properties) = resolver
-                    .receiver_callables(receiver.get(), spelling)
-                    .into_parts();
-                functions.overloads = self
-                    .implicit_context_candidates(scope, std::mem::take(&mut functions.overloads));
-                let callables = crate::libraries::Callables::from_parts(functions, properties);
-                self.receiver_family_postponed_parameters(
-                    resolver,
-                    callables,
-                    super::postponed_calls::PostponedReceiverCall {
-                        scope,
-                        receiver: receiver.get(),
-                        spelling,
-                        arguments,
-                        type_arguments: &type_arguments,
-                        trailing_lambda,
-                    },
-                )
-            })?;
+        let call = ReceiverLevelCall {
+            scope,
+            spelling,
+            arguments,
+            type_arguments: &type_arguments,
+            trailing_lambda,
+        };
+        let (parameters, slots) = self
+            .receiver_member_level_expectations(receiver.get(), call)?
+            .ok_or_else(Self::failure)?;
         crate::trace_compiler!(
             "signature",
             "member call expectations receiver={:?} spelling={spelling} parameters={parameters:?} slots={slots:?}",

@@ -7,6 +7,9 @@
 
 use crate::types::Ty;
 
+mod completeness;
+pub use completeness::IncompleteIrFact;
+
 use super::{
     Callee, CtorDelegateTarget, FuncRef, IrCheckedArgument, IrCheckedConstructorTarget,
     IrCheckedOperation, IrCheckedSubstitution, IrClass, IrExpr, IrFile, IrGenericSig, IrIntrinsic,
@@ -349,6 +352,7 @@ fn validate_expr(expression: &IrExpr) -> Result<(), UndeterminedIrType> {
         | IrExpr::ReifiedTypeOp { .. }
         | IrExpr::UnitInstance
         | IrExpr::CurrentContinuation
+        | IrExpr::InlineFrameMarker
         | IrExpr::NotNullAssert { .. }
         | IrExpr::LateinitCheck { .. }
         | IrExpr::ExternalStaticInstance { .. }
@@ -808,10 +812,14 @@ mod tests {
             context_count: 0,
             has_receiver: false,
             suspend: false,
+            source_suspend: false,
             overrides_non_primitive_result: false,
+            overridden_non_primitive_results: Vec::new(),
             function_adapter: false,
             wraps_function_value: true,
             nullable: true,
+            kotlin_interface: false,
+            parameter_identities: Vec::new(),
         }
     }
 

@@ -897,8 +897,9 @@ impl BodyLowering<'_> {
                 .copied();
             if let Some(class) = class {
                 self.ir.classes[class as usize].methods.push(function);
-                self.ir.class_static_local_functions.insert(function);
-                Some(self.ir.classes[class as usize].fq_name_id())
+                let owner = self.ir.classes[class as usize].fq_name_id();
+                self.ir.class_static_local_functions.insert(function, owner);
+                Some(owner)
             } else {
                 let declaration = crate::fir::DeclarationId::from_raw(body.owner().raw());
                 let foreign_inline_template = self
@@ -1008,6 +1009,7 @@ impl BodyLowering<'_> {
                             crate::ir::IrLambdaForm::AnonymousFunction
                         }
                     },
+                    class_provenance: None,
                 },
             );
             assert!(previous.is_none(), "one FIR lambda has one semantic origin");

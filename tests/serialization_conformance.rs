@@ -77,79 +77,17 @@ fn serializer_object_emits_wellformed_bytecode() {
     );
 }
 
-/// Recursively locate a `<prefix>*.jar` (no `-sources`) under `dir`.
-fn walk(dir: &std::path::Path, prefix: &str, depth: usize, out: &mut Option<PathBuf>) {
-    if out.is_some() || depth > 10 {
-        return;
-    }
-    let Ok(rd) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for e in rd.flatten() {
-        let p = e.path();
-        if p.is_dir() {
-            walk(&p, prefix, depth + 1, out);
-        } else if let Some(n) = p.file_name().and_then(|n| n.to_str()) {
-            if n.starts_with(prefix) && n.ends_with(".jar") && !n.contains("sources") {
-                *out = Some(p.clone());
-                return;
-            }
-        }
-    }
-}
-
-fn locate(prefix: &str) -> Option<PathBuf> {
-    let home = std::env::var("HOME").ok()?;
-    let mut out = None;
-    walk(
-        &std::path::Path::new(&home).join(".gradle"),
-        prefix,
-        0,
-        &mut out,
-    );
-    out
-}
-
-/// The newest `<artifact>-<version>.jar` Gradle has cached for `group:artifact` in `modules-2`,
-/// its dependency cache proper. Versions are compared numerically, so 1.11.0 beats 1.9.0.
-fn gradle_module_jar(group: &str, artifact: &str) -> Option<PathBuf> {
-    let home = std::env::var("HOME").ok()?;
-    let artifact_dir = std::path::Path::new(&home)
-        .join(".gradle/caches/modules-2/files-2.1")
-        .join(group)
-        .join(artifact);
-    let mut best: Option<(Vec<u64>, PathBuf)> = None;
-    for version in std::fs::read_dir(&artifact_dir).ok()?.flatten() {
-        let name = version.file_name();
-        let Some(name) = name.to_str() else { continue };
-        let key = name
-            .split(|c: char| !c.is_ascii_digit())
-            .filter(|part| !part.is_empty())
-            .map(|part| part.parse::<u64>().unwrap_or(0))
-            .collect::<Vec<_>>();
-        let jar_name = format!("{artifact}-{name}.jar");
-        for hash in std::fs::read_dir(version.path()).ok()?.flatten() {
-            let jar = hash.path().join(&jar_name);
-            if jar.is_file() && best.as_ref().is_none_or(|(k, _)| key > *k) {
-                best = Some((key.clone(), jar));
-            }
-        }
-    }
-    best.map(|(_, jar)| jar)
-}
-
 fn runtime_jars() -> Option<(PathBuf, PathBuf, PathBuf)> {
-    // core, json, stdlib from the local gradle cache (mirrors a -classpath user). Ask `modules-2`
-    // by coordinates first: a first-hit walk over the whole of `~/.gradle` stops in whichever
-    // Gradle wrapper distribution readdir lists first (an unrelated, older serialization version)
-    // and is exposed to every concurrent Gradle process rewriting that tree. The walk stays as the
-    // fallback for a cache laid out differently.
-    let core = gradle_module_jar("org.jetbrains.kotlinx", "kotlinx-serialization-core-jvm")
-        .or_else(|| locate("kotlinx-serialization-core-jvm"))?;
-    let json = gradle_module_jar("org.jetbrains.kotlinx", "kotlinx-serialization-json-jvm")
-        .or_else(|| locate("kotlinx-serialization-json-jvm"))?;
-    let std = common::stdlib_jar();
-    Some((core, json, std))
+    let jars = krusty::toolchain::serialization_core_jar()
+        .zip(krusty::toolchain::serialization_json_jar())
+        .map(|(core, json)| (core, json, common::stdlib_jar()));
+    if jars.is_none() && std::env::var_os("KRUSTY_REQUIRE_SERIALIZATION_CONFORMANCE").is_some() {
+        panic!(
+            "required pinned serialization runtime {} could not be provisioned; check network access or KRUSTY_DEPS_CACHE",
+            krusty::toolchain::SERIALIZATION_VERSION
+        );
+    }
+    jars
 }
 
 fn krusty_binary() -> PathBuf {
