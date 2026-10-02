@@ -303,6 +303,10 @@ pub(crate) fn has_hidden_deprecated_member(
     let mut queue = std::collections::VecDeque::from([receiver.non_null()]);
     let mut seen = std::collections::HashSet::new();
     while let Some(current) = queue.pop_front() {
+        if let Some(parts) = super::hierarchy_projection::intersection_components(current) {
+            queue.extend(parts.iter().copied());
+            continue;
+        }
         let Some(internal) = current.kotlin_class_internal() else {
             continue;
         };
@@ -340,6 +344,8 @@ pub(crate) fn members_in_hierarchy(
     // `FunctionN` classifier from the parameter count. For ordinary member lookup its declared
     // classifier is the arity-independent `Function<R>`, whose hierarchy supplies `Any` members.
     // `invoke` remains a member of the `FnSig` itself and is handled by the caller from that signature.
+    let intersection_parts =
+        super::hierarchy_projection::intersection_components(receiver.non_null());
     let receiver = match receiver.non_null() {
         Ty::Fun(signature) => Ty::obj_args("kotlin/Function", &[signature.ret]),
         Ty::Unit => Ty::obj("kotlin/Unit"),
@@ -351,10 +357,17 @@ pub(crate) fn members_in_hierarchy(
     let mut queue = std::collections::VecDeque::from([(receiver, 0)]);
     let mut seen = std::collections::HashSet::new();
     while let Some((current, depth)) = queue.pop_front() {
+        if let Some(parts) = super::hierarchy_projection::intersection_components(current) {
+            queue.extend(parts.iter().copied().map(|part| (part, depth)));
+            continue;
+        }
         let Some(internal) = current.kotlin_class_internal() else {
             continue;
         };
-        if !seen.insert(internal) {
+        // The same classifier reached through distinct applied supertypes is a distinct hierarchy
+        // rung: its substituted parameter and result types can differ. Declaration-aware
+        // normalization below decides whether those members override each other.
+        if !seen.insert(current) {
             continue;
         }
         let Some(classifier) = source.classifier(internal) else {
@@ -388,6 +401,9 @@ pub(crate) fn members_in_hierarchy(
         for property in &mut current_properties.overloads {
             property.receiver_rank += depth;
         }
+        // Preserve exact declaration identity and provenance until the established override
+        // normalizer sees the complete family. Same-signature siblings can differ in defaults,
+        // visibility, annotations, and realization; shape-based dedupe would silently pick one.
         functions.overloads.extend(current_functions.overloads);
         properties.overloads.extend(current_properties.overloads);
         queue.extend(
@@ -397,7 +413,15 @@ pub(crate) fn members_in_hierarchy(
         );
     }
 
-    normalize_inherited_member_functions(source, &mut functions);
+    normalize_inherited_member_functions_with_family(source, &mut functions, intersection_parts);
+    if intersection_parts.is_some() {
+        // Component order is not a hierarchy distance. A member inherited by the earliest
+        // component and a member declared on a later component are one slot; flattening the
+        // walk depth lets that selection see both instead of keeping only the shallower rung.
+        for function in &mut functions.overloads {
+            function.receiver_rank = 0;
+        }
+    }
     Callables::from_parts(functions, properties)
 }
 
@@ -407,6 +431,14 @@ pub(crate) fn members_in_hierarchy(
 pub(crate) fn normalize_inherited_member_functions(
     source: &dyn SymbolSource,
     functions: &mut FunctionSet,
+) {
+    normalize_inherited_member_functions_with_family(source, functions, None);
+}
+
+fn normalize_inherited_member_functions_with_family(
+    source: &dyn SymbolSource,
+    functions: &mut FunctionSet,
+    intersection_parts: Option<&[Ty]>,
 ) {
     // Kotlin operator conventions are inherited by an override even when the overriding declaration
     // does not repeat `operator` (`Comparable<T>.compareTo` is the common case). This is a relation
@@ -436,7 +468,7 @@ pub(crate) fn normalize_inherited_member_functions(
     }
     inherit_overridden_default_arguments(source, functions);
     inherit_overridden_results(source, functions);
-    retain_covariant_inherited_overrides(source, functions);
+    retain_covariant_inherited_overrides(source, functions, intersection_parts);
 }
 
 /// Left-to-right depth-first visit order of `root` and its supertypes. The first visit wins in a
@@ -858,7 +890,11 @@ pub(crate) fn imported_object_member_symbols(
 /// sibling owners at the same receiver rung, Kotlin's covariant-return fake override keeps the
 /// uniquely most-specific result. Incomparable owners/results remain separate so ordinary
 /// overload/ambiguity diagnostics can reject an invalid hierarchy.
-fn retain_covariant_inherited_overrides(source: &dyn SymbolSource, functions: &mut FunctionSet) {
+fn retain_covariant_inherited_overrides(
+    source: &dyn SymbolSource,
+    functions: &mut FunctionSet,
+    intersection_parts: Option<&[Ty]>,
+) {
     let mut retained: Vec<FunctionInfo> = Vec::with_capacity(functions.overloads.len());
     for candidate in functions.overloads.drain(..) {
         let candidate_ret = candidate.ret.apply(candidate.callable.ret);
@@ -889,8 +925,21 @@ fn retain_covariant_inherited_overrides(source: &dyn SymbolSource, functions: &m
             // slot even while an active local classifier has no provider-published owner edge yet.
             // Unrelated direct supertypes remain at the same rank and still require the ordinary
             // owner/result comparison below.
-            let candidate_rank_overrides = candidate.receiver_rank < existing.receiver_rank;
-            let existing_rank_overrides = existing.receiver_rank < candidate.receiver_rank;
+            // Walk depth is an override only inside one classifier hierarchy. Intersection
+            // components are peers: a direct member of a later component is not an override of
+            // a member the earlier component inherits.
+            let rank_is_override = intersection_parts.is_none_or(|parts| {
+                owners_share_intersection_component(
+                    source,
+                    parts,
+                    candidate.callable.owner,
+                    existing.callable.owner,
+                )
+            });
+            let candidate_rank_overrides =
+                rank_is_override && candidate.receiver_rank < existing.receiver_rank;
+            let existing_rank_overrides =
+                rank_is_override && existing.receiver_rank < candidate.receiver_rank;
             let same_result = candidate_is_subtype && existing_is_subtype;
             let candidate_implements_abstract = same_result
                 && candidate.receiver_rank == existing.receiver_rank
@@ -900,10 +949,16 @@ fn retain_covariant_inherited_overrides(source: &dyn SymbolSource, functions: &m
                 && candidate.receiver_rank == existing.receiver_rank
                 && !existing.flags.is_abstract
                 && candidate.flags.is_abstract;
+            // An ordinary class/interface contributes one fake-override slot for unrelated
+            // abstract declarations. An inferred intersection has no declaring classifier that
+            // owns such a slot: keep unrelated declarations exact so defaults and provenance can
+            // participate in selection. Repeated views of the same owner are still one declaration.
             let both_abstract_fake_override = same_result
                 && candidate.flags.is_abstract
                 && existing.flags.is_abstract
-                && existing.receiver_rank == candidate.receiver_rank;
+                && existing.receiver_rank == candidate.receiver_rank
+                && intersection_parts
+                    .is_none_or(|_| candidate.callable.owner == existing.callable.owner);
             if candidate_implements_abstract
                 || (candidate_is_subtype
                     && (candidate_owner_overrides
@@ -933,6 +988,19 @@ fn retain_covariant_inherited_overrides(source: &dyn SymbolSource, functions: &m
         retained.push(candidate);
     }
     functions.overloads = retained;
+}
+
+fn owners_share_intersection_component(
+    source: &dyn SymbolSource,
+    parts: &[Ty],
+    left: TypeName,
+    right: TypeName,
+) -> bool {
+    parts.iter().any(|part| {
+        let hierarchy = super::hierarchy_projection::applied_hierarchy(source, *part);
+        hierarchy.iter().any(|(owner, _, _)| *owner == left)
+            && hierarchy.iter().any(|(owner, _, _)| *owner == right)
+    })
 }
 
 /// Parameter lists occupying one override slot. A Java platform type is flexible, so an override

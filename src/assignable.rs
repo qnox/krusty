@@ -177,6 +177,22 @@ fn assignable_inner(cx: &TyCtx, oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bo
     if sub == Ty::Nothing {
         return true;
     }
+    // A target intersection requires the source to meet every component. Checked before the
+    // source arm so `Int & String & Number` is still a subtype of `Int & String`. `Nothing` is
+    // already a subtype of every intersection via the arm above.
+    if let Ty::Intersection(parts) = sup {
+        return parts
+            .iter()
+            .copied()
+            .all(|part| assignable_inner(cx, oracle, sub, part));
+    }
+    // `A & B` is a subtype of each component, so it meets a target that any component meets.
+    if let Ty::Intersection(parts) = sub {
+        return parts
+            .iter()
+            .copied()
+            .any(|part| assignable_inner(cx, oracle, part, sup));
+    }
     // Projection wrappers are meaningful only as generic arguments. When they reach a recursive
     // comparison, consume their readable bound; `obj_assignable` handles their direction.
     if let Ty::InProjection(inner) | Ty::OutProjection(inner) | Ty::StarProjection(inner) = sup {
@@ -389,6 +405,11 @@ fn capture_projection_parameters(
             *template,
             actual.projection_inner().unwrap_or(actual).non_null(),
         ),
+        Ty::Intersection(parts) => {
+            for &part in parts {
+                capture_projection_parameters(cx, oracle, part, actual);
+            }
+        }
         Ty::Unit | Ty::Pending | Ty::Nothing | Ty::Null | Ty::Error => {}
     }
 }

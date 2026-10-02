@@ -9,10 +9,29 @@ use super::*;
 /// classes emit no `@Metadata` (unchanged). Broader shapes follow as `build_class` grows.
 pub(super) fn build_class_metadata(
     ir: &IrFile,
+    c: &crate::ir::IrClass,
+    opts: &EmitOptions,
+    env: &EmitEnv<'_>,
+) -> Option<KotlinMetadata> {
+    build_class_metadata_with_facts(
+        ir,
+        env.override_results,
+        c,
+        opts,
+        env.local_delegated(),
+        env.signature_symbols,
+        env.run,
+    )
+}
+
+pub(super) fn build_class_metadata_with_facts(
+    ir: &IrFile,
     override_results: &crate::jvm::override_results::OverrideResults,
     c: &crate::ir::IrClass,
     opts: &EmitOptions,
     locals: &crate::jvm::property_references::local_delegated_properties::LocalDelegatedProperties,
+    signature_symbols: &dyn crate::backend::BackendClassifierSource,
+    run: &EmitRun,
 ) -> Option<KotlinMetadata> {
     use crate::metadata::class_builder::{
         build_class, ClassTail, FnMeta, PropMeta, COMPONENT_FN_FLAGS, EQUALS_FN_FLAGS,
@@ -1278,6 +1297,8 @@ pub(super) fn build_class_metadata(
         .iter()
         .map(|retained| retained.annotation.clone())
         .collect();
+    let signature_formatter = JvmSignatureFormatter::with_symbols(ir, signature_symbols, run);
+    let approximate_intersection = |ty| signature_formatter.declaration_approximation(ty);
     let (d1_bytes, d2) = build_class(
         c.fq_name_id(),
         &ctor_params,
@@ -1286,6 +1307,7 @@ pub(super) fn build_class_metadata(
         &methods,
         &enum_entry_meta,
         &ClassTail {
+            intersection_approximation: Some(&approximate_intersection),
             spellings: class_spellings,
             supertype_spellings: &supertype_spellings,
             type_params: &c.type_params,

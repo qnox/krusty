@@ -63,7 +63,7 @@ pub(crate) const PREDEFINED_STRINGS: &[&str] = &[
 ];
 
 #[derive(Default)]
-pub(crate) struct StringTable {
+pub(crate) struct StringTable<'a> {
     strings: Vec<String>,
     records: Vec<Pb>,
     dedup: HashMap<(String, Vec<u8>), u32>,
@@ -78,17 +78,32 @@ pub(crate) struct StringTable {
     /// The local classifiers kotlinc gives no raw-name replacement: enum entry bodies, whose ids
     /// keep their `pkg/Enum.ENTRY` spelling.
     enum_entry_bodies: std::collections::HashSet<TypeName>,
+    /// Explicit declaration approximation for non-denotable intersection types. Metadata has no
+    /// classifier context of its own, so a target that emits intersections must supply the checked
+    /// semantic lookup at the serialization boundary; absence is an error, never invariant fallback.
+    intersection_approximation: Option<&'a dyn Fn(Ty) -> Option<Ty>>,
 }
 
-impl StringTable {
+impl<'a> StringTable<'a> {
     pub(crate) fn with_local_classifiers(
         local_classifiers: &std::collections::HashSet<TypeName>,
         enum_entry_bodies: &std::collections::HashSet<TypeName>,
+        intersection_approximation: Option<&'a dyn Fn(Ty) -> Option<Ty>>,
     ) -> Self {
         StringTable {
             local_classifiers: local_classifiers.clone(),
             enum_entry_bodies: enum_entry_bodies.clone(),
+            intersection_approximation,
             ..StringTable::default()
+        }
+    }
+
+    pub(crate) fn with_intersection_approximation(
+        approximation: Option<&'a dyn Fn(Ty) -> Option<Ty>>,
+    ) -> Self {
+        Self {
+            intersection_approximation: approximation,
+            ..Self::default()
         }
     }
 
@@ -220,6 +235,7 @@ fn is_class_id(classifier: TypeName, class_id: &str) -> bool {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum TypeEncodeError {
     MissingTypeParameter(String),
+    MissingIntersectionApproximation(Ty),
     NonMetadataType(Ty),
     /// A declaration whose type the resolution engine never determined reached `@Metadata`.
     NotDetermined,
@@ -235,6 +251,13 @@ impl fmt::Display for TypeEncodeError {
                 write!(
                     f,
                     "type parameter '{name}' is absent from the declaration table"
+                )
+            }
+            Self::MissingIntersectionApproximation(ty) => {
+                write!(
+                    f,
+                    "intersection type '{}' reached @Metadata without checked declaration approximation",
+                    ty.source_name()
                 )
             }
             Self::NonMetadataType(ty) => {
@@ -409,7 +432,7 @@ pub(crate) fn semantic_named_type_parameters<'a>(
 /// signature, a builtin classifier, a contract conclusion. Declared types reachable from source
 /// must use [`encode_declared_type`] so an alias spelling becomes `Type.abbreviated_type`.
 pub(crate) fn encode_type(
-    strings: &mut StringTable,
+    strings: &mut StringTable<'_>,
     ty: Ty,
     type_parameters: &TypeParameters,
 ) -> Result<Pb, TypeEncodeError> {
@@ -426,7 +449,7 @@ pub(crate) fn encode_type(
 /// Encode a DECLARED type together with how source spelled it, so a `typealias` at any node of the
 /// tree is recorded as `Type.abbreviated_type` (field 13) next to its expanded classifier.
 pub(crate) fn encode_declared_type(
-    strings: &mut StringTable,
+    strings: &mut StringTable<'_>,
     ty: Ty,
     spelled: &Spelled,
     type_parameters: &TypeParameters,
@@ -450,7 +473,7 @@ pub(crate) fn encode_declared_type(
 /// `typealias CargoBox = PBox<Cargo, Cargo>` records `PBox<Cargo, Cargo>` in f4 — argument nodes
 /// included — and `PBox<Payload, Payload>` with per-argument abbreviations in f6.
 pub(crate) fn encode_spelled_type(
-    strings: &mut StringTable,
+    strings: &mut StringTable<'_>,
     ty: Ty,
     spelled: &Spelled,
     type_parameters: &TypeParameters,
@@ -477,7 +500,7 @@ pub(crate) enum Expansion {
 }
 
 pub(crate) fn encode_indexed_type_parameter(
-    strings: &mut StringTable,
+    strings: &mut StringTable<'_>,
     ty: Ty,
     index: u32,
 ) -> Result<Pb, TypeEncodeError> {
@@ -492,7 +515,7 @@ pub(crate) fn encode_indexed_type_parameter(
 }
 
 fn encode_type_with_parameter(
-    strings: &mut StringTable,
+    strings: &mut StringTable<'_>,
     ty: Ty,
     spelled: &Spelled,
     type_parameters: &TypeParameters,
@@ -655,6 +678,25 @@ fn encode_type_with_parameter(
                 message.field_varint(1, 1); // Type.flags: SUSPEND_TYPE
             }
         }
+        Ty::Intersection(parts) => {
+            let semantic = if nullable {
+                Ty::nullable(Ty::Intersection(parts))
+            } else {
+                Ty::Intersection(parts)
+            };
+            let approximated = strings
+                .intersection_approximation
+                .and_then(|approximate| approximate(semantic))
+                .ok_or(TypeEncodeError::MissingIntersectionApproximation(semantic))?;
+            return encode_type_with_parameter(
+                strings,
+                approximated,
+                spelled,
+                type_parameters,
+                forced_parameter,
+                expansion,
+            );
+        }
         Ty::Null
         | Ty::Error
         | Ty::Nullable(_)
@@ -668,7 +710,7 @@ fn encode_type_with_parameter(
 
 fn encode_classifier(
     message: &mut Pb,
-    strings: &mut StringTable,
+    strings: &mut StringTable<'_>,
     classifier: &str,
     nullable: bool,
 ) {
@@ -684,7 +726,7 @@ fn encode_classifier(
 
 fn encode_arguments(
     message: &mut Pb,
-    strings: &mut StringTable,
+    strings: &mut StringTable<'_>,
     arguments: &[Ty],
     spelled: &Spelled,
     type_parameters: &TypeParameters,
@@ -733,7 +775,7 @@ fn encode_arguments(
 /// Its arguments are the AS-SPELLED ones, which is why they come from `alias_args` rather than
 /// from any expanded `Ty`. Returns `None` when nothing was spelled as an alias here.
 pub(crate) fn encode_alias_reference(
-    strings: &mut StringTable,
+    strings: &mut StringTable<'_>,
     spelled: &Spelled,
     nullable: bool,
     type_parameters: &TypeParameters,
@@ -791,7 +833,7 @@ pub(crate) fn encode_alias_reference(
 /// before its arguments, which is what keeps `d2` in kotlinc's order.
 fn encode_abbreviation(
     message: &mut Pb,
-    strings: &mut StringTable,
+    strings: &mut StringTable<'_>,
     spelled: &Spelled,
     nullable: bool,
     type_parameters: &TypeParameters,
@@ -816,13 +858,13 @@ fn encode_abbreviation(
 
 /// A metadata `Annotation` message — `id` (f1), the annotation class's string-table entry. Used for
 /// `ValueParameter.annotation` (f7), which records a parameter's `@Anno` uses.
-pub(crate) fn encode_annotation(strings: &mut StringTable, classifier: TypeName) -> Pb {
+pub(crate) fn encode_annotation(strings: &mut StringTable<'_>, classifier: TypeName) -> Pb {
     let mut annotation = Pb::new();
     annotation.field_varint(1, strings.class_id(classifier) as u64);
     annotation
 }
 
-pub(crate) fn add_extension_function_annotation(message: &mut Pb, strings: &mut StringTable) {
+pub(crate) fn add_extension_function_annotation(message: &mut Pb, strings: &mut StringTable<'_>) {
     let annotation_id = strings.class_id(crate::types::type_name("kotlin/ExtensionFunctionType"));
     let mut annotation = Pb::new();
     annotation.field_varint(1, annotation_id as u64);
@@ -833,7 +875,7 @@ pub(crate) fn add_extension_function_annotation(message: &mut Pb, strings: &mut 
 /// leading context parameters; they stay ordinary type arguments of `FunctionN`.
 pub(crate) fn add_context_function_annotation(
     message: &mut Pb,
-    strings: &mut StringTable,
+    strings: &mut StringTable<'_>,
     count: usize,
 ) {
     let annotation_id =
@@ -858,7 +900,7 @@ fn zigzag_i64(value: i64) -> u64 {
 }
 
 pub(crate) fn encode_metadata_type_parameter(
-    strings: &mut StringTable,
+    strings: &mut StringTable<'_>,
     index: usize,
     parameter: &MetadataTypeParameter,
     type_parameters: &TypeParameters,
@@ -888,7 +930,7 @@ pub(crate) fn encode_metadata_type_parameter(
 }
 
 pub(crate) fn encode_type_parameter(
-    strings: &mut StringTable,
+    strings: &mut StringTable<'_>,
     index: usize,
     name: &str,
     reified: bool,
@@ -970,6 +1012,22 @@ mod tests {
             panic!("an undeclared type parameter was encoded")
         };
         assert_eq!(error, TypeEncodeError::MissingTypeParameter("T".into()));
+    }
+
+    #[test]
+    fn an_intersection_requires_an_explicit_declaration_approximation() {
+        let intersection = Ty::intersection(&[
+            Ty::obj_args("sample/Box", &[Ty::Int]),
+            Ty::obj_args("sample/Box", &[Ty::String]),
+        ]);
+        let mut strings = StringTable::default();
+        let Err(error) = encode_type(&mut strings, intersection, &TypeParameters::new()) else {
+            panic!("an intersection without a declaration approximation was encoded")
+        };
+        assert_eq!(
+            error,
+            TypeEncodeError::MissingIntersectionApproximation(intersection)
+        );
     }
 
     #[test]

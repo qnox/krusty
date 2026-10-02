@@ -218,14 +218,18 @@ pub(super) fn emit_suspend_lambda_class(
     emit_invoke(&mut cw, &formatter, &shape, &result);
     emit_bridge(&mut cw, &shape);
     // A lambda class is local to the scope it was written in.
-    let (d1, d2) = lambda_metadata(ir, lambda);
+    let (d1, d2) = lambda_metadata(ir, lambda, &formatter);
     cw.set_kotlin_metadata(3, &[2, 4, 0], synthetic_class_xi(SYNTHETIC_LOCAL), &d1, &d2);
     env.run.finish_class(cw)
 }
 
 /// The lambda's function, which kotlinc records in the class's `@Metadata` for reflection: its
 /// receiver, value parameters and result, without its context parameters.
-fn lambda_metadata(ir: &IrFile, lambda: &SuspendLambdaClass) -> (Vec<String>, Vec<String>) {
+fn lambda_metadata(
+    ir: &IrFile,
+    lambda: &SuspendLambdaClass,
+    formatter: &JvmSignatureFormatter<'_>,
+) -> (Vec<String>, Vec<String>) {
     let Ty::Fun(signature) = lambda.function_type.non_null() else {
         unreachable!("a suspend lambda has a function type")
     };
@@ -247,6 +251,7 @@ fn lambda_metadata(ir: &IrFile, lambda: &SuspendLambdaClass) -> (Vec<String>, Ve
         .collect();
     let local_classifiers = crate::jvm::local_classifiers::names(ir);
     let enum_entry_bodies = crate::jvm::local_classifiers::enum_entry_bodies(ir);
+    let approximate_intersection = |ty| formatter.declaration_approximation(ty);
     let (bytes, strings) = crate::metadata::lambda_function::build(
         &crate::metadata::lambda_function::LambdaFunction {
             receiver,
@@ -255,6 +260,7 @@ fn lambda_metadata(ir: &IrFile, lambda: &SuspendLambdaClass) -> (Vec<String>, Ve
             type_parameters: &lambda.type_parameters,
             local_classifiers: &local_classifiers,
             enum_entry_bodies: &enum_entry_bodies,
+            intersection_approximation: &approximate_intersection,
         },
     );
     (crate::metadata::encoding::bytes_to_strings(&bytes), strings)

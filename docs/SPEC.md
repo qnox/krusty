@@ -2780,6 +2780,40 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   The same rule instantiates the reified element of `filterIsInstanceTo` from the
   destination collection. Tests: `tests/generic_bound_projection_e2e.rs` and
   `tests/backend_rejection_coverage_e2e.rs`.
+- **Incompatible upper bounds infer an intersection, not `Nothing`.** A type variable
+  constrained only from contravariant inputs (`In<Int>()` and `In<String>()` against
+  `fun <E> intersect(vararg x: In<E>): E`) is fixed to `Int & String`. That intersection
+  is a subtype of each bound and of their supertypes, and it is not `Nothing`, so the
+  call yields a value: `null as E` inside the generic body erases, and the caller keeps
+  the reference (`a == null` is true at run time). One upper bound that is a subtype of
+  the others is that bound (`select(Context<Any>())` is `Any`, not `Nothing`). An
+  expected `Nothing` result still instantiates the variable as `Nothing`, and a star in
+  an `in` position remains `Nothing`. Canonical order is structural, so permutations,
+  duplicates, the same classifier with distinct arguments, and distinct function shapes
+  are one identity. `Left? & Right?` admits null; `Left? & Right` does not. A nullable
+  bottom beside a non-null component is `Nothing`; beside only nullable components it is
+  `Nothing?`. Member lookup unions every component, so a value of `Left & Right` can
+  call members and properties and form callable references from either interface.
+  When several components declare one member slot, the call uses the
+  canonical-earliest component's declaration, including its default arguments.
+  A member that component inherits still occupies the slot ahead of a later
+  component's direct declaration. A property uses that same order for a read
+  and for a callable reference: the earliest component's nearest declaration
+  wins, including a property it only inherits. A `var` overrides a `val` from
+  any component, so the earliest mutable declaration owns the getter, the
+  setter, and a mutable property reference.
+  That union does not discard a supertype member an override still needs: an override
+  that omits `operator` inherits it from `Comparable.compareTo` or `Iterable.iterator`.
+  A public declaration approximates the intersection: unrelated classifiers become
+  `Any` (`Any?` when the intersection admits null); a shared classifier keeps that
+  classifier and approximates its arguments from their variance. The JVM carrier is
+  that shared erased class, otherwise `java/lang/Object`. This is separate from a
+  type-parameter bound whose class bound already has a value-class carrier. An
+  expression-body function whose inferred return is `Nothing` (`Nothing?` beside a
+  non-null bound) must state that return explicitly, unless it overrides a declaration:
+  `override fun enabled() = throw ...` keeps the inherited result and may still infer
+  `Nothing` for its own body. Tests:
+  `tests/empty_intersection_inference_e2e.rs`.
 - **A tail-call-forwarded suspend fn boxes its EARLY returns.** The tail-forward shape (no state machine,
   `$completion` threaded to the callee, callee's `Object` result `areturn`ed verbatim) also admits bodies
   with early exits (`if (n == 0) return true; return odd(n - 1)`); the CPS method returns `Object`, so the

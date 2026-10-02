@@ -381,6 +381,11 @@ fn type_parameters_mentioned(ty: Ty, names: &mut std::collections::HashSet<&'sta
             }
             type_parameters_mentioned(signature.ret, names);
         }
+        Ty::Intersection(parts) => {
+            for &part in parts {
+                type_parameters_mentioned(part, names);
+            }
+        }
         _ => {}
     }
 }
@@ -461,6 +466,19 @@ mod tests {
 
     fn analyze_standalone_source_inputs(inputs: &[SourceInput<'_>]) -> SourceSetAnalysis {
         crate::jvm_analysis::analyze_standalone_source_inputs(inputs)
+    }
+
+    #[test]
+    fn an_intersection_mentions_a_type_parameter_in_either_component() {
+        let mut names = std::collections::HashSet::new();
+        type_parameters_mentioned(
+            Ty::intersection(&[
+                Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any"))),
+                Ty::obj("demo/Left"),
+            ]),
+            &mut names,
+        );
+        assert!(names.contains("T"));
     }
 
     #[test]

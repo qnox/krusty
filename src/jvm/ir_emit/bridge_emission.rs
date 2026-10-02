@@ -8,10 +8,9 @@
 use super::{
     box_prim_free, discard, emit_num_conv, emit_return, emit_value_class_box_adapter,
     emit_value_class_unbox_adapter, finish_code, finish_code_sig, ir_ty_to_jvm, jvm_declared_ty,
-    jvm_function_params, jvm_method_signature, jvm_tys, load, local_variable_desc,
-    method_descriptor, slot_words, throw_assertion_error, type_descriptor, unbox_prim_from,
-    verif_for_jvm_free, ClassWriter, CodeBuilder, EmitEnv, EmitRun, JvmSignatureFormatter,
-    VerifType,
+    jvm_function_params, jvm_tys, load, local_variable_desc, method_descriptor, slot_words,
+    throw_assertion_error, type_descriptor, unbox_prim_from, verif_for_jvm_free, ClassWriter,
+    CodeBuilder, EmitEnv, EmitRun, JvmSignatureFormatter, VerifType,
 };
 use crate::ir::IrFile;
 use crate::types::Ty;
@@ -644,7 +643,14 @@ impl EntryHeader {
                 "a lowered value-class member signs its carrier"
             );
             generic.params.remove(0);
-            jvm_method_signature(formatter, &generic, function)
+            // The carrier occupied signed slot 0, so a later vararg keeps declaration-site
+            // variance at its shifted index.
+            let vararg_index = ir
+                .fn_varargs
+                .get(&member)
+                .and_then(|vararg| vararg.index.checked_sub(1));
+            formatter
+                .method_signature(&generic, function, vararg_index)
                 .filter(|signature| signature != descriptor)
         });
         let nullability = super::declared_nullability::declared_nullability(ir, member);

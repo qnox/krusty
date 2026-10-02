@@ -389,6 +389,12 @@ fn ensure_determined_type(ty: crate::types::Ty) -> Result<(), UndeterminedDiagno
         | Ty::OutProjection(inner)
         | Ty::StarProjection(inner)
         | Ty::TyParam(_, inner) => ensure_determined_type(*inner),
+        Ty::Intersection(parts) => {
+            for &part in parts {
+                ensure_determined_type(part)?;
+            }
+            Ok(())
+        }
         _ => Ok(()),
     }
 }
@@ -437,6 +443,11 @@ fn qualified_type_name(ty: crate::types::Ty) -> Result<String, UndeterminedDiagn
         Ty::DefinitelyNotNull(inner) => {
             format!("{} & Any", qualified_type_name(*inner)?)
         }
+        Ty::Intersection(parts) => parts
+            .iter()
+            .map(|part| qualified_type_name(*part))
+            .collect::<Result<Vec<_>, _>>()?
+            .join(" & "),
         Ty::TyParam(name, _) => crate::types::type_parameter_source_name(name).to_string(),
         Ty::Fun(signature) => {
             let parameters = signature

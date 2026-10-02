@@ -1,0 +1,25 @@
+# kotlinc output recorded per Kotlin version by tests/common/recorded.rs. A version with
+# no value is recorded from its kotlinc on the next local run; KRUSTY_RECORD=1 re-records.
+
+[a_mixed_nullable_intersection_is_not_nullable]
+2.4.20:
+
+[a_nullable_bottom_beside_a_non_null_bound_is_nothing]
+2.4.20:
+  NullBottomIntersection.kt:4:5: return type 'Nothing' needs to be specified explicitly.
+
+[a_nullable_bottom_beside_a_nullable_bound_is_not_nothing]
+2.4.20:
+  NullableBottomIntersection.kt:7:6: argument type mismatch: actual type is 'Nothing?', but 'Any' was expected.
+
+[an_intersection_is_not_nothing_without_an_expected_nothing]
+2.4.20:
+  EmptyIntersectionNothing.kt:6:6: argument type mismatch: actual type is 'Int & String', but 'Nothing' was expected.
+
+[an_intersection_of_vals_cannot_be_reassigned]
+2.4.20:
+  IntersectionValReassignment.kt:8:7: 'val' cannot be reassigned.
+
+[nullable_bounds_admit_null_and_a_mixed_bound_does_not]
+2.4.20:
+  NullableIntersection.kt:8:6: argument type mismatch: actual type is 'Left? & Right?', but 'Any' was expected.

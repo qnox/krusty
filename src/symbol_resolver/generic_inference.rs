@@ -22,7 +22,8 @@ use call_constraints::GenericBoundViolation;
 pub(crate) use call_constraints::{
     collect_assignability_constraints_from_symbols, infer_generic_call_constraints_from_symbols,
     infer_generic_call_constraints_with_argument_ordinals,
-    infer_generic_call_constraints_with_receiver_from_symbols, AssignabilityConstraints,
+    infer_generic_call_constraints_with_receiver_from_symbols, publish_denotable_upper_bindings,
+    seed_denotable_upper_placeholders, AssignabilityConstraints,
 };
 pub(crate) use call_site_variables::CallSiteVariables;
 pub(crate) use conditional_result::generic_return_expectation_from_sibling;
@@ -1331,9 +1332,9 @@ pub(crate) fn infer_generic_call_bindings_with_receiver_from_symbols(
         actuals,
         vararg_index,
     );
-    let tightest_upper = inferred.tightest_upper_bindings(source);
-    for formal in inferred.upper_only {
-        let binding = tightest_upper.get(&formal).copied().unwrap_or(Ty::Nothing);
+    let formals = inferred.upper_only.iter().cloned().collect::<Vec<_>>();
+    for formal in formals {
+        let binding = inferred.denotable_upper_binding(source, &formal);
         inferred.bindings.entry(formal).or_insert(binding);
     }
     inferred.bindings

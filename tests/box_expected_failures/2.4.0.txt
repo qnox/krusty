@@ -47,7 +47,6 @@ funInterface/suspendFunInterfaceConversionCodegen.kt
 functions/functionNtoString.kt
 functions/functionNtoStringGeneric.kt
 inference/capturedSelfInsideIntersection.kt
-inference/kt67609.kt
 inference/overrideDefaultProperty.kt
 inference/overrideGenericDefaultMethod.kt
 inference/pcla/pclaRootIsTrySyntheticCallWithDelegate.kt

@@ -35,7 +35,7 @@ pub struct LocalPropertyTypeParameter {
 
 /// The `Property` record: name (f2), return type (f3), and a local, delegated flag word (f11).
 pub(crate) fn local_property_pb(
-    st: &mut StringTable,
+    st: &mut StringTable<'_>,
     property: &LocalPropertyMeta,
     type_parameters: &TypeParameters,
 ) -> Pb {

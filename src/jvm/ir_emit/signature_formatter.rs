@@ -78,6 +78,32 @@ pub(super) struct JvmSignatureFormatter<'a> {
 }
 
 impl<'a> JvmSignatureFormatter<'a> {
+    pub(super) fn method_signature(
+        &self,
+        generic: &crate::ir::IrGenericSig,
+        function: &crate::ir::IrFunction,
+        vararg_index: Option<usize>,
+    ) -> Option<String> {
+        let mut signature = super::jvm_type_params(self, generic)?;
+        signature.push('(');
+        for (index, parameter) in generic.params.iter().enumerate() {
+            // A vararg element is a value parameter. `Array<In<E>>` suppresses the element's
+            // declaration-site wildcard; `vararg x: In<E>` keeps `In<? super E>`.
+            let rendered = if vararg_index == Some(index) {
+                self.vararg_element_ty(parameter, Wildcards::Declared)?
+            } else {
+                self.method_ty(parameter, Wildcards::Declared)?
+            };
+            signature.push_str(&rendered);
+        }
+        signature.push(')');
+        signature.push_str(&self.method_ty(
+            generic.ret.as_ref().unwrap_or(&function.ret),
+            Wildcards::Suppressed,
+        )?);
+        Some(signature)
+    }
+
     pub(super) fn new(ir: &'a IrFile, env: &'a EmitEnv<'_>) -> Self {
         Self {
             ir,
@@ -231,6 +257,12 @@ impl<'a> JvmSignatureFormatter<'a> {
         Some(variance)
     }
 
+    pub(super) fn declaration_approximation(&self, ty: Ty) -> Option<Ty> {
+        crate::types::declaration_approximation(ty, &mut |owner, index| {
+            self.declaration_variance(owner, index)
+        })
+    }
+
     fn classifier_is_closed(&self, owner: TypeName) -> Option<bool> {
         if let Some(classifier) = self.current_class(owner) {
             return Some(
@@ -379,6 +411,30 @@ impl<'a> JvmSignatureFormatter<'a> {
         Some(rendered)
     }
 
+    /// A vararg parameter's generic `Signature` element.
+    ///
+    /// The parameter's JVM type is an array, but the element is a value parameter: declaration-site
+    /// variance stays (`vararg x: In<E>` is `[LIn<-TE;>;`). A non-vararg `Array<In<E>>` parameter
+    /// suppresses that wildcard and must keep going through [`Self::method_ty`].
+    pub(super) fn vararg_element_ty(&self, ty: &Ty, wildcards: Wildcards) -> Option<String> {
+        let semantic = match ty {
+            Ty::Nullable(inner) | Ty::PlatformNullable(inner) => inner,
+            ty => ty,
+        };
+        let Ty::Obj(owner, arguments) = semantic else {
+            return self.method_ty(ty, wildcards);
+        };
+        if !owner.matches("kotlin/Array") || arguments.len() != 1 {
+            return self.method_ty(ty, wildcards);
+        }
+        let element = match arguments[0] {
+            Ty::InProjection(_) => Ty::obj("kotlin/Any"),
+            Ty::OutProjection(inner) | Ty::StarProjection(inner) => *inner,
+            argument => argument,
+        };
+        Some(format!("[{}", self.ty_at(&element, wildcards)?))
+    }
+
     /// One parameter or return position in a method `Signature`. Positions without generic structure
     /// use their exact JVM descriptor spelling; structured positions are rendered from the semantic
     /// type. This is a structural choice, not a recovery path after semantic formatting failed.
@@ -389,6 +445,10 @@ impl<'a> JvmSignatureFormatter<'a> {
         };
         match semantic {
             Ty::TyParam(..) | Ty::Fun(_) => self.ty_at(ty, wildcards),
+            Ty::Intersection(_) => {
+                let approximated = self.declaration_approximation(*semantic)?;
+                self.method_ty(&approximated, wildcards)
+            }
             Ty::Obj(_, arguments) if !arguments.is_empty() => self.ty_at(ty, wildcards),
             Ty::InProjection(_)
             | Ty::OutProjection(_)
@@ -443,6 +503,10 @@ impl<'a> JvmSignatureFormatter<'a> {
             Ty::InProjection(inner) => Some(format!("-{}", self.ty_at(inner, wildcards)?)),
             Ty::OutProjection(inner) => Some(format!("+{}", self.ty_at(inner, wildcards)?)),
             Ty::Fun(signature) => self.function_ty(signature, wildcards),
+            Ty::Intersection(_) => {
+                let approximated = self.declaration_approximation(*ty)?;
+                self.ty_at(&approximated, wildcards)
+            }
             // `kotlin.Array<E>` has no JVM class: its realization is the ARRAY type `[E`, and that is
             // how a signature must spell it. Writing `Lkotlin/Array<…>;` names a class no loader can
             // resolve, so any reader of the attribute (reflection, a Java consumer, a decompiler)
