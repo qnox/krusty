@@ -119,12 +119,17 @@ struct CommonPackageFunctionRole {
 enum CommonPackageFunctionIdentity {
     DoubleRangeTo,
     FloatRangeTo,
+    DoubleRangeUntil,
+    FloatRangeUntil,
 }
 
 impl CommonPackageFunctionIdentity {
     fn compiler_intrinsic(self) -> CompilerIntrinsic {
         match self {
-            Self::DoubleRangeTo | Self::FloatRangeTo => CompilerIntrinsic::FloatingRangeMembership,
+            Self::DoubleRangeTo
+            | Self::FloatRangeTo
+            | Self::DoubleRangeUntil
+            | Self::FloatRangeUntil => CompilerIntrinsic::FloatingRangeMembership,
         }
     }
 }
@@ -290,33 +295,69 @@ impl CommonExpectationIndex {
     }
 }
 
-/// Language role carried by exact public identities from the trusted common stdlib KLIB. The two
-/// member ids are Kotlin's stable public identities for the inclusive `Double.rangeTo` and
-/// `Float.rangeTo` declarations. A same-named or same-shaped declaration has a different complete
+/// Language role carried by exact public identities from the trusted common stdlib KLIB. These
+/// member ids are Kotlin's stable public identities for the floating-point `rangeTo` and
+/// `rangeUntil` declarations. A same-named or same-shaped declaration has a different complete
 /// identity and therefore never enters this inventory.
 fn common_package_function_role(
     identity: KlibPublicIdSignature,
 ) -> Option<CommonPackageFunctionRole> {
     const DOUBLE_RANGE_TO: u64 = 692_997_638_542_153_957;
     const FLOAT_RANGE_TO: u64 = 14_812_996_858_166_169_491;
-    let (identity, scalar) =
+    const DOUBLE_RANGE_UNTIL: u64 = 742_649_461_109_916_381;
+    const FLOAT_RANGE_UNTIL: u64 = 1_543_348_898_644_284_516;
+    let (identity, scalar, name, range) =
         if identity.matches_exact(&["kotlin", "ranges"], &["rangeTo"], DOUBLE_RANGE_TO, 0) {
-            (CommonPackageFunctionIdentity::DoubleRangeTo, Ty::Double)
+            (
+                CommonPackageFunctionIdentity::DoubleRangeTo,
+                Ty::Double,
+                "rangeTo",
+                "kotlin/ranges/ClosedFloatingPointRange",
+            )
         } else if identity.matches_exact(&["kotlin", "ranges"], &["rangeTo"], FLOAT_RANGE_TO, 0) {
-            (CommonPackageFunctionIdentity::FloatRangeTo, Ty::Float)
+            (
+                CommonPackageFunctionIdentity::FloatRangeTo,
+                Ty::Float,
+                "rangeTo",
+                "kotlin/ranges/ClosedFloatingPointRange",
+            )
+        } else if identity.matches_exact(
+            &["kotlin", "ranges"],
+            &["rangeUntil"],
+            DOUBLE_RANGE_UNTIL,
+            0,
+        ) {
+            (
+                CommonPackageFunctionIdentity::DoubleRangeUntil,
+                Ty::Double,
+                "rangeUntil",
+                "kotlin/ranges/OpenEndRange",
+            )
+        } else if identity.matches_exact(
+            &["kotlin", "ranges"],
+            &["rangeUntil"],
+            FLOAT_RANGE_UNTIL,
+            0,
+        ) {
+            (
+                CommonPackageFunctionIdentity::FloatRangeUntil,
+                Ty::Float,
+                "rangeUntil",
+                "kotlin/ranges/OpenEndRange",
+            )
         } else {
             return None;
         };
     Some(CommonPackageFunctionRole {
         identity,
         package: crate::types::wk::kotlin_ranges_package(),
-        name: "rangeTo",
+        name,
         generic_sig: GenericSig {
             formals: Vec::new(),
             formal_bounds: Vec::new(),
             receiver: Some(scalar),
             params: vec![scalar],
-            ret: Ty::obj_args("kotlin/ranges/ClosedFloatingPointRange", &[scalar]),
+            ret: Ty::obj_args(range, &[scalar]),
             return_policy: Default::default(),
         },
     })
@@ -473,7 +514,8 @@ mod tests {
         bytes
     }
 
-    fn floating_range_to_identity(
+    fn floating_range_identity(
+        name: &str,
         member_id: u64,
     ) -> crate::metadata::id_signature::KlibPublicIdSignature {
         let mut package = Vec::new();
@@ -484,12 +526,9 @@ mod tests {
         push_varint((6 << 3) | 1, &mut common);
         common.extend(member_id.to_le_bytes());
         let encoded = bytes_field(1, &common);
-        decode_public_id_signature(
-            &encoded,
-            &["kotlin", "ranges", "rangeTo"].map(str::to_string),
-        )
-        .expect("valid public identity")
-        .expect("public identity")
+        decode_public_id_signature(&encoded, &["kotlin", "ranges", name].map(str::to_string))
+            .expect("valid public identity")
+            .expect("public identity")
     }
 
     fn floating_range_candidate(role: &super::CommonPackageFunctionRole) -> FunctionInfo {
@@ -498,7 +537,7 @@ mod tests {
             role.generic_sig.receiver,
             LibraryCallable::library(
                 type_name("kotlin/ranges/RangesKt"),
-                "rangeTo",
+                role.name,
                 vec![Ty::Double, Ty::Double],
                 role.generic_sig.ret,
                 role.generic_sig.ret,
@@ -513,11 +552,23 @@ mod tests {
     #[test]
     fn floating_range_role_requires_the_exact_common_declaration_identity() {
         const DOUBLE_RANGE_TO: u64 = 692_997_638_542_153_957;
-        let exact = common_package_function_role(floating_range_to_identity(DOUBLE_RANGE_TO))
-            .expect("the exact common identity owns the role");
-        assert!(
-            common_package_function_role(floating_range_to_identity(DOUBLE_RANGE_TO + 1)).is_none()
+        const DOUBLE_RANGE_UNTIL: u64 = 742_649_461_109_916_381;
+        let exact =
+            common_package_function_role(floating_range_identity("rangeTo", DOUBLE_RANGE_TO))
+                .expect("the exact common identity owns the role");
+        let open =
+            common_package_function_role(floating_range_identity("rangeUntil", DOUBLE_RANGE_UNTIL))
+                .expect("the exact open-end identity owns the role");
+        assert_eq!(open.name, "rangeUntil");
+        assert_eq!(
+            open.generic_sig.ret,
+            Ty::obj_args("kotlin/ranges/OpenEndRange", &[Ty::Double])
         );
+        assert!(common_package_function_role(floating_range_identity(
+            "rangeUntil",
+            DOUBLE_RANGE_UNTIL + 1,
+        ))
+        .is_none());
 
         let candidate = floating_range_candidate(&exact);
         let missing_identity = CommonExpectationIndex::default();
@@ -536,8 +587,9 @@ mod tests {
     #[test]
     fn floating_range_role_requires_the_paired_jvm_dependency() {
         const DOUBLE_RANGE_TO: u64 = 692_997_638_542_153_957;
-        let exact = common_package_function_role(floating_range_to_identity(DOUBLE_RANGE_TO))
-            .expect("the exact common identity owns the role");
+        let exact =
+            common_package_function_role(floating_range_identity("rangeTo", DOUBLE_RANGE_TO))
+                .expect("the exact common identity owns the role");
         let candidate = floating_range_candidate(&exact);
         let index = CommonExpectationIndex {
             package_function_roles: vec![exact],
@@ -575,53 +627,58 @@ mod tests {
     }
 
     #[test]
-    fn paired_stdlib_provider_publishes_only_the_inclusive_floating_range_identities() {
+    fn paired_stdlib_provider_publishes_only_the_exact_floating_range_identities() {
         let Some(stdlib) = crate::toolchain::stdlib_jar() else {
             return;
         };
         let libraries = JvmLibraries::new(std::rc::Rc::new(Classpath::new(vec![stdlib])))
             .expect("stdlib provider");
-        let symbols = libraries.symbols(
-            SymbolNamespace::Package(crate::types::wk::kotlin_ranges_package()),
-            "rangeTo",
-        );
-        let functions = match &symbols.callables {
-            crate::libraries::Callables::Functions(functions)
-            | crate::libraries::Callables::Both { functions, .. } => functions,
-            _ => panic!("rangeTo is missing from the paired stdlib provider"),
-        };
+        for (name, range) in [
+            ("rangeTo", "kotlin/ranges/ClosedFloatingPointRange"),
+            ("rangeUntil", "kotlin/ranges/OpenEndRange"),
+        ] {
+            let symbols = libraries.symbols(
+                SymbolNamespace::Package(crate::types::wk::kotlin_ranges_package()),
+                name,
+            );
+            let functions = match &symbols.callables {
+                crate::libraries::Callables::Functions(functions)
+                | crate::libraries::Callables::Both { functions, .. } => functions,
+                _ => panic!("{name} is missing from the paired stdlib provider"),
+            };
 
-        for scalar in [Ty::Double, Ty::Float] {
-            let expected_range = Ty::obj_args("kotlin/ranges/ClosedFloatingPointRange", &[scalar]);
-            let matches = functions
-                .overloads
-                .iter()
-                .filter(|function| {
-                    function.generic_sig.as_ref().is_some_and(|signature| {
-                        signature.receiver == Some(scalar)
-                            && signature.params == [scalar]
-                            && signature.ret == expected_range
+            for scalar in [Ty::Double, Ty::Float] {
+                let expected_range = Ty::obj_args(range, &[scalar]);
+                let matches = functions
+                    .overloads
+                    .iter()
+                    .filter(|function| {
+                        function.generic_sig.as_ref().is_some_and(|signature| {
+                            signature.receiver == Some(scalar)
+                                && signature.params == [scalar]
+                                && signature.ret == expected_range
+                        })
                     })
-                })
-                .collect::<Vec<_>>();
-            assert_eq!(matches.len(), 1, "one exact {scalar:?}.rangeTo identity");
+                    .collect::<Vec<_>>();
+                assert_eq!(matches.len(), 1, "one exact {scalar:?}.{name} identity");
+                assert_eq!(
+                    matches[0].callable.compiler_intrinsic,
+                    Some(CompilerIntrinsic::FloatingRangeMembership),
+                );
+            }
             assert_eq!(
-                matches[0].callable.compiler_intrinsic,
-                Some(CompilerIntrinsic::FloatingRangeMembership),
+                functions
+                    .overloads
+                    .iter()
+                    .filter(|function| {
+                        function.callable.compiler_intrinsic
+                            == Some(CompilerIntrinsic::FloatingRangeMembership)
+                    })
+                    .count(),
+                2,
+                "generic Comparable.{name} and unrelated overloads remain ordinary declarations",
             );
         }
-        assert_eq!(
-            functions
-                .overloads
-                .iter()
-                .filter(|function| {
-                    function.callable.compiler_intrinsic
-                        == Some(CompilerIntrinsic::FloatingRangeMembership)
-                })
-                .count(),
-            2,
-            "generic Comparable.rangeTo and unrelated overloads remain ordinary declarations",
-        );
     }
 
     fn write_empty_zip(path: &Path) {

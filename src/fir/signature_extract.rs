@@ -7,7 +7,7 @@ mod evaluated_casts;
 mod integer_literals;
 mod safe_index;
 
-use crate::ast::{BinOp, Expr, ExprId, File, RangeKind, Stmt, TrFlags, TypeRef, UnOp};
+use crate::ast::{BinOp, Expr, ExprId, File, Stmt, TrFlags, TypeRef, UnOp};
 use crate::types::Ty;
 use std::collections::{HashMap, HashSet};
 
@@ -1697,12 +1697,7 @@ impl SignatureConstraintExtractor {
             Expr::RangeTo { lo, hi, kind } => {
                 let receiver = self.expression(file, *lo, scope, origin)?;
                 let argument = self.expression(file, *hi, scope, origin)?;
-                let spelling = match kind {
-                    RangeKind::Through => "rangeTo",
-                    RangeKind::OpenEnd => "rangeUntil",
-                    RangeKind::Until => "until",
-                    RangeKind::DownTo => "downTo",
-                };
+                let spelling = kind.operator_name();
                 self.member_call(receiver, spelling, [argument], scope, node_origin)
             }
             Expr::IncDec { target, dec, .. } => {

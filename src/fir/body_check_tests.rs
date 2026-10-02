@@ -1418,6 +1418,283 @@ fn custom_in_range_keeps_both_selected_convention_calls() {
 }
 
 #[test]
+fn mixed_open_end_membership_selects_range_until() {
+    let analysis = checked_analysis(
+        "class Start\n\
+         class End\n\
+         class Needle\n\
+         class Span\n\
+         operator fun Start.rangeUntil(other: End): Span = Span()\n\
+         operator fun Span.contains(value: Needle): Boolean = false\n\
+         fun test(value: Needle, start: Start, end: End) = value in start..<end\n",
+    );
+    let file = &analysis.files[0];
+    let info = analysis.types[0].as_ref().expect("checked file");
+    let in_range = file
+        .expr_arena
+        .iter()
+        .enumerate()
+        .find_map(|(index, expr)| match expr {
+            Expr::InRange { .. } => Some(crate::ast::ExprId(index as u32)),
+            _ => None,
+        })
+        .expect("open-end membership");
+    assert!(
+        info.resolved_operator_call(in_range, "rangeUntil")
+            .is_some(),
+        "mixed open-end membership must select rangeUntil"
+    );
+    assert!(
+        info.resolved_operator_call(in_range, "rangeTo").is_none(),
+        "mixed open-end membership must not select the inclusive rangeTo"
+    );
+    assert!(info.resolved_operator_call(in_range, "contains").is_some());
+
+    let function = file
+        .decls
+        .iter()
+        .find_map(|declaration| match file.decl(*declaration) {
+            Decl::Fun(function) if function.name == "test" => Some(function),
+            Decl::Class(_) | Decl::Fun(_) | Decl::Property(_) => None,
+        })
+        .expect("test declaration");
+    let crate::ast::FunBody::Expr(root) = function.body else {
+        panic!("test must have an expression body")
+    };
+    let parameter = |index: usize| CheckedBodyParameter {
+        name: &function.params[index].name,
+        ty: ResolvedTy::new(info.resolved_type(&function.params[index].ty).unwrap()).unwrap(),
+        span: function.params[index].ty.span,
+        context_kind: crate::types::ContextParameterKind::None,
+        inline_modifier: crate::types::InlineParameterModifier::None,
+    };
+    let parameters = [parameter(0), parameter(1), parameter(2)];
+    let mut origins = OriginStore::default();
+    let body = check_expression_body_with_parameters(
+        file,
+        info,
+        SourceFileId::from_raw(0),
+        BodyOwnerId::from_raw(73),
+        root,
+        &parameters,
+        analysis.streamed.as_ref().expect("Pass 1").module.index(),
+        &mut origins,
+    )
+    .expect("mixed open-end membership must build checked FIR");
+    let FirStatementKind::Expression(root) = body.statement(body.roots()[0]).unwrap().kind else {
+        panic!("root must contain membership FIR")
+    };
+    assert!(
+        matches!(
+            body.expr(root).map(|expression| &expression.kind),
+            Some(FirExprKind::ContainmentCall { .. })
+        ),
+        "mixed open-end membership is a contains call, not a primitive comparison"
+    );
+}
+
+#[test]
+fn uniform_open_end_double_membership_stays_a_comparison() {
+    let Some(stdlib) = crate::toolchain::stdlib_jar() else {
+        return;
+    };
+    let libraries = crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+        crate::jvm::classpath::Classpath::new(vec![stdlib]),
+    ))
+    .expect("stdlib provider");
+    let mut diagnostics = DiagSink::new();
+    let analysis = crate::frontend::analyze_source_set_with_features(
+        &[
+            SourceInput::kotlin("fun test(value: Double): Boolean = value in 1.0..<3.0\n")
+                .with_file_stem("Body"),
+        ],
+        Box::new(libraries),
+        &LangFeatures::new(),
+        &mut diagnostics,
+    );
+    assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+    let file = &analysis.files[0];
+    let info = analysis.types[0].as_ref().expect("checked file");
+    let in_range = file
+        .expr_arena
+        .iter()
+        .enumerate()
+        .find_map(|(index, expr)| match expr {
+            Expr::InRange { .. } => Some(crate::ast::ExprId(index as u32)),
+            _ => None,
+        })
+        .expect("open-end membership");
+    assert!(info
+        .resolved_operator_call(in_range, "rangeUntil")
+        .is_none());
+    assert!(info.resolved_operator_call(in_range, "rangeTo").is_none());
+    let direct = info
+        .resolved_in_range_comparisons
+        .get(&in_range)
+        .expect("the selected stdlib rangeUntil authorizes direct comparison");
+    assert_eq!(direct.comparison, Ty::Double);
+    assert_eq!(
+        direct.provenance,
+        crate::fir::FirRangeComparisonProvenance::FloatingRangeMembership
+    );
+
+    let function = file
+        .decls
+        .iter()
+        .find_map(|declaration| match file.decl(*declaration) {
+            Decl::Fun(function) if function.name == "test" => Some(function),
+            Decl::Class(_) | Decl::Fun(_) | Decl::Property(_) => None,
+        })
+        .expect("test declaration");
+    let crate::ast::FunBody::Expr(root) = function.body else {
+        panic!("test must have an expression body")
+    };
+    let parameter = CheckedBodyParameter {
+        name: &function.params[0].name,
+        ty: ResolvedTy::new(info.resolved_type(&function.params[0].ty).unwrap()).unwrap(),
+        span: function.params[0].ty.span,
+        context_kind: crate::types::ContextParameterKind::None,
+        inline_modifier: crate::types::InlineParameterModifier::None,
+    };
+    let mut origins = OriginStore::default();
+    let body = check_expression_body_with_parameters(
+        file,
+        info,
+        SourceFileId::from_raw(0),
+        BodyOwnerId::from_raw(74),
+        root,
+        &[parameter],
+        analysis.streamed.as_ref().expect("Pass 1").module.index(),
+        &mut origins,
+    )
+    .expect("uniform open-end membership must build checked FIR");
+    let FirStatementKind::Expression(root) = body.statement(body.roots()[0]).unwrap().kind else {
+        panic!("root must contain membership FIR")
+    };
+    assert!(matches!(
+        &body.expr(root).unwrap().kind,
+        FirExprKind::InRange {
+            comparison,
+            operation,
+            provenance,
+            ..
+        }
+            if comparison.get() == Ty::Double
+                && *operation == crate::fir::FirRangeOperation::OpenEnd
+                && *provenance
+                    == crate::fir::FirRangeComparisonProvenance::FloatingRangeMembership
+    ));
+}
+
+#[test]
+fn uniform_open_end_double_range_until_can_be_shadowed() {
+    let analysis = checked_analysis(
+        "class Span\n\
+         operator fun Span.contains(value: Double): Boolean = true\n\
+         operator fun Double.rangeUntil(other: Double): Span = Span()\n\
+         fun test(value: Double, start: Double, end: Double) = value in start..<end\n",
+    );
+    let file = &analysis.files[0];
+    let info = analysis.types[0].as_ref().expect("checked file");
+    let in_range = file
+        .expr_arena
+        .iter()
+        .enumerate()
+        .find_map(|(index, expr)| match expr {
+            Expr::InRange { .. } => Some(crate::ast::ExprId(index as u32)),
+            _ => None,
+        })
+        .expect("shadowed open-end membership");
+    assert!(info
+        .resolved_operator_call(in_range, "rangeUntil")
+        .is_some());
+    assert!(info.resolved_operator_call(in_range, "rangeTo").is_none());
+    assert!(info.resolved_operator_call(in_range, "contains").is_some());
+    assert!(info.resolved_in_range_comparisons.get(&in_range).is_none());
+
+    let function = file
+        .decls
+        .iter()
+        .find_map(|declaration| match file.decl(*declaration) {
+            Decl::Fun(function) if function.name == "test" => Some(function),
+            Decl::Class(_) | Decl::Fun(_) | Decl::Property(_) => None,
+        })
+        .expect("test declaration");
+    let crate::ast::FunBody::Expr(root) = function.body else {
+        panic!("test must have an expression body")
+    };
+    let parameter = |index: usize| CheckedBodyParameter {
+        name: &function.params[index].name,
+        ty: ResolvedTy::new(info.resolved_type(&function.params[index].ty).unwrap()).unwrap(),
+        span: function.params[index].ty.span,
+        context_kind: crate::types::ContextParameterKind::None,
+        inline_modifier: crate::types::InlineParameterModifier::None,
+    };
+    let parameters = [parameter(0), parameter(1), parameter(2)];
+    let mut origins = OriginStore::default();
+    let body = check_expression_body_with_parameters(
+        file,
+        info,
+        SourceFileId::from_raw(0),
+        BodyOwnerId::from_raw(75),
+        root,
+        &parameters,
+        analysis.streamed.as_ref().expect("Pass 1").module.index(),
+        &mut origins,
+    )
+    .expect("shadowed uniform open-end membership must build checked FIR");
+    let FirStatementKind::Expression(root) = body.statement(body.roots()[0]).unwrap().kind else {
+        panic!("root must contain membership FIR")
+    };
+    assert!(
+        matches!(
+            body.expr(root).map(|expression| &expression.kind),
+            Some(FirExprKind::ContainmentCall { .. })
+        ),
+        "a nearer Double.rangeUntil is a contains call, not a primitive comparison"
+    );
+}
+
+#[test]
+fn membership_uses_the_operator_named_by_range_syntax() {
+    for (syntax, operator, modifier) in [
+        ("start..<end", "rangeUntil", "operator"),
+        ("start until end", "until", "infix"),
+        ("start downTo end", "downTo", "infix"),
+    ] {
+        let analysis = checked_analysis(&format!(
+            "class Start\n\
+             class End\n\
+             class Needle\n\
+             class Span\n\
+             {modifier} fun Start.{operator}(other: End): Span = Span()\n\
+             operator fun Span.contains(value: Needle): Boolean = true\n\
+             fun test(value: Needle, start: Start, end: End) = value in {syntax}\n"
+        ));
+        let file = &analysis.files[0];
+        let info = analysis.types[0].as_ref().expect("checked file");
+        let in_range = file
+            .expr_arena
+            .iter()
+            .enumerate()
+            .find_map(|(index, expr)| match expr {
+                Expr::InRange { .. } => Some(crate::ast::ExprId(index as u32)),
+                _ => None,
+            })
+            .expect(operator);
+        assert!(
+            info.resolved_operator_call(in_range, operator).is_some(),
+            "{operator}"
+        );
+        assert!(
+            info.resolved_operator_call(in_range, "rangeTo").is_none(),
+            "{operator} must not be rewritten as rangeTo"
+        );
+        assert!(info.resolved_operator_call(in_range, "contains").is_some());
+    }
+}
+
+#[test]
 fn exact_selected_floating_range_role_carries_its_checked_comparison_type() {
     let (Some(stdlib), Some(jdk)) = (
         crate::toolchain::stdlib_jar(),

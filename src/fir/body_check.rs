@@ -2194,12 +2194,7 @@ impl BodyFirChecker<'_> {
                     }
                 }
                 Expr::RangeTo { lo, hi, kind } => {
-                    let convention = match kind {
-                        RangeKind::Through => "rangeTo",
-                        RangeKind::OpenEnd => "rangeUntil",
-                        RangeKind::Until => "until",
-                        RangeKind::DownTo => "downTo",
-                    };
+                    let convention = kind.operator_name();
                     if self.selected_operator(expression, convention)
                         && !self.selected_range_construction(expression, convention)
                     {
@@ -2226,11 +2221,11 @@ impl BodyFirChecker<'_> {
                     kind,
                     negated,
                 } => {
-                    let selected_range = self.selected_operator(expression, "rangeTo");
+                    let operator = kind.operator_name();
+                    let selected_range = self.selected_operator(expression, operator);
                     let selected_contains = self.selected_operator(expression, "contains");
                     if selected_range && selected_contains {
-                        let range_kind = if self.selected_range_construction(expression, "rangeTo")
-                        {
+                        let range_kind = if self.selected_range_construction(expression, operator) {
                             FirExprKind::Range {
                                 operation: Self::range_operation(*kind),
                                 start: self.expression(*start)?,
@@ -2239,16 +2234,11 @@ impl BodyFirChecker<'_> {
                                 end_type: self.expression_type(*end)?,
                             }
                         } else {
-                            self.source_member_operator_call(
-                                expression,
-                                "rangeTo",
-                                *start,
-                                &[*end],
-                            )?
+                            self.source_member_operator_call(expression, operator, *start, &[*end])?
                         };
                         let range_ty = self
                             .info
-                            .resolved_operator_call(expression, "rangeTo")
+                            .resolved_operator_call(expression, operator)
                             .map(|call| call.ret())
                             .ok_or_else(|| {
                                 self.failure(
@@ -2288,22 +2278,22 @@ impl BodyFirChecker<'_> {
                             .info
                             .resolved_in_range_comparisons
                             .get(&expression)
-                            .copied()
                             .ok_or_else(|| {
-                                self.failure(
-                                    self.file.expr_span(expression),
-                                    BodyCheckFailureKind::UnsupportedExpression(
-                                        ExpressionForm::InRange,
-                                    ),
-                                )
-                            })?;
+                            self.failure(
+                                self.file.expr_span(expression),
+                                BodyCheckFailureKind::UnsupportedExpression(
+                                    ExpressionForm::InRange,
+                                ),
+                            )
+                        })?;
                         FirExprKind::InRange {
                             operation: Self::range_operation(*kind),
+                            provenance: comparison.provenance,
                             comparison: self.resolved_type(
                                 self.file.expr_span(expression).ok_or_else(|| {
                                     self.failure(None, BodyCheckFailureKind::MissingSourceSpan)
                                 })?,
-                                comparison,
+                                comparison.comparison,
                             )?,
                             value: self.expression(*value)?,
                             start: self.expression(*start)?,
@@ -2752,12 +2742,7 @@ impl BodyFirChecker<'_> {
                 origin,
                 kind: FirControlTargetKind::Loop,
             });
-            let convention = match range.kind {
-                RangeKind::Through => "rangeTo",
-                RangeKind::OpenEnd => "rangeUntil",
-                RangeKind::Until => "until",
-                RangeKind::DownTo => "downTo",
-            };
+            let convention = range.kind.operator_name();
             let call = self.source_member_statement_operator_call(
                 statement,
                 convention,

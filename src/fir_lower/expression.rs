@@ -913,6 +913,7 @@ impl BodyLowering<'_> {
             )?,
             FirExprKind::InRange {
                 operation,
+                provenance: _,
                 comparison,
                 value,
                 start,

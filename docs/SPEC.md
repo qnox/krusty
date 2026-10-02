@@ -10968,6 +10968,23 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/custom_floating_range_membership_e2e.rs`, box
   `ranges/contains/inComparableRange.kt`.
 
+- **Open-end membership names `rangeUntil`.** `x in a..<b`, `x in a until b`, and
+  `x in a downTo b` first select that syntax's operator. The result then uses `contains` unless the
+  exact selected declaration carries a provider role authorizing direct primitive comparison.
+  `RangeKind` records the operator name (`rangeTo`, `rangeUntil`, `until`, `downTo`); rendering `..`
+  and `..<` is a separate presentation spelling. A mixed value such as `3.0f in 1.0..<3.0` is
+  outside the range. Primitive `in` becomes a direct comparison only after ordinary selection picks
+  the exact provider declaration carrying the matching range-construction or floating-membership
+  realization. A nearer custom `Double`/`Float` operator instead calls its returned range's
+  `contains`, for both `..` and `..<`. Tests:
+  `mixed_open_end_membership_selects_range_until`,
+  `uniform_open_end_double_membership_stays_a_comparison`,
+  `uniform_open_end_double_range_until_can_be_shadowed`,
+  `membership_uses_the_operator_named_by_range_syntax`,
+  `open_end_range_membership_e2e::float_in_open_end_double_range_matches_kotlinc`,
+  `open_end_range_membership_e2e::shadowed_uniform_double_range_until_matches_kotlinc`,
+  box `ranges/contains/generated/doubleRangeUntil.kt`.
+
 - **Source generic signatures participate in call-site substitution.** Module callables retain
   their declared type parameters, receiver, parameters, bounds, and return type. Receiver-call
   resolution uses that signature to specialize higher-order parameters, so a declaration such as

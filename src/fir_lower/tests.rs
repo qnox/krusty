@@ -3221,6 +3221,9 @@ fn unsigned_range_containment_stays_semantic_until_backend_realization() {
         ty: resolved(Ty::Boolean),
         kind: FirExprKind::InRange {
             operation: FirRangeOperation::Through,
+            provenance: crate::fir::FirRangeComparisonProvenance::RangeConstruction {
+                open_end: false,
+            },
             comparison: resolved(Ty::UInt),
             value,
             start,

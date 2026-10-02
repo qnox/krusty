@@ -20,8 +20,8 @@ pub use branches::{FirCatch, FirWhenBranch, FirWhenCondition, FirWhenSubjectNume
 mod call_storage;
 mod ranges;
 pub use ranges::{
-    FirProgressionClass, FirProgressionSource, FirRangeCounterKind, FirRangeOperation,
-    FirRuntimeFunction,
+    FirProgressionClass, FirProgressionSource, FirRangeComparisonProvenance, FirRangeCounterKind,
+    FirRangeOperation, FirRuntimeFunction,
 };
 mod property_access;
 pub use property_access::{
@@ -1273,6 +1273,9 @@ pub enum FirExprKind {
     },
     InRange {
         operation: FirRangeOperation,
+        /// Exact provider role which authorized bypassing the selected range declaration and
+        /// `contains`. Source syntax alone is never sufficient evidence for this path.
+        provenance: FirRangeComparisonProvenance,
         /// Exact primitive comparison representation selected by the frontend. This is independent
         /// of counted-loop support: `Double`/`Float` ranges are valid membership comparisons.
         comparison: ResolvedTy,
