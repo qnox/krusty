@@ -18,6 +18,13 @@ use crate::compiler_analysis::LibraryRef;
 use crate::{ScanProgress, ScanReporter};
 
 const MAX_PENDING_WATCHED_FILES: usize = 1024;
+/// Edits, dumps, materializations, and project changes run ahead of dependency location: the
+/// query that asked for those classes has already returned. A continuous stream of that
+/// interactive work would otherwise leave location queued for the rest of the session. Once this
+/// many interactive commands have been served while location is waiting, the next dequeue serves
+/// one location command, then interactive work resumes. Replacing the workspace model cancels the
+/// location queue instead of draining it: those candidates belong to the previous classpath.
+const INTERACTIVE_COMMANDS_BEFORE_LOCATION: usize = 32;
 /// The longest an interactive command can be made to wait: one chunk of index work. Sized to sit
 /// inside a single worker source-set round trip.
 const MAX_INDEX_CHUNK_FILES: usize = 32;
@@ -318,7 +325,13 @@ struct CommandQueue {
 
 #[derive(Default)]
 struct CommandState {
+    /// Edits, dumps, materializations, and project changes, in arrival order.
     pending: VecDeque<EngineCommand>,
+    /// Dependency location, in arrival order. Separate from `pending` so an edit dequeues in
+    /// constant time no matter how many location commands are waiting.
+    locations: VecDeque<EngineCommand>,
+    /// Interactive commands served since the last location command, while `locations` was nonempty.
+    interactive_since_location: usize,
     neighborhood: VecDeque<IndexJob>,
     sweep: VecDeque<IndexJob>,
     /// Symbol chunks, drained after interactive work and ahead of the diagnostic sweep until
@@ -476,14 +489,7 @@ impl CommandState {
             EngineCommand::LocateDependencies {
                 generation,
                 candidates,
-            } => {
-                // Latency-sensitive but not interactive: a query already answered without these,
-                // and the next keystroke picks them up.
-                self.pending.push_back(EngineCommand::LocateDependencies {
-                    generation,
-                    candidates,
-                });
-            }
+            } => self.enqueue_location(generation, candidates),
             EngineCommand::IndexSymbols(job) => {
                 let mut chunk =
                     Vec::with_capacity(MAX_SYMBOL_INDEX_CHUNK_FILES.min(job.uris.len()));
@@ -566,14 +572,19 @@ impl CommandState {
         }
     }
 
-    /// Interactive work first, then the neighbourhood, then symbol chunks, then the sweep. The
-    /// levels are the priority, so there is no comparator and no heap. A symbol chunk handed out
-    /// while a sweep chunk is waiting counts toward [`SYMBOL_CHUNKS_BEFORE_SWEEP`]; the next
-    /// dequeue serves the sweep before another symbol chunk.
+    /// Interactive work first. After [`INTERACTIVE_COMMANDS_BEFORE_LOCATION`] of those commands,
+    /// one queued location command runs before the next edit. Then the neighbourhood, then symbol
+    /// chunks, then the sweep. The levels are the priority, so there is no comparator and no heap.
+    /// A symbol chunk handed out while a sweep chunk is waiting counts toward
+    /// [`SYMBOL_CHUNKS_BEFORE_SWEEP`]; the next dequeue serves the sweep before another symbol chunk.
     fn take(&mut self) -> Option<EngineCommand> {
-        if let Some(command) = self.pending.pop_front() {
+        if let Some(command) = self.take_foreground() {
             return Some(command);
         }
+        self.take_background()
+    }
+
+    fn take_background(&mut self) -> Option<EngineCommand> {
         loop {
             if let Some(job) = self.neighborhood.pop_front() {
                 if let Some(job) = self.finish_index_chunk(job) {
@@ -683,11 +694,7 @@ impl CommandState {
     /// Work queued against the previous model must never run against its replacement.
     fn replace_index_generation(&mut self) -> u64 {
         self.generation = self.generation.saturating_add(1);
-        // Location candidates are classpath identities. Drop them with the model-owned index
-        // queues instead of making the new generation drain up to the session's pending-work cap
-        // one stale no-op command at a time.
-        self.pending
-            .retain(|command| !matches!(command, EngineCommand::LocateDependencies { .. }));
+        self.clear_queued_locations();
         self.indexed_done = 0;
         self.indexed_total = 0;
         self.neighborhood.clear();
@@ -724,6 +731,7 @@ impl CommandState {
 
     fn is_empty(&self) -> bool {
         self.pending.is_empty()
+            && self.locations.is_empty()
             && self.symbols.is_empty()
             && self.neighborhood.is_empty()
             && self.sweep.is_empty()
@@ -812,13 +820,11 @@ impl CommandReceiver {
     }
 
     fn interactive_pending(&self) -> bool {
-        !self
-            .queue
+        self.queue
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .pending
-            .is_empty()
+            .interactive_work_queued()
     }
 
     fn indexing_outstanding(&self) -> bool {
@@ -875,17 +881,25 @@ impl CommandReceiver {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let deadline = timeout.map(|timeout| Instant::now() + timeout);
         loop {
-            if let Some(command) = state.pending.pop_front() {
-                return CommandReceive::Command(command);
-            }
-            if state.disconnected {
-                return CommandReceive::Disconnected;
-            }
-            // An overdue project refresh or analysis retry outranks background indexing; checking
-            // the deadline here is what stops a nonempty sweep from starving it indefinitely.
-            if deadline.is_some_and(|deadline| deadline <= Instant::now()) {
+            // Location is not interactive. Disconnect and an overdue refresh or retry must be
+            // able to stop before it, or a location backlog keeps shutdown and the refresh that
+            // would discard that backlog from running.
+            let block_location =
+                state.disconnected || deadline.is_some_and(|deadline| deadline <= Instant::now());
+            if block_location {
+                if let Some(command) = state.take_interactive() {
+                    return CommandReceive::Command(command);
+                }
+                if state.disconnected {
+                    return CommandReceive::Disconnected;
+                }
                 return CommandReceive::Timeout;
             }
+            if let Some(command) = state.take_foreground() {
+                return CommandReceive::Command(command);
+            }
+            // An overdue project refresh or analysis retry outranks background indexing; checking
+            // the deadline above is what stops a nonempty sweep from starving it indefinitely.
             if let Some(command) = state.take() {
                 return CommandReceive::Command(command);
             }
@@ -1131,6 +1145,7 @@ fn run<A: Analysis>(
                 // Raised only after an interactive analysis has been served, and only while no
                 // further interactive work is waiting. Enumerating a large workspace ahead of the
                 // first open document delayed its diagnostics past two minutes on a 64k-file tree.
+                // Queued dependency location is not that wait: the query already returned.
                 if !commands.interactive_pending() {
                     let open = job.open_uris.iter().map(String::as_str).collect::<Vec<_>>();
                     let neighborhood = analyze.neighborhood_index_candidates(&open);
@@ -1395,6 +1410,8 @@ fn send_status(events: &SyncSender<Incoming>, status: ServerStatus) -> Result<()
         .send(Incoming::Engine(EngineEvent::Status(status)))
         .map_err(|_| ())
 }
+
+mod location_queue;
 
 #[cfg(test)]
 mod tests {
@@ -2592,6 +2609,14 @@ mod tests {
             documents: vec![("file:///w/Open.kt".into(), String::new(), 1, 0)],
             open_uris: vec!["file:///w/Open.kt".into()],
         }));
+        sender.send(EngineCommand::LocateDependencies {
+            generation: 0,
+            candidates: vec![DependencyCandidate {
+                internal: "vendor/Held".into(),
+                package: "vendor".into(),
+                name: "Held".into(),
+            }],
+        });
         sender.send(EngineCommand::Index(IndexJob {
             generation: 0,
             priority: IndexPriority::Sweep,
@@ -2608,7 +2633,7 @@ mod tests {
         );
         assert!(
             matches!(receiver.recv(None), CommandReceive::Disconnected),
-            "queued sweep work is abandoned rather than drained, so exit stays prompt"
+            "queued location and sweep work are abandoned rather than drained, so exit stays prompt"
         );
     }
     #[test]
