@@ -78,7 +78,6 @@ inference/pcla/pclaRootIsTrySyntheticCallWithDelegate.kt
 inline/callableReferenceOfLocalFun.kt
 inline/localDeclarationsClash.kt
 inlineClasses/callableRefClassMergingNestedValueClass.kt
-inlineClasses/equalityForIndyLambdaParameter.kt
 inlineSizeReduction/lastBreak.kt
 innerNested/nestedInPackage.kt
 ir/privateSignatures/privateLeakThroughInline.kt

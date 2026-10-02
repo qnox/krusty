@@ -8721,6 +8721,24 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   only on the right, compare with `areEqual`. The calls publish their declared parameters (`V`,
   and `V` or `Any?`), so a value class over `Any?` passes its operands unconverted. Tests:
   `tests/value_class_equality_e2e.rs`. Corpus: `inlineClasses/equalityChecks*`.
+- **`==` of an unsigned value follows the JVM slot of each operand.** Checked FIR keeps
+  `UInt? == UInt` (and the other three unsigned classes, either order) as equality of the original
+  operands. It is not the signed nullable-primitive unbox: that would swap the operands and compare
+  carriers, but a non-null unsigned value is a primitive in a parameter or property and a
+  `kotlin/UInt` box when it arrives through `FunctionN.invoke`. `UInt?` is always that box. The JVM
+  backend then emits:
+  - two boxes: `Intrinsics.areEqual`;
+  - two carriers: the primitive comparison;
+  - a carrier on the left and a box on the right: `UInt.equals-impl(carrier, Object)` (`B`, `S`,
+    or `J` for the other three);
+  - a box on the left and a carrier on the right: a null check (`null` is not equal) then the
+    unboxed carrier compared with the right operand. When the right operand is stored, the left
+    value is stored first as well, including when it is a local, so
+    `var left: UInt? = 1u; left == run { left = 2u; 1u }` compares the original `1u`. A constant
+    on the left is reloaded. kotlinc 2.4.20 re-reads that nullable local and returns false; the
+    test records both results.
+  `!=` negates that result. Tests: `tests/unsigned_equality_e2e.rs`. Corpus:
+  `inlineClasses/equalityForIndyLambdaParameter.kt`.
 
 - **Counted `for` loops over a range literal follow kotlinc's `ForLoopsLowering`.** Checked FIR
   publishes one target-neutral `RangeLoop`; the named backend-boundary pass in
