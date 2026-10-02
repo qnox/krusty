@@ -172,12 +172,105 @@ fn field_lines(bytes: &[u8], class: &str) -> String {
     let _ = std::fs::remove_dir_all(work);
     text.lines()
         .map(str::trim)
-        .filter(|line| {
-            *line != "static {};"
-                && line.contains("static")
-                && line.ends_with(';')
-                && !line.contains('(')
-        })
+        .filter(|line| *line != "static {};" && line.ends_with(';') && !line.contains('('))
         .map(|line| format!("{line}\n"))
         .collect()
+}
+
+const CUSTOM_GETTER: &str = r#"
+class C {
+    companion object {
+        val seen = mutableListOf<Int>()
+        private val secret: Int = 7
+            get() = field
+        init { seen.add(secret) }
+        val after = secret + seen.size
+        fun read() = secret
+    }
+}
+
+fun box(): String {
+    if (C.read() != 7) return "secret=${C.read()}"
+    if (C.after != 8) return "after=${C.after}"
+    return "OK"
+}
+"#;
+
+#[test]
+fn a_custom_getter_initializes_with_the_other_companion_properties() {
+    expect_box_same_as_kotlinc(CUSTOM_GETTER, "CompanionInitCustomGetter");
+    assert_same_fields(CUSTOM_GETTER, "C");
+    assert_same_fields(CUSTOM_GETTER, "C$Companion");
+    assert_same_method(CUSTOM_GETTER, "C", "<clinit>");
+    assert_same_method(CUSTOM_GETTER, "C$Companion", "C$Companion");
+    assert_same_method(CUSTOM_GETTER, "C$Companion", "getSecret");
+}
+
+const CUSTOM_GETTER_NO_FIELD: &str = r#"
+class C {
+    companion object {
+        val seen = mutableListOf<Int>()
+        private val secret: Int
+            get() = 7
+        init { seen.add(secret) }
+        fun snapshot() = seen.toList()
+    }
+}
+
+fun box(): String = if (C.snapshot() == listOf(7)) "OK" else "seen=${C.snapshot()}"
+"#;
+
+#[test]
+fn a_fieldless_custom_getter_keeps_the_init_block_in_the_outer_initializer() {
+    expect_box_same_as_kotlinc(CUSTOM_GETTER_NO_FIELD, "CompanionInitFieldlessGetter");
+    assert_same_fields(CUSTOM_GETTER_NO_FIELD, "C");
+    assert_same_fields(CUSTOM_GETTER_NO_FIELD, "C$Companion");
+    assert_same_method(CUSTOM_GETTER_NO_FIELD, "C", "<clinit>");
+    assert_same_method(CUSTOM_GETTER_NO_FIELD, "C$Companion", "C$Companion");
+}
+
+const CUSTOM_SETTER: &str = r#"
+class C {
+    companion object {
+        val seen = mutableListOf<Int>()
+        private var secret: Int = 7
+            set(v) { field = v + 1 }
+        init { seen.add(secret); secret = 10 }
+        fun read() = secret
+    }
+}
+
+fun box(): String = if (C.read() == 11) "OK" else "secret=${C.read()}"
+"#;
+
+#[test]
+fn a_custom_setter_initializes_with_the_other_companion_properties() {
+    expect_box_same_as_kotlinc(CUSTOM_SETTER, "CompanionInitCustomSetter");
+    assert_same_fields(CUSTOM_SETTER, "C");
+    assert_same_fields(CUSTOM_SETTER, "C$Companion");
+    assert_same_method(CUSTOM_SETTER, "C", "<clinit>");
+    assert_same_method(CUSTOM_SETTER, "C$Companion", "C$Companion");
+    assert_same_method(CUSTOM_SETTER, "C$Companion", "setSecret");
+}
+
+const DELEGATE: &str = r#"
+class C {
+    companion object {
+        val seen = mutableListOf<Int>()
+        private val secret: Int by lazy { 7 }
+        init { seen.add(secret) }
+        fun snapshot() = seen.toList()
+    }
+}
+
+fun box(): String = if (C.snapshot() == listOf(7)) "OK" else "seen=${C.snapshot()}"
+"#;
+
+#[test]
+fn a_delegate_initializes_with_the_other_companion_properties() {
+    expect_box_same_as_kotlinc(DELEGATE, "CompanionInitDelegate");
+    assert_same_fields(DELEGATE, "C");
+    assert_same_fields(DELEGATE, "C$Companion");
+    assert_same_method(DELEGATE, "C", "<clinit>");
+    assert_same_method(DELEGATE, "C$Companion", "C$Companion");
 }

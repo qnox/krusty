@@ -531,15 +531,18 @@ fn companion_initializer_loads_instance(ir: &IrFile, body: crate::ir::ExprId) ->
                 owner,
                 name,
                 ..
-            }
-            | crate::ir::IrExpr::PropertyWrite {
+            } => receiver.filter(|receiver| {
+                crate::ir::expr_runs_no_code(ir, *receiver)
+                    && hoisted_companion_field(ir, *owner, name, false)
+            }),
+            crate::ir::IrExpr::PropertyWrite {
                 receiver,
                 owner,
                 name,
                 ..
             } => receiver.filter(|receiver| {
                 crate::ir::expr_runs_no_code(ir, *receiver)
-                    && hoisted_companion_property(ir, *owner, name)
+                    && hoisted_companion_field(ir, *owner, name, true)
             }),
             _ => None,
         };
@@ -557,9 +560,16 @@ fn companion_initializer_loads_instance(ir: &IrFile, body: crate::ir::ExprId) ->
     walk(ir, body)
 }
 
-/// A companion property whose storage was moved onto the outer class. In the outer `<clinit>`
-/// that field is read and written directly, so its receiver is not an instance load.
-fn hoisted_companion_property(ir: &IrFile, owner: crate::types::TypeName, name: &str) -> bool {
+/// A companion property whose storage was moved onto the outer class and whose access from
+/// `<clinit>` is the field itself, so its receiver is not an instance load.
+///
+/// A declared getter or setter is called instead. That call needs the companion instance.
+fn hoisted_companion_field(
+    ir: &IrFile,
+    owner: crate::types::TypeName,
+    name: &str,
+    write: bool,
+) -> bool {
     let Some(class) = ir.classes.iter().find(|class| class.fq_name == owner) else {
         return false;
     };
@@ -570,6 +580,15 @@ fn hoisted_companion_property(ir: &IrFile, owner: crate::types::TypeName, name: 
     else {
         return false;
     };
+    let property = &class.properties[index];
+    let calls_accessor = if write {
+        property.modifiers.declared_setter
+    } else {
+        property.modifiers.declared_getter
+    };
+    if calls_accessor {
+        return false;
+    }
     ir.jvm_companion_property_static(owner, index as u32)
         .is_some()
 }

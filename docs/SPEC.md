@@ -825,10 +825,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   kotlinc for both the with-parts and empty shapes (unit tests pin the exact bytes).
 - **A companion property that keeps its field still names that field after plainer siblings are
   hoisted.** A plain companion property moves its backing field to the outer class, and the
-  companion's field table is compacted. A property with a custom accessor stays, and every index
-  that names its field — the declaration, a delegate field, and the common-IR property layout —
-  moves with the compaction. A `var` that only customizes its setter therefore still gets its
-  default getter, reading the same field the setter writes. Test:
+  companion's field table is compacted. A property that stays — an open property, a `lateinit`,
+  or a boxed value class — keeps every index that names its field: the declaration, a delegate
+  field, and the common-IR property layout move with the compaction. A `var` that only
+  customizes its setter therefore still gets its default getter, reading the same field the
+  setter writes, whether that field was hoisted or stayed. Test:
   `tests/companion_custom_accessor_field_e2e.rs`.
 - **A class companion's `init` block runs in the outer `<clinit>`.** kotlinc stores the companion
   instance, then runs that companion's property initializers and `init` blocks in source order,
@@ -840,11 +841,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   later property still sees the preceding `init` block. A private companion property is hoisted
   with the public ones: `private static final` on the outer class, initialized in that same
   source order, read through `access$get…$cp` from the companion. The outer class, including
-  `<clinit>`, reads the field directly. Leaving the private property as a companion instance
+  `<clinit>`, reads that plain field directly. Leaving the private property as a companion instance
   field and initializing it from `Companion.<init>` runs that store before the public properties
-  declared ahead of it. A property that keeps a companion instance field — a custom accessor or
-  a delegate — is still initialized on the constructor, because that field is private to the
-  companion. Interface companions keep their own `<clinit>`. Test:
+  declared ahead of it. A custom accessor and a delegate move the same way: the backing field,
+  or `name$delegate`, is a private static of the outer class, and the `init` block stays in
+  that one source-ordered `<clinit>` after the instance store. A read of a property with a
+  declared getter, and a later assignment of a property with a declared setter, call that
+  accessor through `access$get…` / `access$set…`, reloading the companion instance from the
+  outer field at the call. The accessor body and the declaration
+  initializer store use the hoisted field (`access$…$cp` from the companion, `putstatic` from
+  `<clinit>`). A delegate initializer's lambda is a private static method of the outer class,
+  the class whose `<clinit>` evaluates it. The companion constructor
+  remains `super()`. An open property, a `lateinit`, or a boxed value class still keeps its
+  instance field, and an initializer that touches that field stays on the constructor.
+  Interface companions keep their own `<clinit>`. Test:
   `tests/companion_init_block_e2e.rs`.
 - **`companion { … }` blocks and companion extensions (`CompanionBlocksAndExtensions`).** A block
   member is a static member of the classifier that declares the block, not of the file facade,

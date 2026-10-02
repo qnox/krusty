@@ -269,18 +269,39 @@ pub(super) fn cross_owner_member_calls(
                     )
                 }),
                 IrExpr::PropertyRead {
-                    owner, receiver, ..
-                }
-                | IrExpr::PropertyWrite {
-                    owner, receiver, ..
-                } => ir.jvm_member_targets.get(&expression).map(|&function| {
-                    let class = ir.class_id_by_name(*owner);
-                    (
-                        class.expect("a realized member's owner is in this file"),
-                        function,
-                        *receiver,
-                    )
-                }),
+                    owner,
+                    receiver,
+                    name,
+                    ..
+                } => ir
+                    .jvm_member_targets
+                    .get(&expression)
+                    .map(|&function| {
+                        let class = ir.class_id_by_name(*owner);
+                        (
+                            class.expect("a realized member's owner is in this file"),
+                            function,
+                            *receiver,
+                        )
+                    })
+                    .or_else(|| declared_private_accessor(ir, *owner, name, *receiver, false)),
+                IrExpr::PropertyWrite {
+                    owner,
+                    receiver,
+                    name,
+                    ..
+                } => ir
+                    .jvm_member_targets
+                    .get(&expression)
+                    .map(|&function| {
+                        let class = ir.class_id_by_name(*owner);
+                        (
+                            class.expect("a realized member's owner is in this file"),
+                            function,
+                            *receiver,
+                        )
+                    })
+                    .or_else(|| declared_private_accessor(ir, *owner, name, *receiver, true)),
                 _ => None,
             };
             if let Some((class, target, receiver)) = local_target {
@@ -682,9 +703,38 @@ pub(super) fn protected_property_access(
     }
 }
 
-/// How another class reads a private property through the bridge of its exact `getter`: a static
-/// value-class `-impl` getter's bridge takes the same carrier, an instance getter's takes the owner.
-pub(super) fn private_member_read_access(
+/// A property read or write whose accessor is a private method of a class in this file.
+///
+/// Checked member accesses stay [`IrExpr::PropertyRead`] / [`IrExpr::PropertyWrite`] and do not
+/// carry a `jvm_member_targets` entry. The accessor identity is the declaration's getter or
+/// setter. Only a private one needs a bridge; a public accessor is an ordinary call.
+fn declared_private_accessor(
+    ir: &IrFile,
+    owner: crate::types::TypeName,
+    name: &str,
+    receiver: Option<crate::ir::ExprId>,
+    write: bool,
+) -> Option<(crate::ir::ClassId, u32, Option<crate::ir::ExprId>)> {
+    let class = ir.class_id_by_name(owner)?;
+    let function = ir.classes[class as usize]
+        .properties
+        .iter()
+        .find(|property| property.name == name)
+        .and_then(|property| {
+            if write {
+                property.setter
+            } else {
+                property.getter
+            }
+        })?;
+    ir.method_visibility(function)
+        .is_private()
+        .then_some((class, function, receiver))
+}
+
+/// How another class reaches a private accessor through `access$<name>`: a static value-class
+/// `-impl` bridge takes the same carrier, and an instance accessor's takes the owner.
+pub(super) fn private_member_accessor_access(
     ir: &IrFile,
     getter: u32,
     owner: TypeName,

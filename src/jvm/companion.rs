@@ -31,6 +31,33 @@ struct Candidate {
     /// `@JvmField`: the hoisted static IS the property's public surface — a PUBLIC field with no
     /// companion accessors and no `access$…$cp` bridges (kotlinc's realization).
     is_jvm_field: bool,
+    /// Accessors the declaration already has. A custom getter or setter stays; only a missing
+    /// public accessor is synthesized over the hoisted field.
+    declared_getter: Option<u32>,
+    declared_setter: Option<u32>,
+    /// `x$delegate` storage. Property reads stay on the delegated accessor; the field itself is
+    /// still a private static of the outer class.
+    delegate_storage: bool,
+}
+
+/// The init-body store of a delegated property's `$delegate` field, and the value it stores.
+fn delegated_initializer(ir: &IrFile, class: ClassId, field: u32) -> Option<(ExprId, ExprId)> {
+    let body = ir.classes[class as usize].init_body?;
+    let IrExpr::Block { stmts, value: None } = ir.expr(body) else {
+        return None;
+    };
+    stmts
+        .iter()
+        .copied()
+        .find_map(|statement| match ir.expr(statement) {
+            IrExpr::SetField {
+                class: target,
+                index,
+                value,
+                ..
+            } if *target == class && *index == field => Some((statement, *value)),
+            _ => None,
+        })
 }
 
 fn initializer_store(
@@ -222,10 +249,11 @@ pub fn lower_companion_properties(ir: &mut IrFile) {
             // A private companion property is hoisted too: kotlinc stores it as a private
             // static of the outer class, not as a companion instance field. An interface
             // companion cannot host that field, and this loop never selects one.
+            // A custom getter or setter does not keep the field on the companion. kotlinc
+            // still stores it as a private static of the outer class, and the accessor body
+            // reads that static through `access$…$cp`.
             if (!visibility.is_public() && !declaration.is_private && !is_jvm_field)
                 || declaration.is_open
-                || declaration.getter.is_some()
-                || declaration.setter.is_some()
                 || backing.is_lateinit()
                 || backing
                     .ty
@@ -253,6 +281,52 @@ pub fn lower_companion_properties(ir: &mut IrFile) {
                 source_order: declaration.source_order,
                 decl_line: declaration.decl_line,
                 is_jvm_field,
+                declared_getter: declaration.getter,
+                declared_setter: declaration.setter,
+                delegate_storage: false,
+            });
+        }
+        for property in 0..companion_class.properties.len() {
+            let declaration = &companion_class.properties[property];
+            let Some(field) = declaration.delegate_field else {
+                continue;
+            };
+            if declaration.is_open || !receiver_is_inert(ir, companion, field) {
+                continue;
+            }
+            let Some(backing) = companion_class.fields.get(field as usize) else {
+                continue;
+            };
+            if backing
+                .ty
+                .obj_internal()
+                .is_some_and(|name| crate::jvm::value_classes::is_boxed_value_class(ir, name))
+            {
+                continue;
+            }
+            let Some((initializer_store, initializer)) =
+                delegated_initializer(ir, companion, field)
+            else {
+                continue;
+            };
+            candidates.push(Candidate {
+                outer,
+                companion,
+                property,
+                field,
+                initializer,
+                initializer_store,
+                name: backing.name.clone(),
+                ty: backing.ty,
+                is_var: false,
+                visibility: Visibility::Private,
+                is_private: true,
+                source_order: declaration.source_order,
+                decl_line: declaration.decl_line,
+                is_jvm_field: false,
+                declared_getter: declaration.getter,
+                declared_setter: declaration.setter,
+                delegate_storage: true,
             });
         }
     }
@@ -307,11 +381,16 @@ pub fn lower_companion_properties(ir: &mut IrFile) {
         if candidate.is_jvm_field {
             ir.mark_jvm_field_static(index);
         }
-        ir.mark_jvm_companion_property_static(
-            ir.classes[candidate.companion as usize].fq_name,
-            candidate.property as u32,
-            index,
-        );
+        // A delegate field is not the property. Reads of `secret` stay on `getSecret`, which
+        // then loads `secret$delegate`. Recording the delegate as the property static would
+        // bypass that accessor.
+        if !candidate.delegate_storage {
+            ir.mark_jvm_companion_property_static(
+                ir.classes[candidate.companion as usize].fq_name,
+                candidate.property as u32,
+                index,
+            );
+        }
         static_for_field.insert((candidate.companion, candidate.field), index);
     }
 
@@ -343,9 +422,10 @@ pub fn lower_companion_properties(ir: &mut IrFile) {
         // Hoisted stores become outer-class static stores. When the body also has an `init`
         // block and every field it touches is moving with it, keep those stores in the body so
         // `<clinit>` runs one source-ordered initializer after the companion instance is stored.
-        // A property that keeps a companion instance field (a custom accessor, a delegate) is
-        // private to the companion, so its initializer stays on the constructor and the hoisted
-        // stores keep their own `<clinit>` initializers.
+        // A field that is not moving (an open property, a lateinit, a boxed value class)
+        // stays private to the companion, so an initializer that still touches it stays on
+        // the constructor. A custom accessor or a delegate moves with the other fields, and
+        // the body stays one source-ordered initializer.
         let hoisted_fields = candidates
             .iter()
             .filter(|candidate| candidate.companion == companion)
@@ -456,28 +536,33 @@ pub fn lower_companion_properties(ir: &mut IrFile) {
         let static_index = static_for_field[&(candidate.companion, candidate.field)];
         // A private property has no getter or setter. kotlinc reads the hoisted field
         // directly from the outer class and through `access$…$cp` from everywhere else.
+        // A declared accessor stays. Only the side the source omitted is synthesized, so a
+        // custom setter still gets the default getter over the hoisted field.
         let accessors = (!candidate.is_jvm_field && !candidate.is_private).then(|| {
-            let getter_name = property_getter_name(&candidate.name);
-            let read = ir.add_expr(IrExpr::GetStatic(static_index));
-            let returned = ir.add_expr(IrExpr::Return(Some(read)));
-            let getter_body = ir.add_expr(IrExpr::Block {
-                stmts: vec![returned],
-                value: None,
+            let getter = candidate.declared_getter.is_none().then(|| {
+                let getter_name = property_getter_name(&candidate.name);
+                let read = ir.add_expr(IrExpr::GetStatic(static_index));
+                let returned = ir.add_expr(IrExpr::Return(Some(read)));
+                let getter_body = ir.add_expr(IrExpr::Block {
+                    stmts: vec![returned],
+                    value: None,
+                });
+                let getter = ir.add_fun(IrFunction {
+                    name: getter_name.clone(),
+                    params: vec![],
+                    ret: candidate.ty,
+                    body: Some(getter_body),
+                    is_static: false,
+                    dispatch_receiver: Some(ir.classes[candidate.companion as usize].fq_name),
+                    param_checks: vec![],
+                });
+                ir.fn_source_names.insert(getter, getter_name);
+                ir.fn_params
+                    .insert(getter, crate::ir::FnParamInfo::identities(Vec::new()));
+                ir.fn_source_order.insert(getter, candidate.source_order);
+                getter
             });
-            let getter = ir.add_fun(IrFunction {
-                name: getter_name.clone(),
-                params: vec![],
-                ret: candidate.ty,
-                body: Some(getter_body),
-                is_static: false,
-                dispatch_receiver: Some(ir.classes[candidate.companion as usize].fq_name),
-                param_checks: vec![],
-            });
-            ir.fn_source_names.insert(getter, getter_name);
-            ir.fn_params
-                .insert(getter, crate::ir::FnParamInfo::identities(Vec::new()));
-            ir.fn_source_order.insert(getter, candidate.source_order);
-            let setter = candidate.is_var.then(|| {
+            let setter = (candidate.is_var && candidate.declared_setter.is_none()).then(|| {
                 let value = ir.add_expr(IrExpr::GetValue(1));
                 let write = ir.add_expr(IrExpr::SetStatic {
                     index: static_index,
@@ -551,7 +636,9 @@ pub fn lower_companion_properties(ir: &mut IrFile) {
 
         let class = &mut ir.classes[candidate.companion as usize];
         let property_accessors = accessors.map(|(getter, setter)| {
-            class.methods.push(getter);
+            if let Some(getter) = getter {
+                class.methods.push(getter);
+            }
             if let Some(setter) = setter {
                 class.methods.push(setter);
             }
@@ -561,8 +648,12 @@ pub fn lower_companion_properties(ir: &mut IrFile) {
         property.backing_field = None;
         property.storage_ty = None;
         if let Some((getter, setter)) = property_accessors {
-            property.getter = Some(getter);
-            property.setter = setter;
+            if let Some(getter) = getter {
+                property.getter = Some(getter);
+            }
+            if let Some(setter) = setter {
+                property.setter = Some(setter);
+            }
         }
     }
     schedule_class_companion_initializers(ir);
@@ -607,8 +698,96 @@ fn schedule_class_companion_initializers(ir: &mut IrFile) {
         scheduled.push((ir.classes[index].fq_name, companion, body));
     }
     for (owner, companion, body) in scheduled {
+        // The initializer now emits in the outer `<clinit>`. A lambda it evaluates is a private
+        // static of that class; leaving it on the companion makes the outer class call a private
+        // method it cannot see.
+        move_initializer_lambdas(ir, companion, owner, body);
+        // `<clinit>` has no `this`. Each use of the companion instance reloads the outer field.
+        // A single local would be `astore`/`aload`, which is not kotlinc's `<clinit>`.
+        reload_companion_instance(ir, owner, companion, body);
         ir.set_companion_clinit_body(owner, body);
         ir.classes[companion as usize].init_body = None;
+    }
+}
+
+/// Move lambda implementation methods used by `body` from the companion onto `outer`.
+///
+/// Lowering attaches each lambda to the companion, the class whose constructor originally held
+/// the initializer. After the body moves, the `invokedynamic` is emitted by the outer class.
+/// Replace companion-`this` reads in `body` with a load of the outer `Companion` field.
+fn reload_companion_instance(
+    ir: &mut IrFile,
+    outer: crate::types::TypeName,
+    companion: ClassId,
+    body: ExprId,
+) {
+    let companion_name = ir.classes[companion as usize].fq_name;
+    let field = companion_name.nested_segment_ref().to_string();
+    let mut pending = vec![body];
+    let mut seen = HashSet::new();
+    while let Some(expression) = pending.pop() {
+        if !seen.insert(expression) {
+            continue;
+        }
+        if matches!(ir.expr(expression), IrExpr::GetValue(0)) {
+            ir.exprs[expression as usize] = IrExpr::ExternalStaticInstance {
+                owner: outer,
+                ty: companion_name,
+                field: field.clone(),
+            };
+            continue;
+        }
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+    }
+}
+
+fn move_initializer_lambdas(
+    ir: &mut IrFile,
+    companion: ClassId,
+    outer: crate::types::TypeName,
+    body: ExprId,
+) {
+    let Some(outer_class) = ir.class_id_by_name(outer) else {
+        return;
+    };
+    let mut pending = vec![body];
+    let mut seen = HashSet::new();
+    let mut lambdas = Vec::new();
+    while let Some(expression) = pending.pop() {
+        if !seen.insert(expression) {
+            continue;
+        }
+        if let IrExpr::Lambda { impl_fn, .. } = ir.expr(expression) {
+            lambdas.push(*impl_fn);
+            if let Some(nested) = ir
+                .functions
+                .get(*impl_fn as usize)
+                .and_then(|function| function.body)
+            {
+                pending.push(nested);
+            }
+        }
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+    }
+    let moving: Vec<u32> = lambdas
+        .into_iter()
+        .filter(|function| ir.classes[companion as usize].methods.contains(function))
+        .collect();
+    if moving.is_empty() {
+        return;
+    }
+    ir.classes[companion as usize]
+        .methods
+        .retain(|method| !moving.contains(method));
+    for function in &moving {
+        let methods = &mut ir.classes[outer_class as usize].methods;
+        if !methods.contains(function) {
+            methods.push(*function);
+        }
+    }
+    let owner = ir.classes[outer_class as usize].fq_name_id();
+    for function in moving {
+        ir.class_static_local_functions.insert(function, owner);
     }
 }
 

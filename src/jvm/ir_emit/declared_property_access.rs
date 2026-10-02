@@ -40,7 +40,7 @@ impl Emitter<'_> {
             let f = &self.ir.functions[getter as usize];
             // Another class reads a private getter through its bridge, kotlinc's `access$<getter>`.
             if self.reaches_through_bridge(class.fq_name, getter) {
-                return Some(access_bridges::private_member_read_access(
+                return Some(access_bridges::private_member_accessor_access(
                     self.ir, getter, owner,
                 ));
             }
@@ -176,6 +176,17 @@ impl Emitter<'_> {
             .find(|class| class.fq_name == companion)?
             .properties
             .get(property as usize)?;
+        // A declared accessor is user code. The outer `<clinit>` calls it (through
+        // `access$get…` / `access$set…` when it is private) instead of touching the field.
+        // The accessor body and the declaration initializer store are the field operations.
+        let calls_declared_accessor = if writable {
+            declared.modifiers.declared_setter
+        } else {
+            declared.modifiers.declared_getter
+        };
+        if calls_declared_accessor {
+            return None;
+        }
         let private_property = declared.is_private;
         let property_name = declared.name.clone();
         let emitted_by_owner = self.static_owner == Some(StaticOwner::Class(owner));

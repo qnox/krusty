@@ -8180,6 +8180,11 @@ impl<'a> Emitter<'a> {
             ));
         }
         if let Some(setter) = declared.and_then(|p| p.setter) {
+            if self.reaches_through_bridge(class.fq_name, setter) {
+                return Some(access_bridges::private_member_accessor_access(
+                    self.ir, setter, owner,
+                ));
+            }
             let f = &self.ir.functions[setter as usize];
             return Some(PropertyAccess::Accessor {
                 owner,
