@@ -6393,6 +6393,38 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `member_and_extension_tailrec_agree_with_kotlinc` — a `StackOverflowError` on one side and an
   answer on the other is the divergence they report).
 
+  **An assertion or coercion wrapped around the call does not consume the tail position.** A
+  platform-narrowing not-null assertion — the checker's answer when a sibling branch of the same
+  `if` yields a platform type, so the whole conditional is flexible — wraps BOTH branches,
+  including the recursive call. The sweep sees through it exactly as through an implicit
+  coercion: a stepped call yields no value, so there is nothing left to assert, and kotlinc drops
+  the same check when it loops the call. Left opaque, the wrapper hides the tail call entirely;
+  for a `suspend` function the leftover self-call is a suspension point, so the state machine
+  re-invokes the function per iteration — real stack recursion with extra allocation, which is
+  what put both `realStringRepeat.kt` corpus cases on the expected-failures list.
+  Tests: `tests/tailrec_e2e.rs` (`a_tail_call_under_a_platform_not_null_assertion_runs_flat`,
+  `a_suspend_tail_call_under_a_platform_not_null_assertion_runs_flat`, each a million deep);
+  `src/fir_lower/tailrec.rs` (`a_self_call_under_a_not_null_assertion_replaces_its_return`).
+
+  **A self-call whose stepped argument evaluation SUSPENDS is not stepped.** Stepping moves the
+  call's operand evaluation bodily into the loop turn — the spilled temporaries the call reads
+  stay as statements of the turn, followed by the step's parameter stores — and a suspension in
+  that region is one the JVM coroutine state machine cannot split a state around: the resume would
+  land past the reassignment the turn exists to perform. kotlinc draws the same line: it loops a
+  `tailrec suspend` whose stepped operands are pure and re-invokes through the continuation when a
+  suspension sits among them (`EscKt$escape$1.invokeSuspend` ends in a real
+  `invokestatic EscKt.escape(…); areturn`). The sweep therefore scans the self-call's receiver,
+  supplied arguments, and the defaults the step would evaluate — following the spilled operand
+  temporaries into their initializers, the same aliases the self-call test already follows — for
+  the suspend facts common lowering recorded at each call site, and leaves the call a call when it
+  finds one. A suspension the body runs as its own statement is outside that region and does not
+  stop the step. Tests: `tests/tailrec_e2e.rs`
+  (`a_suspend_tail_call_with_a_suspending_argument_stays_a_call_and_runs`, content-compared
+  against kotlinc — the `realStringEscape.kt` corpus shape); `src/fir_lower/tailrec.rs`
+  (`a_self_call_whose_spilled_argument_suspends_stays_a_call`,
+  `a_self_call_whose_argument_suspends_across_a_unit_boundary_stays_a_call`, and their two
+  controls).
+
 - **A `return` is a tail position wherever it stands.** `tailrec` rewrites a tail self-call into a
   loop step, and the tail positions of a function are not only its last expression: nothing of the
   function runs after a `return`, so `if (n > 0) return f(n - 1)` written before the body's final

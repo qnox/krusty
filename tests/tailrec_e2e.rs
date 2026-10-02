@@ -386,6 +386,99 @@ fun box(): String {\n\
     assert_eq!(run(SRC), "OK");
 }
 
+/// A `tailrec` whose base branch returns a PLATFORM type — `StringBuilder.toString()` is `String!`
+/// from java.lang, which carries no Kotlin metadata — has the checker wrap BOTH branches of the
+/// `if` in a platform-narrowing not-null assertion, including the recursive call. The assertion
+/// must not hide the tail call from the sweep: the step takes the assertion's place and no check
+/// survives on the stepped call, which is the shape kotlinc emits.
+#[test]
+fn a_tail_call_under_a_platform_not_null_assertion_runs_flat() {
+    const SRC: &str = "tailrec fun pad(n: Int, acc: StringBuilder): String = if (n == 0) acc.toString() else pad(n - 1, acc.append(\"x\"))\n\
+fun box(): String {\n\
+    if (pad(1000000, StringBuilder()).length != 1000000) return \"fail pad\"\n\
+    return \"OK\"\n\
+}\n";
+    assert_eq!(run(SRC), "OK");
+}
+
+/// The same platform-assertion shape on a SUSPEND tailrec. Left behind, the self-call is a
+/// suspension point: the function gets a state machine whose resume path re-invokes it, so every
+/// iteration is a real stack frame and deep recursion overflows. With the sweep seeing through the
+/// assertion, the loop is the whole body, no suspension point remains, and the function is a plain
+/// looping method with an unused continuation — kotlinc's shape too.
+#[test]
+fn a_suspend_tail_call_under_a_platform_not_null_assertion_runs_flat() {
+    const SRC: &str = "import kotlin.coroutines.*\n\
+tailrec suspend fun repeatA(num: Int, acc: StringBuilder): String = if (num == 0) acc.toString() else repeatA(num - 1, acc.append(\"a\"))\n\
+fun box(): String {\n\
+    var s = \"\"\n\
+    val completion = object : Continuation<String> {\n\
+        override val context: CoroutineContext = EmptyCoroutineContext\n\
+        override fun resumeWith(result: Result<String>) {\n\
+            s = result.getOrThrow()\n\
+        }\n\
+    }\n\
+    val block: suspend () -> String = { repeatA(1000000, StringBuilder()) }\n\
+    block.startCoroutine(completion)\n\
+    if (s.length != 1000000) return \"fail repeat\"\n\
+    return \"OK\"\n\
+}\n";
+    assert_eq!(run(SRC), "OK");
+}
+
+/// The platform-assertion shape whose stepped argument SUSPENDS. `escapeChar` is a suspend call
+/// inside the recursive call's argument, and the argument region the loop step would re-evaluate
+/// is one the coroutine state machine cannot resume into — stepping it miscompiled the resumed
+/// value (`Unit` where the escaped `String` belonged). The sweep declines instead, and the
+/// self-call stays a call through the continuation: kotlinc's own shape for this source (its
+/// `escape$1.invokeSuspend` re-invokes `escape` and returns), so both compilers must agree on the
+/// escaped content at a depth real recursion survives.
+#[test]
+fn a_suspend_tail_call_with_a_suspending_argument_stays_a_call_and_runs() {
+    const SRC: &str = "import kotlin.coroutines.*\n\
+suspend fun escapeChar(c: Char): String? = when (c) {\n\
+    '\\\\' -> \"\\\\\\\\\"\n\
+    '\\n' -> \"\\\\n\"\n\
+    '\"' -> \"\\\\\\\"\"\n\
+    else -> \"\" + c\n\
+}\n\
+tailrec suspend fun String.escape(i: Int = 0, result: StringBuilder = StringBuilder()): String =\n\
+    if (i == length) result.toString()\n\
+    else escape(i + 1, result.append(escapeChar(get(i))))\n\
+fun box(): String {\n\
+    var s = \"\"\n\
+    val completion = object : Continuation<String> {\n\
+        override val context: CoroutineContext = EmptyCoroutineContext\n\
+        override fun resumeWith(result: Result<String>) {\n\
+            s = result.getOrThrow()\n\
+        }\n\
+    }\n\
+    val block: suspend () -> String = { \"a\\nb\\\\\".escape() }\n\
+    block.startCoroutine(completion)\n\
+    if (s != \"a\\\\nb\\\\\\\\\") return \"fail escape: $s\"\n\
+    return \"OK\"\n\
+}\n";
+    common::expect_box_same_as_kotlinc(SRC, "TailrecSuspendArgumentEscape");
+}
+
+/// An EXPLICIT `!!` on the self-call is not the platform-narrowing assertion: kotlinc reports the
+/// call under it as not a tail call, keeps recursing, and runs the check on every frame — so the
+/// base branch's `null` throws rather than being returned. The sweep must keep the source `!!`
+/// opaque (its `message` is `None`) for both halves of that.
+#[test]
+fn a_tail_call_under_an_explicit_bang_bang_stays_a_call_and_throws() {
+    const SRC: &str = "tailrec fun requireNonNull(n: Int): String? = if (n == 0) null else requireNonNull(n - 1)!!\n\
+fun box(): String {\n\
+    return try {\n\
+        requireNonNull(3)\n\
+        \"fail: no NPE\"\n\
+    } catch (e: NullPointerException) {\n\
+        \"OK\"\n\
+    }\n\
+}\n";
+    common::expect_box_same_as_kotlinc(SRC, "TailrecExplicitNotNull");
+}
+
 /// The elvis arm that is NOT the tail call keeps the conversion it needs.
 ///
 /// Distributing a coercion into a `when`'s arms is only sound if every arm still gets one; the
