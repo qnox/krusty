@@ -359,6 +359,10 @@ jobs:
           KRUSTY_GRADLE_TEST_BIN: ${{ github.workspace }}/krusty
           KRUSTY_GRADLE_KGP_VERSION: ${{ matrix.kotlin }}
           KRUSTY_GRADLE_VERSION: ${{ matrix.gradle }}
+          # Swatinem/rust-cache archives the Cargo target directory and may prune files that are
+          # not Cargo build output. Keep Gradle's mutable Kotlin DSL workspace out of target so a
+          # restored cache cannot contain a script directory without its metadata.bin.
+          KRUSTY_GRADLE_USER_HOME: ${{ runner.temp }}/krusty-gradle-user-home
         run: |
           chmod +x krusty
           KRUSTY_GRADLE_BIN=$(command -v gradle) \
