@@ -6,28 +6,13 @@ use super::{
 };
 use crate::ir::{ClassId, IrBinOp, IrExpr};
 use crate::jvm::classfile::CodeBuilder;
+use crate::jvm::constructor_debug::property_store_line;
 use crate::types::Ty;
 
 struct StoredConstructorProperty {
     class_name: String,
     field_name: String,
     ty: Ty,
-}
-
-fn constructor_initializer_store_line(
-    ir: &crate::ir::IrFile,
-    class: ClassId,
-    index: u32,
-) -> Option<u32> {
-    let class_decl = ir.classes.get(class as usize)?;
-    let field = class_decl.fields.get(index as usize)?;
-    if field.constructor_store_line != 0 {
-        return Some(field.constructor_store_line);
-    }
-    ir.prop_decl_lines
-        .get(&(class_decl.fq_name_id(), field.name.clone()))
-        .copied()
-        .filter(|line| *line != 0)
 }
 
 impl Emitter<'_> {
@@ -90,7 +75,12 @@ impl Emitter<'_> {
         let initializer_line = self
             .constructor_initializer_class
             .is_some()
-            .then(|| constructor_initializer_store_line(self.ir, class, index))
+            .then(|| {
+                self.ir
+                    .classes
+                    .get(class as usize)
+                    .and_then(|class| property_store_line(self.ir, class, index, statement))
+            })
             .flatten();
         let class_decl = &self.ir.classes[class as usize];
         let field = &class_decl.fields[index as usize];
