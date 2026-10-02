@@ -226,13 +226,7 @@ pub(super) fn realize(
         }
         let class_name = (runtime_reified && ir.specialized_functions.contains_key(&fid))
             .then(|| specialized_reified_placeholder(facade, fid));
-        match class_shape(
-            ir,
-            fid,
-            every_emitted_root,
-            runtime_reified,
-            class_name,
-        ) {
+        match class_shape(ir, fid, every_emitted_root, runtime_reified, class_name) {
             Ok((site, body, captures)) => realize_class(ir, fid, body, &site, signature, &captures),
             Err(shape) => {
                 crate::trace_compiler!(
@@ -549,10 +543,9 @@ pub(super) fn rename_specialized_reified_classes(
         })
         .collect::<Vec<_>>();
     for (function, from) in pending {
-        let name = crate::jvm::ir_emit::lambda_class_names::specialized_name(
-            ir, function, facade, modes,
-        )
-        .expect("a specialized reified lambda retains complete caller provenance");
+        let name =
+            crate::jvm::ir_emit::lambda_class_names::specialized_name(ir, function, facade, modes)
+                .expect("a specialized reified lambda retains complete caller provenance");
         let names = std::collections::HashMap::from([(from, crate::types::type_name(&name))]);
         ir.remap_classifier_identities(&names);
     }

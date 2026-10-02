@@ -352,7 +352,9 @@ fn enclosed_by_specialized_reified_lambda(ir: &IrFile, class: &IrClass) -> bool 
         _ => return false,
     };
     ir.specialized_functions.contains_key(&function)
-        && ir.runtime_reified_lambda_implementations.contains(&function)
+        && ir
+            .runtime_reified_lambda_implementations
+            .contains(&function)
         && ir.class_method_owners.get(&function).is_some_and(|owners| {
             owners.iter().any(|&owner| {
                 ir.classes
