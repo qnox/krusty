@@ -256,6 +256,9 @@ pub fn classes_against_kotlinc_module(sources: &[(&str, &str)]) -> ClassSets {
         super::common_core::compile_in_process_files(sources, &[stdlib], Some(jdk.as_path()))
             .expect("krusty accepted module inventory fixture")
             .into_iter()
+            // The in-process emitter also returns `META-INF/<module>.kotlin_module`. The reference
+            // side is class files only, so the inventory comparison is class identity.
+            .filter(|(_, bytes)| bytes.starts_with(&[0xCA, 0xFE, 0xBA, 0xBE]))
             .collect();
     ClassSets { reference, krusty }
 }
