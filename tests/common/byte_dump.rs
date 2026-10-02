@@ -49,6 +49,7 @@ use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -598,7 +599,20 @@ impl PendingDump {
     }
 }
 
-type Stamp = (u64, u32, u64);
+/// One observed file generation. Modification time and length catch ordinary writes; the Unix
+/// identity and change time distinguish an atomic same-size replacement even when its mtime is
+/// preserved. This harness already relies on Unix `flock`, so the same platform boundary owns the
+/// generation fields.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Stamp {
+    modified_seconds: u64,
+    modified_nanos: u32,
+    len: u64,
+    device: u64,
+    inode: u64,
+    change_seconds: i64,
+    change_nanos: i64,
+}
 
 struct Archive {
     modules: BTreeMap<String, BTreeMap<String, Vec<Span>>>,
@@ -987,7 +1001,15 @@ fn file_stamp(path: &Path) -> Option<Stamp> {
     let meta = std::fs::metadata(path).ok()?;
     let modified = meta.modified().ok()?;
     let since = modified.duration_since(SystemTime::UNIX_EPOCH).ok()?;
-    Some((since.as_secs(), since.subsec_nanos(), meta.len()))
+    Some(Stamp {
+        modified_seconds: since.as_secs(),
+        modified_nanos: since.subsec_nanos(),
+        len: meta.len(),
+        device: meta.dev(),
+        inode: meta.ino(),
+        change_seconds: meta.ctime(),
+        change_nanos: meta.ctime_nsec(),
+    })
 }
 
 fn archive_path(root: &Path) -> PathBuf {

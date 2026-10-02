@@ -1392,9 +1392,9 @@ fn dirty_publication_reloads_a_replacement_with_an_equal_cached_stamp() {
     let path = archive_path(&root);
     std::fs::write(&path, std::fs::read(archive_path(&foreign_root)).unwrap()).unwrap();
 
-    // Filesystems and atomic replacements do not promise a unique `(mtime, len)` generation.
-    // Force the cached tuple to equal the replacement while retaining the stale archive snapshot.
-    // Publication must still reload the locked file before it replays the local pending record.
+    // Force even the complete cached generation to equal the replacement while retaining the
+    // stale archive snapshot. Publication must still reload the locked file before it replays the
+    // local pending record: the lock, not an unlocked observation, is its authority.
     let replacement_stamp = file_stamp(&path).unwrap();
     let mut cache = dump_cache().lock().unwrap();
     let slot = cache.get_mut(&path).unwrap();
@@ -1429,6 +1429,74 @@ fn dirty_publication_reloads_a_replacement_with_an_equal_cached_stamp() {
     );
     let _ = std::fs::remove_dir_all(&root);
     let _ = std::fs::remove_dir_all(&foreign_root);
+}
+
+#[test]
+fn clean_observation_reloads_an_equal_metadata_atomic_replacement() {
+    let root = temp_root("clean-equal-stamp-replacement");
+    let replacement_root = temp_root("clean-equal-stamp-replacement-new");
+    let release = version("2.4.20");
+    let fingerprint = fingerprint_parts(&[b"same inputs"]);
+    let key = "case|A|default|plain";
+
+    store_files(&root, "mod", key, release, fingerprint, &files(b"old"));
+    flush_archive(&root);
+    assert_eq!(
+        load_files(&root, "mod", key, release, fingerprint)
+            .unwrap()
+            .get("pkg/A")
+            .unwrap(),
+        b"old"
+    );
+
+    store_files(
+        &replacement_root,
+        "mod",
+        key,
+        release,
+        fingerprint,
+        &files(b"new"),
+    );
+    flush_archive(&replacement_root);
+    let path = archive_path(&root);
+    write_atomic(
+        &path,
+        &std::fs::read(archive_path(&replacement_root)).unwrap(),
+    );
+    make_cached_metadata_equal_but_keep_prior_identity(&path);
+
+    assert_eq!(
+        load_files(&root, "mod", key, release, fingerprint)
+            .unwrap()
+            .get("pkg/A")
+            .unwrap(),
+        b"new",
+        "file identity must expose a replacement whose ordinary metadata matches the cache"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(&replacement_root);
+}
+
+#[test]
+fn clean_observation_rejects_an_equal_metadata_corrupt_atomic_replacement() {
+    let root = temp_root("clean-equal-stamp-corrupt-replacement");
+    let release = version("2.4.20");
+    let fingerprint = fingerprint_parts(&[b"same inputs"]);
+    let key = "case|A|default|plain";
+
+    store_files(&root, "mod", key, release, fingerprint, &files(b"old"));
+    flush_archive(&root);
+    assert!(load_files(&root, "mod", key, release, fingerprint).is_some());
+    let path = archive_path(&root);
+    let len = std::fs::metadata(&path).unwrap().len() as usize;
+    write_atomic(&path, &vec![0; len]);
+    make_cached_metadata_equal_but_keep_prior_identity(&path);
+
+    assert!(
+        load_files(&root, "mod", key, release, fingerprint).is_none(),
+        "a same-size corrupt replacement is a miss, never stale cached bytes"
+    );
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -1532,4 +1600,22 @@ fn temp_root(label: &str) -> PathBuf {
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
     root
+}
+
+fn make_cached_metadata_equal_but_keep_prior_identity(path: &Path) {
+    let replacement = file_stamp(path).expect("replacement stamp");
+    let mut cache = dump_cache().lock().unwrap();
+    let slot = cache.get_mut(path).expect("clean cached archive");
+    assert!(slot.pending.is_empty());
+    let prior = slot.stamp.expect("prior archive stamp");
+    assert_ne!(
+        (prior.device, prior.inode),
+        (replacement.device, replacement.inode),
+        "an atomic replacement has a distinct file identity"
+    );
+    slot.stamp = Some(Stamp {
+        device: prior.device,
+        inode: prior.inode,
+        ..replacement
+    });
 }
