@@ -194,16 +194,61 @@ impl Checker<'_> {
             .map(|source| source.suspend)
     }
 
-    /// Whether `actual` already implements the fun interface `target`.
+    /// Whether `actual` is already the exact applied fun interface `expected`.
     ///
-    /// A class or object that is that interface stays that value. A function supertype on the
-    /// same value is not a reason to build a fresh adapter. Lambdas and callable references are
-    /// still conversions: their checked type may already be the interface.
+    /// Assignability is the comparison, so a different instantiation, variance, or projection is
+    /// not this interface and may still convert. A function supertype on the same value is not a
+    /// reason to build a fresh adapter. Lambdas and callable references stay conversions: their
+    /// checked type may already be the interface.
     pub(super) fn sam_argument_already_implements(
         &self,
         argument: ExprId,
         actual: Ty,
-        target: TypeName,
+        expected: Ty,
+    ) -> bool {
+        if matches!(
+            self.file.expr(argument),
+            Expr::Lambda { .. } | Expr::CallableRef { .. }
+        ) {
+            return false;
+        }
+        if matches!(actual, Ty::Error | Ty::Pending | Ty::Fun(_))
+            || actual.mentions_pending()
+            || !matches!(expected.non_null(), Ty::Obj(_, _))
+        {
+            return false;
+        }
+        self.receiver_is_assignable(actual, expected)
+    }
+
+    /// Whether generic inference should read `actual` rather than its function supertype.
+    ///
+    /// A solved parameter uses the applied interface, so `Worker<TokenA>` does not instantiate
+    /// `Worker<TokenB>`. An unsolved `Worker<T>` has no application to compare yet; any
+    /// instantiation of that classifier is the value's own constraint.
+    pub(super) fn sam_argument_supplies_interface(
+        &self,
+        argument: ExprId,
+        actual: Ty,
+        parameter: Ty,
+    ) -> bool {
+        if parameter.mentions_ty_param() {
+            let Some(classifier) = self
+                .semantic_sam_signature(parameter)
+                .map(|signature| signature.internal)
+            else {
+                return false;
+            };
+            return self.sam_argument_instantiates_classifier(argument, actual, classifier);
+        }
+        self.sam_argument_already_implements(argument, actual, parameter)
+    }
+
+    fn sam_argument_instantiates_classifier(
+        &self,
+        argument: ExprId,
+        actual: Ty,
+        classifier: TypeName,
     ) -> bool {
         if matches!(
             self.file.expr(argument),
@@ -224,7 +269,7 @@ impl Checker<'_> {
             }
             seen.push(ty);
             if let Ty::Obj(name, _) = ty {
-                if name == target {
+                if name == classifier {
                     return true;
                 }
             }
@@ -287,16 +332,59 @@ impl Checker<'_> {
         }
     }
 
+    /// Expected type of each source argument, using the vararg element when the argument is one
+    /// packed value. `Ty::Error` means the mapping is unavailable; that is not evidence the value
+    /// already is the target.
+    pub(super) fn sam_argument_expected_types(
+        &self,
+        call: ExprId,
+        args: &[ExprId],
+        argument_names: Option<&[Option<String>]>,
+        params: &[Ty],
+        call_sig: &CallSig,
+    ) -> Vec<Ty> {
+        let Some(parameters) = call_argument_parameter_indices(
+            args.len(),
+            params.len(),
+            argument_names,
+            self.file.call_has_trailing_lambda.contains(&call.0),
+            call_sig,
+        ) else {
+            return vec![Ty::Error; args.len()];
+        };
+        args.iter()
+            .enumerate()
+            .zip(parameters)
+            .map(|((source, &argument), parameter)| {
+                let Some(declared) = params.get(parameter).copied() else {
+                    return Ty::Error;
+                };
+                let named = argument_names
+                    .and_then(|names| names.get(source))
+                    .is_some_and(Option::is_some);
+                if call_sig.vararg_index == Some(parameter)
+                    && !named
+                    && !self.file.is_spread_arg(argument)
+                {
+                    declared.array_read_elem().unwrap_or(declared)
+                } else {
+                    declared
+                }
+            })
+            .collect()
+    }
+
     pub(super) fn record_selected_sam_signatures(
         &mut self,
         scope: &CheckerScope<'_>,
         args: &[ExprId],
         signatures: &[Option<crate::symbol_resolver::SamSignature>],
+        expected_types: &[Ty],
     ) {
-        for (&argument, signature) in args.iter().zip(signatures) {
+        for ((&argument, signature), &expected) in args.iter().zip(signatures).zip(expected_types) {
             if let Some(signature) = signature {
                 let nominal = self.expr_types[argument.0 as usize];
-                if self.sam_argument_already_implements(argument, nominal, signature.internal) {
+                if self.sam_argument_already_implements(argument, nominal, expected) {
                     continue;
                 }
                 if let Some(conversion) =

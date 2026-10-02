@@ -140,10 +140,20 @@ impl CallArgKind {
     /// independently deciding whether to feed `KFunctionN` or `(P) -> R` into the generic solver.
     pub(crate) fn inference_type(&self, source: &dyn SymbolSource, parameter: Ty) -> Ty {
         if let Some(sam) = super::semantic_sam_signature(source, parameter) {
-            // A value that already implements the fun interface constrains that
-            // interface. Its function supertype must not instantiate the interface.
-            if self.nominal_implements_classifier(source, sam.internal) {
-                return self.ty();
+            // A solved application is the exact interface: `Worker<TokenA>` does not instantiate
+            // `Worker<TokenB>`. An unsolved `Worker<T>` has no application yet, so any
+            // instantiation of that classifier is this value's constraint rather than its
+            // function supertype.
+            let nominal = self.ty();
+            let already = if parameter.mentions_ty_param() {
+                self.nominal_implements_classifier(source, sam.internal)
+            } else {
+                !matches!(nominal.non_null(), Ty::Error | Ty::Pending | Ty::Fun(_))
+                    && !nominal.mentions_pending()
+                    && semantic_arg_assignable(source, &parameter, &nominal)
+            };
+            if already {
+                return nominal;
             }
             self.function_type()
                 .unwrap_or_else(|| self.type_for(parameter))

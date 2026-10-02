@@ -16275,18 +16275,12 @@ impl<'a> Checker<'a> {
                     "top-level SAM inference call={} parameter={parameter_index} declared={parameter:?} nominal={actual:?} function={function:?}",
                     call.0,
                 );
-                let inference_actual = match self.semantic_sam_signature(*parameter) {
-                    Some(sam)
-                        if !self.sam_argument_already_implements(
-                            argument,
-                            *actual,
-                            sam.internal,
-                        ) =>
-                    {
+                let inference_actual =
+                    if self.sam_argument_supplies_interface(argument, *actual, *parameter) {
+                        *actual
+                    } else {
                         function.unwrap_or(*actual)
-                    }
-                    _ => *actual,
-                };
+                    };
                 let inferred = crate::symbol_resolver::infer_generic_call_bindings_from_symbols(
                     &source,
                     &signature,
@@ -16613,7 +16607,13 @@ impl<'a> Checker<'a> {
             // the conversion is precisely what makes the argument applicable. Evaluate that
             // semantic conversion before the ordinary nominal rejection below. Its score remains
             // lower than a direct function/`Any` fit, preserving Kotlin's overload preference.
-            let sam_conversion = {
+            // A value already assignable to this exact applied interface is an ordinary argument:
+            // recording a conversion here would rank it below that direct fit and could select
+            // the adapted overload.
+            let sam_conversion = if self.sam_argument_already_implements(argument, actual, expected)
+            {
+                None
+            } else {
                 let argument_kind = call_arg_kind(self.file, argument, actual);
                 let probe = if argument_kind.is_lambda_literal() {
                     self.lambda_probe_ty(scope, argument).unwrap_or(actual)
@@ -46342,7 +46342,14 @@ impl<'a> Checker<'a> {
             }
         }
         if let Some(signatures) = sam_signatures {
-            self.record_selected_sam_signatures(scope, args, signatures);
+            let expected_types = self.sam_argument_expected_types(
+                call,
+                args,
+                argument_names,
+                &shape.params,
+                &shape.call_sig,
+            );
+            self.record_selected_sam_signatures(scope, args, signatures, &expected_types);
         }
         let implicit = shape
             .context_sources
@@ -58210,7 +58217,7 @@ impl<'a> Checker<'a> {
                     return;
                 }
             } else if conversion_matches
-                && !self.sam_argument_already_implements(argument, actual, sam.internal)
+                && !self.sam_argument_already_implements(argument, actual, expected)
             {
                 if let Some(conversion) = self.sam_conversion_record(scope, argument, actual, sam) {
                     self.resolved_sam_conversions.insert(argument, conversion);

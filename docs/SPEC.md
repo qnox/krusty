@@ -8481,15 +8481,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `inlineClasses/funInterface/mangledSamWrappers`, `mangledSamWrappersGeneric`,
   `callableReference/adaptedReferences/suspendConversion/propertyReferenceToSuspendFunction`,
   and `coroutines/suspendConversion/suspendConversionBetweenFunInterfaces`.
-- **A value that already implements the expected fun interface is not wrapped.** An argument
-  whose classifier is that interface — an object expression, a class that implements it, or the
-  same value when the interface is generic — is passed through, even when the value also has a
-  function supertype (`fun interface Foo : () -> Int`, or `class Impl : Worker, (String) -> Unit`).
-  Wrapping it would replace its identity and `toString`. A function value that is not the
-  interface, and a lambda or callable reference, still convert. Tests:
+- **A value that already implements the expected fun interface is not wrapped.** Assignability
+  to the exact applied interface — including its type arguments, variance, and projections — is
+  an ordinary argument during overload ranking, even when the value also has a function
+  supertype. A different instantiation is not that interface and still converts. An unsolved
+  `Worker<T>` is inferred from the value's own instantiation, not from that function supertype.
+  The direct overload outranks a candidate that fits only by SAM adaptation. Wrapping a value
+  that is already the interface would replace its identity and `toString`. A function value that
+  is not the interface, and a lambda or callable reference, still convert. Tests:
   `an_object_that_is_the_fun_interface_is_not_sam_converted`,
   `a_class_that_implements_a_fun_interface_and_a_function_type_is_not_sam_converted`,
   `a_generic_fun_interface_subtype_is_not_sam_converted`,
+  `a_mismatched_fun_interface_instantiation_still_converts`,
+  `a_star_projected_fun_interface_subtype_is_not_sam_converted`,
+  `a_contravariant_fun_interface_supertype_is_not_sam_converted`,
+  `a_direct_fun_interface_overload_beats_a_sam_adapted_one`,
   `a_function_value_passed_to_a_fun_interface_still_converts`, and
   `tests/sam_conversion_e2e.rs`. Corpus: `funInterface/kt46908_functionSupertype.kt`,
   `funInterface/noConversionForSubtype.kt`, `funInterface/noConversionForSubtypeGeneric.kt`.
