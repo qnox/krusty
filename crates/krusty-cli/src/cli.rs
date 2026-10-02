@@ -74,10 +74,10 @@ pub struct Options {
     /// (diagnostic wording, class-file details) this compilation reproduces. `None` leaves the
     /// choice to `KRUSTY_LANGUAGE_VERSION`, then the newest supported release.
     pub kotlin_reference_version: Option<KotlinVersion>,
-    /// `-language-version <major.minor>`: the language-version stamp written as every
-    /// `@kotlin.Metadata` `mv` and as the `.kotlin_module` header version (`[X, Y, 0]`). `None`
-    /// keeps kotlinc's no-flag stamp, its default language version.
-    pub language_version: Option<[i32; 3]>,
+    /// `-Xmetadata-version <major.minor>`: the artifact stamp written as every `@kotlin.Metadata`
+    /// `mv` and as the `.kotlin_module` header version (`[X, Y, 0]`). This does not select language
+    /// semantics. `None` keeps the default stamp, the implemented language version.
+    pub metadata_version: Option<[i32; 3]>,
 }
 
 impl Default for Options {
@@ -100,7 +100,7 @@ impl Default for Options {
             no_jdk: false,
             jvm_target_major: None,
             kotlin_reference_version: None,
-            language_version: None,
+            metadata_version: None,
             jvm_default: JvmDefaultMode::default(),
             java_parameters: false,
             lambda_modes: LambdaModes::default(),
@@ -166,17 +166,37 @@ fn apply_jvm_default(
     }
 }
 
-/// Parse a `-language-version` value: kotlinc takes a bare `major.minor`, which the metadata
-/// stamp pads with a zero patch. Segments are unsigned decimal — `i32::parse` alone would admit
-/// signs (`-2.2`) that kotlinc rejects.
-fn parse_language_version(value: &str) -> Option<[i32; 3]> {
+/// Stable levels a metadata stamp may name. kotlinc 2.4.20 also accepts experimental 2.5 and 2.6;
+/// the stamp contract stops at 2.4, the language this compiler implements.
+const METADATA_STAMP_LEVELS: [(i32, i32); 5] = [(2, 0), (2, 1), (2, 2), (2, 3), (2, 4)];
+
+/// The only `-language-version` this compiler implements. Other levels are not a stamp switch.
+const IMPLEMENTED_LANGUAGE_LEVEL: [i32; 3] = [2, 4, 0];
+
+fn supported_stamp_levels() -> String {
+    METADATA_STAMP_LEVELS
+        .iter()
+        .map(|(major, minor)| format!("{major}.{minor}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Parse a `major.minor` level on the shared stamp contract. Anything else — a patch segment,
+/// a sign, or a level outside 2.0 through 2.4 — is unknown.
+fn parse_metadata_level(value: &str) -> Option<[i32; 3]> {
     let (major, minor) = value.split_once('.')?;
-    let segment = |s: &str| {
-        (s.bytes().all(|b| b.is_ascii_digit()) && !s.is_empty())
-            .then(|| s.parse().ok())
+    if minor.contains('.') {
+        return None;
+    }
+    let segment = |text: &str| -> Option<i32> {
+        (text.bytes().all(|byte| byte.is_ascii_digit()) && !text.is_empty())
+            .then(|| text.parse().ok())
             .flatten()
     };
-    Some([segment(major)?, segment(minor)?, 0])
+    let level = [segment(major)?, segment(minor)?, 0];
+    METADATA_STAMP_LEVELS
+        .contains(&(level[0], level[1]))
+        .then_some(level)
 }
 
 /// Split a classpath string on the platform separator (`:` on Unix).
@@ -239,20 +259,35 @@ pub fn parse(argv: impl IntoIterator<Item = String>) -> Options {
                     opts.module_name = v;
                 }
             }
-            // `-language-version X.Y` stamps every `@kotlin.Metadata` `mv` and the
-            // `.kotlin_module` header with `[X, Y, 0]` (kotlinc's no-flag output keeps its default
-            // language version). A value kotlinc cannot parse fails the invocation rather than
-            // silently compiling with a stamp the build did not ask for.
+            // Public `-language-version` selects language semantics. This compiler implements 2.4
+            // only, so every other level is rejected rather than compiled under 2.4 rules with a
+            // different artifact stamp. The stamp itself is the internal `-Xmetadata-version`.
             "-language-version" => match it.next() {
-                Some(v) => match parse_language_version(&v) {
-                    Some(version) => opts.language_version = Some(version),
-                    None => opts
-                        .errors
-                        .push(format!("invalid value '{v}' for -language-version")),
+                Some(v) => match parse_metadata_level(&v) {
+                    Some(IMPLEMENTED_LANGUAGE_LEVEL) => {}
+                    Some(_) => opts.errors.push(format!(
+                        "krusty does not support -language-version={v}; only 2.4 is implemented"
+                    )),
+                    None => opts.errors.push(format!(
+                        "unknown language version: {v}\nSupported language versions: {}",
+                        supported_stamp_levels()
+                    )),
                 },
                 None => opts
                     .errors
                     .push("missing value for -language-version".to_string()),
+            },
+            "-Xmetadata-version" => match it.next() {
+                Some(v) => match parse_metadata_level(&v) {
+                    Some(version) => opts.metadata_version = Some(version),
+                    None => opts.errors.push(format!(
+                        "unknown metadata version: {v}\nSupported metadata versions: {}",
+                        supported_stamp_levels()
+                    )),
+                },
+                None => opts
+                    .errors
+                    .push("missing value for -Xmetadata-version".to_string()),
             },
             "-jdk-home" => {
                 if let Some(v) = it.next() {
@@ -600,8 +635,9 @@ Common options (kotlinc-compatible):
   -module-name <name>   name of the generated <name>.kotlin_module (default: main)
   -include-runtime      accepted (no-op: krusty does not bundle the stdlib)
   -jvm-target <v>        class-file version to emit (1.8→v52, 9→v53, …, 25→v69; default v52)
-  -language-version <v>  stamp @kotlin.Metadata and the .kotlin_module header with this
-                         language version (major.minor; default: the compiler's own)
+  -language-version <v>  language semantics to compile (only 2.4 is implemented)
+  -Xmetadata-version <v> internal artifact stamp for @kotlin.Metadata and the
+                         .kotlin_module header (2.0–2.4; does not change semantics)
   -version              print version and exit
   -jvm-default <mode>   interface default-method strategy: enable | no-compatibility
                         (legacy -Xjvm-default=all | all-compatibility)
@@ -922,31 +958,60 @@ mod tests {
         assert!(o.ignored.contains(&"-Xsomething".to_string()));
     }
 
-    /// `-language-version` selects the emitted metadata version stamp; it is an active backend
-    /// option, so it must reach `Options`, never `ignored`. A value that is not `major.minor` is
-    /// fatal, like any other invalid option value.
+    /// Public `-language-version` accepts only the implemented level, 2.4, and does not select a
+    /// stamp. `-Xmetadata-version` is the internal stamp and accepts the shared 2.0–2.4 contract.
     #[test]
-    fn language_version_is_read_and_validated() {
-        let o = parse_args(&["-language-version", "2.2", "f.kt"]);
-        assert_eq!(o.language_version, Some([2, 2, 0]));
-        assert!(o.ignored.is_empty(), "{:?}", o.ignored);
-        assert!(o.errors.is_empty(), "{:?}", o.errors);
-        assert_eq!(o.sources, vec!["f.kt".to_string()]);
-        assert_eq!(parse_args(&["f.kt"]).language_version, None);
+    fn language_version_rejects_unimplemented_levels_and_the_stamp_is_internal() {
+        let current = parse_args(&["-language-version", "2.4", "f.kt"]);
+        assert!(current.errors.is_empty(), "{:?}", current.errors);
+        assert_eq!(current.metadata_version, None);
+        assert_eq!(current.sources, vec!["f.kt".to_string()]);
 
-        for bad in ["banana", "2", "2.4.0", "2.x", "-2.2", "+2.2"] {
-            let o = parse_args(&["-language-version", bad, "f.kt"]);
-            assert_eq!(o.language_version, None, "{bad:?}");
+        let older = parse_args(&["-language-version", "2.2", "f.kt"]);
+        assert_eq!(older.metadata_version, None);
+        assert_eq!(
+            older.errors,
+            [
+                "krusty does not support -language-version=2.2; only 2.4 is implemented"
+                    .to_string()
+            ]
+        );
+
+        let stamp = parse_args(&["-Xmetadata-version", "2.2", "f.kt"]);
+        assert_eq!(stamp.metadata_version, Some([2, 2, 0]));
+        assert!(stamp.errors.is_empty(), "{:?}", stamp.errors);
+        assert!(stamp.ignored.is_empty(), "{:?}", stamp.ignored);
+
+        let supported = "2.0, 2.1, 2.2, 2.3, 2.4";
+        for bad in [
+            "banana", "2", "2.4.0", "2.x", "-2.2", "+2.2", "0.0", "2.5", "999.1",
+        ] {
+            let language = parse_args(&["-language-version", bad, "f.kt"]);
             assert_eq!(
-                o.errors,
-                [format!("invalid value '{bad}' for -language-version")]
+                language.errors,
+                [format!(
+                    "unknown language version: {bad}\nSupported language versions: {supported}"
+                )],
+                "{bad:?}"
+            );
+            let metadata = parse_args(&["-Xmetadata-version", bad, "f.kt"]);
+            assert_eq!(metadata.metadata_version, None, "{bad:?}");
+            assert_eq!(
+                metadata.errors,
+                [format!(
+                    "unknown metadata version: {bad}\nSupported metadata versions: {supported}"
+                )],
+                "{bad:?}"
             );
         }
 
-        let o = parse_args(&["-language-version"]);
         assert_eq!(
-            o.errors,
+            parse_args(&["-language-version"]).errors,
             ["missing value for -language-version".to_string()]
+        );
+        assert_eq!(
+            parse_args(&["-Xmetadata-version"]).errors,
+            ["missing value for -Xmetadata-version".to_string()]
         );
     }
 

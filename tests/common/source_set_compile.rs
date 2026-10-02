@@ -13,9 +13,9 @@ pub fn compile_in_process_files(
     compile_in_process_files_target(sources, cp_jars, jdk_modules, None)
 }
 
-/// [`compile_in_process_files`] with a `-language-version` metadata stamp (`[X, Y, 0]`; `None`
-/// keeps the default), for fixtures asserting the `@kotlin.Metadata` `mv` and the
-/// `.kotlin_module` header version.
+/// [`compile_in_process_files`] with an internal metadata stamp (`[X, Y, 0]`; `None` keeps the
+/// default), for fixtures asserting the `@kotlin.Metadata` `mv` and the `.kotlin_module` header
+/// version. This is not `-language-version`.
 #[allow(dead_code)] // e2e-only today; the conformance target shares this module
 pub fn compile_in_process_files_metadata_version(
     sources: &[(&str, &str)],

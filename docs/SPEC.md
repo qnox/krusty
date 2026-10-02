@@ -10009,18 +10009,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `multiplatform/k2/expectStatic.kt`.) Classes compiled with this experimental feature match
   kotlinc's except the `@Metadata` pre-release flag kotlinc sets (`xi` 50 against 48).
 
-- **`-language-version X.Y` stamps the emitted metadata, not the language.** kotlinc's
-  `-language-version` both gates language semantics and selects the version stamp written into the
-  artifacts; krusty has no alternate language-semantics mode, so the flag selects only the stamp:
-  every emitted `@kotlin.Metadata` carries `mv=[X, Y, 0]` and the `.kotlin_module` header records
-  `[X, Y, 0]` as its version ints. Without the flag the stamp is the compiler's default language
-  version (`[2, 4, 0]`), matching the reference toolchain's no-flag output. The value is a bare
-  `major.minor`; anything else (`2`, `2.4.0`, a non-numeric segment) fails the invocation rather
-  than compiling under a stamp the build did not ask for. `-api-version` stays an accepted-and-
-  ignored compatibility flag. (`tests/metadata_language_version_e2e.rs` — including a differential
-  comparison of the stamped `mv` and the module header against kotlinc run with
-  `-language-version 2.2` — plus `language_version_is_read_and_validated` in
-  `crates/krusty-cli/src/cli.rs` and `language_version_stamps_the_header` in
+- **`-language-version` is the implemented language, and the artifact stamp is separate.**
+  kotlinc's `-language-version` both gates language semantics and selects the version written into
+  `@kotlin.Metadata` and the `.kotlin_module` header. krusty implements 2.4 only, so a public
+  `-language-version` other than 2.4 is rejected; 2.4 leaves the default stamp `[2, 4, 0]`. The
+  internal `-Xmetadata-version X.Y` writes `mv=[X, Y, 0]` and the same version into the module
+  header without claiming those language semantics. The accepted levels are the one contract
+  2.0, 2.1, 2.2, 2.3, and 2.4; a patch segment, a sign, or any other pair (including kotlinc's
+  experimental 2.5) is an unknown version. `-api-version` stays an accepted-and-ignored
+  compatibility flag. (`tests/metadata_language_version_e2e.rs` compares class, facade,
+  `$DefaultImpls`, suspend-lambda, and regenerated-inline-object stamps with kotlinc's
+  `-language-version 2.2` output; `language_version_rejects_unimplemented_levels_and_the_stamp_is_internal`
+  in `crates/krusty-cli/src/cli.rs`; `language_version_stamps_the_header` in
   `src/metadata/module.rs`.)
 
 ## 8. Success criteria for the PoC
