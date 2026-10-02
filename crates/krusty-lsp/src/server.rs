@@ -1,6 +1,7 @@
 mod engine;
 mod implementation;
 mod line_index;
+mod output_queue;
 mod response_page;
 mod semantic_token_response;
 mod status;
