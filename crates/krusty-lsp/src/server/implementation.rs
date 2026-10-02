@@ -4488,7 +4488,7 @@ where
 {
     // Stdout is written on its own thread. A client that stops reading must not block this loop:
     // the analysis engine publishes on `incoming`, and a blocked write would stall that queue.
-    let mut writer = super::output_queue::OutputQueue::spawn(writer);
+    let mut writer = super::output_queue::OutputQueue::spawn(writer)?;
     let writer = &mut writer;
     let mut pending = VecDeque::new();
     let mut input_dispatches_since_maintenance = 0usize;
@@ -4550,7 +4550,7 @@ where
         &incoming,
         ENGINE_SHUTDOWN_GRACE,
     );
-    outcome
+    writer.finish(outcome)
 }
 
 /// Disconnect the analysis command queue and wait at most `grace` for its thread to unwind.
