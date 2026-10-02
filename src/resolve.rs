@@ -16625,8 +16625,11 @@ impl<'a> Checker<'a> {
             {
                 return None;
             }
-            self.call_arg_kind(scope, argument)
-                .is_expected_type_callable()
+            let contextual_expected_type_callable = contextual_call_result
+                && self
+                    .call_arg_kind(scope, argument)
+                    .is_expected_type_callable();
+            contextual_expected_type_callable
                 .then_some(0)
                 .or_else(|| self.member_argument_score(expected, semantic_actual))
                 .or_else(|| contextual_call_result.then_some(0))

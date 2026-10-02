@@ -92,3 +92,32 @@ fun box(): String {
 
     common::expect_box_same_as_kotlinc(source, "TopLevelVarargElementSpecificity");
 }
+
+#[test]
+fn classpath_contextual_vararg_tie_matches_kotlinc() {
+    const LIB: &str = r#"
+package dep
+
+class Leaf
+class Crate<out T>
+
+fun <T> crate(): Crate<T> = Crate<T>()
+
+fun equal(vararg values: Crate<Leaf>) = "vararg"
+fun equal(value: Crate<Leaf>) = "fixed"
+"#;
+    const MAIN: &str = r#"
+import dep.*
+
+fun box(): String {
+    val typed: Crate<Leaf> = crate()
+    val actual = equal(typed) + "/" + equal(crate())
+    return if (actual == "fixed/fixed") "OK" else actual
+}
+"#;
+
+    let Some(out) = common::expect_box_run_against("classpath_vararg_tie", LIB, MAIN) else {
+        return;
+    };
+    assert_eq!(out.trim(), "OK", "box() = {out:?}");
+}
