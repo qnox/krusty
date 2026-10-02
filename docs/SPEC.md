@@ -10447,6 +10447,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `a_multi_line_enum_member_value_of_returns_to_its_line`,
   `a_reified_enum_value_of_template_marks_its_call_site`.
 
+- **A reflective `E::valueOf` is the enum's `valueOf` member, not a lambda.** Used as a
+  `KFunction`, `E::valueOf` is a callable-reference value whose target is the classifier's implicit
+  `valueOf(String)` member. Common IR records that operation and the classifier; the JVM carrier is
+  the same `FunctionReferenceImpl` a reflective function uses, reflecting `valueOf(Ljava/lang/String;)LE;`
+  on `E` and invoking `E.valueOf`. A use whose expected type is already `(String) -> E` stays a
+  lambda. An adapted reflective reference is refused: its reflected signature is not the adapter's.
+  Tests: `reflective_enum_value_of_reference_names_the_classifier_member`,
+  `function_typed_enum_value_of_reference_stays_a_lambda`,
+  `callable_ref_e2e::reflective_enum_value_of_reference_returns_the_named_entry`. Box:
+  `callableReference/function/enumValueOfMethod.kt`.
+
 - **An assignment's write dispatches where its LVALUE is named.** `b\n    .value =\n    x` puts the
   setter call on the `.value` line, the way a multi-line call's dispatch returns to its selector's
   line — kotlinc records `line 4: 6, line 6: 7, line 5: 8, line 7: 11`, and krusty had no entry for

@@ -5,6 +5,29 @@
 use super::common;
 
 #[test]
+fn reflective_enum_value_of_reference_returns_the_named_entry() {
+    const SRC: &str = "\
+enum class E { ENTRY }\n\
+fun box(): String {\n\
+    val f = E::valueOf\n\
+    val result = f(\"ENTRY\")\n\
+    return if (result == E.ENTRY) \"OK\" else \"Fail $result\"\n\
+}\n";
+    common::expect_box_same_as_kotlinc(SRC, "EnumValueOfMethod");
+}
+
+#[test]
+fn function_typed_enum_value_of_reference_invokes_the_member() {
+    const SRC: &str = "\
+enum class E { ENTRY }\n\
+fun apply(f: (String) -> E, name: String): E = f(name)\n\
+fun box(): String {\n\
+    return if (apply(E::valueOf, \"ENTRY\") == E.ENTRY) \"OK\" else \"Fail\"\n\
+}\n";
+    common::expect_box_same_as_kotlinc(SRC, "EnumValueOfFunction");
+}
+
+#[test]
 fn callable_refs_run() {
     const SRC: &str = "fun inc(n: Int): Int = n + 1\n\
 fun twice(n: Int): Int = n * 2\n\

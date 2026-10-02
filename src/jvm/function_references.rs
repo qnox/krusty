@@ -213,6 +213,11 @@ fn realize_adapter_reference(
         crate::ir::IrCallableReferenceTarget::Constructor { .. } => {
             crate::ir::ReflectedCallable::Constructor
         }
+        // A classifier callable is a source declaration of that classifier, reflected by the
+        // operation's Kotlin name.
+        crate::ir::IrCallableReferenceTarget::Classifier { .. } => {
+            crate::ir::ReflectedCallable::Source
+        }
         // A conversion is a compiler builtin whose reflected name and signature are fixed.
         crate::ir::IrCallableReferenceTarget::External { .. }
         | crate::ir::IrCallableReferenceTarget::FunctionValueConversion { .. } => {
@@ -258,6 +263,14 @@ fn realize_adapter_reference(
         crate::ir::IrCallableReferenceTarget::Constructor { classifier } => {
             (Some(classifier), "<init>".to_string(), false, None)
         }
+        crate::ir::IrCallableReferenceTarget::Classifier {
+            classifier,
+            operation,
+        } => match operation {
+            crate::ir::IrClassifierCallable::EnumValueOf => {
+                (Some(classifier), "valueOf".to_string(), false, None)
+            }
+        },
         // A local function has no declaration of its own on the JVM: kotlinc reflects it on
         // `Intrinsics.Kotlin`, not top-level, under the function it was lifted to.
         crate::ir::IrCallableReferenceTarget::Local { name, .. } => (
