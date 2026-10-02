@@ -449,3 +449,49 @@ fn a_captured_legacy_context_receiver_keeps_its_own_role() {
         .collect::<Vec<_>>();
     assert_eq!(fields, [("$$context_receiver_0", "LBox;")]);
 }
+
+/// `::FLocal` inside an extension must not take the extension receiver: the local class never
+/// reads it, so its constructor and the constructor reference are `(LT, FT)`. `read` does read the
+/// receiver, so that local class's constructor keeps `Rec` and the direct call passes it.
+const CONSTRUCTOR_REFERENCE: &str = r#"
+open class L<LL>(val ll: LL)
+class Rec<T>(val rt: T)
+
+fun <FT> Rec<FT>.fn(): L<FT> {
+    class FLocal<LT>(lt: LT, val pt: FT) : L<LT>(lt)
+    return foo2(rt, rt, ::FLocal)
+}
+
+fun <FT> Rec<FT>.read(extra: FT): String {
+    class Local(val pt: FT) {
+        fun show(): String = this@read.rt.toString()
+    }
+    return Local(extra).show()
+}
+
+fun <T1, T2, R> foo2(t1: T1, t2: T2, bb: (T1, T2) -> R): R = bb(t1, t2)
+
+fun box(): String {
+    val unused = Rec("O").fn().ll
+    val used = Rec("K").read("x")
+    return unused + used
+}
+"#;
+
+#[test]
+fn an_unused_extension_receiver_is_not_a_constructor_reference_parameter() {
+    let shapes = [
+        ("MainKt$fn$FLocal", "MainKt$fn$FLocal"),
+        ("MainKt$fn$1", "invoke"),
+        ("MainKt$read$Local", "MainKt$read$Local"),
+    ];
+    for (class, method) in shapes {
+        let pair = common::ModuleClassPair::compile(&[("Main.kt", CONSTRUCTOR_REFERENCE)], class);
+        let (reference, krusty) = pair.method_code(class, method);
+        assert_eq!(
+            krusty, reference,
+            "{class}.{method}: constructor-reference shape differs from kotlinc"
+        );
+    }
+    common::expect_box_same_as_kotlinc(CONSTRUCTOR_REFERENCE, "LocalCtorRef");
+}

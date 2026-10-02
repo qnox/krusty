@@ -340,6 +340,39 @@ pub(super) fn merge_local_receiver_capture(
     bindings.push(None);
 }
 
+impl Checker<'_> {
+    /// Finish a local class's receiver captures after its body has been checked.
+    ///
+    /// Receivers the body read are ordered by first use. An implicit receiver the inventory held
+    /// only so that check could see it, and which the body never read, is dropped: it is not a
+    /// constructor parameter. The discovered-map entry is replaced with that result, or removed
+    /// when nothing remains.
+    pub(super) fn finalize_local_class_receiver_captures(
+        &mut self,
+        declaration: DeclId,
+        captures: &mut Vec<AnonymousObjectCapture>,
+        bindings: &mut Vec<Option<u32>>,
+        used_receivers: Vec<(usize, AnonymousObjectCaptureSource)>,
+    ) {
+        capture_field_order::order_receivers_by_first_use(
+            captures,
+            bindings,
+            used_receivers.clone(),
+        );
+        drop_unused_implicit_receivers(captures, bindings, &used_receivers);
+        if captures.is_empty() {
+            self.discovered_local_class_captures.remove(&declaration);
+            self.discovered_local_class_capture_bindings
+                .remove(&declaration);
+        } else {
+            self.discovered_local_class_captures
+                .insert(declaration, std::mem::take(captures));
+            self.discovered_local_class_capture_bindings
+                .insert(declaration, std::mem::take(bindings));
+        }
+    }
+}
+
 /// Drop an implicit receiver the local-class inventory held only so the body check could see it.
 ///
 /// A receiver whose use count increased stays, in the field the body check already numbered.
