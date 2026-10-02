@@ -119,4 +119,3 @@ typeErasure/funWithReifiedTypeParameterContextParameterAndExtensionReceiverInsid
 unsignedTypes/implicitIntegerCoercionNamedArg.kt
 unsignedTypes/signedToUnsignedConversions.kt
 unsignedTypes/varargsOfUnsignedTypes.kt
-vararg/kt10926.kt
