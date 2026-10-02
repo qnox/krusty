@@ -28,8 +28,8 @@ pub(super) struct InlineExpansions {
     unread_operands: HashSet<ExprId>,
     provenance: HashMap<ExprId, IrInlineCopyProvenance>,
     /// The semantic type declared for a materialized inline parameter, before call-site
-    /// specialization. A backend chooses storage/debug representation from this fact; the
-    /// declaration expression itself keeps its specialized semantic type.
+    /// specialization. A backend uses this only for declaration-owned debug representation; the
+    /// declaration expression and its physical slot keep the call-site-specialized type.
     declared_operand_types: HashMap<ExprId, Ty>,
     /// Discarded copied `Unit` values whose source closing line must remain physically anchored.
     /// Other copied `Unit` nodes carry source-map provenance without inventing an instruction.
