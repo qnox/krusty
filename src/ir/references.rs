@@ -38,6 +38,20 @@ pub enum IrCallableReferenceTarget {
     FunctionValueConversion {
         ordinal: u32,
     },
+    /// A language-defined classifier callable. `operation` is the declaration the reference
+    /// reflects; `classifier` is that declaration's owner.
+    Classifier {
+        classifier: TypeName,
+        operation: IrClassifierCallable,
+    },
+}
+
+/// A language-defined classifier callable a reference reflects. The physical name and descriptor
+/// belong to the backend that realizes the carrier.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IrClassifierCallable {
+    /// The classifier's implicit `valueOf(String)` member.
+    EnumValueOf,
 }
 
 /// A checked callable-reference value after common invocation lowering. `adapter` is an exact

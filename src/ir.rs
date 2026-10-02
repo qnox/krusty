@@ -124,7 +124,8 @@ pub use properties::{
 };
 pub use property_layouts::IrLocalPropertyLayout;
 pub use references::{
-    FuncRef, IrCallableReference, IrCallableReferenceTarget, PropRef, ReflectedCallable,
+    FuncRef, IrCallableReference, IrCallableReferenceTarget, IrClassifierCallable, PropRef,
+    ReflectedCallable,
 };
 pub use sam_target::IrSamTarget;
 pub use static_properties::{IrStatic, IrStaticAccessor, IrStaticAccessors};

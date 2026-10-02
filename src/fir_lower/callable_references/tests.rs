@@ -1525,6 +1525,96 @@ fn consuming_lowering_materializes_source_object_value() {
 }
 
 #[test]
+fn reflective_enum_value_of_reference_names_the_classifier_member() {
+    let ir = lower_single_source(
+        "enum class E { ENTRY }\n\
+         fun box(): String {\n\
+             val f = E::valueOf\n\
+             return if (f(\"ENTRY\") == E.ENTRY) \"OK\" else \"Fail\"\n\
+         }\n",
+        "EnumValueOfMethod",
+    );
+
+    let reference = semantic_references(&ir)
+        .into_iter()
+        .find(|reference| {
+            matches!(
+                reference.target,
+                crate::ir::IrCallableReferenceTarget::Classifier { .. }
+            )
+        })
+        .expect("semantic enum valueOf reference");
+    assert!(matches!(
+        reference.target,
+        crate::ir::IrCallableReferenceTarget::Classifier {
+            classifier,
+            operation: crate::ir::IrClassifierCallable::EnumValueOf,
+        } if classifier == crate::types::type_name("E")
+    ));
+    assert!(matches!(
+        reference.function_type,
+        Ty::Fun(signature) if signature.params == [Ty::String]
+    ));
+    assert_eq!(reference.declaration_parameters.as_ref(), [Ty::String]);
+    assert_eq!(reference.declaration_result, Ty::obj("E"));
+    assert!(reference.adaptation.is_none());
+    assert!(reference.captures.is_empty());
+    assert!(reference.bound_receiver.is_none());
+    let body = ir.functions[reference.adapter as usize]
+        .body
+        .expect("enum valueOf adapter");
+    assert!(expression_contains_enum_value_of(&ir, body));
+    assert_common_ir_has_no_jvm_reference_carrier(&ir);
+}
+
+fn expression_contains_enum_value_of(ir: &IrFile, expression: crate::ir::ExprId) -> bool {
+    let mut pending = vec![expression];
+    let mut seen = std::collections::HashSet::new();
+    while let Some(current) = pending.pop() {
+        if !seen.insert(current) {
+            continue;
+        }
+        if matches!(
+            ir.expr(current),
+            IrExpr::EnumValueOf {
+                declaration: crate::ir::EnumValueOfDeclaration::Member,
+                ..
+            }
+        ) {
+            return true;
+        }
+        crate::ir::for_each_child(&ir.exprs, current, &mut |child| pending.push(child));
+    }
+    false
+}
+
+#[test]
+fn function_typed_enum_value_of_reference_stays_a_lambda() {
+    let ir = lower_single_source(
+        "enum class E { ENTRY }\n\
+         fun apply(f: (String) -> E, name: String): E = f(name)\n\
+         fun box(): E = apply(E::valueOf, \"ENTRY\")\n",
+        "EnumValueOfFunction",
+    );
+
+    assert!(
+        semantic_references(&ir).is_empty(),
+        "a function-typed enum valueOf reference is a lambda, not a reflective carrier"
+    );
+    assert!(ir.exprs.iter().any(|expression| matches!(
+        expression,
+        IrExpr::Lambda { captures, .. } if captures.is_empty()
+    )));
+    assert!(ir.exprs.iter().any(|expression| matches!(
+        expression,
+        IrExpr::EnumValueOf {
+            declaration: crate::ir::EnumValueOfDeclaration::Member,
+            ..
+        }
+    )));
+}
+
+#[test]
 fn local_callable_reference_stays_semantic_through_common_lowering() {
     let ir = lower_single_source(
         "fun reference(offset: Int): (Int) -> Int {\n    fun selected(value: Int): Int = offset + value\n    return ::selected\n}\n",

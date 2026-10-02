@@ -252,6 +252,32 @@ impl BodyLowering<'_> {
         }))
     }
 
+    fn structural_classifier_reference(
+        &mut self,
+        classifier: TypeName,
+        operation: crate::ir::IrClassifierCallable,
+        adapter: crate::ir::FunId,
+        function_type: Ty,
+        declaration_parameters: Vec<Ty>,
+        declaration_result: Ty,
+    ) -> ExprId {
+        self.ir
+            .add_expr(IrExpr::CallableReference(crate::ir::IrCallableReference {
+                target: crate::ir::IrCallableReferenceTarget::Classifier {
+                    classifier,
+                    operation,
+                },
+                adapter,
+                captures: Vec::new(),
+                bound_receiver: None,
+                function_type,
+                declaration_parameters: declaration_parameters.into_boxed_slice(),
+                declaration_result,
+                declaration_suspend: false,
+                adaptation: None,
+            }))
+    }
+
     fn structural_constructor_reference(
         &mut self,
         classifier: TypeName,
@@ -363,10 +389,18 @@ impl BodyLowering<'_> {
         binding: FirCallableReferenceBinding,
         adaptation: Option<&FirReferenceAdaptation>,
         reference_ty: Ty,
+        reflective: bool,
     ) -> Result<ExprId, FirLoweringFailure> {
         let (classifier, parameters, result) =
             (callable.classifier, callable.parameters, callable.result);
         let failed = || FirLoweringFailure::UnsupportedClassifierCallableReference(classifier);
+        // An adapted reflective reference needs a reflected signature distinct from its adapter,
+        // which this carrier does not represent. A plain function-typed use stays a lambda.
+        let reflective_enum_value_of =
+            reflective && matches!(callable.operation, FirClassifierCallable::EnumValueOf);
+        if reflective_enum_value_of && adaptation.is_some() {
+            return Err(failed());
+        }
         if binding != FirCallableReferenceBinding::Static {
             return Err(failed());
         }
@@ -433,6 +467,16 @@ impl BodyLowering<'_> {
         });
         self.ir
             .set_method_visibility(function, crate::types::Visibility::Private);
+        if reflective_enum_value_of {
+            return Ok(self.structural_classifier_reference(
+                classifier,
+                crate::ir::IrClassifierCallable::EnumValueOf,
+                function,
+                reference_ty,
+                parameters.iter().map(|parameter| parameter.get()).collect(),
+                result.get(),
+            ));
+        }
         self.ir.lambda_own_params_from.insert(function, 0);
         Ok(self.ir.add_expr(IrExpr::Lambda {
             impl_fn: function,

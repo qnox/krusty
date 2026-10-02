@@ -264,7 +264,10 @@ fn expression(expression: &mut IrExpr, names: &HashMap<TypeName, TypeName>) {
         IrExpr::Checked(operation) => checked_operation(operation, names),
         IrExpr::CallableReference(reference) => {
             match &mut reference.target {
-                IrCallableReferenceTarget::Constructor { classifier } => name(classifier, names),
+                IrCallableReferenceTarget::Constructor { classifier }
+                | IrCallableReferenceTarget::Classifier { classifier, .. } => {
+                    name(classifier, names)
+                }
                 IrCallableReferenceTarget::Local {
                     owner: Some(owner), ..
                 } => name(owner, names),
