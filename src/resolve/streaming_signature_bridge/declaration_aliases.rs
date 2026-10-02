@@ -101,7 +101,7 @@ pub(in crate::resolve) fn publish_compact_nested_aliases(
         // nested class. Its qualified identity therefore uses an ordinary name-tree child (`/`),
         // never the backend nested-class (`$`) relation.
         let identity = crate::types::type_name_child(owner_identity, alias);
-        if let Some(target) = expansion.kotlin_class_internal() {
+        if let Some(target) = crate::libraries::type_alias_target_classifier(expansion) {
             table.source_alias_fqns.insert(identity, target);
         }
         table

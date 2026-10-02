@@ -30,6 +30,7 @@ pub mod fir;
 pub mod fir_lower;
 pub mod frontend;
 mod inline_parameter_modifier;
+pub mod integer_constant;
 pub mod ir;
 pub mod ir_print;
 pub mod java_source;

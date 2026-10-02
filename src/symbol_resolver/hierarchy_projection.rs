@@ -619,6 +619,10 @@ mod tests {
             std::rc::Rc::new(ResolvedSymbols {
                 builtin_classifier: false,
                 classifier_name: classifier.as_ref().and(identity),
+                classifier_declaration: classifier
+                    .as_ref()
+                    .and(identity)
+                    .map(crate::libraries::ClassifierDeclaration::Ordinary),
                 classifier,
                 callables: Callables::None,
                 importable_declaration: false,

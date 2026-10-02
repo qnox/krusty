@@ -62,6 +62,7 @@ mod tests {
             Rc::new(ResolvedSymbols {
                 builtin_classifier: false,
                 classifier_name: None,
+                classifier_declaration: None,
                 classifier: None,
                 callables: Callables::from_parts(
                     FunctionSet {

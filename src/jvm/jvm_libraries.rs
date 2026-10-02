@@ -4222,7 +4222,7 @@ impl JvmLibraries {
         // A classpath `typealias` (`kotlin/collections/ArrayList` → `java/util/ArrayList`) has no class of
         // its own; resolve the underlying type and tag it with `alias_target` so name resolution records
         // the real internal.
-        let built = if let Some(target) = self.cp.type_alias_target_name(internal_name) {
+        let built = if let Some(target) = self.semantic_type_alias_target(internal_name) {
             self.classifier_record(target).map(|rc| {
                 let mut t = (*rc).clone();
                 t.alias_target = Some(target);
@@ -4297,6 +4297,22 @@ impl JvmLibraries {
         built
     }
 
+    /// Normalize a metadata typealias target into the common source classifier model. JVM metadata
+    /// encodes a suspend function type with its continuation-bearing physical `FunctionN`, while
+    /// source dependencies publish the semantic source arity. Providers must agree before the
+    /// resolver selects the declaration; core must not accept two physical spellings afterward.
+    fn semantic_type_alias_target(&self, identity: TypeName) -> Option<TypeName> {
+        let (target, _, expansion, _) = self.cp.type_alias_expansion(identity)?;
+        Self::normalized_type_alias_target(target, expansion)
+    }
+
+    fn normalized_type_alias_target(target: TypeName, expansion: Ty) -> Option<TypeName> {
+        match expansion.non_null() {
+            Ty::Fun(_) => crate::libraries::type_alias_target_classifier(expansion),
+            _ => Some(target),
+        }
+    }
+
     fn symbols(
         &self,
         namespace: SymbolNamespace,
@@ -4347,6 +4363,13 @@ impl JvmLibraries {
         let from_builtins = classifier.is_some()
             && classifier_name
                 .is_some_and(|identity| self.cp.builtin_classifier_name(identity).is_some());
+        let classifier_declaration = classifier.as_ref().and_then(|_| match alias_identity {
+            Some(identity) => {
+                <Self as crate::libraries::SemanticPlatform>::type_alias_expansion(self, identity)
+                    .map(crate::libraries::ClassifierDeclaration::TypeAlias)
+            }
+            None => classifier_name.map(crate::libraries::ClassifierDeclaration::Ordinary),
+        });
         let classifier_name = classifier.as_ref().map(|classifier| {
             classifier
                 .alias_target
@@ -4702,11 +4725,22 @@ impl JvmLibraries {
         // stdlib. Federate that classifier source with the platform record here; platform metadata wins
         // when present, while callables remain exclusively metadata/platform declarations.
         let core = EmptySymbolSource.symbols(namespace, name);
-        let (classifier_name, classifier, builtin_classifier) = if classifier.is_some() {
-            (classifier_name, classifier, from_builtins)
-        } else {
-            (core.classifier_name, core.classifier.clone(), false)
-        };
+        let (classifier_name, classifier_declaration, classifier, builtin_classifier) =
+            if classifier.is_some() {
+                (
+                    classifier_name,
+                    classifier_declaration,
+                    classifier,
+                    from_builtins,
+                )
+            } else {
+                (
+                    core.classifier_name,
+                    core.classifier_declaration.clone(),
+                    core.classifier.clone(),
+                    false,
+                )
+            };
         let classifier = classifier.map(|classifier| {
             classifier_name.map_or(classifier.clone(), |owner| {
                 self.register_external_classifier(owner, classifier)
@@ -4724,6 +4758,7 @@ impl JvmLibraries {
             name,
             ResolvedSymbols {
                 classifier_name,
+                classifier_declaration,
                 classifier,
                 builtin_classifier,
                 callables,
@@ -5496,16 +5531,19 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
     }
 
     fn type_alias_expansion(&self, internal: TypeName) -> Option<crate::libraries::AliasExpansion> {
-        self.cp.type_alias_expansion(internal).map(
-            |(target, formals, expansion, expansion_spelling)| crate::libraries::AliasExpansion {
-                identity: internal,
-                target: self.canonical_source_type_name(target),
-                formals,
-                expansion_spelling,
-                // Metadata may name a mapped JVM collection as the expanded classifier. Normalize
-                // the complete template at the provider boundary so core resolution only sees
-                // source identities, including inside projections, function types, and nullability.
-                expansion: canonicalize_jvm_collections(expansion),
+        self.cp.type_alias_expansion(internal).and_then(
+            |(target, formals, expansion, expansion_spelling)| {
+                let target = Self::normalized_type_alias_target(target, expansion)?;
+                Some(crate::libraries::AliasExpansion {
+                    identity: internal,
+                    target: self.canonical_source_type_name(target),
+                    formals,
+                    expansion_spelling,
+                    // Metadata may name a mapped JVM collection as the expanded classifier. Normalize
+                    // the complete template at the provider boundary so core resolution only sees
+                    // source identities, including inside projections, function types, and nullability.
+                    expansion: canonicalize_jvm_collections(expansion),
+                })
             },
         )
     }

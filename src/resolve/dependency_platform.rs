@@ -63,12 +63,7 @@ impl DependencyPlatform {
         identity: TypeName,
     ) -> Option<crate::libraries::AliasExpansion> {
         let (formals, expansion) = self.symbols.source_alias_expansions.get(&identity)?;
-        let target = expansion.non_null().kotlin_class_internal().or_else(|| {
-            expansion
-                .fun_arity()
-                .and_then(|arity| self.platform.function_type(usize::from(arity)))
-                .and_then(Ty::obj_internal)
-        })?;
+        let target = *self.symbols.source_alias_fqns.get(&identity)?;
         let expansion_spelling = self
             .symbols
             .alias_expansion_spellings
@@ -348,9 +343,11 @@ impl SymbolSource for DependencyPlatform {
             return merged.clone();
         }
         let primary = self.platform.symbols(namespace, name);
-        let source_alias = namespace
+        let source_alias_identity = namespace
             .existing_classifier(name)
-            .and_then(|identity| self.source_alias_expansion(identity));
+            .filter(|identity| self.source_alias_expansion(*identity).is_some());
+        let source_alias =
+            source_alias_identity.and_then(|identity| self.source_alias_expansion(identity));
         let source = source_alias.as_ref().map_or_else(
             || self.source().symbols(namespace, name),
             |alias| {
@@ -361,6 +358,9 @@ impl SymbolSource for DependencyPlatform {
                 });
                 Rc::new(ResolvedSymbols {
                     classifier_name: Some(alias.target),
+                    classifier_declaration: Some(
+                        crate::libraries::ClassifierDeclaration::TypeAlias(alias.clone()),
+                    ),
                     classifier,
                     importable_declaration: true,
                     ..ResolvedSymbols::default()
@@ -412,6 +412,11 @@ impl SymbolSource for DependencyPlatform {
         }
         let (source_functions, source_properties) = source.callables.clone().into_parts();
         let classifier_name = primary.classifier_name.or(source.classifier_name);
+        let classifier_declaration = if primary.classifier_name.is_some() {
+            primary.classifier_declaration.clone()
+        } else {
+            source.classifier_declaration.clone()
+        };
         let builtin_classifier = if primary.classifier_name.is_some() {
             primary.builtin_classifier
         } else {
@@ -419,6 +424,7 @@ impl SymbolSource for DependencyPlatform {
         };
         let merged = Rc::new(ResolvedSymbols {
             classifier_name,
+            classifier_declaration,
             builtin_classifier,
             classifier,
             callables: Callables::from_parts(
@@ -592,6 +598,10 @@ mod tests {
                 .map(|&is_public| std::sync::Arc::new(type_shape(is_public)));
             Rc::new(ResolvedSymbols {
                 classifier_name: classifier.as_ref().and(classifier_name),
+                classifier_declaration: classifier
+                    .as_ref()
+                    .and(classifier_name)
+                    .map(crate::libraries::ClassifierDeclaration::Ordinary),
                 classifier,
                 ..ResolvedSymbols::default()
             })

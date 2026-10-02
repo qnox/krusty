@@ -2,6 +2,19 @@
 
 use super::*;
 
+/// Publish one retained pass-one diagnostic through the ordinary source diagnostic sink.
+pub(super) fn emit_production_signature_diagnostic(
+    diagnostics: &mut crate::diag::DiagSink,
+    diagnostic: &ProductionSignatureDiagnostic,
+) {
+    diagnostics.set_file(diagnostic.file);
+    if let Some(identity) = diagnostic.identity {
+        diagnostics.error_with_identity(diagnostic.span, identity, diagnostic.message.clone());
+    } else {
+        diagnostics.error(diagnostic.span, diagnostic.message.clone());
+    }
+}
+
 impl ProductionSignatureSemantics<'_> {
     pub(super) fn record_unresolved_reference(
         &self,

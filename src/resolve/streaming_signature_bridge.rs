@@ -23,6 +23,7 @@ mod delegates;
 mod diagnostics;
 mod file_import_scopes;
 mod header_projection;
+mod integer_constants;
 mod local_signatures;
 mod lookups;
 mod postponed_calls;
@@ -112,18 +113,6 @@ struct ProductionSignatureDiagnostic {
     message: String,
     identity: Option<crate::diag::DiagnosticIdentity>,
     unconditional: bool,
-}
-
-fn emit_production_signature_diagnostic(
-    diagnostics: &mut crate::diag::DiagSink,
-    diagnostic: &ProductionSignatureDiagnostic,
-) {
-    diagnostics.set_file(diagnostic.file);
-    if let Some(identity) = diagnostic.identity {
-        diagnostics.error_with_identity(diagnostic.span, identity, diagnostic.message.clone());
-    } else {
-        diagnostics.error(diagnostic.span, diagnostic.message.clone());
-    }
 }
 
 struct ExplicitContextCall {
@@ -1271,8 +1260,8 @@ impl ProductionSignatureSemantics<'_> {
             return crate::symbol_resolver::CallArgKind::LambdaLiteral(argument.ty.get());
         }
         match argument.integer_literal {
-            Some(value) => {
-                crate::symbol_resolver::CallArgKind::integer_literal(argument.ty.get(), value)
+            Some(constant) => {
+                crate::symbol_resolver::CallArgKind::integer_constant(argument.ty.get(), constant)
             }
             None => crate::symbol_resolver::CallArgKind::Typed(argument.ty.get()),
         }
@@ -4842,7 +4831,7 @@ pub(crate) fn finalized_streamed_signature_index(
         .iter()
         .filter(|diagnostic| diagnostic.unconditional)
     {
-        emit_production_signature_diagnostic(diags, diagnostic);
+        diagnostics::emit_production_signature_diagnostic(diags, diagnostic);
     }
     if !failed.is_empty() {
         crate::trace_compiler!(
@@ -4855,7 +4844,7 @@ pub(crate) fn finalized_streamed_signature_index(
             .iter()
             .filter(|diagnostic| !diagnostic.unconditional)
         {
-            emit_production_signature_diagnostic(diags, diagnostic);
+            diagnostics::emit_production_signature_diagnostic(diags, diagnostic);
         }
     }
 
@@ -4930,7 +4919,7 @@ pub(crate) fn finalized_streamed_signature_index(
         .iter()
         .filter(|diagnostic| diagnostic.unconditional)
     {
-        emit_production_signature_diagnostic(diags, diagnostic);
+        diagnostics::emit_production_signature_diagnostic(diags, diagnostic);
     }
     if !failed.is_empty() || !finalization_failures.is_empty() {
         crate::trace_compiler!(
@@ -4953,7 +4942,7 @@ pub(crate) fn finalized_streamed_signature_index(
             {
                 continue;
             }
-            emit_production_signature_diagnostic(diags, diagnostic);
+            diagnostics::emit_production_signature_diagnostic(diags, diagnostic);
         }
         failed.extend(
             finalization_failures
@@ -5565,13 +5554,21 @@ pub(crate) fn finalized_streamed_signature_index(
             );
             stop_with_failure!(stub.id);
         };
+        let Some(&target) = table.source_alias_fqns.get(&identity) else {
+            crate::trace_compiler!(
+                "fir",
+                "signature finalization declined {:?}: resolved type-alias target is missing",
+                stub.id,
+            );
+            stop_with_failure!(stub.id);
+        };
         let expansion_spelling = table
             .alias_expansion_spellings
             .get(&identity)
             .map(|(spelling, _, _)| spelling.clone())
             .unwrap_or_default();
         if index
-            .publish_type_alias_header(stub.id, identity, *expansion, expansion_spelling)
+            .publish_type_alias_header(stub.id, identity, target, *expansion, expansion_spelling)
             .is_err()
         {
             stop_with_failure!(stub.id);

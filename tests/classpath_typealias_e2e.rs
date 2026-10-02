@@ -59,6 +59,33 @@ fn pass_two_applies_generic_function_typealias_from_dependency() {
 }
 
 #[test]
+fn same_package_dependency_typealias_keeps_its_generic_function_template() {
+    let library = r#"package fixture
+
+data class Mark(val value: String)
+class Input
+typealias Transform<T> = (T) -> Mark
+
+class Consumer<T>(private val value: T) {
+    fun apply(transform: Transform<T>): Mark = transform(value)
+}
+"#;
+    let main = r#"package fixture
+
+fun box(): String {
+    val transform: Transform<Input> = { Mark("OK") }
+    return Consumer(Input()).apply(transform).value
+}
+"#;
+
+    assert_eq!(
+        common::expect_box_run_against("same_package_generic_function_typealias", library, main,)
+            .as_deref(),
+        Some("OK"),
+    );
+}
+
+#[test]
 fn classpath_typealias_visibility_is_enforced() {
     const VISIBILITY_LIB: &str = "package visibility\n\
         class Real\n\
@@ -95,4 +122,37 @@ fn classpath_typealias_visibility_is_enforced() {
     if let Some(root) = libout.parent() {
         let _ = std::fs::remove_dir_all(root);
     }
+}
+
+#[test]
+fn same_target_star_aliases_with_different_templates_are_ambiguous() {
+    let Some(dependency) = common::compile_libs_ref(
+        "same_target_star_alias_ambiguity",
+        &[
+            (
+                "Pair.kt",
+                "package fixture\nclass Pair<A, B>(val first: A, val second: B)\n",
+            ),
+            (
+                "Left.kt",
+                "package left\nimport fixture.Pair\ntypealias Choice<T> = Pair<T, T>\n",
+            ),
+            (
+                "Right.kt",
+                "package right\nimport fixture.Pair\nclass Marker\ntypealias Choice<T> = Pair<T, Marker>\n",
+            ),
+        ],
+    ) else {
+        return;
+    };
+    let source = "import left.*\n\
+        import right.*\n\
+        class Token\n\
+        fun use(value: Choice<Token>): Token = Token()\n";
+    let sources = [("Main.kt", source)];
+    let result = common::compiler_diagnostics(&sources, &[dependency]);
+    common::expect_identical_rejection(
+        &result,
+        "same-target star aliases with different templates",
+    );
 }

@@ -7546,6 +7546,10 @@ mod tests {
             std::rc::Rc::new(crate::libraries::ResolvedSymbols {
                 builtin_classifier: false,
                 classifier_name: classifier.as_ref().and(classifier_name),
+                classifier_declaration: classifier
+                    .as_ref()
+                    .and(classifier_name)
+                    .map(crate::libraries::ClassifierDeclaration::Ordinary),
                 classifier: classifier.map(std::sync::Arc::new),
                 callables: Callables::None,
                 importable_declaration: false,
@@ -7612,6 +7616,10 @@ mod tests {
             std::rc::Rc::new(crate::libraries::ResolvedSymbols {
                 builtin_classifier: false,
                 classifier_name: classifier.as_ref().and(classifier_name),
+                classifier_declaration: classifier
+                    .as_ref()
+                    .and(classifier_name)
+                    .map(crate::libraries::ClassifierDeclaration::Ordinary),
                 classifier: classifier.map(std::sync::Arc::new),
                 callables: Callables::None,
                 importable_declaration: false,
@@ -7726,6 +7734,10 @@ mod tests {
                 };
             std::rc::Rc::new(crate::libraries::ResolvedSymbols {
                 builtin_classifier: false,
+                classifier_declaration: classifier
+                    .as_ref()
+                    .and(classifier_name)
+                    .map(crate::libraries::ClassifierDeclaration::Ordinary),
                 classifier_name: classifier.as_ref().map(|classifier| {
                     classifier
                         .alias_target
@@ -8078,10 +8090,7 @@ mod tests {
             &source,
             &source,
             &classifier,
-            &[CallArgKind::IntegerLiteral {
-                ty: Ty::Int,
-                value: 1,
-            }],
+            &[CallArgKind::integer_literal(Ty::Int, 1)],
         )
         .expect("the inferred constructor parameter must be applicable");
 
@@ -8807,6 +8816,7 @@ mod tests {
                 std::rc::Rc::new(crate::libraries::ResolvedSymbols {
                     builtin_classifier: false,
                     classifier_name: None,
+                    classifier_declaration: None,
                     classifier: None,
                     callables: crate::libraries::Callables::Functions(FunctionSet { overloads }),
                     importable_declaration: false,
@@ -8856,6 +8866,7 @@ mod tests {
                 std::rc::Rc::new(crate::libraries::ResolvedSymbols {
                     builtin_classifier: false,
                     classifier_name: None,
+                    classifier_declaration: None,
                     classifier: None,
                     callables: crate::libraries::Callables::Functions(FunctionSet { overloads }),
                     importable_declaration: false,
