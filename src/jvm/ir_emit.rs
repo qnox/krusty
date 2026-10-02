@@ -8122,10 +8122,7 @@ impl<'a> Emitter<'a> {
         selected_interface: bool,
     ) -> Option<crate::jvm::inline::PropertyAccess> {
         let crate::ir::IrLocalPropertyLayout::Member {
-            class,
-            owner,
-            name,
-            ..
+            class, owner, name, ..
         } = self.ir.local_property_layouts.get(&target)?
         else {
             return None;
@@ -8139,10 +8136,7 @@ impl<'a> Emitter<'a> {
         target: crate::fir::PropertyId,
     ) -> Option<crate::jvm::inline::PropertyAccess> {
         let crate::ir::IrLocalPropertyLayout::Member {
-            class,
-            owner,
-            name,
-            ..
+            class, owner, name, ..
         } = self.ir.local_property_layouts.get(&target)?
         else {
             return None;
@@ -8159,7 +8153,11 @@ impl<'a> Emitter<'a> {
     ) -> Option<crate::jvm::inline::PropertyAccess> {
         use crate::jvm::inline::PropertyAccess;
         let class = self.ir.classes.iter().find(|c| c.fq_name == owner)?;
-        if let Some(index) = class.properties.iter().position(|property| property.name == name) {
+        if let Some(index) = class
+            .properties
+            .iter()
+            .position(|property| property.name == name)
+        {
             if let Some(access) =
                 self.hoisted_companion_property_access(class.fq_name, index as u32, true)
             {
