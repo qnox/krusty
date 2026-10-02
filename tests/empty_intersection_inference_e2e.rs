@@ -157,20 +157,20 @@ fun box(): String {\n\
 }
 
 #[test]
-fn unrelated_same_signature_defaults_follow_kotlinc_intersection_selection() {
-    // The two declarations have the same call shape, but their default expressions and stable
-    // owners are distinct. Intersection member collection must carry both identities into the
-    // ordinary override/default machinery; Kotlin 2.4.20 accepts the resulting synthetic member.
+fn an_intersection_call_uses_the_canonical_components_default() {
+    // Both components declare `choose` with a default. Kotlin 2.4.20 accepts the call and uses
+    // the canonical-earliest component, which is also the encounter order of `Left` then `Right`.
     const SRC: &str = "\
-interface Left { fun choose(value: Int = 1): String }\n\
-interface Right { fun choose(value: Int = 2): String }\n\
+interface Left { fun choose(value: Int = 1): String = \"L$value\" }\n\
+interface Right { fun choose(value: Int = 2): String = \"R$value\" }\n\
 class In<in K>\n\
-fun <E> intersect(vararg x: In<E>): E = null as E\n\
-fun check() {\n\
+class OnlyLeft : Left\n\
+fun <E> intersect(vararg x: In<E>): E = OnlyLeft() as E\n\
+fun box(): String {\n\
     val value = intersect(In<Left>(), In<Right>())\n\
-    value.choose()\n\
+    return if (value.choose() == \"L1\") \"OK\" else \"NO\"\n\
 }\n";
-    common::assert_errors_match_kotlinc(&[("IntersectionDefaultAmbiguity.kt", SRC)], &[]);
+    common::expect_box_same_as_kotlinc(SRC, "IntersectionComponentDefault");
 }
 
 #[test]

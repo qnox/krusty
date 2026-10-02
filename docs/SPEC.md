@@ -2794,6 +2794,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   bottom beside a non-null component is `Nothing`; beside only nullable components it is
   `Nothing?`. Member lookup unions every component, so a value of `Left & Right` can
   call members and properties and form callable references from either interface.
+  When several components declare one member slot, the call uses the
+  canonical-earliest component's declaration, including its default arguments.
   That union does not discard a supertype member an override still needs: an override
   that omits `operator` inherits it from `Comparable.compareTo` or `Iterable.iterator`.
   A public declaration approximates the intersection: unrelated classifiers become

@@ -43381,6 +43381,7 @@ impl<'a> Checker<'a> {
         }
         crate::symbol_resolver::retain_most_specific_declarations(
             &self.fed_source(),
+            extension_receiver,
             &mut maximal,
             |(_, generic, _, _, _, candidate, _, parameters)| {
                 let receiver = candidate
@@ -43391,7 +43392,9 @@ impl<'a> Checker<'a> {
                             .map(|receiver| crate::types::ty_subst(receiver, &HashMap::new()))
                     })
                     .flatten();
-                (receiver, parameters, *generic)
+                let member_owner = (candidate.kind == crate::libraries::FnKind::Member)
+                    .then_some(candidate.callable.owner);
+                (receiver, parameters, *generic, member_owner)
             },
         );
         // Distinct SAM target types do not make an overload family inherently ambiguous. The

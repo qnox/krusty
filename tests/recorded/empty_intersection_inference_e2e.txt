@@ -19,6 +19,3 @@
 [nullable_bounds_admit_null_and_a_mixed_bound_does_not]
 2.4.20:
   NullableIntersection.kt:8:6: argument type mismatch: actual type is 'Left? & Right?', but 'Any' was expected.
-
-[unrelated_same_signature_defaults_follow_kotlinc_intersection_selection]
-2.4.20:
