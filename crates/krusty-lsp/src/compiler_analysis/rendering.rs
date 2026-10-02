@@ -89,9 +89,15 @@ pub(crate) fn render_ty(ty: Ty) -> String {
                 .join(", ");
             format!("{suspend}({parameters}) -> {}", render_ty(signature.ret))
         }
-        Ty::Nullable(inner) => format!("{}?", render_ty(*inner)),
+        Ty::Nullable(inner) => render_nullable(*inner),
         Ty::PlatformNullable(inner) => format!("{}!", render_ty(*inner)),
         Ty::DefinitelyNotNull(inner) => format!("{} & Any", render_ty(*inner)),
+        Ty::Intersection(parts) => parts
+            .iter()
+            .copied()
+            .map(render_ty)
+            .collect::<Vec<_>>()
+            .join(" & "),
         Ty::TyParam(name, _) => name.to_string(),
         Ty::InProjection(inner) => format!("in {}", render_ty(*inner)),
         Ty::OutProjection(inner) => format!("out {}", render_ty(*inner)),
@@ -99,6 +105,27 @@ pub(crate) fn render_ty(ty: Ty) -> String {
         // Editor surface: a declaration the resolution engine has not resolved yet has no type to
         // show. It reaches here only while analysis is mid-flight.
         Ty::Pending => "…".to_string(),
+    }
+}
+
+/// A nullable intersection is `A? & B?`. A function component is parenthesized so `?` does not
+/// bind only to its result.
+fn render_nullable(ty: Ty) -> String {
+    match ty {
+        Ty::Intersection(parts) => parts
+            .iter()
+            .copied()
+            .map(|part| {
+                let rendered = render_ty(part);
+                if matches!(part, Ty::Fun(_)) {
+                    format!("({rendered})?")
+                } else {
+                    format!("{rendered}?")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" & "),
+        other => format!("{}?", render_ty(other)),
     }
 }
 
@@ -112,5 +139,12 @@ mod tests {
         let parameter = Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")));
         let intersection = Ty::DefinitelyNotNull(intern_ty(parameter));
         assert_eq!(render_ty(intersection), "T & Any");
+    }
+
+    #[test]
+    fn an_intersection_renders_each_component_and_keeps_nullability() {
+        let intersection = Ty::intersection(&[Ty::obj("demo/Left"), Ty::obj("demo/Right")]);
+        assert_eq!(render_ty(intersection), "Left & Right");
+        assert_eq!(render_ty(Ty::nullable(intersection)), "Left? & Right?");
     }
 }
