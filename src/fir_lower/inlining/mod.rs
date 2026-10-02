@@ -21,7 +21,6 @@ use crate::types::{stored_value_ty, ty_subst_keep_unbound, Ty};
 use super::BodyLowering;
 
 mod escaping_lambda;
-mod local_delegate_plans;
 mod property_accessors;
 
 #[cfg(test)]
@@ -31,6 +30,24 @@ pub(super) fn splice_inline_property_accessors(
     ir: &mut crate::ir::IrFile,
 ) -> Result<(), super::FirFileLoweringFailure> {
     property_accessors::splice_inline_property_accessors(ir)
+}
+
+/// Specialize one expression copied across an inline boundary. A local delegated-property access
+/// keeps the checker-selected declaration plan: kotlinc's local-delegate helper remains the erased
+/// declaration helper and is reused (or rehomed by the JVM) across call-site substitutions.
+pub(super) fn specialize_inline_copy(
+    ir: &mut crate::ir::IrFile,
+    expression: ExprId,
+    bindings: &HashMap<String, Ty>,
+    runtime: &HashMap<String, Ty>,
+) -> Option<()> {
+    specialize_recorded_facts(ir, expression, bindings, runtime);
+    {
+        let expression = ir.exprs.get_mut(expression as usize)?;
+        specialize_typed_expression(expression, bindings, runtime);
+        specialize_dependency_substitutions(expression, runtime);
+    }
+    Some(())
 }
 
 /// What one physical operand position of an inline expansion fills.
@@ -157,17 +174,10 @@ impl BodyLowering<'_> {
             .map(|slot| slot.unwrap_or(SPLICED))
             .collect::<Vec<_>>();
         let (copy, cloned) = crate::ir::clone_expression_dag(self.ir, default);
-        let mut local_delegate_plans = HashMap::new();
         let mut copied_expressions = cloned.values().copied().collect::<Vec<_>>();
         copied_expressions.sort_unstable();
         for copied in copied_expressions {
-            local_delegate_plans::specialize_inline_copy(
-                self.ir,
-                copied,
-                bindings,
-                reified_bindings,
-                &mut local_delegate_plans,
-            )?;
+            specialize_inline_copy(self.ir, copied, bindings, reified_bindings)?;
         }
         let locals = super::source_calls::rehome_inline_body_values(
             self.ir,
@@ -206,17 +216,10 @@ impl BodyLowering<'_> {
             .map(|slot| slot.unwrap_or(SPLICED))
             .collect::<Vec<_>>();
         let (copy, cloned) = crate::ir::clone_expression_dag(self.ir, default);
-        let mut local_delegate_plans = HashMap::new();
         let mut copied_expressions = cloned.values().copied().collect::<Vec<_>>();
         copied_expressions.sort_unstable();
         for copied in copied_expressions {
-            local_delegate_plans::specialize_inline_copy(
-                self.ir,
-                copied,
-                bindings,
-                reified_bindings,
-                &mut local_delegate_plans,
-            )?;
+            specialize_inline_copy(self.ir, copied, bindings, reified_bindings)?;
         }
         let IrExpr::Lambda { captures, .. } = self.ir.expr(copy).clone() else {
             return None;
@@ -641,7 +644,6 @@ impl BodyLowering<'_> {
             .map(|(&source, &copy)| (source, copy))
             .collect::<Vec<_>>();
         copies.sort_by_key(|&(_, copy)| copy);
-        let mut local_delegate_plans = HashMap::new();
         for &(source, copy) in &copies {
             self.ir.record_inline_copy_owner(copy, source_owner);
             // A compiler temporary's synthetic zero is refreshed after its type specializes.
@@ -652,13 +654,7 @@ impl BodyLowering<'_> {
             // templates even though those templates own an independent value-numbering domain.
             // Value rebasing and return rewriting remain protected below, but the checked type
             // decision must cross the enclosing inline-call boundary with the lambda.
-            local_delegate_plans::specialize_inline_copy(
-                self.ir,
-                copy,
-                &bindings,
-                &reified_bindings,
-                &mut local_delegate_plans,
-            )?;
+            specialize_inline_copy(self.ir, copy, &bindings, &reified_bindings)?;
             if let Some(previous_zero) = generated_zero {
                 let replacement = match self.ir.expr(copy) {
                     IrExpr::Variable { ty, .. } => IrConst::zero_for_value_type(*ty),

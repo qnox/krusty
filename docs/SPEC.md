@@ -4440,11 +4440,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   remains unchanged. A nested declaration closure that uses the reified parameter is a class too
   (`defineNested$1$nested$1`), not an invokedynamic; the call site still receives its own
   specialized class.
-  A local-delegate accessor inside that copy becomes a new helper only when its body or signature
-  names the expansion's type arguments. An accessor that does not, such as an ordinary `getValue`,
-  stays the original helper, so the declaration lambda and the call-site copy do not emit two
-  methods with the same JVM name.
+  A local delegated property keeps the checker-selected declaration accessor plan across those
+  copies. Kotlin emits that convention helper with the declaration's erased signature and reuses
+  it across call-site type substitutions; common lowering therefore specializes the copied access
+  expression's recorded facts, but does not clone or mutate the declaration plan. The JVM may
+  rehome the same plan when an inline copy is emitted under another physical owner, and owns the
+  resulting erased helper identity.
   Tests: `fir_lower::inlining::escaping_reified_lambda`, `tests/escaping_reified_lambda_e2e.rs`,
+  `tests/reified_local_delegate_e2e.rs`,
   boxes `nullCheckOptimization/kt22410.kt`, `reified/lambda.kt`, `reified/extensionLambda.kt`,
   `reified/lambdaNameClash.kt`, `basics/k42000_1.kt`, `basics/k42000_crossmodule.kt`.
 

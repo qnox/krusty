@@ -28,10 +28,9 @@ fn plan_reference(ir: &IrFile, plan: u32) -> (String, LocalDelegatedPropertyId) 
 
 fn plan_references(ir: &IrFile) -> Vec<(String, LocalDelegatedPropertyId)> {
     (0..ir.local_delegate_plans.len())
-        .filter_map(|plan| {
-            let plan = u32::try_from(plan).ok()?;
-            (!ir.inline_local_delegate_plan_copies.contains(&plan))
-                .then(|| plan_reference(ir, plan))
+        .map(|plan| {
+            let plan = u32::try_from(plan).expect("local delegate plan id fits u32");
+            plan_reference(ir, plan)
         })
         .collect()
 }
@@ -226,9 +225,41 @@ fn two_inline_copies_keep_the_checked_declaration_identity() {
             .map(|(_, plans)| plans.as_slice())
             .unwrap_or_else(|| panic!("{name} must carry an inlined local delegate access"))
     };
-    assert_eq!(ir.inline_local_delegate_plan_copies, Default::default());
+    assert_eq!(ir.local_delegate_plans.len(), 1);
     assert_eq!(plans("first"), &[0]);
     assert_eq!(plans("second"), &[0]);
     assert_eq!(plan_reference(&ir, 0), (name.clone(), *declaration));
     assert_eq!(declaration.ordinal(), 0);
+}
+
+#[test]
+fn generic_inline_copies_keep_one_declaration_plan_across_substitutions() {
+    let ir = lower_single_source(
+        "import kotlin.reflect.KProperty
+        interface Root
+        class Token : Root
+        class Carrier<T : Root>(private val value: T) {
+            operator fun getValue(owner: Any?, property: KProperty<*>): T = value
+        }
+        inline fun <reified T : Root> delegated(value: T): T {
+            val local by Carrier(value)
+            return local
+        }
+        fun exact(value: Token): Root = delegated<Token>(value)
+        fun erased(value: Root): Root = delegated<Root>(value)
+        ",
+        "GenericInlineLocalDelegate",
+    );
+
+    assert_eq!(ir.local_delegate_plans.len(), 1);
+    let functions = accesses_by_function(&ir);
+    let plans = |name: &str| {
+        functions
+            .iter()
+            .find(|(function, _)| function == name)
+            .map(|(_, plans)| plans.as_slice())
+            .unwrap_or_else(|| panic!("{name} must carry an inlined local delegate access"))
+    };
+    assert_eq!(plans("exact"), &[0]);
+    assert_eq!(plans("erased"), &[0]);
 }

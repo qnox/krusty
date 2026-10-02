@@ -162,7 +162,7 @@ impl BodyLowering<'_> {
                         dispatch_receiver,
                         extension_receiver,
                         context_arguments: Vec::new(),
-                        substitutions: super::lower_substitutions(substitutions),
+                        substitutions: super::checked::lower_substitutions(substitutions),
                     }));
                 self.record_inline_property_splice(read, getter_inline_splice);
                 read

@@ -1534,9 +1534,6 @@ pub struct IrFile {
     /// declaring property's plan without copying it or manufacturing another helper.
     pub(crate) local_delegate_plan_ids:
         std::collections::HashMap<crate::fir::LocalDelegatedPropertyId, u32>,
-    /// Plans copied with an inline expansion. They are realized only for emitted copied accesses;
-    /// unlike source declaration plans, they do not independently require a lexical helper.
-    pub(crate) inline_local_delegate_plan_copies: std::collections::HashSet<u32>,
     /// JVM `$suspendImpl` body carriers (an interface member's, or an overridable class member's),
     /// keyed by carrier function id, with the exact owner and source-declaration function id. The JVM signature/default-stub boundaries consume
     /// these identities; they must not recover either one from the generated `$suspendImpl`

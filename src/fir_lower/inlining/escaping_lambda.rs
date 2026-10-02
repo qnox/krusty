@@ -139,17 +139,10 @@ fn specialized_lambda_function(
     }
     let body = ir.functions.get(function as usize)?.body?;
     let (cloned_body, cloned) = crate::ir::clone_expression_dag(ir, body);
-    let mut local_delegate_plans = HashMap::new();
     let mut copied_expressions = cloned.values().copied().collect::<Vec<_>>();
     copied_expressions.sort_unstable();
     for copy in copied_expressions {
-        super::local_delegate_plans::specialize_inline_copy(
-            ir,
-            copy,
-            bindings,
-            reified_bindings,
-            &mut local_delegate_plans,
-        )?;
+        super::specialize_inline_copy(ir, copy, bindings, reified_bindings)?;
     }
     let mut shape = ir.functions[function as usize].clone();
     shape.body = Some(cloned_body);
