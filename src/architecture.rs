@@ -264,6 +264,9 @@ mod tests {
             "kotlin_version",
             "kt_string",
             "libraries",
+            // The role of a lifted callable (lambda, local function, or local delegated-property
+            // accessor) is a source fact. JVM naming reads it; it carries no class-file spelling.
+            "lifting_provenance",
             "lru",
             "metadata",
             "module_symbols",
@@ -428,6 +431,9 @@ mod tests {
                     "fir",
                     "ir",
                     "kt_string",
+                    // Which enclosing callable is a lambda, so a nested one takes that lambda's
+                    // numbering. The role is recorded at the source walk; lowering only reads it.
+                    "lifting_provenance",
                     "names",
                     "trace",
                     "trace_compiler",

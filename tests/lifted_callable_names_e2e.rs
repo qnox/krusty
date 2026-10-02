@@ -6,6 +6,13 @@
 //! numbered sequence per class and outermost declaration name, in source order: overloads share
 //! it, constructors and `init` blocks share `_init_`, and a lambda spliced at an inline call site
 //! still takes its number. A suspend lambda becomes a class of its own and takes none.
+//!
+//! Every lambda numbers what it contains on its own, local functions nested in it included, and
+//! spells a lambda among them as a bare number (`one$lambda$0$1$0`, `one$lambda$0$lf$0`); a local
+//! function opens no numbering of its own (`one$loc$lambda$1`). The methods follow kotlinc's
+//! order: local functions as their enclosing body (a lambda's body is one) finishes, nested bodies
+//! first; then the declared members' lambdas, each nested lambda before the one around it; then
+//! the lambdas of each local function.
 
 use super::common;
 
@@ -182,4 +189,31 @@ fn a_suspend_lambda_takes_no_number() {
 #[test]
 fn lifted_callables_run() {
     common::expect_box_same_as_kotlinc(SOURCE, "LiftedNamesRun");
+}
+
+#[test]
+fn lambdas_number_and_order_their_nested_callables_like_kotlinc() {
+    let src = "import kotlin.reflect.KProperty\n\
+         class Cell(private val stored: Int) {\n\
+         \x20   operator fun getValue(owner: Any?, property: KProperty<*>): Int = stored\n\
+         }\n\
+         fun invokeBlock(block: () -> Int): Int = block()\n\
+         class Rack {\n\
+         \x20   fun one(): Int {\n\
+         \x20       val f = invokeBlock {\n\
+         \x20           val delegated by Cell(8)\n\
+         \x20           fun lf(): Int = invokeBlock { 3 }\n\
+         \x20           fun lf2(): Int = 4\n\
+         \x20           invokeBlock { invokeBlock { 1 } } + invokeBlock { 2 } +\n\
+         \x20               lf() + lf2() + delegated\n\
+         \x20       }\n\
+         \x20       fun loc(): Int = invokeBlock { 5 }\n\
+         \x20       return f + loc() + invokeBlock { 6 }\n\
+         \x20   }\n\
+         \x20   fun two(): Int = invokeBlock {\n\
+         \x20       fun lf(): Int = 7\n\
+         \x20       invokeBlock { lf() }\n\
+         \x20   }\n\
+         }\n";
+    common::assert_classes_identical_to_kotlinc("LiftedLambdaNames", src, &["Rack"]);
 }

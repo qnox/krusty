@@ -27,6 +27,7 @@ use crate::ast::{
     ClassDecl, ClassInit, CtorDelegation, Decl, DeclId, Expr, ExprId, File, FunBody, FunDecl,
     LiftingSite, LiftingStep, LocalDelegateProvenance, PropDecl, Stmt, StmtId,
 };
+use crate::lifting_provenance::LiftingCallableKind;
 
 /// The counters of one file, carried across its declaration units.
 #[derive(Default)]
@@ -121,7 +122,7 @@ impl Walker<'_> {
     }
 
     /// `scope` extended by the next position of its sequence.
-    fn next(&mut self, scope: &Scope, name: Option<&str>) -> Scope {
+    fn next(&mut self, scope: &Scope, kind: LiftingCallableKind, name: Option<&str>) -> Scope {
         let counter = self
             .counters
             .sequences
@@ -131,6 +132,7 @@ impl Walker<'_> {
         *counter += 1;
         let mut path = scope.path.clone();
         path.push(LiftingStep {
+            kind,
             name: name.map(str::to_string),
             position,
         });
@@ -294,7 +296,7 @@ impl Walker<'_> {
         let file = self.file;
         match file.expr(expression) {
             Expr::Lambda { body, .. } => {
-                let own = self.next(scope, None);
+                let own = self.next(scope, LiftingCallableKind::Lambda, None);
                 self.sites.lambdas.insert(expression.0, Self::site(&own));
                 self.expr(*body, &own);
             }
@@ -339,7 +341,11 @@ impl Walker<'_> {
         let file = self.file;
         match file.stmt(statement) {
             Stmt::LocalFun(function) => {
-                let own = self.next(scope, Some(&function.name));
+                let own = self.next(
+                    scope,
+                    LiftingCallableKind::LocalFunction,
+                    Some(&function.name),
+                );
                 self.sites
                     .local_functions
                     .insert(statement, Self::site(&own));
@@ -352,7 +358,13 @@ impl Walker<'_> {
                 // Its accessors are local functions without a source name.
                 let accessors = if *is_var { 2 } else { 1 };
                 let accessors = (0..accessors)
-                    .map(|_| Self::site(&self.next(scope, None)))
+                    .map(|_| {
+                        Self::site(&self.next(
+                            scope,
+                            LiftingCallableKind::LocalDelegatedPropertyAccessor,
+                            None,
+                        ))
+                    })
                     .collect();
                 // Numbered once the whole unit is walked: see `number_local_delegates`.
                 let provenance = LocalDelegateProvenance {
