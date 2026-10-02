@@ -28477,6 +28477,15 @@ enum class EntryChoice {
     }
 
     #[test]
+    fn floating_membership_without_a_selected_range_operator_fails_closed() {
+        let (errors, _) = check("fun f(x: Double): Boolean = x in 1.0..2.0");
+        assert_eq!(
+            errors,
+            ["operator 'rangeTo' cannot be applied to 'Double' and 'Double'"]
+        );
+    }
+
+    #[test]
     fn non_unit_lambda_still_requires_an_exhaustive_trailing_when() {
         let (errors, _) = check(
             "fun consumeInt(block: () -> Int): Int = block()\n\
@@ -61668,8 +61677,12 @@ impl<'a> Checker<'a> {
                 nullable,
             } => return self.expr_inner_as(scope, e, operand, ty, nullable),
             Expr::InRange {
-                value, start, end, ..
-            } => return self.expr_inner_in_range(scope, e, value, start, end),
+                value,
+                start,
+                end,
+                kind,
+                ..
+            } => return self.expr_inner_in_range(scope, e, value, start, end, kind),
             Expr::RangeTo { lo, hi, kind } => {
                 let lt = self.expr(scope, lo);
                 let rt = self.expr(scope, hi);
@@ -62762,26 +62775,6 @@ impl<'a> Checker<'a> {
         self.set(e, t)
     }
 
-    /// Whether `x in a..b` has a REFERENCE value over a primitive range whose elements can actually
-    /// inhabit it (`x: Any` over `4..10`). The membership test then reduces to "is `x` a boxed element
-    /// of the range", so a value type unrelated to the boxed element (`x: String` over `4..10`) is
-    /// excluded — that comparison is never non-trivially true and kotlinc rejects it.
-    ///
-    /// Only `Int`/`Long`/`Char` elements qualify, because the widened form is `Iterable<T>.contains`:
-    /// a FLOATING-POINT range is a `ClosedFloatingPointRange`, not an `Iterable`, so kotlinc rejects
-    /// `x: Any in 1.0..2.0` outright; a `Byte`/`Short` range is really an `IntRange` (its elements box
-    /// to `Integer`, not to the bound's own wrapper); and an unsigned range's elements box to their
-    /// inline class, which krusty erases to the signed primitive.
-    fn in_range_widened_value(&self, value: Ty, element: Ty) -> bool {
-        if !matches!(element, Ty::Int | Ty::Long | Ty::Char) {
-            return false;
-        }
-        let Some(boxed) = element.boxed_ref() else {
-            return false;
-        };
-        value.is_reference() && self.when_objs_comparable(value.non_null(), boxed)
-    }
-
     fn expr_inner_in_range(
         &mut self,
         scope: &CheckerScope<'_>,
@@ -62789,107 +62782,9 @@ impl<'a> Checker<'a> {
         value: ExprId,
         start: ExprId,
         end: ExprId,
+        kind: crate::ast::RangeKind,
     ) -> Ty {
-        self.resolved_in_range_comparisons.remove(&e);
-        let t = {
-            let vt = self.expr(scope, value);
-            let st = self.expr(scope, start);
-            let et = self.expr(scope, end);
-            // Built-in range overload selection uses a type parameter's declared upper bound. The
-            // original symbolic type remains attached to each expression; these three values are
-            // only the classifiers participating in `rangeTo`/`contains` selection.
-            let prim = |t: &Ty| {
-                matches!(
-                    *t,
-                    Ty::Int
-                        | Ty::Long
-                        | Ty::Char
-                        | Ty::Short
-                        | Ty::Byte
-                        | Ty::Double
-                        | Ty::Float
-                        | Ty::UInt
-                        | Ty::ULong
-                )
-            };
-            let range_operand = |ty: Ty| {
-                let primary = ty.range_operand_bound();
-                if prim(&primary) {
-                    primary
-                } else {
-                    self.semantic_tparam_extra_bounds(scope, ty)
-                        .into_iter()
-                        .map(Ty::range_operand_bound)
-                        .find(prim)
-                        .unwrap_or(primary)
-                }
-            };
-            let range_vt = range_operand(vt);
-            let range_st = range_operand(st);
-            let range_et = range_operand(et);
-            // Require uniform operand types — the lowering emits direct same-type comparisons, so a
-            // mixed range (Int value, Long bounds) would need promotion that isn't modeled yet.
-            if prim(&range_vt) && range_vt == range_st && range_st == range_et {
-                let comparison = range_st.range_counter_type().unwrap_or(range_st);
-                self.resolved_in_range_comparisons.insert(e, comparison);
-                Ty::Boolean
-            } else if prim(&range_st)
-                && range_st == range_et
-                && self.in_range_widened_value(vt, range_st)
-            {
-                // A WIDENED value over a primitive range: `when (x: Any) { in 4..10 -> … }`. kotlinc
-                // lowers it to `CollectionsKt.contains(4..10, x)`, which is true exactly when `x` is a
-                // BOXED element of the range — so it stays a comparison chain, guarded by the
-                // `instanceof` the boxed element type implies.
-                let comparison = range_st
-                    .range_counter_type()
-                    .expect("widened direct membership is restricted to counted primitive ranges");
-                self.resolved_in_range_comparisons.insert(e, comparison);
-                Ty::Boolean
-            } else {
-                // Every non-direct-comparison range desugars through the ordinary declarations
-                // `a.rangeTo(b).contains(x)`. This includes reference operators AND mixed unsigned
-                // membership (`UByte in UIntRange`, `UInt in ULongRange`), whose `contains` overloads
-                // live in stdlib metadata. Scalar storage is irrelevant to source applicability.
-                if let Some((range_ty, range_call)) = self.operator_call_ret(
-                    scope,
-                    e,
-                    st,
-                    "rangeTo",
-                    &[et],
-                    &[end],
-                    self.span(e),
-                    None,
-                ) {
-                    if let Some((Ty::Boolean, contains_call)) = self.operator_call_ret(
-                        scope,
-                        e,
-                        range_ty,
-                        "contains",
-                        &[vt],
-                        &[value],
-                        self.span(e),
-                        None,
-                    ) {
-                        self.resolved_operator_calls
-                            .insert((e, SyntheticOperatorCall::RangeTo), range_call);
-                        self.resolved_operator_calls
-                            .insert((e, SyntheticOperatorCall::Contains), contains_call);
-                        return self.set(e, Ty::Boolean);
-                    }
-                }
-                self.diags.error(
-                    self.span(e),
-                    format!(
-                        "operator 'contains' cannot be applied to range '{}' and '{}'",
-                        st.source_name(),
-                        vt.source_name()
-                    ),
-                );
-                Ty::Error
-            }
-        };
-        self.set(e, t)
+        self.resolve_in_range_expression(scope, e, value, start, end, kind)
     }
 
     /// Select one `inc`/`dec` convention across the binding's ranked data-flow receiver types.

@@ -135,6 +135,7 @@ mod tests {
                 .to_string(),
             signature: None,
             public: true,
+            paired_common: false,
         }
     }
 

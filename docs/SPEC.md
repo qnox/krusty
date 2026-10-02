@@ -10926,6 +10926,25 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   handling. Classpath generic signatures preserve declared bounds for receiver matching and JVM
   erasure. Tests: `tests/reference_range_expression_e2e.rs`.
 
+- **A nearer `Double`/`Float` range operator replaces primitive `in`.** `x in a..b` for those
+  primitives is a direct IEEE comparison only when overload resolution selects the exact common
+  stdlib `kotlin.ranges` `rangeTo` identity returning `ClosedFloatingPointRange`. The provider
+  reads that identity from the common KLIB and joins its `FloatingRangeMembership` role to the
+  physical JVM declaration only when both artifacts come from the paired stdlib dependency. A
+  same-shaped declaration from another dependency, a declaration outside that package, and
+  `Comparable.rangeTo` returning `ClosedRange`, do not carry it (`-0.0 in 0.0..0.0` is true and
+  `NaN in NaN..NaN` is false only for the stdlib operator). A declaration in a nearer scope is an
+  ordinary operator call followed by `contains`. The generic `Comparable.rangeTo` orders with
+  `compareTo`, so `-0.0` is outside `0.0..0.0` and `NaN` is inside `NaN..NaN`. Integral ranges stay
+  comparisons. Tests:
+  `jvm::common_metadata::tests::floating_range_role_requires_the_exact_common_declaration_identity`,
+  `floating_range_role_requires_the_paired_jvm_dependency`,
+  `paired_stdlib_provider_publishes_only_the_inclusive_floating_range_identities`,
+  `libraries::builtin_top_level_realization::tests::a_shape_equivalent_floating_range_has_no_realization`,
+  `a_nearer_double_range_to_is_a_contains_call`,
+  `tests/custom_floating_range_membership_e2e.rs`, box
+  `ranges/contains/inComparableRange.kt`.
+
 - **Source generic signatures participate in call-site substitution.** Module callables retain
   their declared type parameters, receiver, parameters, bounds, and return type. Receiver-call
   resolution uses that signature to specialize higher-order parameters, so a declaration such as

@@ -10,6 +10,7 @@
 //! - `simple_name → internal_name` for every class in the classpath
 //! - Kotlin type aliases from `@kotlin.Metadata` `d2` arrays in `*TypeAliasesKt.class` files
 
+mod builtin_inventory;
 mod builtin_signatures;
 mod builtins_validation;
 mod candidate_union;
@@ -629,6 +630,7 @@ struct ExtCandidateRecord {
     ret_desc: String,
     signature: Option<String>,
     public: bool,
+    paired_common: bool,
 }
 
 impl ExtCandidateRecord {
@@ -640,6 +642,7 @@ impl ExtCandidateRecord {
             ret_desc: cand.ret_desc.clone(),
             signature: cand.signature.clone(),
             public: cand.public,
+            paired_common: cand.paired_common,
         }
     }
 
@@ -651,6 +654,7 @@ impl ExtCandidateRecord {
             ret_desc: self.ret_desc.clone(),
             signature: self.signature.clone(),
             public: self.public,
+            paired_common: self.paired_common,
         }
     }
 }
@@ -834,6 +838,10 @@ pub struct ExtCandidate {
     /// the bytecode inliner can splice it, but the resolver admits it only for inline-only selection,
     /// never as a callable (an `invokestatic` to a package-private method would `IllegalAccessError`).
     pub public: bool,
+    /// This physical callable comes from the JVM library paired with the selected common KLIB.
+    /// Only that pairing may actualize a common declaration identity; another jar with the same
+    /// owner or method shape remains unrelated.
+    pub(super) paired_common: bool,
 }
 
 /// ONE classpath entry's contribution to the extension/top-level-function index, built once per
@@ -1160,6 +1168,30 @@ impl BuiltinsFile {
         let mut file = BuiltinsFile::default();
         for function in package.functions {
             let bounds = builtin_bounds(&function.formals, &HashMap::new());
+            let generic_sig = GenericSig {
+                formals: function.formals.iter().map(|p| p.name.clone()).collect(),
+                formal_bounds: function
+                    .formals
+                    .iter()
+                    .map(|p| {
+                        p.bounds
+                            .iter()
+                            .map(|bound| builtin_ty(bound, &bounds))
+                            .collect()
+                    })
+                    .collect(),
+                receiver: function
+                    .receiver
+                    .as_ref()
+                    .map(|receiver| builtin_ty(receiver, &bounds)),
+                params: function
+                    .params
+                    .iter()
+                    .map(|parameter| builtin_ty(parameter, &bounds))
+                    .collect(),
+                ret: builtin_ty(&function.ret, &bounds),
+                return_policy: Default::default(),
+            };
             file.functions.push(BuiltinFunction {
                 name: function.name,
                 only_input_type_formals: function
@@ -1168,30 +1200,7 @@ impl BuiltinsFile {
                     .filter(|parameter| parameter.only_input)
                     .map(|parameter| parameter.name.clone())
                     .collect(),
-                generic_sig: GenericSig {
-                    formals: function.formals.iter().map(|p| p.name.clone()).collect(),
-                    formal_bounds: function
-                        .formals
-                        .iter()
-                        .map(|p| {
-                            p.bounds
-                                .iter()
-                                .map(|bound| builtin_ty(bound, &bounds))
-                                .collect()
-                        })
-                        .collect(),
-                    receiver: function
-                        .receiver
-                        .as_ref()
-                        .map(|receiver| builtin_ty(receiver, &bounds)),
-                    params: function
-                        .params
-                        .iter()
-                        .map(|parameter| builtin_ty(parameter, &bounds))
-                        .collect(),
-                    ret: builtin_ty(&function.ret, &bounds),
-                    return_policy: Default::default(),
-                },
+                generic_sig,
                 param_names: function.param_names,
                 param_defaults: function.param_defaults,
                 vararg: function.vararg,
@@ -1763,6 +1772,24 @@ impl Classpath {
     /// ambient compiler installation.
     pub(super) fn common_expectation_klib(&self) -> Option<PathBuf> {
         self.common_expectation_klib.clone()
+    }
+
+    /// Whether `internal` is supplied by the JVM stdlib entry whose sibling common KLIB was selected
+    /// for this classpath. This is dependency provenance, not an owner-name test: a copied or
+    /// shadowing jar cannot actualize identities from a different library's KLIB.
+    fn common_metadata_owns(&self, internal: TypeName) -> bool {
+        let Some(klib) = self.common_expectation_klib.as_ref() else {
+            return false;
+        };
+        let Some(directory) = klib.parent() else {
+            return false;
+        };
+        let stdlib = directory.join("kotlin-stdlib.jar");
+        let Some(expected) = self.entries.iter().position(|entry| entry.path() == stdlib) else {
+            return false;
+        };
+        let physical = super::jvm_class_map::to_jvm_type_name(internal);
+        self.owning_entry(physical) == Some(expected)
     }
 
     pub fn new(paths: Vec<PathBuf>) -> Classpath {
@@ -2640,10 +2667,11 @@ impl Classpath {
             return out;
         };
         let root_public = root_ci.is_public();
-        let mut cur = Some(root_ci);
+        let mut cur = Some((root, root_ci));
         let mut visited = std::collections::HashSet::new();
         visited.insert(root);
-        while let Some(ci) = cur.take() {
+        while let Some((current, ci)) = cur.take() {
+            let paired_common = self.common_metadata_owns(current);
             for m in &ci.methods {
                 // Static methods of this name only — never `<init>`/`<clinit>` (the eager scan excluded
                 // `<`-prefixed names; a real call name never starts with `<`, so this only hardens the path).
@@ -2663,11 +2691,15 @@ impl Classpath {
                     ret_desc,
                     signature: m.signature.clone(),
                     public: root_public && m.is_public(),
+                    paired_common,
                 });
             }
-            cur = ci
-                .super_class
-                .and_then(|next| visited.insert(next).then(|| self.find_name(next)).flatten());
+            cur = ci.super_class.and_then(|next| {
+                visited
+                    .insert(next)
+                    .then(|| self.find_name(next).map(|class| (next, class)))
+                    .flatten()
+            });
         }
         out
     }
@@ -2736,9 +2768,9 @@ impl Classpath {
                 };
                 match read {
                     EntryReadResult::Data(bytes) => match super::metadata::parse_builtins(&bytes) {
-                        Ok(package) => (
+                        Ok(decoded) => (
                             Ok(Some(std::sync::Arc::new(BuiltinsFile::from_package(
-                                package,
+                                decoded,
                             )))),
                             true,
                         ),
@@ -2815,42 +2847,6 @@ impl Classpath {
     fn builtins_file_for_package(&self, package: TypeName) -> std::sync::Arc<BuiltinsFile> {
         self.try_builtins_file_for_package(package)
             .unwrap_or_else(|error| panic!("validated Kotlin builtins became unreadable: {error}"))
-    }
-
-    pub(super) fn builtin_package_functions(
-        &self,
-        package: TypeName,
-        name: &str,
-    ) -> Vec<BuiltinPackageFunction> {
-        self.builtins_file_for_package(package)
-            .functions
-            .iter()
-            .filter(|function| function.name == name)
-            .map(|function| BuiltinPackageFunction {
-                generic_sig: function.generic_sig.clone(),
-                only_input_type_formals: function.only_input_type_formals.clone(),
-                params: function
-                    .generic_sig
-                    .receiver
-                    .iter()
-                    .chain(&function.generic_sig.params)
-                    .copied()
-                    .map(builtin_erased)
-                    .collect(),
-                ret: builtin_erased(function.generic_sig.ret),
-                param_names: function.param_names.clone(),
-                param_defaults: function.param_defaults.clone(),
-                vararg: function.vararg,
-                visibility: function.visibility,
-                is_inline: function.is_inline,
-                has_reified_type_params: function.has_reified_type_params,
-                is_suspend: function.is_suspend,
-                is_operator: function.is_operator,
-                is_infix: function.is_infix,
-                context_count: function.context_count,
-                annotations: function.annotations.clone(),
-            })
-            .collect()
     }
 
     /// The `.kotlin_builtins` fragment path for a package, mirroring kotlinc's
@@ -4137,6 +4133,7 @@ impl Classpath {
                 break;
             }
             let Some(ci) = self.find_name(cn) else { break };
+            let paired_common = self.common_metadata_owns(cn);
             for m in &ci.methods {
                 if !m.is_static() || m.name.starts_with('<') {
                     continue;
@@ -4158,6 +4155,7 @@ impl Classpath {
                     ret_desc,
                     signature: m.signature.clone(),
                     public,
+                    paired_common,
                 });
             }
             cur = ci.super_class;
@@ -5599,6 +5597,7 @@ mod fq_tests {
             ret_desc: "Ljava/util/List;".to_string(),
             signature: None,
             public: true,
+            paired_common: false,
         };
 
         cached.all.push(record);
@@ -5626,6 +5625,7 @@ mod fq_tests {
             ret_desc: "I".to_string(),
             signature: None,
             public: true,
+            paired_common: false,
         });
         members
             .by_source

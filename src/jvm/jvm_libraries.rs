@@ -663,6 +663,8 @@ impl JvmLibraries {
     /// `FnKind` as needed.
     fn top_level_overloads(&self, name: &str, pkg: TypeName) -> Vec<FunctionInfo> {
         let mut overloads = Vec::new();
+        let cm = &self.common_expectations;
+        let namespace = SymbolNamespace::Package(pkg);
         for c in self.cp.functions_in_scope(name, &[pkg]) {
             // Accessors and functions share the bytecode static-method index.
             if self
@@ -840,11 +842,6 @@ impl JvmLibraries {
                     self.top_level_default_realization(&callable).map(Box::new);
             }
             callable.inline_body_plan = self.inline_body_plan(&callable).map(Box::new);
-            // The static-method index (`find_top_level`) also surfaces an EXTENSION's compiled form
-            // (`T.run` → `run(receiver, block)`); classify by the metadata signature's receiver so it is
-            // an `Extension`, not a receiver-less `TopLevel`. Extension resolution reaches it through the
-            // by-receiver query; keeping the kind honest is what lets the top-level queries ignore it
-            // without per-call-site receiver checks.
             let generic_sig = generic_sig_for_callable;
             let kind = if generic_sig.as_ref().is_some_and(|g| g.receiver.is_some()) {
                 FnKind::Extension
@@ -874,6 +871,7 @@ impl JvmLibraries {
                 annotations: meta.annotations.clone(),
                 ..FunctionInfo::plain(kind, None, callable)
             });
+            cm.attach_tail(c.paired_common, namespace, name, &mut overloads);
         }
         for builtin in self.cp.builtin_package_functions(pkg, name) {
             if overloads.iter().any(|candidate| {
@@ -4601,10 +4599,8 @@ impl JvmLibraries {
                     declared_params: generic_sig
                         .as_ref()
                         .map(|signature| signature.parameters_with_receiver(mf.context_count())),
-                    // Carry the resolved bytecode method's generic `Signature` — a `<reified T>` extension's
-                    // splice reads its formal-type-parameter NAMES from here to bind the call's explicit
-                    // type arguments. Without it the reified body cannot be specialized and the call falls
-                    // back to a (throwing) direct invoke of the inline-only method.
+                    // Carry the bytecode generic `Signature` so a reified extension can bind explicit
+                    // type arguments instead of invoking its throwing inline-only method.
                     signature: cand.as_ref().and_then(|c| c.signature.clone()),
                     // The name this extension is DECLARED under, beside the JVM method it is
                     // realized as: `@JvmName` renames the method, and a value-class signature
@@ -4620,6 +4616,7 @@ impl JvmLibraries {
                         self.top_level_default_realization(&callable).map(Box::new);
                 }
                 callable.inline_body_plan = self.inline_body_plan(&callable).map(Box::new);
+                let paired = cand.as_ref().is_some_and(|c| c.paired_common);
                 overloads.push(FunctionInfo {
                     ret: ReturnInfo::new(mf.ret_nullable(), ret_class),
                     visibility: mf.visibility,
@@ -4640,6 +4637,8 @@ impl JvmLibraries {
                     call_sig,
                     ..FunctionInfo::plain(FnKind::Extension, Some(receiver), callable)
                 });
+                self.common_expectations
+                    .attach_tail(paired, namespace, name, &mut overloads);
             }
             // PROPERTIES declared by the facade — receiver-less TOP-LEVEL ones (`val plugin: Plugin`)
             // and EXTENSION ones (`arr.lastIndex`, `list.indices`). Both are the callable namespace's

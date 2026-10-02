@@ -366,4 +366,268 @@ impl<'a> Checker<'a> {
                 .map(|(_, params)| params)
         }
     }
+
+    /// Whether `x in a..b` has a REFERENCE value over a primitive range whose elements can actually
+    /// inhabit it (`x: Any` over `4..10`). The membership test then reduces to "is `x` a boxed element
+    /// of the range", so a value type unrelated to the boxed element (`x: String` over `4..10`) is
+    /// excluded — that comparison is never non-trivially true and kotlinc rejects it.
+    ///
+    /// Only `Int`/`Long`/`Char` elements qualify, because the widened form is `Iterable<T>.contains`:
+    /// a FLOATING-POINT range is a `ClosedFloatingPointRange`, not an `Iterable`, so kotlinc rejects
+    /// `x: Any in 1.0..2.0` outright; a `Byte`/`Short` range is really an `IntRange` (its elements box
+    /// to `Integer`, not to the bound's own wrapper); and an unsigned range's elements box to their
+    /// inline class, which krusty erases to the signed primitive.
+    fn in_range_widened_value(&self, value: Ty, element: Ty) -> bool {
+        if !matches!(element, Ty::Int | Ty::Long | Ty::Char) {
+            return false;
+        }
+        let Some(boxed) = element.boxed_ref() else {
+            return false;
+        };
+        value.is_reference() && self.when_objs_comparable(value.non_null(), boxed)
+    }
+
+    pub(super) fn resolve_in_range_expression(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        e: ExprId,
+        value: ExprId,
+        start: ExprId,
+        end: ExprId,
+        kind: crate::ast::RangeKind,
+    ) -> Ty {
+        self.resolved_in_range_comparisons.remove(&e);
+        let t = {
+            let vt = self.expr(scope, value);
+            let st = self.expr(scope, start);
+            let et = self.expr(scope, end);
+            // Built-in range overload selection uses a type parameter's declared upper bound. The
+            // original symbolic type remains attached to each expression; these three values are
+            // only the classifiers participating in `rangeTo`/`contains` selection.
+            let prim = |t: &Ty| {
+                matches!(
+                    *t,
+                    Ty::Int
+                        | Ty::Long
+                        | Ty::Char
+                        | Ty::Short
+                        | Ty::Byte
+                        | Ty::Double
+                        | Ty::Float
+                        | Ty::UInt
+                        | Ty::ULong
+                )
+            };
+            let range_operand = |ty: Ty| {
+                let primary = ty.range_operand_bound();
+                if prim(&primary) {
+                    primary
+                } else {
+                    self.semantic_tparam_extra_bounds(scope, ty)
+                        .into_iter()
+                        .map(Ty::range_operand_bound)
+                        .find(prim)
+                        .unwrap_or(primary)
+                }
+            };
+            let range_vt = range_operand(vt);
+            let range_st = range_operand(st);
+            let range_et = range_operand(et);
+            // Require uniform operand types — the lowering emits direct same-type comparisons, so a
+            // mixed range (Int value, Long bounds) would need promotion that isn't modeled yet.
+            if prim(&range_vt) && range_vt == range_st && range_st == range_et {
+                // `Double`/`Float` `in a..b` is a comparison only for the stdlib floating range.
+                // A nearer `operator fun Double.rangeTo` is an ordinary `rangeTo` + `contains`.
+                // Integral ranges stay comparisons: their `rangeTo` members are range constructions,
+                // and probing them would re-check every counted membership.
+                if matches!(st, Ty::Double | Ty::Float)
+                    && st == et
+                    && st == vt
+                    && kind == crate::ast::RangeKind::Through
+                {
+                    let operands = InRangeOperands {
+                        expression: e,
+                        end,
+                        value,
+                        start_ty: st,
+                        end_ty: et,
+                        value_ty: vt,
+                    };
+                    match self.select_floating_range_membership(scope, &operands) {
+                        FloatingRangeMembershipSelection::ExactIntrinsic => {}
+                        FloatingRangeMembershipSelection::Ordinary {
+                            range_ty,
+                            range_call,
+                        } => {
+                            let resolved =
+                                self.finish_range_contains(scope, &operands, range_ty, range_call);
+                            return self.set(e, resolved);
+                        }
+                        FloatingRangeMembershipSelection::Unresolved => {
+                            self.diags.error(
+                                self.span(e),
+                                format!(
+                                    "operator 'rangeTo' cannot be applied to '{}' and '{}'",
+                                    st.source_name(),
+                                    et.source_name()
+                                ),
+                            );
+                            return self.set(e, Ty::Error);
+                        }
+                    }
+                }
+                let comparison = range_st.range_counter_type().unwrap_or(range_st);
+                self.resolved_in_range_comparisons.insert(e, comparison);
+                Ty::Boolean
+            } else if prim(&range_st)
+                && range_st == range_et
+                && self.in_range_widened_value(vt, range_st)
+            {
+                // A WIDENED value over a primitive range: `when (x: Any) { in 4..10 -> … }`. kotlinc
+                // lowers it to `CollectionsKt.contains(4..10, x)`, which is true exactly when `x` is a
+                // BOXED element of the range — so it stays a comparison chain, guarded by the
+                // `instanceof` the boxed element type implies.
+                let comparison = range_st
+                    .range_counter_type()
+                    .expect("widened direct membership is restricted to counted primitive ranges");
+                self.resolved_in_range_comparisons.insert(e, comparison);
+                Ty::Boolean
+            } else {
+                // Every non-direct-comparison range desugars through the ordinary declarations
+                // `a.rangeTo(b).contains(x)`. This includes reference operators AND mixed unsigned
+                // membership (`UByte in UIntRange`, `UInt in ULongRange`), whose `contains` overloads
+                // live in stdlib metadata. Scalar storage is irrelevant to source applicability.
+                let operands = InRangeOperands {
+                    expression: e,
+                    end,
+                    value,
+                    start_ty: st,
+                    end_ty: et,
+                    value_ty: vt,
+                };
+                if let Some(resolved) = self.record_range_contains(scope, &operands) {
+                    return self.set(e, resolved);
+                }
+                self.diags.error(
+                    self.span(e),
+                    format!(
+                        "operator 'contains' cannot be applied to range '{}' and '{}'",
+                        st.source_name(),
+                        vt.source_name()
+                    ),
+                );
+                Ty::Error
+            }
+        };
+        self.set(e, t)
+    }
+
+    /// Select the range constructor before deciding whether membership may become a comparison.
+    /// Only the exact selected common role authorizes the intrinsic; absence remains a frontend
+    /// failure, while every ordinary declaration continues through its selected `contains` call.
+    fn select_floating_range_membership(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        operands: &InRangeOperands,
+    ) -> FloatingRangeMembershipSelection {
+        let Some((range_ty, range_call)) = self.operator_call_ret(
+            scope,
+            operands.expression,
+            operands.start_ty,
+            "rangeTo",
+            &[operands.end_ty],
+            &[operands.end],
+            self.span(operands.expression),
+            None,
+        ) else {
+            return FloatingRangeMembershipSelection::Unresolved;
+        };
+        if matches!(
+            &range_call,
+            ResolvedCall::Extension(extension)
+                if extension.callable.compiler_intrinsic
+                    == Some(crate::libraries::CompilerIntrinsic::FloatingRangeMembership)
+        ) {
+            return FloatingRangeMembershipSelection::ExactIntrinsic;
+        }
+        FloatingRangeMembershipSelection::Ordinary {
+            range_ty,
+            range_call,
+        }
+    }
+
+    /// Record `rangeTo` + `contains` when both resolve. `None` leaves the caller's diagnostic in place.
+    fn record_range_contains(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        operands: &InRangeOperands,
+    ) -> Option<Ty> {
+        let (range_ty, range_call) = self.operator_call_ret(
+            scope,
+            operands.expression,
+            operands.start_ty,
+            "rangeTo",
+            &[operands.end_ty],
+            &[operands.end],
+            self.span(operands.expression),
+            None,
+        )?;
+        Some(self.finish_range_contains(scope, operands, range_ty, range_call))
+    }
+
+    fn finish_range_contains(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        operands: &InRangeOperands,
+        range_ty: Ty,
+        range_call: ResolvedCall,
+    ) -> Ty {
+        let Some((Ty::Boolean, contains_call)) = self.operator_call_ret(
+            scope,
+            operands.expression,
+            range_ty,
+            "contains",
+            &[operands.value_ty],
+            &[operands.value],
+            self.span(operands.expression),
+            None,
+        ) else {
+            self.diags.error(
+                self.span(operands.expression),
+                format!(
+                    "operator 'contains' cannot be applied to range '{}' and '{}'",
+                    operands.start_ty.source_name(),
+                    operands.value_ty.source_name()
+                ),
+            );
+            return Ty::Error;
+        };
+        self.resolved_operator_calls.insert(
+            (operands.expression, SyntheticOperatorCall::RangeTo),
+            range_call,
+        );
+        self.resolved_operator_calls.insert(
+            (operands.expression, SyntheticOperatorCall::Contains),
+            contains_call,
+        );
+        Ty::Boolean
+    }
+}
+
+struct InRangeOperands {
+    expression: ExprId,
+    end: ExprId,
+    value: ExprId,
+    start_ty: Ty,
+    end_ty: Ty,
+    value_ty: Ty,
+}
+
+enum FloatingRangeMembershipSelection {
+    ExactIntrinsic,
+    Ordinary {
+        range_ty: Ty,
+        range_call: ResolvedCall,
+    },
+    Unresolved,
 }

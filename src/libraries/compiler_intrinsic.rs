@@ -81,6 +81,11 @@ pub enum CompilerIntrinsic {
     Count,
     TrimIndent,
     TrimMargin,
+    /// The common stdlib `kotlin.ranges` `Double`/`Float` `rangeTo` declarations.
+    /// Membership is an IEEE comparison. The provider copies this role from the exact common
+    /// declaration onto its physical realization; a nearer operator and an otherwise identical
+    /// declaration from another dependency do not carry it.
+    FloatingRangeMembership,
     /// `kotlin.ranges` progression builders a counted `for` loop reads through instead of calling
     /// (kotlinc's `ForLoopsLowering` handlers). Outside a loop header they are ordinary calls.
     RangeDownTo,
