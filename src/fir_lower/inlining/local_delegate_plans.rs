@@ -170,7 +170,7 @@ fn expression_mentions(
     bindings: &HashMap<String, Ty>,
     runtime: &HashMap<String, Ty>,
 ) -> bool {
-    let recorded = [
+    let direct_recorded = [
         ir.logical_types.get(&expression).copied(),
         ir.whens.exhaustive.get(&expression).copied(),
         ir.physical_types.get(&expression).copied(),
@@ -181,13 +181,36 @@ fn expression_mentions(
     .into_iter()
     .flatten()
     .any(|ty| type_mentions(ty, bindings));
-    if recorded {
+    if direct_recorded {
+        return true;
+    }
+    let parameter_facts = [
+        ir.call_declared_params.get(&expression),
+        ir.construction_declared_params.get(&expression),
+    ]
+    .into_iter()
+    .flatten()
+    .flatten()
+    .any(|ty| type_mentions(*ty, bindings));
+    if parameter_facts {
         return true;
     }
     if ir
-        .call_declared_params
+        .module_member_accesses
         .get(&expression)
-        .is_some_and(|parameters| parameters.iter().any(|ty| type_mentions(*ty, bindings)))
+        .is_some_and(|access| {
+            let parameters = match access {
+                crate::ir::IrModuleMemberAccess::Callable {
+                    selected_parameters,
+                    ..
+                }
+                | crate::ir::IrModuleMemberAccess::Property {
+                    selected_parameters,
+                    ..
+                } => selected_parameters,
+            };
+            parameters.iter().any(|ty| type_mentions(*ty, bindings))
+        })
     {
         return true;
     }
@@ -202,7 +225,54 @@ fn expression_mentions(
     {
         return true;
     }
+    if ir
+        .annotation_constructions
+        .get(&expression)
+        .is_some_and(|construction| {
+            construction
+                .members
+                .iter()
+                .any(|(_, ty)| type_mentions(*ty, bindings))
+        })
+    {
+        return true;
+    }
+    if ir
+        .value_class_suspend_calls
+        .get(&expression)
+        .is_some_and(|result| match result {
+            crate::ir::IrValueClassSuspendResult::Boxed { carrier, .. }
+            | crate::ir::IrValueClassSuspendResult::Carrier { carrier, .. } => {
+                type_mentions(*carrier, bindings)
+            }
+        })
+        || ir
+            .intrinsic_suspension_points
+            .get(&expression)
+            .is_some_and(|point| type_mentions(point.result, bindings))
+    {
+        return true;
+    }
     match ir.expr(expression) {
+        IrExpr::Checked(operation) => checked_operation_mentions(operation, bindings),
+        IrExpr::CallableReference(reference) => {
+            let receiver = match &reference.target {
+                crate::ir::IrCallableReferenceTarget::External { receiver, .. } => *receiver,
+                _ => None,
+            };
+            receiver.is_some_and(|ty| type_mentions(ty, bindings))
+                || type_mentions(reference.function_type, bindings)
+                || reference
+                    .declaration_parameters
+                    .iter()
+                    .any(|ty| type_mentions(*ty, bindings))
+                || type_mentions(reference.declaration_result, bindings)
+                || reference
+                    .adaptation
+                    .as_deref()
+                    .is_some_and(|adaptation| adaptation_mentions(adaptation, bindings))
+        }
+        IrExpr::Call { callee, .. } => callee_mentions(callee, bindings, runtime),
         IrExpr::TypeOp { type_operand, .. } => type_mentions(*type_operand, runtime),
         IrExpr::KClassLiteral { classifier, .. } => {
             classifier.is_some_and(|ty| type_mentions(ty, runtime))
@@ -213,9 +283,289 @@ fn expression_mentions(
         IrExpr::Variable { ty, .. }
         | IrExpr::PrimitiveNeg { ty, .. }
         | IrExpr::PropertyRead { ty, .. }
-        | IrExpr::PropertyWrite { ty, .. } => type_mentions(*ty, bindings),
+        | IrExpr::PropertyWrite { ty, .. }
+        | IrExpr::RefNew { elem: ty, .. }
+        | IrExpr::RefGet { elem: ty, .. }
+        | IrExpr::RefSet { elem: ty, .. }
+        | IrExpr::Vararg { array_type: ty, .. }
+        | IrExpr::NewArray { array_type: ty, .. }
+        | IrExpr::Try { result: ty, .. } => type_mentions(*ty, bindings),
+        IrExpr::New {
+            ctor_params: Some(parameters),
+            ..
+        }
+        | IrExpr::PluginPlaceholder {
+            types: parameters, ..
+        } => parameters.iter().any(|ty| type_mentions(*ty, bindings)),
+        IrExpr::InvokeFunction { params, ret, .. } => {
+            params.iter().any(|ty| type_mentions(*ty, bindings)) || type_mentions(*ret, bindings)
+        }
+        IrExpr::Lambda { sam: Some(sam), .. } => {
+            sam.parameters
+                .iter()
+                .chain(&sam.declared_parameters)
+                .any(|ty| type_mentions(*ty, bindings))
+                || type_mentions(sam.result, bindings)
+                || type_mentions(sam.declared_result, bindings)
+        }
         _ => false,
     }
+}
+
+fn checked_operation_mentions(
+    operation: &crate::ir::IrCheckedOperation,
+    bindings: &HashMap<String, Ty>,
+) -> bool {
+    use crate::ir::IrCheckedOperation;
+
+    match operation {
+        IrCheckedOperation::Call {
+            arguments,
+            substitutions,
+            ..
+        }
+        | IrCheckedOperation::ConstructorDelegation {
+            arguments,
+            substitutions,
+            ..
+        } => {
+            arguments.iter().any(|argument| match argument {
+                crate::ir::IrCheckedArgument::Vararg { array_type, .. } => {
+                    type_mentions(*array_type, bindings)
+                }
+                _ => false,
+            }) || substitutions
+                .iter()
+                .any(|substitution| substitution_mentions(substitution, bindings))
+                || match operation {
+                    IrCheckedOperation::ConstructorDelegation {
+                        target,
+                        outer_parameter,
+                        ..
+                    } => {
+                        outer_parameter.is_some_and(|ty| type_mentions(ty, bindings))
+                            || matches!(target, crate::ir::IrCheckedConstructorTarget::External { parameters, .. }
+                                if parameters.iter().any(|ty| type_mentions(*ty, bindings)))
+                    }
+                    _ => false,
+                }
+        }
+        IrCheckedOperation::PropertyRead { substitutions, .. }
+        | IrCheckedOperation::PropertyWrite { substitutions, .. } => substitutions
+            .iter()
+            .any(|substitution| substitution_mentions(substitution, bindings)),
+        IrCheckedOperation::ExternalPropertyRead {
+            parameters,
+            result,
+            source_receiver,
+            ..
+        }
+        | IrCheckedOperation::ExternalPropertyWrite {
+            parameters,
+            result,
+            source_receiver,
+            ..
+        } => {
+            parameters.iter().any(|ty| type_mentions(*ty, bindings))
+                || type_mentions(*result, bindings)
+                || source_receiver.is_some_and(|ty| type_mentions(ty, bindings))
+        }
+        IrCheckedOperation::RangeConstruction {
+            start_type,
+            end_type,
+            result,
+            ..
+        } => [*start_type, *end_type, *result]
+            .into_iter()
+            .any(|ty| type_mentions(ty, bindings)),
+        IrCheckedOperation::RangeContains { counter, .. }
+        | IrCheckedOperation::RangeLoop { counter, .. } => type_mentions(*counter, bindings),
+        IrCheckedOperation::PropertyReference {
+            target,
+            substitutions,
+            adaptation,
+            ..
+        } => {
+            property_reference_target_mentions(target, bindings)
+                || substitutions
+                    .iter()
+                    .any(|substitution| substitution_mentions(substitution, bindings))
+                || adaptation
+                    .as_deref()
+                    .is_some_and(|adaptation| adaptation_mentions(adaptation, bindings))
+        }
+        IrCheckedOperation::LateinitFieldRead { .. }
+        | IrCheckedOperation::BackingFieldRead { .. }
+        | IrCheckedOperation::BackingFieldWrite { .. }
+        | IrCheckedOperation::IllegalProgressionStep { .. } => false,
+    }
+}
+
+fn property_reference_target_mentions(
+    target: &crate::fir::FirPropertyReferenceTarget,
+    bindings: &HashMap<String, Ty>,
+) -> bool {
+    use crate::fir::FirPropertyReferenceTarget;
+
+    match target {
+        FirPropertyReferenceTarget::Module(_) => false,
+        FirPropertyReferenceTarget::SpecializedModule {
+            receiver,
+            property_type,
+            ..
+        } => {
+            receiver.is_some_and(|ty| type_mentions(ty.get(), bindings))
+                || type_mentions(property_type.get(), bindings)
+        }
+        FirPropertyReferenceTarget::Classifier { property_type, .. } => {
+            type_mentions(property_type.get(), bindings)
+        }
+        FirPropertyReferenceTarget::External {
+            reflection_owner,
+            getter,
+            setter,
+            property_type,
+            ..
+        } => {
+            reflection_owner.is_some_and(|ty| type_mentions(ty.get(), bindings))
+                || property_target_mentions(getter, bindings)
+                || setter
+                    .as_deref()
+                    .is_some_and(|setter| property_target_mentions(setter, bindings))
+                || type_mentions(property_type.get(), bindings)
+        }
+    }
+}
+
+fn property_target_mentions(
+    target: &crate::fir::FirPropertyTarget,
+    bindings: &HashMap<String, Ty>,
+) -> bool {
+    match target {
+        crate::fir::FirPropertyTarget::Module { .. } => false,
+        crate::fir::FirPropertyTarget::External {
+            receiver,
+            parameters,
+            result,
+            ..
+        } => {
+            receiver.is_some_and(|ty| type_mentions(ty.get(), bindings))
+                || parameters
+                    .iter()
+                    .any(|ty| type_mentions(ty.get(), bindings))
+                || type_mentions(result.get(), bindings)
+        }
+    }
+}
+
+fn adaptation_mentions(
+    adaptation: &crate::fir::FirReferenceAdaptation,
+    bindings: &HashMap<String, Ty>,
+) -> bool {
+    adaptation
+        .parameter_types
+        .iter()
+        .any(|ty| type_mentions(ty.get(), bindings))
+        || type_mentions(adaptation.result_type.get(), bindings)
+}
+
+fn callee_mentions(
+    callee: &crate::ir::Callee,
+    bindings: &HashMap<String, Ty>,
+    runtime: &HashMap<String, Ty>,
+) -> bool {
+    use crate::ir::Callee;
+
+    match callee {
+        Callee::Intrinsic { operation, ret } => {
+            intrinsic_mentions(*operation, runtime) || type_mentions(*ret, bindings)
+        }
+        Callee::CrossFile { params, ret, .. }
+        | Callee::Module { params, ret, .. }
+        | Callee::Super { params, ret, .. } => {
+            params.iter().any(|ty| type_mentions(*ty, bindings)) || type_mentions(*ret, bindings)
+        }
+        Callee::ModuleWithDefaults {
+            params,
+            ret,
+            dispatch_receiver_ty,
+            ..
+        } => {
+            params.iter().any(|ty| type_mentions(*ty, bindings))
+                || type_mentions(*ret, bindings)
+                || dispatch_receiver_ty.is_some_and(|ty| type_mentions(ty, bindings))
+        }
+        Callee::External {
+            params,
+            ret,
+            substitutions,
+            ..
+        } => {
+            params.iter().any(|ty| type_mentions(*ty, bindings))
+                || type_mentions(*ret, bindings)
+                || substitutions
+                    .iter()
+                    .any(|substitution| substitution_mentions(substitution, runtime))
+        }
+        Callee::Virtual {
+            params: Some((params, ret)),
+            ..
+        } => params.iter().any(|ty| type_mentions(*ty, bindings)) || type_mentions(*ret, bindings),
+        Callee::Local(_)
+        | Callee::ClassStatic { .. }
+        | Callee::ClassStaticWithDefaults { .. }
+        | Callee::ClassStaticDefault { .. }
+        | Callee::LocalDefault(_)
+        | Callee::LocalWithDefaults { .. }
+        | Callee::Static { .. }
+        | Callee::Virtual { params: None, .. }
+        | Callee::Special { .. } => false,
+    }
+}
+
+fn intrinsic_mentions(operation: crate::ir::IrIntrinsic, bindings: &HashMap<String, Ty>) -> bool {
+    use crate::ir::IrIntrinsic;
+
+    match operation {
+        IrIntrinsic::EnumValueOf { classifier }
+        | IrIntrinsic::TypeOf { ty: classifier }
+        | IrIntrinsic::PrimitiveCompare {
+            operand: classifier,
+            ..
+        }
+        | IrIntrinsic::UnsignedToString { source: classifier }
+        | IrIntrinsic::PrimitiveArrayNew {
+            element: classifier,
+        }
+        | IrIntrinsic::Ieee754Equals {
+            operand: classifier,
+        }
+        | IrIntrinsic::GeneratedPropertyEquals { ty: classifier }
+        | IrIntrinsic::GeneratedPropertyHash { ty: classifier }
+        | IrIntrinsic::DataClassArrayToString { ty: classifier } => {
+            type_mentions(classifier, bindings)
+        }
+        IrIntrinsic::Assert { .. }
+        | IrIntrinsic::ArrayGet
+        | IrIntrinsic::ArraySet
+        | IrIntrinsic::ArraySize
+        | IrIntrinsic::StringGet
+        | IrIntrinsic::StringLength
+        | IrIntrinsic::EnumName
+        | IrIntrinsic::NullableAnyToString
+        | IrIntrinsic::CoroutineContext => false,
+    }
+}
+
+fn substitution_mentions(
+    substitution: &crate::ir::IrCheckedSubstitution,
+    bindings: &HashMap<String, Ty>,
+) -> bool {
+    type_mentions(substitution.value, bindings)
+        || substitution
+            .additional_bounds
+            .iter()
+            .any(|ty| type_mentions(*ty, bindings))
 }
 
 fn type_mentions(ty: Ty, bindings: &HashMap<String, Ty>) -> bool {
