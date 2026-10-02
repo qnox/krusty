@@ -50,6 +50,19 @@ The "extra leading `00`" is the **`UTF8_MODE_MARKER`** (`BitEncoding`): the d1 p
 `0x00` byte before the delimited `StringTableTypes`. The reader strips it before
 `parseDelimitedFrom`. krusty emits it verbatim; confirmed by the round-trips below.
 
+## Version stamp — `mv` and the `.kotlin_module` header
+
+Every emitted `@Metadata` carries `mv` (metadata version) and the `.kotlin_module` header carries
+the same version as its first ints after the format marker. The stamp is selected by
+`-language-version X.Y` → `[X, Y, 0]`; without the flag it is the compiler's default language
+version, `[2, 4, 0]` (`EmitOptions::DEFAULT_METADATA_VERSION`), matching the reference toolchain's
+no-flag output. One value threads from `crates/krusty-cli` through `JvmBackend::with_metadata_version`
+into `EmitOptions::metadata_version`; regenerated anonymous-object metadata at inline call sites
+stamps the caller's version, exactly as kotlinc's `AnonymousObjectTransformer` does. krusty does not
+gate language semantics on the flag — it changes the stamp only. Pinned by
+`tests/metadata_language_version_e2e.rs`, which diffs the stamped `mv` and the 20-byte module header
+against kotlinc run with `-language-version 2.2`.
+
 ## Class metadata (kind=1) — `ProtoBuf.Class`
 Reverse-engineered from kotlinc for `class Point(val x: Int, var y: String)` (see
 `metadata/class_builder.rs`). `d1 = 00 <delimited StringTableTypes> <Class>`, k=1, mv=[1,9,0], xi=48.

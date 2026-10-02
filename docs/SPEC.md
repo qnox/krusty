@@ -10009,6 +10009,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `multiplatform/k2/expectStatic.kt`.) Classes compiled with this experimental feature match
   kotlinc's except the `@Metadata` pre-release flag kotlinc sets (`xi` 50 against 48).
 
+- **`-language-version X.Y` stamps the emitted metadata, not the language.** kotlinc's
+  `-language-version` both gates language semantics and selects the version stamp written into the
+  artifacts; krusty has no alternate language-semantics mode, so the flag selects only the stamp:
+  every emitted `@kotlin.Metadata` carries `mv=[X, Y, 0]` and the `.kotlin_module` header records
+  `[X, Y, 0]` as its version ints. Without the flag the stamp is the compiler's default language
+  version (`[2, 4, 0]`), matching the reference toolchain's no-flag output. The value is a bare
+  `major.minor`; anything else (`2`, `2.4.0`, a non-numeric segment) fails the invocation rather
+  than compiling under a stamp the build did not ask for. `-api-version` stays an accepted-and-
+  ignored compatibility flag. (`tests/metadata_language_version_e2e.rs` — including a differential
+  comparison of the stamped `mv` and the module header against kotlinc run with
+  `-language-version 2.2` — plus `language_version_is_read_and_validated` in
+  `crates/krusty-cli/src/cli.rs` and `language_version_stamps_the_header` in
+  `src/metadata/module.rs`.)
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.

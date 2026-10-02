@@ -17,7 +17,8 @@ pub mod source_set_compile;
 
 pub use source_set_compile::compile_in_process_files;
 
-pub(crate) use kotlin_metadata::raw_kotlin_metadata;
+#[allow(unused_imports)] // e2e-only today; the conformance target shares this module
+pub(crate) use kotlin_metadata::{kotlin_metadata_ints, raw_kotlin_metadata};
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read as _, Write as _};
@@ -572,7 +573,7 @@ pub fn compile_to_dir(
     } else {
         Vec::new()
     };
-    let module_bytes = krusty::metadata::module::build_kotlin_module(&packages);
+    let module_bytes = krusty::metadata::module::build_kotlin_module(&packages, [2, 4, 0]);
     let meta_inf = out_dir.join("META-INF");
     std::fs::create_dir_all(&meta_inf).ok()?;
     std::fs::write(meta_inf.join("main.kotlin_module"), module_bytes).ok()?;
