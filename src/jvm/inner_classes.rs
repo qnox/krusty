@@ -370,9 +370,9 @@ fn enclosure_reaches_inline(ir: &IrFile, start: Option<crate::ir::IrEnclosure>) 
                 }
             }
             crate::ir::IrEnclosure::PropertyAccessor { property, setter } => {
-                if let Some(function) = property_accessor_function(ir, property, setter) {
-                    pending.push(Some(crate::ir::IrEnclosure::Function(function)));
-                }
+                let function =
+                    crate::jvm::ir_emit::property_accessor_function(ir, property, setter);
+                pending.push(Some(crate::ir::IrEnclosure::Function(function)));
             }
             crate::ir::IrEnclosure::Constructor { class, .. }
             | crate::ir::IrEnclosure::ClassInitializer(class)
@@ -385,26 +385,6 @@ fn enclosure_reaches_inline(ir: &IrFile, start: Option<crate::ir::IrEnclosure>) 
         }
     }
     false
-}
-
-fn property_accessor_function(
-    ir: &IrFile,
-    property: crate::fir::PropertyId,
-    setter: bool,
-) -> Option<crate::ir::FunId> {
-    use crate::ir::IrLocalPropertyLayout;
-    let layout = ir.local_property_layouts.get(&property)?;
-    let (getter, setter_fn) = match layout {
-        IrLocalPropertyLayout::TopLevelStorage { getter, setter, .. }
-        | IrLocalPropertyLayout::Member { getter, setter, .. } => (*getter, *setter),
-        IrLocalPropertyLayout::TopLevelAccessor { getter, setter, .. }
-        | IrLocalPropertyLayout::MemberExtension { getter, setter, .. } => (Some(*getter), *setter),
-    };
-    if setter {
-        setter_fn
-    } else {
-        getter
-    }
 }
 
 pub(super) fn class_access(ir: &IrFile, class: &IrClass) -> u16 {

@@ -2638,6 +2638,16 @@ impl FirBody {
                         callables.insert(splice.callable);
                     }
                 }
+                FirExprKind::PropertyReference {
+                    target:
+                        FirPropertyReferenceTarget::SpecializedModule {
+                            getter_inline_splice: Some(splice),
+                            ..
+                        },
+                    ..
+                } => {
+                    callables.insert(splice.callable);
+                }
                 FirExprKind::Lambda { body, .. } => {
                     body.collect_referenced_module_callables(callables);
                 }

@@ -38,12 +38,36 @@ fun box(): String {\n\
 #[test]
 fn an_inline_reified_property_reference_uses_the_checked_type_argument() {
     const SRC: &str = "\
-class Token(val text: String)\n\
-inline val <reified T> T.identity: T\n\
-    get() = (this as Any) as T\n\
-fun apply(read: (Token) -> Token): String = read(Token(\"OK\")).text\n\
-fun box(): String = apply(Token::identity)\n";
+interface Root\n\
+class Token : Root\n\
+inline val <reified T : Root> T.identity: T\n\
+    get() = (this as Root) as T\n\
+fun apply(read: (Token) -> Token, value: Token): Token = read(value)\n\
+fun box(): String {\n\
+    val token = Token()\n\
+    return if (apply(Token::identity, token) === token) \"OK\" else \"fail\"\n\
+}\n";
     common::expect_box_same_as_kotlinc(SRC, "inlineReifiedPropertyReference");
+}
+
+#[test]
+fn a_cross_file_inline_reified_property_reference_retains_its_checked_getter() {
+    const LIB: &str = "\
+interface Root\n\
+class Token : Root\n\
+inline val <reified T : Root> T.identity: T\n\
+    get() = (this as Root) as T\n";
+    const MAIN: &str = "\
+fun apply(read: (Token) -> Token, value: Token): Token = read(value)\n\
+fun box(): String {\n\
+    val token = Token()\n\
+    return if (apply(Token::identity, token) === token) \"OK\" else \"fail\"\n\
+}\n";
+    let sources = [("lib.kt", LIB), ("main.kt", MAIN)];
+    assert_eq!(
+        run_box_files(&sources),
+        common::kotlinc_box_files_result(&sources, "MainKt")
+    );
 }
 
 /// The extension receiver and the stored value each run once. The setter sees that value.

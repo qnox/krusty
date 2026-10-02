@@ -76,7 +76,9 @@ pub enum FirPropertyReferenceTarget {
         declared_property_type: ResolvedTy,
         /// Exact checked getter splice for this reference use. A function-valued property
         /// reference materializes a read later, but lowering must not rediscover whether the
-        /// accessor is inline or reconstruct its type arguments.
+        /// accessor is inline or reconstruct its type arguments. The substitutions mirror the
+        /// expression's authoritative substitution list, which remains the inline-plan mutation
+        /// inventory; this record adds the selected accessor identity.
         getter_inline_splice: Option<Box<FirInlineAccessorSplice>>,
     },
     Classifier {

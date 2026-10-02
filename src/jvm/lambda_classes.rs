@@ -183,11 +183,13 @@ pub(super) fn realize(ir: &mut IrFile, classifiers: &dyn crate::types::Classifie
         .collect::<Vec<_>>();
     for fid in lambdas {
         let runtime_reified = ir.runtime_reified_lambda_implementations.contains(&fid);
-        // Ordinary value-class lambdas retain the pre-existing function-body boundary. The wider
-        // emitted-root search exists specifically for a source closure whose checked reified
-        // operation requires a concrete runtime class; treating a generated constructor-reference
-        // adapter in a static initializer as that source-lambda case changes its physical ABI.
-        let values = reachable_lambdas(ir, fid, runtime_reified);
+        // A genuine source lambda has naming/origin provenance and obeys the same class-realization
+        // rule in every emitted root. Generated callable-reference adapters deliberately have no
+        // lambda origin: widening their root inventory would reclassify their already-selected ABI.
+        // Runtime-reified copies keep the wide inventory too even if a preceding transform moved
+        // their origin record.
+        let every_emitted_root = ir.lambda_origins.contains_key(&fid) || runtime_reified;
+        let values = reachable_lambdas(ir, fid, every_emitted_root);
         let Some(function_type) = values
             .first()
             .and_then(|node| ir.logical_types.get(node).copied())
@@ -207,7 +209,7 @@ pub(super) fn realize(ir: &mut IrFile, classifiers: &dyn crate::types::Classifie
         {
             continue;
         }
-        match class_shape(ir, fid, runtime_reified) {
+        match class_shape(ir, fid, every_emitted_root, runtime_reified) {
             Ok((site, body, captures)) => realize_class(ir, fid, body, &site, signature, &captures),
             Err(shape) => {
                 crate::trace_compiler!(
@@ -225,9 +227,10 @@ pub(super) fn realize(ir: &mut IrFile, classifiers: &dyn crate::types::Classifie
 fn class_shape(
     ir: &IrFile,
     fid: FunId,
+    every_emitted_root: bool,
     allow_nested_lambdas: bool,
 ) -> Result<(Site, ExprId, Vec<Capture>), &'static str> {
-    let site = site_in_roots(ir, fid, allow_nested_lambdas)
+    let site = site_in_roots(ir, fid, every_emitted_root)
         .ok_or("no single named value outside an inline call")?;
     let body = ir.functions[fid as usize].body.ok_or("no body")?;
     if nests_lifted_functions_with(ir, body, allow_nested_lambdas) {

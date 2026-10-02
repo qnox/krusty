@@ -805,7 +805,12 @@ fn inline_generic_property_reference_publishes_the_selected_getter_splice() {
     let expression = body
         .expr(root_expression(&body))
         .expect("inline generic property reference");
-    let FirExprKind::PropertyReference { target, .. } = &expression.kind else {
+    let FirExprKind::PropertyReference {
+        target,
+        substitutions,
+        ..
+    } = &expression.kind
+    else {
         panic!("inline generic property must remain a checked property reference")
     };
     let FirPropertyReferenceTarget::SpecializedModule {
@@ -821,6 +826,15 @@ fn inline_generic_property_reference_publishes_the_selected_getter_splice() {
     };
     assert!(substitution.reified);
     assert_eq!(substitution.value, *property_type);
+    let [expression_substitution] = substitutions.as_ref() else {
+        panic!("the property reference must retain its authoritative checked type argument")
+    };
+    assert_eq!(expression_substitution.reified, substitution.reified);
+    assert_eq!(expression_substitution.value, substitution.value);
+
+    let mut referenced = std::collections::HashSet::new();
+    body.collect_referenced_module_callables(&mut referenced);
+    assert_eq!(referenced, [splice.callable].into_iter().collect());
 }
 
 #[test]
