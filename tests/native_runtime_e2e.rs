@@ -2120,3 +2120,73 @@ fn a_runtime_compiler_that_emits_another_machines_code_fails_the_build() {
         "another machine's object must not publish a partial target table"
     );
 }
+
+#[test]
+fn a_runtime_object_aligned_past_the_targets_page_fails_the_build() {
+    // An x86_64 relocatable whose one loaded section asks for 8 KiB alignment: more than the 4 KiB
+    // page krusty's linker starts x86_64's writable segment on, so no link could honour it.
+    let scratch = common::scratch_dir().expect("scratch directory");
+    let out_dir = scratch.join("overaligned-runtime-compiler-out");
+    fs::create_dir(&out_dir).expect("create build-script output directory");
+    let mut object = vec![0u8; 128];
+    object[..8].copy_from_slice(b"\x7fELF\x02\x01\x01\x00");
+    object[16..20].copy_from_slice(&[1, 0, 62, 0]); // ET_REL, EM_X86_64
+    object[0x28..0x30].copy_from_slice(&64u64.to_le_bytes()); // e_shoff
+    object[0x3a..0x3c].copy_from_slice(&64u16.to_le_bytes()); // e_shentsize
+    object[0x3c..0x3e].copy_from_slice(&1u16.to_le_bytes()); // e_shnum
+    object[64 + 0x08..64 + 0x10].copy_from_slice(&2u64.to_le_bytes()); // sh_flags: SHF_ALLOC
+    object[64 + 0x30..64 + 0x38].copy_from_slice(&0x2000u64.to_le_bytes()); // sh_addralign
+    let prepared = scratch.join("overaligned-object.o");
+    fs::write(&prepared, object).expect("write over-aligned object");
+    let compiler = scratch.join("runtime-compiler-writes-overaligned");
+    fs::write(
+        &compiler,
+        format!(
+            "#!/bin/sh\n\
+             while [ $# -gt 0 ]; do\n\
+             if [ \"$1\" = -o ]; then shift; cp '{}' \"$1\"; fi\n\
+             shift\n\
+             done\n",
+            prepared.display()
+        ),
+    )
+    .expect("write over-aligned compiler");
+    let mut permissions = fs::metadata(&compiler)
+        .expect("read over-aligned compiler metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&compiler, permissions).expect("make over-aligned compiler executable");
+
+    let output = run_build_script(&compiler, &out_dir);
+    assert!(!output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stderr).expect("build-script stderr is UTF-8"),
+        format!(
+            "native runtime: `{}` built `krusty_rt.c` for `x86_64-unknown-linux-gnu` as an object \
+             with a section aligned to 0x2000 bytes, more than the target's 0x1000-byte maximum \
+             page size\n",
+            compiler.display()
+        )
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("build-script stdout is UTF-8"),
+        "cargo:rerun-if-changed=src/native/runtime/krusty_rt.c\n\
+         cargo:rerun-if-changed=src/native/runtime/krusty_collections.c\n\
+         cargo:rerun-if-changed=src/native/runtime/krusty_maps.c\n\
+         cargo:rerun-if-changed=src/native/runtime/krusty_classes.c\n\
+         cargo:rerun-if-changed=src/native/runtime/krusty_lang.c\n\
+         cargo:rerun-if-changed=src/native/runtime/krusty_fp.c\n\
+         cargo:rerun-if-changed=src/native/runtime/krusty_gc.c\n\
+         cargo:rerun-if-changed=src/native/runtime/krusty_start.c\n\
+         cargo:rerun-if-changed=src/native/runtime/krusty_sys.h\n\
+         cargo:rerun-if-changed=src/native/runtime/krusty_rt.h\n\
+         cargo:rerun-if-changed=src/native/runtime/krusty_internal.h\n\
+         cargo:rerun-if-changed=build.rs\n\
+         cargo:rerun-if-changed=src/native/target_contract.rs\n\
+         cargo:rerun-if-env-changed=KRUSTY_RUNTIME_CC\n"
+    );
+    assert!(
+        !out_dir.join("prebuilt_runtime.rs").exists(),
+        "an over-aligned object must not publish a partial target table"
+    );
+}

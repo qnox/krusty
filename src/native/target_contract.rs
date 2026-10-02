@@ -4,8 +4,10 @@
 //! target, operating system and architecture; the compiler names targets, checks produced
 //! binaries, and picks the prebuilt objects to link. Both must agree on which targets exist and on
 //! each one's triple and ELF machine number. Kept in two places, a target added or changed on one
-//! side would still build, so they are kept here once. This module depends on nothing but `core`:
-//! the build script includes it by `#[path]`, before the crate it belongs to exists.
+//! side would still build, so they are kept here once. The architecture's other ELF facts, such as
+//! the page size its executables are laid out for, sit beside the machine number so that each fact
+//! about a target's ELF files has one source. This module depends on nothing but `core`: the build
+//! script includes it by `#[path]`, before the crate it belongs to exists.
 
 /// A supported instruction set.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -46,6 +48,24 @@ impl Arch {
             Self::X86_64 => 62,
             Self::Aarch64 => 183,
             Self::Riscv64 => 243,
+        }
+    }
+
+    /// The largest page size a Linux kernel for this architecture can run with: what a static
+    /// executable's loadable segments are aligned to, and how far apart they must start.
+    ///
+    /// The kernel maps each `PT_LOAD` segment in whole pages of whatever size it was built with,
+    /// so two segments that share a page at that size overlap, and the later mapping replaces the
+    /// earlier one's permissions or bytes. An executable laid out for 4 KiB pages therefore breaks
+    /// on an AArch64 kernel built for 16 or 64 KiB pages, which distributions ship; 64 KiB is the
+    /// largest AArch64 Linux supports and what `ld.lld` and GNU ld use there. x86_64 Linux maps
+    /// user memory in 4 KiB pages only, and so does RISC-V Linux (its larger sizes are huge pages,
+    /// which never back an executable's segments), which is again what both linkers use.
+    pub const fn max_page_size(self) -> u64 {
+        match self {
+            Self::X86_64 => 0x1000,
+            Self::Aarch64 => 0x1_0000,
+            Self::Riscv64 => 0x1000,
         }
     }
 

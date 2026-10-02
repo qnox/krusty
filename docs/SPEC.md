@@ -9443,6 +9443,75 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`a_runtime_compiler_that_emits_another_machines_code_fails_the_build`),
   `native::prebuilt::tests::a_prebuilt_runtime_is_every_source_as_a_closed_set_of_objects_for_its_arch`.
 
+- **Native linker: segments are laid out for the largest page the target's kernel may use.**
+  krusty's static linker (`src/native/linker/`) maps its read+execute segment from file offset 0 at
+  `0x400000` and starts the read+write segment on the next multiple of the architecture's maximum
+  page size, in the file and in memory, with both `PT_LOAD` headers' `p_align` set to that size.
+  The size is a target fact kept beside the ELF machine number (`Arch::max_page_size` in
+  `src/native/target_contract.rs`): 4 KiB for x86_64 and riscv64, whose Linux maps user memory in
+  4 KiB pages, and 64 KiB for AArch64, whose kernels may be built for 4, 16 or 64 KiB pages. A
+  layout for 4 KiB alone would put the writable segment in the code's last 64 KiB page and have
+  one mapping replace the other. The file is padded to the page rather than kept dense (GNU ld and
+  `ld.lld` map one file page into both segments instead), which costs at most one page and keeps
+  every file page in one segment. A section may ask for alignment up to that page size, and
+  `build.rs` fails krusty's build on a runtime object with a loaded section aligned past it, naming
+  the source and the alignment, rather than leaving every link to refuse it.
+  Tests: `native::linker::elf::tests` (`the_segments_are_laid_out_for_each_architecture_s_largest_page`,
+  `a_section_may_be_aligned_to_at_most_the_target_s_largest_page`), `tests/native_runtime_e2e.rs`
+  (`a_runtime_object_aligned_past_the_targets_page_fails_the_build`).
+
+- **Native linker: relocations come from `SHT_RELA` tables only.** An input with any `SHT_REL` or
+  `SHT_CREL` table is refused with `ProgramLinkError::UnsupportedRelocationTable`, naming the input,
+  the section the table patches and the table type. A `REL` entry's addend is the value already in
+  the field it patches, decoded per relocation kind; read as a `RELA` entry it is 0, so the link
+  would succeed with every such reference misplaced. The x86_64, AArch64 and RISC-V psABIs specify
+  `RELA` for relocatable objects and the runtime's clang and the code generator emit nothing else,
+  so krusty implements no implicit-addend decoding. `CREL` is refused whole, including its
+  explicit-addend form, for the same reason. The check covers every table in the object, not only
+  those patching loaded sections.
+  Tests: `native::linker::elf::tests` (`a_rel_relocation_table_is_refused`,
+  `a_crel_relocation_table_is_refused`, `the_same_reference_in_a_rela_table_links`).
+- **Native linker: a RISC-V object's stated ABI must be the target's, and `e_flags` is merged per
+  the psABI.** krusty's riscv64 targets are `lp64d` (the ABI the `riscv64-unknown-linux-gnu` triple
+  names and the runtime is compiled for). Each input's `e_flags` must say double-float: another
+  `EF_RISCV_FLOAT_ABI` passes floating-point arguments in other registers. `EF_RISCV_RVE` (RV64E,
+  `lp64e`) and `EF_RISCV_RV64ILP32` (32-bit pointers) must be clear, and so must every bit the psABI
+  reserves or leaves to vendors, since the linker cannot know what one asks for. Each is refused
+  with `ProgramLinkError::IncompatibleAbi { input, mismatch: AbiMismatch::… }`. The executable's
+  `e_flags` is double-float plus the UNION of the inputs' `EF_RISCV_RVC` (compressed code may be
+  anywhere in it) and `EF_RISCV_TSO` (RVWMO code is also correct under RVTSO, so one input needing
+  RVTSO makes the whole program need it), as GNU ld and `ld.lld` merge them; a program object with
+  0x4 linked against the runtime's 0x5 objects gives 0x5. `.riscv.attributes` is read as well:
+  `Tag_RISCV_stack_align` must be 16 and `Tag_RISCV_arch` must start `rv64i` (its extensions are
+  not compared: a linker merges them, and whether the machine has them is the deployment's
+  concern). `Tag_RISCV_unaligned_access` accepts only its defined 0/1 policies and is then dropped
+  because the final executable has no attributes section. `Tag_RISCV_atomic_abi` A6C and A7, whose
+  sequentially consistent loads and stores use different fences, may not meet in one link.
+  Undefined unaligned-access and atomic-ABI values are errors.
+  Explicitly different deprecated `Tag_RISCV_priv_spec*` version triples are incompatible.
+  `Tag_RISCV_x3_reg_usage` is merged with missing/UNKNOWN value 0 allowed to adopt only the global
+  pointer (1) or shadow-stack (2) use; every other pair of different uses is incompatible. An
+  unrecognized tag with `tag % 128 < 64` is mandatory under the psABI and is refused rather than
+  discarded; unknown optional tags are read by their odd/string or even/integer representation and
+  dropped because the executable has no section headers. A truncated attributes section is a
+  `Parse` error. The unit-test objects state the flags their code needs (0x4, or 0x5 for one with
+  compressed instructions) rather than 0.
+  Tests: `native::linker::abi::tests` (`riscv64_output_flags_keep_the_float_abi_and_merge_rvc_and_tso`,
+  `x86_64_and_aarch64_output_flags_are_zero`, `a_riscv64_object_with_another_float_abi_is_refused`,
+  `a_riscv64_rve_object_is_refused`, `a_riscv64_ilp32_object_is_refused`,
+  `a_riscv64_object_with_unknown_flags_is_refused`, `riscv64_attributes_for_the_target_link`,
+  `a_riscv64_object_assuming_another_stack_alignment_is_refused`,
+  `a_riscv64_object_for_another_base_isa_is_refused`,
+  `a_riscv64_object_with_an_undefined_unaligned_access_policy_is_refused`,
+  `riscv64_objects_for_different_privileged_specifications_are_refused`,
+  `riscv64_objects_with_conflicting_atomic_abis_are_refused`,
+  `a_riscv64_object_with_an_undefined_atomic_abi_is_refused`,
+  `riscv64_x3_usage_is_merged_only_as_the_psabi_permits`,
+  `an_unknown_mandatory_riscv64_attribute_is_refused`,
+  `a_truncated_riscv64_attributes_section_is_a_parse_error`) and
+  `native::linker::tests::a_program_links_against_the_runtime_on_every_target` (0x5 against
+  the real runtime).
+
 - **Operations over constants fold (kotlinc's `ConstEvaluationLowering`).** kotlinc's JVM backend
   runs its IR interpreter in `OnlyIntrinsicConst` mode before any other lowering: a call to an
   `@IntrinsicConstEvaluation` builtin (`Int.plus`, `toByte()`, `compareTo`, `String.length`, ...) or
