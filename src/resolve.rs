@@ -43183,12 +43183,11 @@ impl<'a> Checker<'a> {
             ) else {
                 continue;
             };
+            // An omitted vararg is one unspecified parameter, same as an omitted default.
+            // Leaving it out made an empty vararg look more specific than `f(x: T = …)`.
             let omitted_defaults = mapped_slots
                 .iter()
-                .enumerate()
-                .filter(|(parameter, argument)| {
-                    argument.is_none() && shape.call_sig.vararg_index != Some(*parameter)
-                })
+                .filter(|argument| argument.is_none())
                 .count();
             let argument_parameters = call_argument_parameter_indices(
                 args.len(),
@@ -43387,8 +43386,8 @@ impl<'a> Checker<'a> {
         // its receiver or value parameters are more specific. Likewise, receiver distance only
         // orders candidates *inside* one extension scope rung. Keep `HidesMembers` above members,
         // members above ordinary extensions, and skip a rung whose only candidates lack context.
-        // The remaining overload rules below (low-priority annotation, conversion cost, argument
-        // score and specificity) then compare declarations from exactly one applicable rung.
+        // Later rules share one rung. Argument score there is type fit and omitted defaults;
+        // a vararg loses only after element specificity, as a tie-break among equal shapes.
         let hides_members = crate::types::type_name("kotlin/internal/HidesMembers");
         let tower_rank = |candidate: &SelectedCallable| {
             if candidate.is_extension() && candidate.annotations.contains(&hides_members) {
@@ -43447,12 +43446,12 @@ impl<'a> Checker<'a> {
         let best = applicable
             .iter()
             .filter(|(_, _, _, missing_context, _, _, _, _)| !has_context || !*missing_context)
-            .map(|(rank, ..)| *rank)
+            .map(|(rank, ..)| (rank.0, rank.1))
             .max()?;
         let nearest_receiver = applicable
             .iter()
             .filter(|(rank, _, _, missing_context, _, _, _, _)| {
-                *rank == best && (!has_context || !missing_context)
+                (rank.0, rank.1) == best && (!has_context || !missing_context)
             })
             .map(|(_, _, _, _, _, candidate, _, _)| candidate.receiver_rank)
             .min()?;
@@ -43462,7 +43461,7 @@ impl<'a> Checker<'a> {
         let mut maximal = applicable
             .into_iter()
             .filter(|(rank, _, _, missing_context, _, candidate, _, _)| {
-                *rank == best
+                (rank.0, rank.1) == best
                     && (!has_context || !missing_context)
                     && candidate.receiver_rank == nearest_receiver
             })

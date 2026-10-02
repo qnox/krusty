@@ -1095,7 +1095,7 @@ pub(crate) enum CandidateSelection<T> {
     Ambiguous,
 }
 
-fn fixed_parameter_shape(
+pub(super) fn fixed_parameter_shape(
     params: &[Ty],
     args: &[CallArgKind],
     fits: impl Fn(usize, &Ty, &CallArgKind) -> bool,
@@ -1136,7 +1136,7 @@ fn vararg_parameter_shape(
 /// is not necessarily last (`fun option(vararg names: String, help: String = "")`), so the
 /// final-slot assumption below only serves candidates whose metadata records no vararg at all.
 /// `params` are the VALUE parameters, so the recorded index is shifted past the context ones.
-fn candidate_vararg_shape(
+pub(super) fn candidate_vararg_shape(
     candidate: &FunctionInfo,
     params: &[Ty],
     args: &[CallArgKind],
@@ -1194,7 +1194,7 @@ fn vararg_parameter_shape_at(
     fits: impl Fn(usize, &Ty, &CallArgKind) -> bool,
 ) -> Option<Vec<Ty>> {
     let array = *params.get(vararg_index)?;
-    let element = array.array_elem()?;
+    let element = array.array_read_elem()?;
     if args.len() == vararg_index + 1
         && args.get(vararg_index).map(|argument| argument.ty()) == Some(array)
     {
@@ -6218,7 +6218,7 @@ fn semantic_arg_assignable(src: &dyn SymbolSource, param: &Ty, arg: &Ty) -> bool
     )
 }
 
-fn distinct_source_declarations(left: &FunctionInfo, right: &FunctionInfo) -> bool {
+pub(super) fn distinct_source_declarations(left: &FunctionInfo, right: &FunctionInfo) -> bool {
     match (left.stable_declaration, right.stable_declaration) {
         (Some(left), Some(right)) => left != right,
         _ => {
@@ -6334,11 +6334,16 @@ fn best_by_args_at_priority_with_ties<'a>(
             || function_like_fits(p, arg)
             || arg.binds_result_to(src, *p)
     };
-    match source_aware_most_specific_with_ties(
+    match overload_selection::select_equally_specific(
         cands
             .iter()
-            .filter(|(_, params)| params.as_slice() == arg_tys)
-            .map(|(candidate, _)| (declaration_specificity_params(candidate), *candidate)),
+            .filter_map(|(candidate, params)| {
+                let declared = declaration_specificity_params(candidate);
+                (params.as_slice() == arg_tys
+                    && (!args.is_empty() || declared.len() == params.len()))
+                .then(|| (declared, *candidate))
+            })
+            .collect(),
         |_, left, right| {
             parameter_at_least_as_specific(src, left, right, CallArgKind::Typed(Ty::Error))
         },
@@ -6346,10 +6351,14 @@ fn best_by_args_at_priority_with_ties<'a>(
         CandidateSelectionWithTies::Selected(candidate) => {
             return CandidateSelectionWithTies::Selected(candidate);
         }
-        CandidateSelectionWithTies::Ambiguous(candidates) => {
-            return CandidateSelectionWithTies::Ambiguous(candidates)
+        CandidateSelectionWithTies::Ambiguous(candidates)
+            if candidates
+                .iter()
+                .all(|candidate| candidate.call_sig.vararg_index.is_none()) =>
+        {
+            return CandidateSelectionWithTies::Ambiguous(candidates);
         }
-        CandidateSelectionWithTies::None => {}
+        CandidateSelectionWithTies::Ambiguous(_) | CandidateSelectionWithTies::None => {}
     }
     match integer_literal_overload_with_ties(
         cands
@@ -6372,20 +6381,20 @@ fn best_by_args_at_priority_with_ties<'a>(
         parameter_at_least_as_specific(src, left, right, CallArgKind::Typed(Ty::Error))
     };
 
-    // Expected-result inference may make several otherwise unrelated overloads applicable. Unlike
-    // ordinary classpath assignability, declaration order cannot choose among them: the inferred
-    // result would then depend on provider iteration order. Run the same unique-most-specific rule
-    // used for source declarations and report incomparable maxima as an ambiguity.
+    // Expected-result inference can make unrelated overloads applicable. Equal mapped parameter
+    // types keep the non-vararg; incomparable parameter types stay ambiguous.
     if args.iter().any(CallArgKind::is_expected_type_callable) {
-        match unique_most_specific_with_conflicts_and_ties(
-            cands.iter().filter_map(|(candidate, params)| {
-                fixed_parameter_shape(params, args, |position, param, arg| {
-                    fits(position, param, arg)
+        match overload_selection::select_equally_specific(
+            cands
+                .iter()
+                .filter_map(|(candidate, params)| {
+                    fixed_parameter_shape(params, args, |position, param, arg| {
+                        fits(position, param, arg)
+                    })
+                    .map(|shape| (shape, *candidate))
                 })
-                .map(|shape| (shape, *candidate))
-            }),
+                .collect(),
             specificity,
-            |left, right| distinct_source_declarations(left, right),
         ) {
             CandidateSelectionWithTies::Selected(candidate) => {
                 return CandidateSelectionWithTies::Selected(candidate);
@@ -6397,22 +6406,13 @@ fn best_by_args_at_priority_with_ties<'a>(
         }
     }
 
-    // Exact arity is judged by the one semantic assignability relation. Every applicable overload
-    // competes in the same most-specific selection; there is no later descriptor/erasure retry.
-    match source_aware_most_specific_with_ties(
-        cands.iter().filter_map(|(candidate, params)| {
-            fixed_parameter_shape(params, args, |position, param, arg| {
-                fits(position, param, arg)
-            })
-            .map(|shape| (shape, *candidate))
-        }),
-        specificity,
-    ) {
+    match overload_selection::select_fixed_or_more_specific_vararg(cands, args, &fits, &specificity)
+    {
         CandidateSelectionWithTies::Selected(candidate) => {
             return CandidateSelectionWithTies::Selected(candidate);
         }
         CandidateSelectionWithTies::Ambiguous(candidates) => {
-            return CandidateSelectionWithTies::Ambiguous(candidates)
+            return CandidateSelectionWithTies::Ambiguous(candidates);
         }
         CandidateSelectionWithTies::None => {}
     }

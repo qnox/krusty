@@ -49,6 +49,109 @@ pub(super) fn unique_most_specific_with_conflicts<T>(
     .collapse()
 }
 
+/// Compare fixed-arity shapes with vararg element shapes in one specificity pass.
+///
+/// Element expansion is included only when some candidate already matches argument
+/// for argument. An empty call then still falls through to defaulted parameters
+/// instead of selecting an empty vararg. When the shapes are equally specific, a
+/// declaration without a vararg wins. An empty supplied shape is exact only when
+/// the declaration itself has no value parameters. An exact tie that still carries
+/// the vararg's array type is resolved here from the supplied element shapes.
+pub(super) fn select_fixed_or_more_specific_vararg<'a>(
+    candidates: &[(&'a FunctionInfo, Vec<Ty>)],
+    args: &[CallArgKind],
+    fits: impl Fn(usize, &Ty, &CallArgKind) -> bool,
+    at_least_as_specific: impl Fn(usize, Ty, Ty) -> bool,
+) -> CandidateSelectionWithTies<&'a FunctionInfo> {
+    let mut fixed = Vec::new();
+    let mut elements = Vec::new();
+    for (candidate, params) in candidates {
+        if let Some(shape) = super::fixed_parameter_shape(params, args, &fits) {
+            fixed.push((shape, *candidate));
+        } else if candidate.call_sig.vararg {
+            if let Some(shape) = super::candidate_vararg_shape(candidate, params, args, &fits) {
+                elements.push((shape, *candidate));
+            }
+        }
+    }
+    // No fixed declaration accepted the call argument-for-argument. Leave element
+    // expansion to the later vararg pass so an empty call still prefers a default.
+    if fixed.is_empty() {
+        return CandidateSelectionWithTies::None;
+    }
+    fixed.append(&mut elements);
+    select_equally_specific(fixed, at_least_as_specific)
+}
+
+/// Most-specific parameter shapes, then the non-vararg tie-break.
+///
+/// The tie-break applies only when every maximal shape can forward to every
+/// other. Incomparable parameter types stay ambiguous.
+pub(super) fn select_equally_specific<'a>(
+    shapes: Vec<(Vec<Ty>, &'a FunctionInfo)>,
+    at_least_as_specific: impl Fn(usize, Ty, Ty) -> bool,
+) -> CandidateSelectionWithTies<&'a FunctionInfo> {
+    let selection = unique_most_specific_with_conflicts_and_ties(
+        shapes
+            .iter()
+            .map(|(shape, candidate)| (shape.clone(), *candidate)),
+        &at_least_as_specific,
+        |left, right| super::distinct_source_declarations(left, right),
+    );
+    if mutually_as_specific(&shapes, &selection, &at_least_as_specific) {
+        prefer_non_vararg(selection)
+    } else {
+        selection
+    }
+}
+
+fn mutually_as_specific<'a>(
+    shapes: &[(Vec<Ty>, &'a FunctionInfo)],
+    selection: &CandidateSelectionWithTies<&'a FunctionInfo>,
+    at_least_as_specific: impl Fn(usize, Ty, Ty) -> bool,
+) -> bool {
+    let CandidateSelectionWithTies::Ambiguous(candidates) = selection else {
+        return false;
+    };
+    let maximal = shapes
+        .iter()
+        .filter(|(_, candidate)| {
+            candidates
+                .iter()
+                .any(|tied| std::ptr::eq(*tied, *candidate))
+        })
+        .map(|(shape, _)| shape.as_slice())
+        .collect::<Vec<_>>();
+    maximal.iter().all(|left| {
+        maximal.iter().all(|right| {
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(*right)
+                    .enumerate()
+                    .all(|(position, (&left, &right))| at_least_as_specific(position, left, right))
+        })
+    })
+}
+
+fn prefer_non_vararg<'a>(
+    selection: CandidateSelectionWithTies<&'a FunctionInfo>,
+) -> CandidateSelectionWithTies<&'a FunctionInfo> {
+    let CandidateSelectionWithTies::Ambiguous(candidates) = selection else {
+        return selection;
+    };
+    let fixed = candidates
+        .iter()
+        .copied()
+        .filter(|candidate| candidate.call_sig.vararg_index.is_none())
+        .collect::<Vec<_>>();
+    match fixed.len() {
+        0 => CandidateSelectionWithTies::Ambiguous(candidates),
+        1 => CandidateSelectionWithTies::Selected(fixed[0]),
+        _ => CandidateSelectionWithTies::Ambiguous(fixed),
+    }
+}
+
 pub(super) fn unique_most_specific_with_conflicts_and_ties<T>(
     candidates: impl IntoIterator<Item = (Vec<Ty>, T)>,
     at_least_as_specific: impl Fn(usize, Ty, Ty) -> bool,

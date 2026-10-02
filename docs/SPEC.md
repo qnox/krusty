@@ -6344,6 +6344,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   is then coerced to the physical array element, so primitive specializations are boxed for
   `Object[]` while primitive arrays remain unboxed
   (`tests/vararg_element_default_e2e.rs` — runtime-verified; both failures were VerifyErrors).
+  The element shape is part of the same most-specific comparison as a fixed parameter,
+  not a fallback after a wider fixed candidate has already won. `Collection<String>` as
+  a vararg element is more specific than `Any` or `Collection<Any?>` (`Collection` is
+  covariant), so `list: List<String>` selects the vararg. Equal element and parameter
+  types keep the declaration that has no vararg, and a call with no arguments still
+  prefers a defaulted parameter over an empty vararg. A contextual argument such as
+  `listOf("")` is compared on those same mapped parameter types, so equal types still
+  keep the non-vararg. Tests:
+  `tests/vararg_element_specificity_e2e.rs`, box `vararg/kt10926.kt`.
 
 - **A plain constructor initializer types a capturable local.** `val sb = StringBuilder()` is
   capturable by an anonymous object exactly like an annotated local — the capture list infers the
