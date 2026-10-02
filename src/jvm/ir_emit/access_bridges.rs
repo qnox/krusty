@@ -269,18 +269,17 @@ pub(super) fn cross_owner_member_calls(
                     )
                 }),
                 IrExpr::PropertyRead {
-                    owner, receiver, ..
-                }
-                | IrExpr::PropertyWrite {
-                    owner, receiver, ..
-                } => ir.jvm_member_targets.get(&expression).map(|&function| {
-                    let class = ir.class_id_by_name(*owner);
-                    (
-                        class.expect("a realized member's owner is in this file"),
-                        function,
-                        *receiver,
-                    )
-                }),
+                    owner,
+                    receiver,
+                    operation,
+                    ..
+                } => realized_property_accessor(ir, expression, *operation, *owner, *receiver),
+                IrExpr::PropertyWrite {
+                    owner,
+                    receiver,
+                    operation,
+                    ..
+                } => realized_property_accessor(ir, expression, *operation, *owner, *receiver),
                 _ => None,
             };
             if let Some((class, target, receiver)) = local_target {
@@ -682,9 +681,29 @@ pub(super) fn protected_property_access(
     }
 }
 
-/// How another class reads a private property through the bridge of its exact `getter`: a static
-/// value-class `-impl` getter's bridge takes the same carrier, an instance getter's takes the owner.
-pub(super) fn private_member_read_access(
+/// The getter or setter recorded for this property operation.
+///
+/// The record is the declaration's function, attached when the operation is realized or when a
+/// companion initializer moves onto another class. A missing record stays missing: the accessor
+/// is not chosen by scanning the owner's properties for the source spelling.
+fn realized_property_accessor(
+    ir: &IrFile,
+    expression: crate::ir::ExprId,
+    operation: Option<u32>,
+    owner: crate::types::TypeName,
+    receiver: Option<crate::ir::ExprId>,
+) -> Option<(crate::ir::ClassId, u32, Option<crate::ir::ExprId>)> {
+    let function = ir
+        .jvm_member_targets
+        .get(&operation.unwrap_or(expression))
+        .copied()?;
+    let class = ir.class_id_by_name(owner)?;
+    Some((class, function, receiver))
+}
+
+/// How another class reaches a private accessor through `access$<name>`: a static value-class
+/// `-impl` bridge takes the same carrier, and an instance accessor's takes the owner.
+pub(super) fn private_member_accessor_access(
     ir: &IrFile,
     getter: u32,
     owner: TypeName,

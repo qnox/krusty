@@ -825,11 +825,39 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   kotlinc for both the with-parts and empty shapes (unit tests pin the exact bytes).
 - **A companion property that keeps its field still names that field after plainer siblings are
   hoisted.** A plain companion property moves its backing field to the outer class, and the
-  companion's field table is compacted. A property with a custom accessor stays, and every index
-  that names its field — the declaration, a delegate field, and the common-IR property layout —
-  moves with the compaction. A `var` that only customizes its setter therefore still gets its
-  default getter, reading the same field the setter writes. Test:
+  companion's field table is compacted. A property that stays — an open property, a `lateinit`,
+  or a boxed value class — keeps every index that names its field: the declaration, a delegate
+  field, and the common-IR property layout move with the compaction. A `var` that only
+  customizes its setter therefore still gets its default getter, reading the same field the
+  setter writes, whether that field was hoisted or stayed. Test:
   `tests/companion_custom_accessor_field_e2e.rs`.
+- **A class companion's `init` block runs in the outer `<clinit>`.** kotlinc stores the companion
+  instance, then runs that companion's property initializers and `init` blocks in source order,
+  all inside the enclosing class's `<clinit>`. The companion's own `<init>` is only `super()`.
+  An `init` that touched a hoisted property used to run inside `Companion.<init>`, before
+  `C.Companion` was stored and before the property's static field existed, so `C.visited.add`
+  threw `ExceptionInInitializerError`. The initializer body now runs after the instance store.
+  When it contains anything besides hoisted property stores, those stores stay in the body so a
+  later property still sees the preceding `init` block. A private companion property is hoisted
+  with the public ones: `private static final` on the outer class, initialized in that same
+  source order, read through `access$get…$cp` from the companion. The outer class, including
+  `<clinit>`, reads that plain field directly. Leaving the private property as a companion instance
+  field and initializing it from `Companion.<init>` runs that store before the public properties
+  declared ahead of it. A custom accessor and a delegate move the same way: the backing field,
+  or `name$delegate`, is a private static of the outer class, and the `init` block stays in
+  that one source-ordered `<clinit>` after the instance store. A read of a property with a
+  declared getter, and a later assignment of a property with a declared setter, call that
+  accessor through `access$get…` / `access$set…`, reloading the companion instance from the
+  outer field at the call. The function is the declaration's getter or setter, recorded
+  against the property operation's stable identity when the initializer moves. A missing
+  realization is not filled from the property's name. The accessor body and the declaration
+  initializer store use the hoisted field (`access$…$cp` from the companion, `putstatic` from
+  `<clinit>`). A delegate initializer's lambda is a private static method of the outer class,
+  the class whose `<clinit>` evaluates it. The companion constructor
+  remains `super()`. An open property, a `lateinit`, or a boxed value class still keeps its
+  instance field, and an initializer that touches that field stays on the constructor.
+  Interface companions keep their own `<clinit>`. Test:
+  `tests/companion_init_block_e2e.rs`.
 - **`companion { … }` blocks and companion extensions (`CompanionBlocksAndExtensions`).** A block
   member is a static member of the classifier that declares the block, not of the file facade,
   measured against kotlinc 2.4.20: a function is a `public static final` method of `C`; a property
@@ -4002,7 +4030,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   The nested class calls the owner's `access$get<X>$p` / `access$set<X>$p`, and that accessor reads
   or writes the field directly. Those methods are distinct from `access$get<X>` /
   `access$set<X>`, which another class uses to call source-declared accessors — a property
-  reference, or a companion writing a private property whose setter is user code. Both pairs can
+  reference, or a companion writing a private property whose setter is user code. That
+  `access$set<X>` is the private-member bridge (`invokespecial` of the setter) and is emitted
+  once; the static-accessor plan does not add a second copy of the same method. Both pairs can
   coexist for one property. A top-level property's accessor is a static method of the file facade;
   a member property's takes the instance. Tests: `tests/backing_field_accessor_e2e.rs`
   (`an_inner_accessor_reads_its_own_backing_field`,

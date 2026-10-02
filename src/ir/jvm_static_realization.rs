@@ -50,6 +50,16 @@ impl IrFile {
         self.jvm_companion_hoisted_statics.contains(&index)
     }
 
+    /// Record the companion initializer that `outer`'s `<clinit>` runs after storing the instance.
+    pub(crate) fn set_companion_clinit_body(&mut self, outer: TypeName, body: super::ExprId) {
+        self.companion_clinit_bodies.insert(outer, body);
+    }
+
+    /// The companion initializer scheduled for `outer`'s `<clinit>`, if that class has one.
+    pub(crate) fn companion_clinit_body(&self, outer: TypeName) -> Option<super::ExprId> {
+        self.companion_clinit_bodies.get(&outer).copied()
+    }
+
     /// Record/query the `@JvmField` realization of a hoisted companion property: the static IS the
     /// property's public JVM surface — no accessors, no `access$…$cp` bridges — so every reader and
     /// writer goes `getstatic`/`putstatic` on the owner directly (kotlinc's shape).

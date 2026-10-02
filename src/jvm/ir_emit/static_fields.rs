@@ -515,6 +515,84 @@ pub(super) fn emit_hoisted_companion_bridges(ir: &IrFile, fq_name: &str, cw: &mu
     }
 }
 
+/// Whether the outer `<clinit>` must bind value 0 before running a moved companion initializer.
+///
+/// A hoisted companion property is a static field of this class. Emission does not evaluate a
+/// bare local used only as that property's receiver, so storing the instance for it becomes
+/// `getstatic`/`pop`. A member call, a capture, or any other use of the local does load it.
+fn companion_initializer_loads_instance(ir: &IrFile, body: crate::ir::ExprId) -> bool {
+    fn walk(ir: &IrFile, expr: crate::ir::ExprId) -> bool {
+        if matches!(ir.expr(expr), crate::ir::IrExpr::GetValue(0)) {
+            return true;
+        }
+        let dropped_receiver = match ir.expr(expr) {
+            crate::ir::IrExpr::PropertyRead {
+                receiver,
+                owner,
+                name,
+                ..
+            } => receiver.filter(|receiver| {
+                crate::ir::expr_runs_no_code(ir, *receiver)
+                    && hoisted_companion_field(ir, *owner, name, false)
+            }),
+            crate::ir::IrExpr::PropertyWrite {
+                receiver,
+                owner,
+                name,
+                ..
+            } => receiver.filter(|receiver| {
+                crate::ir::expr_runs_no_code(ir, *receiver)
+                    && hoisted_companion_field(ir, *owner, name, true)
+            }),
+            _ => None,
+        };
+        let mut found = false;
+        crate::ir::for_each_child(&ir.exprs, expr, &mut |child| {
+            if dropped_receiver == Some(child) {
+                return;
+            }
+            if walk(ir, child) {
+                found = true;
+            }
+        });
+        found
+    }
+    walk(ir, body)
+}
+
+/// A companion property whose storage was moved onto the outer class and whose access from
+/// `<clinit>` is the field itself, so its receiver is not an instance load.
+///
+/// A declared getter or setter is called instead. That call needs the companion instance.
+fn hoisted_companion_field(
+    ir: &IrFile,
+    owner: crate::types::TypeName,
+    name: &str,
+    write: bool,
+) -> bool {
+    let Some(class) = ir.classes.iter().find(|class| class.fq_name == owner) else {
+        return false;
+    };
+    let Some(index) = class
+        .properties
+        .iter()
+        .position(|property| property.name == name)
+    else {
+        return false;
+    };
+    let property = &class.properties[index];
+    let calls_accessor = if write {
+        property.modifiers.declared_setter
+    } else {
+        property.modifiers.declared_getter
+    };
+    if calls_accessor {
+        return false;
+    }
+    ir.jvm_companion_property_static(owner, index as u32)
+        .is_some()
+}
+
 /// A class with a `companion object` gets its `<clinit>` LAST among the methods (kotlinc's
 /// order): the `Companion` instance store, then each non-const owner static's initializer (a
 /// hoisted companion property, or a companion `const val` whose initializer isn't a compile-time
@@ -544,6 +622,7 @@ pub(super) fn emit_class_static_initializer(
         // construction and hoisted-initializer constants.
         cw.reserve_method_name("<clinit>");
         cw.seed_utf8("()V");
+        let companion_initializer = ir.companion_clinit_body(c.fq_name);
         let mut e = Emitter::new(
             ir,
             cw,
@@ -552,7 +631,10 @@ pub(super) fn emit_class_static_initializer(
             fq_name,
             facade,
             Ty::Unit,
-            clinit_statics.iter().map(|&(_, _, init)| init),
+            clinit_statics
+                .iter()
+                .map(|&(_, _, init)| init)
+                .chain(companion_initializer),
         );
         let mut clinit = CodeBuilder::new(0);
         e.emit_delegated_property_array(env, c.fq_name, fq_name, &mut clinit);
@@ -578,6 +660,41 @@ pub(super) fn emit_class_static_initializer(
                 clinit_lines.push((pc, line));
             }
             e.emit_static_initializer_store(fq_name, static_index, init, &mut clinit);
+        }
+        if let Some(body) = companion_initializer {
+            // The companion constructor no longer runs this body. Value 0 is the companion
+            // instance, which `<clinit>` has already stored. Bind it only when emission loads
+            // that value. A property receiver that is a bare local is not loaded once the
+            // property is a static field, and storing it anyway becomes `getstatic`/`pop`.
+            if companion_initializer_loads_instance(ir, body) {
+                let companion = c
+                    .companion_class
+                    .expect("a companion initializer belongs to a class that declares one");
+                let companion_name = companion.render();
+                let descriptor = format!("L{companion_name};");
+                let field =
+                    e.cw.fieldref(fq_name, companion.nested_segment_ref(), &descriptor);
+                clinit.getstatic(field, 1);
+                let receiver_ty = Ty::obj_name(companion);
+                let existing = e.slots.get(&0).map(|(slot, _)| *slot);
+                let receiver = match existing {
+                    Some(slot) => slot,
+                    None => e
+                        .frame
+                        .enter(super::frame_map::FrameKey::Receiver, receiver_ty),
+                };
+                store(receiver_ty, receiver, &mut clinit);
+                e.slots.insert(0, (receiver, receiver_ty));
+            }
+            let first = clinit.line_marks().len();
+            e.render_initializer_boundaries = true;
+            e.emit(body, &mut clinit);
+            e.render_initializer_boundaries = false;
+            let marks = clinit.line_marks()[first..]
+                .iter()
+                .map(|&(pc, line)| (pc, u32::from(line)));
+            clinit_lines.extend(marks);
+            clinit_lines.dedup_by_key(|(_, line)| *line);
         }
         clinit.ret_void();
         clinit.ensure_locals(e.frame.max());
