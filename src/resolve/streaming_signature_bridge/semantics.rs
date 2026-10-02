@@ -697,7 +697,7 @@ impl ProductionSignatureSemantics<'_> {
                         include_scope_owner_body,
                     );
                     let spelling = self
-                        .qualified_classifier_binding(lookup_scope, &failed.name)
+                        .qualified_type_classifier_binding(lookup_scope, &failed.name)
                         .1
                         .unwrap_or_else(|| failed.name.clone());
                     Err(self.record_unresolved_reference_at(
@@ -729,7 +729,7 @@ impl ProductionSignatureSemantics<'_> {
             .clone()
         })?;
         let spelling = self
-            .qualified_classifier_binding(lookup_scope, &failed.name)
+            .qualified_type_classifier_binding(lookup_scope, &failed.name)
             .1
             .unwrap_or_else(|| failed.name.clone());
         Err(self.record_unresolved_reference_at(

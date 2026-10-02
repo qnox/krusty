@@ -105,6 +105,16 @@ pub struct IrPropertyModifiers {
     pub declared_setter: bool,
     pub delegated: bool,
     pub lateinit: bool,
+    pub member_kind: IrMemberKind,
+}
+
+/// How a class member came to be, as Kotlin metadata's `MEMBER_KIND` records it.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum IrMemberKind {
+    #[default]
+    Declaration,
+    /// A forwarder to an interface delegate (`class C(d: I) : I by d`).
+    Delegation,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

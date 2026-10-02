@@ -65,3 +65,34 @@ fun box(): String {\n\
     let out = run(SRC).expect("suspend conversion of an aliased fn value should compile + run");
     assert_eq!(out, "OK");
 }
+
+/// A bound reference to a regular member reaching a NULLABLE suspend function type is the same
+/// function-typed context as the non-null one: the reference is adapted into a suspend function
+/// value rather than typed as its standalone `KSuspendFunction0` reflection classifier (corpus
+/// suspendConversion/suspendConversionNullableCCE.kt).
+const NULLABLE_SUSPEND_TARGET_SRC: &str = "object Accepted\n\
+fun interface Sam {\n\
+    fun run()\n\
+}\n\
+class Runner : Sam {\n\
+    override fun run() {}\n\
+}\n\
+fun accept(f: (suspend () -> Unit)?): Accepted = Accepted\n\
+fun box(): String {\n\
+    val sam: Sam = Runner()\n\
+    val stored: (suspend () -> Unit)? = sam::run\n\
+    if (stored == null) return \"stored\"\n\
+    return if (accept(sam::run) === Accepted) \"OK\" else \"fail\"\n\
+}\n";
+
+#[test]
+fn bound_reference_converts_to_a_nullable_suspend_parameter() {
+    common::expect_box_ok_with_stdlib(NULLABLE_SUSPEND_TARGET_SRC, "ScNullable");
+    for class in [
+        "ScNullableKt",
+        "ScNullableKt$box$stored$1",
+        "ScNullableKt$box$1",
+    ] {
+        common::assert_class_matches_kotlinc("ScNullable", NULLABLE_SUSPEND_TARGET_SRC, class);
+    }
+}
