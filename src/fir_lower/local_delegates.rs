@@ -22,6 +22,7 @@ struct LocalDelegateAccessorRequest<'a> {
     reference: &'a IrLocalPropertyReference,
     reference_type: Ty,
     call: &'a FirDelegateCall,
+    dispatch_parameter: Option<&'a crate::fir::FirLocalDelegateDispatchParameter>,
     value_type: Option<Ty>,
     site: crate::fir::FirLiftingSite,
     line: u32,
@@ -43,6 +44,7 @@ impl BodyLowering<'_> {
                 reference: &reference,
                 reference_type,
                 call: &plan.get_value,
+                dispatch_parameter: plan.get_value_dispatch.as_ref(),
                 value_type: None,
                 site: plan
                     .accessor_sites
@@ -64,6 +66,7 @@ impl BodyLowering<'_> {
                         reference: &reference,
                         reference_type,
                         call,
+                        dispatch_parameter: plan.set_value_dispatch.as_ref(),
                         value_type: Some(plan.property_type.get()),
                         site: plan
                             .accessor_sites
@@ -111,6 +114,7 @@ impl BodyLowering<'_> {
             reference,
             reference_type,
             call,
+            dispatch_parameter,
             value_type,
             site,
             line,
@@ -145,11 +149,33 @@ impl BodyLowering<'_> {
         }
         let mut parameters = Vec::new();
         let mut identities = Vec::new();
+        let mut captured_receivers = Vec::new();
         if let Some(dispatch_type) = dispatch_type {
             parameters.push(dispatch_type);
-            identities.push(IrParameterIdentity::generated(
-                IrGeneratedParameterRole::LocalDelegateDispatch,
-                None,
+            match dispatch_parameter {
+                Some(crate::fir::FirLocalDelegateDispatchParameter::ImplicitReceiver(receiver)) => {
+                    identities.push(IrParameterIdentity::captured_receiver(0));
+                    captured_receivers.push(super::lower_captured_receiver(receiver));
+                }
+                Some(crate::fir::FirLocalDelegateDispatchParameter::ContextValue(name)) => {
+                    identities.push(IrParameterIdentity::captured_value(
+                        Some(name.to_string()),
+                        0,
+                        crate::ir::IrValueCapture {
+                            declaration: crate::ir::IrCapturedDeclaration::Parameter,
+                            capturer: crate::ir::IrCapturingCallable::LocalFunction,
+                        },
+                    ));
+                }
+                None => {
+                    return Err(FirLoweringFailure::InvalidLocalDelegatePlan(
+                        self.body.owner(),
+                    ));
+                }
+            }
+        } else if dispatch_parameter.is_some() {
+            return Err(FirLoweringFailure::InvalidLocalDelegatePlan(
+                self.body.owner(),
             ));
         }
         parameters.push(storage_type);
@@ -179,6 +205,7 @@ impl BodyLowering<'_> {
             parameters,
             parameter_identities: identities,
             type_parameters,
+            captured_receivers,
             result,
             source_order,
             site,

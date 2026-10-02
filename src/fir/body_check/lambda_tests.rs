@@ -472,6 +472,10 @@ fn context_lambda_records_context_types_and_selected_receiver_coordinate() {
         panic!("context lambda must become a checked local callable")
     };
     assert_eq!(lambda_body.context_receiver_types().len(), 1);
+    assert_eq!(
+        lambda_body.context_parameter_kinds(),
+        &[crate::types::ContextParameterKind::Anonymous]
+    );
     assert!(lambda_body.receiver_type().is_none());
     let root = lambda_body
         .expr(root_expression(lambda_body))

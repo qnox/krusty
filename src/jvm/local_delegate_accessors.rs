@@ -365,10 +365,9 @@ fn realize_accessor(
         );
     }
     ir.fn_source_names.insert(function, source_name.to_owned());
-    ir.fn_params.insert(
-        function,
-        FnParamInfo::identities(accessor.parameter_identities),
-    );
+    let mut parameters = FnParamInfo::identities(accessor.parameter_identities);
+    parameters.captured_receivers = accessor.captured_receivers;
+    ir.fn_params.insert(function, parameters);
     ir.set_method_visibility(function, Visibility::Private);
     if accessor.line != 0 {
         ir.fn_decl_lines.insert(function, accessor.line);

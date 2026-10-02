@@ -114,7 +114,7 @@ fn inline_call_argument(ir: &IrFile, node: ExprId) -> bool {
 struct Capture {
     name: String,
     ty: Ty,
-    /// Whether it is the enclosing class's `this`.
+    /// Whether its constructor parameter uses kotlinc's `$receiver` spelling.
     receiver: bool,
 }
 
@@ -247,7 +247,8 @@ fn is_primitive(ty: Ty) -> bool {
 /// body never assigns one.
 fn captures(ir: &IrFile, fid: FunId, body: ExprId, site: &Site) -> Option<Vec<Capture>> {
     let function = &ir.functions[fid as usize];
-    let identities = &ir.fn_params.get(&fid)?.identities;
+    let parameter_info = ir.fn_params.get(&fid)?;
+    let identities = &parameter_info.identities;
     let own_from = site.captures.len();
     if ir.lambda_own_params_from.get(&fid).copied() != Some(own_from as u32)
         || identities.len() != function.params.len()
@@ -268,7 +269,16 @@ fn captures(ir: &IrFile, fid: FunId, body: ExprId, site: &Site) -> Option<Vec<Ca
                 IrParameterRole::CapturedValue { .. } => {
                     (format!("${}", identity.source_name.as_ref()?), false)
                 }
-                IrParameterRole::CapturedReceiver { ordinal: 0 } => ("this$0".to_string(), true),
+                IrParameterRole::CapturedReceiver { ordinal } => {
+                    let receiver = parameter_info.captured_receivers.get(ordinal as usize)?;
+                    (
+                        crate::jvm::capture_names::lifted_receiver_name(
+                            &parameter_info.captured_receivers,
+                            ordinal as usize,
+                        ),
+                        crate::jvm::capture_names::uses_receiver_constructor_parameter(receiver),
+                    )
+                }
                 _ => return None,
             };
             let ty = match ir.shared_capture_parameters.get(&(fid, parameter as u32)) {
@@ -418,10 +428,11 @@ fn declare_class(
     class.lambda = Some(crate::ir::IrLambdaClass {
         invoke: fid,
         function_type: site.function_type,
-        receiver_capture: captures
+        receiver_captures: captures
             .iter()
-            .position(|capture| capture.receiver)
-            .map(|field| field as u32),
+            .enumerate()
+            .filter_map(|(field, capture)| capture.receiver.then_some(field as u32))
+            .collect(),
         bridge: crate::ir::IrInvokeBridge::logical(signature.params.clone(), signature.ret),
     });
     ir.add_class(class)

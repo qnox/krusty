@@ -937,10 +937,16 @@ impl BodyLowering<'_> {
         }
         let parameter_identities =
             local_function_parameter_identities(self.body, &self.capture_slots, body)?;
+        let captured_receivers = body
+            .implicit_receiver_captures()
+            .iter()
+            .map(|capture| super::lower_captured_receiver(&capture.receiver))
+            .collect();
         self.ir
             .fn_params
             .entry(function)
-            .or_insert_with(|| crate::ir::FnParamInfo::identities(parameter_identities));
+            .or_insert_with(|| crate::ir::FnParamInfo::identities(parameter_identities))
+            .captured_receivers = captured_receivers;
         if let Some(line) = local_function_debug_line(body) {
             self.ir.fn_decl_lines.insert(function, line);
         }

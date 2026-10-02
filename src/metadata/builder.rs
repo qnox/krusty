@@ -512,10 +512,18 @@ fn function_pb(
         if flags != 0 {
             vp.field_varint(1, flags);
         }
-        vp.field_varint(2, st.local(pname) as u64); // ValueParameter.name = 2
-                                                    // A `vararg` parameter is SPELLED as its element (`vararg xs: Cargo`) but RECORDED as the
-                                                    // array, so the element's spelling has to be lifted under the array rather than applied to
-                                                    // it — otherwise the record claims `Array` itself was written as the alias.
+        // An anonymous context parameter has no source name. Metadata records kotlinc's
+        // `<unused var>`, the same spelling a property's context parameter uses.
+        let recorded_name = if context_kind == Some(&crate::types::ContextParameterKind::Anonymous)
+        {
+            "<unused var>"
+        } else {
+            pname.as_str()
+        };
+        vp.field_varint(2, st.local(recorded_name) as u64); // ValueParameter.name = 2
+                                                            // A `vararg` parameter is SPELLED as its element (`vararg xs: Cargo`) but RECORDED as the
+                                                            // array, so the element's spelling has to be lifted under the array rather than applied to
+                                                            // it — otherwise the record claims `Array` itself was written as the alias.
         let (declared_ty, declared_spelling) = if f.vararg_index == Some(i) {
             (
                 super::vararg_recorded_type(*pty),

@@ -3,6 +3,9 @@
 use super::FirBody;
 
 impl FirBody {
+    /// The first `count` context slots are named lexical values written on the callable. Every
+    /// remaining slot is a context parameter of the function type the lambda is checked against
+    /// (`context(Receiver) () -> R`): an anonymous context parameter, not a legacy context receiver.
     pub fn set_context_value_count(&mut self, count: u32) {
         assert!(self.context_parameter_kinds.is_empty());
         assert!(
@@ -14,7 +17,7 @@ impl FirBody {
                 if ordinal < count as usize {
                     crate::types::ContextParameterKind::Named
                 } else {
-                    crate::types::ContextParameterKind::LegacyReceiver
+                    crate::types::ContextParameterKind::Anonymous
                 }
             })
             .collect();

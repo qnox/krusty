@@ -46,7 +46,9 @@ pub use local_callables::BodyLocalCallableDeclarationId;
 pub use local_class_capture::*;
 pub use local_class_names::*;
 pub use local_delegated_properties::LocalDelegatedPropertyId;
-pub(crate) use local_delegated_properties::{FirLocalDelegatePlan, LocalDelegateBinding};
+pub(crate) use local_delegated_properties::{
+    FirLocalDelegateDispatchParameter, FirLocalDelegatePlan, LocalDelegateBinding,
+};
 pub(crate) use module_symbols::*;
 pub use overrides::*;
 pub use parameters::*;

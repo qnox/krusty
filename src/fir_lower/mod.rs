@@ -738,6 +738,29 @@ impl<'a> BodyLowering<'a> {
     }
 }
 
+/// Mechanical lowering of checker-selected captured-receiver provenance. Both lifted callables
+/// and local-class constructor captures use this exact cross-phase contract.
+fn lower_captured_receiver(
+    receiver: &crate::fir::FirCapturedReceiver,
+) -> crate::ir::IrCapturedReceiver {
+    match receiver {
+        crate::fir::FirCapturedReceiver::Enclosing => crate::ir::IrCapturedReceiver::Enclosing,
+        crate::fir::FirCapturedReceiver::Callable(label) => {
+            crate::ir::IrCapturedReceiver::Callable(label.clone())
+        }
+        crate::fir::FirCapturedReceiver::Lambda(label) => {
+            crate::ir::IrCapturedReceiver::Lambda(label.clone())
+        }
+        crate::fir::FirCapturedReceiver::Context { kind, types, index } => {
+            crate::ir::IrCapturedReceiver::Context {
+                kind: *kind,
+                types: types.iter().map(|ty| ty.get()).collect(),
+                index: *index,
+            }
+        }
+    }
+}
+
 fn directly_shared_locals(
     body: &FirBody,
 ) -> HashMap<crate::fir::LocalValueId, crate::fir::ResolvedTy> {

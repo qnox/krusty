@@ -58,7 +58,7 @@ pub(crate) struct SuspendLambdaCapture {
     pub field: u32,
     /// The captured value's type.
     pub ty: crate::types::Ty,
-    /// Whether it is the enclosing class's `this`, which the constructor names `$receiver`.
+    /// Whether the constructor names it `$receiver` rather than like its field.
     pub receiver: bool,
 }
 

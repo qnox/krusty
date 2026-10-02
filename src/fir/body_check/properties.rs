@@ -400,6 +400,7 @@ impl BodyFirChecker<'_> {
                     depth: source.depth,
                     path: Box::new([]),
                     ty,
+                    receiver: FirCapturedReceiver::Enclosing,
                 });
             let value = self.body.add_expr(FirExpr {
                 origin,
@@ -625,7 +626,7 @@ impl BodyFirChecker<'_> {
         if self.body.local_callable().is_some()
             && selected.receiver_depth >= self.owned_receiver_count as usize
         {
-            let (enclosing_depth, captured_depth, path) = self
+            let (enclosing_depth, captured_depth, path, receiver) = self
                 .enclosing_receiver_capture(selected.receiver_depth)
                 .ok_or_else(|| self.failure(span, BodyCheckFailureKind::UnsupportedCallShape))?;
             self.body
@@ -636,6 +637,7 @@ impl BodyFirChecker<'_> {
                     depth: captured_depth,
                     path: path.clone(),
                     ty: selected_ty,
+                    receiver,
                 });
             let value = self.body.add_expr(FirExpr {
                 origin,

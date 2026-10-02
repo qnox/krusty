@@ -1762,6 +1762,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   lifted name and descriptor are already taken in the class it lands in (an enum entry's argument
   lambdas are placed in the enum rather than the entry class kotlinc uses, so they are numbered
   with the enum's) (`tests/lifted_callable_names_e2e.rs`).
+- **Lifted captured receivers.** A lifted lambda or local function takes each implicit receiver it
+  captures as a leading parameter. The Nth captured class instance is `this$N`. An extension
+  receiver is `$` before the receiver's own name, with its `$` separators turned into `_`:
+  `$this_within` for a lambda labelled `within`, `$this_extension` for `fun String.extension()`,
+  `$this_property` for an extension property's accessor, and `$this` for an unlabelled one.
+  Anonymous and function-type context captures retain the complete declared rung, so repeated
+  classifier labels are disambiguated (`$$context-Token$2` on 2.4.20); a legacy context receiver
+  instead uses `$$context_receiver_N`. A named context value remains an ordinary value capture.
+  A lifted receiver lambda's guard quotes its receiver's local name (`$this$within`), not `<this>`
+  (`tests/captured_receiver_names_e2e.rs`).
 - `enum class`: compiled as a `final` class extending `java/lang/Enum` with a `public static final`
   constant per entry, a synthetic `$VALUES` array, a private `(String name, int ordinal, …userArgs)`
   constructor calling `super(name, ordinal)`, a `<clinit>` that constructs entries in declaration
@@ -10535,9 +10545,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **A lambda's implementation guards its own parameters** (kotlinc's `generateNonNullAssertions`,
   which skips a private function unless it is `LOCAL_FUNCTION_FOR_LAMBDA`). The private static
   method of a lambda literal checks each non-null parameter whose JVM type is not primitive with
-  `Intrinsics.checkNotNullParameter`: its extension receiver and its value parameters, but not the
-  values it captures. An anonymous function (`fun(…) {}`), a private `LOCAL_FUNCTION` for kotlinc,
-  guards nothing, and a suspend lambda (a class) is left alone. `Unit` is a reference type here, for
+  `Intrinsics.checkNotNullParameter`: its extension receiver, the anonymous context parameters of
+  the function type it is checked against, and its value parameters, but not the values it captures.
+  That context parameter's guard quotes the same label a declaration uses (`$context-Receiver`, and
+  `$context-Token$1` when the label repeats). The lambda method still writes no `LocalVariableTable`
+  row for it; a declaration gains that row at 2.4.20. An anonymous function (`fun(…) {}`), a
+  private `LOCAL_FUNCTION` for kotlinc, guards nothing, and a suspend lambda (a class) is left
+  alone. `Unit` is a reference type here, for
   every function (`fun f(u: Unit)` is guarded too). The message is the parameter's name: a bare `_`
   is `<unused var>`, a destructuring pattern `<destruct>`, and the receiver its local name
   (`$this$<label>`, or `<this>`). An anonymous function's bare `_` parameter is unused too, so it has
@@ -10552,7 +10566,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   callable's own scope block (`IrFile::callable_scopes`) starts no line of its own and, in value
   position too, keeps its locals open to the method's end, so a lambda that returns a value
   covers its return with them as kotlinc does. Test: `tests/lambda_parameter_checks_e2e.rs`
-  (separate cases for a `Unit` parameter and destructured parameters).
+  (separate cases for a `Unit` parameter and destructured parameters) and
+  `tests/captured_receiver_names_e2e.rs`.
 
 - **A `break`/`continue` marks its own line on a `nop` before it jumps** (kotlinc's
   `visitBreakContinue`), whether or not it leaves a `try`; the same `nop` is the instruction that
