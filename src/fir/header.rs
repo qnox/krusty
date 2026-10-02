@@ -2206,7 +2206,7 @@ pub fn extract_file_header_syntax(
             &property.type_params,
             &[],
             |_| false,
-            |_| false,
+            |name| property.reified_type_params.contains(name),
         );
         let bounds = bounds(headers, names, &property.type_param_bounds);
         headers.insert_declaration(HeaderDeclaration {

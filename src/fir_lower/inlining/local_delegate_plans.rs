@@ -4,7 +4,7 @@
 //! copied across an inline boundary, the accessor bodies must follow that copy and use the same
 //! split between static type substitution and runtime-reified substitution.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::ir::{ExprId, IrExpr};
 use crate::types::Ty;
@@ -51,6 +51,13 @@ fn clone_specialized_plan(
         return Some(copy);
     }
     let mut plan = ir.local_delegate_plans.get(source_plan as usize)?.clone();
+    // The delegate operator is not itself reified. A copy whose accessor never names this
+    // expansion's type arguments is the same helper; cloning it emits a second method with the
+    // same JVM name.
+    if !plan_mentions_bindings(ir, &plan, bindings, runtime, &mut HashSet::new()) {
+        copies.insert(source_plan, source_plan);
+        return Some(source_plan);
+    }
     let copy = u32::try_from(ir.local_delegate_plans.len()).ok()?;
     // Publish the identity before cloning accessor bodies so a malformed recursive plan cannot
     // recurse forever. The placeholder is replaced before this helper returns.
@@ -89,4 +96,128 @@ fn specialize_accessor(
         }
     }
     Some(())
+}
+
+fn plan_mentions_bindings(
+    ir: &crate::ir::IrFile,
+    plan: &crate::ir::IrLocalDelegatePlan,
+    bindings: &HashMap<String, Ty>,
+    runtime: &HashMap<String, Ty>,
+    seen: &mut HashSet<u32>,
+) -> bool {
+    type_mentions(plan.reference.property_type, bindings)
+        || accessor_mentions(ir, &plan.getter, bindings, runtime, seen)
+        || plan
+            .setter
+            .as_ref()
+            .is_some_and(|accessor| accessor_mentions(ir, accessor, bindings, runtime, seen))
+}
+
+fn accessor_mentions(
+    ir: &crate::ir::IrFile,
+    accessor: &crate::ir::IrLocalDelegateAccessorPlan,
+    bindings: &HashMap<String, Ty>,
+    runtime: &HashMap<String, Ty>,
+    seen: &mut HashSet<u32>,
+) -> bool {
+    accessor
+        .parameters
+        .iter()
+        .any(|ty| type_mentions(*ty, bindings))
+        || type_mentions(accessor.result, bindings)
+        || accessor.type_parameters.iter().any(|parameter| {
+            parameter
+                .bounds
+                .iter()
+                .any(|(bound, _)| type_mentions(*bound, bindings))
+        })
+        || body_mentions(ir, accessor.body, bindings, runtime, seen)
+}
+
+fn body_mentions(
+    ir: &crate::ir::IrFile,
+    root: ExprId,
+    bindings: &HashMap<String, Ty>,
+    runtime: &HashMap<String, Ty>,
+    plans: &mut HashSet<u32>,
+) -> bool {
+    let mut pending = vec![root];
+    let mut expressions = HashSet::new();
+    while let Some(expression) = pending.pop() {
+        if !expressions.insert(expression) {
+            continue;
+        }
+        if expression_mentions(ir, expression, bindings, runtime) {
+            return true;
+        }
+        if let IrExpr::LocalDelegateAccess(access) = ir.expr(expression) {
+            if plans.insert(access.plan) {
+                if let Some(plan) = ir.local_delegate_plans.get(access.plan as usize) {
+                    if plan_mentions_bindings(ir, plan, bindings, runtime, plans) {
+                        return true;
+                    }
+                }
+            }
+        }
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+    }
+    false
+}
+
+fn expression_mentions(
+    ir: &crate::ir::IrFile,
+    expression: ExprId,
+    bindings: &HashMap<String, Ty>,
+    runtime: &HashMap<String, Ty>,
+) -> bool {
+    let recorded = [
+        ir.logical_types.get(&expression).copied(),
+        ir.whens.exhaustive.get(&expression).copied(),
+        ir.physical_types.get(&expression).copied(),
+        ir.ext_call_source_receiver.get(&expression).copied(),
+        ir.call_declared_ret.get(&expression).copied(),
+        ir.suspend_calls.get(&expression).copied(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|ty| type_mentions(ty, bindings));
+    if recorded {
+        return true;
+    }
+    if ir
+        .call_declared_params
+        .get(&expression)
+        .is_some_and(|parameters| parameters.iter().any(|ty| type_mentions(*ty, bindings)))
+    {
+        return true;
+    }
+    if ir
+        .reified_call_subst
+        .get(&expression)
+        .is_some_and(|substitutions| {
+            substitutions
+                .iter()
+                .any(|(_, ty)| type_mentions(*ty, runtime))
+        })
+    {
+        return true;
+    }
+    match ir.expr(expression) {
+        IrExpr::TypeOp { type_operand, .. } => type_mentions(*type_operand, runtime),
+        IrExpr::KClassLiteral { classifier, .. } => {
+            classifier.is_some_and(|ty| type_mentions(ty, runtime))
+        }
+        IrExpr::LocalPropertyReference(reference) => {
+            type_mentions(reference.property_type, bindings)
+        }
+        IrExpr::Variable { ty, .. }
+        | IrExpr::PrimitiveNeg { ty, .. }
+        | IrExpr::PropertyRead { ty, .. }
+        | IrExpr::PropertyWrite { ty, .. } => type_mentions(*ty, bindings),
+        _ => false,
+    }
+}
+
+fn type_mentions(ty: Ty, bindings: &HashMap<String, Ty>) -> bool {
+    !bindings.is_empty() && crate::types::ty_subst_keep_unbound(ty, bindings) != ty
 }
