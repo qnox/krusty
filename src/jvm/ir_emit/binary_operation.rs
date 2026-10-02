@@ -1,6 +1,6 @@
 //! JVM emission for checked binary operations and their operand/debug-line ordering.
 
-use super::{debug_lines, emit_num_conv, ir_ty_to_jvm, CodeBuilder, Emitter, TempRole, Ty};
+use super::{emit_num_conv, ir_ty_to_jvm, CodeBuilder, Emitter, TempRole, Ty};
 use crate::ir::IrBinOp;
 
 impl Emitter<'_> {
@@ -34,7 +34,7 @@ impl Emitter<'_> {
                 }
                 // The operands may have moved the line to a continuation. kotlinc puts the
                 // operation back on the expression's own start line.
-                debug_lines::mark_expression_start(self.ir, expression, code);
+                self.mark_expression_start(expression, code);
                 match lt {
                     Ty::Long => match op {
                         Add => code.ladd(),
@@ -110,7 +110,7 @@ impl Emitter<'_> {
             }
             BitAnd | BitOr | BitXor => {
                 self.emit_binary_operands_with_live_prefix(lhs, rhs, code);
-                debug_lines::mark_expression_start(self.ir, expression, code);
+                self.mark_expression_start(expression, code);
                 match lt {
                     Ty::Long => match op {
                         BitAnd => code.land(),
@@ -128,7 +128,7 @@ impl Emitter<'_> {
             }
             Shl | Shr | Ushr => {
                 self.emit_operands(&[lhs, rhs], code); // shift amount is an `Int`
-                debug_lines::mark_expression_start(self.ir, expression, code);
+                self.mark_expression_start(expression, code);
                 match lt {
                     Ty::Long => match op {
                         Shl => code.lshl(),
