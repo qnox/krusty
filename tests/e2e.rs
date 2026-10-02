@@ -1722,6 +1722,8 @@ mod property_conversion_inference_e2e;
 mod property_infer_member_e2e;
 #[path = "property_initializer_newline_e2e.rs"]
 mod property_initializer_newline_e2e;
+#[path = "property_parameter_initializers_e2e.rs"]
+mod property_parameter_initializers_e2e;
 #[path = "property_reference_class_e2e.rs"]
 mod property_reference_class_e2e;
 #[path = "property_reference_dependency_e2e.rs"]

@@ -68,6 +68,7 @@ mod capture_storage;
 mod cast_narrowing;
 mod catch_flow;
 mod checker_symbol_queries;
+mod class_body_bindings;
 mod classifier_associated;
 mod classifier_binding;
 mod collection_literals;
@@ -47477,70 +47478,6 @@ impl<'a> Checker<'a> {
         labels
     }
 
-    /// Bind the lexical capture selected for one property's own initializer, so `val x = x`
-    /// reads the enclosing value's storage. A function local already owns that unqualified name
-    /// in every nested body (`declare_dispatch_property_with_provenance`); this binding is the
-    /// reified field the initializer reads.
-    fn declare_property_initializer_class_storage_capture(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        declaration: DeclId,
-        name: &str,
-    ) {
-        let Some((field, capture)) = self
-            .body_class_storage_captures(declaration)
-            .into_iter()
-            .enumerate()
-            .find(|(_, capture)| {
-                capture.name == name
-                    && matches!(
-                        capture.source,
-                        AnonymousObjectCaptureSource::LexicalValue
-                            | AnonymousObjectCaptureSource::ClassStorage { .. }
-                    )
-                    && capture.storage_ty.is_none()
-            })
-        else {
-            return;
-        };
-        self.declare_class_storage(
-            scope,
-            &capture.name,
-            capture.ty,
-            capture.shared_cell,
-            u32::try_from(field).expect("too many local-class captures"),
-            capture.shared_cell,
-        );
-    }
-
-    fn declare_body_class_storage_captures(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        declaration: DeclId,
-    ) {
-        for (field, capture) in self
-            .body_class_storage_captures(declaration)
-            .into_iter()
-            .enumerate()
-        {
-            if matches!(
-                capture.source,
-                AnonymousObjectCaptureSource::LexicalValue
-                    | AnonymousObjectCaptureSource::ClassStorage { .. }
-            ) && capture.storage_ty.is_none()
-            {
-                self.declare_class_storage(
-                    scope,
-                    &capture.name,
-                    capture.ty,
-                    capture.shared_cell,
-                    field as u32,
-                    capture.shared_cell,
-                );
-            }
-        }
-    }
-
     fn declare_enum_entry_property_storage(
         &mut self,
         scope: &CheckerScope<'_>,
@@ -53367,9 +53304,7 @@ impl<'a> Checker<'a> {
                     .map(|parameter| self.type_ref_ty(&property_scope, &parameter.ty))
                     .collect()
             });
-        for (parameter, ty) in class.props.iter().zip(primary_parameter_types) {
-            self.declare(&property_scope, &parameter.name, ty, parameter.is_var);
-        }
+        self.declare_initializer_parameters(&property_scope, &class.props, primary_parameter_types);
 
         loop {
             let mut progressed = false;
@@ -54314,25 +54249,14 @@ impl<'a> Checker<'a> {
                             .map(|parameter| self.type_ref_ty(property_scope, &parameter.ty))
                             .collect()
                     });
-                for (parameter, ty) in cl.props.iter().zip(primary_parameter_types) {
-                    // A constructor property is already the dispatch property above. Initializers
-                    // read that property; only a plain parameter is a local.
-                    let property_visible = parameter.is_property
-                        && self
-                            .lookup(property_scope, &parameter.name)
-                            .is_some_and(|binding| {
-                                matches!(
-                                    binding.origin,
-                                    ReceiverFnValueOrigin::DispatchProperty { .. }
-                                )
-                            });
-                    if property_visible {
-                        continue;
-                    }
-                    self.declare(property_scope, &parameter.name, ty, parameter.is_var);
-                }
-                // Reapply capture bindings after constructor parameters. An enclosing function local
-                // is one of those captures and stays ahead of a same-named constructor `val`.
+                self.declare_initializer_parameters(
+                    property_scope,
+                    &cl.props,
+                    primary_parameter_types,
+                );
+                // Reapply non-colliding semantic capture bindings after provider-visible synthetic
+                // storage and plain constructor parameters enter this child rung. A same-named
+                // source property gets its capture only in the initializer-specific scope below.
                 self.declare_body_class_storage_captures(property_scope, d);
                 for (property_index, property) in cl.body_props.iter().enumerate() {
                     let source_member = crate::libraries::SourceMember::ClassProperty {
@@ -54559,9 +54483,11 @@ impl<'a> Checker<'a> {
                             .map(|parameter| self.type_ref_ty(field_scope, &parameter.ty))
                             .collect()
                     });
-                for (parameter, ty) in cl.props.iter().zip(primary_parameter_types) {
-                    self.declare(field_scope, &parameter.name, ty, parameter.is_var);
-                }
+                self.declare_initializer_parameters(
+                    field_scope,
+                    &cl.props,
+                    primary_parameter_types,
+                );
                 for property in &cl.body_props {
                     let Some(field) = property.explicit_backing_field.as_ref() else {
                         continue;
@@ -56072,24 +55998,15 @@ impl<'a> Checker<'a> {
                     }
                 }
                 // Constructor properties are stored before body initializers and `init` blocks.
-                // Those regions read the property. Super arguments and interface delegation stay
-                // on the parameter rung above.
-                let initialized_scope = scope.child(ScopeKind::Block);
-                for parameter in cl.props.iter().filter(|parameter| parameter.is_property) {
-                    let Some(property) = props.iter().find(|property| {
-                        property.name == parameter.name
-                            && current_owner.is_some_and(|owner| property.owner == owner)
-                    }) else {
-                        continue;
-                    };
-                    self.declare_scoped_property_with_mutability(
-                        &initialized_scope,
-                        property,
-                        true,
-                        property.is_var || deferred_val.contains(property.name.as_str()),
-                    );
-                }
-                let scope = &initialized_scope;
+                // Start those regions from the dispatch rung and add only plain parameters; the
+                // header scope above retains every parameter for `super(…)` and delegation.
+                let initializer_scope = dispatch_scope.child(ScopeKind::Block);
+                let scope = &initializer_scope;
+                self.declare_initializer_parameters(
+                    scope,
+                    &cl.props,
+                    source_primary_params.iter().copied(),
+                );
                 for (bp_index, bp) in cl.body_props.iter().enumerate() {
                     let selected_property =
                         self.selected_body_declarations
