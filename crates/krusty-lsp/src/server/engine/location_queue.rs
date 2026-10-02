@@ -31,16 +31,29 @@ impl CommandState {
             self.interactive_since_location = 0;
             return self.locations.pop_front();
         }
-        if let Some(command) = self.pending.pop_front() {
-            if self.locations.is_empty() {
-                self.interactive_since_location = 0;
-            } else {
-                self.interactive_since_location += 1;
-            }
+        if let Some(command) = self.pop_interactive() {
             return Some(command);
         }
         self.interactive_since_location = 0;
         self.locations.pop_front()
+    }
+
+    /// The next edit, dump, materialization, or project change, leaving location queued.
+    ///
+    /// Shutdown and an overdue refresh use this so they can finish interactive work and then
+    /// stop. A due location yield does not run, and an idle location backlog is not drained.
+    pub(super) fn take_interactive(&mut self) -> Option<EngineCommand> {
+        self.pop_interactive()
+    }
+
+    fn pop_interactive(&mut self) -> Option<EngineCommand> {
+        let command = self.pending.pop_front()?;
+        if self.locations.is_empty() {
+            self.interactive_since_location = 0;
+        } else {
+            self.interactive_since_location += 1;
+        }
+        Some(command)
     }
 
     /// True when an edit, dump, materialization, or project change is waiting. Queued dependency
@@ -64,9 +77,10 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::super::{
-        Analysis, AnalysisEngine, AnalysisJob, CommandState, DependencyCandidate, DocumentAnalysis,
-        DumpJob, EngineCommand, LibraryRef, LocatedDependency, MaterializeJob,
-        MaterializedDefinition, INTERACTIVE_COMMANDS_BEFORE_LOCATION,
+        command_queue, Analysis, AnalysisEngine, AnalysisJob, CommandReceive, CommandState,
+        DependencyCandidate, DocumentAnalysis, DumpJob, EngineCommand, LibraryRef,
+        LocatedDependency, MaterializeJob, MaterializedDefinition,
+        INTERACTIVE_COMMANDS_BEFORE_LOCATION,
     };
     use crate::IndexOutcome;
 
@@ -307,5 +321,45 @@ mod tests {
             open_uris: Vec::new(),
         }));
         assert!(state.interactive_work_queued());
+    }
+
+    #[test]
+    fn an_expired_refresh_deadline_runs_before_queued_location() {
+        let (sender, receiver) = command_queue();
+        sender.send(located("Held"));
+        for token in 0..INTERACTIVE_COMMANDS_BEFORE_LOCATION {
+            sender.send(EngineCommand::Dump(DumpJob {
+                token: token as u64,
+                uri: "file:///a.kt".into(),
+            }));
+        }
+        sender.send(EngineCommand::Dump(DumpJob {
+            token: 1_000,
+            uri: "file:///a.kt".into(),
+        }));
+
+        let mut order = Vec::new();
+        for token in 0..=INTERACTIVE_COMMANDS_BEFORE_LOCATION {
+            match receiver.recv(Some(Duration::ZERO)) {
+                CommandReceive::Command(EngineCommand::Dump(job)) => order.push(job.token),
+                CommandReceive::Command(_) => {
+                    panic!("expected dump {token} before location")
+                }
+                CommandReceive::Timeout => {
+                    panic!("expected dump {token} before the refresh deadline")
+                }
+                CommandReceive::Disconnected => panic!("expected dump {token} before disconnect"),
+            }
+        }
+        assert_eq!(
+            order,
+            (0..INTERACTIVE_COMMANDS_BEFORE_LOCATION as u64)
+                .chain(std::iter::once(1_000))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            matches!(receiver.recv(Some(Duration::ZERO)), CommandReceive::Timeout),
+            "an overdue refresh runs before a due location yield"
+        );
     }
 }

@@ -891,17 +891,25 @@ impl CommandReceiver {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let deadline = timeout.map(|timeout| Instant::now() + timeout);
         loop {
+            // Location is not interactive. Disconnect and an overdue refresh or retry must be
+            // able to stop before it, or a location backlog keeps shutdown and the refresh that
+            // would discard that backlog from running.
+            let block_location =
+                state.disconnected || deadline.is_some_and(|deadline| deadline <= Instant::now());
+            if block_location {
+                if let Some(command) = state.take_interactive() {
+                    return CommandReceive::Command(command);
+                }
+                if state.disconnected {
+                    return CommandReceive::Disconnected;
+                }
+                return CommandReceive::Timeout;
+            }
             if let Some(command) = state.take_foreground() {
                 return CommandReceive::Command(command);
             }
-            if state.disconnected {
-                return CommandReceive::Disconnected;
-            }
             // An overdue project refresh or analysis retry outranks background indexing; checking
-            // the deadline here is what stops a nonempty sweep from starving it indefinitely.
-            if deadline.is_some_and(|deadline| deadline <= Instant::now()) {
-                return CommandReceive::Timeout;
-            }
+            // the deadline above is what stops a nonempty sweep from starving it indefinitely.
             if let Some(command) = state.take() {
                 return CommandReceive::Command(command);
             }
@@ -2608,6 +2616,14 @@ mod tests {
             documents: vec![("file:///w/Open.kt".into(), String::new(), 1, 0)],
             open_uris: vec!["file:///w/Open.kt".into()],
         }));
+        sender.send(EngineCommand::LocateDependencies {
+            generation: 0,
+            candidates: vec![DependencyCandidate {
+                internal: "vendor/Held".into(),
+                package: "vendor".into(),
+                name: "Held".into(),
+            }],
+        });
         sender.send(EngineCommand::Index(IndexJob {
             generation: 0,
             priority: IndexPriority::Sweep,
@@ -2624,7 +2640,7 @@ mod tests {
         );
         assert!(
             matches!(receiver.recv(None), CommandReceive::Disconnected),
-            "queued sweep work is abandoned rather than drained, so exit stays prompt"
+            "queued location and sweep work are abandoned rather than drained, so exit stays prompt"
         );
     }
     #[test]
