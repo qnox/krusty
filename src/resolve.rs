@@ -1385,11 +1385,7 @@ impl<'symbols, 'scope> ExtensionOverloads<'symbols, 'scope> {
                     .unwrap_or(&[])
                     .iter()
                     .chain(self.ranked.iter().map(|(_, signature)| *signature))
-                    .any(|signature| {
-                        level
-                            .iter()
-                            .any(|candidate| *candidate == signature.package)
-                    })
+                    .any(|signature| level.contains(&signature.package))
             })
         });
         self.exact
@@ -1407,15 +1403,10 @@ impl<'symbols, 'scope> ExtensionOverloads<'symbols, 'scope> {
                             crate::symbol_source::SymbolNamespace::Classifier(_) => false,
                         };
                     }
-                    selected_import_level.is_some_and(|level| {
-                        scope.levels()[level]
-                            .iter()
-                            .any(|candidate| *candidate == signature.package)
-                    })
+                    selected_import_level
+                        .is_some_and(|level| scope.levels()[level].contains(&signature.package))
                 }) || (import_scope.is_none()
-                    && packages.is_some_and(|packages| {
-                        packages.iter().any(|package| *package == signature.package)
-                    }))
+                    && packages.is_some_and(|packages| packages.contains(&signature.package)))
                     || (import_scope.is_none() && packages.is_none())
             })
     }
@@ -7808,7 +7799,7 @@ fn module_signatures_mention_pending(table: &SymbolTable) -> bool {
             || signature
                 .generic_sig
                 .as_ref()
-                .is_some_and(&generic_mentions_pending)
+                .is_some_and(generic_mentions_pending)
     };
     if table
         .funs
@@ -11791,7 +11782,7 @@ impl TypeInfo {
                 InvokeKind::Operator { target, .. } => specialize(target),
             }),
             Some(ExprLowering::ReceiverFnInvoke { ret, .. }) => Some(*ret),
-            _ => self.resolved_calls.get(&expression).map(&specialize),
+            _ => self.resolved_calls.get(&expression).map(specialize),
         }
     }
 
@@ -48683,7 +48674,7 @@ impl<'a> Checker<'a> {
                             .parameter_constraints
                             .get(*slot)
                             .copied()
-                            .map(&constraint_rank)
+                            .map(constraint_rank)
                             .unwrap_or(0)
                     })
                     .collect::<Vec<_>>()
@@ -48758,7 +48749,7 @@ impl<'a> Checker<'a> {
                                         .parameter_constraints
                                         .get(*slot)
                                         .copied()
-                                        .map(&constraint_rank)
+                                        .map(constraint_rank)
                                         .unwrap_or(0)
                                 })
                                 .collect::<Vec<_>>()

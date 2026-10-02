@@ -372,7 +372,7 @@ fn analyze_many(
 ) -> (crate::frontend::SourceSetAnalysis, Vec<String>) {
     let inputs = sources
         .iter()
-        .map(|(source, stem)| SourceInput::kotlin(*source).with_file_stem(*stem))
+        .map(|(source, stem)| SourceInput::kotlin(source).with_file_stem(stem))
         .collect::<Vec<_>>();
     let stems = sources
         .iter()

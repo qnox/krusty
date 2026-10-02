@@ -153,9 +153,12 @@ fn reject_duplicate_method(
 /// Different Kotlin shapes (`fun <T> id(): Int` and `fun id(): Int`, or `List<T>` and
 /// `List<String>`) stay distinct in the resolver. They collide only once the physical name and
 /// descriptor are known, and only inside one file facade.
-fn package_function_signature_clashes(
-    ir: &IrFile,
-) -> Result<Vec<(crate::diag::Span, String)>, Vec<(crate::diag::Span, String)>> {
+///
+/// Both variants carry `(span, message)` rows: `Ok` the clashes to report, `Err` the failure to
+/// report instead.
+type ClashRows = Vec<(crate::diag::Span, String)>;
+
+fn package_function_signature_clashes(ir: &IrFile) -> Result<ClashRows, ClashRows> {
     let mut groups: Vec<((String, String), Vec<usize>)> = Vec::new();
     for (index, declaration) in ir.package_functions.iter().enumerate() {
         if declaration.companion {

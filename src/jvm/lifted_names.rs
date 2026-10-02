@@ -138,6 +138,12 @@ fn container_segment(container: &str) -> String {
         .collect()
 }
 
+/// The next number of a scope's counter.
+fn take(next: &mut u32) -> u32 {
+    *next += 1;
+    *next - 1
+}
+
 #[cfg(test)]
 mod tests {
     use super::container_segment;
@@ -149,10 +155,4 @@ mod tests {
         assert_eq!(container_segment("lz$delegate"), "lz_delegate");
         assert_eq!(container_segment("outer"), "outer");
     }
-}
-
-/// The next number of a scope's counter.
-fn take(next: &mut u32) -> u32 {
-    *next += 1;
-    *next - 1
 }

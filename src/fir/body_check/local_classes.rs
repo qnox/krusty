@@ -24,6 +24,10 @@ enum RequiredConstructorCapture {
     Receiver(ClassCaptureBinding),
 }
 
+/// The storage receiver for an outer-class capture: the receiver expression plus the capture path
+/// that remains to be walked from it.
+type StorageReceiver = Result<Option<(FirExprId, Box<[DeclarationId]>)>, BodyCheckFailure>;
+
 impl RequiredConstructorCapture {
     fn binding(&self) -> ClassCaptureBinding {
         match self {
@@ -474,7 +478,7 @@ impl BodyFirChecker<'_> {
         &mut self,
         binding: ClassCaptureBinding,
         origin: OriginId,
-    ) -> Result<Option<(FirExprId, Box<[DeclarationId]>)>, BodyCheckFailure> {
+    ) -> StorageReceiver {
         let Some(source) = binding.receiver_source else {
             return Ok(None);
         };
@@ -528,7 +532,7 @@ impl BodyFirChecker<'_> {
         &mut self,
         binding: ClassCaptureBinding,
         origin: OriginId,
-    ) -> Result<Option<(FirExprId, Box<[DeclarationId]>)>, BodyCheckFailure> {
+    ) -> StorageReceiver {
         if !self.constructor_prefix_capture_access || binding.enclosing_depth == 0 {
             return Ok(None);
         }

@@ -2802,8 +2802,8 @@ fun combine(entries: Array<Entry>): String {
         let java = "package p; public class Widget {}".to_string();
         let source = "fun use(w: p.Widget) {}";
         let mut input = Vec::new();
-        write_analysis_request(&mut input, source, &[java.clone()], None);
-        write_analysis_request(&mut input, source, &[java.clone()], None);
+        write_analysis_request(&mut input, source, std::slice::from_ref(&java), None);
+        write_analysis_request(&mut input, source, std::slice::from_ref(&java), None);
         write_analysis_request(&mut input, source, &[], None);
         write_analysis_request(&mut input, source, &[java], None);
         let mut output = Vec::new();
@@ -2865,10 +2865,25 @@ fun combine(entries: Array<Entry>): String {
         let source = "fun use(w: p.Widget) = w.value().token";
         let classpath = [root.clone()];
         let mut input = Vec::new();
-        write_analysis_request(&mut input, source, &[java.clone()], Some(&classpath));
-        write_analysis_request(&mut input, source, &[java.clone()], Some(&classpath));
+        write_analysis_request(
+            &mut input,
+            source,
+            std::slice::from_ref(&java),
+            Some(&classpath),
+        );
+        write_analysis_request(
+            &mut input,
+            source,
+            std::slice::from_ref(&java),
+            Some(&classpath),
+        );
         let mutate_after = input.len() as u64;
-        write_analysis_request(&mut input, source, &[java.clone()], Some(&classpath));
+        write_analysis_request(
+            &mut input,
+            source,
+            std::slice::from_ref(&java),
+            Some(&classpath),
+        );
         let class_file = root.join("q/Payload.class");
         let mut reader = MutateAfter {
             inner: Cursor::new(input),

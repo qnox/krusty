@@ -168,6 +168,13 @@ pub(super) fn publish_inherited_statuses(
     }
 }
 
+/// One implementation's override edges in nearest-first order, per implementation.
+type ImplementationEdges<Id, E> = Vec<(Id, Vec<Overridden<Id, E>>)>;
+
+/// Edges grouped per implementation while collecting, each stamped with its publish depth until
+/// the group is sorted and the stamps dropped.
+type DepthStampedEdges<Id, E> = HashMap<Id, Vec<(u32, Overridden<Id, E>)>>;
+
 /// Each implementation's edges in nearest-first order. A classifier also publishes edges for an
 /// implementation it inherits (a superclass member realizing one of its interfaces); those say
 /// nothing about the member's own declaration, so only edges published by the member's declaring
@@ -179,13 +186,13 @@ fn own_edges<'a, Id, Edge, E>(
     implementation: impl Fn(&ResolvedModuleIndex, &Edge) -> Option<(Id, DeclarationId)>,
     overridden: impl Fn(&Edge) -> Overridden<Id, E>,
     depth: impl Fn(&Edge) -> u32,
-) -> Vec<(Id, Vec<Overridden<Id, E>>)>
+) -> ImplementationEdges<Id, E>
 where
     Id: Copy + Eq + Hash,
     Edge: 'a,
 {
     let mut order = Vec::new();
-    let mut grouped: HashMap<Id, Vec<(u32, Overridden<Id, E>)>> = HashMap::new();
+    let mut grouped: DepthStampedEdges<Id, E> = HashMap::new();
     for classifier in classifiers {
         for edge in edges(classifier) {
             let Some((id, declaration)) = implementation(index, edge) else {
@@ -219,7 +226,7 @@ where
 /// Resolve every implementation. Source order is not topological, so a base declared later is
 /// resolved on demand; a declaration outside this batch was published by an earlier one.
 fn derive<Id: Copy + Eq + Hash, S: Status>(
-    implementations: &[(Id, Vec<Overridden<Id, S::Edge>>)],
+    implementations: &ImplementationEdges<Id, S::Edge>,
     own: impl Fn(Id) -> S,
     published: impl Fn(Id) -> S,
 ) -> Vec<(Id, S)> {
