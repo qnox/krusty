@@ -187,6 +187,42 @@ mod tests {
     }
 
     #[test]
+    fn function_classifier_normalization_keeps_the_nullability_wrapper() {
+        let function = type_name("fixture/Function0");
+        let callable_object = type_name("fixture/CallableObject");
+        let source = Shapes {
+            declarations: vec![
+                (
+                    function,
+                    callable_classifier([type_name("kotlin/Function")]),
+                ),
+                (callable_object, callable_classifier([function])),
+            ],
+        };
+        let expected = Ty::fun(Vec::new(), Ty::String);
+        let plain = Ty::obj_name(function);
+        assert_eq!(declared_function_type(&source, plain), Some(expected));
+        assert_eq!(
+            declared_function_type(&source, Ty::nullable(plain)),
+            Some(Ty::nullable(expected))
+        );
+        assert_eq!(
+            declared_function_type(&source, Ty::platform_nullable(plain)),
+            Some(Ty::platform_nullable(expected))
+        );
+        for wrapped in [
+            Ty::nullable(Ty::obj_name(callable_object)),
+            Ty::platform_nullable(Ty::obj_name(callable_object)),
+        ] {
+            assert_eq!(
+                declared_function_type(&source, wrapped),
+                None,
+                "a nominal callable object stays nominal under {wrapped:?}"
+            );
+        }
+    }
+
+    #[test]
     fn applied_callable_classifier_preserves_nullable_arguments() {
         let callable = type_name("fixture/Callable1");
         let parameter = "P".to_string();

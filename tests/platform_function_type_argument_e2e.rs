@@ -6,18 +6,11 @@
 
 use super::common;
 
-fn run_box(src: &str, stem: &str) {
-    let Some(out) = common::compile_and_run_with_stdlib(src, stem) else {
-        panic!("{stem}: expected the box to compile and run");
-    };
-    assert_eq!(out, "OK", "{stem}");
-}
-
 /// The CallOnceFunction shape from the Kotlin monorepo's util.runtime module: a generic class whose
 /// `AtomicReference` stores a function type, cleared with `getAndSet(null)`.
 #[test]
 fn null_to_a_platform_parameter_of_function_shape() {
-    run_box(
+    common::expect_box_same_as_kotlinc(
         r#"
 import java.util.concurrent.atomic.AtomicReference
 
@@ -46,7 +39,7 @@ fun box(): String {
 /// `null` before the normalization fix.
 #[test]
 fn null_to_a_platform_parameter_of_nominal_shape() {
-    run_box(
+    common::expect_box_same_as_kotlinc(
         r#"
 import java.util.concurrent.atomic.AtomicReference
 
@@ -60,4 +53,36 @@ fun box(): String {
 "#,
         "PlatformNominalShapeNull",
     );
+}
+
+/// An explicitly nullable function parameter admits `null`. This is the source-level counterpart of
+/// the platform wrapper: both wrappers must survive classifier normalization.
+#[test]
+fn null_to_a_nullable_function_parameter() {
+    common::expect_box_same_as_kotlinc(
+        r#"
+fun take(f: ((String) -> String)?): String = if (f == null) "OK" else f("x")
+
+fun box(): String = take(null)
+"#,
+        "NullableFunctionParameterNull",
+    );
+}
+
+/// A non-null function parameter rejects `null`. The diagnostic list, including file, line, column,
+/// message, and order, must match kotlinc.
+#[test]
+fn null_to_a_non_null_function_parameter_is_rejected() {
+    let result = common::compiler_diagnostics(
+        &[(
+            "Main.kt",
+            r#"
+fun take(f: (String) -> String): String = f("x")
+
+fun box(): String = take(null)
+"#,
+        )],
+        &[],
+    );
+    common::expect_identical_rejection(&result, "null passed to a non-null function parameter");
 }
