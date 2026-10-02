@@ -131,14 +131,13 @@ fn emit_reference_spread(
             // Preserve the established byte sequence when no child introduces control flow.
             emitter.emit_value(element, code);
         }
+        let produced = temps.map_or_else(|| emitter.value_ty(element), |temps| temps[index].1);
         let method = if spreads[index] {
             emitter
                 .cw
                 .methodref(builder, "addSpread", "(Ljava/lang/Object;)V")
         } else {
-            if let Some(primitive) = box_element {
-                box_prim_free(emitter.cw, code, primitive);
-            }
+            box_reference_scalar(emitter, box_element, produced, code);
             emitter
                 .cw
                 .methodref(builder, "add", "(Ljava/lang/Object;)V")
@@ -207,9 +206,9 @@ pub(super) fn emit_packed_array(
         load(array_type, slot, code);
         code.push_int(index as i32, emitter.cw);
         emitter.emit_value(element, code);
-        if let Some(primitive) = box_element {
-            box_prim_free(emitter.cw, code, primitive);
-        }
+        // A nullable unsigned element is already the boxed value (or null). Boxing again calls
+        // `box-impl` on a reference.
+        box_reference_scalar(emitter, box_element, emitter.value_ty(element), code);
         code.array_store(store_op, width);
     }
 
@@ -255,9 +254,7 @@ fn emit_packed_array_through_temps(
         load(jvm_array_type, slot, code);
         code.push_int(index as i32, emitter.cw);
         load(temp_ty, temp_slot, code);
-        if let Some(primitive) = box_element {
-            box_prim_free(emitter.cw, code, primitive);
-        }
+        box_reference_scalar(emitter, box_element, temp_ty, code);
         code.array_store(store_op, width);
     }
 
@@ -265,4 +262,17 @@ fn emit_packed_array_through_temps(
     load(jvm_array_type, slot, code);
     emitter.release_temporary(array_lease);
     emitter.release_operand_spills(&temps);
+}
+
+/// Box a reference-array element that is still a JVM scalar. An element that is already the boxed
+/// value, including `null`, stays as it is: a second unsigned `box-impl` does not accept a reference.
+fn box_reference_scalar(
+    emitter: &mut Emitter<'_>,
+    primitive: Option<Ty>,
+    produced: Ty,
+    code: &mut CodeBuilder,
+) {
+    if let Some(primitive) = primitive.filter(|_| produced.is_jvm_scalar()) {
+        box_prim_free(emitter.cw, code, primitive);
+    }
 }

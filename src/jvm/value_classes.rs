@@ -3126,17 +3126,25 @@ pub(crate) fn lower_value_classes(
                 }
             }
             // Dynamic invokes, reference varargs, and string concatenations are the erased
-            // reference boundaries handled here.
-            if let IrExpr::InvokeFunction { args, .. }
-            | IrExpr::Vararg { elements: args, .. }
-            // A value-class part of a string template flows into `StringBuilder.append(Object)` /
-            // `String.valueOf(Object)`, so it must box (→ the value class's `toString`) — unless it
-            // is a non-null unboxed value, which kotlinc renders directly through the static
-            // `toString-impl` over its carrier.
-            | IrExpr::StringConcat(args) = &ir.exprs[id as usize]
-            {
-                let template = matches!(&ir.exprs[id as usize], IrExpr::StringConcat(_));
-                for a in args.clone() {
+            // reference boundaries handled here. A spread contributes the array itself:
+            // `IntSpreadBuilder.addSpread` reads the carrier (`int[]` for `UIntArray`), so boxing
+            // that value class would hand the builder the box.
+            let aggregate = match &ir.exprs[id as usize] {
+                IrExpr::InvokeFunction { args, .. } => Some((args.clone(), Vec::new(), false)),
+                // A value-class part of a string template flows into `StringBuilder.append(Object)`,
+                // so it must box — unless it is a non-null unboxed value, which kotlinc renders
+                // through the static `toString-impl` over its carrier.
+                IrExpr::StringConcat(args) => Some((args.clone(), Vec::new(), true)),
+                IrExpr::Vararg {
+                    elements, spreads, ..
+                } => Some((elements.clone(), spreads.clone(), false)),
+                _ => None,
+            };
+            if let Some((args, spread_flags, template)) = aggregate {
+                for (index, a) in args.into_iter().enumerate() {
+                    if spread_flags.get(index).copied().unwrap_or(false) {
+                        continue;
+                    }
                     let representation = repr_ctx.repr(a);
                     crate::trace_compiler!(
                         "value_classes",
