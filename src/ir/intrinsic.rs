@@ -27,6 +27,12 @@ pub enum IrIntrinsic {
     EnumValueOf {
         classifier: Ty,
     },
+    /// Kotlin's compiler-supplied zero-argument `enumEntries<T>()`. `classifier` may remain a
+    /// declaration-owned reified type parameter in the emitted inline template; call-site inline
+    /// specialization turns it into the exact enum classifier without reopening resolution.
+    EnumEntries {
+        classifier: Ty,
+    },
     /// Kotlin's compiler-supplied `typeOf<T>()`. `ty` is the complete selected type argument,
     /// including nullability, arguments, and projections. It may name a declaration-owned reified
     /// type parameter in an emitted inline template, which the target realizes as its reified

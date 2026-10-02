@@ -66,6 +66,7 @@ fn intrinsic_binary_operation(
         | crate::libraries::CompilerIntrinsic::SuspendCoroutineUninterceptedOrReturn
         | crate::libraries::CompilerIntrinsic::EnumValues
         | crate::libraries::CompilerIntrinsic::EnumValueOf
+        | crate::libraries::CompilerIntrinsic::EnumEntries
         | crate::libraries::CompilerIntrinsic::EnumName
         | crate::libraries::CompilerIntrinsic::TypeOf
         | crate::libraries::CompilerIntrinsic::IsEmpty
@@ -1728,28 +1729,10 @@ impl BodyFirChecker<'_> {
             .singleton_dispatch
             .as_deref()
             .map(|singleton| singleton.ty());
-        let concrete_classifier = |ty: Ty| {
-            (!ty.mentions_ty_param())
-                .then(|| ty.kotlin_class_internal())
-                .flatten()
-        };
-        let selected_classifier_intrinsic = match selected.callable.compiler_intrinsic {
-            Some(crate::libraries::CompilerIntrinsic::EnumValues) => selected
-                .callable
-                .ret
-                .array_elem()
-                .and_then(concrete_classifier)
-                .map(|classifier| (classifier, crate::fir::FirClassifierCallable::EnumValues)),
-            Some(crate::libraries::CompilerIntrinsic::EnumValueOf) => {
-                concrete_classifier(selected.callable.ret).map(|classifier| {
-                    (
-                        classifier,
-                        crate::fir::FirClassifierCallable::TopLevelEnumValueOf,
-                    )
-                })
-            }
-            _ => None,
-        };
+        let selected_classifier_intrinsic = super::enum_reflection::selected_classifier_call(
+            selected.callable.compiler_intrinsic,
+            selected.callable.ret,
+        );
         let selected_intrinsic = match selected.callable.compiler_intrinsic {
             Some(crate::libraries::CompilerIntrinsic::Assert) => {
                 let mode = if self.file.assert_always_disabled {

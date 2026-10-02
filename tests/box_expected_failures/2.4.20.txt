@@ -42,7 +42,6 @@ coroutines/tailCallOptimizations/crossinline.kt
 delegatedProperty/getDelegateWithoutReflection.kt
 diagnostics/functions/tailRecursion/realStringRepeat.kt
 enum/enumEntriesCompatibilityCheckPrioritized.kt
-enum/enumEntriesNameClashes.kt
 extensionFunctions/extensionFunctionAsASupertypeOfValueClass.kt
 extensionFunctions/kt475.kt
 fullValueClasses/basicSyntax.kt

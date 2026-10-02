@@ -631,6 +631,66 @@ mod tests {
         );
     }
 
+    fn enum_entries<'a>(params: &'a [Ty], ret: Ty) -> BuiltinFunctionDeclaration<'a> {
+        BuiltinFunctionDeclaration {
+            package: type_name("kotlin/enums"),
+            name: "enumEntries",
+            kind: FnKind::TopLevel,
+            receiver: None,
+            params,
+            ret,
+            context_count: 0,
+            type_parameter_count: 1,
+            vararg: None,
+            is_suspend: false,
+            is_operator: false,
+            is_infix: false,
+        }
+    }
+
+    #[test]
+    fn enum_entries_shape_has_no_realization_without_its_public_identity() {
+        let parameter = Ty::ty_param("T", Ty::obj("kotlin/Enum"));
+        let result = Ty::obj_args("kotlin/enums/EnumEntries", &[parameter]);
+        assert_eq!(
+            function_realization(enum_entries(&[], result)),
+            None,
+            "the zero-argument shape is not the stdlib declaration"
+        );
+        let array = [Ty::array(parameter)];
+        assert_eq!(
+            function_realization(enum_entries(&array, result)),
+            None,
+            "the array overload is an ordinary function"
+        );
+        let mut same_shape = FunctionInfo::plain(
+            FnKind::TopLevel,
+            None,
+            crate::libraries::LibraryCallable::library(
+                type_name("kotlin/enums/EnumEntriesKt"),
+                "enumEntries",
+                Vec::new(),
+                result,
+                result,
+                "",
+            ),
+        );
+        same_shape.generic_sig = Some(crate::libraries::GenericSig {
+            formals: vec!["T".to_string()],
+            formal_bounds: vec![vec![Ty::obj("kotlin/Enum")]],
+            receiver: None,
+            params: Vec::new(),
+            ret: result,
+            return_policy: Default::default(),
+        });
+        same_shape.flags.reified = true;
+        assert_eq!(
+            normalized_function_realization(type_name("kotlin/enums"), "enumEntries", &same_shape),
+            None,
+            "normalized package overloads do not acquire the intrinsic from shape"
+        );
+    }
+
     #[test]
     fn type_of_requires_the_exact_reflection_declaration_shape() {
         let declaration = |package, result| BuiltinFunctionDeclaration {

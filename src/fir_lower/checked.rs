@@ -809,6 +809,11 @@ impl BodyLowering<'_> {
                             classifier: *classifier,
                         }))
                     }
+                    (crate::fir::FirClassifierCallable::EnumEntries, []) => {
+                        Ok(self.ir.add_expr(IrExpr::EnumEntries {
+                            classifier: *classifier,
+                        }))
+                    }
                     (crate::fir::FirClassifierCallable::EnumValueOf, [argument]) => {
                         Ok(self.ir.add_expr(IrExpr::EnumValueOf {
                             classifier: *classifier,

@@ -844,6 +844,14 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
                     "String({})",
                     emit_expr(ir, dispatch_receiver.unwrap(), inst)
                 ),
+                crate::ir::IrIntrinsic::EnumEntries { classifier } => {
+                    let classifier = classifier
+                        .non_null()
+                        .obj_internal()
+                        .map(|name| class_simple(&name.render()).to_string())
+                        .unwrap_or_else(|| "undefined".to_string());
+                    format!("{classifier}.getEntries()")
+                }
                 crate::ir::IrIntrinsic::EnumValueOf { classifier } => {
                     let classifier = classifier
                         .non_null()
