@@ -362,4 +362,18 @@ impl Emitter<'_> {
             .copied();
         self.adapt_physical_operand(source, semantic, destination_semantic, physical, code);
     }
+
+    pub(super) fn constructor_physical_params(
+        &self,
+        construction: crate::ir::ExprId,
+        descriptor: &str,
+    ) -> Vec<Ty> {
+        let checked = self
+            .ir
+            .construction_declared_params
+            .get(&construction)
+            .map(|params| params.as_ref());
+        crate::jvm::physical_type::constructor_operand_tys(descriptor, checked)
+            .expect("constructor descriptor must be valid")
+    }
 }
