@@ -1655,6 +1655,10 @@ pub struct IrFile {
         IrLiftingSequence,
         std::collections::BTreeMap<u32, IrLiftingEntry>,
     >,
+    /// Earliest declaring-member order for each logical lifting sequence. Overloads with the same
+    /// source name share one sequence (and therefore one `$lambda$N` counter), while this separate
+    /// fact lets a target restore declaration order when it realizes a helper later.
+    pub(crate) lifting_sequence_source_order: std::collections::HashMap<IrLiftingSequence, u32>,
     /// The sequence and lifting site of each function lowered from a lambda or local function.
     pub(crate) lifted_functions:
         std::collections::HashMap<FunId, (IrLiftingSequence, crate::fir::FirLiftingSite)>,

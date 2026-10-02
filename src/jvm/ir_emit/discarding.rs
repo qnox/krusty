@@ -45,7 +45,7 @@ impl Emitter<'_> {
                 // A copied inline body's terminal `Unit` carries its mapped closing line on a
                 // `nop`, even though the value itself is not materialized.
                 IrExpr::UnitInstance => {
-                    if self.has_mapped_inline_line(expression) {
+                    if self.has_retained_mapped_inline_unit_line(expression) {
                         self.mark_expression_start(expression, code);
                         code.nop();
                     }

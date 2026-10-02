@@ -886,6 +886,8 @@ impl super::IrFile {
         self.logical_types
             .values_mut()
             .for_each(|value| *value = ty(*value, names));
+        self.inline_operand_declared_types_mut()
+            .for_each(|value| *value = ty(*value, names));
         self.physical_types
             .values_mut()
             .for_each(|value| *value = ty(*value, names));

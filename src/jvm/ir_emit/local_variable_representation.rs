@@ -1,18 +1,17 @@
-//! JVM storage for source locals whose declaration omits an initializer.
+//! JVM storage for locals whose physical slot retains the declaration's unspecialized type.
 //!
-//! Common IR retains the declared semantic type and the parser-supplied zero placeholder. An inline
-//! expansion may specialize the local's semantic type, but that does not change the JVM erasure of
-//! the declaration that owns its slot. This boundary chooses both the erased slot and its matching
-//! physical zero; common lowering never rewrites a semantic type to encode either decision.
+//! Common IR retains the declared semantic type for a source local's parser-supplied zero and for
+//! a materialized inline parameter. An inline expansion may specialize the local's semantic type,
+//! but that does not change the JVM erasure of the declaration that owns its slot. This boundary
+//! chooses the erased slot and any matching physical zero without changing that specialized type.
 
 use super::*;
 use crate::ir::{ExprId, IrExpr};
 
 fn slot_type(ir: &IrFile, declaration: ExprId, semantic: Ty) -> Ty {
     let declared = ir
-        .deferred_local_types
-        .get(&declaration)
-        .copied()
+        .inline_operand_declared_type(declaration)
+        .or_else(|| ir.deferred_local_types.get(&declaration).copied())
         .unwrap_or(semantic);
     ir_ty_to_jvm(&stored_value_ty(declared))
 }

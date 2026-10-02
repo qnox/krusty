@@ -12,7 +12,7 @@
 use std::collections::{HashMap, HashSet};
 
 use super::{ExprId, IrFile};
-use crate::types::TypeName;
+use crate::types::{Ty, TypeName};
 
 /// Source identity for code copied from a same-file inline declaration. Common IR retains the
 /// semantic owner and call line; a target formats the physical source-map path and line range.
@@ -27,6 +27,13 @@ pub(super) struct InlineExpansions {
     copies: HashSet<ExprId>,
     unread_operands: HashSet<ExprId>,
     provenance: HashMap<ExprId, IrInlineCopyProvenance>,
+    /// The semantic type declared for a materialized inline parameter, before call-site
+    /// specialization. A backend chooses storage/debug representation from this fact; the
+    /// declaration expression itself keeps its specialized semantic type.
+    declared_operand_types: HashMap<ExprId, Ty>,
+    /// Discarded copied `Unit` values whose source closing line must remain physically anchored.
+    /// Other copied `Unit` nodes carry source-map provenance without inventing an instruction.
+    retained_unit_lines: HashSet<ExprId>,
 }
 
 impl IrFile {
@@ -69,6 +76,9 @@ impl IrFile {
     pub(crate) fn unmark_inline_copy(&mut self, expression: ExprId) {
         self.inline_expansions.copies.remove(&expression);
         self.inline_expansions.provenance.remove(&expression);
+        self.inline_expansions
+            .retained_unit_lines
+            .remove(&expression);
     }
 
     /// A clone keeps what its source was: an inline copy (expanding an inline call copies an
@@ -83,6 +93,12 @@ impl IrFile {
         if self.is_unread_inline_operand(source) {
             self.mark_unread_inline_operand(target);
         }
+        if let Some(ty) = self.inline_operand_declared_type(source) {
+            self.record_inline_operand_declared_type(target, ty);
+        }
+        if self.retains_inline_unit_line(source) {
+            self.retain_inline_unit_line(target);
+        }
     }
 
     pub(crate) fn is_inline_copy(&self, expression: ExprId) -> bool {
@@ -96,6 +112,42 @@ impl IrFile {
 
     pub(crate) fn is_unread_inline_operand(&self, operand: ExprId) -> bool {
         self.inline_expansions.unread_operands.contains(&operand)
+    }
+
+    pub(crate) fn record_inline_operand_declared_type(&mut self, declaration: ExprId, ty: Ty) {
+        self.inline_expansions
+            .declared_operand_types
+            .insert(declaration, ty);
+    }
+
+    pub(crate) fn inline_operand_declared_type(&self, declaration: ExprId) -> Option<Ty> {
+        self.inline_expansions
+            .declared_operand_types
+            .get(&declaration)
+            .copied()
+    }
+
+    pub(crate) fn inline_operand_declared_types(&self) -> impl Iterator<Item = Ty> + '_ {
+        self.inline_expansions
+            .declared_operand_types
+            .values()
+            .copied()
+    }
+
+    pub(crate) fn inline_operand_declared_types_mut(&mut self) -> impl Iterator<Item = &mut Ty> {
+        self.inline_expansions.declared_operand_types.values_mut()
+    }
+
+    pub(crate) fn retain_inline_unit_line(&mut self, expression: ExprId) {
+        self.inline_expansions
+            .retained_unit_lines
+            .insert(expression);
+    }
+
+    pub(crate) fn retains_inline_unit_line(&self, expression: ExprId) -> bool {
+        self.inline_expansions
+            .retained_unit_lines
+            .contains(&expression)
     }
 
     pub(crate) fn remap_inline_copy_owners(

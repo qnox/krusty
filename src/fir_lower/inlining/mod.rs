@@ -447,41 +447,43 @@ impl BodyLowering<'_> {
         let operand_slots = plans
             .into_iter()
             .zip(operands.iter())
-            .zip(&declared_operand_types)
+            .zip(operand_types.iter().zip(&declared_operand_types))
             .enumerate()
-            .map(|(index, ((plan, operand), declared_ty))| match plan {
-                InlineOperandPlan::Splice => None,
-                InlineOperandPlan::Reuse(slot) => Some(slot),
-                InlineOperandPlan::Default => {
-                    let slot = self.allocate_temporary();
-                    defaulted.push((index, slot));
-                    Some(slot)
-                }
-                InlineOperandPlan::Copy => {
-                    let operand = operand.expect("a copied operand is supplied");
-                    let slot = self.allocate_temporary();
-                    let declaration = self.ir.add_expr(IrExpr::Variable {
-                        index: slot,
-                        // The copied body consumes the specialized type, but kotlinc's inline
-                        // parameter local retains the declaration's erased storage type.
-                        ty: stored_value_ty(*declared_ty),
-                        init: Some(operand),
-                        named: true,
-                    });
-                    self.ir.call_operand_bindings.insert(declaration);
-                    if let Some(parameter) = parameter_names.get(index) {
-                        if let Some(source_name) = parameter.source_name.clone() {
-                            self.ir.value_names.insert(declaration, source_name);
-                        }
-                        self.ir.set_debug_local_provenance(
-                            declaration,
-                            IrDebugLocalProvenance::inline_value(parameter.local_role, 1),
-                        );
+            .map(
+                |(index, ((plan, operand), (specialized_ty, declared_ty)))| match plan {
+                    InlineOperandPlan::Splice => None,
+                    InlineOperandPlan::Reuse(slot) => Some(slot),
+                    InlineOperandPlan::Default => {
+                        let slot = self.allocate_temporary();
+                        defaulted.push((index, slot));
+                        Some(slot)
                     }
-                    operand_declarations.push(declaration);
-                    Some(slot)
-                }
-            })
+                    InlineOperandPlan::Copy => {
+                        let operand = operand.expect("a copied operand is supplied");
+                        let slot = self.allocate_temporary();
+                        let declaration = self.ir.add_expr(IrExpr::Variable {
+                            index: slot,
+                            ty: stored_value_ty(*specialized_ty),
+                            init: Some(operand),
+                            named: true,
+                        });
+                        self.ir.call_operand_bindings.insert(declaration);
+                        self.ir
+                            .record_inline_operand_declared_type(declaration, *declared_ty);
+                        if let Some(parameter) = parameter_names.get(index) {
+                            if let Some(source_name) = parameter.source_name.clone() {
+                                self.ir.value_names.insert(declaration, source_name);
+                            }
+                            self.ir.set_debug_local_provenance(
+                                declaration,
+                                IrDebugLocalProvenance::inline_value(parameter.local_role, 1),
+                            );
+                        }
+                        operand_declarations.push(declaration);
+                        Some(slot)
+                    }
+                },
+            )
             .collect::<Vec<_>>();
         let mut inline_lambdas = inline_lambdas.to_vec();
         // A copied lambda is a value. Leaving it in this table would replace every read with a
@@ -794,6 +796,7 @@ impl BodyLowering<'_> {
                 if let Some(line) = close_line {
                     self.ir.expr_source_lines.insert(unit, line);
                 }
+                self.ir.retain_inline_unit_line(unit);
                 Some(unit)
             }
             Some(slot) => Some(self.ir.add_expr(IrExpr::GetValue(slot))),
@@ -1602,6 +1605,7 @@ fn produce_sole_tail_return(
                 ir.expr_source_lines.insert(produced, line);
             }
         }
+        ir.retain_inline_unit_line(produced);
     }
     ir.exprs[tail as usize] = IrExpr::Block {
         stmts: Vec::new(),

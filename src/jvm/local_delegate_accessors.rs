@@ -367,18 +367,17 @@ fn realize_accessor(
     if accessor.line != 0 {
         ir.fn_decl_lines.insert(function, accessor.line);
     }
-    ir.lifted_functions.insert(
-        function,
-        (
-            IrLiftingSequence {
-                source,
-                source_order: accessor.source_order,
-                owner: accessor.site.owner.clone(),
-                container: accessor.site.container.clone(),
-            },
-            accessor.site,
-        ),
-    );
+    let sequence = IrLiftingSequence {
+        source,
+        owner: accessor.site.owner.clone(),
+        container: accessor.site.container.clone(),
+    };
+    ir.lifting_sequence_source_order
+        .entry(sequence.clone())
+        .and_modify(|earliest| *earliest = (*earliest).min(accessor.source_order))
+        .or_insert(accessor.source_order);
+    ir.lifted_functions
+        .insert(function, (sequence, accessor.site));
     if let Some(owner) = owner {
         let class = ir.class_id_by_name(owner).ok_or(())?;
         ir.classes[class as usize].methods.push(function);

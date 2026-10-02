@@ -338,7 +338,12 @@ pub(super) fn order_lifted_functions(ir: &IrFile, members: &mut [u32]) {
             .iter()
             .all(|sequence| sequence.source == first.source)
     }) {
-        sequences.sort_by_key(|sequence| sequence.source_order);
+        sequences.sort_by_key(|sequence| {
+            ir.lifting_sequence_source_order
+                .get(*sequence)
+                .copied()
+                .unwrap_or(u32::MAX)
+        });
     }
     let sequence_rank = |sequence| sequences.iter().position(|&s| s == sequence);
     let site = |function: &u32| &ir.lifted_functions[function];

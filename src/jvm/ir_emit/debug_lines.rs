@@ -154,10 +154,12 @@ impl Emitter<'_> {
         }
     }
 
-    pub(super) fn has_mapped_inline_line(&self, expression: ExprId) -> bool {
-        self.ir
-            .inline_copy_provenance(expression)
-            .is_some_and(|provenance| provenance.call_line.is_some())
+    pub(super) fn has_retained_mapped_inline_unit_line(&self, expression: ExprId) -> bool {
+        self.ir.retains_inline_unit_line(expression)
+            && self
+                .ir
+                .inline_copy_provenance(expression)
+                .is_some_and(|provenance| provenance.call_line.is_some())
             && self.ir.expr_source_lines.contains_key(&expression)
     }
 
