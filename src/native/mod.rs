@@ -20,6 +20,7 @@
 
 mod linker;
 mod prebuilt;
+mod runtime;
 mod target;
 mod target_contract;
 

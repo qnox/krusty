@@ -1,4 +1,5 @@
-/* krusty native runtime — generated; do not edit. */
+/* krusty native runtime: the object model, strings and builders, boxing, class literals, `lazy`,
+   pairs and ranges. Hand-written freestanding C; build.rs compiles it for every target. */
 #include "krusty_internal.h"
 
 /* ---- kernel interface ---------------------------------------------------------------------- */
