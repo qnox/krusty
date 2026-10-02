@@ -1,86 +1,94 @@
-//! A vararg's element type competes with a fixed parameter in one specificity
-//! comparison. A strictly narrower element wins; equal types keep the declaration
-//! that has no vararg. An empty call still prefers a defaulted parameter.
+//! A vararg's element type competes with a fixed parameter in one specificity comparison. A
+//! strictly narrower element wins; equal types keep the declaration that has no vararg. The same
+//! policy applies to member and top-level overloads, contextual calls, and integer adaptation.
+
 use super::common;
 
 #[test]
-fn vararg_element_specificity_follows_the_parameter_types() {
-    let src = r#"
+fn member_vararg_element_specificity_matches_kotlinc() {
+    let source = r#"
+open class Root
+class Leaf : Root()
+class Crate<out T> : Root()
+fun <T> crate(): Crate<T> = Crate<T>()
+
 class All<T> {
-    fun equalAny(vararg values: Any) = "vararg"
-    fun equalAny(values: Any) = "fixed"
+    fun equalRoot(vararg values: Root) = "vararg"
+    fun equalRoot(value: Root) = "fixed"
 
     fun equalT(vararg values: T) = "vararg"
-    fun equalT(values: T) = "fixed"
+    fun equalT(value: T) = "fixed"
 
-    fun iterable(vararg values: T) = "vararg"
-    fun iterable(values: Iterable<out T>) = "fixed"
+    fun narrower(vararg values: Crate<Leaf>) = "vararg"
+    fun narrower(value: Root) = "fixed"
 
-    fun collection(vararg values: T) = "vararg"
-    fun collection(values: Collection<T>) = "fixed"
+    fun covariant(vararg values: Crate<Leaf>) = "vararg"
+    fun covariant(value: Crate<Root>) = "fixed"
 
-    fun element(vararg values: Collection<T>) = "vararg"
-    fun element(values: T) = "fixed"
+    fun two(vararg values: Crate<Leaf>) = "vararg"
+    fun two(first: Root, second: Root) = "fixed"
 
-    fun stringElement(vararg values: Collection<String>) = "vararg"
-    fun stringElement(values: Any) = "fixed"
+    fun leading(first: Crate<Leaf>, vararg rest: Crate<Leaf>) = "vararg"
+    fun leading(first: Root, second: Root) = "fixed"
 
-    fun stringCollection(vararg values: Collection<String>) = "vararg"
-    fun stringCollection(values: Collection<T>) = "fixed"
-
-    fun twoAny(vararg values: Collection<String>) = "vararg"
-    fun twoAny(values: Any, values2: Any) = "fixed"
-
-    fun twoT(vararg values: Collection<String>) = "vararg"
-    fun twoT(values: T, values2: T) = "fixed"
-
-    fun leading(values: Collection<String>, vararg values2: Collection<String>) = "vararg"
-    fun leading(values: Any, values2: Any) = "fixed"
-
-    fun defaults(x: String = "a") = "fixed"
-    fun defaults(vararg x: String) = "vararg"
+    fun defaults(value: Leaf = Leaf()) = "fixed"
+    fun defaults(vararg value: Leaf) = "vararg"
 }
 
 fun box(): String {
-    val c: All<Any?> = All()
-    val list: List<String> = listOf("")
-    val parts = listOf(
-        c.equalAny(list),
-        c.equalT(list),
-        c.iterable(list),
-        c.collection(list),
-        c.element(list),
-        c.element(listOf("")),
-        c.stringElement(list),
-        c.stringCollection(list),
-        c.twoAny(list, list),
-        c.twoT(list, list),
-        c.leading(list, list),
-        c.defaults(),
-        c.defaults("b"),
-        c.equalAny(listOf("")),
-        c.equalT(listOf("")),
-        c.stringCollection(listOf("")),
-        c.twoAny(listOf(""), listOf("")),
-    )
-    val expected = listOf(
-        "fixed", "fixed", "fixed", "fixed",
-        "vararg", "vararg", "vararg", "vararg",
-        "vararg", "vararg", "vararg",
-        "fixed", "fixed",
-        "fixed", "fixed", "vararg", "vararg",
-    )
-    return if (parts == expected) "OK" else parts.toString()
+    val all: All<Root> = All()
+    val typed: Crate<Leaf> = crate()
+    val actual =
+        all.equalRoot(typed) + "/" +
+        all.equalT(typed) + "/" +
+        all.narrower(typed) + "/" +
+        all.narrower(crate()) + "/" +
+        all.covariant(typed) + "/" +
+        all.covariant(crate()) + "/" +
+        all.two(typed, typed) + "/" +
+        all.two(crate(), crate()) + "/" +
+        all.leading(typed, typed) + "/" +
+        all.defaults() + "/" +
+        all.defaults(Leaf())
+    return if (actual == "fixed/fixed/vararg/vararg/vararg/vararg/vararg/vararg/vararg/fixed/fixed") {
+        "OK"
+    } else {
+        actual
+    }
 }
 "#;
-    let (reference_code, reference_stderr) =
-        common::kotlinc_source_result("VarargElementSpecificityReference", src);
-    assert_eq!(
-        reference_code, 0,
-        "kotlinc rejected the vararg specificity fixture: {reference_stderr}"
-    );
-    assert_eq!(
-        common::expect_box_run_with_stdlib(src, "VarargElementSpecificity"),
-        "OK"
-    );
+
+    common::expect_box_same_as_kotlinc(source, "MemberVarargElementSpecificity");
+}
+
+#[test]
+fn top_level_contextual_and_integer_vararg_ties_match_kotlinc() {
+    let source = r#"
+open class Root
+class Leaf : Root()
+class Crate<out T> : Root()
+fun <T> crate(): Crate<T> = Crate<T>()
+
+fun equal(vararg values: Crate<Leaf>) = "vararg"
+fun equal(value: Crate<Leaf>) = "fixed"
+
+fun narrower(vararg values: Crate<Leaf>) = "vararg"
+fun narrower(value: Root) = "fixed"
+
+fun integer(vararg value: Byte) = "vararg"
+fun integer(value: Byte) = "fixed"
+
+fun box(): String {
+    val typed: Crate<Leaf> = crate()
+    val actual =
+        equal(typed) + "/" +
+        equal(crate()) + "/" +
+        narrower(typed) + "/" +
+        narrower(crate()) + "/" +
+        integer(1)
+    return if (actual == "fixed/fixed/vararg/vararg/fixed") "OK" else actual
+}
+"#;
+
+    common::expect_box_same_as_kotlinc(source, "TopLevelVarargElementSpecificity");
 }
