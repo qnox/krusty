@@ -132,7 +132,16 @@ fn generic_inline_copies_reuse_one_erased_plan_per_physical_owner() {
 
 #[test]
 fn reified_delegate_accessor_plan_stays_one_erased_declaration_helper() {
-    common::expect_box_same_as_kotlinc(REUSED_REIFIED_PLAN, "ReusedReifiedDelegatePlan");
+    // The reused helper keeps the declaration's reified marker, so invoking the lambda throws.
+    // Both compilers do that; a successful `OK` would mean the helper was specialized.
+    let reference = common::kotlinc_box_result(REUSED_REIFIED_PLAN);
+    let krusty =
+        common::expect_box_run_with_stdlib(REUSED_REIFIED_PLAN, "ReusedReifiedDelegatePlan");
+    assert_eq!(krusty, reference, "ReusedReifiedDelegatePlan");
+    assert!(
+        reference.starts_with("ERROR:UnsupportedOperationException:"),
+        "the shared helper still executes its reified marker: {reference}"
+    );
 
     let pair = common::ModuleClassPair::compile(
         &[("ReusedReifiedDelegatePlan.kt", REUSED_REIFIED_PLAN)],
@@ -162,7 +171,7 @@ fn reified_delegate_accessor_plan_stays_one_erased_declaration_helper() {
         "the reference plan is one declaration-erased helper",
     );
     assert_eq!(
-        helper_descriptors(&ours, "$jvm_delegate"),
+        helper_descriptors(&ours, "$lambda$0"),
         reference_helpers,
         "Token and Root lambda copies must share the declaration helper",
     );
