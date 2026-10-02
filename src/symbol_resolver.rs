@@ -6334,7 +6334,10 @@ fn best_by_args_at_priority_with_ties<'a>(
             || semantic_arg_assignable(src, p, &arg.ty())
             || (arg.ty() == Ty::Null && matches!(p.non_null(), Ty::TyParam(..)))
             || function_like_fits(p, arg)
-            || arg.binds_result_to(src, *p)
+            // A nested call with input-constrained type variables already has semantic type
+            // evidence in its provisional result. Only a result-only producer may be rebound
+            // freely by this enclosing parameter.
+            || arg.binds_unconstrained_result_to(src, *p)
     };
     match overload_selection::select_equally_specific(
         cands
@@ -6383,29 +6386,8 @@ fn best_by_args_at_priority_with_ties<'a>(
         parameter_at_least_as_specific(src, left, right, CallArgKind::Typed(Ty::Error))
     };
 
-    if args.iter().any(CallArgKind::is_expected_type_callable) {
-        match overload_selection::select_equally_specific(
-            cands
-                .iter()
-                .filter_map(|(candidate, params)| {
-                    fixed_parameter_shape(params, args, |position, param, arg| {
-                        fits(position, param, arg)
-                    })
-                    .map(|shape| (shape, *candidate))
-                })
-                .collect(),
-            specificity,
-        ) {
-            CandidateSelectionWithTies::Selected(candidate) => {
-                return CandidateSelectionWithTies::Selected(candidate);
-            }
-            CandidateSelectionWithTies::Ambiguous(candidates) => {
-                return CandidateSelectionWithTies::Ambiguous(candidates)
-            }
-            CandidateSelectionWithTies::None => {}
-        }
-    }
-
+    // Contextual nested calls use this same comparison. Keeping them in a fixed-only pre-pass
+    // would discard an applicable vararg element shape before specificity can compare it.
     match overload_selection::select_fixed_or_more_specific_vararg(cands, args, &fits, &specificity)
     {
         CandidateSelectionWithTies::Selected(candidate) => {
