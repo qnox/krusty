@@ -280,11 +280,42 @@ impl CallArgKind {
         }
         !self.result_is_input_constrained() && self.binds_result_to(src, parameter)
     }
+
+    /// Whether overload applicability may use an enclosing parameter to complete this nested
+    /// call without replacing a concrete result established by the nested call's own inputs.
+    ///
+    /// A concrete expectation cannot rebind `listOf(1, 2)` from `List<Int>` to
+    /// `Collection<String>`. A still-symbolic parameter such as `List<P>`, however, participates
+    /// in the same constraint system as an input-constrained generic operator and may finish its
+    /// result. Result-only producers remain freely contextual.
+    fn may_bind_result_during_overload_selection(&self, parameter: Ty) -> bool {
+        !self.result_is_input_constrained() || parameter.mentions_ty_param()
+    }
+
+    pub(super) fn binds_overload_result_to(&self, src: &dyn SymbolSource, parameter: Ty) -> bool {
+        self.may_bind_result_during_overload_selection(parameter)
+            && self.binds_result_to(src, parameter)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn expected_type_call(provisional: Ty, params: Vec<Ty>) -> CallArgKind {
+        let formal = Ty::ty_param("T", Ty::obj("kotlin/Any"));
+        CallArgKind::ExpectedTypeCallable {
+            provisional,
+            generic_sig: std::sync::Arc::new(GenericSig {
+                formals: vec!["T".to_owned()],
+                formal_bounds: vec![Vec::new()],
+                receiver: None,
+                params,
+                ret: Ty::obj_args("fixture/Box", &[formal]),
+                return_policy: Default::default(),
+            }),
+        }
+    }
 
     #[test]
     fn integer_literal_uses_concrete_contextual_parameter_type() {
@@ -297,5 +328,27 @@ mod tests {
     fn out_of_range_integer_literal_keeps_ordinary_type() {
         let literal = CallArgKind::integer_literal(Ty::Int, 256);
         assert_eq!(literal.type_for(Ty::Byte), Ty::Int);
+    }
+
+    #[test]
+    fn input_constrained_result_binds_only_to_a_symbolic_enclosing_parameter() {
+        let formal = Ty::ty_param("T", Ty::obj("kotlin/Any"));
+        let call = expected_type_call(Ty::obj_args("fixture/Box", &[Ty::Int]), vec![formal]);
+        let concrete = Ty::obj_args("fixture/Box", &[Ty::String]);
+        let symbolic = Ty::obj_args("fixture/Box", &[Ty::ty_param("P", Ty::obj("kotlin/Any"))]);
+
+        assert!(!call.may_bind_result_during_overload_selection(concrete));
+        assert!(call.may_bind_result_during_overload_selection(symbolic));
+    }
+
+    #[test]
+    fn result_only_producer_may_bind_to_a_concrete_enclosing_parameter() {
+        let call = expected_type_call(
+            Ty::obj_args("fixture/Box", &[Ty::ty_param("T", Ty::obj("kotlin/Any"))]),
+            Vec::new(),
+        );
+        let concrete = Ty::obj_args("fixture/Box", &[Ty::String]);
+
+        assert!(call.may_bind_result_during_overload_selection(concrete));
     }
 }

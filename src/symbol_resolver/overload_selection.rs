@@ -66,12 +66,18 @@ pub(super) fn select_fixed_or_more_specific_vararg<'a>(
     let mut fixed = Vec::new();
     let mut elements = Vec::new();
     for (candidate, params) in candidates {
-        if let Some(shape) = super::fixed_parameter_shape(params, args, &fits) {
-            fixed.push((shape, *candidate));
-        } else if candidate.call_sig.vararg {
+        // A contextual nested call may bind to both the raw vararg array and its element. The
+        // source call supplies an element unless the recorded vararg mapper recognizes a true
+        // whole-array/spread form, so classify the declared vararg shape first. Otherwise the raw
+        // array can hide a narrower element before specificity runs.
+        if candidate.call_sig.vararg {
             if let Some(shape) = super::candidate_vararg_shape(candidate, params, args, &fits) {
                 elements.push((shape, *candidate));
+                continue;
             }
+        }
+        if let Some(shape) = super::fixed_parameter_shape(params, args, &fits) {
+            fixed.push((shape, *candidate));
         }
     }
     // No fixed declaration accepted the call argument-for-argument. Leave element
@@ -314,10 +320,58 @@ pub(super) fn integer_literal_overload_with_ties<T>(
 
 #[cfg(test)]
 mod tests {
-    use super::ReceiverFunctionSelection;
+    use super::{
+        select_fixed_or_more_specific_vararg, CandidateSelectionWithTies, ReceiverFunctionSelection,
+    };
+    use crate::libraries::{CallSig, FnKind, FunctionInfo, LibraryCallable};
+    use crate::types::Ty;
+
+    fn candidate(name: &str, parameter: Ty, vararg: bool) -> FunctionInfo {
+        let callable = LibraryCallable::library(
+            "fixture/OverloadsKt",
+            name,
+            vec![parameter],
+            Ty::String,
+            Ty::String,
+            "(Ljava/lang/Object;)Ljava/lang/String;",
+        );
+        let mut candidate = FunctionInfo::plain(FnKind::TopLevel, None, callable);
+        if vararg {
+            candidate.call_sig = CallSig {
+                required: 1,
+                vararg: true,
+                vararg_index: Some(0),
+                ..Default::default()
+            };
+        }
+        candidate
+    }
 
     #[test]
     fn a_receiver_selection_carries_a_pointer_to_its_callable() {
         assert_eq!(std::mem::size_of::<ReceiverFunctionSelection>(), 96);
+    }
+
+    #[test]
+    fn contextual_vararg_uses_its_element_before_its_raw_array() {
+        let root = Ty::obj("fixture/Root");
+        let leaf = Ty::obj("fixture/Leaf");
+        let fixed = candidate("pick", root, false);
+        let vararg = candidate("pick", Ty::array(leaf), true);
+        let candidates = [(&fixed, vec![root]), (&vararg, vec![Ty::array(leaf)])];
+        let args = [super::CallArgKind::Typed(Ty::Error)];
+
+        let selected = select_fixed_or_more_specific_vararg(
+            &candidates,
+            &args,
+            |_, _, _| true,
+            |_, left, right| left == right || (left == leaf && right == root),
+        );
+
+        assert!(matches!(
+            selected,
+            CandidateSelectionWithTies::Selected(candidate)
+                if std::ptr::eq(candidate, &vararg)
+        ));
     }
 }

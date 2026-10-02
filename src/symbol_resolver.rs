@@ -6334,10 +6334,9 @@ fn best_by_args_at_priority_with_ties<'a>(
             || semantic_arg_assignable(src, p, &arg.ty())
             || (arg.ty() == Ty::Null && matches!(p.non_null(), Ty::TyParam(..)))
             || function_like_fits(p, arg)
-            // A nested call with input-constrained type variables already has semantic type
-            // evidence in its provisional result. Only a result-only producer may be rebound
-            // freely by this enclosing parameter.
-            || arg.binds_unconstrained_result_to(src, *p)
+            // Preserve concrete evidence supplied by a nested call's own inputs, while allowing a
+            // still-symbolic enclosing parameter to participate in the same constraint system.
+            || arg.binds_overload_result_to(src, *p)
     };
     match overload_selection::select_equally_specific(
         cands
