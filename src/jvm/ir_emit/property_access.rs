@@ -81,6 +81,9 @@ impl Emitter<'_> {
     ) {
         use crate::jvm::inline::PropertyAccess;
         let access = access_bridges::protected_property_access(self.run, operation, access);
+        let Some(access) = self.checked_dispatched_accessor(operation, access) else {
+            return;
+        };
         let exact_field = matches!(&access, PropertyAccess::Field { .. });
         // Kotlin treats the expression to the left of a static `@JvmField` READ as a qualifier and
         // does not evaluate it.  A write is observably different and still evaluates an explicit
@@ -257,6 +260,108 @@ impl Emitter<'_> {
             self.narrow_on_stack(physical, *ty, code);
         }
     }
+
+    /// An instance accessor call names the class its dispatch receiver statically has, as any
+    /// virtual call does (`Leaf.getBase`, not `Base.getBase`).
+    pub(super) fn dispatched_accessor(
+        &self,
+        operation: crate::ir::ExprId,
+        access: crate::jvm::inline::PropertyAccess,
+    ) -> Result<crate::jvm::inline::PropertyAccess, crate::jvm::member_dispatch::MissingClassifier>
+    {
+        use crate::jvm::inline::PropertyAccess;
+        match access {
+            PropertyAccess::Accessor {
+                owner,
+                name,
+                descriptor,
+                is_static: false,
+                is_interface,
+            } => {
+                let (owner, is_interface) = crate::jvm::member_dispatch::call_owner(
+                    self.dispatch_classifiers.as_ref(),
+                    owner,
+                    is_interface,
+                    self.ir.dispatch_classes.get(&operation).copied(),
+                )?;
+                Ok(PropertyAccess::Accessor {
+                    owner,
+                    name,
+                    descriptor,
+                    is_static: false,
+                    is_interface,
+                })
+            }
+            access => Ok(access),
+        }
+    }
+}
+
+/// Whether a realized property accessor consumes the receiver as an OPERAND. An instance accessor
+/// always does. A STATIC one does not — a `@JvmStatic` object property's `setX(V)` takes the VALUE,
+/// not a receiver — except on a `@JvmInline value class`, where every member is realized as a static
+/// `-impl` whose FIRST parameter is the receiver's carrier (`kotlin/Result.isSuccess` is
+/// `isSuccess-impl(Ljava/lang/Object;)Z`). Reading `!is_static` alone evaluated that receiver only for
+/// effect and then invoked the static with an empty stack.
+pub(super) fn accessor_takes_receiver(access: &crate::jvm::inline::PropertyAccess) -> bool {
+    use crate::jvm::inline::PropertyAccess;
+    match access {
+        PropertyAccess::Field { is_static, .. } => !is_static,
+        PropertyAccess::Accessor {
+            is_static,
+            name,
+            descriptor,
+            ..
+        } => {
+            !is_static
+                || crate::jvm::names::parse_method_descriptor(descriptor).is_some_and(
+                    |(params, ret)| is_value_class_impl_accessor(name, params.len(), ret != "V"),
+                )
+        }
+        // An instance bridge takes the receiver; a named object's static field bridge does not.
+        PropertyAccess::AccessBridge { takes_receiver, .. } => *takes_receiver,
+    }
+}
+
+/// kotlinc's spelling for a `@JvmInline value class` member realized as a static over the carrier: the
+/// Kotlin name with an `-impl` suffix (`isSuccess-impl`, `getLabel-impl`). It is the only static
+/// accessor shape whose leading parameter is a receiver rather than a value.
+///
+/// `is_read` distinguishes the two sites, because the parameter COUNT is what separates a carrier from
+/// a value: such a getter takes exactly the carrier, and such a setter the carrier AND the new value. A
+/// `@JvmStatic` property whose name merely ends in `-impl` (reachable through `@JvmName`) therefore
+/// cannot be mistaken for one — its static setter takes a single VALUE parameter.
+fn is_value_class_impl_accessor(name: &str, params: usize, is_read: bool) -> bool {
+    name.ends_with("-impl") && params == if is_read { 1 } else { 2 }
+}
+
+/// The type the receiver must hold ON THE STACK for `access`, given the property's `owner`.
+///
+/// Normally the owner itself. On a value class's static `-impl` accessor it is the accessor's first
+/// DECLARED parameter — the carrier (`isSuccess-impl(Ljava/lang/Object;)Z` consumes the erased
+/// underlying, never a `kotlin/Result` box). Narrowing an erased operand to the owner there emits a
+/// `checkcast` no unboxed carrier can pass.
+pub(super) fn accessor_receiver_ty(
+    access: &crate::jvm::inline::PropertyAccess,
+    owner: TypeName,
+) -> Ty {
+    use crate::jvm::inline::PropertyAccess;
+    if let PropertyAccess::Accessor {
+        is_static: true,
+        name,
+        descriptor,
+        ..
+    } = access
+    {
+        if let Some((params, ret)) = crate::jvm::names::parse_method_descriptor(descriptor) {
+            if is_value_class_impl_accessor(name, params.len(), ret != "V") {
+                if let Some(carrier) = params.first() {
+                    return crate::jvm::jvm_libraries::desc_to_ty(carrier);
+                }
+            }
+        }
+    }
+    Ty::obj_name(owner)
 }
 
 /// Physical type a property write stores. A class descriptor is a reference slot even when its

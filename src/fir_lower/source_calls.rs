@@ -10,7 +10,7 @@ use crate::ir::{
     Callee, ExprId, IrCheckedArgument, IrConst, IrDebugLocalProvenance, IrExpr, IrInlineLocalRole,
     IrTypeOp,
 };
-use crate::types::Ty;
+use crate::types::{Ty, TypeName};
 
 use super::checked_arguments::{
     materialize_checked_arguments, CheckedArgumentSlot, CheckedArgumentValue,
@@ -62,6 +62,36 @@ pub(super) struct SelectedOperandRequest<'a> {
     pub(super) mode: SelectedOperandMode,
 }
 
+/// A member call's lowered dispatch receiver with the module class it statically has.
+#[derive(Clone, Copy)]
+pub(super) struct DispatchOperand {
+    pub(super) receiver: Option<ExprId>,
+    pub(super) class: Option<TypeName>,
+}
+
+impl DispatchOperand {
+    /// A receiver whose static class does not name the call's owner.
+    pub(super) fn plain(receiver: Option<ExprId>) -> Self {
+        Self {
+            receiver,
+            class: None,
+        }
+    }
+}
+
+pub(super) struct ExternalPropertyRequest<'a> {
+    pub(super) target: ExternalPropertyId,
+    pub(super) dispatch: crate::fir::FirPropertyDispatch,
+    pub(super) receiver_ty: Option<ResolvedTy>,
+    pub(super) parameters: &'a [ResolvedTy],
+    pub(super) result: ResolvedTy,
+    pub(super) extension_receiver_parameter: Option<u32>,
+    pub(super) dispatch_receiver: DispatchOperand,
+    pub(super) extension_receiver: Option<ExprId>,
+    pub(super) arguments: &'a [IrCheckedArgument],
+    pub(super) write: bool,
+}
+
 pub(super) struct ExternalCallRequest<'a> {
     pub(super) target: ExternalCallableId,
     pub(super) default_provider: Option<ExternalCallableId>,
@@ -77,6 +107,8 @@ pub(super) struct ExternalCallRequest<'a> {
     pub(super) substitutions: &'a [crate::fir::FirTypeSubstitution],
     pub(super) extension_receiver_parameter: Option<u32>,
     pub(super) dispatch_receiver: Option<ExprId>,
+    /// The module class `dispatch_receiver` statically has, when it names the call's owner.
+    pub(super) dispatch_class: Option<TypeName>,
     pub(super) extension_receiver: Option<ExprId>,
     pub(super) arguments: &'a [IrCheckedArgument],
 }
@@ -242,20 +274,26 @@ impl BodyLowering<'_> {
         Some(invocation)
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn external_property_access(
         &mut self,
-        target: ExternalPropertyId,
-        dispatch: crate::fir::FirPropertyDispatch,
-        receiver_ty: Option<ResolvedTy>,
-        parameters: &[ResolvedTy],
-        result: ResolvedTy,
-        extension_receiver_parameter: Option<u32>,
-        dispatch_receiver: Option<ExprId>,
-        extension_receiver: Option<ExprId>,
-        arguments: &[IrCheckedArgument],
-        write: bool,
+        request: ExternalPropertyRequest<'_>,
     ) -> Option<ExprId> {
+        let ExternalPropertyRequest {
+            target,
+            dispatch,
+            receiver_ty,
+            parameters,
+            result,
+            extension_receiver_parameter,
+            dispatch_receiver:
+                DispatchOperand {
+                    receiver: dispatch_receiver,
+                    class: dispatch_class,
+                },
+            extension_receiver,
+            arguments,
+            write,
+        } = request;
         let source_receiver = dispatch_receiver
             .is_some()
             .then_some(receiver_ty)
@@ -314,6 +352,7 @@ impl BodyLowering<'_> {
             }
         };
         let access = self.ir.add_expr(IrExpr::Checked(operation));
+        self.record_dispatch_class(access, dispatch_class);
         Some(self.wrap_call_statements(statements, access))
     }
 
@@ -336,6 +375,7 @@ impl BodyLowering<'_> {
             substitutions,
             extension_receiver_parameter,
             dispatch_receiver,
+            dispatch_class,
             extension_receiver,
             arguments,
         } = request;
@@ -412,6 +452,9 @@ impl BodyLowering<'_> {
             self.ir
                 .ext_call_source_receiver
                 .insert(call, receiver.get());
+        }
+        if dispatch_receiver.is_some() {
+            self.record_dispatch_class(call, dispatch_class);
         }
         if let Some(result) = declared_result {
             self.ir.call_declared_ret.insert(call, result.get());
@@ -1324,13 +1367,17 @@ impl BodyLowering<'_> {
     pub(super) fn same_file_call(
         &mut self,
         target: CallableId,
-        dispatch_receiver: Option<ExprId>,
+        dispatch: DispatchOperand,
         extension_receiver: Option<ExprId>,
         arguments: &[IrCheckedArgument],
         specialized_parameters: &[Ty],
         substitutions: &[crate::fir::FirTypeSubstitution],
         source_line: Option<u32>,
     ) -> Option<Result<ExprId, FirLoweringFailure>> {
+        let DispatchOperand {
+            receiver: dispatch_receiver,
+            class: dispatch_class,
+        } = dispatch;
         let callable = self.index.callable(target)?;
         let declaration = self.index.declaration_anchor(callable.declaration)?;
         if declaration.kind != DeclarationKind::Function {
@@ -1375,8 +1422,10 @@ impl BodyLowering<'_> {
                 Some(self.direct_call_operand(receiver, Ty::obj_name(classifier.classifier)))
             }
             Some(receiver) => {
+                // A held receiver keeps the class it statically has, as kotlinc's temporary does.
                 let classifier = self.index.enclosing_classifier(callable.declaration)?;
-                let semantic_receiver = Ty::obj_name(classifier.classifier);
+                let semantic_receiver =
+                    Ty::obj_name(dispatch_class.unwrap_or(classifier.classifier));
                 let storage_receiver = self
                     .ir
                     .physical_types
@@ -1704,6 +1753,7 @@ impl BodyLowering<'_> {
             );
         }
         if dispatch_receiver.is_some() && !has_defaults {
+            self.record_dispatch_class(call, dispatch_class);
             self.ir.module_member_accesses.insert(
                 call,
                 crate::ir::IrModuleMemberAccess::Callable {

@@ -53,6 +53,7 @@ mod local_delegates;
 mod local_property_reference_tests;
 mod local_property_references;
 mod loops;
+mod member_dispatch;
 mod module_declarations;
 mod package_declarations;
 mod properties;

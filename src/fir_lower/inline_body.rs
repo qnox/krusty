@@ -581,6 +581,7 @@ impl BodyLowering<'_> {
             substitutions: &[],
             extension_receiver_parameter: None,
             dispatch_receiver: Some(receiver),
+            dispatch_class: Self::static_class(Some(call.receiver)),
             extension_receiver: None,
             arguments: &arguments,
         })

@@ -91,12 +91,14 @@ mod inline_frame_marker;
 mod instance_field_names;
 use instance_field_names::instance_field_jvm_name;
 mod interface_compatibility;
+mod interface_hierarchy;
 mod intrinsic_probes;
 mod lambda_class;
 mod lambda_class_names;
 mod local_updates;
 mod local_variable_representation;
 mod loop_emission;
+mod member_dispatch;
 mod member_schedule;
 mod metadata_member_order;
 mod metadata_policy;
@@ -115,6 +117,7 @@ mod override_result_emission;
 use override_result_emission::{declared_method_desc, declared_method_signature};
 mod primary_constructor_parameters;
 mod property_access;
+use property_access::{accessor_receiver_ty, accessor_takes_receiver};
 mod property_reference_class;
 mod property_reference_values;
 mod return_emission;
@@ -476,6 +479,9 @@ pub(super) struct EmitEnv<'a> {
     /// `Signature` attributes. Declaration-site variance is a Kotlin fact; spelling it as JVM
     /// use-site wildcards is owned entirely by this emitter.
     signature_symbols: &'a dyn BackendClassifierSource,
+    /// Exact invocation-owner facts for both the stable module/dependency model and classifiers
+    /// whose completed declarations exist only in this common-IR file.
+    dispatch_classifiers: std::rc::Rc<crate::jvm::member_dispatch::CheckedDispatchClassifiers<'a>>,
     /// `-jvm-default`. Read at CALL SITES: under `Disable` an interface's `$default` synthetic lives
     /// on the `$DefaultImpls` holder, not on the interface, so a call that omits a defaulted argument
     /// must target the holder or it links to a method that does not exist.
@@ -732,77 +738,6 @@ impl EmitOptions {
         self.param_assertions = enabled;
         self
     }
-}
-
-/// `Class.flags` (proto field 1) for any Kotlin class kind — ONE bitfield, not a per-kind constant.
-/// Decoded from kotlinc 2.4.0 across every kind (plain 6, open 22, abstract 38, sealed 54, interface
-/// 102, annotation 262, object 326, data 1030, value 8199, enum 32902):
-///   bit0 hasAnnotations | bits1-3 visibility (PUBLIC=3) | bits4-5 modality (FINAL0/OPEN1/ABSTRACT2/
-///   SEALED3) | bits6-8 classKind (CLASS0/INTERFACE1/ENUM2/ENUM_ENTRY3/ANNOTATION4/OBJECT5/COMPANION6)
-///   | bit10 isData | bit13 isValue | bit14 isFunInterface | bit15 hasEnumEntries.
-/// The writer omits the field at [`DEFAULT_CLASS_FLAGS`] (a public final class).
-/// Whether a realized property accessor consumes the receiver as an OPERAND. An instance accessor
-/// always does. A STATIC one does not — a `@JvmStatic` object property's `setX(V)` takes the VALUE,
-/// not a receiver — except on a `@JvmInline value class`, where every member is realized as a static
-/// `-impl` whose FIRST parameter is the receiver's carrier (`kotlin/Result.isSuccess` is
-/// `isSuccess-impl(Ljava/lang/Object;)Z`). Reading `!is_static` alone evaluated that receiver only for
-/// effect and then invoked the static with an empty stack.
-fn accessor_takes_receiver(access: &crate::jvm::inline::PropertyAccess) -> bool {
-    use crate::jvm::inline::PropertyAccess;
-    match access {
-        PropertyAccess::Field { is_static, .. } => !is_static,
-        PropertyAccess::Accessor {
-            is_static,
-            name,
-            descriptor,
-            ..
-        } => {
-            !is_static
-                || crate::jvm::names::parse_method_descriptor(descriptor).is_some_and(
-                    |(params, ret)| is_value_class_impl_accessor(name, params.len(), ret != "V"),
-                )
-        }
-        // An instance bridge takes the receiver; a named object's static field bridge does not.
-        PropertyAccess::AccessBridge { takes_receiver, .. } => *takes_receiver,
-    }
-}
-
-/// kotlinc's spelling for a `@JvmInline value class` member realized as a static over the carrier: the
-/// Kotlin name with an `-impl` suffix (`isSuccess-impl`, `getLabel-impl`). It is the only static
-/// accessor shape whose leading parameter is a receiver rather than a value.
-///
-/// `is_read` distinguishes the two sites, because the parameter COUNT is what separates a carrier from
-/// a value: such a getter takes exactly the carrier, and such a setter the carrier AND the new value. A
-/// `@JvmStatic` property whose name merely ends in `-impl` (reachable through `@JvmName`) therefore
-/// cannot be mistaken for one — its static setter takes a single VALUE parameter.
-fn is_value_class_impl_accessor(name: &str, params: usize, is_read: bool) -> bool {
-    name.ends_with("-impl") && params == if is_read { 1 } else { 2 }
-}
-
-/// The type the receiver must hold ON THE STACK for `access`, given the property's `owner`.
-///
-/// Normally the owner itself. On a value class's static `-impl` accessor it is the accessor's first
-/// DECLARED parameter — the carrier (`isSuccess-impl(Ljava/lang/Object;)Z` consumes the erased
-/// underlying, never a `kotlin/Result` box). Narrowing an erased operand to the owner there emits a
-/// `checkcast` no unboxed carrier can pass.
-fn accessor_receiver_ty(access: &crate::jvm::inline::PropertyAccess, owner: TypeName) -> Ty {
-    use crate::jvm::inline::PropertyAccess;
-    if let PropertyAccess::Accessor {
-        is_static: true,
-        name,
-        descriptor,
-        ..
-    } = access
-    {
-        if let Some((params, ret)) = crate::jvm::names::parse_method_descriptor(descriptor) {
-            if is_value_class_impl_accessor(name, params.len(), ret != "V") {
-                if let Some(carrier) = params.first() {
-                    return crate::jvm::jvm_libraries::desc_to_ty(carrier);
-                }
-            }
-        }
-    }
-    Ty::obj_name(owner)
 }
 
 /// The primary constructor's parameter descriptors. Only the LEADING `ctor_param_count` fields are
@@ -1570,6 +1505,12 @@ pub(crate) fn emit_all_with_checked_classifiers(
         override_results: facts.metadata.override_results,
         collection_method_entry_barriers: facts.metadata.collection_method_entry_barriers,
         signature_symbols: facts.signature_symbols,
+        dispatch_classifiers: std::rc::Rc::new(
+            crate::jvm::member_dispatch::CheckedDispatchClassifiers::new(
+                ir,
+                facts.signature_symbols,
+            ),
+        ),
         jvm_default: opts.jvm_default,
         lambda_modes: opts.lambda_modes,
         java_parameters: opts.java_parameters,
@@ -5084,85 +5025,6 @@ enum ForwarderDispatch {
     InterfaceSpecial,
 }
 
-/// Whether `candidate` transitively derives from the interface `ancestor`, read through the
-/// symbol-source classifier model (module and classpath providers both expose direct supertypes).
-fn interface_derives_from(
-    symbols: &dyn BackendClassifierSource,
-    candidate: crate::types::TypeName,
-    ancestor: crate::types::TypeName,
-) -> bool {
-    let mut pending = vec![candidate];
-    let mut seen = std::collections::HashSet::new();
-    while let Some(owner) = pending.pop() {
-        if !seen.insert(owner) {
-            continue;
-        }
-        let Some(shape) = symbols.classifier(owner) else {
-            continue;
-        };
-        for parent in shape.supertypes.iter().copied() {
-            if parent == ancestor {
-                return true;
-            }
-            if symbols
-                .classifier(parent)
-                .is_some_and(|parent| parent.is_interface())
-            {
-                pending.push(parent);
-            }
-        }
-    }
-    false
-}
-
-/// The transitive interface closure of the `direct` supertypes, in a TOPOLOGICAL order of the
-/// derives-from DAG: every interface precedes all of its ancestors, so a derived redeclaration
-/// claims a member key before its ancestor's, and incomparable interfaces keep the declaration
-/// order of the `direct` list. (A pairwise comparator was not a total order — incomparable pairs
-/// compared `Equal` inconsistently.) Read entirely through the symbol-source classifier model:
-/// this pass neither searches IR classes nor retries a missing class against another origin.
-fn sorted_interface_closure(
-    symbols: &dyn BackendClassifierSource,
-    direct: Vec<crate::types::TypeName>,
-) -> Vec<(
-    crate::types::TypeName,
-    std::sync::Arc<crate::backend::BackendClassifierFact>,
-)> {
-    // DFS post-order emits ancestors before derived; reversing yields the topological order.
-    fn visit(
-        symbols: &dyn BackendClassifierSource,
-        owner: crate::types::TypeName,
-        seen: &mut std::collections::HashSet<crate::types::TypeName>,
-        out: &mut Vec<(
-            crate::types::TypeName,
-            std::sync::Arc<crate::backend::BackendClassifierFact>,
-        )>,
-    ) {
-        if !seen.insert(owner) {
-            return;
-        }
-        let Some(shape) = symbols
-            .classifier(owner)
-            .filter(|shape| shape.is_interface())
-        else {
-            return;
-        };
-        for parent in shape.supertypes.iter().rev().copied() {
-            visit(symbols, parent, seen, out);
-        }
-        out.push((owner, shape));
-    }
-    let mut seen = std::collections::HashSet::new();
-    let mut out = Vec::new();
-    // Every supertype list is walked reversed and the post-order reversed again, so incomparable
-    // supertypes come out in declaration order at every level, as kotlinc's inherited members do.
-    for owner in direct.into_iter().rev() {
-        visit(symbols, owner, &mut seen, &mut out);
-    }
-    out.reverse();
-    out
-}
-
 fn backend_member_jvm_name(ir: &IrFile, member: &crate::backend::BackendMemberFact) -> String {
     if let Some(name) = &member.physical_name {
         return name.to_string();
@@ -5197,9 +5059,9 @@ fn emit_default_impls_forwarders(
     }
     let symbols = env.signature_symbols;
     let derives_from = |candidate: crate::types::TypeName, ancestor: crate::types::TypeName| {
-        interface_derives_from(symbols, candidate, ancestor)
+        interface_hierarchy::derives_from(symbols, candidate, ancestor)
     };
-    let closure = sorted_interface_closure(symbols, c.interfaces.iter_ids().collect());
+    let closure = interface_hierarchy::sorted_closure(symbols, c.interfaces.iter_ids().collect());
 
     let method_key = |name: &str, params: &[Ty]| {
         (
@@ -6713,6 +6575,8 @@ struct Emitter<'a> {
     self_companion: Option<TypeName>,
     /// Checked classifier declarations: which kind of classifier an operand's type names.
     classifiers: &'a dyn BackendClassifierSource,
+    /// Complete classifier facts used only for physical virtual-call owner selection.
+    dispatch_classifiers: std::rc::Rc<crate::jvm::member_dispatch::CheckedDispatchClassifiers<'a>>,
     owner: String,
     facade: String,
     slots: HashMap<u32, (u16, Ty)>,
@@ -6856,6 +6720,7 @@ impl<'a> Emitter<'a> {
             intrinsic_probe_continuations: env.intrinsic_probe_continuations,
             static_owner,
             classifiers: env.signature_symbols,
+            dispatch_classifiers: env.dispatch_classifiers.clone(),
             owner: owner.to_string(),
             facade: facade.to_string(),
             slots: HashMap::new(),
@@ -8083,6 +7948,9 @@ impl<'a> Emitter<'a> {
             });
         let access =
             access_bridges::protected_property_access(self.run, operation.expression, access);
+        let Some(access) = self.checked_dispatched_accessor(operation.expression, access) else {
+            return;
+        };
         let access_owner = match &access {
             PropertyAccess::Field { owner, .. }
             | PropertyAccess::Accessor { owner, .. }
@@ -9018,15 +8886,22 @@ impl<'a> Emitter<'a> {
                         self.mark_call_start(e, code);
                         code.invokespecial(m, aw, physical_call_result_words(ret));
                     }
-                } else if is_iface {
-                    // Dispatch through an interface — `invokeinterface I.m`.
-                    let m = self.cw.interface_methodref(&owner, &name, &desc);
-                    self.mark_call_start(e, code);
-                    code.invokeinterface(m, aw, physical_call_result_words(ret));
                 } else {
-                    let m = self.cw.methodref(&owner, &name, &desc);
-                    self.mark_call_start(e, code);
-                    code.invokevirtual(m, aw, physical_call_result_words(ret));
+                    let Some((owner, is_iface)) =
+                        self.module_member_call_owner(e, c.fq_name_id(), is_iface)
+                    else {
+                        return;
+                    };
+                    if is_iface {
+                        // Dispatch through an interface — `invokeinterface I.m`.
+                        let m = self.cw.interface_methodref(&owner, &name, &desc);
+                        self.mark_call_start(e, code);
+                        code.invokeinterface(m, aw, physical_call_result_words(ret));
+                    } else {
+                        let m = self.cw.methodref(&owner, &name, &desc);
+                        self.mark_call_start(e, code);
+                        code.invokevirtual(m, aw, physical_call_result_words(ret));
+                    }
                 }
             }
             IrExpr::Call {
@@ -9490,7 +9365,15 @@ impl<'a> Emitter<'a> {
                     // special-casing below only applies to the `descriptor` form (a classpath receiver).
                     if let Some((param_tys, ret_ty)) = params {
                         let owner_identity = *owner;
-                        let owner = owner.render();
+                        let Some((owner, interface)) = self.source_virtual_call_owner(
+                            e,
+                            owner_identity,
+                            interface,
+                            semantic_receiver,
+                        ) else {
+                            return;
+                        };
+                        let name = name.clone();
                         let ptys = jvm_tys(param_tys);
                         let ret = self.physical_call_result(e, jvm_declared_ty(ret_ty));
                         let descriptor = method_descriptor(&ptys, ret);

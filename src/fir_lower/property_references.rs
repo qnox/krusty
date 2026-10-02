@@ -177,18 +177,20 @@ impl BodyLowering<'_> {
                 if !parameters.is_empty() {
                     return Err(FirLoweringFailure::UnsupportedPropertyReferenceTarget);
                 }
-                self.external_property_access(
-                    *property,
-                    dispatch.clone(),
-                    *receiver,
-                    parameters,
-                    *result,
-                    *extension_receiver_parameter,
-                    dispatch_receiver,
-                    extension_receiver,
-                    &[],
-                    false,
-                )
+                self.external_property_access(super::source_calls::ExternalPropertyRequest {
+                    target: *property,
+                    dispatch: dispatch.clone(),
+                    receiver_ty: *receiver,
+                    parameters: parameters,
+                    result: *result,
+                    extension_receiver_parameter: *extension_receiver_parameter,
+                    dispatch_receiver: super::source_calls::DispatchOperand::plain(
+                        dispatch_receiver,
+                    ),
+                    extension_receiver: extension_receiver,
+                    arguments: &[],
+                    write: false,
+                })
                 .ok_or(FirLoweringFailure::UnsupportedExternalProperty(*property))?
             }
         };

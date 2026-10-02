@@ -18,7 +18,8 @@ pub(super) fn emit_inherited_default_surface(
     env: &EmitEnv,
 ) {
     let symbols = env.signature_symbols;
-    let closure = sorted_interface_closure(symbols, c.interfaces.iter_ids().collect());
+    let closure =
+        super::interface_hierarchy::sorted_closure(symbols, c.interfaces.iter_ids().collect());
     if closure.is_empty() {
         return;
     }

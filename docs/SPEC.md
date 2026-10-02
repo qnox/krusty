@@ -1772,6 +1772,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   instead uses `$$context_receiver_N`. A named context value remains an ordinary value capture.
   A lifted receiver lambda's guard quotes its receiver's local name (`$this$within`), not `<this>`
   (`tests/captured_receiver_names_e2e.rs`).
+- **Inherited member call owner.** A call to an inherited member, or a read or write through an
+  inherited property accessor, names the receiver's own class as the owner, as kotlinc does:
+  `Leaf.m`, `Leaf.getBase`, `Leaf.hashCode`. An interface default reached through a class receiver
+  is `invokevirtual Leaf.d`. A type-parameter receiver keeps the declaring class, and a class
+  member reached through an interface receiver stays on the declaration (`Object.toString`).
+  Common IR records only the class the receiver statically has; the JVM decides the owner in one
+  path for module and dependency classes alike, over the backend classifier model: the receiver's
+  class is named when it inherits the member and is neither a value class nor package-private.
+  A concrete static receiver requires a complete receiver-to-declaration classifier chain;
+  a missing receiver or intermediate backend fact is an emission error, never an implicit choice
+  of the declaration owner. Classifiers completed only in the active common-IR file—body-local and
+  nested-local declarations, anonymous objects, enum-entry bodies, and generated classes—join the
+  frozen module/dependency facts by exact identity at each JVM realization boundary. Their absence
+  is not retried through a provider or inferred from a generated class name.
+  An array receiver names the JVM array type (`[Ljava/lang/String;`, `[C`), not `kotlin/Array`
+  or `kotlin/CharArray`, which have no class file (`tests/inherited_member_owner_e2e.rs`).
 - `enum class`: compiled as a `final` class extending `java/lang/Enum` with a `public static final`
   constant per entry, a synthetic `$VALUES` array, a private `(String name, int ordinal, …userArgs)`
   constructor calling `super(name, ordinal)`, a `<clinit>` that constructs entries in declaration

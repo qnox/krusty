@@ -33,6 +33,7 @@ mod function_references;
 mod hidden_constructors;
 mod inline_body_slots;
 mod interface_entries;
+mod mangled_calls;
 mod member_names;
 mod module_members;
 mod operand_nullness;
@@ -768,14 +769,9 @@ pub(crate) fn lower_value_classes(
             .obj_internal()
             .is_some_and(|fq| callable_under.contains_key(&fq))
     };
-    // `(owner-internal, plain name, arity)` → mangled name, for rewriting resolved-by-name calls
-    // (`super.f(vc)`, an interface method) to the value-class-mangled method.
+    // `(owner-internal, plain name, arity)` → mangled name for declaration-owned JVM synthetics:
+    // annotation markers and override bridges that name their own target method.
     let mut mangle_map: HashMap<(TypeName, String, usize), String> = HashMap::new();
-    // The declaration behind each `mangle_map` key, when exactly one ordinary (non-suspend,
-    // non-value-class-member) function has it. Its erased signature is the call's descriptor: a
-    // descriptor string cannot say whether `LX;` stood for `X` or for `X?` (a `T : X?` result), and
-    // the two erase differently when `X?` stays boxed.
-    let mut mangled_declarations: HashMap<(TypeName, String, usize), Option<u32>> = HashMap::new();
     // Exact getters whose override pair diverges in semantic type (for example `Vid` over `Vid?`).
     // The two declarations hash differently under JVM value-class mangling, so the accessor bridge
     // owns their compatibility and the implementation getter keeps its ordinary spelling.
@@ -843,8 +839,8 @@ pub(crate) fn lower_value_classes(
         let vc_member = !synthesized && vc_methods.contains(&(fid as u32));
         let source_name = f.name.clone();
         // Mangle a USER function whose (pre-erasure) signature mentions a value class — kotlinc's
-        // `base-<hash>`. Index-resolved `MethodCall`s pick this up automatically; name-resolved calls
-        // (super/interface) are rewritten below via `mangle_map`.
+        // `base-<hash>`. Index-resolved `MethodCall`s pick this up automatically; virtual and super
+        // calls are rewritten below through their exact selected declaration identity.
         if !synthesized {
             // A top-level (facade/file-class) function has no dispatch receiver — its value-class RETURN
             // is not mangled; a member's is.
@@ -894,11 +890,6 @@ pub(crate) fn lower_value_classes(
             if mangled != source_name {
                 if let Some(owner) = f.dispatch_receiver {
                     let key = (owner, source_name.clone(), orig_params[fid].len());
-                    let ordinary = !lower_value_member && !is_suspend;
-                    mangled_declarations
-                        .entry(key.clone())
-                        .and_modify(|declaration| *declaration = None)
-                        .or_insert(ordinary.then_some(fid as u32));
                     mangle_map.insert(key, mangled.clone());
                 }
                 f.name = mangled;
@@ -1167,52 +1158,16 @@ pub(crate) fn lower_value_classes(
         }
     }
 
-    // 1b. Rewrite name-resolved calls to a mangled method (`super.f(vc)`, an interface method) — its
-    //     name gets the `-<hash>` suffix and its descriptor's value-class types erase to the underlying.
-    if !mangle_map.is_empty() {
-        let declaration_descriptors: HashMap<(TypeName, String, usize), String> =
-            mangled_declarations
-                .into_iter()
-                .filter_map(|(key, declaration)| {
-                    let function = &ir.functions[declaration? as usize];
-                    Some((key, ir_method_desc(&function.params, &function.ret)))
-                })
-                .collect();
-        for e in &mut ir.exprs {
-            if let IrExpr::Call {
-                callee:
-                    Callee::Special {
-                        owner,
-                        name,
-                        descriptor,
-                        ..
-                    }
-                    | Callee::Virtual {
-                        owner,
-                        name,
-                        descriptor,
-                        ..
-                    }
-                    | Callee::Static {
-                        owner,
-                        name,
-                        descriptor,
-                        ..
-                    },
-                args,
-                ..
-            } = e
-            {
-                let key = (*owner, name.clone(), args.len());
-                if let Some(mangled) = mangle_map.get(&key) {
-                    *name = mangled.clone();
-                    *descriptor = declaration_descriptors
-                        .get(&key)
-                        .cloned()
-                        .unwrap_or_else(|| erase_descriptor(descriptor, &under));
-                }
-            }
-        }
+    // 1b. Rewrite calls carrying an exact selected source declaration to its mangled realization
+    // (`super.f(vc)`, an interface method).
+    if !renamed_functions.is_empty() {
+        mangled_calls::rename(
+            ir,
+            &renamed_functions,
+            &lowered_value_members,
+            &suspend_fids,
+            &under,
+        );
     }
     // The checker already selected one SAM declaration. Its declared signature and suspend fact
     // travel on the lambda, so the physical slot is realized from those, not from a
