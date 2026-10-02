@@ -4458,6 +4458,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   nested callable scopes, independently of their own lambda/local-function enclosure. Inline
   property accessors publish the same provenance. The JVM consumes that recorded exposure when
   exporting helpers; it does not rediscover an inline owner by walking declarations or source names.
+  JVM naming keeps ordinary local delegates in the normal lambda numbering sequence. The distinct
+  inline-declaration helper spelling is selected only for the exact delegated-helper lifting site
+  carrying that recorded inline exposure, not for every local delegate or every private accessor.
   The checked convention's substitutions include its receiver classifier's type parameters as
   well as callable parameters. The selected declaration's lexical scope fixes their stable
   identities: a callable parameter shadows the enclosing parameter, and an unrelated declaration

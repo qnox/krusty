@@ -31,6 +31,7 @@ pub(crate) struct ForeignHelperOwner {
 pub(crate) struct HelperAccess {
     exported: Vec<(u32, Option<TypeName>)>,
     foreign: HashMap<u32, ForeignHelperOwner>,
+    inline_delegates: HashSet<u32>,
 }
 
 impl HelperAccess {
@@ -45,6 +46,11 @@ impl HelperAccess {
 
     pub(crate) fn foreign_owner(&self, function: u32) -> Option<ForeignHelperOwner> {
         self.foreign.get(&function).copied()
+    }
+
+    pub(crate) fn uses_inline_delegate_name(&self, function: u32) -> bool {
+        // A foreign prototype has the same declaration ABI even though it exports nothing here.
+        self.inline_delegates.contains(&function)
     }
 }
 
@@ -137,6 +143,9 @@ pub(crate) fn realize(
             })
             .transpose()?;
         for function in std::iter::once(getter).chain(setter) {
+            if exported {
+                helper_access.inline_delegates.insert(function);
+            }
             if let Some(foreign) = foreign {
                 helper_access.foreign.insert(function, foreign);
             } else if exported {

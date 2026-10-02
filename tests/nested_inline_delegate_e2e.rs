@@ -4,12 +4,11 @@ use super::common;
 
 const DECLARATIONS: &str = "import kotlin.reflect.KProperty
 inline operator fun String.getValue(owner: Any?, property: KProperty<*>): String = property.name + this
-inline fun <A, B> passChecked(value: A, block: (A) -> B): B = block(value)
 object NestedOwner {
-    inline fun readNested(): String = passChecked({
-        val nestedResult by \"OK\"
-        nestedResult
-    }) { it() }
+    inline fun readNested(crossinline suffix: () -> String): () -> String = {
+        val nestedResult by \"O\"
+        nestedResult + suffix()
+    }
     fun readLocal(): String {
         fun localReader(): String {
             val localResult by \"OK\"
@@ -26,7 +25,7 @@ inline val inlineProperty: String
 ";
 
 const CALLERS: &str = "object NestedCaller {
-    fun nested(): String = NestedOwner.readNested()
+    fun nested(): String = NestedOwner.readNested { \"K\" }()
     fun local(): String = NestedOwner.readLocal()
     fun property(): String = inlineProperty
 }

@@ -178,7 +178,7 @@ fn run_backend_passes_after_plugins(
     // the same JVM boundary as source super calls, never in the plugin itself or the emitter.
     // Every body of the file is lowered, so each lifting sequence is whole: name its callables
     // before any pass renders a debug name from them.
-    crate::jvm::lifted_names::number(ir);
+    crate::jvm::lifted_names::number(ir, &facts.local_delegate_access);
     crate::jvm::module_calls::realize_super_calls(ir, callables)
         .map_err(|_| SkipReason::SuperCalls)?;
     crate::jvm::annotation_constructions::lower_annotation_constructions(ir, facade);
