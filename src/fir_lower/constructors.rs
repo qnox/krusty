@@ -692,6 +692,7 @@ fn push_secondary_constructor(
             delegate,
             synthetic: false,
             vc_params: false,
+            param_checks: Vec::new(),
         });
     if let Some(external_target) = external_target {
         ir.external_secondary_super_constructors
@@ -1038,6 +1039,7 @@ pub(super) fn accept_constructor_body(
         return Err(FirFileLoweringFailure::ResultTypeMismatch(declaration));
     }
 
+    let root_block = lowered.root_block;
     let mut roots = lowered.roots.into_vec();
     let delegation = roots
         .first()
@@ -1059,11 +1061,15 @@ pub(super) fn accept_constructor_body(
     let body = if roots.is_empty() {
         None
     } else {
+        // The body's exact checked root scope, when it has one, stays live through the return.
+        // Do not rediscover that semantic boundary from the lowered expression shape.
+        ir.callable_scopes.extend(root_block);
         let first = ir.exprs.len();
         let block = ir.add_expr(IrExpr::Block {
             stmts: roots,
             value: None,
         });
+        ir.callable_scopes.insert(block);
         if let Some(cause) = origin {
             for raw in first..ir.exprs.len() {
                 ir.fir_origins.insert(

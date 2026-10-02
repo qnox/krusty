@@ -252,3 +252,36 @@ fn no_call_assertions_matches_kotlincs_platform_call_contract() {
         "krusty output under the flag must match kotlinc's assertion contract"
     );
 }
+
+/// A secondary constructor's guards run ahead of its delegation, and its body keeps a local, so a
+/// stripped guard that left the debug tables in place would move both tables off kotlinc's.
+const SECONDARY_SOURCE: &str = r#"
+class Token
+
+fun measure(token: Token): Int = 1
+
+class Holder(val x: Int) {
+    var y: Int = 0
+
+    constructor(token: Token) : this(measure(token))
+
+    constructor(token: Token, count: Int, enabled: Boolean) : this(count) {
+        val local = measure(token) + count
+        y = local
+    }
+}
+"#;
+
+#[test]
+fn no_param_assertions_secondary_constructor_is_identical_to_kotlincs() {
+    let flag = Some("-Xno-param-assertions");
+    let krusty = compile_krusty(SECONDARY_SOURCE, "Secondary", flag);
+    let reference = compile_reference(SECONDARY_SOURCE, "Secondary", flag);
+    assert_eq!(class_names(&krusty), class_names(&reference));
+    for ((name, ours), (_, theirs)) in krusty.iter().zip(&reference) {
+        assert!(
+            ours == theirs,
+            "{name} differs from kotlinc's -Xno-param-assertions build"
+        );
+    }
+}
