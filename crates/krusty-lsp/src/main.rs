@@ -1125,6 +1125,10 @@ struct WorkerHost {
     index_project_sources: ProjectSources,
     analysis_cache: Vec<CachedProjectAnalysis>,
     analysis_pending: bool,
+    /// Set for a background index chunk. The worker returns diagnostics and skips the navigation
+    /// indexes the index store discards. Cleared before the function returns so an interactive
+    /// analysis cannot reuse the flag.
+    index_diagnostics_only: bool,
     platform_classpath: Vec<PathBuf>,
     worker_reconfigure_retry_at_ms: Option<u64>,
     worker_reconfigure_retry_backoff_ms: u64,
@@ -1154,6 +1158,7 @@ impl WorkerHost {
             index_project_sources: ProjectSources::default(),
             analysis_cache: Vec::new(),
             analysis_pending: false,
+            index_diagnostics_only: false,
             platform_classpath,
             worker_reconfigure_retry_at_ms: None,
             worker_reconfigure_retry_backoff_ms: 0,
@@ -1372,31 +1377,9 @@ impl WorkerHost {
     }
 }
 
-/// Bytes one index chunk may read. Mirrors the open-document budget in spirit: a count of files is
-/// not a memory bound.
-const MAX_INDEX_CHUNK_BYTES: usize = 8 * 1024 * 1024;
-
 impl krusty_lsp::Analysis for WorkerHost {
     fn index_workspace_files(&mut self, uris: &[&str]) -> krusty_lsp::IndexOutcome {
-        let mut budget = MAX_INDEX_CHUNK_BYTES;
-        let readable: Vec<(String, String)> = uris
-            .iter()
-            .filter_map(|uri| {
-                let path = krusty_lsp::uri::file_uri_to_path(uri)?;
-                // Reject a known-oversized file before allocating its contents. Rechecking the
-                // actual string length after the read handles a file that grows between metadata
-                // and read without charging an inaccurate size.
-                let metadata_bytes = usize::try_from(std::fs::metadata(&path).ok()?.len()).ok()?;
-                if metadata_bytes > budget {
-                    return None;
-                }
-                let text = std::fs::read_to_string(path).ok()?;
-                // The open-document path is byte-bounded; indexing has to be too, or a generated
-                // multi-hundred-megabyte source would sit in memory twice per chunk.
-                budget = budget.checked_sub(text.len())?;
-                Some(((*uri).to_string(), text))
-            })
-            .collect();
+        let readable = krusty_lsp::workspace_index_input::read_index_chunk(uris);
         if readable.is_empty() {
             // No worker call was needed, but every URI was conclusively absent, unreadable, or
             // outside the read budget. Treating this as infrastructure failure would make a
@@ -1411,16 +1394,14 @@ impl krusty_lsp::Analysis for WorkerHost {
             .map(|(uri, text)| (uri.as_str(), text.as_str()))
             .collect();
         let indexed_uris: Vec<&str> = documents.iter().map(|(uri, _)| *uri).collect();
-        // Use the same module grouping, source visibility, language flags, and classpath selection
-        // as interactive analysis. A raw `analyze(&texts)` call loses every one of those origins
-        // and publishes false unresolved-reference diagnostics for otherwise valid workspace files.
-        //
-        // Indexing still must not evict or populate the interactive cache. Temporarily replacing
-        // that cache lets the shared project-analysis path stay the single semantic implementation
-        // while keeping background chunks invisible to the next keystroke's hot state.
+        // Same module grouping, visibility, language flags, and classpath as interactive analysis.
+        // The interactive cache is swapped out so a background chunk cannot evict the open
+        // document's hot state or publish false unresolved references from a raw text-only call.
         let interactive_cache = std::mem::take(&mut self.analysis_cache);
         std::mem::swap(&mut self.project_sources, &mut self.index_project_sources);
+        self.index_diagnostics_only = true;
         let (analyses, _support) = self.analyze_open_documents(&documents, &indexed_uris);
+        self.index_diagnostics_only = false;
         std::mem::swap(&mut self.project_sources, &mut self.index_project_sources);
         self.analysis_cache = interactive_cache;
         // A short result means the worker did not answer; report it as inconclusive so the store
@@ -1815,7 +1796,10 @@ impl krusty_lsp::Analysis for WorkerHost {
                     documents.len() + group.inferred_support_count,
                     &group.java_sources,
                     &language_arguments,
-                    classpath.as_deref(),
+                    krusty_lsp::WorkerAnalysisOptions {
+                        classpath: classpath.as_deref(),
+                        diagnostics_only: self.index_diagnostics_only,
+                    },
                 );
                 let cacheable = result.is_ok();
                 let mut group_analyses =
@@ -2060,6 +2044,9 @@ fn dependencies_excluding_friends(dependencies: &[usize], friends: &[usize]) -> 
         .filter(|index| !friends.contains(index))
         .collect()
 }
+
+#[cfg(test)]
+mod index_diagnostics;
 
 #[cfg(test)]
 mod tests {
