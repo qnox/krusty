@@ -344,7 +344,8 @@ pub(crate) fn members_in_hierarchy(
     // `FunctionN` classifier from the parameter count. For ordinary member lookup its declared
     // classifier is the arity-independent `Function<R>`, whose hierarchy supplies `Any` members.
     // `invoke` remains a member of the `FnSig` itself and is handled by the caller from that signature.
-    let intersection_family = matches!(receiver.non_null(), Ty::Intersection(_));
+    let intersection_parts =
+        super::hierarchy_projection::intersection_components(receiver.non_null());
     let receiver = match receiver.non_null() {
         Ty::Fun(signature) => Ty::obj_args("kotlin/Function", &[signature.ret]),
         Ty::Unit => Ty::obj("kotlin/Unit"),
@@ -412,8 +413,8 @@ pub(crate) fn members_in_hierarchy(
         );
     }
 
-    normalize_inherited_member_functions_with_family(source, &mut functions, intersection_family);
-    if intersection_family {
+    normalize_inherited_member_functions_with_family(source, &mut functions, intersection_parts);
+    if intersection_parts.is_some() {
         // Component order is not a hierarchy distance. A member inherited by the earliest
         // component and a member declared on a later component are one slot; flattening the
         // walk depth lets that selection see both instead of keeping only the shallower rung.
@@ -431,13 +432,13 @@ pub(crate) fn normalize_inherited_member_functions(
     source: &dyn SymbolSource,
     functions: &mut FunctionSet,
 ) {
-    normalize_inherited_member_functions_with_family(source, functions, false);
+    normalize_inherited_member_functions_with_family(source, functions, None);
 }
 
 fn normalize_inherited_member_functions_with_family(
     source: &dyn SymbolSource,
     functions: &mut FunctionSet,
-    intersection_family: bool,
+    intersection_parts: Option<&[Ty]>,
 ) {
     // Kotlin operator conventions are inherited by an override even when the overriding declaration
     // does not repeat `operator` (`Comparable<T>.compareTo` is the common case). This is a relation
@@ -467,7 +468,7 @@ fn normalize_inherited_member_functions_with_family(
     }
     inherit_overridden_default_arguments(source, functions);
     inherit_overridden_results(source, functions);
-    retain_covariant_inherited_overrides(source, functions, intersection_family);
+    retain_covariant_inherited_overrides(source, functions, intersection_parts);
 }
 
 /// Left-to-right depth-first visit order of `root` and its supertypes. The first visit wins in a
@@ -892,7 +893,7 @@ pub(crate) fn imported_object_member_symbols(
 fn retain_covariant_inherited_overrides(
     source: &dyn SymbolSource,
     functions: &mut FunctionSet,
-    intersection_family: bool,
+    intersection_parts: Option<&[Ty]>,
 ) {
     let mut retained: Vec<FunctionInfo> = Vec::with_capacity(functions.overloads.len());
     for candidate in functions.overloads.drain(..) {
@@ -924,8 +925,21 @@ fn retain_covariant_inherited_overrides(
             // slot even while an active local classifier has no provider-published owner edge yet.
             // Unrelated direct supertypes remain at the same rank and still require the ordinary
             // owner/result comparison below.
-            let candidate_rank_overrides = candidate.receiver_rank < existing.receiver_rank;
-            let existing_rank_overrides = existing.receiver_rank < candidate.receiver_rank;
+            // Walk depth is an override only inside one classifier hierarchy. Intersection
+            // components are peers: a direct member of a later component is not an override of
+            // a member the earlier component inherits.
+            let rank_is_override = intersection_parts.is_none_or(|parts| {
+                owners_share_intersection_component(
+                    source,
+                    parts,
+                    candidate.callable.owner,
+                    existing.callable.owner,
+                )
+            });
+            let candidate_rank_overrides =
+                rank_is_override && candidate.receiver_rank < existing.receiver_rank;
+            let existing_rank_overrides =
+                rank_is_override && existing.receiver_rank < candidate.receiver_rank;
             let same_result = candidate_is_subtype && existing_is_subtype;
             let candidate_implements_abstract = same_result
                 && candidate.receiver_rank == existing.receiver_rank
@@ -943,7 +957,8 @@ fn retain_covariant_inherited_overrides(
                 && candidate.flags.is_abstract
                 && existing.flags.is_abstract
                 && existing.receiver_rank == candidate.receiver_rank
-                && (!intersection_family || candidate.callable.owner == existing.callable.owner);
+                && intersection_parts
+                    .is_none_or(|_| candidate.callable.owner == existing.callable.owner);
             if candidate_implements_abstract
                 || (candidate_is_subtype
                     && (candidate_owner_overrides
@@ -973,6 +988,19 @@ fn retain_covariant_inherited_overrides(
         retained.push(candidate);
     }
     functions.overloads = retained;
+}
+
+fn owners_share_intersection_component(
+    source: &dyn SymbolSource,
+    parts: &[Ty],
+    left: TypeName,
+    right: TypeName,
+) -> bool {
+    parts.iter().any(|part| {
+        let hierarchy = super::hierarchy_projection::applied_hierarchy(source, *part);
+        hierarchy.iter().any(|(owner, _, _)| *owner == left)
+            && hierarchy.iter().any(|(owner, _, _)| *owner == right)
+    })
 }
 
 /// Parameter lists occupying one override slot. A Java platform type is flexible, so an override
