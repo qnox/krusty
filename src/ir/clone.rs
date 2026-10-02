@@ -576,6 +576,7 @@ fn copy_function_implementation_facts(
     if ir.suspend_funs.contains(&source) {
         ir.suspend_funs.push(target);
     }
+    ir.copy_lambda_type_parameters(source, target, bindings);
     // A specialization is another implementation of the same source lambda. Identity, ordinals, and
     // class provenance stay on that source record; [`super::IrSpecializedFunction`] is the generated
     // copy's identity.
@@ -646,6 +647,7 @@ mod tests {
         ir.fn_decl_lines.insert(source, 4);
         ir.inline_fns.insert(source);
         ir.signatures.insert(source, signature(parameter));
+        ir.record_lambda_type_parameters(source, vec![signature(parameter).type_params[0].clone()]);
         let class = ir.add_class(blank_class("Holder"));
         ir.classes[class as usize].methods.push(source);
         ir.note_class_method(class, source);
@@ -703,6 +705,11 @@ mod tests {
         assert_eq!(ir.signatures[&source].ret, Some(parameter));
         assert_eq!(ir.signatures[&first].params, vec![specialized]);
         assert_eq!(ir.signatures[&first].ret, Some(specialized));
+        assert_eq!(ir.lambda_type_parameters(first).len(), 1);
+        assert_eq!(
+            ir.lambda_type_parameters(first)[0].bounds[0].0,
+            Ty::obj("kotlin/Any")
+        );
         let recorded = &ir.specialized_functions[&first];
         assert_eq!(recorded.source, source);
         assert_eq!(recorded.caller, Some(IrEnclosure::Function(caller)));

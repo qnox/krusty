@@ -292,6 +292,9 @@ fn run_backend_passes_after_plugins(
     crate::jvm::suspend::finalize_suspend_bridges(ir, &mut facts.bridge_adaptations);
     // After the suspend transform: the body moved onto the static is the finished state machine.
     crate::jvm::suspend_impls::lower_suspend_impls(ir);
+    // Source lambda names are inputs to lifting. Fix them before reparenting so the lifted-name
+    // pass can retain the final caller-qualified path and ordinal.
+    crate::jvm::debug_local_names::realize_source_lambda_implementation_names(ir);
     crate::jvm::ir_emit::mark_must_inline_lambdas(ir);
     crate::jvm::ir_emit::reparent_lambda_impls(ir);
     // After reparenting: a lifted name is distinct only within the class the method lands in.

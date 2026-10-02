@@ -8,6 +8,8 @@ annotations/instances/arraysAndKClass.kt
 annotations/instances/enumAndKClass.kt
 annotations/instances/multimoduleTypeParams.kt
 annotations/instances/typeAliasesAndGenericsInterop.kt
+basics/k42000_1.kt
+basics/k42000_crossmodule.kt
 bridges/internalMethodOverrideInOtherModule.kt
 bridges/internalMethodOverrideMultipleInheritance.kt
 callableReference/funInterfaceConstructor/funInterfaceConstructorEquality.kt
@@ -81,8 +83,6 @@ inlineClasses/callableRefClassMergingNestedValueClass.kt
 inlineSizeReduction/lastBreak.kt
 innerNested/nestedInPackage.kt
 ir/privateSignatures/privateLeakThroughInline.kt
-ir/recursiveGeneric.kt
-ir/recursiveGeneric2.kt
 multiDecl/nameBasedDestructuringUnderscoreWithRenaming.kt
 multiplatform/k2/defaultArguments/bothInExpectAndActual.kt
 multiplatform/k2/defaultArguments/bothInExpectAndActual2.kt

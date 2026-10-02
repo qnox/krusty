@@ -149,17 +149,8 @@ fn specialization_ordinal(ir: &IrFile, implementation: u32) -> Option<u32> {
     (ordinal != 0).then_some(ordinal)
 }
 
-fn specialization_caller_name(
-    ir: &IrFile,
-    specialization: &crate::ir::IrSpecializedFunction,
-) -> String {
-    match specialization.caller {
-        Some(crate::ir::IrEnclosure::Function(function))
-        | Some(crate::ir::IrEnclosure::Lambda(function)) => {
-            emitted_function_name(ir, function, &ir.functions[function as usize].name)
-        }
-        _ => specialization.caller_source_name.clone(),
-    }
+fn specialization_caller_name(specialization: &crate::ir::IrSpecializedFunction) -> String {
+    specialization.caller_source_name.clone()
 }
 
 /// A specialized copy keeps semantic expansion and containment provenance in common IR. JavaScript
@@ -175,7 +166,7 @@ fn emitted_function_name(ir: &IrFile, function: u32, name: &str) -> String {
                     .expect("a specialized function retains its sibling position")
             ),
             None => {
-                let caller = specialization_caller_name(ir, specialization);
+                let caller = specialization_caller_name(specialization);
                 let ordinal = specialization_ordinal(ir, function)
                     .expect("a specialized function retains its expansion position");
                 format!("{name}${caller}${ordinal}")

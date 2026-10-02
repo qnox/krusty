@@ -1,58 +1,29 @@
+//! Escaping reified lambdas that cross a local delegated-property accessor boundary.
+//!
+//! The delegate operator itself is deliberately ordinary. Kotlin does not inline a reified
+//! `getValue` call made through local-delegate syntax; using one would make the reference fixture
+//! throw before it could test Krusty's specialization.
+
 use super::common;
 
 #[test]
-fn an_inlined_local_delegate_specializes_only_its_reified_parameter() {
+fn an_escaping_lambda_specializes_a_cast_after_reading_a_local_delegate() {
     common::expect_box_same_as_kotlinc(
         "interface Item\n\
          class Token : Item\n\
          class Root : Item\n\
-         class Delegate<T, R : Item>(val value: Any, val candidate: Item)\n\
-         inline operator fun <T, reified R : Item> Delegate<T, R>.getValue(\n\
-             owner: Any?, property: Any?\n\
-         ): Any? = if (candidate is R) value as? T else null\n\
-         inline fun <T, reified R : Item> read(value: Any, candidate: Item): Any? {\n\
-             val delegate = Delegate<T, R>(value, candidate)\n\
-             val local by delegate\n\
-             return local\n\
+         class Delegate(private val value: Any?) {\n\
+             operator fun getValue(owner: Any?, property: Any?): Any? = value\n\
          }\n\
-         fun box(): String {\n\
-             val kept = read<Root, Token>(Token(), Token())\n\
-             val rejected = read<Root, Token>(Token(), Root())\n\
-             return if (kept is Token && rejected == null) \"OK\" else \"Fail\"\n\
-         }\n",
-        "ReifiedLocalDelegate",
-    );
-}
-
-#[test]
-fn an_escaping_lambda_specializes_the_local_delegate_accessor_it_captures() {
-    common::expect_box_same_as_kotlinc(
-        "interface Item\n\
-         class Token : Item\n\
-         class Root : Item\n\
-         class Delegate<T, R : Item>(val value: Any, val candidate: Item)\n\
-         inline operator fun <T, reified R : Item> Delegate<T, R>.getValue(\n\
-             owner: Any?, property: Any?\n\
-         ): Any? = if (candidate is R) value as? T else null\n\
          var read: () -> Any? = { null }\n\
-         class Installer {\n\
-             inline fun <T, reified R : Item> install(value: Any, candidate: Item) {\n\
-                 read = {\n\
-                     val delegate = Delegate<T, R>(value, candidate)\n\
-                     val local by delegate\n\
-                     local\n\
-                 }\n\
-             }\n\
-         }\n\
-         class Caller {\n\
-             fun installKept() = Installer().install<Root, Token>(Token(), Token())\n\
-             fun installRejected() = Installer().install<Root, Token>(Token(), Root())\n\
+         inline fun <reified R : Item> install(value: Any?) {\n\
+             val local by Delegate(value)\n\
+             read = { local as? R }\n\
          }\n\
          fun box(): String {\n\
-             val caller = Caller()\n\
-             caller.installKept()\n\
+             install<Token>(Token())\n\
              val kept = read()\n\
-             caller.installRejected()\n\
+             install<Token>(Root())\n\
              return if (kept is Token && read() == null) \"OK\" else \"Fail\"\n\
          }\n",
         "EscapingReifiedLocalDelegate",
@@ -60,53 +31,24 @@ fn an_escaping_lambda_specializes_the_local_delegate_accessor_it_captures() {
 }
 
 #[test]
-fn a_local_delegate_accessor_specializes_the_lambda_it_returns() {
+fn an_omitted_noinline_default_specializes_after_reading_a_local_delegate() {
     common::expect_box_same_as_kotlinc(
         "interface Item\n\
          class Token : Item\n\
          class Root : Item\n\
-         class Delegate<T, R : Item>(val value: Any, val candidate: Item)\n\
-         inline operator fun <T, reified R : Item> Delegate<T, R>.getValue(\n\
-             owner: Any?, property: Any?\n\
-         ): () -> Any? = { if (candidate is R) value as? T else null }\n\
-         inline fun <T, reified R : Item> make(\n\
-             value: Any, candidate: Item\n\
-         ): () -> Any? {\n\
-             val delegate = Delegate<T, R>(value, candidate)\n\
-             val local by delegate\n\
-             return local\n\
+         class Delegate(private val value: Any?) {\n\
+             operator fun getValue(owner: Any?, property: Any?): Any? = value\n\
          }\n\
-         fun box(): String {\n\
-             val kept = make<Root, Token>(Token(), Token())()\n\
-             val rejected = make<Root, Token>(Token(), Root())()\n\
-             return if (kept is Token && rejected == null) \"OK\" else \"Fail\"\n\
-         }\n",
-        "ReifiedLocalDelegateLambdaResult",
-    );
-}
-
-#[test]
-fn an_omitted_noinline_default_specializes_its_local_delegate_plan() {
-    common::expect_box_same_as_kotlinc(
-        "interface Item\n\
-         class Token : Item\n\
-         class Root : Item\n\
-         class Delegate<T, R : Item>(val value: Any, val candidate: Item)\n\
-         inline operator fun <T, reified R : Item> Delegate<T, R>.getValue(\n\
-             owner: Any?, property: Any?\n\
-         ): Any? = if (candidate is R) value as? T else null\n\
-         inline fun <T, reified R : Item> read(\n\
-             value: Any,\n\
-             candidate: Item,\n\
+         inline fun <reified R : Item> read(\n\
+             value: Any?,\n\
              noinline action: () -> Any? = {\n\
-                 val delegate = Delegate<T, R>(value, candidate)\n\
-                 val local by delegate\n\
-                 local\n\
+                 val local by Delegate(value)\n\
+                 local as? R\n\
              }\n\
          ): Any? = action()\n\
          fun box(): String {\n\
-             val kept = read<Root, Token>(Token(), Token())\n\
-             val rejected = read<Root, Token>(Token(), Root())\n\
+             val kept = read<Token>(Token())\n\
+             val rejected = read<Token>(Root())\n\
              return if (kept is Token && rejected == null) \"OK\" else \"Fail\"\n\
          }\n",
         "ReifiedLocalDelegateDefaultLambda",

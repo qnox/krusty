@@ -2,7 +2,7 @@
 
 use crate::ir::{ExprId, FunId, IrDebugLocalProvenance, IrFile, IrInlineLocalRole, IrLambdaOrigin};
 
-/// Physical JVM names for lambda implementations and specialized copies.
+/// Physical JVM names for specialized lambda implementation copies.
 ///
 /// A lambda origin keeps kotlinc's `$lambda$N` spelling. Common IR retains only semantic expansion
 /// provenance; the JVM computes the suffix that makes each copied implementation unique.
@@ -20,29 +20,39 @@ pub(super) fn lambda_implementation_names(
             if realized_lambda_class_method(ir, id, specialized_suspend_classes) {
                 return None;
             }
+            let specialization = ir.specialized_functions.get(&id)?;
             let origin = ir.lambda_origins.get(&id);
-            let specialization = ir.specialized_functions.get(&id);
-            if origin.is_none() && specialization.is_none() {
-                return None;
-            }
             let mut name = origin.map_or_else(|| function.name.clone(), lambda_implementation_name);
-            if let Some(specialization) = specialization {
-                let ordinal = crate::jvm::ir_emit::lambda_class_names::specialization_ordinal(
-                    ir, id, facade, modes,
-                )
-                .expect("a specialized implementation retains its sibling position");
-                let (_, caller) = crate::jvm::ir_emit::lambda_class_names::specialization_location(
-                    ir,
-                    specialization,
-                    facade,
-                    modes,
-                )
-                .expect("a specialized implementation retains its JVM caller location");
-                name = format!("{name}${caller}${ordinal}");
-            }
+            let ordinal = crate::jvm::ir_emit::lambda_class_names::specialization_ordinal(
+                ir, id, facade, modes,
+            )
+            .expect("a specialized implementation retains its sibling position");
+            let (_, caller) = crate::jvm::ir_emit::lambda_class_names::specialization_location(
+                ir,
+                specialization,
+                facade,
+                modes,
+            )
+            .expect("a specialized implementation retains its JVM caller location");
+            name = format!("{name}${caller}${ordinal}");
             Some((id, name))
         })
         .collect()
+}
+
+/// Give source lambda implementations their source-owned JVM spellings before lifting reparents
+/// them. The lifted-name pass may then qualify those names with the final caller. A later
+/// specialization pass must never revisit these source functions and erase that qualification.
+pub(crate) fn realize_source_lambda_implementation_names(ir: &mut IrFile) {
+    let names = ir
+        .lambda_origins
+        .iter()
+        .filter(|(function, _)| !ir.specialized_functions.contains_key(function))
+        .map(|(&function, origin)| (function, lambda_implementation_name(origin)))
+        .collect::<Vec<_>>();
+    for (function, name) in names {
+        ir.functions[function as usize].name = name;
+    }
 }
 
 /// A lambda already moved onto a concrete class owns an exact target method name (`invoke` or
@@ -61,8 +71,8 @@ fn realized_lambda_class_method(
         })
 }
 
-/// Apply the JVM-owned implementation spellings after lambda/suspend realization and lifted naming
-/// have fixed each implementation's physical caller and its final method name.
+/// Apply generated-specialization spellings after lambda/suspend realization and lifted naming
+/// have fixed each copied implementation's physical caller and final method name.
 pub(crate) fn realize_lambda_implementation_names(
     ir: &mut IrFile,
     facade: &str,
@@ -450,5 +460,24 @@ mod tests {
         );
 
         assert_eq!(ir.functions[implementation as usize].name, "invokeSuspend");
+    }
+
+    #[test]
+    fn late_specialization_naming_does_not_overwrite_a_lifted_source_name() {
+        let mut ir = IrFile::default();
+        let implementation = lambda(&mut ir, None);
+        ir.functions[implementation as usize].name = "outer$nested$lambda$0".to_string();
+
+        realize_lambda_implementation_names(
+            &mut ir,
+            "LpKt",
+            crate::jvm::ir_emit::LambdaModes::default(),
+            &crate::jvm::suspend::SpecializedLambdaClasses::default(),
+        );
+
+        assert_eq!(
+            ir.functions[implementation as usize].name,
+            "outer$nested$lambda$0"
+        );
     }
 }
