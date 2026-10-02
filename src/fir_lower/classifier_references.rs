@@ -504,6 +504,9 @@ impl BodyLowering<'_> {
             (FirClassifierCallable::EnumValues, []) => {
                 self.ir.add_expr(IrExpr::EnumValues { classifier })
             }
+            (FirClassifierCallable::EnumEntries, []) => {
+                self.ir.add_expr(IrExpr::EnumEntries { classifier })
+            }
             (FirClassifierCallable::EnumValueOf, [argument]) => {
                 self.ir.add_expr(IrExpr::EnumValueOf {
                     classifier,

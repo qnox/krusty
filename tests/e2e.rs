@@ -683,6 +683,8 @@ mod enum_constant_annotation_emit_e2e;
 mod enum_ctor_default_arg_e2e;
 #[path = "enum_entries_e2e.rs"]
 mod enum_entries_e2e;
+#[path = "enum_entries_intrinsic_e2e.rs"]
+mod enum_entries_intrinsic_e2e;
 #[path = "enum_entry_body_enclosure_e2e.rs"]
 mod enum_entry_body_enclosure_e2e;
 #[path = "enum_entry_deferred_val_e2e.rs"]

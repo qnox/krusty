@@ -2614,13 +2614,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   so the partly-built array held there would be lost. `is_branchy`'s `==`/`!=` arm fires only when the
   LHS is *syntactically* a primitive literal (`file_expr_is_jvm_scalar`), so `listOf(x == y, …)` over
   `Int` parameters is NOT declined and does reach emit — that gap is what exposed the frame bug.
-- **Enum reflection intrinsics** `enumValueOf<E>(name)` / `enumValues<E>()`: the checker requires an
-  enum type argument and types the result as `E` / `Array<E>`. The synthetic registry emits
-  `E.valueOf(name)` / `E.values()`, including through an expanded reified inline function. A reified
-  inline function returning `T` (e.g. a `safeEnumValueOf` wrapper) is checked inside the body against
-  T's erased bound (`Enum`): the expansion's result slot is typed by that erased return and the
-  expansion's value is cast back to the call-site type (the `checkcast` kotlinc emits after a reified
-  call), keeping branch-merge frames consistent (`tests/enum_value_of_intrinsic_e2e.rs`).
+- **Enum reflection intrinsics** `enumValueOf<E>(name)` / `enumValues<E>()` / `enumEntries<E>()`:
+  the checker requires an enum type argument and types the result as `E` / `Array<E>` /
+  `EnumEntries<E>`. The synthetic registry emits `E.valueOf(name)` / `E.values()` /
+  `E.getEntries()`, including through an expanded reified inline function. The zero-argument
+  `enumEntries` declaration's stdlib body only throws. Its compiler role comes from that
+  declaration's common-stdlib public identity and is joined only to the paired JVM method: a
+  same-named declaration with parameters, and the same shape without that identity, stay ordinary
+  calls. Direct and reified calls emit `E.getEntries()`
+  (`tests/enum_entries_intrinsic_e2e.rs`). A reified inline function returning `T` (e.g. a
+  `safeEnumValueOf` wrapper) is checked inside the body against T's erased bound (`Enum`): the
+  expansion's result slot is typed by that erased return and the expansion's value is cast back to
+  the call-site type (the `checkcast` kotlinc emits after a reified call), keeping branch-merge
+  frames consistent (`tests/enum_value_of_intrinsic_e2e.rs`).
 - **Primitive-array init constructor** `IntArray(n) { i -> elem }` (and `Long`/`Double`/`Float`/`Boolean`/
   `Char`/`Byte`/`Short`): kotlinc inlines the index lambda into a fill loop, which krusty reproduces by
   desugaring to `{ val n = <size>; val a = new T[n]; var i = 0; while (i < n) { a[i] = <body[it:=i]>; i++ }; a }`
