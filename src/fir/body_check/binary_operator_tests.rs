@@ -115,6 +115,50 @@ fn a_constant_operand_keeps_its_checked_widening() {
     }
 }
 
+/// `UInt? == UInt` stays a source-order equality. The non-null operand is a carrier in a
+/// parameter and a box in a function value, so the checker must not unbox it up front.
+#[test]
+fn unsigned_nullable_equality_keeps_both_operands() {
+    let (body, _) =
+        checked_function_body("fun equal(a: UInt?, b: UInt): Boolean = a == b\n", "equal");
+    let kind = &body
+        .expr(root_expression(&body))
+        .expect("checked equality")
+        .kind;
+    assert!(
+        matches!(
+            kind,
+            FirExprKind::Equality {
+                operation: FirBinaryOperation::Equal,
+                mode: EqualityMode::Structural,
+                ..
+            }
+        ),
+        "unsigned equality must keep its operands, found {kind:?}"
+    );
+}
+
+/// `Int? == Int` still unboxes the nullable operand before the primitive comparison.
+#[test]
+fn signed_nullable_equality_unboxes_the_primitive() {
+    let (body, _) =
+        checked_function_body("fun equal(a: Int?, b: Int): Boolean = a == b\n", "equal");
+    let kind = &body
+        .expr(root_expression(&body))
+        .expect("checked equality")
+        .kind;
+    assert!(
+        matches!(
+            kind,
+            FirExprKind::NullablePrimitiveComparison {
+                nullable_first: true,
+                ..
+            }
+        ),
+        "a nullable Int still compares as a primitive, found {kind:?}"
+    );
+}
+
 /// `<A : Double, B : Double?>` compares as a primitive `Double` against a nullable `Double`.
 #[test]
 fn double_type_parameter_equality_uses_the_floating_bound() {
