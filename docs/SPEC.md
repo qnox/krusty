@@ -6355,9 +6355,30 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   so a typed crate selects the vararg. Equal element and parameter types keep the
   declaration that has no vararg, and a call with no arguments still prefers a defaulted
   parameter over an empty vararg. A contextual repository-owned generic factory call is
-  compared on those same mapped parameter types. Integer-literal adaptation reaches the
+  compared on those same mapped parameter types. An input-constrained factory such as
+  `pooled(Leaf())` keeps its recorded `Pooled<Leaf>` and outranks a contextual
+  `Pool<String>`. A result-only factory such as `crate()` is an ordinary successful
+  argument: scoring it below a supertype of its erased provisional
+  (`Crate<Any> <: Root`) dropped the vararg before specificity, so `narrower(crate())`
+  selected the fixed `Root` parameter. Integer-literal adaptation reaches the
   same tie-break, so `Byte` versus `vararg Byte` keeps the fixed declaration. Tests:
   `tests/vararg_element_specificity_e2e.rs`, box `vararg/kt10926.kt`.
+
+- **An input-constrained nested call is argument evidence; a result-only producer is not.**
+  `listOf(value)` and `xs.map { B(it) }` fix a type variable that also appears in the
+  result, so the provisional result constrains the enclosing call. `emptySet()` and
+  `ArrayList()` do not: only the enclosing expectation may finish them. `Collection<T>.plus`
+  therefore joins the receiver's element with that fixed nested element (`A` and `B` join
+  to `P`; `A` and `Int` join to `Any`) instead of pinning `T` to the receiver and then
+  rejecting `List<B>` against `Iterable<A>`. The same fixed result is what a concrete
+  constructor parameter sees. `Ov(listOf(1, 2))` is applicable to `List<Int>` because the
+  argument is `List<Int>`; rebinding `T` so the same call also satisfies
+  `Collection<String>` left the two constructors tied. A parameter that still mentions a
+  type variable, and a result-only producer, may still be completed from the expectation.
+  Tests: `tests/chained_plus_element_join_e2e.rs`,
+  `tests/operator_expected_result_seeding_e2e.rs`,
+  `tests/classpath_collection_and_nested_named_e2e.rs`
+  (`classpath_collection_ctor_overload_prefers_exact`).
 
 - **A plain constructor initializer types a capturable local.** `val sb = StringBuilder()` is
   capturable by an anonymous object exactly like an annotated local — the capture list infers the

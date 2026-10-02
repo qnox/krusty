@@ -514,8 +514,9 @@ fn bind_member_return_from_call_args(
         gsig.params.iter().zip(args).enumerate().filter_map(
             |(parameter, (&declared, argument))| {
                 (!no_infer_params.get(parameter).copied().unwrap_or(false)
-                    && !argument.is_expected_type_callable()
-                    && !argument.is_omitted_default())
+                    && !argument.is_omitted_default()
+                    && (!argument.is_expected_type_callable()
+                        || argument.result_is_input_constrained()))
                 .then_some((
                     parameter,
                     argument.inference_type(source, declared),
@@ -6045,13 +6046,12 @@ fn logical_call_params(
             .zip(arguments)
             .enumerate()
             .filter_map(|(parameter, (&declared, argument))| {
-                // A nested generic call's erased provisional result is not an input constraint.
-                // Once this candidate supplies a parameter, argument checking propagates it into
-                // the nested call.
-                (!argument.is_expected_type_callable()
-                    && !argument.is_lambda_literal()
-                    && !argument.is_omitted_default())
-                .then_some((
+                // A result-only nested call is not an input constraint; argument checking
+                // propagates the selected parameter into it. A nested call whose own inputs
+                // already fixed the result (`listOf(value)`, `xs.map { B(it) }`) is evidence:
+                // `Collection<T>.plus` joins that element type with the receiver instead of
+                // pinning `T` to the receiver alone.
+                argument.supplies_fixed_argument_type().then_some((
                     parameter,
                     argument.inference_type(source, declared),
                     argument.is_spread(),
@@ -6124,10 +6124,7 @@ fn indexed_call_shape(
         .iter()
         .enumerate()
         .filter_map(|(source_index, argument)| {
-            if argument.is_expected_type_callable()
-                || argument.is_lambda_literal()
-                || argument.is_omitted_default()
-            {
+            if !argument.supplies_fixed_argument_type() {
                 return None;
             }
             let parameter = if source_index < logical_vararg {

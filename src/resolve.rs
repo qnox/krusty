@@ -16627,9 +16627,15 @@ impl<'a> Checker<'a> {
                 return None;
             }
             let argument_kind = self.call_arg_kind(scope, argument);
+            // An input-constrained result already has a real type (`Pooled<Leaf>`, `List<Int>`),
+            // so the ordinary score applies. A result-only call such as `crate(): Crate<T>` has
+            // no fixed type: do not score its erased provisional (`Crate<Any> <: Root`) as a
+            // subtype, and do not rank the fit below that subtype either. An ordinary successful
+            // argument leaves both candidates tied so specificity can prefer the narrower vararg
+            // element.
             (argument_kind.is_expected_type_callable()
                 && !argument_kind.result_is_input_constrained())
-            .then_some(0)
+            .then_some(1)
             .or_else(|| self.member_argument_score(expected, semantic_actual))
             .or_else(|| contextual_call_result.then_some(0))
             .or_else(|| {
@@ -49126,9 +49132,16 @@ impl<'a> Checker<'a> {
                     // conversion. Narrowing that predicate is a project-wide decision (the plain-call and
                     // classpath-constructor origins already take it), not one to fork here.
                     ConstructorParameterConstraint::Concrete => {
+                        // `listOf(1, 2)` is already `List<Int>`. Rebinding that result to
+                        // `Collection<String>` would make the unrelated constructor applicable
+                        // and leave the two tied. A still-open producer (`emptyList()`) and a
+                        // parameter that still mentions a type variable may bind from the
+                        // expectation.
+                        let kind = self.call_arg_kind(scope, argument);
                         self.receiver_is_assignable(actual, expected)
                             || expected.accepts_numeric(actual)
-                            || self.call_result_can_bind_expected(argument, expected)
+                            || (kind.may_bind_result_during_overload_selection(expected)
+                                && self.call_result_can_bind_expected(argument, expected))
                     }
                     ConstructorParameterConstraint::Inferred => true,
                     ConstructorParameterConstraint::GenericConstructed => {
