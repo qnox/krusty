@@ -76,7 +76,7 @@ pub(in crate::jvm) fn published_floating_range_membership(
     )
 }
 
-impl Classpath {
+impl super::Classpath {
     pub(in crate::jvm) fn builtin_package_functions(
         &self,
         package: TypeName,
