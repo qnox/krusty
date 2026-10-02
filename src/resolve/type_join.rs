@@ -11,6 +11,23 @@ fn joined_star_projection(star_upper_bound: Ty, left: Ty, right: Ty) -> Option<T
         .then(|| Ty::star_projection(star_upper_bound))
 }
 
+/// Non-null built-in scalars. An empty contravariant intersection with one of these is `*`;
+/// two classifiers stay an intersection, which this join approximates as `Nothing`.
+fn builtin_scalar(ty: Ty) -> bool {
+    ty.is_unsigned()
+        || matches!(
+            ty,
+            Ty::Byte
+                | Ty::Short
+                | Ty::Int
+                | Ty::Long
+                | Ty::Float
+                | Ty::Double
+                | Ty::Char
+                | Ty::Boolean
+        )
+}
+
 /// Returns the flexible operand when the pair differs only by one top-level PLATFORM wrapper.
 ///
 /// This is intentionally exact. A nested PLATFORM occurrence belongs to the enclosing
@@ -88,6 +105,13 @@ pub(super) fn join_type_projection(
         } else {
             Ty::Nothing
         };
+        // A built-in scalar has no denotable intersection with an unrelated argument.
+        // `Comparable<UInt>` and `Comparable<ULong>` therefore join as `Comparable<*>`.
+        // Two classifiers keep `Nothing`, the approximation of their intersection type
+        // (`Contra<A>` and `Contra<B>` are `Contra<A & B>`).
+        if intersection == Ty::Nothing && (builtin_scalar(left) || builtin_scalar(right)) {
+            return Some(Ty::star_projection(star_upper_bound));
+        }
         return Some(if declaration_variance == TypeVariance::In {
             intersection
         } else {

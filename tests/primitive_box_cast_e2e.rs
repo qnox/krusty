@@ -63,6 +63,25 @@ fun box() : String {\n\
 }
 
 #[test]
+fn ordinary_platform_classifier_keeps_body_type_binding() {
+    const SRC: &str = "// WITH_STDLIB\n\
+fun box(): String {\n\
+    val value: Any = \"OK\"\n\
+    val typed: Object = value\n\
+    if (typed !is Object) return \"is\"\n\
+    val cast = value as Object\n\
+    val values = ArrayList<Object>()\n\
+    values.add(cast)\n\
+    return values[0] as String\n\
+}\n";
+    assert_eq!(
+        common::checker_diags_with_stdlib(SRC).expect("Kotlin stdlib fixture"),
+        [] as [String; 0],
+    );
+    common::expect_box_ok_with_stdlib(SRC, "PlatformObject");
+}
+
+#[test]
 fn is_check_on_primitive_operand_boxes() {
     // `x is Number` where an inline function's generic type parameter is specialized to a primitive
     // (`x: T`, `T = Int`): the operand is a raw `int` in the slot, so it must be BOXED before

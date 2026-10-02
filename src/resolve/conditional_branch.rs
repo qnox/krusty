@@ -2,6 +2,9 @@
 
 use super::{Checker, CheckerScope};
 use crate::ast::{Expr, ExprId, File};
+use crate::integer_constant::IntegerConstant;
+use crate::libraries::GenericSig;
+use crate::symbol_resolver::CallArgKind;
 use crate::types::Ty;
 
 /// Return an outer expectation only when it is a fixed type in this lexical scope.
@@ -12,6 +15,102 @@ pub(super) fn usable_expected(scope: &CheckerScope<'_>, expected: Option<Ty>) ->
     expected
         .filter(|ty| *ty != Ty::Error && !ty.mentions_pending())
         .filter(|ty| Checker::type_is_lexically_fixed(scope, *ty))
+}
+
+/// Retype integer-constant branches to the non-null primitive of the other branches.
+///
+/// A conditional with no expected type still adapts a constant that fits: `0` beside a `Long` is
+/// `Long`, `0` beside a `Byte` is `Byte`, and `0u` beside a `ULong` is `ULong`. Branches that are
+/// all integer constants stay constants, so `if (c) 1 else 2` remains `Int`. A constant that does
+/// not fit, or a non-constant of another primitive, is left unchanged.
+pub(super) fn integer_constant_branch_types(
+    checker: &Checker<'_>,
+    branches: &[(ExprId, Ty)],
+) -> Vec<Ty> {
+    let constants = branches
+        .iter()
+        .map(|(expression, _)| checker.integer_constant_provenance(*expression))
+        .collect::<Vec<_>>();
+    let types = branches.iter().map(|(_, ty)| *ty).collect::<Vec<_>>();
+    let Some(target) = integer_constant_sibling_primitive(checker, &types, &constants) else {
+        return types;
+    };
+    types
+        .into_iter()
+        .zip(constants)
+        .map(|(ty, constant)| if constant.is_some() { target } else { ty })
+        .collect()
+}
+
+/// The primitive every integer-constant branch fits, taken from the non-constant branches.
+fn integer_constant_sibling_primitive(
+    checker: &Checker<'_>,
+    types: &[Ty],
+    constants: &[Option<IntegerConstant>],
+) -> Option<Ty> {
+    let mut concrete = None;
+    for (ty, constant) in types.iter().zip(constants) {
+        if constant.is_some() {
+            continue;
+        }
+        concrete = Some(match concrete {
+            None => *ty,
+            Some(so_far) => checker.semantic_common_supertype(so_far, *ty)?,
+        });
+    }
+    let target = concrete?.non_null();
+    let fits = constants.iter().all(|constant| {
+        let Some(constant) = constant else {
+            return true;
+        };
+        let natural = match constant {
+            IntegerConstant::Signed(_) | IntegerConstant::DivisionByZero => Ty::Int,
+            IntegerConstant::Unsigned(_) => Ty::UInt,
+        };
+        CallArgKind::integer_constant(natural, *constant).adapts_integer_literal_to(target)
+    });
+    let has_constant = constants.iter().any(Option::is_some);
+    (fits && has_constant).then_some(target)
+}
+
+/// Adapt integer-constant branches, then join the pair the way `if` and elvis do.
+pub(super) fn join_adapted_branches(
+    checker: &mut Checker<'_>,
+    scope: &CheckerScope<'_>,
+    expected: Option<Ty>,
+    left_expr: ExprId,
+    left: Ty,
+    right_expr: ExprId,
+    right: Ty,
+    expression: ExprId,
+) -> Ty {
+    let adapted = integer_constant_branch_types(checker, &[(left_expr, left), (right_expr, right)]);
+    join_types(checker, scope, expected, adapted[0], adapted[1], expression)
+}
+
+/// Replace a `try` result when an integer constant was adapted to a sibling primitive.
+///
+/// The provisional result is the per-catch join. Adaptation re-joins only when a constant branch
+/// changed, and that second join uses [`try_branch_join`] so a non-constant primitive disagreement
+/// keeps the lenient result.
+pub(super) fn adapted_try_result(
+    checker: &Checker<'_>,
+    value_required: bool,
+    branches: &[(ExprId, Ty)],
+    provisional: Ty,
+) -> Ty {
+    let adapted = integer_constant_branch_types(checker, branches);
+    let changed = adapted
+        .iter()
+        .zip(branches.iter())
+        .any(|(adapted_ty, (_, original))| *adapted_ty != *original);
+    if !changed {
+        return provisional;
+    }
+    adapted
+        .into_iter()
+        .reduce(|left, right| try_branch_join(checker, value_required, left, right))
+        .unwrap_or(provisional)
 }
 
 /// Join the values produced by two conditional branches.
@@ -56,12 +155,23 @@ pub(super) fn join_results(
     expected: Option<Ty>,
     results: impl IntoIterator<Item = (Ty, ExprId)>,
 ) -> Option<Ty> {
-    results.into_iter().fold(None, |result, (ty, expression)| {
-        Some(match result {
-            Some(current) => join_types(checker, scope, expected, current, ty, expression),
-            None => ty,
+    let results = results.into_iter().collect::<Vec<_>>();
+    let adapted = integer_constant_branch_types(
+        checker,
+        &results
+            .iter()
+            .map(|(ty, expression)| (*expression, *ty))
+            .collect::<Vec<_>>(),
+    );
+    results
+        .into_iter()
+        .zip(adapted)
+        .fold(None, |result, ((_, expression), ty)| {
+            Some(match result {
+                Some(current) => join_types(checker, scope, expected, current, ty, expression),
+                None => ty,
+            })
         })
-    })
 }
 
 /// Join a `try`'s body and catch types where [`join_types`] does not apply: the `try` is a
@@ -73,8 +183,11 @@ pub(super) fn join_results(
 /// Branches that otherwise disagree give their common supertype where the value is discarded, as
 /// kotlinc's FIR types every `try` (`try { sb.append(x) } catch (e: E) { println(e) }` is `Any`);
 /// the JVM backend decides from that type whether the `try` holds a result temporary. A statement
-/// `try` is not otherwise constrained. A value-position disagreement keeps the lenient `Unit`: the
-/// backend stores every branch straight into one merge slot and cannot widen or box per branch.
+/// `try` is not otherwise constrained. Integer-constant branches are adapted to a sibling primitive
+/// before this function runs, so `try { longValue } catch (e: Exception) { 0 }` arrives as `Long`
+/// on every branch and the backend widens the stored value. A value-position disagreement that is
+/// not that adaptation keeps the lenient `Unit`: an `Int` expression beside a `Long` has no single
+/// primitive the backend can widen both branches to.
 pub(super) fn try_branch_join(
     checker: &Checker<'_>,
     value_required: bool,
@@ -112,6 +225,71 @@ pub(super) fn branch_value_expression(file: &File, expression: ExprId) -> ExprId
 }
 
 impl Checker<'_> {
+    fn conditional_call_result_signature(&self, expression: ExprId) -> Option<&GenericSig> {
+        let expression = branch_value_expression(self.file, expression);
+        if let Some(signature) = self.unbound_call_result_signature(expression) {
+            return Some(signature);
+        }
+        if self
+            .file
+            .call_type_args
+            .get(&expression.0)
+            .is_some_and(|arguments| !arguments.is_empty())
+        {
+            return None;
+        }
+        let signature = self.selected_generic_call_signature(expression)?;
+        signature
+            .formals
+            .iter()
+            .any(|formal| {
+                let formal = std::slice::from_ref(formal);
+                crate::types::ty_mentions_param(signature.ret, formal)
+                    && signature
+                        .receiver
+                        .is_none_or(|receiver| !crate::types::ty_mentions_param(receiver, formal))
+                    && signature
+                        .params
+                        .iter()
+                        .all(|parameter| !crate::types::ty_mentions_param(*parameter, formal))
+            })
+            .then_some(signature)
+    }
+
+    /// Report a conditional branch whose selected generic call remains symbolic after sibling
+    /// rebinding. A call defaulted to its formal's bound has no symbolic remainder and is not
+    /// diagnosed here.
+    pub(super) fn report_unbound_conditional_branch(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        branch: ExprId,
+    ) {
+        if self.postponed_argument_depth != 0 {
+            return;
+        }
+        let Some(signature) = self.unbound_call_result_signature(branch).cloned() else {
+            return;
+        };
+        let actual = self.expr_types[branch.0 as usize];
+        if Self::type_is_lexically_fixed(scope, actual) {
+            return;
+        }
+        let Some(formal) = signature
+            .formals
+            .iter()
+            .find(|formal| crate::types::ty_mentions_param(actual, std::slice::from_ref(formal)))
+        else {
+            return;
+        };
+        self.diags.error(
+            self.call_callee_name_span(branch),
+            format!(
+                "cannot infer type for type parameter '{}'. Specify it explicitly.",
+                crate::types::type_parameter_source_name(formal)
+            ),
+        );
+    }
+
     /// The outer expectation that fixes each branch's own generic result, so a sibling branch
     /// does not rebind it.
     ///

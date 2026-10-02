@@ -1,6 +1,7 @@
 //! Structural evaluation of compact signature expressions through the ordinary resolver adapter.
 
 use super::*;
+use crate::integer_constant::IntegerConstant;
 
 /// The sole structural evaluator for [`SigExpr`]. It knows only how graph nodes compose; every
 /// semantic decision is delegated to [`SignatureSemantics`].
@@ -32,9 +33,26 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
             expression: SigExprId,
             graph: &SignatureGraph,
             memo: &HashMap<SigExprId, ResolvedTy>,
-        ) -> Option<i32> {
+        ) -> Option<IntegerConstant> {
             match graph.expr(expression)? {
-                SigExpr::IntegerLiteral(value) => Some(value),
+                SigExpr::IntegerLiteral(value) => Some(IntegerConstant::Signed(value)),
+                SigExpr::UnsignedIntegerLiteral(value) => Some(IntegerConstant::Unsigned(value)),
+                SigExpr::Join { operands, .. } => {
+                    let operands = graph.operands(operands);
+                    if operands.is_empty() {
+                        return None;
+                    }
+                    let mut constants = Vec::with_capacity(operands.len());
+                    for &operand in operands {
+                        let constant = evaluated_integer_literal(semantics, operand, graph, memo)?;
+                        let ty = memo.get(&operand)?.get().non_null();
+                        match (ty, constant.is_unsigned()) {
+                            (Ty::Int, false) | (Ty::UInt, true) => constants.push(constant),
+                            _ => return None,
+                        }
+                    }
+                    IntegerConstant::representative(&constants)
+                }
                 SigExpr::Binary {
                     operator, lhs, rhs, ..
                 } => {
@@ -57,6 +75,58 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                 }
                 _ => None,
             }
+        }
+
+        /// Give each integer-constant operand the non-null primitive fixed by the other operands.
+        ///
+        /// All-constant joins stay constants: `if (c) 1 else 2` is still `Int`. A constant that
+        /// does not fit the sibling primitive leaves every operand unchanged.
+        fn adapt_integer_constant_operands<S: SignatureSemantics>(
+            semantics: &S,
+            operands: &[SigExprId],
+            resolved: &mut [ResolvedTy],
+            graph: &SignatureGraph,
+            memo: &HashMap<SigExprId, ResolvedTy>,
+            scope: SignatureScope,
+            origin: OriginId,
+        ) {
+            let constants = operands
+                .iter()
+                .zip(resolved.iter())
+                .map(|(operand, ty)| {
+                    let value = evaluated_integer_literal(semantics, *operand, graph, memo)?;
+                    matches!(ty.get().non_null(), Ty::Int | Ty::UInt).then_some(value)
+                })
+                .collect::<Vec<_>>();
+            if constants.iter().all(Option::is_some) || constants.iter().all(Option::is_none) {
+                return;
+            }
+            let concrete = resolved
+                .iter()
+                .zip(&constants)
+                .filter(|(_, constant)| constant.is_none())
+                .map(|(ty, _)| *ty)
+                .collect::<Vec<_>>();
+            let Ok(sibling) = (if concrete.len() == 1 {
+                Ok(concrete[0])
+            } else {
+                semantics.least_upper_bound(scope, origin, &concrete)
+            }) else {
+                return;
+            };
+            let mut adapted = Vec::with_capacity(resolved.len());
+            for (ty, constant) in resolved.iter().zip(&constants) {
+                if let Some(value) = *constant {
+                    let Some(next) = semantics.adapted_integer_constant_branch(*ty, value, sibling)
+                    else {
+                        return;
+                    };
+                    adapted.push(next);
+                } else {
+                    adapted.push(*ty);
+                }
+            }
+            resolved.copy_from_slice(&adapted);
         }
 
         fn argument_probe<'a, S: SignatureSemantics>(
@@ -865,6 +935,8 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                     SigExpr::Known(ty) => Ok(ty),
                     SigExpr::IntegerLiteral(_) => Ok(ResolvedTy::new(Ty::Int)
                         .expect("the built-in Int literal type is always publishable")),
+                    SigExpr::UnsignedIntegerLiteral(_) => Ok(ResolvedTy::new(Ty::UInt)
+                        .expect("the built-in UInt literal type is always publishable")),
                     SigExpr::DeclarationType(declaration) => {
                         demand(declaration).map(|signature| signature.result)
                     }
@@ -1405,6 +1477,15 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                                 break;
                             }
                         }
+                        adapt_integer_constant_operands(
+                            semantics,
+                            &operand_expressions,
+                            &mut resolved_operands,
+                            graph,
+                            memo,
+                            scope,
+                            origin,
+                        );
                         semantics.least_upper_bound(scope, origin, &resolved_operands)
                     }
                     SigExpr::Nullable(base) => semantics.make_nullable(evaluate_expression(

@@ -3,3 +3,9 @@
 
 [a_context_receiver_function_value_takes_its_context_and_receiver_from_scope]
 2.4.0..2.4.20:
+
+[a_receiver_function_value_without_context_does_not_hide_an_applicable_callable]
+2.4.20:
+
+[a_receiver_function_value_without_receiver_leaves_arguments_for_the_winning_callable]
+2.4.20:

@@ -6498,6 +6498,37 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   conditional is still computed as `Int` and widened at the use, so an overflowing `Int` addition
   inside a branch wraps before that widening. Test:
   `tests/numeric_ops_coverage_e2e.rs::integer_constant_conditional_adapts`.
+- **An overflowing `Int` constant expression widens after it wraps.** `2147483647 + 1` and
+  `-(1 shl 31)` are `Int` computations: the addition and the shift overflow in 32 bits, unary minus
+  of `Int.MIN_VALUE` stays `Int.MIN_VALUE`, and only then does the value become `Long`
+  (`-2147483648L`). A non-constant `Int` does not become `Long`. The addition stays typed `Int`
+  and the initializer records a numeric conversion. Tests:
+  `resolve::integer_constants::tests::overflowing_int_constant_initializers_widen_to_long`,
+  `tests/integer_literal_branch_join_e2e.rs::overflowing_int_constant_expression_wraps_before_adapting_to_long`.
+- **An `Int` division or remainder by zero stays an integer constant.** `1 / 0` and `1 % 0` have no
+  compile-time magnitude — executing them throws — but they are still `Int` constant expressions, so
+  they adapt to `Long` the way every `Int` constant does. They do not narrow to `Byte` or `Short`.
+  A non-constant operand (`value / 0`) does not adapt. A `const val` cannot publish the missing
+  magnitude and is rejected with `const 'val' initializer must be a constant value.` Tests:
+  `resolve::integer_constants::tests::division_by_zero_adapts_to_long_without_a_folded_value`,
+  `tests/integer_literal_branch_join_e2e.rs::division_by_zero_int_constant_throws_after_adapting_to_long`,
+  `tests/classpath_jdk_static_e2e.rs::non_literal_int_does_not_match_long_parameter`.
+- **An integer-constant branch takes a sibling primitive.** An `if`, `when`, elvis, or `try` with no
+  expected type still adapts an integer-constant branch to the non-null primitive of the other
+  branches when every such constant fits: `if (flag) current() - start else 0` is `Long`,
+  `if (flag) byteValue else 0` is `Byte`,   `if (flag) ulongValue else 0u` is `ULong`, and
+  `if (flag) longOrNull else 0` is `Long?`. An unsigned constant keeps its full `UInt` magnitude,
+  including values above `Int.MAX_VALUE`: `2147483648u` and `UInt.MAX_VALUE` beside a `ULong` are
+  `ULong`. Unsigned arithmetic is not that constant. `if (flag) ulongValue else 65535u + 1u` is
+  not a `ULong`: an explicit `ULong` return is `Comparable<*>` on the reference compiler, and
+  inferring the return lowers the sum as `Long` and throws. The same magnitude refuses a narrower
+  unsigned sibling (`2147483648u` beside a `UShort`).
+  Checker and signature evaluation share one range test, so those boundaries cannot drift. The same
+  approximation infers an expression body's return type. A conditional whose branches are all
+  integer constants stays an integer constant (`if (c) 1 else 2` is `Int` and still prefers
+  `f(Int)` over `f(Long)`). A constant that does not fit (`200` beside a `Byte`) and a non-constant
+  of another primitive (`anInt` beside a `Long`) do not adapt. Test:
+  `tests/integer_literal_branch_join_e2e.rs`.
 - **`UByte`/`UShort` operate as `UInt`.** Their representation is the SIGN-extended `byte`/`short` the
   JVM loads, so every widening out of it masks first (`UByte.toInt()` is `iand 0xFF`, `UShort.toInt()`
   is `iand 0xFFFF`) — exactly kotlinc's lowering. Kotlin gives them no arithmetic of their own: each
@@ -7099,6 +7130,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `src/resolve/alias_constructor_application.rs`. Tests:
   `tests/typealias_constructor_inference_e2e.rs::an_omitted_stdlib_alias_argument_is_inferred_from_the_constructor_arguments`,
   `tests/typealias_constructor_inference_e2e.rs::an_omitted_source_alias_argument_is_inferred_through_the_alias_expansion`.
+  The alias that supplies those arguments is the declaration selected on the classifier tower, not
+  every later alias of the same spelling. A same-package `class Pick<A, B>` outranks
+  `import lower.*; typealias Pick<T> = sample.Pick<T, T>`, so `Pick<First, Second>(First, Second)`
+  is the class. Re-reading the spelling after selection would apply the alias and reject two type
+  arguments. The same selected binding is what an applied callable reference
+  (`Pick<First, Second>::selected`) already uses. Test:
+  `tests/callable_ref_e2e.rs::an_applied_callable_reference_keeps_the_selected_classifier_rung`.
 - **Sealed exhaustiveness descends the hierarchy.** A sealed subclass that is ITSELF sealed is
   covered when all of ITS subclasses are: the hierarchy is a tree and only its LEAVES can be
   instantiated. Checking only the DIRECT subclasses reported
@@ -7581,6 +7619,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   like a written argument; omitting that left an `int` in an `Object` slot, which is a `VerifyError`
   at class load rather than a wrong answer.
   Tests: `tests/context_parameter_signature_order_e2e.rs`.
+
+- **A receiver-function value with a missing context does not hide a later callable.**
+  `val action: context(Needed) Receiver.() -> Mark` invoked as `action()` is applicable only when
+  both an implicit `Receiver` and a `Needed` are in scope. When `Needed` is absent, the value is
+  not a committed error: an applicable top-level `fun action(): Mark` is selected and runs. When
+  that value is the only candidate, the diagnostic names each missing anonymous function-type
+  context parameter in source order (`no context argument for 'p1: Needed' found.`). Reporting the
+  gap from `FunctionN.invoke` instead hides that later function.
+  Tests:
+  `tests/context_function_type_e2e.rs::a_receiver_function_value_without_context_does_not_hide_an_applicable_callable`,
+  `tests/context_function_type_e2e.rs::a_lone_receiver_function_value_reports_its_missing_context`.
 
 - **A flow narrowing does not survive a loop that writes its subject.** A straight-line proof is a
   proof about ONE edge, and a loop has a back edge: a body that reassigns `x` reaches its own start
@@ -10757,17 +10806,24 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   spellings uniformly); a class TARGET whose type argument carries the `->`
   (`Map<String, (Int) -> Int>`) keeps its plain class-name alias. An alias whose target is ITSELF a
   generic fn alias reference (`typealias Chain<T> = Mapper<T, String>` — no `->` on the line) is not
-  expanded (unresolved → skip). (`generic_fun_type_alias_substitutes_use_site_args`,
-  `generic_suspend_fun_type_alias`, `class_target_alias_with_fn_type_argument_is_preserved`.)
+  expanded (unresolved → skip). JVM metadata may encode a suspend alias with a continuation-bearing
+  physical `FunctionN`; the JVM provider normalizes that to the source-arity classifier before
+  publishing the common semantic record. A use `Bar<String>` still substitutes into the recorded
+  `(T) -> String` template. Applying the
+  use-site argument to `FunctionN` itself would type the value as `Function1<String>` and reject
+  both the lambda and a dependency parameter that already expanded to `(String) -> String`.
+  (`generic_fun_type_alias_substitutes_use_site_args`,
+  `generic_suspend_fun_type_alias`, `class_target_alias_with_fn_type_argument_is_preserved`,
+  `classpath_generic_function_typealias_substitutes_arguments`,
+  `classpath_suspend_function_typealias_substitutes_arguments`.)
+  Corpus: `compileKotlinAgainstKotlin/typeAliasesKt13181.kt`.
 
 - **An UNRESOLVED local type annotation is an error, not a silent `Error` bind.** `resolve_ty` is
   deliberately lenient (returns `Ty::Error` with no diagnostic) for expression positions, but a
   local whose annotation fails to resolve would take its initializer's shape with every use-site
-  check Error-suppressed — a cross-module `val b: Bar<String> = { "OK" }` (alias declared in another
-  module, not importable) SAM-converts the lambda by its own arity and throws
-  `IncompatibleClassChangeError` at the call expecting the annotated shape (corpus
-  `typeAliasesKt13181.kt`, unlocked by the generic-alias expansion). kotlinc rejects the unresolved
-  annotation; krusty now does too. (`unresolved_local_type_annotation_is_rejected`.)
+  check Error-suppressed — a lambda then SAM-converts by its own arity and throws
+  `IncompatibleClassChangeError` at the call expecting the annotated shape. kotlinc rejects the
+  unresolved annotation; krusty now does too. (`unresolved_local_type_annotation_is_rejected`.)
 
 - **A `suspend Bar.() -> R` value invoked with member syntax is a suspension point.** `b.f()` /
   `b?.f()` where `f: suspend Bar.() -> R` is in lexical scope resolves like the non-suspend

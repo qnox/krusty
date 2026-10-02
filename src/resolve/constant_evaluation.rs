@@ -88,6 +88,7 @@ pub(super) fn source_literal_constant(
 }
 
 /// Checked facts needed to evaluate one `const val` initializer.
+#[derive(Clone, Copy)]
 pub(crate) struct CheckedConstantExpression<'a> {
     pub file: &'a File,
     pub expression_types: &'a [Ty],
@@ -187,6 +188,19 @@ impl Evaluator<'_> {
                 let operand = self.evaluate(*receiver, None, depth + 1)?;
                 evaluate_numeric_conversion(operand, ty)
             }
+            Expr::Call { callee, args } if args.len() == 1 => {
+                let intrinsic = self
+                    .context
+                    .resolved_calls
+                    .get(&expression)
+                    .and_then(ResolvedCall::compiler_intrinsic)?;
+                let Expr::Member { receiver, .. } = self.context.file.expr(*callee) else {
+                    return None;
+                };
+                let receiver = self.evaluate(*receiver, None, depth + 1)?;
+                let argument = self.evaluate(args[0], None, depth + 1)?;
+                evaluate_primitive_intrinsic(intrinsic, receiver, argument, ty)
+            }
             _ => None,
         }
     }
@@ -250,6 +264,36 @@ impl Evaluator<'_> {
         .then_some(())?;
         arithmetic_numeric(expected, left, right, result_ty)
     }
+}
+
+fn evaluate_primitive_intrinsic(
+    intrinsic: CompilerIntrinsic,
+    receiver: LibraryConst,
+    argument: LibraryConst,
+    ty: Ty,
+) -> Option<LibraryConst> {
+    let value = match (ty.non_null(), intrinsic) {
+        (Ty::Int, CompilerIntrinsic::PrimitiveShiftLeft) => {
+            LibConst::Int(constant_i32(&receiver)?.wrapping_shl(constant_i32(&argument)? as u32))
+        }
+        (Ty::Int, CompilerIntrinsic::PrimitiveShiftRight) => {
+            LibConst::Int(constant_i32(&receiver)?.wrapping_shr(constant_i32(&argument)? as u32))
+        }
+        (Ty::Int, CompilerIntrinsic::PrimitiveUnsignedShiftRight) => LibConst::Int(
+            (constant_i32(&receiver)? as u32).wrapping_shr(constant_i32(&argument)? as u32) as i32,
+        ),
+        (Ty::Long, CompilerIntrinsic::PrimitiveShiftLeft) => {
+            LibConst::Long(constant_i64(&receiver)?.wrapping_shl(constant_i32(&argument)? as u32))
+        }
+        (Ty::Long, CompilerIntrinsic::PrimitiveShiftRight) => {
+            LibConst::Long(constant_i64(&receiver)?.wrapping_shr(constant_i32(&argument)? as u32))
+        }
+        (Ty::Long, CompilerIntrinsic::PrimitiveUnsignedShiftRight) => LibConst::Long(
+            (constant_i64(&receiver)? as u64).wrapping_shr(constant_i32(&argument)? as u32) as i64,
+        ),
+        _ => return None,
+    };
+    Some(LibraryConst { ty, value })
 }
 
 fn retype_constant(mut constant: LibraryConst, ty: Ty) -> Option<LibraryConst> {

@@ -285,6 +285,10 @@ impl crate::symbol_source::SymbolSource for ExistingLibrary {
         .then_some(name)
         .filter(|name| matches!(*name, "adjust" | "configure" | "transform")) else {
             return std::rc::Rc::new(ResolvedSymbols {
+                classifier_declaration: classifier
+                    .as_ref()
+                    .and(classifier_name)
+                    .map(crate::libraries::ClassifierDeclaration::Ordinary),
                 classifier_name: classifier.as_ref().and(classifier_name),
                 classifier,
                 ..ResolvedSymbols::default()
@@ -336,6 +340,10 @@ impl crate::symbol_source::SymbolSource for ExistingLibrary {
         });
         std::rc::Rc::new(ResolvedSymbols {
             builtin_classifier: false,
+            classifier_declaration: classifier
+                .as_ref()
+                .and(classifier_name)
+                .map(crate::libraries::ClassifierDeclaration::Ordinary),
             classifier_name: classifier.as_ref().map(|classifier| {
                 classifier
                     .alias_target

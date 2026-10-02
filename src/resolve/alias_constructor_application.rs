@@ -29,6 +29,20 @@ impl Checker<'_> {
             let identity = self.scoped_source_alias_identity(scope, name)?;
             self.source_alias_expansion(identity)?
         };
+        Some(self.alias_constructor_call_ty(scope, call, name, &formals, expansion, expected))
+    }
+
+    /// Apply `formals`/`expansion` as the constructor call `name`. The caller has already chosen
+    /// which alias declaration won; this does not look the spelling up again.
+    pub(super) fn alias_constructor_call_ty(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        call: ExprId,
+        name: &str,
+        formals: &[String],
+        expansion: Ty,
+        expected: Option<Ty>,
+    ) -> Ty {
         let arguments = self
             .file
             .call_type_args
@@ -43,7 +57,7 @@ impl Checker<'_> {
         // constructor selection; if it is, the array constructor consumes the same semantic shape.
         if arguments.is_empty() && !formals.is_empty() {
             let signature = GenericSig {
-                formals: formals.clone(),
+                formals: formals.to_vec(),
                 formal_bounds: vec![vec![Ty::nullable(Ty::obj("kotlin/Any"))]; formals.len()],
                 receiver: None,
                 params: Vec::new(),
@@ -70,18 +84,16 @@ impl Checker<'_> {
                     )
                 })
                 .unwrap_or_default();
-            return Some(crate::symbol_resolver::ty_subst_keep_unbound(
-                expansion, &bindings,
-            ));
+            return crate::symbol_resolver::ty_subst_keep_unbound(expansion, &bindings);
         }
-        Some(self.alias_application_ty(
+        self.alias_application_ty(
             scope,
-            formals,
+            formals.to_vec(),
             expansion,
             name,
             &arguments,
             self.call_callee_name_span(call),
-        ))
+        )
     }
 
     /// The facet of an alias constructor application that constructor selection may treat as

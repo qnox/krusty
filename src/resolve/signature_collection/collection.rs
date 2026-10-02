@@ -4356,7 +4356,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                 continue;
             };
             let identity = crate::types::type_name_child(package, alias);
-            if let Some(target) = expansion.kotlin_class_internal() {
+            if let Some(target) = crate::libraries::type_alias_target_classifier(expansion) {
                 table.source_alias_fqns.insert(identity, target);
             }
             table
@@ -4456,7 +4456,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                     .split('.')
                     .fold(package, crate::types::type_name_child);
                 let identity = crate::types::type_name_child(owner, &alias.name);
-                if let Some(target) = expansion.kotlin_class_internal() {
+                if let Some(target) = crate::libraries::type_alias_target_classifier(expansion) {
                     table.source_alias_fqns.insert(identity, target);
                 }
                 table

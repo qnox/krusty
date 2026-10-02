@@ -1,3 +1,4 @@
+use crate::integer_constant::IntegerConstant;
 use crate::libraries::{GenericSig, SemanticPlatform};
 use crate::symbol_source::SymbolSource;
 use crate::types::Ty;
@@ -20,14 +21,26 @@ pub(crate) enum CallArgKind {
         generic_sig: std::sync::Arc<GenericSig>,
     },
     /// A safely folded integer constant and its ordinary runtime type.
-    IntegerLiteral { ty: Ty, value: i32 },
+    IntegerLiteral { ty: Ty, constant: IntegerConstant },
     /// A legal declaration-default slot produced by the shared argument mapper.
     OmittedDefault,
 }
 
 impl CallArgKind {
+    #[cfg(test)]
     pub(crate) fn integer_literal(ty: Ty, value: i32) -> Self {
-        Self::IntegerLiteral { ty, value }
+        let constant = if ty.is_unsigned() {
+            u64::try_from(value)
+                .map(IntegerConstant::Unsigned)
+                .unwrap_or(IntegerConstant::Signed(value))
+        } else {
+            IntegerConstant::Signed(value)
+        };
+        Self::integer_constant(ty, constant)
+    }
+
+    pub(crate) fn integer_constant(ty: Ty, constant: IntegerConstant) -> Self {
+        Self::IntegerLiteral { ty, constant }
     }
 
     pub(crate) fn ty(&self) -> Ty {
@@ -61,9 +74,9 @@ impl CallArgKind {
                 provisional: substitute(*provisional),
                 generic_sig: generic_sig.clone(),
             },
-            Self::IntegerLiteral { ty, value } => Self::IntegerLiteral {
+            Self::IntegerLiteral { ty, constant } => Self::IntegerLiteral {
                 ty: substitute(*ty),
-                value: *value,
+                constant: *constant,
             },
             Self::OmittedDefault => Self::OmittedDefault,
         }
@@ -205,18 +218,15 @@ impl CallArgKind {
     }
 
     pub(crate) fn adapts_integer_literal_to(&self, parameter: Ty) -> bool {
-        let Self::IntegerLiteral { ty, value } = self else {
+        let Self::IntegerLiteral { ty, constant } = self else {
             return false;
         };
-        match (*ty, parameter) {
-            (Ty::Int, Ty::Byte) => i8::try_from(*value).is_ok(),
-            (Ty::Int, Ty::Short) => i16::try_from(*value).is_ok(),
-            (Ty::Int, Ty::Long) => true,
-            (Ty::UInt, Ty::UByte) => u8::try_from(*value).is_ok(),
-            (Ty::UInt, Ty::UShort) => u16::try_from(*value).is_ok(),
-            (Ty::UInt, Ty::ULong) => *value >= 0,
+        let family = match (*ty, parameter) {
+            (Ty::Int, Ty::Byte | Ty::Short | Ty::Long) => true,
+            (Ty::UInt, Ty::UByte | Ty::UShort | Ty::ULong) => true,
             _ => false,
-        }
+        };
+        family && constant.fits(parameter)
     }
 
     pub(crate) fn adapts_signed_integer_literal_to_unsigned(&self, parameter: Ty) -> bool {

@@ -4844,38 +4844,21 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         &self,
         operator: crate::fir::SigBinaryOperator,
         lhs_ty: crate::fir::ResolvedTy,
-        lhs: i32,
+        lhs: crate::integer_constant::IntegerConstant,
         rhs_ty: crate::fir::ResolvedTy,
-        rhs: i32,
+        rhs: crate::integer_constant::IntegerConstant,
         result: crate::fir::ResolvedTy,
-    ) -> Option<i32> {
-        // `select_binary` has already resolved the operator convention. Only the exact primitive
-        // Int -> Int operation has Kotlin integer-constant provenance; a user operator that happens
-        // to return Int, or arithmetic on another primitive width, is not an adaptable Int literal.
-        if lhs_ty.get() != Ty::Int || rhs_ty.get() != Ty::Int || result.get() != Ty::Int {
-            return None;
-        }
-        match operator {
-            crate::fir::SigBinaryOperator::Add => Some(lhs.wrapping_add(rhs)),
-            crate::fir::SigBinaryOperator::Subtract => Some(lhs.wrapping_sub(rhs)),
-            crate::fir::SigBinaryOperator::Multiply => Some(lhs.wrapping_mul(rhs)),
-            crate::fir::SigBinaryOperator::Divide if rhs != 0 => Some(lhs.overflowing_div(rhs).0),
-            crate::fir::SigBinaryOperator::Remainder if rhs != 0 => {
-                Some(lhs.overflowing_rem(rhs).0)
-            }
-            crate::fir::SigBinaryOperator::Divide
-            | crate::fir::SigBinaryOperator::Remainder
-            | crate::fir::SigBinaryOperator::Equal
-            | crate::fir::SigBinaryOperator::NotEqual
-            | crate::fir::SigBinaryOperator::Less
-            | crate::fir::SigBinaryOperator::LessOrEqual
-            | crate::fir::SigBinaryOperator::Greater
-            | crate::fir::SigBinaryOperator::GreaterOrEqual
-            | crate::fir::SigBinaryOperator::BooleanAnd
-            | crate::fir::SigBinaryOperator::BooleanOr
-            | crate::fir::SigBinaryOperator::ReferentialEqual
-            | crate::fir::SigBinaryOperator::ReferentialNotEqual => None,
-        }
+    ) -> Option<crate::integer_constant::IntegerConstant> {
+        super::integer_constants::fold_selected_binary(operator, lhs_ty, lhs, rhs_ty, rhs, result)
+    }
+
+    fn adapted_integer_constant_branch(
+        &self,
+        current: crate::fir::ResolvedTy,
+        constant: crate::integer_constant::IntegerConstant,
+        sibling: crate::fir::ResolvedTy,
+    ) -> Option<crate::fir::ResolvedTy> {
+        super::integer_constants::adapted_branch(current, constant, sibling)
     }
 
     fn select_binary(
