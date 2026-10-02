@@ -232,7 +232,7 @@ const DECLARES_DEFAULT_VALUE: u64 = 2;
 /// The records are appended AFTER the parameter's type, which is also the order kotlinc interns their
 /// class ids in: a parameter's annotation descriptor lands in `d2` after the parameter's own name.
 pub(crate) fn append_param_annotations(
-    st: &mut StringTable,
+    st: &mut StringTable<'_>,
     vp: &mut Pb,
     annotations: &[crate::ir::AppliedAnnotation],
 ) {
@@ -353,7 +353,7 @@ fn modality_bits(modality: crate::ir::IrPropertyModality) -> u64 {
     }
 }
 
-fn type_pb(st: &mut StringTable, t: Ty, type_parameters: &TypeParameters) -> Pb {
+fn type_pb(st: &mut StringTable<'_>, t: Ty, type_parameters: &TypeParameters) -> Pb {
     encode_type(st, t, type_parameters)
         .unwrap_or_else(|error| panic!("invalid emitted metadata type: {error}"))
 }
@@ -361,7 +361,7 @@ fn type_pb(st: &mut StringTable, t: Ty, type_parameters: &TypeParameters) -> Pb 
 /// [`type_pb`] for a DECLARED type, carrying how source spelled it so a `typealias` becomes
 /// `Type.abbreviated_type` (field 13).
 fn type_pb_declared(
-    st: &mut StringTable,
+    st: &mut StringTable<'_>,
     t: Ty,
     spelled: &crate::spelling::Spelled,
     type_parameters: &TypeParameters,
@@ -373,7 +373,7 @@ fn type_pb_declared(
 /// [`type_pb`], but a `Some(id)` encodes the type as `Type.typeParameter` (f7) — a bare type parameter
 /// (`val a: T`), which kotlinc records by INDEX rather than by the erased `java/lang/Object` class name.
 fn type_pb_tp(
-    st: &mut StringTable,
+    st: &mut StringTable<'_>,
     t: Ty,
     tparam: Option<u32>,
     spelled: &crate::spelling::Spelled,
@@ -417,7 +417,11 @@ struct CtorShape<'a> {
     annotations: &'a [crate::ir::AppliedAnnotation],
 }
 
-fn build_ctor(st: &mut StringTable, shape: CtorShape<'_>, type_parameters: &TypeParameters) -> Pb {
+fn build_ctor(
+    st: &mut StringTable<'_>,
+    shape: CtorShape<'_>,
+    type_parameters: &TypeParameters,
+) -> Pb {
     let mut ctor = Pb::new();
     // `HAS_ANNOTATIONS` (bit 0) follows from the records below, exactly like a function's. Setting it
     // forces the flags field to be WRITTEN, so the proto default the caller was relying on has to be
@@ -514,7 +518,7 @@ fn build_ctor(st: &mut StringTable, shape: CtorShape<'_>, type_parameters: &Type
     ctor
 }
 
-fn jvm_method_sig(st: &mut StringTable, name: Option<&str>, desc: &str) -> Pb {
+fn jvm_method_sig(st: &mut StringTable<'_>, name: Option<&str>, desc: &str) -> Pb {
     let mut p = Pb::new();
     if let Some(n) = name {
         p.field_varint(1, st.local(n) as u64); // JvmMethodSignature.name = 1
@@ -579,6 +583,9 @@ impl Default for CapturedTypeParameters<'_> {
 }
 
 pub struct ClassTail<'a> {
+    /// Checked approximation of a non-denotable intersection at the metadata boundary. The
+    /// serializer has no declaration source and must never guess a classifier's variance.
+    pub intersection_approximation: Option<&'a dyn Fn(Ty) -> Option<Ty>>,
     /// How SOURCE spelled the CLASS HEADER's types: primary-constructor parameters and
     /// type-parameter bounds. Members carry their own on [`FnMeta`]/[`PropMeta`].
     pub spellings: crate::spelling::DeclaredSpellings,
@@ -678,6 +685,7 @@ static NO_LOCAL_CLASSIFIERS: std::sync::LazyLock<std::collections::HashSet<TypeN
 impl Default for ClassTail<'_> {
     fn default() -> Self {
         ClassTail {
+            intersection_approximation: None,
             supertype_spellings: &[],
             spellings: crate::spelling::DeclaredSpellings::default(),
             flags: DEFAULT_CLASS_FLAGS,
@@ -726,7 +734,7 @@ pub struct EnumEntryMeta<'a> {
 
 /// f13 = an enum entry (`EnumEntry { name = f1, annotation = f2 }`). The entry's NAME interns
 /// before its annotations, and each annotation's own strings follow it, kotlinc's `d2` order.
-fn enum_entry_pb(st: &mut StringTable, entry: &EnumEntryMeta<'_>) -> Pb {
+fn enum_entry_pb(st: &mut StringTable<'_>, entry: &EnumEntryMeta<'_>) -> Pb {
     let mut ee = Pb::new();
     ee.field_varint(1, st.local(entry.name) as u64);
     if let Some(annotations) = entry.annotations {
@@ -750,8 +758,11 @@ pub fn build_class(
     let class_flags = tail.flags;
     let companion_name = tail.companion;
     let nested_class_names = tail.nested;
-    let mut st =
-        StringTable::with_local_classifiers(tail.local_classifiers, tail.enum_entry_bodies);
+    let mut st = StringTable::with_local_classifiers(
+        tail.local_classifiers,
+        tail.enum_entry_bodies,
+        tail.intersection_approximation,
+    );
 
     // STRINGS ARE INTERNED IN kotlinc's ORDER (fq_name, supertype, constructors, properties'
     // JVM signatures, functions, enum entries, then the companion + nested names LAST) even though the
@@ -910,7 +921,7 @@ pub fn build_class(
         ));
     }
 
-    let build_prop = |st: &mut StringTable, p: &PropMeta| {
+    let build_prop = |st: &mut StringTable<'_>, p: &PropMeta| {
         let mut prop = Pb::new();
         // kotlinc's serializer names a type parameter the declaration being written owns
         // (`Type.type_parameter_name`) and addresses an enclosing class's by table id.
@@ -924,7 +935,7 @@ pub fn build_class(
                 .iter()
                 .map(|parameter| parameter.semantic_name.as_str()),
         ));
-        let return_type = |st: &mut StringTable, type_parameters: &TypeParameters| {
+        let return_type = |st: &mut StringTable<'_>, type_parameters: &TypeParameters| {
             type_pb_tp(
                 st,
                 p.ty,
@@ -1150,7 +1161,7 @@ pub fn build_class(
     };
 
     // Member functions (name f2, return_type f3, value_parameter f6, flags f9; JVM sig derivable).
-    let build_func = |st: &mut StringTable,
+    let build_func = |st: &mut StringTable<'_>,
                       requirements: &mut VersionRequirementTable,
                       m: &FnMeta| {
         let mut func = Pb::new();

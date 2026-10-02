@@ -145,14 +145,14 @@ impl FnMeta {
 /// table ids via `tps`. Handles generic class arguments (`Type.argument` = 2), nullability
 /// (`Type.nullable` = 3), class types (`Type.class_name` = 6), and type parameters
 /// (`Type.type_parameter` = 7).
-fn type_pb_generic(st: &mut StringTable, t: Ty, tps: &TypeParameters) -> Pb {
+fn type_pb_generic(st: &mut StringTable<'_>, t: Ty, tps: &TypeParameters) -> Pb {
     encode_type(st, t, tps).unwrap_or_else(|error| panic!("invalid emitted metadata type: {error}"))
 }
 
 /// [`type_pb_generic`] for a DECLARED type, carrying how source spelled it so a `typealias`
 /// becomes `Type.abbreviated_type` (field 13).
 fn type_pb_declared(
-    st: &mut StringTable,
+    st: &mut StringTable<'_>,
     t: Ty,
     spelled: &crate::spelling::Spelled,
     tps: &TypeParameters,
@@ -165,7 +165,7 @@ fn type_pb_declared(
 /// mirror of the reader in `src/jvm/metadata.rs`. `tps` maps the function's type-parameter names
 /// to their table ids (for an `is R` conclusion).
 fn contract_pb(
-    st: &mut StringTable,
+    st: &mut StringTable<'_>,
     contract: &crate::contracts::Contract,
     tps: &TypeParameters,
 ) -> Pb {
@@ -176,7 +176,7 @@ fn contract_pb(
     p
 }
 
-fn effect_pb(st: &mut StringTable, e: &crate::contracts::Effect, tps: &TypeParameters) -> Pb {
+fn effect_pb(st: &mut StringTable<'_>, e: &crate::contracts::Effect, tps: &TypeParameters) -> Pb {
     use crate::contracts::Effect;
     let mut p = Pb::new();
     match e {
@@ -200,7 +200,7 @@ fn effect_pb(st: &mut StringTable, e: &crate::contracts::Effect, tps: &TypeParam
 
 fn write_returns_effect(
     p: &mut Pb,
-    st: &mut StringTable,
+    st: &mut StringTable<'_>,
     rv: &crate::contracts::ReturnsValue,
     conclusion: Option<&crate::contracts::Condition>,
     tps: &TypeParameters,
@@ -238,7 +238,11 @@ fn expression_param_ref_pb(param: crate::contracts::ParamRef) -> Pb {
     p
 }
 
-fn condition_pb(st: &mut StringTable, c: &crate::contracts::Condition, tps: &TypeParameters) -> Pb {
+fn condition_pb(
+    st: &mut StringTable<'_>,
+    c: &crate::contracts::Condition,
+    tps: &TypeParameters,
+) -> Pb {
     use crate::contracts::{Condition, ConditionType};
     let mut p = Pb::new();
     match c {
@@ -302,7 +306,7 @@ fn zigzag_i64(value: i64) -> u64 {
     ((value as u64) << 1) ^ ((value >> 63) as u64)
 }
 
-fn annotation_value_pb(st: &mut StringTable, value: &crate::ir::AnnoValue) -> Pb {
+fn annotation_value_pb(st: &mut StringTable<'_>, value: &crate::ir::AnnoValue) -> Pb {
     use crate::ir::{AnnoValue, IrConst};
     let mut out = Pb::new();
     match value {
@@ -386,7 +390,10 @@ fn annotation_value_pb(st: &mut StringTable, value: &crate::ir::AnnoValue) -> Pb
     out
 }
 
-pub(crate) fn annotation_pb(st: &mut StringTable, annotation: &crate::ir::AppliedAnnotation) -> Pb {
+pub(crate) fn annotation_pb(
+    st: &mut StringTable<'_>,
+    annotation: &crate::ir::AppliedAnnotation,
+) -> Pb {
     let mut out = Pb::new();
     out.field_varint(1, u64::from(st.class_id(annotation.internal)));
     for (name, value) in &annotation.values {
@@ -399,7 +406,7 @@ pub(crate) fn annotation_pb(st: &mut StringTable, annotation: &crate::ir::Applie
 }
 
 fn function_pb(
-    st: &mut StringTable,
+    st: &mut StringTable<'_>,
     f: &FnMeta,
     requirements: &mut VersionRequirementTable,
     param_assertions: bool,
@@ -600,7 +607,7 @@ fn function_pb(
 }
 
 /// The function's `JvmMethodSignature` message, or `None` when it records no physical handle.
-fn method_signature_pb(st: &mut StringTable, f: &FnMeta) -> Option<Pb> {
+fn method_signature_pb(st: &mut StringTable<'_>, f: &FnMeta) -> Option<Pb> {
     let desc = f.jvm_desc.as_ref()?;
     let mut sig = Pb::new();
     if let Some(name) = &f.jvm_name {
@@ -706,7 +713,7 @@ fn visibility_bits(visibility: crate::types::Visibility) -> u64 {
     }
 }
 
-pub(crate) fn type_alias_pb(st: &mut StringTable, alias: &TypeAliasMeta) -> Pb {
+pub(crate) fn type_alias_pb(st: &mut StringTable<'_>, alias: &TypeAliasMeta) -> Pb {
     let mut p = Pb::new();
     let vis = visibility_bits(alias.visibility);
     if vis != 3 {
@@ -793,14 +800,14 @@ const PKG_VAL_FLAGS: u64 = property_flags::DEFAULT;
 const PKG_VAR_FLAGS: u64 =
     property_flags::DEFAULT | property_flags::IS_VAR | property_flags::HAS_SETTER;
 
-fn jvm_method_sig(st: &mut StringTable, name: &str, desc: &str) -> Pb {
+fn jvm_method_sig(st: &mut StringTable<'_>, name: &str, desc: &str) -> Pb {
     let mut p = Pb::new();
     p.field_varint(1, st.local(name) as u64); // JvmMethodSignature.name = 1
     p.field_varint(2, st.local(desc) as u64); // JvmMethodSignature.desc = 2
     p
 }
 
-fn property_pb(st: &mut StringTable, m: &PropMeta) -> Pb {
+fn property_pb(st: &mut StringTable<'_>, m: &PropMeta) -> Pb {
     let mut p = Pb::new();
     assert_eq!(
         m.semantic_type_params.len(),
@@ -964,7 +971,25 @@ pub fn build_package(
     (module_name, locals): (Option<&str>, &[LocalPropertyMeta]),
     param_assertions: bool,
 ) -> (Vec<u8>, Vec<String>) {
-    let mut st = StringTable::default();
+    build_package_with_intersection_approximation(
+        funcs,
+        props,
+        aliases,
+        (module_name, locals),
+        param_assertions,
+        None,
+    )
+}
+
+pub(crate) fn build_package_with_intersection_approximation(
+    funcs: &[FnMeta],
+    props: &[PropMeta],
+    aliases: &[TypeAliasMeta],
+    (module_name, locals): (Option<&str>, &[LocalPropertyMeta]),
+    param_assertions: bool,
+    intersection_approximation: Option<&dyn Fn(Ty) -> Option<Ty>>,
+) -> (Vec<u8>, Vec<String>) {
+    let mut st = StringTable::with_intersection_approximation(intersection_approximation);
     let mut requirements = VersionRequirementTable::default();
     let mut package = Pb::new();
     // STRINGS INTERN IN SOURCE DECLARATION ORDER across kinds (a `const val` before a `fun`

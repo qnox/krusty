@@ -19770,9 +19770,7 @@ impl<'a> Checker<'a> {
                 // therefore handled by their own rungs below before the imported-extension family.
                 let mut member_mapping_failure = None;
                 let mut extension_rung = None;
-                if rt == Ty::String
-                    || matches!(rt.non_null(), Ty::Obj(..) | Ty::TyParam(..) | Ty::Fun(..))
-                {
+                if crate::symbol_resolver::supports_member_lookup(rt) {
                     match self.record_member_call_with_slots(
                         scope,
                         call,
@@ -25741,6 +25739,7 @@ impl<'a> Checker<'a> {
                 _ => Ty::Unit,
             };
             let semantic = inferred_declaration_ty(semantic);
+            self.report_inferred_nothing_return(f, semantic, false);
             let physical =
                 crate::symbol_resolver::ty_subst_keep_unbound(semantic, &semantic_erasure);
             (physical, semantic)
@@ -42425,6 +42424,11 @@ impl<'a> Checker<'a> {
             } else {
                 inferred.tightest_upper_bindings(&source)
             };
+            // Snapshot the denotable upper before `inferred.bindings` moves. Publishing it does
+            // not replace a binding the expected result already fixed, so
+            // `(): Nothing = intersect(...)` stays `Nothing` while an unconstrained
+            // `intersect(In<Int>(), In<String>())` becomes `Int & String`.
+            let denotable_upper_bindings = inferred.denotable_upper_bindings(&source);
             crate::symbol_resolver::merge_call_argument_bindings(
                 &source,
                 &signature,
@@ -42627,16 +42631,17 @@ impl<'a> Checker<'a> {
                     inferred_nested,
                 );
             }
-            // A projected-return input that contributes only upper constraints has bottom as its
-            // most specific solution. Preserve that parameter-side solution before contextual
-            // result constraints are merged: the result may be approximated to its expected type,
-            // but `Context<in Nothing>` must not become `Context<in Expected>`. Ordinary generic
-            // calls still let an expected result contextualize their parameters (for example,
-            // `Continuation<String>` determines its callback's `Result<String>` parameter).
+            // A projected-return input contributes only upper constraints. `Nothing` is the
+            // placeholder an expected result can still replace (`select(Context<Any>()): String`).
+            // An incompatible expected type must not turn `Context<out T>` passed to
+            // `Context<in U>` into `Context<in Expected>`. A concrete upper is published below,
+            // after that replacement, and only when the expected result did not fix the variable
+            // (`select(Context<Any>())` is `Any`).
             if candidate.projected_return_hazard {
-                for formal in &inferred.upper_only {
-                    bindings.entry(formal.clone()).or_insert(Ty::Nothing);
-                }
+                crate::symbol_resolver::seed_denotable_upper_placeholders(
+                    &mut bindings,
+                    &denotable_upper_bindings,
+                );
             }
             if let (Some(expected), Some(result_bindings)) = (expected, expected_result_bindings) {
                 // The expected result also relates through the declared return's supertypes: a Java
@@ -42738,11 +42743,12 @@ impl<'a> Checker<'a> {
                     );
                 }
             }
-            if !candidate.projected_return_hazard {
-                for formal in &inferred.upper_only {
-                    bindings.entry(formal.clone()).or_insert(Ty::Nothing);
-                }
-            }
+            crate::symbol_resolver::publish_denotable_upper_bindings(
+                &mut bindings,
+                denotable_upper_bindings,
+                expected_return_intersection_bindings.as_ref(),
+                |sub, sup| self.receiver_is_assignable(sub, sup),
+            );
             // Join bottom bindings against `where`-clause subtype constraints IN the real
             // bindings — the return type substitutes from them (`ifBlank { null }` must select
             // with `R = String?`, not pass a check-local copy and return `Nothing?`).
@@ -43375,6 +43381,7 @@ impl<'a> Checker<'a> {
         }
         crate::symbol_resolver::retain_most_specific_declarations(
             &self.fed_source(),
+            extension_receiver,
             &mut maximal,
             |(_, generic, _, _, _, candidate, _, parameters)| {
                 let receiver = candidate
@@ -43385,7 +43392,9 @@ impl<'a> Checker<'a> {
                             .map(|receiver| crate::types::ty_subst(receiver, &HashMap::new()))
                     })
                     .flatten();
-                (receiver, parameters, *generic)
+                let member_owner = (candidate.kind == crate::libraries::FnKind::Member)
+                    .then_some(candidate.callable.owner);
+                (receiver, parameters, *generic, member_owner)
             },
         );
         // Distinct SAM target types do not make an overload family inherently ambiguous. The
@@ -52530,6 +52539,7 @@ impl<'a> Checker<'a> {
         if infer_ret {
             self.check_operator_declaration(f, self.ret_ty);
         }
+        self.report_inferred_nothing_return(f, self.ret_ty, false);
         if f.receiver.is_some() && companion_classifier.is_none() {
             self.extension_receiver_labels.pop();
             self.this_labels.pop();
@@ -56983,6 +56993,7 @@ impl<'a> Checker<'a> {
         if infer_ret {
             self.check_operator_declaration(f, self.ret_ty);
         }
+        self.report_inferred_nothing_return(f, self.ret_ty, f.is_override());
         if f.receiver.is_some() {
             self.extension_receiver_labels.pop();
             self.this_labels.pop();
@@ -56992,30 +57003,6 @@ impl<'a> Checker<'a> {
         self.retire_type_parameter_owners(&owned_type_parameters);
         self.active_statement_suppressions
             .truncate(suppression_depth);
-    }
-
-    fn check_fun_body(&mut self, scope: &CheckerScope<'_>, f: &FunDecl) {
-        match &f.body {
-            FunBody::Expr(e) => {
-                let t = self.expr_declared(scope, *e, self.ret_ty);
-                let actual = self.recorded_expression_type_for_expected(scope, *e, t, self.ret_ty);
-                self.narrow_platform_value(self.ret_ty, *e, PlatformNarrowing::Declaration);
-                self.expect_assignable(self.ret_ty, actual, self.span(*e), "function body");
-            }
-            FunBody::Block(e) => {
-                let _ = self.expr_statement(scope, *e);
-                if !matches!(self.ret_ty, Ty::Unit | Ty::Nothing | Ty::Error)
-                    && !self.body_terminates(*e)
-                {
-                    self.diags.error(
-                        f.span,
-                        "a 'return' expression required in a function with a block body ('{...}')"
-                            .to_string(),
-                    );
-                }
-            }
-            FunBody::None => {}
-        }
     }
 
     fn obj_name_is_subtype(&self, sub: TypeName, sup: TypeName) -> bool {
@@ -63214,7 +63201,9 @@ impl<'a> Checker<'a> {
                                 .or_else(|| self.report_unmapped_labelled_call(e, a))
                                 .unwrap_or(Ty::Error),
                         }
-                    } else if matches!(recv, Ty::Obj(..) | Ty::TyParam(..) | Ty::Nothing) {
+                    } else if recv == Ty::Nothing
+                        || crate::symbol_resolver::supports_member_lookup(recv)
+                    {
                         // `x?.Inner()` selects an inner classifier's constructor exactly as
                         // `x.Inner()` does: the member tower rung owns both families.
                         match self.record_member_call_with_slots(

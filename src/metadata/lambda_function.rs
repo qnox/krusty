@@ -33,6 +33,8 @@ pub(crate) struct LambdaFunction<'a> {
     /// The file's classifiers whose class ids are local, and the enum entry bodies among them.
     pub local_classifiers: &'a HashSet<TypeName>,
     pub enum_entry_bodies: &'a HashSet<TypeName>,
+    /// Checked declaration approximation for a non-denotable intersection in this signature.
+    pub intersection_approximation: &'a dyn Fn(Ty) -> Option<Ty>,
 }
 
 /// `d1` (before its string packing) and `d2` for a lambda class.
@@ -43,8 +45,11 @@ pub(crate) struct LambdaFunction<'a> {
 /// use and referred to by id. The function's name and result are interned first, then its type
 /// parameters, receiver and value parameters.
 pub(crate) fn build(lambda: &LambdaFunction<'_>) -> (Vec<u8>, Vec<String>) {
-    let mut strings =
-        StringTable::with_local_classifiers(lambda.local_classifiers, lambda.enum_entry_bodies);
+    let mut strings = StringTable::with_local_classifiers(
+        lambda.local_classifiers,
+        lambda.enum_entry_bodies,
+        Some(lambda.intersection_approximation),
+    );
     let mut named = Vec::new();
     type_parameters_named_by(lambda.result, &mut named);
     if let Some(receiver) = lambda.receiver {
@@ -75,7 +80,7 @@ pub(crate) fn build(lambda: &LambdaFunction<'_>) -> (Vec<u8>, Vec<String>) {
             TypeParameterRef::Named(parameter.name.clone()),
         );
     }
-    let encode = |strings: &mut StringTable, ty| {
+    let encode = |strings: &mut StringTable<'_>, ty| {
         encode_type(strings, ty, &parameters)
             .unwrap_or_else(|error| panic!("invalid lambda metadata type: {error}"))
     };

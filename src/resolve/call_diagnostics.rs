@@ -100,13 +100,14 @@ impl Checker<'_> {
             .collect::<Vec<_>>();
         crate::symbol_resolver::retain_most_specific_declarations(
             &self.fed_source(),
+            None,
             &mut contenders,
             |(candidate, shape, generic)| {
                 let receiver = candidate
                     .is_extension()
                     .then(|| candidate.semantic_receiver())
                     .flatten();
-                (receiver, shape.as_slice(), *generic)
+                (receiver, shape.as_slice(), *generic, None)
             },
         );
         crate::trace_compiler!(

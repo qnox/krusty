@@ -6,11 +6,77 @@
 //! instead.
 
 use super::lambda_returns::ReturnTarget;
-use super::Checker;
-use crate::ast::{Expr, ExprId, Stmt, StmtId};
+use super::{Checker, CheckerScope, PlatformNarrowing};
+use crate::ast::{Expr, ExprId, FunBody, FunDecl, Stmt, StmtId};
 use crate::types::Ty;
 
 impl Checker<'_> {
+    pub(super) fn check_fun_body(&mut self, scope: &CheckerScope<'_>, function: &FunDecl) {
+        match &function.body {
+            FunBody::Expr(expression) => {
+                let checked = self.expr_declared(scope, *expression, self.ret_ty);
+                let actual = self.recorded_expression_type_for_expected(
+                    scope,
+                    *expression,
+                    checked,
+                    self.ret_ty,
+                );
+                self.narrow_platform_value(
+                    self.ret_ty,
+                    *expression,
+                    PlatformNarrowing::Declaration,
+                );
+                self.expect_assignable(
+                    self.ret_ty,
+                    actual,
+                    self.span(*expression),
+                    "function body",
+                );
+            }
+            FunBody::Block(body) => {
+                let _ = self.expr_statement(scope, *body);
+                if !matches!(self.ret_ty, Ty::Unit | Ty::Nothing | Ty::Error)
+                    && !self.body_terminates(*body)
+                {
+                    self.diags.error(
+                        function.span,
+                        "a 'return' expression required in a function with a block body ('{...}')"
+                            .to_string(),
+                    );
+                }
+            }
+            FunBody::None => {}
+        }
+    }
+
+    pub(super) fn report_inferred_nothing_return(
+        &mut self,
+        function: &FunDecl,
+        inferred_return: Ty,
+        inherits_override: bool,
+    ) {
+        if function.ret.is_some() || inherits_override || inferred_return != Ty::Nothing {
+            return;
+        }
+        // Ordinary bodies are released after signature inference. The result is already
+        // `Nothing`; only a body that is still in the arena can show that it is a `throw`.
+        let FunBody::Expr(expression) = function.body else {
+            return;
+        };
+        if self
+            .file
+            .expr_arena
+            .get(expression.0 as usize)
+            .is_some_and(|body| matches!(body, Expr::Throw { .. }))
+        {
+            return;
+        }
+        self.diags.error(
+            function.name_span,
+            "return type 'Nothing' needs to be specified explicitly.".to_string(),
+        );
+    }
+
     /// True if evaluating `e` always transfers control away (a `return`, or a block/if whose every
     /// exit does). Used to detect early-return guards for smart-casting the rest of a block.
     pub(super) fn expr_diverges(&self, e: ExprId) -> bool {

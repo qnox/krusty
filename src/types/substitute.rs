@@ -115,6 +115,19 @@ where
                 })
                 .collect::<Vec<_>>(),
         ),
+        Ty::Intersection(parts) => Ty::intersection(
+            &parts
+                .iter()
+                .map(|part| {
+                    substitute_type_parameters(
+                        *part,
+                        lookup,
+                        preserve_unbound,
+                        enforce_bound_nullability,
+                    )
+                })
+                .collect::<Vec<_>>(),
+        ),
         _ => ty,
     }
 }
@@ -165,6 +178,12 @@ pub(crate) fn ty_with_param_bounds(ty: Ty, bounds: &HashMap<String, Ty>) -> Ty {
                 .map(|argument| ty_with_param_bounds(*argument, bounds))
                 .collect::<Vec<_>>(),
         ),
+        Ty::Intersection(parts) => Ty::intersection(
+            &parts
+                .iter()
+                .map(|part| ty_with_param_bounds(*part, bounds))
+                .collect::<Vec<_>>(),
+        ),
         _ => ty,
     }
 }
@@ -202,6 +221,12 @@ pub(crate) fn ty_rename_params(ty: Ty, identities: &HashMap<&str, &'static str>)
             &arguments
                 .iter()
                 .map(|argument| ty_rename_params(*argument, identities))
+                .collect::<Vec<_>>(),
+        ),
+        Ty::Intersection(parts) => Ty::intersection(
+            &parts
+                .iter()
+                .map(|part| ty_rename_params(*part, identities))
                 .collect::<Vec<_>>(),
         ),
         _ => ty,

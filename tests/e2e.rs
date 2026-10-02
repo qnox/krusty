@@ -663,6 +663,8 @@ mod elvis_return_smartcast_e2e;
 mod elvis_signature_inference_e2e;
 #[path = "empty_enum_e2e.rs"]
 mod empty_enum_e2e;
+#[path = "empty_intersection_inference_e2e.rs"]
+mod empty_intersection_inference_e2e;
 #[path = "empty_locals_e2e.rs"]
 mod empty_locals_e2e;
 #[path = "empty_loop_body_e2e.rs"]

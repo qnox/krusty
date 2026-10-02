@@ -172,6 +172,11 @@ pub(crate) fn type_parameters_named_by(ty: Ty, names: &mut Vec<&'static str>) {
         | Ty::PlatformNullable(inner)
         | Ty::InProjection(inner)
         | Ty::OutProjection(inner) => type_parameters_named_by(*inner, names),
+        Ty::Intersection(parts) => {
+            for &part in parts {
+                type_parameters_named_by(part, names);
+            }
+        }
         // A star names no type; the bound it keeps is the parameter's.
         Ty::StarProjection(_) => {}
         Ty::Unit | Ty::Null | Ty::Nothing | Ty::Error | Ty::Pending => {}
