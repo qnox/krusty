@@ -1780,6 +1780,8 @@ mod reified_inline_return_infer_e2e;
 mod reified_inline_splice_ldc_wide_e2e;
 #[path = "reified_parameter_forwarding_e2e.rs"]
 mod reified_parameter_forwarding_e2e;
+#[path = "reified_primitive_safecast_e2e.rs"]
+mod reified_primitive_safecast_e2e;
 #[path = "reified_splice_host_pool_wide_e2e.rs"]
 mod reified_splice_host_pool_wide_e2e;
 #[path = "relational_compare_to_seam_e2e.rs"]

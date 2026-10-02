@@ -133,10 +133,19 @@ impl BodyLowering<'_> {
         let read = self.ir.add_expr(IrExpr::GetValue(operand_slot));
         let matches = self.instance_check(false, read, runtime_target);
         let read = self.ir.add_expr(IrExpr::GetValue(operand_slot));
+        // `as? T` yields `T?`. A concrete primitive already names its boxed wrapper (`Int?`).
+        // A type parameter does not: an inline call later substitutes `T` with `Int`, and a
+        // success cast recorded as bare `T` unboxes that match and then unboxes the `null`
+        // mismatch. Recording `T?` specializes to `Int?`, which stays a boxed reference.
+        let cast_target = if runtime_target.is_ty_param() {
+            Ty::nullable(runtime_target)
+        } else {
+            runtime_target
+        };
         let cast = self.ir.add_expr(IrExpr::TypeOp {
             op: IrTypeOp::Cast,
             arg: read,
-            type_operand: runtime_target,
+            type_operand: cast_target,
         });
         let null = self.ir.add_expr(IrExpr::Const(crate::ir::IrConst::Null));
         let result = self.ir.add_expr(IrExpr::When {
@@ -158,7 +167,7 @@ mod tests {
         BodyOwnerId, FirBody, FirExpr, FirExprKind, FirStatement, FirStatementKind,
         FirTypeOperation, OriginId, ResolvedModuleIndex, ResolvedTy,
     };
-    use crate::ir::{IrConst, IrExpr, IrFile};
+    use crate::ir::{IrConst, IrExpr, IrFile, IrTypeOp};
     use crate::types::Ty;
 
     use super::super::lower_body;
@@ -179,6 +188,18 @@ mod tests {
 
     /// Lower `<a literal> is/!is Nothing` as the only root of a body, and answer the `IrExpr` the
     /// root produced together with the file it was built in.
+    fn collect_type_ops(ir: &IrFile, id: crate::ir::ExprId, operations: &mut Vec<(IrTypeOp, Ty)>) {
+        if let IrExpr::TypeOp {
+            op, type_operand, ..
+        } = ir.expr(id)
+        {
+            operations.push((*op, *type_operand));
+        }
+        crate::ir::for_each_child(&ir.exprs, id, &mut |child| {
+            collect_type_ops(ir, child, operations);
+        });
+    }
+
     fn lowered_nothing_check(operation: FirTypeOperation) -> (IrFile, IrExpr) {
         let origin = OriginId::from_raw(0);
         let mut body = FirBody::new(BodyOwnerId::from_raw(1));
@@ -255,6 +276,55 @@ mod tests {
             matches!(ir.expr(value), IrExpr::Const(IrConst::Null)),
             "the result is the exact null value, got {:?}",
             ir.expr(value)
+        );
+    }
+
+    /// `as? T` produces `T?`. The success cast must name that nullable type parameter so a later
+    /// inline specialization of `T` to a primitive stays on the boxed wrapper.
+    #[test]
+    fn a_safe_cast_to_a_type_parameter_casts_the_nullable_parameter() {
+        let origin = OriginId::from_raw(0);
+        let parameter = Ty::ty_param("T@safecast", Ty::obj("kotlin/Any"));
+        let mut body = FirBody::new(BodyOwnerId::from_raw(1));
+        let operand = body.add_expr(FirExpr {
+            origin,
+            ty: resolved(Ty::obj("kotlin/Any")),
+            kind: FirExprKind::Constant(crate::fir::FirConstant::Int(7)),
+        });
+        let cast = body.add_expr(FirExpr {
+            origin,
+            ty: resolved(Ty::nullable(parameter)),
+            kind: FirExprKind::TypeOperation {
+                operation: FirTypeOperation::SafeCast,
+                operand,
+                target: resolved(parameter),
+            },
+        });
+        let statement = body.add_statement(FirStatement {
+            origin,
+            kind: FirStatementKind::Expression(cast),
+        });
+        body.push_root(statement);
+
+        let mut ir = IrFile::default();
+        let lowered = lower_body(body, &ResolvedModuleIndex::default(), &mut ir)
+            .expect("a safe cast to a type parameter lowers");
+        let mut operations = Vec::new();
+        for &root in &lowered.roots {
+            collect_type_ops(&ir, root, &mut operations);
+        }
+
+        assert!(
+            operations
+                .iter()
+                .any(|(op, ty)| { *op == IrTypeOp::InstanceOf && *ty == parameter }),
+            "the guard tests the non-null parameter, got {operations:?}"
+        );
+        assert!(
+            operations
+                .iter()
+                .any(|(op, ty)| { *op == IrTypeOp::Cast && *ty == Ty::nullable(parameter) }),
+            "the success cast names T?, got {operations:?}"
         );
     }
 

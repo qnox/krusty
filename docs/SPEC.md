@@ -2140,8 +2140,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `{ val t = x; if (t is T) t as T else null }` (with no `t` when `x` is a stable read of an
   immutable local or parameter, which is tested and cast in place, as kotlinc's `irLetS` does)
   — `instanceof` then `checkcast` on a match, `null` on a
-  mismatch (it never throws); the result is `T?`. The target must be a reference type (a primitive
-  `as? Int` would yield the boxed `Int?` wrapper — not yet modeled, so it skips). `SafeCast` in
+  mismatch (it never throws); the result is `T?`. A primitive target (`as? Int`) tests the boxed
+  wrapper and yields that nullable wrapper. A reified type parameter is not a primitive until an
+  inline call specializes it, so the success cast is recorded as `T?`: specializing bare `T` to
+  `Int` unboxes the match and then unboxes the `null` mismatch
+  (`tests/reified_primitive_safecast_e2e.rs`). `SafeCast` in
   `tests/feature_box_e2e.rs`. `is`/`as`/`as?` targets resolve through the **same** name→internal map the
   checker uses (`syms.class_names`), so a **classpath** type (`CharSequence`, `Number`, `Runnable`, a Java
   class) works, not just builtins and user classes. A class implementing a **generic classpath interface**
