@@ -21,6 +21,7 @@ names! {
     kotlin_coroutines_package => "kotlin/coroutines",
     kotlin_reflect_package => "kotlin/reflect",
     kotlin_ranges_package => "kotlin/ranges",
+    ranges_facade => "kotlin/ranges/RangesKt",
     kotlin_internal_package => "kotlin/internal",
     intrinsic_const_evaluation => "kotlin/internal/IntrinsicConstEvaluation",
     platform_dependent => "kotlin/internal/PlatformDependent",
