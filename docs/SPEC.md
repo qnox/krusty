@@ -8496,6 +8496,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `a_star_projected_fun_interface_subtype_is_not_sam_converted`,
   `a_contravariant_fun_interface_supertype_is_not_sam_converted`,
   `a_direct_fun_interface_overload_beats_a_sam_adapted_one`,
+  `a_direct_generic_call_keeps_the_nominal_argument_type`,
   `a_function_value_passed_to_a_fun_interface_still_converts`, and
   `tests/sam_conversion_e2e.rs`. Corpus: `funInterface/kt46908_functionSupertype.kt`,
   `funInterface/noConversionForSubtype.kt`, `funInterface/noConversionForSubtypeGeneric.kt`.

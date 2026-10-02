@@ -16269,18 +16269,18 @@ impl<'a> Checker<'a> {
                 else {
                     continue;
                 };
-                let function = self.expression_function_type(scope, argument, actual.non_null());
+                let parameter_is_sam = self.semantic_sam_signature(*parameter).is_some();
+                let nominal_supplies_interface = parameter_is_sam
+                    && self.sam_argument_supplies_interface(argument, *actual, *parameter);
+                let function = (parameter_is_sam && !nominal_supplies_interface)
+                    .then(|| self.expression_function_type(scope, argument, actual.non_null()))
+                    .flatten();
                 crate::trace_compiler!(
                     "resolve",
                     "top-level SAM inference call={} parameter={parameter_index} declared={parameter:?} nominal={actual:?} function={function:?}",
                     call.0,
                 );
-                let inference_actual =
-                    if self.sam_argument_supplies_interface(argument, *actual, *parameter) {
-                        *actual
-                    } else {
-                        function.unwrap_or(*actual)
-                    };
+                let inference_actual = function.unwrap_or(*actual);
                 let inferred = crate::symbol_resolver::infer_generic_call_bindings_from_symbols(
                     &source,
                     &signature,
