@@ -1,17 +1,5 @@
-//! JVM `@JvmInline value class` IR lowering pass — an **optional, JVM-only** IR→IR transform.
-//!
-//! Common lowering keeps a value class as a plain `Class{X}` so common IR stays target-neutral (a JS
-//! backend, or a future Valhalla JVM with *native* value types, leaves value classes alone). The old
-//! JVM has no native value types, so this pass realizes kotlinc's unboxed representation:
-//!   * a NON-nullable `X` erases to its single field's (underlying) type `U` everywhere — signatures,
-//!     fields, locals (a nullable `X?` stays the boxed `Class{X}`);
-//!   * `new X(arg)` becomes `X.constructor-impl(arg): U` (the unboxed value);
-//!   * sole-property access on an unboxed value (`x.v`) is identity (the value already IS the `U`);
-//!   * a value-class parameter that erased to a primitive loses its non-null `checkNotNullParameter`.
-//!
-//! The value class's own synthesized members (`box-impl`/`unbox-impl`/`constructor-impl`/getter/`<init>`)
-//! genuinely operate on the boxed object, so they are NOT
-//! rewritten (only their signatures erase, and `box-impl`'s return stays the boxed `X`).
+//! JVM realization of `@JvmInline` value classes: erase a non-null value class to its carrier,
+//! rewrite construction and member calls onto `*-impl`, and box or unbox at representation boundaries.
 
 mod accessor_names;
 mod bridge_names;
@@ -29,6 +17,7 @@ mod default_calls;
 mod default_constructions;
 mod descriptor_parameters;
 mod equality;
+mod function_invocation;
 mod function_references;
 mod hidden_constructors;
 mod inline_body_slots;
@@ -1784,9 +1773,7 @@ pub(crate) fn lower_value_classes(
             target_slots.entry(id).or_insert(bi);
         }
     }
-    // Process in ascending ExprId order: a child (inner `.z`, created first → lower id) is rewritten
-    // before its parent (outer `.x`), so a nested property-access chain's `prop_access` always sees the
-    // child's already-rewritten (`unbox-impl`/coercion) form and decides box/unbox deterministically.
+    // Ascending ExprId order rewrites a child before its parent, so `prop_access` sees the rewritten child.
     let mut targets: Vec<ExprId> = target_slots.keys().copied().collect();
     targets.sort_unstable();
     // Exact identities of coercions created below to expose a value class's sole underlying
@@ -1794,15 +1781,9 @@ pub(crate) fn lower_value_classes(
     // extraction rather than an ordinary `X -> U` value conversion. Keep this backend-local origin
     // fact until boundary insertion so an Object carrier is not boxed back into `X`.
     let mut sole_property_coercions = HashSet::new();
-    // User value-class member bodies normally stay out of the general boundary rewrite below because
-    // their slot-0 `this` is the BOXED wrapper and their own member ABI deliberately preserves it.
-    // A constructor nested in such a body is still an independent boundary, though: any argument whose
-    // declared field/parameter is a non-null value class is physically its UNBOXED carrier. Collect only
-    // those constructor edges here, using the same pre-erasure target types as the generic `New` handling
-    // in step 5. This is classifier- and origin-neutral; anonymous captures are one producer of the shape,
-    // but ordinary local/nested constructions obey the same representation rule.
-    // Filled by each sole-property read of a nested value class's carrier and when step 5 applies
-    // each `BoxOp::Unbox`; the representation queries of the later tail rewrites read it.
+    // Member bodies keep a boxed `this`. A nested constructor still passes a non-null value-class
+    // argument as its carrier; collect those edges with the pre-erasure target types. `carrier_unboxes`
+    // records sole-property reads and later `BoxOp::Unbox` results for the tail rewrites.
     let mut carrier_unboxes = CarrierUnboxes::new();
     let mut value_member_constructor_ops: Vec<(ExprId, BoxOp)> = Vec::new();
     for &id in &targets {
@@ -1948,6 +1929,18 @@ pub(crate) fn lower_value_classes(
                         .collect::<Vec<_>>()
                 );
             }
+        }
+        // A value-class callee still shaped as a function-value call has no selected member.
+        // Do not invent `invoke-impl` from a name and an arity, and do not box it.
+        if function_invocation::missing_member_implementation(
+            &ir.logical_types,
+            &ir.suspend_calls,
+            &under,
+            &repr_ctx,
+            id,
+            &ir.exprs[i],
+        ) {
+            return false;
         }
         let rw = match &ir.exprs[i] {
             // `new X(args)` → `X.constructor-impl(args): U`. The return is the underlying `U`; the

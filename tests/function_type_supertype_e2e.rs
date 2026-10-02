@@ -188,3 +188,196 @@ fun box(): String {\n\
 }\n";
     common::expect_box_ok_with_stdlib(SRC, "BigArityFunctionSupertypeBridge");
 }
+
+/// A value class that implements a function type is still a carrier at a direct call. kotlinc calls
+/// the static implementation (`invoke-impl` or the signature hash) with that carrier as argument
+/// zero. Boxing it and calling `FunctionN.invoke` leaves an `int` where the interface expects an
+/// object (`VerifyError`).
+#[test]
+fn a_value_class_extension_function_is_called_through_its_static_invoke() {
+    const SRC: &str = "// LANGUAGE: +FunctionalTypeWithExtensionAsSupertype\n\
+@JvmInline\n\
+value class ValueClass(private val s: Int) : Int.() -> String {\n\
+    override fun invoke(p1: Int): String = if (s == 1 && p1 == 1) \"OK\" else \"fail\"\n\
+}\n\
+fun box(): String = ValueClass(1)(1)\n";
+    common::expect_box_same_as_kotlinc(SRC, "ValueClassExtensionFunction");
+}
+
+#[test]
+fn a_value_class_function_call_keeps_the_carrier_in_every_direct_shape() {
+    const SRC: &str = "// LANGUAGE: +FunctionalTypeWithExtensionAsSupertype\n\
+@JvmInline\n\
+value class Out(val v: Int)\n\
+@JvmInline\n\
+value class Id(val v: Int)\n\
+@JvmInline\n\
+value class ValueClass(private val s: Int) : Int.() -> String {\n\
+    override fun invoke(p1: Int): String = \"${s}${p1}\"\n\
+}\n\
+@JvmInline\n\
+value class Nullary(private val s: Int) : () -> String {\n\
+    override fun invoke(): String = \"n$s\"\n\
+}\n\
+@JvmInline\n\
+value class Name(val raw: String) : () -> String {\n\
+    override fun invoke(): String = raw\n\
+}\n\
+@JvmInline\n\
+value class TakesId(val s: Int) : (Id) -> String {\n\
+    override fun invoke(p: Id): String = \"${s}${p.v}\"\n\
+}\n\
+@JvmInline\n\
+value class MakesOut(val s: Int) : () -> Out {\n\
+    override fun invoke(): Out = Out(s)\n\
+}\n\
+fun local(): String {\n\
+    val v = ValueClass(1)\n\
+    return v(2)\n\
+}\n\
+fun param(v: ValueClass): String = v(3)\n\
+fun bang(v: ValueClass?): String = v!!(4)\n\
+fun explicit(v: ValueClass): String = v.invoke(5)\n\
+fun asFn(): String {\n\
+    val f: Int.() -> String = ValueClass(6)\n\
+    return f(7)\n\
+}\n\
+fun box(): String {\n\
+    val seen = listOf(\n\
+        ValueClass(1)(1), local(), param(ValueClass(1)), bang(ValueClass(1)),\n\
+        explicit(ValueClass(1)), asFn(), Nullary(8)(), Name(\"N\")(),\n\
+        TakesId(1)(Id(2)), MakesOut(9)().v.toString(),\n\
+    ).joinToString(\",\")\n\
+    return if (seen == \"11,12,13,14,15,67,n8,N,12,9\") \"OK\" else seen\n\
+}\n";
+    common::expect_box_same_as_kotlinc(SRC, "ValueClassFunctionShapes");
+}
+
+#[test]
+fn a_sibling_value_class_function_is_called_through_its_static_invoke() {
+    const DECL: &str = "@JvmInline\n\
+value class ValueClass(private val s: Int) : (Int) -> String {\n\
+    override fun invoke(p1: Int): String = if (s == p1) \"OK\" else \"fail\"\n\
+}\n";
+    const CALL: &str = "fun box(): String = ValueClass(4)(4)\n";
+    let sources = [("ValueClass.kt", DECL), ("Box.kt", CALL)];
+    assert_eq!(common::kotlinc_box_files_result(&sources, "BoxKt"), "OK");
+    assert_eq!(
+        common::compile_and_run_files_with_stdlib(&sources).as_deref(),
+        Some("OK")
+    );
+    assert_same_method(&sources, "BoxKt", "box");
+}
+
+/// Two `invoke` members of one arity lower to the same static name and a different descriptor.
+/// Declaration order must not choose the target.
+#[test]
+fn same_arity_invoke_overloads_keep_the_selected_descriptor_in_either_order() {
+    const INT_FIRST: &str = "@JvmInline\n\
+value class IntFirst(val s: Int) : (String) -> String {\n\
+    operator fun invoke(n: Int): String = \"i$n\"\n\
+    override fun invoke(text: String): String = \"s$text\"\n\
+}\n\
+fun intFirst(): String = IntFirst(1)(2) + IntFirst(1)(\"a\")\n";
+    const STRING_FIRST: &str = "@JvmInline\n\
+value class StringFirst(val s: Int) : (Int) -> String {\n\
+    override fun invoke(n: Int): String = \"i$n\"\n\
+    operator fun invoke(text: String): String = \"s$text\"\n\
+}\n\
+fun stringFirst(): String = StringFirst(1)(2) + StringFirst(1)(\"a\")\n";
+    let src = format!("{INT_FIRST}\n{STRING_FIRST}\nfun box(): String {{\n    val seen = intFirst() + stringFirst()\n    return if (seen == \"i2sa\" + \"i2sa\") \"OK\" else seen\n}}\n");
+    common::expect_box_same_as_kotlinc(&src, "ValueClassInvokeOverloads");
+    assert_same_method(
+        &[("ValueClassInvokeOverloads.kt", src.as_str())],
+        "ValueClassInvokeOverloadsKt",
+        "intFirst",
+    );
+    assert_same_method(
+        &[("ValueClassInvokeOverloads.kt", src.as_str())],
+        "ValueClassInvokeOverloadsKt",
+        "stringFirst",
+    );
+}
+
+#[test]
+fn a_generic_value_class_invoke_uses_the_substituted_member() {
+    const SRC: &str = "@JvmInline\n\
+value class Box<T : Any>(val value: T) : (T) -> String {\n\
+    override fun invoke(item: T): String = value.toString() + item.toString()\n\
+}\n\
+fun box(): String = if (Box(\"O\")(\"K\") == \"OK\") \"OK\" else Box(\"O\")(\"K\")\n";
+    common::expect_box_same_as_kotlinc(SRC, "GenericValueClassInvoke");
+    assert_same_method(
+        &[("GenericValueClassInvoke.kt", SRC)],
+        "GenericValueClassInvokeKt",
+        "box",
+    );
+}
+
+#[test]
+fn direct_narrowed_and_function_typed_value_class_calls_match_kotlinc() {
+    const SRC: &str = "@JvmInline\n\
+value class ValueClass(val s: Int) : (Int) -> String {\n\
+    override fun invoke(p: Int): String = \"${s}${p}\"\n\
+}\n\
+fun direct(): String = ValueClass(1)(2)\n\
+fun narrowed(v: ValueClass?): String = v!!(3)\n\
+fun typed(): String {\n\
+    val f: (Int) -> String = ValueClass(4)\n\
+    return f(5)\n\
+}\n\
+fun box(): String {\n\
+    val seen = direct() + narrowed(ValueClass(1)) + typed()\n\
+    return if (seen == \"121345\") \"OK\" else seen\n\
+}\n";
+    common::expect_box_same_as_kotlinc(SRC, "ValueClassInvokeAbi");
+    let sources = [("ValueClassInvokeAbi.kt", SRC)];
+    assert_same_method(&sources, "ValueClassInvokeAbiKt", "direct");
+    assert_same_method(&sources, "ValueClassInvokeAbiKt", "narrowed-d8IPsTA");
+    assert_same_method(&sources, "ValueClassInvokeAbiKt", "typed");
+}
+
+#[test]
+fn a_non_operator_invoke_overload_is_rejected() {
+    const SRC: &str = "@JvmInline\n\
+value class ValueClass(val s: Int) : () -> String {\n\
+    override fun invoke(): String = \"n\"\n\
+    fun invoke(n: Int): String = \"i$n\"\n\
+}\n\
+fun box() {\n\
+    ValueClass(1)(1)\n\
+}\n";
+    common::assert_errors_match_kotlinc(&[("NonOperatorInvoke.kt", SRC)], &[]);
+}
+
+#[test]
+fn a_compiled_dependency_value_class_invoke_uses_the_static_member() {
+    const LIB: &str = "package lib\n\
+@JvmInline\n\
+value class ValueClass(val s: Int) : (Int) -> String {\n\
+    override fun invoke(p: Int): String = \"${s}${p}\"\n\
+}\n";
+    const CALLER: &str = "import lib.ValueClass\n\
+fun box(): String = if (ValueClass(1)(2) == \"12\") \"OK\" else ValueClass(1)(2)\n";
+    let lib =
+        common::kotlinc_lib_out(&[("Lib.kt", LIB)]).expect("reference kotlinc is provisioned");
+    let pair = common::ModuleClassPair::compile_with_classpath(
+        &[("DependencyValueClassInvoke.kt", CALLER)],
+        &[lib],
+        "DependencyValueClassInvokeKt",
+    );
+    let (kotlinc, krusty) = pair.method_code("DependencyValueClassInvokeKt", "box");
+    assert_eq!(
+        krusty, kotlinc,
+        "DependencyValueClassInvokeKt.box instructions differ\n--- kotlinc ---\n{kotlinc}--- krusty ---\n{krusty}"
+    );
+}
+
+fn assert_same_method(sources: &[(&str, &str)], class: &str, method: &str) {
+    let pair = common::ModuleClassPair::compile(sources, class);
+    let (kotlinc, krusty) = pair.method_code(class, method);
+    assert_eq!(
+        krusty, kotlinc,
+        "{class}.{method} instructions differ\n--- kotlinc ---\n{kotlinc}--- krusty ---\n{krusty}"
+    );
+}

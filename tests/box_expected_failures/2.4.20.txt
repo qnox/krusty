@@ -40,7 +40,6 @@ coroutines/suspendFunctionMethodReference.kt
 coroutines/tailCallOptimizations/crossinline.kt
 delegatedProperty/getDelegateWithoutReflection.kt
 enum/enumEntriesCompatibilityCheckPrioritized.kt
-extensionFunctions/extensionFunctionAsASupertypeOfValueClass.kt
 extensionFunctions/kt475.kt
 fullValueClasses/basicSyntax.kt
 fullValueClasses/construction.kt
