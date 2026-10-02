@@ -16,6 +16,10 @@
 2.4.20:
   EmptyIntersectionNothing.kt:6:6: argument type mismatch: actual type is 'Int & String', but 'Nothing' was expected.
 
+[an_intersection_of_vals_cannot_be_reassigned]
+2.4.20:
+  IntersectionValReassignment.kt:8:7: 'val' cannot be reassigned.
+
 [nullable_bounds_admit_null_and_a_mixed_bound_does_not]
 2.4.20:
   NullableIntersection.kt:8:6: argument type mismatch: actual type is 'Left? & Right?', but 'Any' was expected.

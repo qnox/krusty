@@ -39,6 +39,20 @@ impl SymbolResolver<'_> {
         {
             return None;
         }
+        // Component order is the selection order. A later component's direct property must not
+        // hide a property the earlier component only inherits, and a `var` overrides a `val`.
+        if let Some(parts) = hierarchy_projection::intersection_components(recv) {
+            return self.intersection_member_property(parts, name, &property_applicable);
+        }
+        self.select_classifier_member_property(recv, name, &property_applicable)
+    }
+
+    fn select_classifier_member_property(
+        &self,
+        recv: Ty,
+        name: &str,
+        property_applicable: &dyn Fn(&crate::libraries::PropertyInfo) -> Option<(bool, usize)>,
+    ) -> Option<SelectedMemberProperty> {
         let mut queue = std::collections::VecDeque::from([(recv, 0u32)]);
         let mut seen = std::collections::HashSet::new();
         let mut nearer: Vec<(std::sync::Arc<crate::libraries::LibraryType>, Ty)> = Vec::new();
@@ -168,5 +182,49 @@ impl SymbolResolver<'_> {
             .filter(|(_, accessible)| *accessible)
             .map(|(property, _)| property)
             .or(inaccessible_declaration)
+    }
+
+    /// The property a value read or callable reference uses. An intersection walks each canonical
+    /// component to completion; the earliest `var` wins over every `val`, and otherwise the
+    /// earliest declaration wins, including one that component only inherits.
+    fn intersection_member_property(
+        &self,
+        parts: &[Ty],
+        name: &str,
+        property_applicable: &dyn Fn(&crate::libraries::PropertyInfo) -> Option<(bool, usize)>,
+    ) -> Option<SelectedMemberProperty> {
+        let mut selected_val = None;
+        for part in parts.iter().copied() {
+            let Some(selected) =
+                self.select_classifier_member_property(part, name, property_applicable)
+            else {
+                continue;
+            };
+            if selected
+                .property
+                .as_ref()
+                .is_some_and(|property| property.setter.is_some())
+            {
+                return Some(selected);
+            }
+            if selected_val.is_none() {
+                selected_val = Some(selected);
+            }
+        }
+        selected_val
+    }
+
+    pub(super) fn declared_member_property(
+        &self,
+        receiver: Ty,
+        name: &str,
+        callables: &crate::libraries::Callables,
+    ) -> Option<crate::libraries::PropertyInfo> {
+        if hierarchy_projection::intersection_components(receiver.non_null()).is_some() {
+            return self
+                .select_member_property(receiver, name)
+                .and_then(|selected| selected.property);
+        }
+        super::member_property_from_callables(callables)
     }
 }

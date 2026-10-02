@@ -3,6 +3,14 @@
 
 use super::common;
 
+fn expect_method_matches(name: &str, src: &str, class: &str, method: &str) {
+    match common::method_code_diff_against_kotlinc(name, &[], src, class, method) {
+        None => panic!("reference kotlinc is provisioned"),
+        Some(Ok(())) => {}
+        Some(Err(difference)) => panic!("{difference}"),
+    }
+}
+
 const INTERSECT: &str = "\
 class In<in K>\n\
 fun <E> intersect(vararg x: In<E>): E = null as E\n\
@@ -237,6 +245,87 @@ fun box(): String =\n\
     try { Off().enabled(); \"called\" }\n\
     catch (e: RuntimeException) { if (e.message == \"off\") \"OK\" else \"msg\" }\n";
     common::expect_box_same_as_kotlinc(SRC, "OverrideNothingBody");
+}
+
+#[test]
+fn an_inherited_property_precedes_a_later_components_declaration() {
+    // `Left` does not declare `mark`. The property it inherits from `Shared` still precedes
+    // `Right`'s direct declaration, so both the read and the callable reference bind to
+    // `Shared.getMark`. `Both` overrides the property, so the runtime value does not reveal
+    // the owner.
+    const SRC: &str = "\
+interface Shared { val mark: Int get() = 1 }\n\
+interface Left : Shared\n\
+interface Right { val mark: Int get() = 2 }\n\
+class In<in K>\n\
+class Both : Left, Right {\n\
+    override val mark: Int get() = 0\n\
+}\n\
+fun <E> intersect(vararg x: In<E>): E = Both() as E\n\
+fun read(): Int {\n\
+    val value = intersect(In<Left>(), In<Right>())\n\
+    return value.mark\n\
+}\n\
+fun ref(): Int {\n\
+    val value = intersect(In<Left>(), In<Right>())\n\
+    return value::mark.get()\n\
+}\n\
+fun box(): String = if (read() == 0 && ref() == 0) \"OK\" else \"NO\"\n";
+    expect_method_matches(
+        "InheritedIntersectionProperty",
+        SRC,
+        "InheritedIntersectionPropertyKt",
+        "public static final int read(",
+    );
+    expect_method_matches(
+        "InheritedIntersectionProperty",
+        SRC,
+        "InheritedIntersectionPropertyKt$ref$1",
+        "public java.lang.Object get(",
+    );
+}
+
+#[test]
+fn a_later_var_overrides_an_earlier_inherited_val() {
+    const SRC: &str = "\
+interface Shared { val mark: Int get() = 1 }\n\
+interface Left : Shared\n\
+interface Right {\n\
+    var mark: Int\n\
+        get() = 2\n\
+        set(value) { calls += value }\n\
+}\n\
+var calls = 0\n\
+class In<in K>\n\
+class Both : Left, Right {\n\
+    override var mark: Int\n\
+        get() = 2\n\
+        set(value) { calls += value }\n\
+}\n\
+fun <E> intersect(vararg x: In<E>): E = Both() as E\n\
+fun box(): String {\n\
+    val value = intersect(In<Left>(), In<Right>())\n\
+    value.mark = 3\n\
+    val ref = value::mark\n\
+    ref.set(4)\n\
+    return if (value.mark == 2 && calls == 7) \"OK\" else \"NO\"\n\
+}\n";
+    common::expect_box_same_as_kotlinc(SRC, "IntersectionVarOverridesVal");
+}
+
+#[test]
+fn an_intersection_of_vals_cannot_be_reassigned() {
+    const SRC: &str = "\
+interface Shared { val mark: Int get() = 1 }\n\
+interface Left : Shared\n\
+interface Right { val mark: Int get() = 2 }\n\
+class In<in K>\n\
+fun <E> intersect(vararg x: In<E>): E = null as E\n\
+fun box() {\n\
+    val value = intersect(In<Left>(), In<Right>())\n\
+    value.mark = 1\n\
+}\n";
+    common::assert_errors_match_kotlinc(&[("IntersectionValReassignment.kt", SRC)], &[]);
 }
 
 #[test]

@@ -3154,7 +3154,7 @@ impl<'a> SymbolResolver<'a> {
                     });
                 let member_dispatch = receiver_allows_member_dispatch(ty);
                 let member_property = member_dispatch
-                    .then(|| member_property_from_callables(&callables))
+                    .then(|| self.declared_member_property(ty, name, &callables))
                     .flatten();
                 let read = member_property
                     .as_ref()

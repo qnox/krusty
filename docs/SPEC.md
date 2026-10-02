@@ -2797,7 +2797,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   When several components declare one member slot, the call uses the
   canonical-earliest component's declaration, including its default arguments.
   A member that component inherits still occupies the slot ahead of a later
-  component's direct declaration.
+  component's direct declaration. A property uses that same order for a read
+  and for a callable reference: the earliest component's nearest declaration
+  wins, including a property it only inherits. A `var` overrides a `val` from
+  any component, so the earliest mutable declaration owns the getter, the
+  setter, and a mutable property reference.
   That union does not discard a supertype member an override still needs: an override
   that omits `operator` inherits it from `Comparable.compareTo` or `Iterable.iterator`.
   A public declaration approximates the intersection: unrelated classifiers become
