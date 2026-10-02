@@ -12,10 +12,11 @@ pub struct FirLiftingSite {
     pub lifted: bool,
 }
 
-/// One enclosing local callable of a [`FirLiftingSite`]: its source name (`None` for a lambda or a
-/// local delegated property's accessor) and its position in the sequence's source order.
+/// One enclosing local callable of a [`FirLiftingSite`]: its semantic role, optional source name,
+/// and position in the sequence's source order.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FirLiftingStep {
+    pub kind: crate::lifting_provenance::LiftingCallableKind,
     pub name: Option<Box<str>>,
     pub position: u32,
 }
@@ -29,6 +30,7 @@ impl FirLiftingSite {
                 .path
                 .iter()
                 .map(|step| FirLiftingStep {
+                    kind: step.kind,
                     name: step.name.as_deref().map(Into::into),
                     position: step.position,
                 })

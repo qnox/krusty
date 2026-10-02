@@ -310,11 +310,11 @@ fn is_lifted_lambda(ir: &IrFile, function: u32) -> bool {
 /// placement, leaving every other member where it is.
 ///
 /// kotlinc's LocalDeclarationPopupLowering lowers bodies in postfix order and, as it finishes a
-/// body, appends that body's local functions to the class in source order; a local function
-/// declared inside a lambda belongs to the body enclosing the lambda. So `fun box() { fun foo() {
-/// fun bar() {} } }` places `box$foo$bar` before `box$foo`. The methods of indy lambdas are added
-/// by a later lowering that walks the class's members in their order by then: first every lambda of
-/// the declared members' bodies, then those of each lifted local function's body.
+/// body, appends that body's local functions to the class in source order; a lambda's body is a
+/// body of its own. So `fun box() { fun foo() { fun bar() {} } }` places `box$foo$bar` before
+/// `box$foo`. The methods of indy lambdas are added by a later lowering that walks the class's
+/// members in their order by then: first every lambda of the declared members' bodies, then those
+/// of each lifted local function's body, each nested lambda before the lambda enclosing it.
 pub(super) fn order_lifted_functions(ir: &IrFile, members: &mut [u32]) {
     let slots: Vec<usize> = (0..members.len())
         .filter(|&slot| ir.lifted_functions.contains_key(&members[slot]))
@@ -356,28 +356,29 @@ pub(super) fn order_lifted_functions(ir: &IrFile, members: &mut [u32]) {
         let ((left_sequence, left_site), (right_sequence, right_site)) = (site(left), site(right));
         sequence_rank(left_sequence)
             .cmp(&sequence_rank(right_sequence))
-            .then_with(|| {
-                popup_body_order(owning_body(&left_site.path), owning_body(&right_site.path))
-            })
+            .then_with(|| popup_body_order(enclosing(&left_site.path), enclosing(&right_site.path)))
             .then_with(|| own_position(&left_site.path).cmp(&own_position(&right_site.path)))
     });
     // A lambda's body owner: the declared member (every one of which precedes the lifted local
     // functions), or the lifted local function whose path is the lambda's owning body.
-    let lambda_key = |function: &u32| {
+    let body_rank = |function: &u32| {
         let (sequence, lambda_site) = site(function);
-        let body = owning_body(&lambda_site.path);
+        let body = owning_function(&lambda_site.path);
         let owner = local_functions.iter().position(|local| {
             let (local_sequence, local_site) = site(local);
             local_sequence == sequence && *local_site.path == *body
         });
-        let body_rank = match (body.is_empty(), owner) {
+        match (body.is_empty(), owner) {
             (false, Some(owner)) => (1, owner),
             _ => (0, sequence_rank(sequence).unwrap_or(usize::MAX)),
-        };
-        (body_rank, own_position(&lambda_site.path))
+        }
     };
     let mut lambdas = lambdas;
-    lambdas.sort_by_key(lambda_key);
+    lambdas.sort_by(|left, right| {
+        body_rank(left)
+            .cmp(&body_rank(right))
+            .then_with(|| popup_body_order(&site(left).1.path, &site(right).1.path))
+    });
     for (slot, function) in slots
         .into_iter()
         .zip(local_functions.into_iter().chain(lambdas))
@@ -390,19 +391,27 @@ fn own_position(path: &[crate::fir::FirLiftingStep]) -> Option<u32> {
     path.last().map(|step| step.position)
 }
 
-/// The body a lifted function is lowered with: the path of its nearest enclosing local function, or
-/// the empty path of the container itself. Lambdas are not bodies of their own.
-fn owning_body(path: &[crate::fir::FirLiftingStep]) -> &[crate::fir::FirLiftingStep] {
+/// The body a lifted local function is declared in: the path of the local callable, lambda or local
+/// function, that encloses it, or the empty path of the container itself.
+fn enclosing(path: &[crate::fir::FirLiftingStep]) -> &[crate::fir::FirLiftingStep] {
+    &path[..path.len().saturating_sub(1)]
+}
+
+/// The function whose body a lambda's method is generated from: the path of its nearest enclosing
+/// local function, or the empty path of the container itself.
+fn owning_function(path: &[crate::fir::FirLiftingStep]) -> &[crate::fir::FirLiftingStep] {
     let enclosing = &path[..path.len().saturating_sub(1)];
     let depth = enclosing
         .iter()
-        .rposition(|step| step.name.is_some())
+        .rposition(|step| {
+            step.kind == crate::lifting_provenance::LiftingCallableKind::LocalFunction
+        })
         .map_or(0, |index| index + 1);
     &enclosing[..depth]
 }
 
-/// Postfix order of two bodies of one sequence: a nested body finishes before the body enclosing
-/// it, and sibling bodies finish in source order.
+/// Postfix order of two bodies (or lambdas) of one sequence: a nested one finishes before the one
+/// enclosing it, and siblings finish in source order.
 fn popup_body_order(
     left: &[crate::fir::FirLiftingStep],
     right: &[crate::fir::FirLiftingStep],

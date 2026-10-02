@@ -7,6 +7,10 @@
 //! taken in the sequence. `N` counts the lambdas and name-clashing local functions of the sequence
 //! in source order, including lambdas that are spliced at inline call sites and so never become a
 //! method. A suspend lambda becomes a class of its own and takes no number.
+//!
+//! Every lambda numbers what it contains on its own, local functions nested in it included, and
+//! spells a lambda among them as the bare number: `one$lambda$0$0`, `one$lambda$0$lf$1`. A local
+//! function does not: a lambda in `loc` takes the enclosing count, `one$loc$lambda$2`.
 
 use std::collections::{HashMap, HashSet};
 
@@ -18,22 +22,35 @@ use crate::ir::{IrFile, IrLiftingSequence};
 pub(crate) fn number(ir: &mut IrFile) {
     let mut segments = HashMap::<(&IrLiftingSequence, u32), String>::new();
     for (sequence, entries) in &ir.lifting_sequences {
-        let mut next = 0u32;
-        let mut used = HashSet::new();
+        let mut scopes = HashMap::<Option<u32>, (u32, HashSet<&str>)>::new();
         for (&position, entry) in entries {
             if !entry.lifted {
                 continue;
             }
-            let segment = match &entry.name {
-                None => {
-                    next += 1;
-                    format!("lambda${}", next - 1)
+            let (next, used) = scopes.entry(entry.scope).or_default();
+            let segment = match entry.kind {
+                crate::lifting_provenance::LiftingCallableKind::Lambda
+                | crate::lifting_provenance::LiftingCallableKind::LocalDelegatedPropertyAccessor => {
+                    assert!(
+                        entry.name.is_none(),
+                        "an unnamed lifting role gained a spelling"
+                    );
+                    match entry.scope {
+                        None => format!("lambda${}", take(next)),
+                        Some(_) => take(next).to_string(),
+                    }
                 }
-                Some(name) if !used.insert(name.clone()) => {
-                    next += 1;
-                    format!("{name}${}", next - 1)
+                crate::lifting_provenance::LiftingCallableKind::LocalFunction => {
+                    let name = entry
+                        .name
+                        .as_deref()
+                        .expect("a source local function retains its spelling");
+                    if !used.insert(name) {
+                        format!("{name}${}", take(next))
+                    } else {
+                        name.to_string()
+                    }
                 }
-                Some(name) => name.to_string(),
             };
             segments.insert((sequence, position), segment);
         }
@@ -132,4 +149,10 @@ mod tests {
         assert_eq!(container_segment("lz$delegate"), "lz_delegate");
         assert_eq!(container_segment("outer"), "outer");
     }
+}
+
+/// The next number of a scope's counter.
+fn take(next: &mut u32) -> u32 {
+    *next += 1;
+    *next - 1
 }
