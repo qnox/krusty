@@ -23,6 +23,9 @@ struct Candidate {
     ty: Ty,
     is_var: bool,
     visibility: Visibility,
+    /// A private property has no companion accessor. In-class reads become static reads of the
+    /// hoisted field, and another class reaches it through `access$get…$cp`.
+    is_private: bool,
     source_order: u32,
     decl_line: u32,
     /// `@JvmField`: the hoisted static IS the property's public surface — a PUBLIC field with no
@@ -53,16 +56,21 @@ fn initializer_store(
     })
 }
 
+fn redundant_companion_receiver(ir: &IrFile, class: ClassId, receiver: ExprId) -> bool {
+    let companion = ir.classes[class as usize].fq_name;
+    match ir.expr(receiver) {
+        IrExpr::SingletonValue { classifier } => *classifier == companion,
+        IrExpr::ExternalStaticInstance { ty, .. } => *ty == companion,
+        IrExpr::StaticInstance { ty, .. } => ir.classes[*ty as usize].fq_name == companion,
+        IrExpr::GetStatic(index) => ir.statics.get(*index as usize).is_some_and(|field| {
+            field.ty.obj_internal() == Some(companion)
+                || field.ty.non_null().obj_internal() == Some(companion)
+        }),
+        _ => false,
+    }
+}
+
 fn receiver_is_inert(ir: &IrFile, class: ClassId, field: u32) -> bool {
-    let receiver_is_redundant_companion_value = |receiver: ExprId| {
-        let companion = ir.classes[class as usize].fq_name;
-        match ir.expr(receiver) {
-            IrExpr::SingletonValue { classifier } => *classifier == companion,
-            IrExpr::ExternalStaticInstance { ty, .. } => *ty == companion,
-            IrExpr::StaticInstance { ty, .. } => ir.classes[*ty as usize].fq_name == companion,
-            _ => false,
-        }
-    };
     ir.exprs.iter().all(|expression| match expression {
         IrExpr::GetField {
             receiver,
@@ -75,7 +83,7 @@ fn receiver_is_inert(ir: &IrFile, class: ClassId, field: u32) -> bool {
             index,
         } if *target == class && *index == field => {
             crate::ir::expr_runs_no_code(ir, *receiver)
-                || receiver_is_redundant_companion_value(*receiver)
+                || redundant_companion_receiver(ir, class, *receiver)
         }
         IrExpr::SetField {
             receiver,
@@ -84,7 +92,7 @@ fn receiver_is_inert(ir: &IrFile, class: ClassId, field: u32) -> bool {
             ..
         } if *target == class && *index == field => {
             crate::ir::expr_runs_no_code(ir, *receiver)
-                || receiver_is_redundant_companion_value(*receiver)
+                || redundant_companion_receiver(ir, class, *receiver)
         }
         _ => true,
     })
@@ -211,8 +219,10 @@ pub fn lower_companion_properties(ir: &mut IrFile) {
             let is_jvm_field = jvm_field_eligible(declaration, backing);
             let inert_receiver = receiver_is_inert(ir, companion, field);
             let initializer_store = initializer_store(ir, companion, field, initializer);
-            if (!visibility.is_public() && !is_jvm_field)
-                || declaration.is_private
+            // A private companion property is hoisted too: kotlinc stores it as a private
+            // static of the outer class, not as a companion instance field. An interface
+            // companion cannot host that field, and this loop never selects one.
+            if (!visibility.is_public() && !declaration.is_private && !is_jvm_field)
                 || declaration.is_open
                 || declaration.getter.is_some()
                 || declaration.setter.is_some()
@@ -239,6 +249,7 @@ pub fn lower_companion_properties(ir: &mut IrFile) {
                 ty: declaration.ty,
                 is_var: declaration.is_var,
                 visibility,
+                is_private: declaration.is_private,
                 source_order: declaration.source_order,
                 decl_line: declaration.decl_line,
                 is_jvm_field,
@@ -329,14 +340,16 @@ pub fn lower_companion_properties(ir: &mut IrFile) {
             || stmts
                 .iter()
                 .any(|statement| !removed_stores.contains(statement));
-        // Hoisted stores are about to become outer-class static stores. What remains must be
-        // movable with them: a leftover companion instance field (a private property) cannot be
-        // read from the outer `<clinit>`, so its initializer stays on the companion constructor
-        // and the hoisted stores keep their own `<clinit>` initializers.
-        let hoisted_properties = candidates
+        // Hoisted stores become outer-class static stores. When the body also has an `init`
+        // block and every field it touches is moving with it, keep those stores in the body so
+        // `<clinit>` runs one source-ordered initializer after the companion instance is stored.
+        // A property that keeps a companion instance field (a custom accessor, a delegate) is
+        // private to the companion, so its initializer stays on the constructor and the hoisted
+        // stores keep their own `<clinit>` initializers.
+        let hoisted_fields = candidates
             .iter()
             .filter(|candidate| candidate.companion == companion)
-            .map(|candidate| candidate.name.clone())
+            .map(|candidate| candidate.field)
             .collect::<HashSet<_>>();
         if has_other_statement
             && class_companion_clinit_owner(ir, companion).is_some()
@@ -345,7 +358,7 @@ pub fn lower_companion_properties(ir: &mut IrFile) {
                 companion,
                 body,
                 &removed_stores,
-                &hoisted_properties,
+                &hoisted_fields,
             )
         {
             retain_initializer_stores.insert(companion);
@@ -384,7 +397,11 @@ pub fn lower_companion_properties(ir: &mut IrFile) {
                     index: static_for_field[&(class, index)],
                     value,
                 };
-                if crate::ir::expr_runs_no_code(ir, receiver) {
+                // The companion instance is already stored. Reloading it only to discard it
+                // before a static store is not part of kotlinc's `<clinit>`.
+                if crate::ir::expr_runs_no_code(ir, receiver)
+                    || redundant_companion_receiver(ir, class, receiver)
+                {
                     Some(write)
                 } else {
                     let write = ir.add_expr(write);
@@ -437,7 +454,9 @@ pub fn lower_companion_properties(ir: &mut IrFile) {
     // A `@JvmField` property gets NONE: the public owner field is its entire JVM surface.
     for candidate in candidates {
         let static_index = static_for_field[&(candidate.companion, candidate.field)];
-        let accessors = (!candidate.is_jvm_field).then(|| {
+        // A private property has no getter or setter. kotlinc reads the hoisted field
+        // directly from the outer class and through `access$…$cp` from everywhere else.
+        let accessors = (!candidate.is_jvm_field && !candidate.is_private).then(|| {
             let getter_name = property_getter_name(&candidate.name);
             let read = ir.add_expr(IrExpr::GetStatic(static_index));
             let returned = ir.add_expr(IrExpr::Return(Some(read)));
@@ -574,9 +593,8 @@ fn schedule_class_companion_initializers(ir: &mut IrFile) {
         let Some(body) = ir.classes[companion as usize].init_body else {
             continue;
         };
-        // A private property stays an instance field of the companion. Reading it from the outer
-        // `<clinit>` becomes a getter call, and a private property has no getter. Leave that
-        // initializer on the companion constructor, which can use the field directly.
+        // Hoisted fields are already static reads. What remains is a companion instance field,
+        // which the outer class cannot touch. That initializer stays on the constructor.
         if initializer_needs_companion_instance(
             ir,
             companion,
@@ -594,14 +612,18 @@ fn schedule_class_companion_initializers(ir: &mut IrFile) {
     }
 }
 
+/// Whether `body` still reads or writes a companion instance field.
+///
+/// `hoisted_fields` are backing fields about to become outer statics. Their operations do not
+/// keep the initializer on the constructor: after the rewrite they are static loads of the
+/// outer class. A field that stays on the companion is private there, so the outer `<clinit>`
+/// cannot load it.
 fn initializer_needs_companion_instance(
     ir: &IrFile,
     companion: ClassId,
     body: ExprId,
     skip: &HashSet<ExprId>,
-    // Properties whose stores are moving to the outer class. Their reads are static after that
-    // move, even while the declaration still names its old field.
-    hoisted_properties: &HashSet<String>,
+    hoisted_fields: &HashSet<u32>,
 ) -> bool {
     let companion_name = ir.classes[companion as usize].fq_name;
     let mut pending = vec![body];
@@ -611,22 +633,24 @@ fn initializer_needs_companion_instance(
             continue;
         }
         match ir.expr(expression) {
-            IrExpr::GetField { class, .. }
-            | IrExpr::SetField { class, .. }
-            | IrExpr::LateinitInitialized { class, .. }
-                if *class == companion =>
+            IrExpr::GetField { class, index, .. }
+            | IrExpr::SetField { class, index, .. }
+            | IrExpr::LateinitInitialized { class, index, .. }
+                if *class == companion && !hoisted_fields.contains(index) =>
             {
                 return true;
             }
             IrExpr::PropertyRead { owner, name, .. }
             | IrExpr::PropertyWrite { owner, name, .. }
                 if *owner == companion_name
-                    && !hoisted_properties.contains(name)
                     && ir.classes[companion as usize]
                         .properties
                         .iter()
                         .any(|property| {
-                            property.name == *name && property.backing_field.is_some()
+                            property.name == *name
+                                && property
+                                    .backing_field
+                                    .is_some_and(|field| !hoisted_fields.contains(&field))
                         }) =>
             {
                 return true;

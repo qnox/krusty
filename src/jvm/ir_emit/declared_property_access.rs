@@ -19,6 +19,17 @@ impl Emitter<'_> {
     ) -> Option<crate::jvm::inline::PropertyAccess> {
         use crate::jvm::inline::PropertyAccess;
         let class = self.ir.classes.iter().find(|c| c.fq_name == owner)?;
+        if let Some(index) = class
+            .properties
+            .iter()
+            .position(|property| property.name == name)
+        {
+            if let Some(access) =
+                self.hoisted_companion_property_access(class.fq_name, index as u32, false)
+            {
+                return Some(access);
+            }
+        }
         let interface = is_jvm_interface(class) || selected_interface;
         // A property that DECLARES an accessor (computed, delegated, or `field`-using) is always read
         // through it — the accessor is user code, and a direct field load would skip it. Only a plain
@@ -139,6 +150,69 @@ impl Emitter<'_> {
             descriptor: type_descriptor(jvm_declared_ty(&field.ty)),
             // A static-storage object's backing fields are JVM statics (kotlinc's shape).
             is_static: static_storage(self.ir, class),
+        })
+    }
+
+    /// A companion property whose storage was moved onto the outer class.
+    ///
+    /// The outer class, including its `<clinit>`, reads and writes the private static field.
+    /// A private property has no accessor, so every other class uses `access$get…$cp` /
+    /// `access$set…$cp`. A public property's accessor stays the companion getter or setter.
+    pub(super) fn hoisted_companion_property_access(
+        &self,
+        companion: TypeName,
+        property: u32,
+        writable: bool,
+    ) -> Option<crate::jvm::inline::PropertyAccess> {
+        use crate::jvm::inline::PropertyAccess;
+        let static_id = self.ir.jvm_companion_property_static(companion, property)?;
+        let storage = self.ir.statics.get(static_id as usize)?;
+        let owner = storage.owner?;
+        let descriptor = type_descriptor(jvm_declared_ty(&storage.ty));
+        let declared = self
+            .ir
+            .classes
+            .iter()
+            .find(|class| class.fq_name == companion)?
+            .properties
+            .get(property as usize)?;
+        let private_property = declared.is_private;
+        let property_name = declared.name.clone();
+        let emitted_by_owner = self.static_owner == Some(StaticOwner::Class(owner));
+        if emitted_by_owner || self.ir.is_jvm_field_static(static_id) {
+            return Some(PropertyAccess::Field {
+                owner,
+                name: self.ir.static_field_jvm_name(static_id).to_string(),
+                descriptor,
+                is_static: true,
+            });
+        }
+        if !private_property {
+            return None;
+        }
+        let (name, descriptor) = if writable {
+            (
+                format!(
+                    "access${}$cp",
+                    crate::names::property_setter_name(&property_name)
+                ),
+                format!("({descriptor})V"),
+            )
+        } else {
+            (
+                format!(
+                    "access${}$cp",
+                    crate::names::property_getter_name(&property_name)
+                ),
+                format!("(){descriptor}"),
+            )
+        };
+        Some(PropertyAccess::AccessBridge {
+            owner,
+            name,
+            descriptor,
+            takes_receiver: false,
+            inline_uninitialized_guard: None,
         })
     }
 }

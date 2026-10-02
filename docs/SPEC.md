@@ -837,9 +837,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `C.Companion` was stored and before the property's static field existed, so `C.visited.add`
   threw `ExceptionInInitializerError`. The initializer body now runs after the instance store.
   When it contains anything besides hoisted property stores, those stores stay in the body so a
-  later property still sees the preceding `init` block. A private companion property stays an
-  instance field, so an initializer that still reads one remains on the companion constructor,
-  which can load that field. Interface companions keep their own `<clinit>`. Test:
+  later property still sees the preceding `init` block. A private companion property is hoisted
+  with the public ones: `private static final` on the outer class, initialized in that same
+  source order, read through `access$get…$cp` from the companion. The outer class, including
+  `<clinit>`, reads the field directly. Leaving the private property as a companion instance
+  field and initializing it from `Companion.<init>` runs that store before the public properties
+  declared ahead of it. A property that keeps a companion instance field — a custom accessor or
+  a delegate — is still initialized on the constructor, because that field is private to the
+  companion. Interface companions keep their own `<clinit>`. Test:
   `tests/companion_init_block_e2e.rs`.
 - **`companion { … }` blocks and companion extensions (`CompanionBlocksAndExtensions`).** A block
   member is a static member of the classifier that declares the block, not of the file facade,

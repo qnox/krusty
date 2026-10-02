@@ -8124,16 +8124,12 @@ impl<'a> Emitter<'a> {
         let crate::ir::IrLocalPropertyLayout::Member {
             class,
             owner,
-            property,
             name,
             ..
         } = self.ir.local_property_layouts.get(&target)?
         else {
             return None;
         };
-        if let Some(access) = self.hoisted_jvm_field_access(*class, *property) {
-            return Some(access);
-        }
         debug_assert_eq!(self.ir.classes[*class as usize].fq_name, *owner);
         self.declared_property_read_access(*owner, name, selected_accessor, selected_interface)
     }
@@ -8145,39 +8141,14 @@ impl<'a> Emitter<'a> {
         let crate::ir::IrLocalPropertyLayout::Member {
             class,
             owner,
-            property,
             name,
             ..
         } = self.ir.local_property_layouts.get(&target)?
         else {
             return None;
         };
-        if let Some(access) = self.hoisted_jvm_field_access(*class, *property) {
-            return Some(access);
-        }
         debug_assert_eq!(self.ir.classes[*class as usize].fq_name, *owner);
         self.declared_property_write_access(*owner, name)
-    }
-
-    fn hoisted_jvm_field_access(
-        &self,
-        class: crate::ir::ClassId,
-        property: u32,
-    ) -> Option<crate::jvm::inline::PropertyAccess> {
-        let class = self.ir.classes.get(class as usize)?;
-        let static_id = self
-            .ir
-            .jvm_companion_property_static(class.fq_name, property)?;
-        if !self.ir.is_jvm_field_static(static_id) {
-            return None;
-        }
-        let field = self.ir.statics.get(static_id as usize)?;
-        Some(crate::jvm::inline::PropertyAccess::Field {
-            owner: field.owner?,
-            name: field.name.clone(),
-            descriptor: type_descriptor(jvm_declared_ty(&field.ty)),
-            is_static: true,
-        })
     }
 
     /// The write analogue of [`Self::declared_property_read_access`].
@@ -8188,6 +8159,13 @@ impl<'a> Emitter<'a> {
     ) -> Option<crate::jvm::inline::PropertyAccess> {
         use crate::jvm::inline::PropertyAccess;
         let class = self.ir.classes.iter().find(|c| c.fq_name == owner)?;
+        if let Some(index) = class.properties.iter().position(|property| property.name == name) {
+            if let Some(access) =
+                self.hoisted_companion_property_access(class.fq_name, index as u32, true)
+            {
+                return Some(access);
+            }
+        }
         // The write analogue: a declared setter is user code and must not be bypassed.
         let declared = class.properties.iter().find(|p| p.name == name);
         let direct_field = self.direct_field_access(class, declared, true);
