@@ -8,11 +8,15 @@ use std::time::Duration;
 use serde_json::Value;
 
 use super::diagnostic_page::WorkspaceDiagnosticStream;
-use super::implementation::{json_io, write_framed, Incoming};
+use super::implementation::{json_io, write_framed, Incoming, INPUT_QUEUE_CAPACITY};
 use super::output_queue::OutputQueue;
 
 const DIAGNOSTIC_STREAM_DRAIN_POLL: Duration = Duration::from_millis(1);
 const MAX_INPUTS_BUFFERED_DURING_DIAGNOSTIC_STREAM: usize = 32;
+/// Once the normal pending deque is full, retain at most one production input-channel's worth of
+/// additional events while looking for a cancellation. The aggregate retained-input bound is
+/// therefore `MAX_INPUTS_BUFFERED_DURING_DIAGNOSTIC_STREAM + INPUT_QUEUE_CAPACITY`.
+const MAX_INPUTS_DEFERRED_DURING_DIAGNOSTIC_STREAM: usize = INPUT_QUEUE_CAPACITY;
 
 pub struct Dispatch {
     pub messages: Vec<Value>,
@@ -88,12 +92,9 @@ pub(super) fn dispatch_sync<W: Write>(
 pub(super) struct AsyncResponseDelivery {
     stream: Option<WorkspaceDiagnosticStream>,
     incoming_closed: bool,
-    /// One non-cancellation pulled while the pending deque is already at its cap.
-    ///
-    /// The cap stays in force for ordinary events. This slot exists only so a matching
-    /// cancellation behind a full deque can be recognized without dropping the event that had to
-    /// be read to see it.
-    held: Option<Incoming>,
+    /// A production input-channel's worth of events pulled after the normal pending deque fills.
+    /// Their FIFO order follows the pending deque and is restored before normal dispatch resumes.
+    deferred: VecDeque<Incoming>,
 }
 
 impl AsyncResponseDelivery {
@@ -122,8 +123,9 @@ impl AsyncResponseDelivery {
 
     /// Makes one bounded delivery step. State-changing events remain queued until the immutable
     /// snapshot reaches its sole terminal response; only its matching cancellation is consumed.
-    /// A full pending deque still observes a matching cancellation from the input channel, and
-    /// holds at most the one ordinary event that had to be read to see it.
+    /// A full pending deque still observes a matching cancellation behind the bounded input
+    /// channel. If that complete lookahead fills with unrelated events, the stream fails closed
+    /// before another page while retaining all events in their original order.
     pub(super) fn advance(
         &mut self,
         writer: &mut OutputQueue,
@@ -137,12 +139,12 @@ impl AsyncResponseDelivery {
             let AsyncResponseDelivery {
                 stream,
                 incoming_closed,
-                held,
+                deferred,
             } = &mut *self;
             let Some(stream) = stream.as_mut() else {
                 return Ok(());
             };
-            observe_incoming(held, incoming_closed, stream, incoming, pending);
+            observe_incoming(deferred, incoming_closed, stream, incoming, pending);
         }
         if writer.is_idle()? {
             let message = self
@@ -153,14 +155,12 @@ impl AsyncResponseDelivery {
                 write_value(writer, &message)?;
             } else {
                 self.stream = None;
-                if let Some(event) = self.held.take() {
-                    pending.push_back(event);
-                }
+                pending.append(&mut self.deferred);
             }
             return Ok(());
         }
         if pending.len() >= MAX_INPUTS_BUFFERED_DURING_DIAGNOSTIC_STREAM
-            || self.held.is_some()
+            || !self.deferred.is_empty()
             || self.incoming_closed
         {
             std::thread::sleep(DIAGNOSTIC_STREAM_DRAIN_POLL);
@@ -181,7 +181,7 @@ impl AsyncResponseDelivery {
 }
 
 fn observe_incoming(
-    held: &mut Option<Incoming>,
+    deferred: &mut VecDeque<Incoming>,
     incoming_closed: &mut bool,
     stream: &mut WorkspaceDiagnosticStream,
     incoming: &Receiver<Incoming>,
@@ -189,28 +189,28 @@ fn observe_incoming(
 ) {
     cancel_from_pending(stream, pending);
     loop {
-        let event = if let Some(event) = held.take() {
-            event
-        } else {
-            match incoming.try_recv() {
-                Ok(event) => event,
-                Err(mpsc::TryRecvError::Empty) => break,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    *incoming_closed = true;
+        match incoming.try_recv() {
+            Ok(event) => {
+                if is_matching_cancellation(stream, &event) {
+                    stream.cancel();
+                    break;
+                }
+                if pending.len() < MAX_INPUTS_BUFFERED_DURING_DIAGNOSTIC_STREAM {
+                    pending.push_back(event);
+                    continue;
+                }
+                deferred.push_back(event);
+                if deferred.len() == MAX_INPUTS_DEFERRED_DURING_DIAGNOSTIC_STREAM {
+                    stream.cancel_for_delivery_backlog();
                     break;
                 }
             }
-        };
-        if is_matching_cancellation(stream, &event) {
-            stream.cancel();
-            continue;
+            Err(mpsc::TryRecvError::Empty) => break,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                *incoming_closed = true;
+                break;
+            }
         }
-        if pending.len() < MAX_INPUTS_BUFFERED_DURING_DIAGNOSTIC_STREAM {
-            pending.push_back(event);
-            continue;
-        }
-        *held = Some(event);
-        break;
     }
 }
 
@@ -339,6 +339,25 @@ mod tests {
             bytes = &bytes[body_end..];
         }
         messages
+    }
+
+    fn wait_until_idle(writer: &mut OutputQueue) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !writer.is_idle().expect("output queue state") {
+            assert!(
+                Instant::now() < deadline,
+                "output queue did not become idle"
+            );
+            std::thread::yield_now();
+        }
+    }
+
+    fn configuration_event(index: usize) -> Value {
+        json!({
+            "jsonrpc": "2.0",
+            "method": "workspace/didChangeConfiguration",
+            "params": {"index": index}
+        })
     }
 
     #[test]
@@ -583,6 +602,186 @@ mod tests {
                     "message": "request cancelled"
                 }
             })]
+        );
+    }
+
+    #[test]
+    fn full_pending_and_one_unrelated_event_still_observe_the_following_cancel() {
+        use crate::server::output_queue::SharedWriter;
+
+        let id = json!("workspace/diagnostic/full-with-unrelated");
+        let token = json!("workspace/diagnostic/progress");
+        let items = (0..80)
+            .map(|index| json!({"index": index, "payload": "m".repeat(8 * 1024)}))
+            .collect::<Vec<_>>();
+        let WorkspaceDiagnosticResponse::Stream(stream) =
+            workspace_diagnostic_response(id.clone(), items.clone(), Some(&token))
+        else {
+            panic!("oversized bounded response must stream");
+        };
+        let (inner, captured) = SharedWriter::recording();
+        let mut writer = OutputQueue::spawn(inner).expect("output queue");
+        let mut delivery = AsyncResponseDelivery::default();
+        assert_eq!(
+            delivery
+                .accept(&mut writer, Dispatch::diagnostic_stream(stream))
+                .unwrap(),
+            None
+        );
+
+        let (_empty_sender, empty_incoming) = mpsc::sync_channel(INPUT_QUEUE_CAPACITY);
+        let mut pending = VecDeque::new();
+        delivery
+            .advance(&mut writer, &empty_incoming, &mut pending)
+            .unwrap();
+        wait_until_idle(&mut writer);
+
+        let mut expected_events = (0..MAX_INPUTS_BUFFERED_DURING_DIAGNOSTIC_STREAM)
+            .map(configuration_event)
+            .collect::<Vec<_>>();
+        pending.extend(expected_events.iter().cloned().map(Incoming::Message));
+        let unrelated = configuration_event(MAX_INPUTS_BUFFERED_DURING_DIAGNOSTIC_STREAM);
+        expected_events.push(unrelated.clone());
+        let (sender, incoming) = mpsc::sync_channel(INPUT_QUEUE_CAPACITY);
+        sender.send(Incoming::Message(unrelated)).unwrap();
+        sender
+            .send(Incoming::Message(json!({
+                "jsonrpc": "2.0",
+                "method": "$/cancelRequest",
+                "params": {"id": id}
+            })))
+            .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while delivery.is_active() {
+            assert!(
+                Instant::now() < deadline,
+                "queued cancellation did not reach its terminal"
+            );
+            delivery
+                .advance(&mut writer, &incoming, &mut pending)
+                .unwrap();
+        }
+
+        let retained = pending
+            .iter()
+            .map(|event| match event {
+                Incoming::Message(message) => message.clone(),
+                _ => panic!("only messages were queued"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(retained, expected_events);
+        assert_eq!(writer.finish(Ok(0)).unwrap(), 0);
+        assert_eq!(
+            decode_frames(&captured.lock().expect("captured output")),
+            vec![
+                json!({
+                    "jsonrpc": "2.0",
+                    "method": "$/progress",
+                    "params": {
+                        "token": token,
+                        "value": {"items": &items[..31]}
+                    }
+                }),
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": {
+                        "code": -32800,
+                        "message": "request cancelled"
+                    }
+                })
+            ]
+        );
+    }
+
+    #[test]
+    fn full_pending_and_full_lookahead_fail_closed_without_reordering_events() {
+        use crate::server::output_queue::SharedWriter;
+
+        let id = json!("workspace/diagnostic/input-capacity");
+        let token = json!("workspace/diagnostic/progress");
+        let items = (0..80)
+            .map(|index| json!({"index": index, "payload": "m".repeat(8 * 1024)}))
+            .collect::<Vec<_>>();
+        let WorkspaceDiagnosticResponse::Stream(stream) =
+            workspace_diagnostic_response(id.clone(), items.clone(), Some(&token))
+        else {
+            panic!("oversized bounded response must stream");
+        };
+        let (inner, captured) = SharedWriter::recording();
+        let mut writer = OutputQueue::spawn(inner).expect("output queue");
+        let mut delivery = AsyncResponseDelivery::default();
+        assert_eq!(
+            delivery
+                .accept(&mut writer, Dispatch::diagnostic_stream(stream))
+                .unwrap(),
+            None
+        );
+
+        let (_empty_sender, empty_incoming) = mpsc::sync_channel(INPUT_QUEUE_CAPACITY);
+        let mut pending = VecDeque::new();
+        delivery
+            .advance(&mut writer, &empty_incoming, &mut pending)
+            .unwrap();
+        wait_until_idle(&mut writer);
+
+        let expected_events = (0..MAX_INPUTS_BUFFERED_DURING_DIAGNOSTIC_STREAM
+            + MAX_INPUTS_DEFERRED_DURING_DIAGNOSTIC_STREAM)
+            .map(configuration_event)
+            .collect::<Vec<_>>();
+        pending.extend(
+            expected_events[..MAX_INPUTS_BUFFERED_DURING_DIAGNOSTIC_STREAM]
+                .iter()
+                .cloned()
+                .map(Incoming::Message),
+        );
+        let (sender, incoming) = mpsc::sync_channel(INPUT_QUEUE_CAPACITY);
+        for event in &expected_events[MAX_INPUTS_BUFFERED_DURING_DIAGNOSTIC_STREAM..] {
+            sender.send(Incoming::Message(event.clone())).unwrap();
+        }
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while delivery.is_active() {
+            assert!(
+                Instant::now() < deadline,
+                "full delivery lookahead did not reach its terminal"
+            );
+            delivery
+                .advance(&mut writer, &incoming, &mut pending)
+                .unwrap();
+        }
+
+        let retained = pending
+            .iter()
+            .map(|event| match event {
+                Incoming::Message(message) => message.clone(),
+                _ => panic!("only messages were queued"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(retained, expected_events);
+        assert_eq!(writer.finish(Ok(0)).unwrap(), 0);
+        assert_eq!(
+            decode_frames(&captured.lock().expect("captured output")),
+            vec![
+                json!({
+                    "jsonrpc": "2.0",
+                    "method": "$/progress",
+                    "params": {
+                        "token": token,
+                        "value": {"items": &items[..31]}
+                    }
+                }),
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": {
+                        "code": -32802,
+                        "message": "workspace diagnostic delivery input queue is full",
+                        "data": {"retriggerRequest": false}
+                    }
+                })
+            ]
         );
     }
 }

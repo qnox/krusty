@@ -83,6 +83,7 @@ pub(super) struct WorkspaceDiagnosticStream {
 enum StreamTerminal {
     Result,
     Cancelled,
+    DeliveryBacklog,
     Emitted,
 }
 
@@ -98,6 +99,13 @@ impl WorkspaceDiagnosticStream {
         }
     }
 
+    pub(super) fn cancel_for_delivery_backlog(&mut self) {
+        if matches!(self.terminal, StreamTerminal::Result) {
+            self.pages.clear();
+            self.terminal = StreamTerminal::DeliveryBacklog;
+        }
+    }
+
     pub(super) fn next_message(&mut self) -> Option<Value> {
         if let Some(page) = self.pages.pop_front() {
             return Some(progress_report(&self.token, page));
@@ -105,6 +113,7 @@ impl WorkspaceDiagnosticStream {
         match std::mem::replace(&mut self.terminal, StreamTerminal::Emitted) {
             StreamTerminal::Result => Some(result_report(&self.id, Vec::new())),
             StreamTerminal::Cancelled => Some(request_cancelled(&self.id)),
+            StreamTerminal::DeliveryBacklog => Some(delivery_backlog(&self.id)),
             StreamTerminal::Emitted => None,
         }
     }
@@ -170,6 +179,14 @@ fn request_cancelled(id: &Value) -> Value {
             "message": "request cancelled"
         }
     })
+}
+
+fn delivery_backlog(id: &Value) -> Value {
+    server_cancelled(
+        id,
+        "workspace diagnostic delivery input queue is full",
+        Some(json!({"retriggerRequest": false})),
+    )
 }
 
 fn omission_diagnostic() -> Value {

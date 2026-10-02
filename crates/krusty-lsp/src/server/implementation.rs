@@ -53,7 +53,7 @@ use krusty::diag::{Diagnostic, DiagnosticKind, Severity};
 
 pub const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_HEADER_BYTES: usize = 8 * 1024;
-const INPUT_QUEUE_CAPACITY: usize = 4;
+pub(super) const INPUT_QUEUE_CAPACITY: usize = 4;
 const MAX_INPUT_DISPATCHES_BEFORE_MAINTENANCE: usize = 32;
 /// How long shutdown waits for the analysis thread before abandoning a wedged worker.
 const ENGINE_SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
