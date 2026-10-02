@@ -152,13 +152,13 @@ fn reified_delegate_accessor_plan_stays_one_erased_declaration_helper() {
                     && method.name.ends_with(suffix)
                     && method.descriptor == "(LDelegate;)Ljava/lang/Object;"
             })
-            .map(|method| method.descriptor.as_str())
+            .map(|method| method.descriptor.clone())
             .collect::<Vec<_>>()
     };
     let reference_helpers = helper_descriptors(&reference, "$lambda-0");
     assert_eq!(
         reference_helpers,
-        vec!["(LDelegate;)Ljava/lang/Object;"],
+        vec!["(LDelegate;)Ljava/lang/Object;".to_owned()],
         "the reference plan is one declaration-erased helper",
     );
     assert_eq!(
