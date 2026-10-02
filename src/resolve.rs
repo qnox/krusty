@@ -14557,26 +14557,18 @@ impl<'a> Checker<'a> {
         let diagnostic_span = mexpr.map_or(span, |member| self.member_name_span(member, name));
         match self.select_property_read(scope, rt, name) {
             Ok(Some(selection)) => {
-                if let Some((visibility, owner)) = selection.access() {
-                    if visibility != Visibility::Public
-                        && !self.receiver_property_accessible(
+                if let Some((visibility, owner)) = self.hidden_property_read(&selection, rt) {
+                    if report_diagnostics {
+                        self.report_inaccessible_property(
                             visibility,
+                            name,
+                            selection.ty(),
                             owner,
-                            selection.access_receiver(rt),
-                        )
-                    {
-                        if report_diagnostics {
-                            self.report_inaccessible_property(
-                                visibility,
-                                name,
-                                selection.ty(),
-                                owner,
-                                selection.external_property(),
-                                diagnostic_span,
-                            );
-                        }
-                        return Ty::Error;
+                            selection.external_property(),
+                            diagnostic_span,
+                        );
                     }
+                    return Ty::Error;
                 }
                 return self.record_property_read(scope, mexpr, selection);
             }
@@ -14775,9 +14767,7 @@ impl<'a> Checker<'a> {
     ) -> Option<Ty> {
         if let Ok(Some(selection)) = self.select_property_read(scope, rt, name) {
             let access = selection.access();
-            let inaccessible = access.is_some_and(|(visibility, owner)| {
-                !self.receiver_property_accessible(visibility, owner, selection.access_receiver(rt))
-            });
+            let inaccessible = self.hidden_property_read(&selection, rt).is_some();
             crate::trace_compiler!(
                 "name_type",
                 "implicit property probe receiver={rt:?} name={name} type={:?} access={access:?} inaccessible={inaccessible}",

@@ -7167,7 +7167,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   receiver.** Kotlin's protected rule constrains only the implicit dispatch receiver (`this` or the
   `with(...)` receiver supplying the member's owner); the extension receiver of `recv.prop` is an
   ordinary argument. Read selection therefore probes `receiver_property_accessible` with the
-  selected property's dispatch-receiver type (`PropertyReadSelection::access_receiver`), so
+  selected property's dispatch-receiver type (`PropertyReadSelection::hidden_from`), so
   `compute.observable` inside the declaring class reads a protected member of `this` and compiles,
   while a read from an unrelated class still reports
   `cannot access 'x': it is protected in 'A'`. Tests:
