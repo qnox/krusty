@@ -571,12 +571,24 @@ fn regression_fixture(name: &str, body: &str) -> (PathBuf, PathBuf) {
 
 #[cfg(unix)]
 fn regression_threads() -> String {
-    let nproc = Command::new("nproc").output().expect("nproc").stdout;
-    let n = String::from_utf8(nproc)
-        .expect("nproc is UTF-8")
+    // Probe with the same pipeline scripts/conformance-regressions.sh uses: nproc is GNU
+    // coreutils, getconf is POSIX and present on macOS, sysctl is the last resort.
+    let probed = Command::new("sh")
+        .args([
+            "-c",
+            "nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu",
+        ])
+        .output()
+        .expect("probe the CPU count");
+    assert!(
+        probed.status.success(),
+        "CPU count probe failed: {probed:?}"
+    );
+    let n = String::from_utf8(probed.stdout)
+        .expect("CPU count is UTF-8")
         .trim()
         .parse::<u32>()
-        .expect("nproc is a count");
+        .expect("CPU count is a number");
     n.min(4).to_string()
 }
 
