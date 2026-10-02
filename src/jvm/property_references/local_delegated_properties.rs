@@ -18,6 +18,13 @@ pub(crate) struct LocalDelegatedProperties {
 }
 
 impl LocalDelegatedProperties {
+    pub(super) fn remap_owners(&mut self, names: &HashMap<TypeName, TypeName>) {
+        self.by_container = std::mem::take(&mut self.by_container)
+            .into_iter()
+            .map(|(owner, properties)| (names.get(&owner).copied().unwrap_or(owner), properties))
+            .collect();
+    }
+
     /// The local delegated properties `ir` references, by the class or facade declaring them, or
     /// `None` when a top-level one's source has no facade among `stems`.
     pub(crate) fn collect(ir: &IrFile, stems: &[String]) -> Option<Self> {

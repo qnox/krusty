@@ -185,7 +185,7 @@ impl InnerClasses {
                 access: if coroutine {
                     let public = u16::from(
                         (suspend_lambda && suspend_lambda_is_public(ir, class))
-                            || runtime_reified_lambda(ir, class),
+                            || published_inline_lambda(ir, class),
                     );
                     0x0008 | 0x0010 | public
                 } else {
@@ -308,13 +308,17 @@ pub(in crate::jvm) fn suspend_lambda_is_public(ir: &IrFile, class: &IrClass) -> 
         || enclosure_reaches_inline(ir, class.enclosure)
 }
 
-/// A lambda class whose body executes a reified operation. kotlinc publishes it
+/// A retained or regenerated lambda class exposed by an inline declaration. kotlinc publishes it
 /// (`ACC_PUBLIC`) because an inline caller in another package constructs it.
-fn runtime_reified_lambda(ir: &IrFile, class: &IrClass) -> bool {
+fn published_inline_lambda(ir: &IrFile, class: &IrClass) -> bool {
     class
-        .methods
-        .iter()
-        .any(|method| ir.runtime_reified_lambda_implementations.contains(method))
+        .lambda
+        .as_ref()
+        .is_some_and(|lambda| lambda.public_inline)
+        || class
+            .methods
+            .iter()
+            .any(|method| ir.runtime_reified_lambda_implementations.contains(method))
 }
 
 /// Specialized lambdas regenerated into a caller. The caller's `new` does not add an

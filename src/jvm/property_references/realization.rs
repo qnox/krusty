@@ -179,6 +179,14 @@ pub(crate) struct PropertyReferenceRealizations {
 }
 
 impl PropertyReferenceRealizations {
+    pub(crate) fn remap_delegated_owners(
+        &mut self,
+        names: &std::collections::HashMap<TypeName, TypeName>,
+    ) {
+        self.delegated_arrays.remap_owners(names);
+        self.local_delegated.remap_owners(names);
+    }
+
     pub(crate) fn record(
         &mut self,
         reference: TypeName,

@@ -185,8 +185,11 @@ pub(super) fn realize(
     ir: &mut IrFile,
     classifiers: &dyn crate::types::ClassifierFactSource,
     facade: &str,
-) {
-    let lambdas = ir
+    delegates: &super::local_delegate_closures::Requirements,
+    current_source: crate::ir::IrModuleSource,
+    adapt_factory: bool,
+) -> Result<(), ()> {
+    let mut lambdas = ir
         .exprs
         .iter()
         .filter_map(|expression| match expression {
@@ -196,8 +199,11 @@ pub(super) fn realize(
             _ => None,
         })
         .collect::<Vec<_>>();
+    lambdas.sort_unstable();
+    lambdas.dedup();
     for fid in lambdas {
         let runtime_reified = ir.runtime_reified_lambda_implementations.contains(&fid);
+        let delegate_source = delegates.source(ir, fid);
         // A genuine source lambda has naming/origin provenance and obeys the same class-realization
         // rule in every emitted root. Generated callable-reference adapters deliberately have no
         // lambda origin: widening their root inventory would reclassify their already-selected ABI.
@@ -215,17 +221,67 @@ pub(super) fn realize(
             continue;
         };
         if signature.suspend
-            || (!runtime_reified
-                && !signature
-                    .params
-                    .iter()
-                    .chain([&signature.ret])
-                    .any(|&ty| factory_conflict(ir, classifiers, ty)))
+            || (delegate_source.is_none()
+                && (!adapt_factory
+                    || (!runtime_reified
+                        && !signature
+                            .params
+                            .iter()
+                            .chain([&signature.ret])
+                            .any(|&ty| factory_conflict(ir, classifiers, ty)))))
         {
             continue;
         }
-        let class_name = (runtime_reified && ir.specialized_functions.contains_key(&fid))
-            .then(|| specialized_reified_placeholder(facade, fid));
+        let class_name = ((runtime_reified || delegate_source.is_some())
+            && ir.specialized_functions.contains_key(&fid))
+        .then(|| specialized_reified_placeholder(facade, fid));
+        if let Some(source) = delegate_source {
+            let sites = delegate_sites(ir, fid, class_name)?;
+            if sites.is_empty() {
+                continue;
+            }
+            if source != current_source && !ir.specialized_functions.contains_key(&fid) {
+                // The retained source closure is emitted by its declaration file. Consumers use
+                // that exact class, not another declaration of its body or private helpers.
+                for site in &sites {
+                    replace_value(ir, site);
+                }
+                ir.inline_only_fns.insert(fid);
+                continue;
+            }
+            let body = ir.functions[fid as usize].body.ok_or(())?;
+            let captures = captures(ir, fid, body, &sites[0]).ok_or(())?;
+            if nests_lifted_functions_with(ir, body, runtime_reified) {
+                return Err(());
+            }
+            realize_class(ir, fid, body, &sites[0], signature, &captures);
+            if let Some(result) = super::local_delegate_closures::invoke_result(ir, fid) {
+                let signed_result = ir.functions[fid as usize].ret;
+                ir.functions[fid as usize].ret = result;
+                // A closure does not declare the inline callable's type parameters. Its invoke
+                // signs the logical source/copy result separately from the declaration slot.
+                ir.signatures.insert(
+                    fid,
+                    crate::ir::IrGenericSig {
+                        type_params: Vec::new(),
+                        params: signature.params.clone(),
+                        ret: Some(signed_result),
+                        supers: Vec::new(),
+                    },
+                );
+            }
+            let public_inline = delegates.public_inline(ir, fid);
+            let class = ir.class_id_by_name(sites[0].class).ok_or(())?;
+            ir.classes[class as usize]
+                .lambda
+                .as_mut()
+                .ok_or(())?
+                .public_inline = public_inline;
+            for site in sites.iter().skip(1) {
+                replace_value(ir, site);
+            }
+            continue;
+        }
         match class_shape(ir, fid, every_emitted_root, runtime_reified, class_name) {
             Ok((site, body, captures)) => realize_class(ir, fid, body, &site, signature, &captures),
             Err(shape) => {
@@ -237,6 +293,36 @@ pub(super) fn realize(
             }
         }
     }
+    Ok(())
+}
+
+/// Several inline copies may construct the same retained declaration closure. They have one
+/// implementation identity and one class, but each value supplies its own checked captures.
+fn delegate_sites(ir: &IrFile, fid: FunId, class_name: Option<TypeName>) -> Result<Vec<Site>, ()> {
+    let class = match class_name {
+        Some(class) => class,
+        None => super::local_class_names::lambda_class_name(ir, fid).ok_or(())?,
+    };
+    reachable_lambdas(ir, fid, true)
+        .into_iter()
+        .filter(|&node| !inline_call_argument(ir, node))
+        .map(|node| {
+            let IrExpr::Lambda {
+                captures,
+                sam: None,
+                ..
+            } = &ir.exprs[node as usize]
+            else {
+                return Err(());
+            };
+            Ok(Site {
+                node,
+                class,
+                function_type: ir.logical_types.get(&node).copied().ok_or(())?,
+                captures: captures.clone(),
+            })
+        })
+        .collect()
 }
 
 /// The site, body and captures of a lambda this step realizes as a class, or the shape that keeps
@@ -440,8 +526,12 @@ fn realize_class(
         // The bridge maps its whole body to the lambda's line.
         ir.fn_decl_lines.insert(fid, line);
     }
+    replace_value(ir, site);
+}
+
+fn replace_value(ir: &mut IrFile, site: &Site) {
     let internal = site.class;
-    ir.exprs[site.node as usize] = if captures.is_empty() {
+    ir.exprs[site.node as usize] = if site.captures.is_empty() {
         IrExpr::ExternalStaticInstance {
             owner: internal,
             ty: internal,
@@ -506,6 +596,7 @@ fn declare_class(
         });
     }
     class.lambda = Some(crate::ir::IrLambdaClass {
+        public_inline: false,
         invoke: fid,
         function_type: site.function_type,
         receiver_captures: captures
@@ -532,7 +623,7 @@ pub(super) fn rename_specialized_reified_classes(
     ir: &mut IrFile,
     facade: &str,
     modes: crate::jvm::ir_emit::LambdaModes,
-) {
+) -> std::collections::HashMap<TypeName, TypeName> {
     let pending = ir
         .classes
         .iter()
@@ -542,13 +633,16 @@ pub(super) fn rename_specialized_reified_classes(
             (from == specialized_reified_placeholder(facade, invoke)).then_some((invoke, from))
         })
         .collect::<Vec<_>>();
+    let mut all_names = std::collections::HashMap::new();
     for (function, from) in pending {
         let name =
             crate::jvm::ir_emit::lambda_class_names::specialized_name(ir, function, facade, modes)
                 .expect("a specialized reified lambda retains complete caller provenance");
         let names = std::collections::HashMap::from([(from, crate::types::type_name(&name))]);
         ir.remap_classifier_identities(&names);
+        all_names.extend(names);
     }
+    all_names
 }
 
 /// Make the lifted lambda function the class's `invoke` over the lambda's own parameters, taking

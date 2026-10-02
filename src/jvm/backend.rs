@@ -311,7 +311,11 @@ fn run_backend_passes_after_plugins(
     );
     // A specialized reified lambda is already a function class. Its `$$inlined$` name depends on
     // the caller's lifted spelling, which exists only now.
-    crate::jvm::lambda_classes::rename_specialized_reified_classes(ir, facade, lambda_modes);
+    let closure_names =
+        crate::jvm::lambda_classes::rename_specialized_reified_classes(ir, facade, lambda_modes);
+    facts
+        .property_reference_realizations
+        .remap_delegated_owners(&closure_names);
     // With placement and lifted caller names final, realize JVM-only implementation spellings.
     crate::jvm::debug_local_names::realize_lambda_implementation_names(
         ir,
@@ -989,15 +993,31 @@ impl Backend for JvmBackend {
         }
         // A lambda the metafactory cannot adapt is a class of its own; decided before any lambda
         // is numbered, as kotlinc numbers only the lambdas it lifts.
-        if self.lambda_modes.lambdas == crate::jvm::ir_emit::LambdaMode::Indy {
-            crate::jvm::lambda_classes::realize(&mut file.ir, &file.classifiers, &facade);
+        let current_source = crate::ir::IrModuleSource {
+            source: file.source,
+            package: facade_class.namespace(),
+        };
+        let delegate_closures =
+            crate::jvm::local_delegate_closures::Requirements::collect(&file.ir);
+        if crate::jvm::lambda_classes::realize(
+            &mut file.ir,
+            &file.classifiers,
+            &facade,
+            &delegate_closures,
+            current_source,
+            self.lambda_modes.lambdas == crate::jvm::ir_emit::LambdaMode::Indy,
+        )
+        .is_err()
+        {
+            diags.error(
+                crate::diag::Span::new(0, 0),
+                "internal error: invalid declaration-owned delegate closure realization",
+            );
+            return Vec::new();
         }
         let local_delegate_access = match crate::jvm::local_delegate_accessors::realize(
             &mut file.ir,
-            crate::ir::IrModuleSource {
-                source: file.source,
-                package: facade_class.namespace(),
-            },
+            current_source,
             file.stems,
             &file.classifiers,
         ) {

@@ -70,8 +70,11 @@ pub(crate) fn number(
         .lifted_functions
         .iter()
         .filter_map(|(&function, (sequence, site))| {
-            let mut name = container_segment(&site.container);
-            for step in site.path.iter() {
+            let (mut name, start) = match helper_access.lambda_path_start(function) {
+                Some(start) => ("invoke".to_owned(), start),
+                None => (container_segment(&site.container), 0),
+            };
+            for step in &site.path[start..] {
                 name.push('$');
                 name.push_str(segments.get(&(sequence, step.position))?);
             }

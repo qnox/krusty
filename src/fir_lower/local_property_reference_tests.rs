@@ -291,7 +291,12 @@ fn nested_delegate_plans_retain_the_containing_checked_inline_declaration() {
     let declarations = plan_references(&ir)
         .into_iter()
         .zip(plans)
-        .map(|((name, _), plan)| (name, plan.inline_declaration))
+        .map(|((name, _), plan)| {
+            (
+                name,
+                plan.inline_declaration.map(|inline| inline.declaration),
+            )
+        })
         .collect::<std::collections::HashMap<_, _>>();
     assert_eq!(
         declarations.len(),
@@ -303,4 +308,35 @@ fn nested_delegate_plans_retain_the_containing_checked_inline_declaration() {
     let accessor = declarations["accessorValue"].expect("checked inline accessor");
     assert_ne!(accessor, declaration);
     assert_eq!(declarations["ordinaryValue"], None);
+    let lambdas = plan_references(&ir)
+        .into_iter()
+        .zip(plans)
+        .map(|((name, _), plan)| (name, plan.declaration_lambda))
+        .collect::<std::collections::HashMap<_, _>>();
+    let first = lambdas["firstValue"].expect("first exact source lambda");
+    let second = lambdas["secondValue"].expect("second exact source lambda");
+    assert_ne!(first, second);
+    assert_eq!(lambdas["accessorValue"], None);
+    assert_eq!(lambdas["ordinaryValue"], None);
+}
+
+#[test]
+fn delegate_declaration_lambda_is_inherited_through_a_local_function() {
+    let ir = lower_single_source(
+        &format!(
+            "{DELEGATE}
+        inline fun declaration(): String = {{
+            val direct by Delegate(\"a\")
+            fun localRead(): String {{ val nested by Delegate(\"b\"); return nested }}
+            direct + localRead()
+        }}.invoke()"
+        ),
+        "DelegateDeclarationLambdaIdentity",
+    );
+    assert_eq!(ir.local_delegate_plans.len(), 2);
+    let first = &ir.local_delegate_plans[0];
+    let second = &ir.local_delegate_plans[1];
+    assert!(first.declaration_lambda.is_some());
+    assert_eq!(first.declaration_lambda, second.declaration_lambda);
+    assert_eq!(first.inline_declaration, second.inline_declaration);
 }

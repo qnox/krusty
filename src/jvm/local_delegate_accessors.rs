@@ -1,9 +1,9 @@
 //! JVM realization of checked local delegated-property access plans.
 //!
 //! The frontend/common pipeline records selected convention templates and source provenance only.
-//! The JVM realizes one private-static helper at the property's declaration owner. Inline copies
-//! retain that target and reflection identity; another file carries a typed, non-emitting prototype
-//! of the same helper rather than manufacturing a second declaration.
+//! Non-lambda declarations have one private-static helper at their declaration owner; inline
+//! copies retain a typed prototype and use its access boundary. A lambda's private helper and
+//! reflection table are instead owned by each exact source or specialized closure realization.
 
 use std::collections::{HashMap, HashSet};
 
@@ -32,6 +32,7 @@ pub(crate) struct HelperAccess {
     exported: Vec<(u32, Option<TypeName>)>,
     foreign: HashMap<u32, ForeignHelperOwner>,
     inline_delegates: HashSet<u32>,
+    lambda_paths: HashMap<u32, usize>,
 }
 
 impl HelperAccess {
@@ -52,6 +53,10 @@ impl HelperAccess {
         // A foreign prototype has the same declaration ABI even though it exports nothing here.
         self.inline_delegates.contains(&function)
     }
+
+    pub(crate) fn lambda_path_start(&self, function: u32) -> Option<usize> {
+        self.lambda_paths.get(&function).copied()
+    }
 }
 
 pub(crate) fn realize(
@@ -60,6 +65,7 @@ pub(crate) fn realize(
     stems: &[String],
     classifiers: &crate::backend::CheckedBackendClassifiers<'_>,
 ) -> Result<HelperAccess, ()> {
+    let closure_plans = super::local_delegate_closures::bind(ir)?;
     let plans = std::mem::take(&mut ir.local_delegate_plans);
     let live = emitted_expressions(ir);
     let mut accesses = live
@@ -76,7 +82,11 @@ pub(crate) fn realize(
     let mut uses = plans
         .iter()
         .enumerate()
-        .filter(|(_, declaration)| declaration.reference.source == current_source)
+        .filter(|(plan, declaration)| {
+            !closure_plans.is_template(*plan as u32)
+                && (declaration.reference.source == current_source
+                    || closure_plans.lambda_path_start(*plan as u32).is_some())
+        })
         .map(|(plan, declaration)| {
             Ok((
                 u32::try_from(plan).map_err(|_| ())?,
@@ -88,6 +98,9 @@ pub(crate) fn realize(
     uses.sort_unstable_by_key(|&(plan, member_order, ordinal)| (member_order, ordinal, plan));
     let mut uses = uses.into_iter().map(|(key, _, _)| key).collect::<Vec<_>>();
     for &(_, plan) in &accesses {
+        if closure_plans.is_template(plan) {
+            return Err(());
+        }
         if !uses.contains(&plan) {
             uses.push(plan);
         }
@@ -98,7 +111,8 @@ pub(crate) fn realize(
     for key in uses {
         let plan = plans.get(key as usize).ok_or(())?;
         let owner = plan.reference.class;
-        let foreign = (plan.reference.source != current_source)
+        let lambda_path = closure_plans.lambda_path_start(key);
+        let foreign = (lambda_path.is_none() && plan.reference.source != current_source)
             .then(|| {
                 let classifier = match owner {
                     Some(owner) => owner,
@@ -119,7 +133,8 @@ pub(crate) fn realize(
                 })
             })
             .transpose()?;
-        let exported = plan.inline_declaration.is_some();
+        let inline_delegate = plan.inline_declaration.is_some();
+        let exported = inline_delegate && lambda_path.is_none();
         let getter = realize_accessor(
             ir,
             &plan.storage_name,
@@ -143,8 +158,11 @@ pub(crate) fn realize(
             })
             .transpose()?;
         for function in std::iter::once(getter).chain(setter) {
-            if exported {
+            if inline_delegate {
                 helper_access.inline_delegates.insert(function);
+            }
+            if let Some(start) = lambda_path {
+                helper_access.lambda_paths.insert(function, start);
             }
             if let Some(foreign) = foreign {
                 helper_access.foreign.insert(function, foreign);

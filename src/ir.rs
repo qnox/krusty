@@ -56,7 +56,9 @@ mod lifting_sequences;
 mod local_class_names;
 mod local_delegates;
 pub use local_delegates::IrLocalDelegateAccess;
-pub(crate) use local_delegates::{IrLocalDelegateAccessorPlan, IrLocalDelegatePlan};
+pub(crate) use local_delegates::{
+    IrInlineDeclaration, IrLocalDelegateAccessorPlan, IrLocalDelegatePlan,
+};
 mod local_property_references;
 mod module_records;
 mod operators;

@@ -4449,13 +4449,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   copies. Kotlin emits that convention helper with the declaration's erased signature and reuses
   it across call-site type substitutions; common lowering therefore specializes the copied access
   expression's recorded facts, but does not clone or mutate the declaration plan. The JVM emits
-  that helper exactly once at its declaration owner, with the declaration's reflection metadata.
-  Inline copies call its public synthetic accessor instead of duplicating the helper or metadata
-  in the caller. A cross-file copy retains a typed, non-emitting prototype through generic and
+  a non-lambda helper exactly once at its declaration owner, with the declaration's reflection
+  metadata. Inline copies call its public synthetic accessor. A cross-file copy retains a typed,
+  non-emitting prototype through generic and
   value-class representation; JVM-only facts bind its exact declaration facade or classifier to
   the private-static access boundary. No helper or owner is recovered by source spelling.
-  Common lowering records the containing checked inline declaration identity and retains it through
-  nested callable scopes, independently of their own lambda/local-function enclosure. Inline
+  A delegate inside a lambda instead belongs to that exact source lambda. The JVM realizes the
+  retained source closure and each reified specialized copy as an owned class; each has its own
+  private `invoke$lambda-N` helper and reflection table. No outer-declaration access bridge is
+  emitted for them. A regenerated closure preserves a source type-variable's physical return
+  slot (`Object` for an unbounded parameter), while its generic signature records the specialized
+  result; no concrete-return method or extra erased bridge is invented.
+  Common lowering records the nearest source lambda identity and containing checked inline
+  declaration identity/visibility, retaining them through nested local functions. Inline
   property accessors publish the same provenance. The JVM consumes that recorded exposure when
   exporting helpers; it does not rediscover an inline owner by walking declarations or source names.
   JVM naming keeps ordinary local delegates in the normal lambda numbering sequence. The distinct

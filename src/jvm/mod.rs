@@ -48,6 +48,7 @@ mod lifted_names;
 mod local_class_names;
 mod local_classifiers;
 mod local_delegate_accessors;
+mod local_delegate_closures;
 mod local_properties;
 mod mapped_builtin_declarations;
 mod member_dispatch;
