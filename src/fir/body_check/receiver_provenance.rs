@@ -6,8 +6,8 @@ use super::*;
 
 #[derive(Clone, Debug)]
 pub(super) struct ReceiverFrame {
-    /// Width in resolver receiver-tower coordinates, including named context values that are
-    /// materialized as ordinary FIR parameters rather than receiver slots.
+    /// Width in resolver receiver-tower coordinates. Named context values are ordinary lexical
+    /// bindings and therefore do not occupy receiver-tower or runtime receiver slots.
     pub(super) width: u32,
     /// Stable owner of this frame's dispatch receiver. Enum entries are classifier-like semantic
     /// owners even though their anonymous runtime subclass is not a source classifier header.

@@ -42,13 +42,34 @@ pub(super) fn receiver_name(receiver: &IrCapturedReceiver, dispatch: usize) -> S
     }
 }
 
+/// kotlinc's `LocalDeclarationsLowering` name for the parameter a captured implicit receiver is
+/// lifted into. The ordinal selects the semantic receiver origin; only preceding dispatch
+/// receivers contribute to kotlinc's `this$N` occurrence number.
+pub(super) fn lifted_receiver_name(receivers: &[IrCapturedReceiver], ordinal: usize) -> String {
+    let receiver = receivers
+        .get(ordinal)
+        .expect("a lifted callable publishes the origin of each captured receiver");
+    let dispatch = receivers[..ordinal]
+        .iter()
+        .filter(|receiver| matches!(receiver, IrCapturedReceiver::Enclosing))
+        .count();
+    receiver_name(receiver, dispatch)
+}
+
+/// Whether kotlinc calls the capture's constructor parameter `$receiver` instead of giving it the
+/// same spelling as its field.
+pub(super) fn uses_receiver_constructor_parameter(receiver: &IrCapturedReceiver) -> bool {
+    matches!(
+        receiver,
+        IrCapturedReceiver::Enclosing | IrCapturedReceiver::Callable(_)
+    )
+}
+
 /// The constructor's local-variable name for a capture. kotlinc calls the enclosing instance and a
 /// named callable's receiver `$receiver` there; everything else is named like its field.
 pub(super) fn capture_parameter_local(capture: &IrConstructorCapture) -> String {
-    match capture.receiver {
-        Some(IrCapturedReceiver::Enclosing | IrCapturedReceiver::Callable(_)) => {
-            "$receiver".to_string()
-        }
+    match &capture.receiver {
+        Some(receiver) if uses_receiver_constructor_parameter(receiver) => "$receiver".to_string(),
         _ => capture_name(capture),
     }
 }

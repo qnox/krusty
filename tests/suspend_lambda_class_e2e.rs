@@ -105,6 +105,31 @@ class Box(val v: Int) {\n\
 }
 
 #[test]
+fn an_extension_suspend_lambda_keeps_its_receiver_identity() {
+    // The field is `$this_extension`, while the constructor local follows kotlinc's `$receiver`
+    // convention for a named callable receiver.
+    let src = "class Outcome\n\
+class Receiver { fun outcome(): Outcome = Outcome() }\n\
+suspend fun leaf() {}\n\
+fun Receiver.extension(): suspend () -> Outcome = { leaf(); outcome() }\n";
+    let class = "SlCapturedExtensionKt$extension$1";
+    expect_methods_match("SlCapturedExtension", src, class, &members(class, true));
+}
+
+#[test]
+fn an_anonymous_context_suspend_lambda_keeps_its_receiver_identity() {
+    // An anonymous context parameter uses `$$context-Receiver` for both its field and constructor
+    // local; it must not be collapsed into the enclosing-instance `this$0` convention.
+    let src = "class Outcome\n\
+class Receiver { fun outcome(): Outcome = Outcome() }\n\
+context(value: Receiver) fun consume(): Outcome = value.outcome()\n\
+suspend fun leaf() {}\n\
+context(_: Receiver) fun anonymous(): suspend () -> Outcome = { leaf(); consume() }\n";
+    let class = "SlCapturedContextKt$anonymous$1";
+    expect_methods_match("SlCapturedContext", src, class, &members(class, true));
+}
+
+#[test]
 fn a_captured_var_is_shared_through_its_ref_cell() {
     let src = "suspend fun leaf(): Int = 1\n\
 fun keep(a: Any) {}\n\

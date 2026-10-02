@@ -11,14 +11,14 @@ use super::*;
 
 /// A lambda realized as a class implementing its function type. `invoke` is the lambda's own
 /// function, now an instance method of the class over the lambda's parameters. The class's fields
-/// are the captured values, in capture order; `receiver_capture` names the one holding the
-/// enclosing class's instance.
+/// are the captured values, in capture order; `receiver_captures` names those whose source role
+/// makes kotlinc use its receiver-parameter convention.
 #[derive(Clone, Debug)]
 pub struct IrLambdaClass {
     pub invoke: FunId,
     /// The lambda's function type: the class's `FunctionN` and its generic supertype.
     pub function_type: Ty,
-    pub receiver_capture: Option<u32>,
+    pub receiver_captures: Vec<u32>,
     /// What the erased `FunctionN.invoke` bridge adapts, once `invoke` has its physical signature.
     pub bridge: IrInvokeBridge,
 }
