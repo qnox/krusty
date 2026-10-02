@@ -82,7 +82,7 @@ impl Classpath {
                         .map(|(_, name)| name.to_string())
                         .unwrap_or_else(|| {
                             if m.is_property {
-                                ordinary_builtin_property_jvm_name(internal_id, &m.name)
+                                ordinary_builtin_property_jvm_name(&m.name)
                             } else {
                                 m.name.clone()
                             }
@@ -186,6 +186,50 @@ impl Classpath {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn enum_properties_consume_their_exact_mapped_realizations() {
+        let Some(jar) = crate::toolchain::stdlib_jar() else {
+            return;
+        };
+        let members = Classpath::new(vec![jar]).builtin_members("kotlin/Enum");
+        let property = |name: &str| {
+            let selected = members
+                .iter()
+                .filter(|member| member.name == name)
+                .collect::<Vec<_>>();
+            assert_eq!(selected.len(), 1, "exactly one kotlin.Enum.{name}");
+            let member = selected[0];
+            (
+                member.owner,
+                member.physical_name.as_deref(),
+                member.descriptor.as_str(),
+                member.params.as_slice(),
+                member.ret,
+            )
+        };
+
+        assert_eq!(
+            property("name"),
+            (
+                Some(type_name("java/lang/Enum")),
+                None,
+                "()Ljava/lang/String;",
+                &[] as &[Ty],
+                Ty::String,
+            )
+        );
+        assert_eq!(
+            property("ordinal"),
+            (
+                Some(type_name("java/lang/Enum")),
+                None,
+                "()I",
+                &[] as &[Ty],
+                Ty::Int,
+            )
+        );
+    }
 
     #[test]
     fn enum_name_builtin_keeps_its_qualified_intrinsic_annotation() {

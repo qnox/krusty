@@ -253,7 +253,7 @@ mod tests {
             .iter()
             .copied()
             .collect::<std::collections::HashSet<_>>();
-        assert_eq!(special_realizations().len(), 14);
+        assert_eq!(special_realizations().len(), 16);
         assert_eq!(rows.len(), special_realizations().len());
 
         assert_eq!(
@@ -274,6 +274,34 @@ mod tests {
             ),
             None,
             "a same-named property on another declaration must not inherit Map's policy"
+        );
+        assert_eq!(
+            realization_for_declaration(
+                type_name("kotlin/Enum"),
+                "name",
+                "()Ljava/lang/String;",
+                MappedBuiltinMemberKind::Property,
+            ),
+            Some((type_name("java/lang/Enum"), "name"))
+        );
+        assert_eq!(
+            realization_for_declaration(
+                type_name("kotlin/Enum"),
+                "ordinal",
+                "()I",
+                MappedBuiltinMemberKind::Property,
+            ),
+            Some((type_name("java/lang/Enum"), "ordinal"))
+        );
+        assert_eq!(
+            realization_for_declaration(
+                type_name("kotlin/Enum"),
+                "name",
+                "()Ljava/lang/Object;",
+                MappedBuiltinMemberKind::Property,
+            ),
+            None,
+            "a same-named property with another descriptor must not inherit Enum.name's policy"
         );
         assert_eq!(
             realization_for_declaration(

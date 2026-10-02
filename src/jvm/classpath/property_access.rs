@@ -52,12 +52,8 @@ pub(super) fn companion_owner_field_access(
 }
 
 /// Conventional JVM getter for a builtin property without a declaration-owned special realization.
-pub(super) fn ordinary_builtin_property_jvm_name(owner: TypeName, property: &str) -> String {
-    if owner.matches("kotlin/Enum") && matches!(property, "name" | "ordinal") {
-        property.to_string()
-    } else {
-        crate::jvm::names::property_getter_name(property)
-    }
+pub(super) fn ordinary_builtin_property_jvm_name(property: &str) -> String {
+    crate::jvm::names::property_getter_name(property)
 }
 
 /// Resolve one target realization over the owner's supertype closure. Reads and writes share this

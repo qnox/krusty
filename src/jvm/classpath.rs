@@ -7317,18 +7317,4 @@ mod fq_tests {
             "package gone after clear"
         );
     }
-
-    #[test]
-    fn enum_builtin_properties_use_their_plain_jvm_methods() {
-        let owner = type_name("kotlin/Enum");
-        assert_eq!(ordinary_builtin_property_jvm_name(owner, "name"), "name");
-        assert_eq!(
-            ordinary_builtin_property_jvm_name(owner, "ordinal"),
-            "ordinal"
-        );
-        assert_eq!(
-            ordinary_builtin_property_jvm_name(owner, "declaringClass"),
-            "getDeclaringClass"
-        );
-    }
 }

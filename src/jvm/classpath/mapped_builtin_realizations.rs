@@ -46,9 +46,7 @@ impl Classpath {
                         MappedBuiltinMemberKind::Property,
                     )
                     .map(|(_, name)| name.to_string())
-                    .unwrap_or_else(|| {
-                        super::ordinary_builtin_property_jvm_name(current, &member.name)
-                    });
+                    .unwrap_or_else(|| super::ordinary_builtin_property_jvm_name(&member.name));
                 return Some(super::super::inline::PropertyAccess::Accessor {
                     // Dispatch stays on the mapped form of the resolved receiver owner. The decoded
                     // declaration supplies only the accessor and its own erased descriptor.
