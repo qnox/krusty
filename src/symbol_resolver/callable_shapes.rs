@@ -75,13 +75,7 @@ pub(crate) fn declared_function_type(source: &dyn SymbolSource, ty: Ty) -> Optio
         .represents_function_type()
         .then(|| classifier_callable_signature(source, ty))
         .flatten()
-        .map(|function| {
-            if ty.is_nullable() {
-                Ty::nullable(function)
-            } else {
-                function
-            }
-        })
+        .map(|function| ty.rewrap_nullability(function))
 }
 
 #[cfg(test)]
