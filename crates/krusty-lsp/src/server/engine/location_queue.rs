@@ -78,11 +78,10 @@ mod tests {
 
     use super::super::{
         command_queue, Analysis, AnalysisEngine, AnalysisJob, CommandReceive, CommandState,
-        DependencyCandidate, DocumentAnalysis, DumpJob, EngineCommand, LibraryRef,
-        LocatedDependency, MaterializeJob, MaterializedDefinition,
-        INTERACTIVE_COMMANDS_BEFORE_LOCATION,
+        DependencyCandidate, DumpJob, EngineCommand, LibraryRef, LocatedDependency, MaterializeJob,
+        MaterializedDefinition, INTERACTIVE_COMMANDS_BEFORE_LOCATION,
     };
-    use crate::IndexOutcome;
+    use crate::{DocumentAnalysis, IndexOutcome};
 
     fn located(name: &str) -> EngineCommand {
         EngineCommand::LocateDependencies {
