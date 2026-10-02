@@ -320,22 +320,34 @@ private fun compilerArguments(task: KotlinJvmCompile): List<String> {
     fun reject(condition: Boolean, name: String) {
         if (condition) throw GradleException("krusty does not support compilerOptions.$name")
     }
-    options.languageVersion.orNull?.let {
-        reject(it.version != "2.4", "languageVersion=${it.version}; only 2.4 is supported")
+    val languageVersion = options.languageVersion.orNull?.let {
+        supportedKotlinLevel("languageVersion", it.version)
     }
-    options.apiVersion.orNull?.let {
-        reject(it.version != "2.4", "apiVersion=${it.version}; only 2.4 is supported")
+    val apiVersion = options.apiVersion.orNull?.let {
+        supportedKotlinLevel("apiVersion", it.version)
     }
     reject(options.progressiveMode.getOrElse(false), "progressiveMode")
-    reject(options.optIn.getOrElse(emptyList()).isNotEmpty(), "optIn")
-    reject(options.allWarningsAsErrors.getOrElse(false), "allWarningsAsErrors")
     reject(options.extraWarnings.getOrElse(false), "extraWarnings")
     reject(options.suppressWarnings.getOrElse(false), "suppressWarnings")
     reject(options.verbose.getOrElse(false), "verbose")
     reject(task.multiPlatformEnabled.getOrElse(false), "multiPlatformEnabled")
     reject(task.useModuleDetection.getOrElse(false), "useModuleDetection")
 
-    val arguments = validateFreeArguments(options.freeCompilerArgs.getOrElse(emptyList()))
+    val freeArguments = options.freeCompilerArgs.getOrElse(emptyList())
+    val arguments = validateFreeArguments(freeArguments)
+    freeArguments.firstOrNull(::isFreeJvmDefault)?.let { free ->
+        if (options.jvmDefault.orNull != null) {
+            throw GradleException(
+                "compilerOptions.jvmDefault and freeCompilerArg '$free' are both set; configure exactly one",
+            )
+        }
+    }
+    languageVersion?.let { arguments.addPair("-language-version", it) }
+    apiVersion?.let { arguments.addPair("-api-version", it) }
+    if (options.allWarningsAsErrors.getOrElse(false)) arguments.add("-Werror")
+    options.optIn.getOrElse(emptyList()).takeIf(List<String>::isNotEmpty)?.let {
+        arguments.add(it.joinToString(",", prefix = "-opt-in="))
+    }
     options.moduleName.orNull?.takeIf(String::isNotEmpty)?.let {
         arguments.addPair("-module-name", it)
     }
@@ -353,9 +365,24 @@ private val ALLOWED_FREE_FLAGS = setOf(
     "-Xconsistent-data-class-copy-visibility",
     "-Xexplicit-backing-fields",
     "-Xmulti-dollar-interpolation",
+    "-Xskip-prerelease-check",
+    "-Xsuppress-version-warnings",
+    "-Xdont-warn-on-error-suppression",
+    "-Xrender-internal-diagnostic-names",
+    "-Xskip-metadata-version-check",
+    "-progressive",
 )
 
 private val NAME_DESTRUCTURING_MODES = setOf("only-syntax", "name-mismatch", "complete", "disable")
+
+private val JVM_DEFAULT_MODES = setOf("enable", "no-compatibility", "disable")
+private val JVM_DEFAULT_LEGACY_MODES = setOf("all", "all-compatibility", "disable")
+private val JSPECIFY_MODES = setOf("strict", "warn", "ignore")
+private val WARNING_LEVELS = setOf("error", "warning", "disabled")
+
+private fun isFreeJvmDefault(argument: String): Boolean =
+    argument == "-jvm-default" || argument == "-Xjvm-default" ||
+        argument.startsWith("-jvm-default=") || argument.startsWith("-Xjvm-default=")
 
 private fun validateFreeArguments(input: List<String>): ArrayList<String> {
     val result = ArrayList<String>()
@@ -368,6 +395,21 @@ private fun validateFreeArguments(input: List<String>): ArrayList<String> {
         }
         val key = when {
             argument in ALLOWED_FREE_FLAGS -> argument
+            argument == "-jvm-default" || argument == "-Xjvm-default" -> throw GradleException(
+                "freeCompilerArg '$argument' needs the '=' form: $argument=<mode>",
+            )
+            argument.startsWith("-jvm-default=") &&
+                argument.substringAfter('=') in JVM_DEFAULT_MODES -> "-jvm-default"
+            argument.startsWith("-Xjvm-default=") &&
+                argument.substringAfter('=') in JVM_DEFAULT_LEGACY_MODES -> "-jvm-default"
+            // Several -opt-in arguments are legal (the Kotlin build applies one per opt-in); only an
+            // exact repeat is a duplicate, so the key is the argument itself.
+            argument.startsWith("-opt-in=") && argument.substringAfter('=').isNotEmpty() -> argument
+            argument.startsWith("-Xjspecify-annotations=") &&
+                argument.substringAfter('=') in JSPECIFY_MODES -> "-Xjspecify-annotations"
+            argument.startsWith("-Xjdk-release=") &&
+                (argument.substringAfter('=').toIntOrNull() ?: 0) > 0 -> "-Xjdk-release"
+            argument.startsWith("-Xwarning-level=") -> warningLevelKey(argument)
             argument.startsWith("-Xlambdas=") && argument.substringAfter('=') in setOf("indy", "class") -> "-Xlambdas"
             argument.startsWith("-Xsam-conversions=") && argument.substringAfter('=') in setOf("indy", "class") -> "-Xsam-conversions"
             argument == "-Xname-based-destructuring" -> "-Xname-based-destructuring"
@@ -383,6 +425,19 @@ private fun validateFreeArguments(input: List<String>): ArrayList<String> {
     return result
 }
 
+private fun warningLevelKey(argument: String): String {
+    val diagnostic = argument.removePrefix("-Xwarning-level=")
+    val (name, level) = diagnostic.split(':', limit = 2).let {
+        if (it.size == 2) it[0] to it[1] else "" to ""
+    }
+    if (name.isEmpty() || level !in WARNING_LEVELS) {
+        throw GradleException(
+            "unsupported freeCompilerArg '$argument'; expected -Xwarning-level=<NAME>:error|warning|disabled",
+        )
+    }
+    return "-Xwarning-level=$name"
+}
+
 private fun reservedFreeArgument(argument: String): String? {
     fun isOption(vararg names: String): Boolean = names.any { argument == it || argument.startsWith("$it=") }
     return when {
@@ -391,18 +446,31 @@ private fun reservedFreeArgument(argument: String): String? {
         isOption("-Xfriend-paths") -> "the task friend paths"
         isOption("-module-name") -> "compilerOptions.moduleName"
         isOption("-jvm-target") -> "compilerOptions.jvmTarget"
-        isOption("-jvm-default", "-Xjvm-default") -> "compilerOptions.jvmDefault"
         isOption("-java-parameters") -> "compilerOptions.javaParameters"
         isOption("-jdk-home", "-no-jdk") -> "compilerOptions.noJdk and the Java toolchain"
         isOption("-no-stdlib", "-no-reflect") -> "the plugin-owned dependency policy"
         isOption("-Xkotlin-reference-version") -> "the Kotlin Gradle plugin version"
         isOption("-language-version") -> "compilerOptions.languageVersion"
         isOption("-api-version") -> "compilerOptions.apiVersion"
-        isOption("-progressive") -> "compilerOptions.progressiveMode"
-        isOption("-opt-in") -> "compilerOptions.optIn"
         isOption("-Xplugin", "-P") -> "compiler plugin configuration"
         else -> null
     }
+}
+
+// krusty compiles the 2.x line up to its reference release. The Kotlin repository builds some
+// modules at language/api 2.0 or 2.2 (stable-stdlib and Gradle-plugin-embedded modules), so the
+// plugin passes any 2.x level at or below 2.4 through to krusty instead of demanding exactly 2.4.
+private fun supportedKotlinLevel(name: String, version: String): String {
+    val parts = version.split('.')
+    val supported = parts.size == 2 &&
+        parts[0] == "2" &&
+        (parts[1].toIntOrNull() ?: Int.MAX_VALUE) <= 4
+    if (!supported) {
+        throw GradleException(
+            "krusty does not support compilerOptions.$name=$version; only 2.0 through 2.4 are supported",
+        )
+    }
+    return version
 }
 
 private fun supportedKotlinPluginVersion(version: String): String = when (version) {

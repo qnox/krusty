@@ -481,6 +481,10 @@ mod tests {
                 "-classpath",
                 runtime_classpath.as_str(),
                 "-Xconsistent-data-class-copy-visibility",
+                "-language-version",
+                "2.4",
+                "-api-version",
+                "2.4",
                 "-module-name",
                 "kotlin-util-runtime",
                 "-jvm-target",
@@ -510,6 +514,14 @@ mod tests {
                 "-classpath",
                 util_classpath.as_str(),
                 "-Xconsistent-data-class-copy-visibility",
+                "-Xskip-prerelease-check",
+                "-Xwarning-level=REDUNDANT_CLI_ARG:disabled",
+                "-language-version",
+                "2.4",
+                "-api-version",
+                "2.4",
+                "-Werror",
+                "-opt-in=kotlin.ExperimentalStdlibApi",
                 "-module-name",
                 "kotlin-compiler-util",
                 "-jvm-target",
@@ -534,6 +546,14 @@ mod tests {
                 friend_classpath.as_str(),
                 friend_argument.as_str(),
                 "-Xconsistent-data-class-copy-visibility",
+                "-Xskip-prerelease-check",
+                "-Xwarning-level=REDUNDANT_CLI_ARG:disabled",
+                "-language-version",
+                "2.4",
+                "-api-version",
+                "2.4",
+                "-Werror",
+                "-opt-in=kotlin.ExperimentalStdlibApi",
                 "-module-name",
                 "kotlin-compiler-util",
                 "-jvm-target",
@@ -576,12 +596,9 @@ mod tests {
         assert!(util
             .windows(2)
             .any(|pair| pair[0] == "-jdk-home" && !pair[1].is_empty()));
-        assert!(util.iter().all(|arg| {
-            !matches!(
-                arg.as_str(),
-                "-language-version" | "-api-version" | "-progressive" | "-opt-in"
-            )
-        }));
+        assert!(util
+            .iter()
+            .all(|arg| !matches!(arg.as_str(), "-progressive" | "-opt-in")));
         for unique in [
             "-jvm-default",
             "-java-parameters",
@@ -824,6 +841,14 @@ mod tests {
                 (
                     "compiler-version",
                     "Kotlin compiler 2.4.0 differs from Kotlin Gradle plugin 2.4.10",
+                ),
+                (
+                    "jvm-default-conflict",
+                    "compilerOptions.jvmDefault and freeCompilerArg '-jvm-default=disable' are both set; configure exactly one",
+                ),
+                (
+                    "jvm-default-bad-mode",
+                    "unsupported freeCompilerArg '-jvm-default=sideways'; use a supported compilerOptions property",
                 ),
                 (
                     "jvm-target",
@@ -1245,7 +1270,11 @@ tasks.withType<KotlinJvmCompile>().configureEach {
         apiVersion.set(KotlinVersion.KOTLIN_2_4)
         jvmDefault.set(JvmDefaultMode.NO_COMPATIBILITY)
         javaParameters.set(true)
+        allWarningsAsErrors.set(true)
+        optIn.set(listOf("kotlin.ExperimentalStdlibApi"))
         freeCompilerArgs.add("-Xconsistent-data-class-copy-visibility")
+        freeCompilerArgs.add("-Xskip-prerelease-check")
+        freeCompilerArgs.add("-Xwarning-level=REDUNDANT_CLI_ARG:disabled")
         when (krustyNegative) {
             "structured-option" -> progressiveMode.set(true)
             "reserved-free-argument" -> freeCompilerArgs.add("-d=forbidden")
@@ -1254,6 +1283,8 @@ tasks.withType<KotlinJvmCompile>().configureEach {
             )
             "unknown-free-argument" -> freeCompilerArgs.add("-Xdefinitely-unsupported")
             "plugin-free-argument" -> freeCompilerArgs.add("-Xplugin=forbidden.jar")
+            "jvm-default-conflict" -> freeCompilerArgs.add("-jvm-default=disable")
+            "jvm-default-bad-mode" -> freeCompilerArgs.add("-jvm-default=sideways")
         }
     }
 }
