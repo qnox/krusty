@@ -969,7 +969,12 @@ fn selected_toolchain_entries_have_content_derived_stable_identities() {
         "classpath declaration order remains significant"
     );
 
-    let missing_release = temp_root("selected-platform-missing-release");
+    // Canonicalize up front: the fingerprint canonicalizes the modules path, so the error it
+    // builds names the RESOLVED jdk/release — on macOS temp_dir's /var is a symlink to
+    // /private/var, and comparing against the unresolved spelling fails the assertion.
+    let missing_release = temp_root("selected-platform-missing-release")
+        .canonicalize()
+        .unwrap();
     let missing_modules = missing_release.join("jdk/lib/modules");
     std::fs::create_dir_all(missing_modules.parent().unwrap()).unwrap();
     std::fs::write(&missing_modules, b"modules").unwrap();

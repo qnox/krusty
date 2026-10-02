@@ -422,7 +422,6 @@ impl<'a> Checker<'a> {
                 expression: e,
                 value,
                 kind,
-                start_ty: st,
                 value_ty: vt,
             };
             let convention = range_operator(kind);
@@ -621,6 +620,5 @@ struct InRangeOperands {
     expression: ExprId,
     value: ExprId,
     kind: crate::ast::RangeKind,
-    start_ty: Ty,
     value_ty: Ty,
 }

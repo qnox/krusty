@@ -1623,7 +1623,7 @@ fn uniform_open_end_double_range_until_can_be_shadowed() {
         .is_some());
     assert!(info.resolved_operator_call(in_range, "rangeTo").is_none());
     assert!(info.resolved_operator_call(in_range, "contains").is_some());
-    assert!(info.resolved_in_range_comparisons.get(&in_range).is_none());
+    assert!(!info.resolved_in_range_comparisons.contains_key(&in_range));
 
     let function = file
         .decls

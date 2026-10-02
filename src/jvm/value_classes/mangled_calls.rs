@@ -6,6 +6,10 @@ use super::{erase_descriptor, ir_method_desc, Under};
 use crate::ir::{Callee, ExprId, IrExpr, IrFile};
 use crate::types::Ty;
 
+/// The recorded JVM facts of one renamed declaration: its source name, and its exact descriptor
+/// plus parameter types when the function is not itself value-lowered or suspend.
+type RenamedDeclaration = (String, Option<(String, Vec<Ty>)>);
+
 pub(super) fn rename(
     ir: &mut IrFile,
     renamed_functions: &HashSet<u32>,
@@ -18,22 +22,21 @@ pub(super) fn rename(
     // external generic method can otherwise collide with a same-named source override whose value-
     // class result has a different JVM representation. Resolve only the exact checked module
     // identity that common IR already records on the call.
-    let declarations: HashMap<crate::fir::CallableId, (String, Option<(String, Vec<Ty>)>)> = ir
+    let declarations: HashMap<crate::fir::CallableId, RenamedDeclaration> = ir
         .checked_callable_functions
         .iter()
-        .filter_map(|(&callable, &function)| {
-            renamed_functions.contains(&function).then(|| {
-                let declaration = &ir.functions[function as usize];
-                let exact_descriptor = (!lowered_value_members.contains(&function)
-                    && !suspend_functions.contains(&function))
-                .then(|| {
-                    (
-                        ir_method_desc(&declaration.params, &declaration.ret),
-                        declaration.params.clone(),
-                    )
-                });
-                (callable, (declaration.name.clone(), exact_descriptor))
-            })
+        .filter(|(_, function)| renamed_functions.contains(*function))
+        .map(|(&callable, &function)| {
+            let declaration = &ir.functions[function as usize];
+            let exact_descriptor = (!lowered_value_members.contains(&function)
+                && !suspend_functions.contains(&function))
+            .then(|| {
+                (
+                    ir_method_desc(&declaration.params, &declaration.ret),
+                    declaration.params.clone(),
+                )
+            });
+            (callable, (declaration.name.clone(), exact_descriptor))
         })
         .collect();
     // A call to a renamed declaration of this file passes that exact declaration's parameters,

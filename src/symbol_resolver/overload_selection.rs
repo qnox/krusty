@@ -110,7 +110,7 @@ pub(super) fn select_recorded_exact<'a>(
                 let declared = super::declaration_specificity_params(candidate);
                 (parameters.as_slice() == actual
                     && (!args.is_empty() || declared.len() == parameters.len()))
-                .then(|| (declared, *candidate))
+                .then_some((declared, *candidate))
             })
             .collect(),
         at_least_as_specific,
@@ -142,10 +142,10 @@ pub(super) fn non_vararg_among<'a>(
     )
 }
 
-pub(super) fn select_equally_specific<'a>(
-    shapes: Vec<(Vec<Ty>, &'a FunctionInfo)>,
+pub(super) fn select_equally_specific(
+    shapes: Vec<(Vec<Ty>, &FunctionInfo)>,
     at_least_as_specific: impl Fn(usize, Ty, Ty) -> bool,
-) -> CandidateSelectionWithTies<&'a FunctionInfo> {
+) -> CandidateSelectionWithTies<&FunctionInfo> {
     let selection = unique_most_specific_with_conflicts_and_ties(
         shapes
             .iter()
@@ -192,9 +192,9 @@ fn mutually_as_specific<'a>(
     })
 }
 
-fn prefer_non_vararg<'a>(
-    selection: CandidateSelectionWithTies<&'a FunctionInfo>,
-) -> CandidateSelectionWithTies<&'a FunctionInfo> {
+fn prefer_non_vararg(
+    selection: CandidateSelectionWithTies<&FunctionInfo>,
+) -> CandidateSelectionWithTies<&FunctionInfo> {
     let CandidateSelectionWithTies::Ambiguous(candidates) = selection else {
         return selection;
     };

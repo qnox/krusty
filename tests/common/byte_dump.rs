@@ -759,13 +759,9 @@ fn parse_modules(text: &str) -> Option<BTreeMap<String, BTreeMap<String, Vec<Spa
             .strip_prefix('[')
             .and_then(|line| line.strip_suffix(']'))
         {
-            match module.as_ref().and_then(|module| modules.get_mut(module)) {
-                Some(entries) => {
-                    entries.entry(name.to_string()).or_default();
-                    key = Some(name.to_string());
-                }
-                None => return None,
-            }
+            let entries = module.as_ref().and_then(|module| modules.get_mut(module))?;
+            entries.entry(name.to_string()).or_default();
+            key = Some(name.to_string());
             continue;
         }
         let mut parts = line.split_whitespace();
@@ -776,20 +772,17 @@ fn parse_modules(text: &str) -> Option<BTreeMap<String, BTreeMap<String, Vec<Spa
             return None;
         }
         let (channel, lo, hi) = parse_range(range)?;
-        match module
+        let spans = module
             .as_ref()
             .zip(key.as_ref())
-            .and_then(|(module, key)| modules.get_mut(module)?.get_mut(key))
-        {
-            Some(spans) => spans.push(Span {
-                lo,
-                hi,
-                channel,
-                fingerprint,
-                blob,
-            }),
-            None => return None,
-        }
+            .and_then(|(module, key)| modules.get_mut(module)?.get_mut(key))?;
+        spans.push(Span {
+            lo,
+            hi,
+            channel,
+            fingerprint,
+            blob,
+        });
     }
     Some(modules)
 }
