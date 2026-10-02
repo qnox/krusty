@@ -370,14 +370,12 @@ private val ALLOWED_FREE_FLAGS = setOf(
     "-Xdont-warn-on-error-suppression",
     "-Xrender-internal-diagnostic-names",
     "-Xskip-metadata-version-check",
-    "-progressive",
 )
 
 private val NAME_DESTRUCTURING_MODES = setOf("only-syntax", "name-mismatch", "complete", "disable")
 
 private val JVM_DEFAULT_MODES = setOf("enable", "no-compatibility", "disable")
 private val JVM_DEFAULT_LEGACY_MODES = setOf("all", "all-compatibility", "disable")
-private val JSPECIFY_MODES = setOf("strict", "warn", "ignore")
 private val WARNING_LEVELS = setOf("error", "warning", "disabled")
 
 private fun isFreeJvmDefault(argument: String): Boolean =
@@ -405,10 +403,6 @@ private fun validateFreeArguments(input: List<String>): ArrayList<String> {
             // Several -opt-in arguments are legal (the Kotlin build applies one per opt-in); only an
             // exact repeat is a duplicate, so the key is the argument itself.
             argument.startsWith("-opt-in=") && argument.substringAfter('=').isNotEmpty() -> argument
-            argument.startsWith("-Xjspecify-annotations=") &&
-                argument.substringAfter('=') in JSPECIFY_MODES -> "-Xjspecify-annotations"
-            argument.startsWith("-Xjdk-release=") &&
-                (argument.substringAfter('=').toIntOrNull() ?: 0) > 0 -> "-Xjdk-release"
             argument.startsWith("-Xwarning-level=") -> warningLevelKey(argument)
             argument.startsWith("-Xlambdas=") && argument.substringAfter('=') in setOf("indy", "class") -> "-Xlambdas"
             argument.startsWith("-Xsam-conversions=") && argument.substringAfter('=') in setOf("indy", "class") -> "-Xsam-conversions"
@@ -452,22 +446,19 @@ private fun reservedFreeArgument(argument: String): String? {
         isOption("-Xkotlin-reference-version") -> "the Kotlin Gradle plugin version"
         isOption("-language-version") -> "compilerOptions.languageVersion"
         isOption("-api-version") -> "compilerOptions.apiVersion"
+        isOption("-progressive") -> "compilerOptions.progressiveMode"
         isOption("-Xplugin", "-P") -> "compiler plugin configuration"
         else -> null
     }
 }
 
-// krusty compiles the 2.x line up to its reference release. The Kotlin repository builds some
-// modules at language/api 2.0 or 2.2 (stable-stdlib and Gradle-plugin-embedded modules), so the
-// plugin passes any 2.x level at or below 2.4 through to krusty instead of demanding exactly 2.4.
+// `-language-version` selects source semantics, and the compiler implements 2.4 only. `-api-version`
+// remains a compatibility input, but an older level would likewise promise an API boundary the
+// compiler does not enforce. Reject both mismatches instead of compiling them under 2.4 rules.
 private fun supportedKotlinLevel(name: String, version: String): String {
-    val parts = version.split('.')
-    val supported = parts.size == 2 &&
-        parts[0] == "2" &&
-        (parts[1].toIntOrNull() ?: Int.MAX_VALUE) <= 4
-    if (!supported) {
+    if (version != "2.4") {
         throw GradleException(
-            "krusty does not support compilerOptions.$name=$version; only 2.0 through 2.4 are supported",
+            "krusty does not support compilerOptions.$name=$version; only 2.4 is supported",
         )
     }
     return version

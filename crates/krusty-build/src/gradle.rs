@@ -851,6 +851,38 @@ mod tests {
                     "unsupported freeCompilerArg '-jvm-default=sideways'; use a supported compilerOptions property",
                 ),
                 (
+                    "old-language-version",
+                    "krusty does not support compilerOptions.languageVersion=2.2; only 2.4 is supported",
+                ),
+                (
+                    "old-api-version",
+                    "krusty does not support compilerOptions.apiVersion=2.0; only 2.4 is supported",
+                ),
+                (
+                    "progressive-free-argument",
+                    "freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead",
+                ),
+                (
+                    "jspecify-free-argument",
+                    "unsupported freeCompilerArg '-Xjspecify-annotations=strict'; use a supported compilerOptions property",
+                ),
+                (
+                    "jdk-release-free-argument",
+                    "unsupported freeCompilerArg '-Xjdk-release=8'; use a supported compilerOptions property",
+                ),
+                (
+                    "duplicate-inert-flag",
+                    "duplicate freeCompilerArg '-Xskip-prerelease-check'",
+                ),
+                (
+                    "bad-warning-level",
+                    "unsupported freeCompilerArg '-Xwarning-level=NOPE'; expected -Xwarning-level=<NAME>:error|warning|disabled",
+                ),
+                (
+                    "duplicate-warning-level",
+                    "duplicate freeCompilerArg '-Xwarning-level=REDUNDANT_CLI_ARG'",
+                ),
+                (
                     "jvm-target",
                     "Kotlin JVM target 17 differs from Java target 11",
                 ),
@@ -1285,6 +1317,14 @@ tasks.withType<KotlinJvmCompile>().configureEach {
             "plugin-free-argument" -> freeCompilerArgs.add("-Xplugin=forbidden.jar")
             "jvm-default-conflict" -> freeCompilerArgs.add("-jvm-default=disable")
             "jvm-default-bad-mode" -> freeCompilerArgs.add("-jvm-default=sideways")
+            "old-language-version" -> languageVersion.set(KotlinVersion.KOTLIN_2_2)
+            "old-api-version" -> apiVersion.set(KotlinVersion.KOTLIN_2_0)
+            "progressive-free-argument" -> freeCompilerArgs.add("-progressive")
+            "jspecify-free-argument" -> freeCompilerArgs.add("-Xjspecify-annotations=strict")
+            "jdk-release-free-argument" -> freeCompilerArgs.add("-Xjdk-release=8")
+            "duplicate-inert-flag" -> freeCompilerArgs.add("-Xskip-prerelease-check")
+            "bad-warning-level" -> freeCompilerArgs.add("-Xwarning-level=NOPE")
+            "duplicate-warning-level" -> freeCompilerArgs.add("-Xwarning-level=REDUNDANT_CLI_ARG:error")
         }
     }
 }
