@@ -62,12 +62,9 @@ pub fn stub_classes(
         };
         parsed.push((ctx, decls));
     }
-    let emittable_declarations = parsed
+    let source_declarations = parsed
         .iter()
         .flat_map(|(_, declarations)| declarations)
-        .filter(|declaration| {
-            declaration.outer_internal.is_none() || declaration.access & ACC_PRIVATE == 0
-        })
         .map(|declaration| declaration.internal.as_str())
         .collect::<HashSet<_>>();
     // This parser-owned graph is the only authority for lexical nesting and the type parameters
@@ -81,7 +78,10 @@ pub fn stub_classes(
             .entry(declaration.internal.as_str())
             .or_insert(declaration);
     }
-    let resolve_all = |cand: &str| emittable_declarations.contains(cand) || resolve(cand);
+    // Signature/descriptor resolution knows every parsed declaration, including private nested
+    // classes: javac emits real class files for them, and a member signature may name one. Only
+    // the overlay's emission set excludes them (they are invisible to Kotlin source).
+    let resolve_all = |cand: &str| source_declarations.contains(cand) || resolve(cand);
 
     let mut out = Vec::new();
     let mut emitted: HashSet<&str> = HashSet::new();
@@ -1382,6 +1382,28 @@ mod tests {
             .and_then(|(_, bytes)| parse_class(bytes).ok())
             .expect("Holder");
         assert!(holder.method("value", "()LSame;").is_some());
+    }
+
+    #[test]
+    fn strict_stub_resolves_a_private_nested_class_in_a_member_signature() {
+        // javac emits a real class file for a private nested class, so a member signature may name
+        // it. The overlay does not emit a stub for it (invisible to Kotlin source), but resolution
+        // during stub generation must still know the type exists.
+        let sources = vec![(
+            "Outer.java".to_string(),
+            "public class Outer {\n\
+             \u{20}   private static class Secret<T> {}\n\
+             \u{20}   private static <T> Secret<T> make() { return null; }\n\
+             \u{20}   public static Object go() { return make(); }\n\
+             }"
+            .to_string(),
+        )];
+        let out = stub_classes(&sources, StubMode::Strict, &|candidate| {
+            candidate == "java/lang/Object"
+        })
+        .expect("private nested class in a member signature still stubs");
+        assert!(out.iter().any(|(name, _)| name == "Outer"));
+        assert!(!out.iter().any(|(name, _)| name == "Outer$Secret"));
     }
 
     #[test]
