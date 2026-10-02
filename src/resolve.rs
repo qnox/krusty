@@ -16625,7 +16625,10 @@ impl<'a> Checker<'a> {
             {
                 return None;
             }
-            self.member_argument_score(expected, semantic_actual)
+            self.call_arg_kind(scope, argument)
+                .is_expected_type_callable()
+                .then_some(0)
+                .or_else(|| self.member_argument_score(expected, semantic_actual))
                 .or_else(|| contextual_call_result.then_some(0))
                 .or_else(|| {
                     self.unbound_call_result_signature(argument)
@@ -43183,8 +43186,6 @@ impl<'a> Checker<'a> {
             ) else {
                 continue;
             };
-            // An omitted vararg is one unspecified parameter, same as an omitted default.
-            // Leaving it out made an empty vararg look more specific than `f(x: T = …)`.
             let omitted_defaults = mapped_slots
                 .iter()
                 .filter(|argument| argument.is_none())
