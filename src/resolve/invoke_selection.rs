@@ -59,6 +59,37 @@ impl SelectedInvokePlan {
 }
 
 impl Checker<'_> {
+    pub(super) fn invoke_operator_candidates(
+        &self,
+        receiver_ty: Ty,
+    ) -> Vec<crate::libraries::FunctionInfo> {
+        let value_class = self.ty_is_value_class(receiver_ty) && !receiver_ty.is_nullable();
+        // `override fun invoke` inherits the operator convention from the function supertype
+        // even when the source omits `operator`; hierarchy normalization records that fact.
+        // A same-owner `invoke` that is not that override, and is not itself `operator`, is
+        // not a candidate. An inherited `FunctionN.invoke` stays out too, or the call would
+        // box and dispatch through the interface.
+        let own_function_implementation = value_class
+            && !self
+                .stable_classifier_callable_signatures(receiver_ty)
+                .is_empty();
+        self.resolver()
+            .resolve_symbol(
+                crate::symbol_resolver::SymRecv::Value(receiver_ty),
+                CALLABLE_INVOKE_OPERATOR,
+                &[],
+                &[],
+            )
+            .map(crate::symbol_resolver::Symbol::overloads)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|candidate| {
+                candidate.flags.operator
+                    && (!own_function_implementation || candidate.receiver_rank == 0)
+            })
+            .collect()
+    }
+
     /// The function types a value of `nominal` type can be invoked as: the function supertypes of
     /// its classifier, and for a type parameter those of every bound, followed through bounds that
     /// are themselves type parameters (`T : (Int) -> Int` and `<U : (Int) -> Int, T : U>` both make
@@ -936,9 +967,27 @@ impl Checker<'_> {
             args,
             arg_tys,
         } = call_args;
-        let semantic_receiver_ty = self
-            .expression_function_type(scope, receiver, receiver_ty)
-            .unwrap_or(receiver_ty);
+        // A non-null value class keeps its own type. Its `invoke` members, including the
+        // override of a function supertype, are ordinary declarations; collapsing the receiver
+        // to that supertype would drop which declaration the call selected. An explicit
+        // `receiver.invoke(...)` may already have been handed that supertype; the receiver
+        // expression is still the value class. Every other receiver keeps the type this call
+        // was given, including a smart cast to a function type.
+        let value_class_receiver = self
+            .expr_types
+            .get(receiver.0 as usize)
+            .copied()
+            .filter(|ty| self.ty_is_value_class(*ty) && !ty.is_nullable())
+            .or_else(|| {
+                (self.ty_is_value_class(receiver_ty) && !receiver_ty.is_nullable())
+                    .then_some(receiver_ty)
+            });
+        let semantic_receiver_ty = if let Some(value_class) = value_class_receiver {
+            value_class
+        } else {
+            self.expression_function_type(scope, receiver, receiver_ty)
+                .unwrap_or(receiver_ty)
+        };
         crate::trace_compiler!(
             "resolve",
             "invoke selection call={call:?} receiver={receiver:?} nominal={receiver_ty:?} semantic={semantic_receiver_ty:?} args={arg_tys:?}",
@@ -1001,6 +1050,7 @@ impl Checker<'_> {
                 )
             }
             _ => {
+                let receiver_ty = semantic_receiver_ty;
                 let explicit_type_args = self.resolved_explicit_type_args(scope, call);
                 let invoke_candidates = self.invoke_operator_candidates(receiver_ty);
                 let overloads = invoke_candidates
@@ -1186,6 +1236,17 @@ impl Checker<'_> {
                     let Some(selected) =
                         extension_selection.and_then(CallableCandidateSelection::available)
                     else {
+                        // A same-owner `invoke` can match the arguments without being an
+                        // operator. That is the modifier diagnostic, not an empty candidate list.
+                        if self.report_required_operator_modifier(
+                            scope,
+                            receiver_ty,
+                            CALLABLE_INVOKE_OPERATOR,
+                            arg_tys,
+                            span,
+                        ) {
+                            return InvokeResolution::Selected(Ty::Error);
+                        }
                         return if overloads.is_empty() {
                             if extensions.is_empty() {
                                 InvokeResolution::Absent

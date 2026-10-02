@@ -47018,20 +47018,6 @@ impl<'a> Checker<'a> {
         true
     }
 
-    fn invoke_operator_candidates(&self, receiver_ty: Ty) -> Vec<crate::libraries::FunctionInfo> {
-        self.resolver()
-            .resolve_symbol(
-                crate::symbol_resolver::SymRecv::Value(receiver_ty),
-                CALLABLE_INVOKE_OPERATOR,
-                &[],
-                &[],
-            )
-            .map(crate::symbol_resolver::Symbol::overloads)
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|candidate| candidate.flags.operator)
-            .collect()
-    }
     fn declare(&mut self, scope: &CheckerScope<'_>, name: &str, ty: Ty, is_var: bool) {
         self.declare_with_origin(
             scope,
