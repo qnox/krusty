@@ -1753,7 +1753,8 @@ mod tail_promotion_tests {
             &mut ir,
             block,
             tail,
-            Some(returned)
+            Some(returned),
+            None,
         ));
         assert_block(&ir, block, &[first], Some(tail));
         assert_block(&ir, tail, &[], Some(returned));
@@ -1775,7 +1776,8 @@ mod tail_promotion_tests {
             &mut ir,
             outer,
             tail,
-            Some(returned)
+            Some(returned),
+            None,
         ));
         assert_block(&ir, outer, &[], Some(inner));
         assert_block(&ir, inner, &[first], Some(tail));
@@ -1798,7 +1800,8 @@ mod tail_promotion_tests {
             &mut ir,
             block,
             tail,
-            Some(returned)
+            Some(returned),
+            None,
         ));
         assert_eq!(arena(&ir), before, "a refused promotion mutates nothing");
     }
@@ -1815,7 +1818,7 @@ mod tail_promotion_tests {
         let block = statement_block(&mut ir, vec![tail, after]);
         let before = arena(&ir);
 
-        assert!(!produce_sole_tail_return(&mut ir, block, tail, None));
+        assert!(!produce_sole_tail_return(&mut ir, block, tail, None, None,));
         assert_eq!(
             arena(&ir),
             before,
@@ -1839,7 +1842,8 @@ mod tail_promotion_tests {
             &mut ir,
             outer,
             tail,
-            Some(returned)
+            Some(returned),
+            None,
         ));
         assert_eq!(arena(&ir), before, "a refused promotion mutates nothing");
     }
@@ -1862,7 +1866,8 @@ mod tail_promotion_tests {
             &mut ir,
             block,
             tail,
-            Some(returned)
+            Some(returned),
+            None,
         ));
         assert_eq!(arena(&ir), before, "a refused promotion mutates nothing");
     }
