@@ -8367,6 +8367,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`getSelf-impl-Iq56FA8`); it now takes kotlinc's `getSelf-wFmgt0E`. Tests:
   `tests/sibling_value_class_members_e2e.rs` (the calling class byte-identical to kotlinc; a
   generic value class in another package, instruction-identical; a suspend member).
+- **A direct call of a value class that implements a function type uses that static implementation.**
+  `ValueClass(1)(1)`, where the class implements `Int.() -> String`, is
+  `invokestatic ValueClass."invoke-impl":(II)Ljava/lang/String;` with the unboxed carrier as argument
+  zero. The same shape covers a local, a parameter, `v!!(1)`, an explicit `invoke`, a nullary
+  function type, a reference carrier, and a value-class parameter or result (the result's name is the
+  signature hash, `invoke-…`, and the caller reads the returned carrier). A value whose static type
+  is the function type (`val f: Int.() -> String = ValueClass(1); f(1)`) still boxes and calls
+  `Function1.invoke`. Calling the interface method on the raw carrier is a `VerifyError`. Tests:
+  `tests/function_type_supertype_e2e.rs`.
 - **Stack-map frames are computed from the written method, as kotlinc's writer computes them.**
   kotlinc never records a frame: its class writer is ASM `ClassWriter(COMPUTE_MAXS |
   COMPUTE_FRAMES)` whose `getCommonSuperClass` answers `java/lang/Object` for every pair. krusty

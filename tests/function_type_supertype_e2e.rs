@@ -188,3 +188,82 @@ fun box(): String {\n\
 }\n";
     common::expect_box_ok_with_stdlib(SRC, "BigArityFunctionSupertypeBridge");
 }
+
+/// A value class that implements a function type is still a carrier at a direct call. kotlinc calls
+/// the static implementation (`invoke-impl` or the signature hash) with that carrier as argument
+/// zero. Boxing it and calling `FunctionN.invoke` leaves an `int` where the interface expects an
+/// object (`VerifyError`).
+#[test]
+fn a_value_class_extension_function_is_called_through_its_static_invoke() {
+    const SRC: &str = "// LANGUAGE: +FunctionalTypeWithExtensionAsSupertype\n\
+@JvmInline\n\
+value class ValueClass(private val s: Int) : Int.() -> String {\n\
+    override fun invoke(p1: Int): String = if (s == 1 && p1 == 1) \"OK\" else \"fail\"\n\
+}\n\
+fun box(): String = ValueClass(1)(1)\n";
+    common::expect_box_same_as_kotlinc(SRC, "ValueClassExtensionFunction");
+}
+
+#[test]
+fn a_value_class_function_call_keeps_the_carrier_in_every_direct_shape() {
+    const SRC: &str = "// LANGUAGE: +FunctionalTypeWithExtensionAsSupertype\n\
+@JvmInline\n\
+value class Out(val v: Int)\n\
+@JvmInline\n\
+value class Id(val v: Int)\n\
+@JvmInline\n\
+value class ValueClass(private val s: Int) : Int.() -> String {\n\
+    override fun invoke(p1: Int): String = \"${s}${p1}\"\n\
+}\n\
+@JvmInline\n\
+value class Nullary(private val s: Int) : () -> String {\n\
+    override fun invoke(): String = \"n$s\"\n\
+}\n\
+@JvmInline\n\
+value class Name(val raw: String) : () -> String {\n\
+    override fun invoke(): String = raw\n\
+}\n\
+@JvmInline\n\
+value class TakesId(val s: Int) : (Id) -> String {\n\
+    override fun invoke(p: Id): String = \"${s}${p.v}\"\n\
+}\n\
+@JvmInline\n\
+value class MakesOut(val s: Int) : () -> Out {\n\
+    override fun invoke(): Out = Out(s)\n\
+}\n\
+fun local(): String {\n\
+    val v = ValueClass(1)\n\
+    return v(2)\n\
+}\n\
+fun param(v: ValueClass): String = v(3)\n\
+fun bang(v: ValueClass?): String = v!!(4)\n\
+fun explicit(v: ValueClass): String = v.invoke(5)\n\
+fun asFn(): String {\n\
+    val f: Int.() -> String = ValueClass(6)\n\
+    return f(7)\n\
+}\n\
+fun box(): String {\n\
+    val seen = listOf(\n\
+        ValueClass(1)(1), local(), param(ValueClass(1)), bang(ValueClass(1)),\n\
+        explicit(ValueClass(1)), asFn(), Nullary(8)(), Name(\"N\")(),\n\
+        TakesId(1)(Id(2)), MakesOut(9)().v.toString(),\n\
+    ).joinToString(\",\")\n\
+    return if (seen == \"11,12,13,14,15,67,n8,N,12,9\") \"OK\" else seen\n\
+}\n";
+    common::expect_box_same_as_kotlinc(SRC, "ValueClassFunctionShapes");
+}
+
+#[test]
+fn a_sibling_value_class_function_is_called_through_its_static_invoke() {
+    const DECL: &str = "@JvmInline\n\
+value class ValueClass(private val s: Int) : (Int) -> String {\n\
+    override fun invoke(p1: Int): String = if (s == p1) \"OK\" else \"fail\"\n\
+}\n";
+    const CALL: &str = "fun box(): String = ValueClass(4)(4)\n";
+    let sources = [("ValueClass.kt", DECL), ("Box.kt", CALL)];
+    assert_eq!(common::kotlinc_box_files_result(&sources, "BoxKt"), "OK");
+    assert_eq!(
+        common::compile_and_run_files_with_stdlib(&sources).as_deref(),
+        Some("OK")
+    );
+}
