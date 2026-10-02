@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use crate::compiler_analysis::{
     self, CompletionSymbols, DefinitionSymbols, HighlightSymbols, LibraryRef, SignatureHelpSymbols,
 };
+use crate::worker_resident::{WorkerResidentPolicy, DEFAULT_WORKER_RSS_BYTES};
 use crate::{
     finalize_navigation, read_framed, write_framed, AnalysisBudgets, CompletionIndex,
     DefinitionIndex, DocumentAnalysis, DocumentSymbolIndex, FoldingRangeIndex, HoverIndex,
@@ -664,6 +665,7 @@ pub struct AnalysisWorker {
     executable: PathBuf,
     classpath: Vec<PathBuf>,
     process: WorkerProcess,
+    resident: WorkerResidentPolicy,
     restart_required: bool,
     analyses: usize,
     max_analyses: usize,
@@ -672,16 +674,35 @@ pub struct AnalysisWorker {
 
 impl AnalysisWorker {
     pub fn spawn(executable: PathBuf, classpath: Vec<PathBuf>) -> io::Result<Self> {
+        Self::spawn_with_resident_policy(
+            executable,
+            classpath,
+            WorkerResidentPolicy::platform(DEFAULT_WORKER_RSS_BYTES),
+        )
+    }
+
+    /// Start a worker under `resident`. The supervisor passes its ceiling here; tests pass a
+    /// scripted sample. The sample runs before each request and does not cover growth inside it.
+    pub fn spawn_with_resident_policy(
+        executable: PathBuf,
+        classpath: Vec<PathBuf>,
+        resident: WorkerResidentPolicy,
+    ) -> io::Result<Self> {
         let process = WorkerProcess::spawn(&executable, &classpath)?;
         Ok(Self {
             executable,
             classpath,
             process,
+            resident,
             restart_required: false,
             analyses: 0,
             max_analyses: DEFAULT_ANALYSES_PER_WORKER,
             language_features: LangFeatures::new(),
         })
+    }
+
+    pub fn process_id(&self) -> u32 {
+        self.process.id()
     }
 
     fn restart(&mut self) -> io::Result<()> {
@@ -805,7 +826,12 @@ impl AnalysisWorker {
         &mut self,
         mut operation: impl FnMut(&mut WorkerProcess) -> io::Result<T>,
     ) -> io::Result<T> {
-        if self.restart_required || self.analyses >= self.max_analyses {
+        // Previous residue only. This request can still pass the ceiling; a crash then uses the
+        // restart below. An unreadable sample does not restart.
+        if self.restart_required
+            || self.analyses >= self.max_analyses
+            || self.resident.over_budget(self.process.id())
+        {
             self.restart()?;
         }
         match operation(&mut self.process) {
@@ -1280,6 +1306,12 @@ fn render_analyzed_dump(
 
 fn json_io(error: serde_json::Error) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, error)
+}
+
+impl WorkerProcess {
+    fn id(&self) -> u32 {
+        self.child.id()
+    }
 }
 
 #[cfg(test)]
