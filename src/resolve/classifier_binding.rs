@@ -14,6 +14,32 @@ pub(super) struct SelectedTypeAlias {
     pub(super) expansion: Ty,
 }
 
+type SelectedAliasProvenance = Result<Option<SelectedTypeAlias>, InvalidAliasProvenance>;
+
+#[derive(Clone, Copy)]
+struct InvalidAliasProvenance;
+
+fn selected_alias_from_binding(
+    identity: TypeName,
+    classifier: TypeName,
+    binding: Option<crate::libraries::AliasExpansion>,
+) -> SelectedAliasProvenance {
+    // An ordinary classifier publishes its own identity in both record fields. Do not query
+    // another provider for an equally qualified alias after that classifier has won.
+    if identity == classifier {
+        return Ok(None);
+    }
+    let binding = binding.ok_or(InvalidAliasProvenance)?;
+    if binding.identity != identity || binding.target != classifier {
+        return Err(InvalidAliasProvenance);
+    }
+    Ok(Some(SelectedTypeAlias {
+        identity: Some(binding.identity),
+        formals: binding.formals,
+        expansion: binding.expansion,
+    }))
+}
+
 impl Checker<'_> {
     /// Select the classifier root from the scope tower, then commit every remaining segment through
     /// the shared qualifier loop. The third result is the alias binding from the same winning root
@@ -44,7 +70,10 @@ impl Checker<'_> {
         let scoped = scope.symbols(root_name, &source);
         let root = if let Some(internal) = scoped.classifier_name {
             ResolvedQualifier::Classifier(internal)
-        } else if let Some((internal, alias)) = self.selected_lexical_type_alias(scope, root_name) {
+        } else if let Some(alias) = self.selected_lexical_type_alias(scope, root_name) {
+            let Ok((internal, alias)) = alias else {
+                return Self::invalid_alias_selection(root_name);
+            };
             selected_alias = Some(alias);
             ResolvedQualifier::Classifier(internal)
         } else if let Some(internal) = self.classifier_header_lexical_type_name(root_name) {
@@ -67,20 +96,31 @@ impl Checker<'_> {
                     if let Some((classifier, declaration)) =
                         self.explicit_import_classifier_binding(root_name)
                     {
-                        selected_alias = declaration.and_then(|identity| {
+                        let provenance = declaration.map_or(Ok(None), |identity| {
                             self.selected_alias_from_identity(identity, classifier)
                         });
+                        let Ok(alias) = provenance else {
+                            return Self::invalid_alias_selection(root_name);
+                        };
+                        selected_alias = alias;
                         ResolvedQualifier::Classifier(classifier)
                     } else if let Some((classifier, alias)) =
                         self.selected_same_package_classifier(root_name)
                     {
+                        let Ok(alias) = alias else {
+                            return Self::invalid_alias_selection(root_name);
+                        };
                         selected_alias = alias;
                         ResolvedQualifier::Classifier(classifier)
                     } else if let Some(classifier) =
                         self.alias_ahead_of_imported_classifier(scope, root_name, &source)
                     {
-                        selected_alias =
-                            self.selected_scoped_type_alias(scope, root_name, classifier);
+                        let Ok(alias) =
+                            self.selected_scoped_type_alias(scope, root_name, classifier)
+                        else {
+                            return Self::invalid_alias_selection(root_name);
+                        };
+                        selected_alias = Some(alias);
                         ResolvedQualifier::Classifier(classifier)
                     } else {
                         let imported = classifier_from_imports(
@@ -96,8 +136,12 @@ impl Checker<'_> {
                         );
                         match imported {
                             InheritedNestedClassifier::Found(internal) => {
-                                selected_alias =
-                                    self.selected_imported_type_alias(root_name, internal);
+                                let Ok(alias) =
+                                    self.selected_imported_type_alias(root_name, internal)
+                                else {
+                                    return Self::invalid_alias_selection(root_name);
+                                };
+                                selected_alias = alias;
                                 ResolvedQualifier::Classifier(internal)
                             }
                             InheritedNestedClassifier::Ambiguous => {
@@ -156,7 +200,13 @@ impl Checker<'_> {
             Ok((ResolvedQualifier::Classifier(internal), declaration_identity)) => {
                 let internal = self.libraries.canonical_source_type_name(internal);
                 if let Some(identity) = declaration_identity {
-                    selected_alias = self.selected_alias_from_identity(identity, internal);
+                    let Ok(alias) = self.selected_alias_from_identity(identity, internal) else {
+                        let failed = segments
+                            .last()
+                            .map_or(root_name.as_str(), |(_, segment)| segment);
+                        return Self::invalid_alias_selection(failed);
+                    };
+                    selected_alias = alias;
                 }
                 (
                     InheritedNestedClassifier::Found(internal),
@@ -181,6 +231,20 @@ impl Checker<'_> {
         }
     }
 
+    fn invalid_alias_selection(
+        name: &str,
+    ) -> (
+        InheritedNestedClassifier,
+        Option<String>,
+        Option<SelectedTypeAlias>,
+    ) {
+        (
+            InheritedNestedClassifier::Ambiguous,
+            Some(name.to_string()),
+            None,
+        )
+    }
+
     pub(super) fn select_classifier(
         &self,
         scope: &CheckerScope<'_>,
@@ -193,18 +257,8 @@ impl Checker<'_> {
         &self,
         identity: TypeName,
         classifier: TypeName,
-    ) -> Option<SelectedTypeAlias> {
-        // An ordinary classifier publishes its own identity in both record fields. Do not query
-        // another provider for an equally qualified alias after that classifier has won.
-        if identity == classifier {
-            return None;
-        }
-        let binding = self.source_alias_binding(identity)?;
-        (binding.target == classifier).then_some(SelectedTypeAlias {
-            identity: Some(binding.identity),
-            formals: binding.formals,
-            expansion: binding.expansion,
-        })
+    ) -> SelectedAliasProvenance {
+        selected_alias_from_binding(identity, classifier, self.source_alias_binding(identity))
     }
 
     /// Classifier and alias provenance from the current-package rung. The package namespace and
@@ -214,7 +268,7 @@ impl Checker<'_> {
     fn selected_same_package_classifier(
         &self,
         name: &str,
-    ) -> Option<(TypeName, Option<SelectedTypeAlias>)> {
+    ) -> Option<(TypeName, SelectedAliasProvenance)> {
         let namespace = crate::symbol_source::SymbolNamespace::Package(self.source_package_name());
         let record = self.fed_source().symbols(namespace, name);
         let classifier = self
@@ -222,7 +276,9 @@ impl Checker<'_> {
             .canonical_source_type_name(record.classifier_name?);
         let alias = record
             .classifier_declaration_name
-            .and_then(|identity| self.selected_alias_from_identity(identity, classifier));
+            .map_or(Ok(None), |identity| {
+                self.selected_alias_from_identity(identity, classifier)
+            });
         Some((classifier, alias))
     }
 
@@ -231,7 +287,7 @@ impl Checker<'_> {
         &self,
         name: &str,
         classifier: TypeName,
-    ) -> Option<SelectedTypeAlias> {
+    ) -> SelectedAliasProvenance {
         let source = self.fed_source();
         for level in &self.import_levels {
             let candidates = level
@@ -260,58 +316,71 @@ impl Checker<'_> {
                 .iter()
                 .any(|(_, candidate)| *candidate != classifier)
             {
-                return None;
+                return Err(InvalidAliasProvenance);
             }
+            let mut ordinary = false;
             let mut selected: Option<SelectedTypeAlias> = None;
             for (identity, _) in candidates {
                 let Some(identity) = identity else {
                     // The selected provider did not publish alias provenance. Do not reinterpret
                     // that classifier through an equally named declaration from another source.
-                    return None;
+                    return Err(InvalidAliasProvenance);
                 };
-                let Some(alias) = self.selected_alias_from_identity(identity, classifier) else {
-                    // A real classifier occupies the selected rung. A same-target alias from a
-                    // lower package must not change that declaration into an alias application.
-                    return None;
+                let Some(alias) = self.selected_alias_from_identity(identity, classifier)? else {
+                    // An ordinary classifier is the complete selected declaration, not missing
+                    // alias provenance. Multiple provider/package records may normalize onto the
+                    // same common classifier (for example java.lang.Object and kotlin.Any); the
+                    // target-equality check above has already proved that they are one semantic
+                    // identity. A same-target alias still conflicts with that ordinary identity.
+                    if selected.is_some() {
+                        return Err(InvalidAliasProvenance);
+                    }
+                    ordinary = true;
+                    continue;
                 };
+                if ordinary {
+                    return Err(InvalidAliasProvenance);
+                }
                 match &selected {
                     None => selected = Some(alias),
                     Some(previous)
                         if previous.formals == alias.formals
                             && previous.expansion == alias.expansion => {}
-                    Some(_) => return None,
+                    Some(_) => return Err(InvalidAliasProvenance),
                 }
             }
-            return selected;
+            return if ordinary { Ok(None) } else { Ok(selected) };
         }
-        None
+        Ok(None)
     }
 
     fn selected_lexical_type_alias(
         &self,
         scope: &CheckerScope<'_>,
         name: &str,
-    ) -> Option<(TypeName, SelectedTypeAlias)> {
+    ) -> Option<Result<(TypeName, SelectedTypeAlias), InvalidAliasProvenance>> {
         if let Some(alias) = scope.type_alias(name) {
-            return Some((
+            return Some(Ok((
                 alias.target,
                 SelectedTypeAlias {
                     identity: None,
                     formals: alias.formals,
                     expansion: alias.expansion,
                 },
-            ));
+            )));
         }
         let identity = self.lexical_source_alias_identity(name)?;
-        let binding = self.source_alias_binding(identity)?;
-        Some((
+        let Some(binding) = self.source_alias_binding(identity) else {
+            return Some(Err(InvalidAliasProvenance));
+        };
+        Some(Ok((
             binding.target,
             SelectedTypeAlias {
                 identity: Some(binding.identity),
                 formals: binding.formals,
                 expansion: binding.expansion,
             },
-        ))
+        )))
     }
 
     fn selected_scoped_type_alias(
@@ -319,8 +388,36 @@ impl Checker<'_> {
         scope: &CheckerScope<'_>,
         name: &str,
         classifier: TypeName,
-    ) -> Option<SelectedTypeAlias> {
-        let identity = self.scoped_source_alias_identity(scope, name)?;
-        self.selected_alias_from_identity(identity, classifier)
+    ) -> Result<SelectedTypeAlias, InvalidAliasProvenance> {
+        let identity = self
+            .scoped_source_alias_identity(scope, name)
+            .ok_or(InvalidAliasProvenance)?;
+        self.selected_alias_from_identity(identity, classifier)?
+            .ok_or(InvalidAliasProvenance)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selected_alias_rejects_missing_or_mismatched_provider_contracts() {
+        let alias = crate::types::type_name("fixture/Alias");
+        let target = crate::types::type_name("fixture/Target");
+        let other = crate::types::type_name("fixture/Other");
+        assert!(selected_alias_from_binding(alias, target, None).is_err());
+        assert!(selected_alias_from_binding(
+            alias,
+            target,
+            Some(crate::libraries::AliasExpansion {
+                identity: alias,
+                target: other,
+                formals: vec!["T".to_string()],
+                expansion: Ty::obj_name(other),
+                expansion_spelling: Default::default(),
+            }),
+        )
+        .is_err());
     }
 }

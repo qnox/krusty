@@ -123,3 +123,36 @@ fn classpath_typealias_visibility_is_enforced() {
         let _ = std::fs::remove_dir_all(root);
     }
 }
+
+#[test]
+fn same_target_star_aliases_with_different_templates_are_ambiguous() {
+    let Some(dependency) = common::compile_libs_ref(
+        "same_target_star_alias_ambiguity",
+        &[
+            (
+                "Pair.kt",
+                "package fixture\nclass Pair<A, B>(val first: A, val second: B)\n",
+            ),
+            (
+                "Left.kt",
+                "package left\nimport fixture.Pair\ntypealias Choice<T> = Pair<T, T>\n",
+            ),
+            (
+                "Right.kt",
+                "package right\nimport fixture.Pair\nclass Marker\ntypealias Choice<T> = Pair<T, Marker>\n",
+            ),
+        ],
+    ) else {
+        return;
+    };
+    let source = "import left.*\n\
+        import right.*\n\
+        class Token\n\
+        fun use(value: Choice<Token>): Token = Token()\n";
+    let sources = [("Main.kt", source)];
+    let result = common::compiler_diagnostics(&sources, &[dependency]);
+    common::expect_identical_rejection(
+        &result,
+        "same-target star aliases with different templates",
+    );
+}

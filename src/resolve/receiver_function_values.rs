@@ -6,12 +6,14 @@ use super::*;
 
 /// Result of trying the implicit `value()` spelling of a receiver-function value.
 pub(super) enum ImplicitReceiverFunctionInvoke {
-    Selected(Ty),
+    Applicable,
     /// Value-parameter arity does not match. The explicit form `value(receiver, args)` may.
     TryExplicit,
     /// The implicit spelling is this call's shape and it is not applicable. A later callable may
-    /// still own the name; `missing_context` is reported only when nothing else is.
+    /// still own the name; the exact receiver/context failure is reported only when nothing else is.
     Inapplicable {
+        signature: &'static crate::types::FnSig,
+        missing_receiver: bool,
         missing_context: Vec<MissingContextParameter>,
     },
 }
@@ -287,36 +289,34 @@ impl Checker<'_> {
     /// are reported only when this value is the only candidate. Anonymous function-type context
     /// parameters are `p1`, `p2`, … in source order.
     pub(super) fn classify_implicit_receiver_function_invoke(
-        &mut self,
+        &self,
         scope: &CheckerScope<'_>,
-        call_args: CallArgs<'_>,
-        name: &str,
+        argument_count: usize,
         signature: &'static crate::types::FnSig,
-        origin: ReceiverFnValueOrigin,
     ) -> ImplicitReceiverFunctionInvoke {
         let Some(parts) = Self::receiver_function_parts(signature) else {
             return ImplicitReceiverFunctionInvoke::TryExplicit;
         };
-        if parts.values.len() != call_args.arg_tys.len() {
+        if parts.values.len() != argument_count {
             return ImplicitReceiverFunctionInvoke::TryExplicit;
         }
-        let receiver_matches = self
+        let missing_receiver = self
             .receiver_function_implicit_receiver(
                 scope,
                 parts.receiver,
                 parts.values.len(),
-                call_args.arg_tys.len(),
+                argument_count,
             )
-            .is_some();
+            .is_none();
         let missing_context = self.unavailable_context_parameters(scope, parts.context);
-        if !receiver_matches || !missing_context.is_empty() {
-            return ImplicitReceiverFunctionInvoke::Inapplicable { missing_context };
+        if missing_receiver || !missing_context.is_empty() {
+            return ImplicitReceiverFunctionInvoke::Inapplicable {
+                signature,
+                missing_receiver,
+                missing_context,
+            };
         }
-        self.record_receiver_function_invoke(scope, call_args, name, signature, origin, None)
-            .map_or(
-                ImplicitReceiverFunctionInvoke::TryExplicit,
-                ImplicitReceiverFunctionInvoke::Selected,
-            )
+        ImplicitReceiverFunctionInvoke::Applicable
     }
 
     pub(super) fn report_function_value_context_gaps(
@@ -335,6 +335,44 @@ impl Checker<'_> {
         for &gap in missing {
             self.report_missing_context_parameter(call, gap, &names);
         }
+    }
+
+    pub(super) fn report_function_value_invoke_gaps(
+        &mut self,
+        call: ExprId,
+        args: &[ExprId],
+        signature: &'static crate::types::FnSig,
+        missing_receiver: bool,
+        missing_context: &[MissingContextParameter],
+    ) {
+        if !missing_context.is_empty() {
+            self.report_function_value_context_gaps(call, missing_context);
+            return;
+        }
+        if !missing_receiver {
+            return;
+        }
+        let context_count = signature.context_count.min(signature.params.len());
+        let params = &signature.params[context_count..];
+        let param_names = (0..params.len())
+            .map(|index| format!("p{}", index + 1))
+            .collect::<Vec<_>>();
+        let defaults = vec![false; params.len()];
+        self.report_function_arity(
+            call,
+            DiagnosticFunction {
+                name: "invoke",
+                params,
+                param_names: &param_names,
+                param_defaults: &defaults,
+                required: params.len(),
+                vararg: false,
+                context_count: 0,
+                ret: signature.ret,
+                source_display: None,
+            },
+            args,
+        );
     }
 
     fn unavailable_context_parameters(

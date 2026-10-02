@@ -20165,10 +20165,11 @@ impl<'a> Checker<'a> {
                 // `invoke(this as String)` must keep the receiver from before that cast.
                 let callee_receivers = self.implicit_receivers(scope);
                 let callee_this = self.effective_this_narrow(scope);
-                // Filled when a local receiver-function value matches this call's shape but its
-                // context is absent. The error waits until no later callable accepts the name.
-                let mut deferred_function_value_context: Option<Vec<MissingContextParameter>> =
-                    None;
+                // Filled when a local receiver-function value matches this call's value-argument
+                // shape but its implicit receiver or context is absent. The failure waits until no
+                // later callable accepts the name; arguments are not contextually checked against
+                // the losing value before that later selection.
+                let mut deferred_function_value_failure = None;
                 let local_value = self
                     .lookup(scope, &fname)
                     .map(|local| {
@@ -20198,31 +20199,60 @@ impl<'a> Checker<'a> {
                 if let Some((mut receiver_ty, origin)) =
                     local_value.filter(|_| local_value_invokable)
                 {
-                    if matches!(
-                        origin,
-                        ReceiverFnValueOrigin::DispatchProperty { .. }
-                            | ReceiverFnValueOrigin::ClassStorage(_)
-                            | ReceiverFnValueOrigin::EnumEntryPropertyStorage { .. }
-                    ) {
-                        // A function-valued dispatch property used as `property()` still has a
-                        // value-read callee expression. Record that read exactly as the bare
-                        // `property` spelling before selecting `invoke`.
-                        receiver_ty = self.expr_inner_name(scope, callee, fname.clone(), None);
-                    }
                     let receiver_function = self.receiver_function_value(scope, &fname);
-                    let argument_receiver_ty = receiver_function
-                        .map(|(signature, _)| Ty::Fun(signature))
-                        .unwrap_or(receiver_ty);
-                    let arg_tys =
-                        self.invoke_operator_arg_tys(scope, call, argument_receiver_ty, args);
-                    let skip_explicit_invoke = if matches!(
+                    let implicit_receiver_function = if matches!(
                         origin,
                         ReceiverFnValueOrigin::Local
                             | ReceiverFnValueOrigin::ClassStorage(_)
                             | ReceiverFnValueOrigin::EnumEntryPropertyStorage { .. }
                     ) {
-                        if let Some((signature, fn_origin)) = receiver_function {
-                            match self.classify_implicit_receiver_function_invoke(
+                        receiver_function.map(|(signature, _)| {
+                            self.classify_implicit_receiver_function_invoke(
+                                scope,
+                                args.len(),
+                                signature,
+                            )
+                        })
+                    } else {
+                        None
+                    };
+                    if let Some(ImplicitReceiverFunctionInvoke::Inapplicable {
+                        signature,
+                        missing_receiver,
+                        missing_context,
+                    }) = &implicit_receiver_function
+                    {
+                        deferred_function_value_failure =
+                            Some((*signature, *missing_receiver, missing_context.clone()));
+                        // The lexical value is inapplicable, so the next call-tower rung gets the
+                        // untouched argument expressions and can supply their actual expectations.
+                    } else {
+                        if matches!(
+                            origin,
+                            ReceiverFnValueOrigin::DispatchProperty { .. }
+                                | ReceiverFnValueOrigin::ClassStorage(_)
+                                | ReceiverFnValueOrigin::EnumEntryPropertyStorage { .. }
+                        ) {
+                            // Commit a stored/property value read only after this function-value
+                            // candidate has not been rejected by receiver/context applicability.
+                            // A later callable must inherit neither its callee read nor its argument
+                            // expectations from the losing lexical value.
+                            receiver_ty = self.expr_inner_name(scope, callee, fname.clone(), None);
+                        }
+                        let argument_receiver_ty = receiver_function
+                            .map(|(signature, _)| Ty::Fun(signature))
+                            .unwrap_or(receiver_ty);
+                        let arg_tys =
+                            self.invoke_operator_arg_tys(scope, call, argument_receiver_ty, args);
+                        let implicit_applicable = matches!(
+                            implicit_receiver_function,
+                            Some(ImplicitReceiverFunctionInvoke::Applicable)
+                        );
+                        if implicit_applicable {
+                            let (signature, fn_origin) = receiver_function.expect(
+                                "an applicable receiver-function classification has a value",
+                            );
+                            if let Some(ret) = self.record_receiver_function_invoke(
                                 scope,
                                 CallArgs {
                                     call,
@@ -20232,33 +20262,22 @@ impl<'a> Checker<'a> {
                                 &fname,
                                 signature,
                                 fn_origin,
+                                None,
                             ) {
-                                ImplicitReceiverFunctionInvoke::Selected(ret) => return ret,
-                                ImplicitReceiverFunctionInvoke::Inapplicable {
-                                    missing_context,
-                                } => {
-                                    if !missing_context.is_empty() {
-                                        deferred_function_value_context = Some(missing_context);
-                                    }
-                                    true
-                                }
-                                ImplicitReceiverFunctionInvoke::TryExplicit => false,
+                                return ret;
                             }
-                        } else {
-                            false
                         }
-                    } else {
-                        false
-                    };
-                    // An extension-function value also has the ordinary function invocation
-                    // shape whose first explicit argument is its receiver: `action(receiver)`.
-                    // That shape is independent of where the value is stored. In particular, an
-                    // anonymous/local-class capture is a `ClassStorageRead`, not a source-visible
-                    // property that member lookup may rediscover. After the implicit-receiver form
-                    // above declines the call, invoke the already selected value directly for every
-                    // storage origin. An inapplicable implicit spelling must not take that path:
-                    // `invoke` would commit a context error and hide a later applicable function.
-                    if !skip_explicit_invoke {
+                        // An extension-function value also has the ordinary function invocation
+                        // shape whose first explicit argument is its receiver: `action(receiver)`.
+                        // That shape is independent of where the value is stored. In particular, an
+                        // anonymous/local-class capture is a `ClassStorageRead`, not a source-visible
+                        // property that member lookup may rediscover. After the implicit-receiver form
+                        // above declines the call, invoke the already selected value directly for every
+                        // storage origin. An inapplicable implicit spelling must not take that path:
+                        // `invoke` would commit a context error and hide a later applicable function.
+                        // Reaching this point means the implicit commit either was not this call's
+                        // shape or declined unexpectedly after classification. Preserve the ordinary
+                        // explicit function-value form in both cases.
                         if let Some(ret) = self.record_invoke_or_report(
                             scope,
                             CallArgs {
@@ -23823,8 +23842,16 @@ impl<'a> Checker<'a> {
                             reference,
                         )
                     }
-                } else if let Some(missing) = deferred_function_value_context {
-                    self.report_function_value_context_gaps(call, &missing);
+                } else if let Some((signature, missing_receiver, missing_context)) =
+                    deferred_function_value_failure
+                {
+                    self.report_function_value_invoke_gaps(
+                        call,
+                        args,
+                        signature,
+                        missing_receiver,
+                        &missing_context,
+                    );
                     return Ty::Error;
                 } else {
                     // kotlinc has no "unresolved function" diagnostic: a callee that names nothing at

@@ -514,3 +514,41 @@ fn a_lone_receiver_function_value_reports_its_missing_context() {
     );
     common::expect_identical_rejection(&result, "lone receiver-function missing context");
 }
+
+/// An inapplicable receiver-function value must not type a context-sensitive argument before a
+/// later callable wins. `Box(null)` takes its type argument from the selected top-level function,
+/// not from the losing local value's receiver-function signature.
+#[test]
+fn a_receiver_function_value_without_receiver_leaves_arguments_for_the_winning_callable() {
+    const SOURCE: &str = "interface Mark\n\
+        object Selected : Mark\n\
+        object Fallback : Mark\n\
+        class Receiver\n\
+        class Wrong\n\
+        class Wanted\n\
+        class Box<T>(val value: T?)\n\
+        fun action(value: Box<Wanted>): Mark = Fallback\n\
+        fun use(): Mark {\n\
+        \x20   val action: Receiver.(Box<Wrong>) -> Mark = { Selected }\n\
+        \x20   return action(Box(null))\n\
+        }\n\
+        fun box(): String = if (use() === Fallback) \"OK\" else \"fail\"\n";
+    common::assert_accepted_like_kotlinc(SOURCE);
+    common::expect_box_same_as_kotlinc(SOURCE, "MissingReceiverFunctionFallbackRun");
+}
+
+/// With no later callable, a receiver-function value still owns the failed call and reports its
+/// missing receiver parameter instead of degrading into an unresolved-reference diagnostic.
+#[test]
+fn a_lone_receiver_function_value_reports_its_missing_receiver() {
+    const SOURCE: &str = "interface Mark\n\
+        object Selected : Mark\n\
+        class Receiver\n\
+        fun use(): Mark {\n\
+        \x20   val action: Receiver.() -> Mark = { Selected }\n\
+        \x20   return action()\n\
+        }\n";
+    let sources = [("Main.kt", SOURCE)];
+    let result = common::compiler_diagnostics(&sources, &[]);
+    common::expect_identical_rejection(&result, "lone receiver-function missing receiver");
+}
