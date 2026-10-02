@@ -166,14 +166,26 @@ Byte-equality checks (`byte_diff_against_kotlinc`, `compare_with_kotlinc_plugin`
 `compile_with_kotlinc`, `classes_against_kotlinc_lib`) and the metadata differentials follow the
 same rule with one class-file archive in `KRUSTY_CLASS_DUMP_DIR`, which defaults to
 `target/cache/class-dumps/`. The archive is a single zlib stream: a text index, then each distinct
-output once. An index entry is an open version range plus a content fingerprint and a blob id:
+output once. A run keeps new dumps in memory and writes that file once, when the process exits. An index entry is an open version range plus a content fingerprint and a blob id:
 `2.4.20..` covers that release and every newer one until a
 later recording disagrees, so adding a Kotlin version does not copy the dumps. RC tags of one
 release share `2.4.20-RC..` and do not share the release range. A dump is used when its fingerprint
-still matches the fixture and the compiler's version falls in the range. Locally, a release
-(`2.4.20`, `2.4.20-release-482`) or an RC tag (`2.4.20-RC`, `2.4.20-RC2`, `2.4.0-RC-137`) with no
-matching dump fails the test and does not run kotlinc. `KRUSTY_RECORD_CLASS_DUMPS=1` recompiles and
-rewrites the ranges the run reaches. GitHub restores an immutable cache for the PR's master base.
+still matches the fixture and the compiler's version falls in the range. The lookup fingerprint
+covers source bytes, target, flags, and input identities; it is distinct from the blob id that
+hashes the recorded compiler output. Every lookup starts with content-derived identities for the
+selected kotlinc installation's complete `lib/` tree and the selected JDK's exact `modules` image,
+even when the explicit classpath is empty or unrelated. Selected kotlinc classpath entries then
+contribute their logical distribution paths. Explicit selected JDK `modules` and `ct.sym` entries
+contribute their kind, exact image-content identity, and the hashed label from that JDK's `release`
+file. These selected identities are memoized once per canonical immutable installation during a
+test process, so individual fixtures do not repeatedly read large platform artifacts. Every other
+arbitrary dependency remains content-hashed. The key contains no installation path: equal toolchain
+bytes in two locations match, while a patched compiler/runtime or JDK image with the same reported
+version is a hard miss.
+Locally, a release (`2.4.20`, `2.4.20-release-482`) or an RC tag
+(`2.4.20-RC`, `2.4.20-RC2`, `2.4.0-RC-137`) with no matching dump fails the test and does not run
+kotlinc. `KRUSTY_RECORD_CLASS_DUMPS=1` recompiles and rewrites the ranges the run reaches. GitHub
+restores an immutable cache for the PR's master base.
 PR and merge-group jobs replay every matching entry, compile missing or incomplete entries live,
 and never save the result. Thus a partial prefix cache is an accelerator, not an authority. A
 successful master job refreshes and saves the cache under the supported Kotlin version and master
