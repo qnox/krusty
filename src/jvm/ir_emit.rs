@@ -11466,23 +11466,12 @@ fn descriptor_ret_words(desc: &str) -> i32 {
 
 /// Parse a single JVM field/type descriptor into a `Ty`.
 ///
-/// Suspend operand materialization also consumes exact field descriptors already present in IR. Keep
-/// that pass on this canonical parser instead of growing a second primitive/object/array branch table.
+/// The physical-type boundary owns descriptor parsing. Consumers that still need a `Ty` project it
+/// from that slot instead of maintaining another primitive/object/array table here. In particular,
+/// this preserves the reference element category of `[Lkotlin/UInt;` rather than rebuilding it as
+/// the specialized primitive `UIntArray` (`[I`).
 pub(crate) fn ty_from_field_descriptor(d: &str) -> Ty {
-    match d.as_bytes().first() {
-        Some(b'I') => Ty::Int,
-        Some(b'J') => Ty::Long,
-        Some(b'Z') => Ty::Boolean,
-        Some(b'B') => Ty::Byte,
-        Some(b'C') => Ty::Char,
-        Some(b'S') => Ty::Short,
-        Some(b'F') => Ty::Float,
-        Some(b'D') => Ty::Double,
-        Some(b'V') => Ty::Unit,
-        Some(b'L') => super::physical_type::class_descriptor_ty(d),
-        Some(b'[') => Ty::array(ty_from_field_descriptor(&d[1..])),
-        _ => Ty::Error,
-    }
+    super::physical_type::field_slot(d).ty
 }
 
 /// `(opcode, value-words)` for an array element load (`Xaload`).
@@ -11763,6 +11752,21 @@ mod invariant_tests {
     use crate::jvm::classreader::MethodCode;
     use crate::jvm::inline::MethodBodies;
     use crate::types::Ty;
+
+    #[test]
+    fn descriptor_ty_consumers_preserve_reference_array_elements() {
+        for descriptor in ["[Lfixture/Token;", "[Lkotlin/UInt;", "[[I"] {
+            let ty = ty_from_field_descriptor(descriptor);
+            assert_eq!(type_descriptor(ty), descriptor, "{descriptor}");
+        }
+
+        let (params, result) =
+            parse_physical_method_desc("([Lfixture/Token;[Lkotlin/UInt;)[Lkotlin/UInt;")
+                .expect("valid physical method descriptor");
+        assert_eq!(type_descriptor(params[0]), "[Lfixture/Token;");
+        assert_eq!(type_descriptor(params[1]), "[Lkotlin/UInt;");
+        assert_eq!(type_descriptor(result), "[Lkotlin/UInt;");
+    }
 
     pub(super) struct NoBodies;
     impl MethodBodies for NoBodies {

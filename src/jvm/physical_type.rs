@@ -174,6 +174,7 @@ fn reference_array_slot(element: Ty) -> Ty {
     Ty::obj_args_name(crate::types::wk::array(), &[element])
 }
 
+#[cfg(test)]
 fn specialized_primitive_array(ty: Ty) -> bool {
     ty.obj_internal()
         .is_some_and(|name| crate::types::prim_array_element(name).is_some())
