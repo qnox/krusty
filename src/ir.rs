@@ -41,6 +41,7 @@ mod constructors;
 mod default_arguments;
 mod expression_provenance;
 mod field_flags;
+mod fields;
 mod function_scope;
 mod inline_copies;
 mod suspension_points;
@@ -92,6 +93,7 @@ pub use constructors::{IrConstructorAccess, IrConstructorTarget};
 pub use constructors::{IrSecondaryCtor, IrSecondaryCtorLines};
 pub use expression_provenance::{EnumValueOfDeclaration, IrShortCircuitKind};
 pub use field_flags::IrfFlags;
+pub use fields::IrField;
 pub use function_scope::IrFunctionScope;
 pub use intrinsic::IrIntrinsic;
 pub use lambda_classes::{IrInvokeBridge, IrLambdaClass};
@@ -99,8 +101,8 @@ pub(crate) use lifting::{IrLiftingEntry, IrLiftingSequence};
 pub(crate) use local_class_names::{IrLocalClassNameProvenance, IrLocalClassOwner};
 pub use local_property_references::IrLocalPropertyReference;
 pub use module_records::{
-    IrClassifierKind, IrHeaderAnnotation, IrModuleCallable, IrModuleClassifier,
-    IrModuleMemberAccess, IrModuleSource,
+    IrCallableTypeParameter, IrClassifierKind, IrHeaderAnnotation, IrModuleCallable,
+    IrModuleClassifier, IrModuleMemberAccess, IrModuleSource,
 };
 pub use operators::{IrBinOp, IrTypeOp};
 pub use overrides::{is_kotlin_primitive, IrFunctionOverride, IrPropertyOverride};
@@ -109,8 +111,8 @@ pub use package_declarations::{
 };
 pub use progression::{IrProgressionSource, IrRuntimeFunction};
 pub use properties::{
-    IrCheckedProperty, IrInlinePropertySplice, IrInlineTypeSubstitution, IrModuleProperty,
-    IrProperty, IrPropertyModality, IrPropertyModifiers, MemberExtProp,
+    IrCheckedProperty, IrInlinePropertySplice, IrInlineTypeSubstitution, IrMemberKind,
+    IrModuleProperty, IrProperty, IrPropertyModality, IrPropertyModifiers, MemberExtProp,
 };
 pub use property_layouts::IrLocalPropertyLayout;
 pub use references::{
@@ -138,6 +140,15 @@ pub enum IrCheckedArgument {
         array_type: Ty,
         elements: Vec<(ExprId, bool)>,
     },
+}
+
+/// One supplied argument edge whose declaration parameter mentions a type parameter.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct IrDeclarationArgumentBoundary {
+    pub argument: ExprId,
+    pub parameter: u32,
+    pub declaration: crate::types::Ty,
+    pub retarget_coercion: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -380,6 +391,9 @@ pub enum IrExpr {
     KClassLiteral {
         classifier: Option<Ty>,
         value: Option<ExprId>,
+        /// The literal names a type parameter (`T::class`). Inlining may substitute a primitive
+        /// for it, which still denotes the boxed class token rather than the primitive one.
+        type_argument: bool,
     },
     /// Backend-neutral reflection value passed to local delegated-property conventions.
     LocalPropertyReference(IrLocalPropertyReference),
@@ -701,6 +715,11 @@ pub enum IrExpr {
     /// the CPS pass rewrites it to the real continuation value once the trailing `Continuation`
     /// parameter exists. It must never survive to the emitter.
     CurrentContinuation,
+    /// A debugger frame boundary opened by an inline expansion. It is not a value: no code reads
+    /// it, and it allocates no common-IR local. The callee is recorded in `value_names` and the
+    /// role in `debug_local_provenance`. A backend that emits debug locals materializes the slot,
+    /// the zero store, and the name.
+    InlineFrameMarker,
     /// Invoke a function value (`f(args)` where `f: (A,…) -> R`) via the `FunctionN.invoke` interface
     /// method. Arguments are boxed to `Object`; the `Object` result is cast/unboxed to `ret`.
     /// `params` retains the semantic Kotlin parameter types through backend carrier lowering so an
@@ -849,81 +868,6 @@ pub struct IrEnumEntry {
     /// members, so metadata can visit it in declaration order.
     pub source_order: u32,
     pub subclass: Option<TypeName>,
-}
-
-/// One instance field of an [`IrClass`]. Groups what were parallel `Vec`s keyed by field index, so a
-/// field's type / generic-param name / constant default / finality / visibility can't desync.
-#[derive(Clone, Debug)]
-pub struct IrField {
-    pub name: String,
-    pub ty: Ty,
-    /// Source line for the compiler-generated constructor store into this exact field: a PRIMARY-
-    /// CONSTRUCTOR property's, or a delegated property's delegate. Zero otherwise. This semantic
-    /// debug role is recorded on the resolved field coordinate so a backend never has to recover
-    /// the property from its emitted field name.
-    pub constructor_store_line: u32,
-    /// The source type-parameter NAME the field was declared with (`val x: T` → `Some("T")`), else
-    /// `None`. Platform-neutral; lets the value-class pass pick the CORRECT bound for a generic
-    /// underlying (vs guessing), independent of erasure dropping the name.
-    pub type_param: Option<String>,
-    /// The CONSTANT default from a primary-constructor default (`val b: Int = 5` → `Some(Int(5))`,
-    /// `val t: T? = null` → `Some(Null)`), else `None` (no default, or a non-constant one). Later
-    /// compiler passes may use it; the core backend ignores it.
-    pub default: Option<IrConst>,
-    /// Bit-packed `has_default`/`is_final`/`is_private`/`is_lateinit` (read via the accessors below).
-    /// `has_default` — the primary-constructor parameter declared ANY default (constant or not, e.g.
-    /// `routes: List<String> = emptyList()`); distinct from `default` (constant-only), needed so the
-    /// `@Metadata` emitter sets the `DECLARES_DEFAULT_VALUE` value-parameter flag as kotlinc does.
-    /// `is_final` — the backing field is immutable (`val`), emitted `final`. `is_private` — private
-    /// backing field (the Kotlin default, reached via accessors); `false` for a field read/written
-    /// cross-class (a coroutine continuation's `result`/`label`). `is_lateinit` — backs a `lateinit
-    /// var`; every backend read null-checks it and throws when still unset, matching kotlinc.
-    pub flags: IrfFlags,
-}
-
-impl IrField {
-    /// A plain backing field with Kotlin defaults: mutable-unknown (`is_final = false`), `private`, no
-    /// generic-param name, no constant default. Synthesized classes build fields from this.
-    pub fn new(name: String, ty: Ty) -> IrField {
-        IrField {
-            name,
-            ty,
-            constructor_store_line: 0,
-            type_param: None,
-            default: None,
-            flags: IrfFlags::default().with_is_private(true),
-        }
-    }
-
-    #[inline]
-    pub fn has_default(&self) -> bool {
-        self.flags.has(IrfFlags::HAS_DEFAULT)
-    }
-    #[inline]
-    pub fn is_final(&self) -> bool {
-        self.flags.has(IrfFlags::IS_FINAL)
-    }
-    #[inline]
-    pub fn is_private(&self) -> bool {
-        self.flags.has(IrfFlags::IS_PRIVATE)
-    }
-    #[inline]
-    pub fn is_lateinit(&self) -> bool {
-        self.flags.has(IrfFlags::IS_LATEINIT)
-    }
-
-    /// Chainable override of `is_final` on top of [`IrField::new`] (replaces a `..IrField::new` spread).
-    #[inline]
-    pub fn with_is_final(mut self, on: bool) -> Self {
-        self.flags = self.flags.with_is_final(on);
-        self
-    }
-    /// Chainable override of `is_private` on top of [`IrField::new`].
-    #[inline]
-    pub fn with_is_private(mut self, on: bool) -> Self {
-        self.flags = self.flags.with_is_private(on);
-        self
-    }
 }
 
 /// One primary-constructor parameter of an [`IrClass`], in declaration order: its type, storage,
@@ -1548,9 +1492,8 @@ impl IrClass {
     }
 
     pub fn has_non_top_superclass(&self) -> bool {
-        !self.superclass.matches("")
-            && !self.superclass.matches("java/lang/Object")
-            && !self.superclass.matches("kotlin/Any")
+        self.superclass != crate::types::TypeName::ROOT
+            && self.superclass != crate::types::wk::any()
     }
 
     pub fn annotation_impl_of(&self) -> Option<String> {
@@ -1708,6 +1651,10 @@ pub struct IrFile {
     /// The class name a target chose for each source callable reference and lambda, by
     /// expression id.
     pub(crate) callable_reference_names: std::collections::HashMap<u32, TypeName>,
+    /// The class a JVM naming pass realized for each lambda's inline-depth marker, by
+    /// implementation. Only that pass writes it, from [`IrLambdaOrigin::class_provenance`];
+    /// common lowering never stores a target spelling here.
+    pub(crate) lambda_class_names: std::collections::HashMap<FunId, TypeName>,
     /// The declaration path a target sorts each class it named from provenance by, keyed by that
     /// name: kotlinc's `fqNameWhenAvailable`.
     pub(crate) declaration_paths: std::collections::HashMap<TypeName, String>,
@@ -1783,9 +1730,11 @@ pub struct IrFile {
     /// the anonymous constructor around the forwarded value)`.
     pub(crate) anonymous_super_forwards:
         std::collections::HashMap<(crate::fir::DeclarationId, u32), (u32, u8)>,
-    /// Body-local static functions physically owned by a class. Their `$default` ABI uses the
-    /// ordinary function marker rather than constructor/value-class markers.
-    pub class_static_local_functions: std::collections::HashSet<FunId>,
+    /// Body-local static functions physically owned by a class, by exact function and owner
+    /// identity. Their `$default` ABI uses the ordinary function marker rather than
+    /// constructor/value-class markers; a target also uses the owner to re-enter a suspend local
+    /// without scanning classes or recovering ownership from its generated name.
+    pub(crate) class_static_local_functions: std::collections::HashMap<FunId, TypeName>,
     pub classes: Vec<IrClass>,
     /// Exact generated-constructor identities keyed by their semantic role within a class.
     generated_secondary_constructors:
@@ -2138,6 +2087,11 @@ pub struct IrFile {
     /// with suspension points, builds the state machine + continuation class. Common lowering keeps a
     /// `suspend fun` plain, mirroring how value classes stay plain until their target pass.
     pub suspend_funs: Vec<u32>,
+    /// Functions that exist only to forward an interface member to its delegate (`: I by d`).
+    /// A suspend forwarder threads its own continuation into that one call. It is not a user tail
+    /// call: a reference-carrier value class still forwards, and the backend checkcasts the carrier
+    /// after returning `COROUTINE_SUSPENDED` unchanged.
+    pub(crate) interface_delegation_forwarders: std::collections::HashSet<u32>,
     /// `FunId`s the source declared `tailrec` that KOTLIN loops and the checked lowering does not.
     /// The declaration promises constant stack and the body still recurses, so a backend that
     /// cannot supply the guarantee itself must decline the function rather than emit a program that
@@ -2337,6 +2291,10 @@ pub struct IrFile {
     /// where it was lowered, not from its shape: an adaptation or widening over the same call is
     /// another coercion. A target decides whether the conversion crosses a physical result slot.
     pub declaration_result_coercions: std::collections::HashSet<ExprId>,
+    /// Call-owned supplied-argument edges whose declaration parameters mention type parameters.
+    /// A target may adapt only these exact edges, and only when its own carrier rules select them.
+    pub declaration_argument_boundaries:
+        std::collections::HashMap<ExprId, Box<[IrDeclarationArgumentBoundary]>>,
     /// Realized dependency-call `ExprId` → declaration parameter types in the order of the call's
     /// ordinary argument vector. These are copied from the provider record selected by FIR, never
     /// reconstructed from a name or descriptor. A backend representation pass needs this sparse fact
@@ -2344,6 +2302,10 @@ pub struct IrFile {
     /// parameter and a generic `T` parameter erase to JVM `Object`, but only the latter takes a box.
     /// Dispatch receivers stay separate; a static realization prepends its selected receiver.
     pub call_declared_params: std::collections::HashMap<u32, Box<[Ty]>>,
+    /// Call `ExprId` → JVM parameter types in declaration order. Semantic `call_declared_params`
+    /// stay the Kotlin types; this plan is only the physical slot a selected argument edge is
+    /// adapted to. Mask and marker operands are not entries.
+    pub physical_call_parameters: std::collections::HashMap<ExprId, Box<[Ty]>>,
     /// Construction `ExprId` → the selected constructor's declared semantic parameter types in
     /// argument order. A generic constructor can consume a value-class box through bare `T` even
     /// when its physical descriptor and that value class's carrier are both `Object`; JVM emission
@@ -2749,7 +2711,7 @@ mod clone;
 pub use clone::*;
 mod semantic_validation;
 pub use semantic_validation::{
-    InvalidIrContract, NullableSamContractViolation, UndeterminedIrType,
+    IncompleteIrFact, InvalidIrContract, NullableSamContractViolation, UndeterminedIrType,
 };
 #[cfg(test)]
 pub(crate) mod test_support;

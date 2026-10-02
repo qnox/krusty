@@ -5,9 +5,11 @@ use super::adjacency::Body;
 use super::shapes::{is_op, var_op, VarOp, NOP, POP, POP2};
 use crate::jvm::method_node::Insn;
 
-/// Remove every `xload; pop` (`pop2` for a two-word value) with no kept label between the two;
-/// `true` when there was one. At the start of a protected range the pair leaves a `nop`, which
-/// kotlinc retains there so the range cannot collapse.
+/// Replace every `xload; pop` (`pop2` for a two-word value) with no kept label between the two by
+/// a `nop`, as kotlinc's `simplifyTrivialInstructions` does; `true` when there was one. The `nop`
+/// stands where the load stood, so [`remove_nops`] keeps it exactly when kotlinc's sweep does: the
+/// only instruction of a line (a discarded read `value` written as a statement) or the start of a
+/// protected range.
 pub(super) fn remove_discarded_loads(body: &mut Body) -> bool {
     let mut removed = false;
     let mut cursor = body.first_insn();
@@ -25,15 +27,9 @@ pub(super) fn remove_discarded_loads(body: &mut Body) -> bool {
             continue;
         }
         removed = true;
-        if body.protected_start(load) {
-            body.replace(load, Insn::Op(NOP));
-            body.remove(pop);
-            cursor = body.next_insn(load);
-            continue;
-        }
-        cursor = body.next_insn(pop);
-        body.remove(load);
+        body.replace(load, Insn::Op(NOP));
         body.remove(pop);
+        cursor = body.next_insn(load);
     }
     removed
 }

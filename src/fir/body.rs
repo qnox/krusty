@@ -228,7 +228,11 @@ pub enum FirIntrinsic {
     /// The selected stdlib coroutine primitive. Its function block is checked as an ordinary
     /// argument, but common lowering must inline that exact checked block against the current
     /// continuation rather than emit a call to the stdlib declaration's intrinsic-only stub.
-    SuspendCoroutineUninterceptedOrReturn,
+    /// `callee` is the selected declaration's source name: the spliced block opens an inline frame
+    /// named after it.
+    SuspendCoroutineUninterceptedOrReturn {
+        callee: Box<str>,
+    },
     /// The selected safe coroutine primitive. This is distinct from the unintercepted primitive:
     /// target realization must invoke the block with a one-shot safe, intercepted continuation and
     /// use that continuation's completed value or suspension sentinel as the call result.

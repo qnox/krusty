@@ -992,3 +992,45 @@ fn inner_static_scope_precedes_an_outer_implicit_receiver() {
         }\n";
     common::expect_box_same_as_kotlinc(&format!("{LANGUAGE}{SRC}"), "InnerStaticScope");
 }
+
+/// A block member has no `this`, but its classifier's static scope keeps the place on the tower it
+/// has in the class body: ahead of the classifier's companion object. An unqualified `a` or
+/// `foo(…)` inside the block names the block's own member, not the companion object's
+/// (multiplatform/k2/expectStatic.kt).
+#[test]
+fn a_block_member_names_its_block_before_the_companion_object() {
+    const SRC: &str = "interface Mark\n\
+        object BlockMark : Mark\n\
+        object ObjectMark : Mark\n\
+        class Input\n\
+        class A {\n\
+        \x20   companion {\n\
+        \x20       val a: Mark = BlockMark\n\
+        \x20       fun foo(input: Input): Mark = a\n\
+        \x20       fun bar(): Mark = foo(Input())\n\
+        \x20   }\n\
+        \x20   companion object {\n\
+        \x20       val a: Mark = ObjectMark\n\
+        \x20       fun foo(input: Input): Mark = a\n\
+        \x20   }\n\
+        }\n\
+        fun box(): String {\n\
+        \x20   val blockWins = A.a === BlockMark && A.bar() === BlockMark\n\
+        \x20   val companionWins = A.Companion.a === ObjectMark &&\n\
+        \x20       A.Companion.foo(Input()) === ObjectMark\n\
+        \x20   return if (blockWins && companionWins) \"OK\" else \"fail\"\n\
+        }\n";
+    for comparison in assert_members_and_metadata_match_kotlinc_on(
+        "BlockFirst",
+        SRC,
+        &["A"],
+        &[common::stdlib_jar()],
+    ) {
+        assert_eq!(
+            common::member_blocks(&comparison.krusty),
+            common::member_blocks(&comparison.reference),
+            "A: kotlinc's member code"
+        );
+    }
+    assert_eq!(run(SRC).expect("block first"), "OK");
+}

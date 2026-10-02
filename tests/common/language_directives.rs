@@ -6,6 +6,6 @@ pub fn kotlinc_args(src: &str) -> Vec<String> {
     src.lines()
         .filter_map(|line| line.trim().strip_prefix("// LANGUAGE:"))
         .flat_map(str::split_whitespace)
-        .map(|token| format!("-XXLanguage:{token}"))
+        .map(|token| format!("-XXLanguage:{}", token.trim_end_matches(',')))
         .collect()
 }

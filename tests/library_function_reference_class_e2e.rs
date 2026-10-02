@@ -195,3 +195,15 @@ fn library_function_references_keep_declared_value_class_boundaries() {
     let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(result, "OK");
 }
+
+/// A reference to a top-level function another file of the same module declares reflects that
+/// file's facade as its owner, like a dependency's: `ldc DeclarationsKt`, not the referencing
+/// file's own facade.
+#[test]
+fn a_module_function_in_another_file_is_owned_by_its_own_facade() {
+    let declarations = "class Token\nfun target(value: Token): Token = value\n";
+    let use_site = "fun direct(): (Token) -> Token = ::target\n";
+    let sources = [("Declarations.kt", declarations), ("UseSite.kt", use_site)];
+    let pair = common::ModuleClassPair::compile(&sources, "UseSiteKt$direct$1");
+    assert_eq!(pair.krusty, pair.kotlinc, "UseSiteKt$direct$1");
+}

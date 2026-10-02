@@ -149,11 +149,11 @@ pub(super) fn build_class_metadata(
         .filter(|&fid| {
             // A physical class method is not necessarily a Kotlin declaration. Lifted local
             // functions are implementation methods and have no Function entry. An `interface by`
-            // forwarder is a Kotlin function (member kind DELEGATION); its identity is the
-            // override edge's implementation function, not a source callable. Property forwarders
-            // stay Property records. Metadata consumes those identities instead of inferring
-            // declaration status from a name, descriptor, or parameter spelling.
-            if !source_callable_fids.contains(&fid) && !ir.is_interface_delegation_function(fid) {
+            // forwarder is a Kotlin function too, but it is recorded after the class's own
+            // declarations, sorted with the other delegation members; the override edge names it.
+            // Property forwarders stay Property records. Metadata consumes those identities
+            // instead of inferring declaration status from a name, descriptor, or parameter spelling.
+            if !source_callable_fids.contains(&fid) || ir.is_interface_delegation_function(fid) {
                 return false;
             }
             if ir.lambda_own_params_from.contains_key(&fid) || ir.synthetic_methods.contains(&fid) {
@@ -681,9 +681,8 @@ pub(super) fn build_class_metadata(
     };
     // kotlinc's synthesized data-class methods, in declaration order: componentN, copy, equals,
     // hashCode, toString. Their shapes come entirely from the primary-ctor properties.
-    let declared_methods = || {
-        declared_fids
-            .iter()
+    let describe_methods = |fids: &[u32]| {
+        fids.iter()
             .filter_map(|&fid| {
                 let f = ir.functions.get(fid as usize)?;
                 // Real parameter identities — metadata is reflection-visible, so a placeholder
@@ -924,7 +923,7 @@ pub(super) fn build_class_metadata(
             .collect::<Vec<_>>()
     };
     let class_ty = Ty::obj_name(c.fq_name);
-    let declared_method_list = declared_methods();
+    let declared_method_list = describe_methods(&declared_fids);
     let declared_method_count = declared_method_list.len();
     let inferred_methods: Vec<FnMeta> = if c.is_data {
         let mut m = Vec::new();
@@ -1086,79 +1085,10 @@ pub(super) fn build_class_metadata(
         methods.extend(m);
         methods
     } else if c.is_value {
-        // A value class's Kotlin-visible overrides. Each dispatches to a differently-named static
-        // `-impl` taking the erased underlying, so each records a `JvmMethodSignature` (name + desc).
-        let u = desc(c.fields[0].ty);
-        let methods = vec![
-            FnMeta {
-                context_count: 0,
-                context_parameter_kinds: Vec::new(),
-                spellings: crate::spelling::DeclaredSpellings::default(),
-                name: "equals".into(),
-                params: vec![("other".into(), Ty::nullable(Ty::obj("kotlin/Any")))],
-                ret: Ty::Boolean,
-                type_params: Vec::new(),
-                semantic_type_params: Vec::new(),
-                type_param_bounds: Vec::new(),
-                flags: EQUALS_FN_FLAGS,
-                has_function_typed_parameter: false,
-                params_have_defaults: false,
-                receiver: None,
-                param_modifiers: Vec::new(),
-                vararg_index: None,
-                jvm_sig: Some(format!("({u}Ljava/lang/Object;)Z")),
-                jvm_sig_name: Some("equals-impl".into()),
-                annotations: Vec::new(),
-                param_annotations: Vec::new(),
-                no_infer_params: Vec::new(),
-            },
-            FnMeta {
-                context_count: 0,
-                context_parameter_kinds: Vec::new(),
-                spellings: crate::spelling::DeclaredSpellings::default(),
-                name: "hashCode".into(),
-                params: vec![],
-                ret: Ty::Int,
-                type_params: Vec::new(),
-                semantic_type_params: Vec::new(),
-                type_param_bounds: Vec::new(),
-                flags: HASHCODE_TOSTRING_FN_FLAGS,
-                has_function_typed_parameter: false,
-                params_have_defaults: false,
-                receiver: None,
-                param_modifiers: Vec::new(),
-                vararg_index: None,
-                jvm_sig: Some(format!("({u})I")),
-                jvm_sig_name: Some("hashCode-impl".into()),
-                annotations: Vec::new(),
-                param_annotations: Vec::new(),
-                no_infer_params: Vec::new(),
-            },
-            FnMeta {
-                context_count: 0,
-                context_parameter_kinds: Vec::new(),
-                spellings: crate::spelling::DeclaredSpellings::default(),
-                name: "toString".into(),
-                params: vec![],
-                ret: Ty::String,
-                type_params: Vec::new(),
-                semantic_type_params: Vec::new(),
-                type_param_bounds: Vec::new(),
-                flags: HASHCODE_TOSTRING_FN_FLAGS,
-                has_function_typed_parameter: false,
-                params_have_defaults: false,
-                receiver: None,
-                param_modifiers: Vec::new(),
-                vararg_index: None,
-                jvm_sig: Some(format!("({u})Ljava/lang/String;")),
-                jvm_sig_name: Some("toString-impl".into()),
-                annotations: Vec::new(),
-                param_annotations: Vec::new(),
-                no_infer_params: Vec::new(),
-            },
-        ];
         let mut declared = declared_method_list;
-        declared.extend(methods);
+        declared.extend(value_class_override_metadata::functions(&desc(
+            c.fields[0].ty,
+        )));
         declared
     } else {
         declared_method_list
@@ -1174,6 +1104,10 @@ pub(super) fn build_class_metadata(
             publication,
         ));
     }
+    let mut delegation = describe_methods(&metadata_member_order::delegation_functions(ir, c));
+    metadata_member_order::sort_delegation_functions(&mut delegation);
+    let delegation_functions = methods.len()..methods.len() + delegation.len();
+    methods.extend(delegation);
     let type_aliases = ir
         .class_type_aliases
         .get(&c.fq_name_id())
@@ -1188,12 +1122,18 @@ pub(super) fn build_class_metadata(
             decl_order: alias.source_order as usize,
         })
         .collect::<Vec<_>>();
+    let delegation_properties =
+        metadata_member_order::sort_delegation_properties(&mut props, &mut prop_source_orders);
     let member_order = metadata_member_order::member_order(
         ir,
         c,
         &prop_source_orders,
         &declared_fids,
-        declared_method_count..inferred_method_count,
+        metadata_member_order::MemberRanges {
+            synthesized: declared_method_count..inferred_method_count,
+            delegation_functions,
+            delegation_properties,
+        },
         generated_publication,
         &type_aliases,
     );
@@ -1284,7 +1224,8 @@ pub(super) fn build_class_metadata(
         )
     });
     // Metadata lists the declared superclass before interfaces.
-    let super_internal = c.superclass.render();
+    let superclass = c.superclass;
+    let any = crate::types::wk::any();
     let mut supertypes = ir
         .class_signature(&c.fq_name())
         .filter(|signature| !signature.supers.is_empty())
@@ -1295,22 +1236,22 @@ pub(super) fn build_class_metadata(
     // `@Metadata` records only the supertypes source DECLARED, so drop that implicit `Any`; leaving
     // it in shows every consumer a supertype the declaration never wrote. Both shapes then agree:
     // a superclass slot exists exactly when one was declared.
-    if super_internal == "kotlin/Any"
+    if superclass == any
         && supertypes
             .first()
-            .is_some_and(|first| matches!(first, Ty::Obj(n, _) if n.matches("kotlin/Any")))
+            .is_some_and(|first| matches!(first, Ty::Obj(n, _) if *n == any))
     {
         supertypes.remove(0);
     }
     if supertypes.is_empty() {
-        if super_internal != "kotlin/Any" {
-            supertypes.push(Ty::obj(&super_internal));
+        if superclass != any {
+            supertypes.push(Ty::obj_name(superclass));
         }
         supertypes.extend(c.interfaces.iter_ids().map(Ty::obj_name));
     }
     // The header's spellings have to follow the same shape, or every abbreviation lands on the
     // neighbouring supertype.
-    let has_declared_superclass = super_internal != "kotlin/Any";
+    let has_declared_superclass = superclass != any;
     let class_spellings = ir
         .class_declared_spellings
         .get(&c.fq_name_id())

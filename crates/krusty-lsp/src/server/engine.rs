@@ -1,6 +1,6 @@
 //! Analysis worker for the LSP request loop.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::thread::JoinHandle;
@@ -37,9 +37,18 @@ const MAX_QUEUED_INDEX_BYTES: usize = 32 * 1024 * 1024;
 /// Symbol chunks are a parse each, not a worker round trip, so a larger chunk still returns to the
 /// command loop quickly enough for an interactive request to overtake it.
 const MAX_SYMBOL_INDEX_CHUNK_FILES: usize = 128;
-/// Byte ceiling on URIs awaiting symbol indexing. One copy per queued URI: symbol chunks are never
-/// promoted, so there is no second representation to reserve for.
+/// Byte ceiling on URIs awaiting symbol indexing. Each admitted URI owns two strings until its
+/// chunk is taken: the chunk entry and the dedup key. Symbol chunks are never promoted.
 const MAX_QUEUED_SYMBOL_INDEX_BYTES: usize = 16 * 1024 * 1024;
+/// Symbol chunks run ahead of the diagnostic sweep, but handing a chunk out releases its URIs, so
+/// a watcher can enqueue that file again while the chunk is in flight. One such chunk may run
+/// while a sweep chunk is already waiting. The next dequeue serves the sweep. The re-enqueued URI
+/// stays queued, so the latest write is still indexed after that sweep chunk.
+const SYMBOL_CHUNKS_BEFORE_SWEEP: usize = 1;
+
+fn symbol_queued_uri_bytes(uri: &str) -> usize {
+    workspace_index_uri_bytes(uri).saturating_mul(2)
+}
 
 fn queued_uri_bytes(uri: &str) -> usize {
     // A queued URI owns the map key and one chunk string. Promotion can temporarily leave the old
@@ -335,8 +344,17 @@ struct CommandState {
     interactive_since_location: usize,
     neighborhood: VecDeque<IndexJob>,
     sweep: VecDeque<IndexJob>,
-    /// Symbol chunks, drained after interactive work and ahead of both diagnostic levels.
+    /// Symbol chunks, drained after interactive work and ahead of the diagnostic sweep until
+    /// [`SYMBOL_CHUNKS_BEFORE_SWEEP`] of them have run while a sweep chunk is waiting.
     symbols: VecDeque<SymbolIndexJob>,
+    /// How many symbol chunks have been handed out since the last sweep chunk, while a sweep
+    /// chunk was already queued.
+    symbol_chunks_since_sweep: usize,
+    /// URIs already sitting in `symbols`. A watched file that changes again before its chunk is
+    /// handed out must not enqueue another copy. Once the chunk is handed out the URI may be
+    /// queued again, and that later chunk yields to a waiting sweep after
+    /// [`SYMBOL_CHUNKS_BEFORE_SWEEP`] symbol chunks.
+    symbol_queued: HashSet<String>,
     symbol_queued_bytes: usize,
     /// The level each queued URI currently belongs to. Promotion rewrites the level here and
     /// queues the URI again; the superseded entry is filtered out when its chunk is handed out.
@@ -481,20 +499,15 @@ impl CommandState {
             EngineCommand::LocateDependencies {
                 generation,
                 candidates,
-            } => {
-                // The query already returned. Foreground dequeue runs interactive work ahead of
-                // this queue, up to `INTERACTIVE_COMMANDS_BEFORE_LOCATION`, and queued location
-                // does not keep the workspace sweep from being admitted.
-                self.locations.push_back(EngineCommand::LocateDependencies {
-                    generation,
-                    candidates,
-                });
-            }
+            } => self.enqueue_location(generation, candidates),
             EngineCommand::IndexSymbols(job) => {
                 let mut chunk =
                     Vec::with_capacity(MAX_SYMBOL_INDEX_CHUNK_FILES.min(job.uris.len()));
                 for uri in job.uris {
-                    let bytes = workspace_index_uri_bytes(&uri);
+                    if self.symbol_queued.contains(&uri) {
+                        continue;
+                    }
+                    let bytes = symbol_queued_uri_bytes(&uri);
                     if bytes
                         > MAX_QUEUED_SYMBOL_INDEX_BYTES.saturating_sub(self.symbol_queued_bytes)
                     {
@@ -502,6 +515,7 @@ impl CommandState {
                         break;
                     }
                     self.symbol_queued_bytes = self.symbol_queued_bytes.saturating_add(bytes);
+                    self.symbol_queued.insert(uri.clone());
                     chunk.push(uri);
                     if chunk.len() == MAX_SYMBOL_INDEX_CHUNK_FILES {
                         self.push_symbol_chunk(std::mem::take(&mut chunk));
@@ -568,9 +582,11 @@ impl CommandState {
         }
     }
 
-    /// Interactive work first, then one deferred location command once the yield bound is
-    /// reached, then the neighbourhood, then the sweep. The levels are the priority, so there
-    /// is no comparator and no heap.
+    /// Interactive work first. After [`INTERACTIVE_COMMANDS_BEFORE_LOCATION`] of those commands,
+    /// one queued location command runs before the next edit. Then the neighbourhood, then symbol
+    /// chunks, then the sweep. The levels are the priority, so there is no comparator and no heap.
+    /// A symbol chunk handed out while a sweep chunk is waiting counts toward
+    /// [`SYMBOL_CHUNKS_BEFORE_SWEEP`]; the next dequeue serves the sweep before another symbol chunk.
     fn take(&mut self) -> Option<EngineCommand> {
         if let Some(command) = self.take_foreground() {
             return Some(command);
@@ -578,65 +594,53 @@ impl CommandState {
         self.take_background()
     }
 
-    /// The next edit, dump, materialization, or project change. Location stays on its own queue
-    /// until none of those are waiting, or until interactive work has already run
-    /// [`INTERACTIVE_COMMANDS_BEFORE_LOCATION`] times ahead of it. Two location commands keep the
-    /// order they were queued in. Both pops are from the front of a deque.
-    fn take_foreground(&mut self) -> Option<EngineCommand> {
-        let location_due = !self.locations.is_empty()
-            && self.interactive_since_location >= INTERACTIVE_COMMANDS_BEFORE_LOCATION;
-        if location_due {
-            self.interactive_since_location = 0;
-            return self.locations.pop_front();
-        }
-        if let Some(command) = self.pending.pop_front() {
-            if self.locations.is_empty() {
-                self.interactive_since_location = 0;
-            } else {
-                self.interactive_since_location += 1;
-            }
-            return Some(command);
-        }
-        self.interactive_since_location = 0;
-        self.locations.pop_front()
-    }
-
     fn take_background(&mut self) -> Option<EngineCommand> {
         loop {
-            let job = match self.neighborhood.pop_front() {
-                Some(job) => job,
-                // Symbol chunks come between the two diagnostic levels. Ahead of the sweep, because
-                // they are a parse each and project-wide search should not wait hours for a sweep
-                // that is a full analysis per chunk. Behind the neighbourhood level, because that
-                // level is the fast lane for a file the user just saved, and a whole project's
-                // worth of symbol chunks in front of it would be a latency regression.
-                None => match self.take_symbol_chunk() {
-                    Some(command) => return Some(command),
-                    None => self.sweep.pop_front()?,
-                },
-            };
-            let Some(job) = self.claim(job) else {
-                // Every URI in the chunk was promoted to a higher level; it is a stale duplicate.
+            if let Some(job) = self.neighborhood.pop_front() {
+                if let Some(job) = self.finish_index_chunk(job) {
+                    return Some(EngineCommand::Index(job));
+                }
                 continue;
+            }
+            let sweep_due = !self.sweep.is_empty()
+                && self.symbol_chunks_since_sweep >= SYMBOL_CHUNKS_BEFORE_SWEEP;
+            if !sweep_due {
+                if let Some(command) = self.take_symbol_chunk() {
+                    if self.sweep.is_empty() {
+                        self.symbol_chunks_since_sweep = 0;
+                    } else {
+                        self.symbol_chunks_since_sweep =
+                            self.symbol_chunks_since_sweep.saturating_add(1);
+                    }
+                    return Some(command);
+                }
+            }
+            let Some(job) = self.sweep.pop_front() else {
+                self.symbol_chunks_since_sweep = 0;
+                return self.take_symbol_chunk();
             };
-            self.indexed_done = self.indexed_done.saturating_add(job.uris.len());
-            return Some(EngineCommand::Index(job));
+            self.symbol_chunks_since_sweep = 0;
+            if let Some(job) = self.finish_index_chunk(job) {
+                return Some(EngineCommand::Index(job));
+            }
         }
     }
 
-    /// True when an edit, dump, materialization, or project change is waiting. Queued dependency
-    /// location is absent from this check, so serving an edit still admits the workspace sweep
-    /// while those classes are written afterwards.
-    fn interactive_work_queued(&self) -> bool {
-        !self.pending.is_empty()
+    fn finish_index_chunk(&mut self, job: IndexJob) -> Option<IndexJob> {
+        let job = self.claim(job)?;
+        self.indexed_done = self.indexed_done.saturating_add(job.uris.len());
+        Some(job)
     }
 
     fn take_symbol_chunk(&mut self) -> Option<EngineCommand> {
         let job = self.symbols.pop_front()?;
+        for uri in &job.uris {
+            self.symbol_queued.remove(uri);
+        }
         self.symbol_queued_bytes = self.symbol_queued_bytes.saturating_sub(
             job.uris
                 .iter()
-                .map(|uri| workspace_index_uri_bytes(uri))
+                .map(|uri| symbol_queued_uri_bytes(uri))
                 .sum::<usize>(),
         );
         Some(EngineCommand::IndexSymbols(job))
@@ -700,15 +704,14 @@ impl CommandState {
     /// Work queued against the previous model must never run against its replacement.
     fn replace_index_generation(&mut self) -> u64 {
         self.generation = self.generation.saturating_add(1);
-        // Location candidates are classpath identities. Drop them with the model-owned index
-        // queues instead of making the new generation drain a stale no-op command at a time.
-        self.locations.clear();
-        self.interactive_since_location = 0;
+        self.clear_queued_locations();
         self.indexed_done = 0;
         self.indexed_total = 0;
         self.neighborhood.clear();
         self.sweep.clear();
         self.symbols.clear();
+        self.symbol_chunks_since_sweep = 0;
+        self.symbol_queued.clear();
         self.symbol_queued_bytes = 0;
         self.queued.clear();
         self.queued_bytes = 0;
@@ -1410,7 +1413,6 @@ fn send_status(events: &SyncSender<Incoming>, status: ServerStatus) -> Result<()
         .map_err(|_| ())
 }
 
-#[cfg(test)]
 mod location_queue;
 
 #[cfg(test)]
@@ -1511,68 +1513,6 @@ mod tests {
             state.pending.pop_front(),
             Some(EngineCommand::Analyze(_))
         ));
-    }
-
-    fn located(name: &str) -> EngineCommand {
-        EngineCommand::LocateDependencies {
-            generation: 1,
-            candidates: vec![DependencyCandidate {
-                internal: format!("vendor/{name}"),
-                package: "vendor".to_string(),
-                name: name.to_string(),
-            }],
-        }
-    }
-
-    #[test]
-    fn an_edit_runs_ahead_of_queued_dependency_location() {
-        let mut state = CommandState::default();
-        state.enqueue(EngineCommand::Dump(DumpJob {
-            token: 7,
-            uri: "file:///a.kt".into(),
-        }));
-        state.enqueue(located("First"));
-        state.enqueue(EngineCommand::Analyze(AnalysisJob {
-            documents: vec![("file:///a.kt".into(), "fun a(){}".into(), 2, 0)],
-            open_uris: Vec::new(),
-        }));
-        state.enqueue(located("Second"));
-
-        assert!(state.interactive_work_queued());
-        assert!(matches!(state.take(), Some(EngineCommand::Dump(_))));
-        assert!(matches!(state.take(), Some(EngineCommand::Analyze(_))));
-        assert!(
-            !state.interactive_work_queued(),
-            "the two location commands still queued are not interactive work"
-        );
-        match state.take() {
-            Some(EngineCommand::LocateDependencies { candidates, .. }) => {
-                assert_eq!(candidates[0].name, "First");
-            }
-            other => panic!("expected the earlier location, got {other:?}"),
-        }
-        match state.take() {
-            Some(EngineCommand::LocateDependencies { candidates, .. }) => {
-                assert_eq!(candidates[0].name, "Second");
-            }
-            other => panic!("expected the later location, got {other:?}"),
-        }
-        assert!(state.take().is_none());
-    }
-
-    #[test]
-    fn queued_dependency_location_does_not_hold_back_the_sweep() {
-        let mut state = CommandState::default();
-        state.enqueue(located("Pending"));
-        assert!(
-            !state.interactive_work_queued(),
-            "location is not interactive work, so an edit that just finished can admit the sweep"
-        );
-        state.enqueue(EngineCommand::Analyze(AnalysisJob {
-            documents: vec![("file:///a.kt".into(), String::new(), 1, 0)],
-            open_uris: Vec::new(),
-        }));
-        assert!(state.interactive_work_queued());
     }
 
     #[test]
@@ -2296,6 +2236,138 @@ mod tests {
             !state.index_admission_truncated,
             "a symbol shortfall must not be reported as a diagnostic one"
         );
+    }
+
+    #[test]
+    fn repeated_symbol_updates_do_not_bury_the_diagnostic_sweep() {
+        let mut state = CommandState::default();
+        state.enqueue(EngineCommand::Index(IndexJob {
+            generation: 0,
+            priority: IndexPriority::Sweep,
+            uris: vec!["file:///w/Far.kt".into()],
+        }));
+        for _ in 0..1_000 {
+            state.enqueue(EngineCommand::IndexSymbols(SymbolIndexJob {
+                generation: 0,
+                uris: vec![
+                    "file:///w/Same.kt".into(),
+                    "file:///w/Also.kt".into(),
+                    "file:///w/Same.kt".into(),
+                ],
+            }));
+        }
+
+        let Some(EngineCommand::IndexSymbols(symbols)) = state.take() else {
+            panic!("the symbol chunk should be the only work ahead of the sweep");
+        };
+        assert_eq!(symbols.uris, vec!["file:///w/Same.kt", "file:///w/Also.kt"]);
+        assert!(matches!(
+            state.take(),
+            Some(EngineCommand::Index(IndexJob {
+                priority: IndexPriority::Sweep,
+                ..
+            }))
+        ));
+        assert!(state.take().is_none());
+        assert!(state.symbol_queued.is_empty());
+        assert_eq!(state.symbol_queued_bytes, 0);
+        assert!(!state.symbol_admission_truncated);
+    }
+
+    #[test]
+    fn a_handed_out_symbol_change_cannot_postpone_the_sweep() {
+        let mut state = CommandState::default();
+        for index in 0..8 {
+            state.enqueue(EngineCommand::Index(IndexJob {
+                generation: 0,
+                priority: IndexPriority::Sweep,
+                uris: vec![format!("file:///w/Far{index}.kt")],
+            }));
+        }
+        state.enqueue(EngineCommand::IndexSymbols(SymbolIndexJob {
+            generation: 0,
+            uris: vec!["file:///w/Same.kt".into()],
+        }));
+
+        let mut sweeps_seen = 0;
+        let mut symbols_between = 0;
+        while sweeps_seen < 8 {
+            match state.take() {
+                Some(EngineCommand::IndexSymbols(job)) => {
+                    assert_eq!(job.uris, vec!["file:///w/Same.kt"]);
+                    symbols_between += 1;
+                    assert!(
+                        symbols_between <= SYMBOL_CHUNKS_BEFORE_SWEEP,
+                        "symbol work must yield to a sweep chunk that is already waiting"
+                    );
+                    // The chunk is in flight. The watcher reports a newer write of the same file.
+                    state.enqueue(EngineCommand::IndexSymbols(SymbolIndexJob {
+                        generation: 0,
+                        uris: vec!["file:///w/Same.kt".into()],
+                    }));
+                }
+                Some(EngineCommand::Index(job)) => {
+                    assert_eq!(job.priority, IndexPriority::Sweep);
+                    assert_eq!(job.uris, vec![format!("file:///w/Far{sweeps_seen}.kt")]);
+                    symbols_between = 0;
+                    sweeps_seen += 1;
+                }
+                other => panic!("expected symbol or sweep work, got {other:?}"),
+            }
+        }
+        match state.take() {
+            Some(EngineCommand::IndexSymbols(job)) => {
+                assert_eq!(job.uris, vec!["file:///w/Same.kt"]);
+            }
+            other => panic!("the in-flight change must still be indexed, got {other:?}"),
+        }
+        assert!(state.symbol_queued.is_empty());
+        assert_eq!(state.symbol_queued_bytes, 0);
+        assert!(state.take().is_none());
+    }
+
+    #[test]
+    fn a_symbol_uri_can_be_queued_again_after_its_chunk_is_taken() {
+        let mut state = CommandState::default();
+        state.enqueue(EngineCommand::IndexSymbols(SymbolIndexJob {
+            generation: 0,
+            uris: vec!["file:///w/Same.kt".into()],
+        }));
+        assert!(state.take().is_some());
+        assert!(state.symbol_queued.is_empty());
+        assert_eq!(state.symbol_queued_bytes, 0);
+
+        state.enqueue(EngineCommand::IndexSymbols(SymbolIndexJob {
+            generation: 0,
+            uris: vec!["file:///w/Same.kt".into()],
+        }));
+        let Some(EngineCommand::IndexSymbols(job)) = state.take() else {
+            panic!("a URI released with its chunk can be indexed again");
+        };
+        assert_eq!(job.uris, vec!["file:///w/Same.kt"]);
+        assert!(state.take().is_none());
+    }
+
+    #[test]
+    fn replacing_the_index_generation_lets_a_symbol_uri_be_queued_again() {
+        let mut state = CommandState::default();
+        state.enqueue(EngineCommand::IndexSymbols(SymbolIndexJob {
+            generation: 0,
+            uris: vec!["file:///w/Same.kt".into()],
+        }));
+        let generation = state.replace_index_generation();
+        state.enqueue(EngineCommand::IndexSymbols(SymbolIndexJob {
+            generation: 0,
+            uris: vec!["file:///w/Same.kt".into()],
+        }));
+
+        let Some(EngineCommand::IndexSymbols(job)) = state.take() else {
+            panic!("a new generation must not inherit the previous symbol queue");
+        };
+        assert_eq!(job.generation, generation);
+        assert_eq!(job.uris, vec!["file:///w/Same.kt"]);
+        assert!(state.symbol_queued.is_empty());
+        assert_eq!(state.symbol_queued_bytes, 0);
     }
 
     #[test]

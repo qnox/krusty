@@ -12,7 +12,7 @@ use crate::types::{type_name, Ty};
 
 /// Why [`run_backend_passes`] declined a file: the named pass met a shape it can't lower yet, so the
 /// caller must skip (or diagnose) the file rather than miscompile it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SkipReason {
     /// `lower_value_classes` — a `@JvmInline value class` shape not yet supported.
     ValueClasses,
@@ -25,6 +25,8 @@ pub enum SkipReason {
     DefaultCalls,
     /// A plugin-generated checked `super` call could not be given a JVM invocation shape.
     SuperCalls,
+    /// A checked declaration argument no longer matched its selected JVM parameter boundary.
+    CallArguments(String),
 }
 
 /// What the plugin pass of [`run_backend_passes`] runs: the native plugins the frontend ran for this
@@ -44,6 +46,7 @@ pub(crate) struct BackendPassFacts {
     emit_time_machines: crate::jvm::suspend::EmitTimeMachines,
     /// Physical returns that preserve `COROUTINE_SUSPENDED` and otherwise answer `Unit`.
     suspended_result_returns: crate::jvm::suspend::SuspendedResultReturns,
+    intrinsic_probe_continuations: crate::jvm::suspend::IntrinsicProbeContinuations,
     default_call_operands: crate::jvm::default_call_operands::DefaultCallOperands,
     bridge_adaptations: crate::jvm::bridge_adaptations::BridgeAdaptations,
     /// The bridges that take `FunctionN.invoke`'s packed argument array.
@@ -66,6 +69,8 @@ pub(crate) struct BackendPassFacts {
 /// Runs, in order:
 /// 1. `plugins::run_enabled` — compiler-extension plugins (kotlinx.serialization) synthesize
 ///    declarations from the file's annotations; no-op without a trigger annotation.
+///    Once their output is final, freeze any exact dependency identity selected by a generated
+///    `super` call, then realize all checked super calls from those frozen facts.
 ///
 /// 2. `realize_top_level_jvm_fields` — select public field storage for eligible top-level
 ///    `@JvmField` declarations through stable property/layout identities.
@@ -119,6 +124,7 @@ pub(crate) fn run_backend_passes(
     facade: &str,
     plugins: BackendPassPlugins<'_>,
     classifiers: &CheckedBackendClassifiers<'_>,
+    callables: &mut crate::backend::CheckedBackendCallables,
     classpath: &crate::jvm::classpath::Classpath,
     stems: &[String],
     facts: &mut BackendPassFacts,
@@ -130,13 +136,28 @@ pub(crate) fn run_backend_passes(
         jvm_plugin_type_descriptor,
         classifiers,
     );
-    run_backend_passes_after_plugins(ir, facade, classifiers, classpath, Some(stems), facts)
+    // Plugins run after the frontend/backend handoff and may append checked calls selected by an
+    // exact dependency identity. Freeze those provider-normalized records now, once plugin output
+    // is final and before any realization consumes them. Existing facts remain the original copy.
+    callables
+        .freeze_plugin_super_callables(ir, |identity| classpath.external_callable(identity))
+        .map_err(|_| SkipReason::SuperCalls)?;
+    run_backend_passes_after_plugins(
+        ir,
+        facade,
+        classifiers,
+        callables,
+        classpath,
+        Some(stems),
+        facts,
+    )
 }
 
 fn run_backend_passes_after_plugins(
     ir: &mut crate::ir::IrFile,
     facade: &str,
     classifiers: &CheckedBackendClassifiers<'_>,
+    callables: &crate::backend::CheckedBackendCallables,
     classpath: &crate::jvm::classpath::Classpath,
     stems: Option<&[String]>,
     facts: &mut BackendPassFacts,
@@ -148,7 +169,7 @@ fn run_backend_passes_after_plugins(
     // Every body of the file is lowered, so each lifting sequence is whole: name its callables
     // before any pass renders a debug name from them.
     crate::jvm::lifted_names::number(ir);
-    crate::jvm::module_calls::realize_super_calls(ir, classpath)
+    crate::jvm::module_calls::realize_super_calls(ir, callables)
         .map_err(|_| SkipReason::SuperCalls)?;
     crate::jvm::annotation_constructions::lower_annotation_constructions(ir, facade);
     // A property's own annotations become a synthetic marker method — a JVM realization of a Kotlin
@@ -182,10 +203,16 @@ fn run_backend_passes_after_plugins(
     // checker's supertype view. Runs BEFORE the barrier pass (which annotates existing bridges) and
     // before the value-class pass (which retargets them once mangled names are known).
     // A primitive override of a non-primitive declaration returns the wrapper; its bridges follow.
-    facts.override_results = crate::jvm::override_results::box_primitive_override_results(ir);
+    // A bridge to a value-class override asks which dependency classes are value classes.
+    if !crate::jvm::value_classes::record_referenced_value_classes(ir, classifiers) {
+        return Err(SkipReason::ValueClasses);
+    }
+    facts.override_results =
+        crate::jvm::override_results::box_primitive_override_results(ir, callables)?;
     crate::jvm::bridges::derive_bridges(
         ir,
         classpath,
+        callables,
         &facts.override_results,
         &mut facts.function_argument_arrays,
     )?;
@@ -208,6 +235,16 @@ fn run_backend_passes_after_plugins(
         &mut facts.property_reference_realizations,
     ) {
         return Err(SkipReason::ValueClasses);
+    }
+    // Generic erasure and value-class projection have now fixed every declaration parameter's JVM
+    // carrier. Consume and retarget the exact call-owned adapters before default/suspend/inline
+    // transforms clone or wrap those calls; the provenance is a one-shot representation contract.
+    crate::jvm::physical_call_arguments::retarget_declaration_arguments(ir)
+        .map_err(SkipReason::CallArguments)?;
+    if !facts.default_call_operands.synchronize(ir) {
+        return Err(SkipReason::CallArguments(
+            "default call operand plan no longer matches its call".to_string(),
+        ));
     }
     // The JVM supplies default field values before any constructor runs. Elide only source
     // declaration stores recorded by exact ExprId; common IR and other targets keep them. Runs
@@ -232,6 +269,7 @@ fn run_backend_passes_after_plugins(
         &mut facts.default_call_operands,
         &mut facts.emit_time_machines,
         &mut facts.suspended_result_returns,
+        &mut facts.intrinsic_probe_continuations,
         null_out_dead_spills,
     ) {
         return Err(SkipReason::Suspend);
@@ -627,6 +665,23 @@ pub struct JvmState {
     module_packages: std::collections::BTreeMap<String, Vec<String>>,
 }
 
+/// A checked file after every JVM representation pass has selected its physical facts. Keeping the
+/// handoff together makes the boundary explicit: emission consumes this closed product and must not
+/// recover any of its decisions.
+struct BackendReadyIr<'a> {
+    ir: crate::ir::IrFile,
+    stem: &'a str,
+    module_name: &'a str,
+    facade_name: String,
+    package: String,
+    signature_symbols: &'a dyn BackendClassifierSource,
+    inner_class_resolver: crate::jvm::classfile::InnerClassResolver,
+    pass_facts: BackendPassFacts,
+    metadata: Option<crate::jvm::ir_emit::KotlinMetadata>,
+    has_facade_members: bool,
+    property_realizations: crate::jvm::property_realizations::PropertyRealizations,
+}
+
 impl JvmBackend {
     fn emit_streamed_ir(
         &self,
@@ -641,6 +696,7 @@ impl JvmBackend {
             mut ir,
             source,
             classifiers,
+            mut callables,
             native_plugins,
             module_name,
             stems,
@@ -661,11 +717,19 @@ impl JvmBackend {
                 module_name,
             },
             &classifiers,
+            &mut callables,
             &self.cp,
             stems,
             &mut pass_facts,
         ) {
             report_backend_pass_failure(reason, diags);
+            return Vec::new();
+        }
+        if !pass_facts.default_call_operands.synchronize(&ir) {
+            diags.error(
+                crate::diag::Span::new(0, 0),
+                "default call operand plan no longer matches its call".to_string(),
+            );
             return Vec::new();
         }
         if crate::jvm::declaration_collisions::validate(&ir, &pass_facts.override_results, diags)
@@ -678,39 +742,43 @@ impl JvmBackend {
         let inner_class_resolver =
             checked_module_inner_class_resolver(classifiers.module(), self.cp.clone());
         self.emit_backend_ready_ir(
-            ir,
-            stem,
-            module_name,
-            facade_name,
-            package,
-            &classifiers,
-            inner_class_resolver,
-            pass_facts,
-            metadata,
-            has_facade_members,
-            property_realizations,
+            BackendReadyIr {
+                ir,
+                stem,
+                module_name,
+                facade_name,
+                package,
+                signature_symbols: &classifiers,
+                inner_class_resolver,
+                pass_facts,
+                metadata,
+                has_facade_members,
+                property_realizations,
+            },
             state,
             diags,
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn emit_backend_ready_ir(
         &self,
-        mut ir: crate::ir::IrFile,
-        stem: &str,
-        module_name: &str,
-        facade_name: String,
-        package: String,
-        signature_symbols: &dyn BackendClassifierSource,
-        inner_class_resolver: crate::jvm::classfile::InnerClassResolver,
-        pass_facts: BackendPassFacts,
-        metadata: Option<crate::jvm::ir_emit::KotlinMetadata>,
-        has_facade_members: bool,
-        property_realizations: crate::jvm::property_realizations::PropertyRealizations,
+        ready: BackendReadyIr<'_>,
         state: &mut JvmState,
         diags: &mut DiagSink,
     ) -> Vec<Artifact> {
+        let BackendReadyIr {
+            mut ir,
+            stem,
+            module_name,
+            facade_name,
+            package,
+            signature_symbols,
+            inner_class_resolver,
+            pass_facts,
+            metadata,
+            has_facade_members,
+            property_realizations,
+        } = ready;
         let mut outputs = Vec::new();
         if !self.param_assertions {
             crate::jvm::ir_emit::strip_param_assertions(&mut ir);
@@ -731,6 +799,7 @@ impl JvmBackend {
             continuations: &pass_facts.continuation_metadata,
             emit_time_machines: &pass_facts.emit_time_machines,
             suspended_result_returns: &pass_facts.suspended_result_returns,
+            intrinsic_probe_continuations: &pass_facts.intrinsic_probe_continuations,
             bridge_adaptations: &pass_facts.bridge_adaptations,
             function_argument_arrays: &pass_facts.function_argument_arrays,
             override_results: &pass_facts.override_results,
@@ -807,13 +876,19 @@ fn report_backend_pass_failure(reason: SkipReason, diags: &mut DiagSink) {
             );
             return;
         }
+        SkipReason::CallArguments(detail) => {
+            diags.error(crate::diag::Span::new(0, 0), detail);
+            return;
+        }
         _ => {}
     }
     let what = match reason {
         SkipReason::ValueClasses => "value-class",
         SkipReason::Suspend => "suspend-function",
         SkipReason::Bridges => "bridge-method",
-        SkipReason::DefaultCalls | SkipReason::SuperCalls => unreachable!(),
+        SkipReason::DefaultCalls | SkipReason::SuperCalls | SkipReason::CallArguments(_) => {
+            unreachable!()
+        }
     };
     diags.error(
         crate::diag::Span::new(0, 0),
@@ -844,9 +919,14 @@ impl Backend for JvmBackend {
             );
             return Vec::new();
         }
-        if let Err(target) =
-            crate::jvm::function_references::realize(&mut file.ir, &self.cp, &facade)
-        {
+        if let Err(target) = crate::jvm::function_references::realize(
+            &mut file.ir,
+            &file.callables,
+            crate::jvm::function_references::Facades {
+                current: &facade,
+                stems,
+            },
+        ) {
             diags.error(
                 crate::diag::Span::new(0, 0),
                 format!(
@@ -863,7 +943,7 @@ impl Backend for JvmBackend {
         let mut property_reference_realizations = match crate::jvm::property_references::realize(
             &mut file.ir,
             file.stems,
-            &self.cp,
+            &file.callables,
             &facade,
         ) {
             Ok(realizations) => realizations,
@@ -898,6 +978,7 @@ impl Backend for JvmBackend {
             &mut file.ir,
             file.stems,
             &self.cp,
+            &file.callables,
             &mut property_realizations,
         ) {
             diags.error(
@@ -906,12 +987,15 @@ impl Backend for JvmBackend {
             );
             return Vec::new();
         }
-        if let Err(target) =
-            crate::jvm::external_calls::realize(&mut file.ir, &self.cp, &mut default_call_operands)
-        {
+        if let Err(error) = crate::jvm::external_calls::realize(
+            &mut file.ir,
+            &self.cp,
+            &file.callables,
+            &mut default_call_operands,
+        ) {
             diags.error(
                 crate::diag::Span::new(0, 0),
-                format!("internal error: missing JVM dependency realization for {target}"),
+                format!("internal error: missing JVM dependency realization for {error}"),
             );
             return Vec::new();
         }
@@ -1306,6 +1390,40 @@ mod tests {
             assert!(
                 !text.contains("EmitOptions {"),
                 "{relative} must start from jvm::backend::shipping_emit_options instead of duplicating the shipping configuration",
+            );
+        }
+    }
+
+    #[test]
+    fn selected_dependency_callables_are_not_requeried_during_realization() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        for relative in [
+            "src/jvm/external_calls.rs",
+            "src/jvm/function_references.rs",
+            "src/jvm/bridges.rs",
+            "src/jvm/module_calls.rs",
+        ] {
+            let text = std::fs::read_to_string(root.join(relative))
+                .expect("read dependency-callable realization pass");
+            assert!(
+                !text.contains(".external_callable("),
+                "{relative} must consume CheckedBackendCallables by ExternalCallableId"
+            );
+        }
+    }
+
+    #[test]
+    fn selected_dependency_properties_are_not_requeried_during_realization() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        for relative in [
+            "src/jvm/external_calls.rs",
+            "src/jvm/property_references.rs",
+        ] {
+            let text = std::fs::read_to_string(root.join(relative))
+                .expect("read dependency-property realization pass");
+            assert!(
+                !text.contains(".external_property("),
+                "{relative} must consume CheckedBackendCallables by ExternalPropertyId"
             );
         }
     }

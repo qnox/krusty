@@ -23,6 +23,7 @@ use crate::types::{stored_value_ty, Ty};
 pub(super) fn derive_bridges(
     ir: &mut IrFile,
     classpath: &crate::jvm::classpath::Classpath,
+    callables: &crate::backend::CheckedBackendCallables,
     override_results: &crate::jvm::override_results::OverrideResults,
     argument_arrays: &mut crate::jvm::function_argument_arrays::FunctionArgumentArrays,
 ) -> Result<(), SkipReason> {
@@ -40,11 +41,12 @@ pub(super) fn derive_bridges(
             ir,
             cid,
             classpath,
+            callables,
             override_results,
             argument_arrays,
             &mut order,
         )?;
-        property_bridges(ir, cid, classpath, &mut order)?;
+        property_bridges(ir, cid, classpath, callables, &mut order)?;
         declaration_order(&mut ir.classes[cid].bridges[first..], order);
     }
     Ok(())
@@ -122,15 +124,12 @@ fn is_inherited_special_bridge(method: &crate::jvm::classreader::MethodSig) -> b
 }
 
 fn external_method_name(
-    classpath: &crate::jvm::classpath::Classpath,
+    callables: &crate::backend::CheckedBackendCallables,
     target: crate::fir::ExternalCallableId,
 ) -> Result<String, SkipReason> {
-    let realization = classpath
-        .external_callable(target)
-        .ok_or(SkipReason::Bridges)?;
-    let callable = realization.callable;
+    let callable = callables.callable(target).ok_or(SkipReason::Bridges)?;
     Ok(crate::jvm::names::mapped_builtin_virtual_name(
-        callable.owner,
+        callable.physical_owner,
         &callable.name,
         &callable.descriptor,
     )
@@ -159,6 +158,7 @@ fn superclass_method_bridges(
     ir: &mut IrFile,
     cid: usize,
     classpath: &crate::jvm::classpath::Classpath,
+    callables: &crate::backend::CheckedBackendCallables,
     override_results: &crate::jvm::override_results::OverrideResults,
     argument_arrays: &mut crate::jvm::function_argument_arrays::FunctionArgumentArrays,
     order: &mut Vec<u32>,
@@ -181,13 +181,28 @@ fn superclass_method_bridges(
         let mut declared_parameters = edge.declared_parameters.clone();
         let mut declared_result = edge.declared_result;
         // An overridden declaration whose primitive result is realized as its wrapper is reached
-        // through that wrapper.
-        if let crate::fir::ResolvedFunctionOverrideTarget::Module(callable) = edge.overridden {
-            if override_results
-                .boxed_callable_result(ir, callable)
+        // through that wrapper. Dependency representation comes only from the exact frozen
+        // callable fact; a missing fact fails this pass instead of falling back to the semantic
+        // result.
+        match edge.overridden {
+            crate::fir::ResolvedFunctionOverrideTarget::Module(callable) => {
+                if override_results
+                    .boxed_callable_result(ir, callable)
+                    .is_some()
+                {
+                    declared_result = Ty::nullable(declared_result);
+                }
+            }
+            crate::fir::ResolvedFunctionOverrideTarget::External(target) => {
+                if crate::jvm::override_results::external_boxed_result(
+                    callables,
+                    target,
+                    edge.declared_result,
+                )?
                 .is_some()
-            {
-                declared_result = Ty::nullable(declared_result);
+                {
+                    declared_result = Ty::nullable(declared_result);
+                }
             }
         }
         let mut base_params = declared_parameters
@@ -246,7 +261,7 @@ fn superclass_method_bridges(
         let bridge_name = match edge.overridden {
             crate::fir::ResolvedFunctionOverrideTarget::Module(_) => edge.name.clone(),
             crate::fir::ResolvedFunctionOverrideTarget::External(target) => {
-                external_method_name(classpath, target)?
+                external_method_name(callables, target)?
             }
         };
         let target_name = if edge.implementation_function.is_some() {
@@ -255,7 +270,7 @@ fn superclass_method_bridges(
             match edge.implementation {
                 crate::fir::ResolvedFunctionOverrideTarget::Module(_) => edge.name.clone(),
                 crate::fir::ResolvedFunctionOverrideTarget::External(target) => {
-                    external_method_name(classpath, target)?
+                    external_method_name(callables, target)?
                 }
             }
         };
@@ -385,6 +400,7 @@ fn property_bridges(
     ir: &mut IrFile,
     cid: usize,
     classpath: &crate::jvm::classpath::Classpath,
+    callables: &crate::backend::CheckedBackendCallables,
     order: &mut Vec<u32>,
 ) -> Result<(), SkipReason> {
     let internal_name = ir.classes[cid].fq_name;
@@ -413,14 +429,14 @@ fn property_bridges(
         let bridge_getter = match edge.overridden {
             crate::fir::ResolvedPropertyOverrideTarget::Module(_) => source_getter.clone(),
             crate::fir::ResolvedPropertyOverrideTarget::External(target) => {
-                external_method_name(classpath, target)?
+                external_method_name(callables, target)?
             }
         };
         let target_getter = match edge.implementation {
             _ if edge.implementation_getter.is_some() => source_getter.clone(),
             crate::fir::ResolvedPropertyOverrideTarget::Module(_) => source_getter.clone(),
             crate::fir::ResolvedPropertyOverrideTarget::External(target) => {
-                external_method_name(classpath, target)?
+                external_method_name(callables, target)?
             }
         };
         crate::trace_compiler!(

@@ -37,6 +37,7 @@ impl<'a> SymbolResolver<'a> {
             ExtCtx {
                 fn_scope: self.fn_scope,
                 source: &self.src,
+                type_variables: self.type_variables,
             },
             callables.functions(),
             IndexedConvention::Ordinary,
@@ -50,7 +51,8 @@ impl<'a> SymbolResolver<'a> {
         let binding_receiver = selected
             .semantic_receiver()
             .and_then(|declared| {
-                ReceiverMro::new(&self.src, receiver).binding_receiver(&self.src, declared)
+                self.receiver_mro(receiver)
+                    .binding_receiver(&self.src, declared)
             })
             .unwrap_or(receiver);
         let semantic = selected.semantic_signature();

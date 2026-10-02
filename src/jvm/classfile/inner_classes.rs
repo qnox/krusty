@@ -8,21 +8,30 @@ use super::{ClassWriter, InnerClassResolver, InnerClassSpec};
 /// kotlinc's `fqNameWhenAvailable` of each class declared in executable code, by internal name.
 pub(crate) type DeclarationPaths = Rc<HashMap<String, String>>;
 
+/// What a referenced `InnerClasses` table knows of the file's classes declared in executable code.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct LocalDeclarations {
+    /// The qualified names their rows sort by.
+    paths: DeclarationPaths,
+    /// The internal name of the class each is declared in, by its own: kotlinc's `ClassCodegen`
+    /// lists every class it generates from its own code, whether or not that code names it.
+    declaring: Rc<HashMap<String, String>>,
+}
+
 /// How a class's `InnerClasses` table is built.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum InnerClassTable {
-    /// kotlinc's `ClassCodegen`: every nested class the class references, stably sorted by its
-    /// qualified name. A class declared in executable code is named
-    /// by the declarations enclosing it, from these paths; any other by its outer class's name and
-    /// its own.
-    Referenced(DeclarationPaths),
+    /// kotlinc's `ClassCodegen`: every nested class the class references or its code declares,
+    /// stably sorted by its qualified name. A class declared in executable code is named by the
+    /// declarations enclosing it; any other by its outer class's name and its own.
+    Referenced(LocalDeclarations),
     /// Every row as it was visited, as ASM writes a class that is copied.
     Visited,
 }
 
 impl Default for InnerClassTable {
     fn default() -> Self {
-        Self::Referenced(DeclarationPaths::default())
+        Self::Referenced(LocalDeclarations::default())
     }
 }
 
@@ -49,7 +58,15 @@ impl ClassWriter {
     /// The qualified names the referenced table sorts the file's local classes by.
     pub(crate) fn set_declaration_paths(&mut self, paths: DeclarationPaths) {
         if let InnerClassTable::Referenced(own) = &mut self.inner_class_table {
-            *own = paths;
+            own.paths = paths;
+        }
+    }
+
+    /// The class each of the file's local and anonymous classes is declared in. A class lists
+    /// the ones its own code declares.
+    pub(crate) fn set_declaring_classes(&mut self, declaring: Rc<HashMap<String, String>>) {
+        if let InnerClassTable::Referenced(own) = &mut self.inner_class_table {
+            own.declaring = declaring;
         }
     }
 
@@ -78,8 +95,19 @@ impl ClassWriter {
         self.inner_class_table == InnerClassTable::Visited
             || spec.outer.as_deref() == Some(self.internal_name.as_str())
             || inner_present
+            || self.declares(&spec.inner)
             || self.annotation_class_refs.contains(&spec.inner)
             || self.descriptor_mentions(&spec.inner)
+    }
+
+    /// Whether this class's code declares the local or anonymous class `inner`.
+    fn declares(&self, inner: &str) -> bool {
+        match &self.inner_class_table {
+            InnerClassTable::Referenced(local) => {
+                local.declaring.get(inner) == Some(&self.internal_name)
+            }
+            InnerClassTable::Visited => false,
+        }
     }
 
     /// Seed the `InnerClasses` entries' outer-class refs and simple names at kotlinc's
@@ -192,8 +220,8 @@ impl ClassWriter {
         // kotlinc writes the complete table stably sorted by qualified name (`C.Companion`,
         // `C.NestObj`, `C.Nested`, case-sensitive), classpath-discovered entries included, the
         // classes with an equal name in the order they were met.
-        if let InnerClassTable::Referenced(paths) = &self.inner_class_table {
-            let keys = qualified_names(&self.inner_class_candidates, paths);
+        if let InnerClassTable::Referenced(local) = &self.inner_class_table {
+            let keys = qualified_names(&self.inner_class_candidates, &local.paths);
             // Pool order follows the methods, the order kotlinc's codegen meets their classes.
             let met: HashMap<String, usize> = self
                 .cp

@@ -182,7 +182,9 @@ impl Checker<'_> {
                 stable_declaration,
             });
         }
-        if let Ok(Some(property)) = self.resolver().select_extension_property(receiver.ty, name) {
+        let type_variables = self.postponed_type_variables_in(receiver.ty);
+        let resolver = self.resolver().with_type_variables(&type_variables);
+        if let Ok(Some(property)) = resolver.select_extension_property(receiver.ty, name) {
             let context_args = if property.context_count == 0 {
                 Vec::new()
             } else {
@@ -228,6 +230,29 @@ impl Checker<'_> {
         }
     }
 
+    /// An implicit receiver over a postponed call's type variables adds its constraint against
+    /// the selected extension property's declared receiver to that call.
+    fn constrain_postponed_extension_receiver(
+        &mut self,
+        resolution: &ImplicitPropertyWriteResolution,
+        span: Span,
+    ) {
+        let declared = resolution
+            .extension
+            .as_ref()
+            .and_then(|access| access.property.receiver);
+        if let Some(declared) = declared {
+            if self.postponed_call_mentions(resolution.receiver.ty) {
+                self.expect_assignable(
+                    declared,
+                    resolution.receiver.ty,
+                    span,
+                    "extension receiver",
+                );
+            }
+        }
+    }
+
     pub(super) fn record_implicit_property_write(
         &mut self,
         stmt: StmtId,
@@ -235,6 +260,8 @@ impl Checker<'_> {
     ) {
         match selection {
             PropertyWriteSelection::Implicit(resolution) => {
+                let span = self.file.stmt_spans[stmt.0 as usize];
+                self.constrain_postponed_extension_receiver(resolution, span);
                 let target = self.implicit_property_write_target(resolution);
                 self.stmt_lowers
                     .insert(stmt, StmtLowering::ImplicitPropertyWrite(Box::new(target)));
@@ -257,6 +284,7 @@ impl Checker<'_> {
         match selection {
             PropertyWriteSelection::Implicit(resolution) => {
                 self.mark_extension_receiver_used(expression, resolution.receiver);
+                self.constrain_postponed_extension_receiver(resolution, self.span(expression));
                 let target = self.implicit_property_write_target(resolution);
                 self.expr_lowers.insert(
                     expression,

@@ -5,9 +5,9 @@
 //! the runtime `FunctionReferenceImpl` carrier; it does not resolve a source name or select an
 //! overload.
 
-use super::classpath::{Classpath, ExternalCallableKind};
+use super::classpath::ExternalCallableKind;
 use crate::fir::ExternalCallableId;
-use crate::ir::{FrDispatch, FuncRef, IrClass, IrExpr, IrFile};
+use crate::ir::{ExprId, FrDispatch, FuncRef, IrClass, IrExpr, IrFile};
 use crate::types::{type_name, Ty};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -70,25 +70,31 @@ pub(super) fn reference_class_name(
 /// builtin the compiler implements has no facade: kotlinc reflects it on `Intrinsics.Kotlin`, not
 /// top-level, with the JVM signature its declaration maps to.
 fn external_reflection(
-    classpath: &Classpath,
+    callables: &crate::backend::CheckedBackendCallables,
     declaration: ExternalCallableId,
     receiver: Option<Ty>,
 ) -> Result<
     (Option<crate::types::TypeName>, String, bool, Option<String>),
     FunctionReferenceRealizationTarget,
 > {
-    let realization = classpath
-        .external_callable(declaration)
+    let callable = callables
+        .callable(declaration)
+        .cloned()
         .ok_or(FunctionReferenceRealizationTarget::External(declaration))?;
-    let callable = realization.callable;
     let name = callable
         .reflection_name
         .clone()
         .unwrap_or_else(|| callable.name.clone());
     let descriptor = if callable.descriptor.is_empty() {
         // A compiler-implemented declaration has no JVM method; its signature is the one its
-        // declaration maps to.
-        if callable.compiler_intrinsic.is_none() {
+        // declaration maps to. That includes a member the provider realizes as a compiler
+        // operation (an array's `get`), which kotlinc reflects by that same mapped signature.
+        let compiler_implemented = callable.compiler_intrinsic.is_some()
+            || matches!(
+                callable.member_realization,
+                crate::libraries::MemberRealization::Intrinsic(_)
+            );
+        if !compiler_implemented {
             return Err(FunctionReferenceRealizationTarget::External(declaration));
         }
         let parameters = callable
@@ -103,7 +109,7 @@ fn external_reflection(
     } else {
         callable.descriptor.clone()
     };
-    let (owner_class, physical_name, top_level) = match realization.kind {
+    let (owner_class, physical_name, top_level) = match callable.kind {
         ExternalCallableKind::TopLevel | ExternalCallableKind::Extension
             if callable.descriptor.is_empty() =>
         {
@@ -114,12 +120,12 @@ fn external_reflection(
             )
         }
         ExternalCallableKind::TopLevel | ExternalCallableKind::Extension => {
-            (Some(callable.owner), callable.name.as_str(), true)
+            (Some(callable.physical_owner), callable.name.as_str(), true)
         }
         ExternalCallableKind::Member => (
             receiver.and_then(Ty::kotlin_class_internal),
             crate::jvm::names::mapped_builtin_virtual_name(
-                callable.owner,
+                callable.physical_owner,
                 &callable.name,
                 &descriptor,
             ),
@@ -143,10 +149,18 @@ pub(super) fn reference_enclosure(
         .copied()
 }
 
+/// The file facades the module's references can name: the one this file compiles to, and each
+/// source file's by its stem.
+#[derive(Clone, Copy)]
+pub(super) struct Facades<'a> {
+    pub(super) current: &'a str,
+    pub(super) stems: &'a [String],
+}
+
 fn realize_adapter_reference(
     ir: &mut IrFile,
-    classpath: &Classpath,
-    current_facade: &str,
+    callables: &crate::backend::CheckedBackendCallables,
+    facades: Facades<'_>,
     expression: usize,
     adapter_owner: Option<crate::types::TypeName>,
     own_invoke: bool,
@@ -224,14 +238,22 @@ fn realize_adapter_reference(
                 .get(&target)
                 .ok_or(FunctionReferenceRealizationTarget::Module(target))?;
             // A companion-block member is reflected on the class that declared its block, like
-            // any member of it; only a package declaration is owned by a file facade.
-            let owner = match declaration.placement {
-                crate::ir::IrStaticPlacement::CompanionBlock { declaring_class } => {
-                    Some(declaring_class)
+            // any member of it; only a package declaration is owned by a file facade, the one of
+            // the file declaring it.
+            let (owner, top_level) = match (declaration.placement, declaration.owner) {
+                (crate::ir::IrStaticPlacement::CompanionBlock { declaring_class }, _) => {
+                    (Some(declaring_class), false)
                 }
-                crate::ir::IrStaticPlacement::Package => declaration.owner,
+                (crate::ir::IrStaticPlacement::Package, Some(owner)) => (Some(owner), false),
+                (crate::ir::IrStaticPlacement::Package, None) => (
+                    Some(
+                        super::module_calls::facade_for(declaration.source, facades.stems)
+                            .ok_or(FunctionReferenceRealizationTarget::Module(target))?,
+                    ),
+                    true,
+                ),
             };
-            (owner, declaration.name.to_string(), owner.is_none(), None)
+            (owner, declaration.name.to_string(), top_level, None)
         }
         crate::ir::IrCallableReferenceTarget::Constructor { classifier } => {
             (Some(classifier), "<init>".to_string(), false, None)
@@ -247,7 +269,7 @@ fn realize_adapter_reference(
         crate::ir::IrCallableReferenceTarget::External {
             declaration,
             receiver,
-        } => external_reflection(classpath, declaration, receiver)?,
+        } => external_reflection(callables, declaration, receiver)?,
         // kotlinc reflects every function-value conversion, suspend or `Unit`, as a synthesized
         // `suspendConversion<N>` compiler builtin on `Intrinsics.Kotlin`.
         crate::ir::IrCallableReferenceTarget::FunctionValueConversion { ordinal } => (
@@ -290,7 +312,7 @@ fn realize_adapter_reference(
         reflection_parameters.push(continuation);
         reflection_result = Ty::obj("kotlin/Any");
     }
-    let internal = reference_class_name(ir, current_facade, expression, "function");
+    let internal = reference_class_name(ir, facades.current, expression, "function");
     let mut class = IrClass::synthetic(internal);
     class.enclosure = reference_enclosure(ir, expression);
     class.superclass = type_name(if adapted {
@@ -352,12 +374,15 @@ fn realize_adapter_reference(
     }
     let mut constructor_arguments = reference.captures;
     constructor_arguments.extend(reference.bound_receiver);
+    // The constructor's declared parameters say that a value-class receiver is bound as its box.
+    let mut declared_parameters = None;
     let carrier = match constructor_arguments.as_slice() {
         arguments if !arguments.is_empty() => {
             let mut constructor_parameters = capture_types;
             if bound {
                 constructor_parameters.push(Ty::obj("kotlin/Any"));
             }
+            declared_parameters = Some(constructor_parameters.clone().into_boxed_slice());
             IrExpr::New {
                 internal,
                 args: arguments.to_vec(),
@@ -375,20 +400,30 @@ fn realize_adapter_reference(
         },
         _ => unreachable!("empty and non-empty capture shapes are exhaustive"),
     };
-    install_carrier(ir, expression, carrier, reference.function_type);
+    let carrier = install_carrier(ir, expression, carrier, reference.function_type);
+    if let Some(parameters) = declared_parameters {
+        ir.construction_declared_params.insert(carrier, parameters);
+    }
     Ok(())
 }
 
 /// Replace the reference expression with its carrier, cast to the reference's function type.
 /// kotlinc's `FunctionReferenceLowering` hands the carrier to its use site through that implicit
 /// cast, which the JVM writes as a `checkcast` to the `FunctionN` interface.
-fn install_carrier(ir: &mut IrFile, expression: usize, carrier: IrExpr, function_type: Ty) {
+/// Replace `expression` with `carrier` cast to its function type; the carrier's new id.
+fn install_carrier(
+    ir: &mut IrFile,
+    expression: usize,
+    carrier: IrExpr,
+    function_type: Ty,
+) -> ExprId {
     let carrier = ir.add_expr(carrier);
     ir.exprs[expression] = IrExpr::TypeOp {
         op: crate::ir::IrTypeOp::Cast,
         arg: carrier,
         type_operand: function_type.non_null(),
     };
+    carrier
 }
 
 /// `parameters` of `function`, with each shared mutable capture realized as its JVM holder.
@@ -646,8 +681,8 @@ fn realize_own_invoke(
 
 pub(super) fn realize(
     ir: &mut IrFile,
-    classpath: &Classpath,
-    current_facade: &str,
+    callables: &crate::backend::CheckedBackendCallables,
+    facades: Facades<'_>,
 ) -> Result<(), FunctionReferenceRealizationTarget> {
     let adapter_owners = ir
         .classes
@@ -678,8 +713,8 @@ pub(super) fn realize(
         let own_invoke = sole && own_invoke_realizable(ir, &reference);
         realize_adapter_reference(
             ir,
-            classpath,
-            current_facade,
+            callables,
+            facades,
             raw,
             adapter_owner,
             own_invoke,

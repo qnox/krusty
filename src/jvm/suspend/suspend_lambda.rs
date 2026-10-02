@@ -19,10 +19,7 @@ use super::bytecode_machine::{eligible_points, owned_suspensions, Route, Routed,
 use super::cps::{
     SuspendLambdaCapture, SuspendLambdaClass, SuspendLambdaMachine, TransformedMachine,
 };
-use super::{
-    append_continuation, box_returns, continuation_ty, ensure_tail_return, int_ty,
-    rewrite_current_continuation,
-};
+use super::{append_continuation, box_returns, continuation_ty, ensure_tail_return, int_ty};
 use crate::ir::{
     ClassId, ExprId, IrConst, IrCtorArg, IrExpr, IrField, IrFile, IrParameterRole, IrTypeOp,
 };
@@ -117,7 +114,12 @@ pub(super) fn route(
         }
     }
     // The lambda is its own continuation: `coroutineContext` reads `this`'s context.
-    rewrite_current_continuation(ir, body, 0);
+    super::intrinsic_probes::bind_current_continuation(
+        ir,
+        body,
+        0,
+        route.outputs.intrinsic_probe_continuations,
+    );
     let parameter_reads = read_parameters(ir, class, body, first_parameter, &captures, &parameters);
     for suspension in &suspensions {
         // The lambda is the continuation its suspension points pass on.

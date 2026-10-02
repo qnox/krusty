@@ -31,11 +31,19 @@ pub(crate) enum SuspendedResultReturn {
         classifier: crate::types::TypeName,
         carrier: crate::types::Ty,
     },
+    /// An interface-delegation forwarder whose callee returns a value class as its reference
+    /// carrier. `COROUTINE_SUSPENDED` is returned as it is; any other result is that carrier,
+    /// which `checkcast`s and is returned without boxing.
+    ValueClassCarrier { carrier: crate::types::Ty },
 }
 
 /// The return nodes that reshape a suspend result, and how.
 pub(crate) type SuspendedResultReturns =
     std::collections::HashMap<crate::ir::ExprId, SuspendedResultReturn>;
+
+/// JVM value indices holding the continuation passed to an unintercepted intrinsic suspension
+/// point. The CPS pass owns this physical choice; common IR retains only the semantic point kind.
+pub(crate) type IntrinsicProbeContinuations = std::collections::HashMap<crate::ir::ExprId, u32>;
 
 /// What building a file's machines records for their emission.
 pub(super) struct MachineOutputs<'b> {
@@ -43,6 +51,7 @@ pub(super) struct MachineOutputs<'b> {
     pub(super) default_call_operands:
         &'b mut crate::jvm::default_call_operands::DefaultCallOperands,
     pub(super) suspended_result_returns: &'b mut SuspendedResultReturns,
+    pub(super) intrinsic_probe_continuations: &'b mut IntrinsicProbeContinuations,
 }
 
 /// The function an IR state machine is built for: its body, whether it returns `Unit`, the

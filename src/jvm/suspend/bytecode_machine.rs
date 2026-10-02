@@ -107,9 +107,11 @@ pub(super) fn route(
     }
 
     // A member's continuation nests under its class, a top-level function's under the facade.
-    let receiver = ir.functions[fid as usize].dispatch_receiver;
-    let owner = receiver.map_or_else(|| route.facade.to_string(), |owner| owner.render());
-    let continuation_class = name_continuation(ir, fid, &owner, receiver, route.facade);
+    let semantic_owner = ir.functions[fid as usize].dispatch_receiver;
+    let (receiver, static_owner) = super::continuation_class::reentry_owners(ir, fid);
+    let class_owner = semantic_owner.or(static_owner);
+    let owner = class_owner.map_or_else(|| route.facade.to_string(), |owner| owner.render());
+    let continuation_class = name_continuation(ir, fid, &owner, class_owner, route.facade);
     build_continuation_class(
         ir,
         &continuation_class,
@@ -117,6 +119,7 @@ pub(super) fn route(
         &SpillLayout::default(),
         route.outputs.suspended_result_returns,
         receiver,
+        static_owner,
         &declared_params,
     );
     let function = &ir.functions[fid as usize];

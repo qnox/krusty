@@ -1,13 +1,25 @@
-//! Element load and store for Kotlin arrays.
+//! JVM element loads and stores for the array intrinsic operations.
 //!
-//! A reference `Array<T>` whose element is an unsigned array stores the box. The load unboxes that
-//! element so a following index can use the primitive-array carrier.
+//! The array classifiers (`IntArray`, `Array<T>`, ...) have no loadable JVM class: the provider
+//! attaches `ArrayGet`/`ArraySet` to their exact element declarations, target realization turns a
+//! selected call into that intrinsic, and this module only executes it as array bytecode.
 
-use super::{
-    box_prim_free, reference_array_scalar_adapter, type_descriptor, unbox_prim_from_descriptor,
-    CodeBuilder, Emitter,
-};
 use crate::jvm::array_representation::{array_load_op, array_store_op};
+use crate::jvm::classfile::CodeBuilder;
+use crate::jvm::names::type_descriptor;
+use crate::types::Ty;
+
+use super::{box_prim_free, boxed_prim_of, unbox_prim_from_descriptor, Emitter};
+
+/// Semantic scalar adapter for a JVM reference-array element. Unsigned values share a primitive
+/// carrier with signed values but their array stores must call the Kotlin value-class box adapter.
+pub(super) fn reference_array_scalar_adapter(element: Ty) -> Option<Ty> {
+    element
+        .non_null()
+        .is_unsigned()
+        .then_some(element.non_null())
+        .or_else(|| boxed_prim_of(element))
+}
 
 impl Emitter<'_> {
     pub(super) fn emit_array_get(&mut self, array: u32, index: u32, code: &mut CodeBuilder) {

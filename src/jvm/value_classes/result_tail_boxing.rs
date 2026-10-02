@@ -40,16 +40,20 @@ pub(super) fn box_vc_tail(
         }
         // A supertype return-coercion (`make(): W` → `Any?`) wraps the value — box the INNER value, so
         // the coercion then just widens the boxed `X` (a no-op), rather than boxing the coercion result.
+        // A coercion to the carrier (`stamp.x` → `Int`) must keep that carrier; boxing it first turns
+        // `.x` into `checkcast Number; intValue`.
         IrExpr::TypeOp {
             op: crate::ir::IrTypeOp::ImplicitCoercion,
             arg,
-            ..
-        } if !prim_only => {
+            type_operand,
+        } if !prim_only && is_ref(type_operand) => {
             let arg = *arg;
             box_vc_tail(ir, arg, under, rets, prim_only);
         }
         _ => {
-            if let Some(x) = unboxed_vc_class(&ir.exprs, rets, under, id, !prim_only) {
+            if let Some(x) = unboxed_vc_class(&ir.exprs, rets, under, id, !prim_only)
+                .or_else(|| carrier_field_value_class(ir, under, id))
+            {
                 if ir.has_external_value_class_name(x) {
                     return;
                 }
@@ -94,6 +98,19 @@ fn unboxed_vc_class(
         IrExpr::NotNullAssert { operand, .. } if calls => {
             unboxed_vc_class(exprs, rets, under, *operand, calls)
         }
+        _ => None,
+    }
+}
+
+/// A field load whose logical type is a value class. An explicit backing field stores that class's
+/// carrier, so a consumer that wants a reference (`fun f(): Any = holder.stamp`) boxes it.
+fn carrier_field_value_class(ir: &IrFile, under: &Under, id: ExprId) -> Option<TypeName> {
+    match &ir.exprs[id as usize] {
+        IrExpr::GetField { .. } | IrExpr::GetStatic(_) => ir
+            .logical_types
+            .get(&id)
+            .and_then(|ty| ty.non_null().obj_internal())
+            .filter(|name| under.contains_key(name)),
         _ => None,
     }
 }

@@ -107,15 +107,6 @@ pub trait MethodBodies {
         false
     }
 
-    /// Find a unique metadata-declared static realization for a selected array member.
-    fn static_array_member_realization(
-        &self,
-        _name: &str,
-        _descriptor: &str,
-    ) -> Option<StaticMemberRealization> {
-        None
-    }
-
     /// Decode a selected property read into its exact accessor or field realization.
     fn property_read_access(&self, _owner: TypeName, _property: &str) -> Option<PropertyAccess> {
         None
