@@ -5232,6 +5232,7 @@ fn class_property_write_access(
         descriptor: method.descriptor.clone(),
         is_static: method.is_static(),
         is_interface: ci.is_interface(),
+        static_receiver: static_value_class_property_receiver(ci, method),
     };
     // The bean getter's return descriptor, when this class declares one. A matching one-argument
     // `setX` is the setter whatever it returns; without a getter, only a `void` setter remains,
@@ -5307,6 +5308,7 @@ fn class_property_read_access(
         descriptor: method.descriptor.clone(),
         is_static: method.is_static(),
         is_interface: ci.is_interface(),
+        static_receiver: static_value_class_property_receiver(ci, method),
     };
     let zero_arg = |name: &str| {
         ci.methods
@@ -5366,6 +5368,20 @@ fn class_property_read_access(
         descriptor: field.descriptor.clone(),
         is_static: field.access & super::classreader::ACC_STATIC != 0,
     })
+}
+
+/// The carrier a selected value-class property accessor consumes as its leading static parameter.
+/// Kotlin metadata identifies the owner as a value class; the exact selected method descriptor
+/// supplies its already-erased JVM carrier. No accessor spelling participates in this decision.
+fn static_value_class_property_receiver(
+    ci: &ClassInfo,
+    method: &super::classreader::MethodSig,
+) -> Option<Ty> {
+    (method.is_static() && super::metadata::class_inline(ci).is_some())
+        .then(|| super::names::parse_method_descriptor(&method.descriptor))
+        .flatten()
+        .and_then(|(parameters, _)| parameters.first().copied())
+        .map(super::jvm_libraries::desc_to_ty)
 }
 
 fn capitalize(name: &str) -> String {

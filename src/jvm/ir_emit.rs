@@ -7882,6 +7882,7 @@ impl<'a> Emitter<'a> {
             // For classpath owners the body reader remains authoritative.
             is_interface: operation.interface
                 || self.bodies.owner_is_interface_name(operation.owner),
+            static_receiver: None,
         };
         self.emit_realized_property_read(
             operation.expression,
@@ -7945,6 +7946,7 @@ impl<'a> Emitter<'a> {
                 is_static: false,
                 is_interface: operation.interface
                     || self.bodies.owner_is_interface_name(operation.owner),
+                static_receiver: None,
             });
         let access =
             access_bridges::protected_property_access(self.run, operation.expression, access);
@@ -7979,7 +7981,11 @@ impl<'a> Emitter<'a> {
         if let Some(temps) = &spilled {
             let (slot, receiver_ty, _) = temps[0];
             load(receiver_ty, slot, code);
-            self.narrow_on_stack(receiver_ty, Ty::obj_name(access_owner), code);
+            self.narrow_on_stack(
+                receiver_ty,
+                accessor_receiver_ty(&access, access_owner),
+                code,
+            );
         } else if let Some(receiver) = operation.receiver {
             let receiver_ty = accessor_receiver_ty(&access, access_owner);
             self.emit_property_receiver(receiver, access_owner, takes_receiver, &receiver_ty, code);
@@ -8041,6 +8047,7 @@ impl<'a> Emitter<'a> {
                 descriptor,
                 is_static,
                 is_interface,
+                static_receiver: _,
             } => {
                 let owner = owner.render();
                 let words = crate::jvm::names::parse_method_descriptor(&descriptor)
@@ -8238,6 +8245,7 @@ impl<'a> Emitter<'a> {
                 descriptor: method_descriptor(&[jvm_declared_ty(&f.params[0])], Ty::Unit),
                 is_static: false,
                 is_interface: is_jvm_interface(class),
+                static_receiver: None,
             });
         }
         let field = property_access::declared_property_field(class, declared, name);
@@ -8261,6 +8269,7 @@ impl<'a> Emitter<'a> {
             descriptor: method_descriptor(&[jvm_declared_ty(&f.params[0])], Ty::Unit),
             is_static: false,
             is_interface: is_jvm_interface(class),
+            static_receiver: None,
         };
         if let Some(setter) = setter.filter(|_| !direct_field || field.is_none()) {
             return Some(accessor(setter));
@@ -8273,6 +8282,7 @@ impl<'a> Emitter<'a> {
                 descriptor: method_descriptor(&[jvm_declared_ty(&field.ty)], Ty::Unit),
                 is_static: false,
                 is_interface: is_jvm_interface(class),
+                static_receiver: None,
             });
         }
         Some(PropertyAccess::Field {

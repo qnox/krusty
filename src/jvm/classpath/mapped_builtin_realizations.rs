@@ -57,6 +57,7 @@ impl Classpath {
                     descriptor,
                     is_static: false,
                     is_interface: class.kind == crate::libraries::TypeKind::Interface,
+                    static_receiver: None,
                 });
             }
             pending.extend(class.supertypes.iter_ids());

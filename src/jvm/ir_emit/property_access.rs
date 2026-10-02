@@ -149,6 +149,7 @@ impl Emitter<'_> {
                 descriptor,
                 is_static,
                 is_interface,
+                static_receiver: _,
             } => {
                 let owner = owner.render();
                 // A `void` accessor (a `Unit` property) leaves NOTHING on the stack. The descriptor's
@@ -167,7 +168,13 @@ impl Emitter<'_> {
                 // `getfield`, exactly as kotlinc records it.
                 self.mark_dispatch_line(operation, code);
                 if is_static {
-                    code.invokestatic(m, 0, words);
+                    let arguments = crate::jvm::names::parse_method_descriptor(&descriptor)
+                        .expect("a planned property accessor has a valid JVM descriptor")
+                        .0
+                        .iter()
+                        .map(|parameter| slot_words(ty_from_field_descriptor(parameter)) as i32)
+                        .sum();
+                    code.invokestatic(m, arguments, words);
                 } else if is_interface {
                     code.invokeinterface(m, 0, words);
                 } else {
@@ -277,6 +284,7 @@ impl Emitter<'_> {
                 descriptor,
                 is_static: false,
                 is_interface,
+                static_receiver,
             } => {
                 let (owner, is_interface) = crate::jvm::member_dispatch::call_owner(
                     self.dispatch_classifiers.as_ref(),
@@ -290,6 +298,7 @@ impl Emitter<'_> {
                     descriptor,
                     is_static: false,
                     is_interface,
+                    static_receiver,
                 })
             }
             access => Ok(access),
@@ -297,69 +306,38 @@ impl Emitter<'_> {
     }
 }
 
-/// Whether a realized property accessor consumes the receiver as an OPERAND. An instance accessor
-/// always does. A STATIC one does not — a `@JvmStatic` object property's `setX(V)` takes the VALUE,
-/// not a receiver — except on a `@JvmInline value class`, where every member is realized as a static
-/// `-impl` whose FIRST parameter is the receiver's carrier (`kotlin/Result.isSuccess` is
-/// `isSuccess-impl(Ljava/lang/Object;)Z`). Reading `!is_static` alone evaluated that receiver only for
-/// effect and then invoked the static with an empty stack.
+/// Whether a realized property accessor consumes the receiver as an operand. An instance accessor
+/// always does. A static one does only when its provider/declaration recorded the physical carrier
+/// parameter explicitly; an ordinary `@JvmStatic` accessor consumes no receiver.
 pub(super) fn accessor_takes_receiver(access: &crate::jvm::inline::PropertyAccess) -> bool {
     use crate::jvm::inline::PropertyAccess;
     match access {
         PropertyAccess::Field { is_static, .. } => !is_static,
         PropertyAccess::Accessor {
             is_static,
-            name,
-            descriptor,
+            static_receiver,
             ..
-        } => {
-            !is_static
-                || crate::jvm::names::parse_method_descriptor(descriptor).is_some_and(
-                    |(params, ret)| is_value_class_impl_accessor(name, params.len(), ret != "V"),
-                )
-        }
+        } => !is_static || static_receiver.is_some(),
         // An instance bridge takes the receiver; a named object's static field bridge does not.
         PropertyAccess::AccessBridge { takes_receiver, .. } => *takes_receiver,
     }
 }
 
-/// kotlinc's spelling for a `@JvmInline value class` member realized as a static over the carrier: the
-/// Kotlin name with an `-impl` suffix (`isSuccess-impl`, `getLabel-impl`). It is the only static
-/// accessor shape whose leading parameter is a receiver rather than a value.
-///
-/// `is_read` distinguishes the two sites, because the parameter COUNT is what separates a carrier from
-/// a value: such a getter takes exactly the carrier, and such a setter the carrier AND the new value. A
-/// `@JvmStatic` property whose name merely ends in `-impl` (reachable through `@JvmName`) therefore
-/// cannot be mistaken for one — its static setter takes a single VALUE parameter.
-fn is_value_class_impl_accessor(name: &str, params: usize, is_read: bool) -> bool {
-    name.ends_with("-impl") && params == if is_read { 1 } else { 2 }
-}
-
 /// The type the receiver must hold ON THE STACK for `access`, given the property's `owner`.
 ///
-/// Normally the owner itself. On a value class's static `-impl` accessor it is the accessor's first
-/// DECLARED parameter — the carrier (`isSuccess-impl(Ljava/lang/Object;)Z` consumes the erased
-/// underlying, never a `kotlin/Result` box). Narrowing an erased operand to the owner there emits a
-/// `checkcast` no unboxed carrier can pass.
+/// Normally the owner itself. A static value-class accessor records its erased carrier explicitly;
+/// narrowing that operand to the semantic owner would emit a `checkcast` no unboxed carrier can pass.
 pub(super) fn accessor_receiver_ty(
     access: &crate::jvm::inline::PropertyAccess,
     owner: TypeName,
 ) -> Ty {
     use crate::jvm::inline::PropertyAccess;
     if let PropertyAccess::Accessor {
-        is_static: true,
-        name,
-        descriptor,
+        static_receiver: Some(receiver),
         ..
     } = access
     {
-        if let Some((params, ret)) = crate::jvm::names::parse_method_descriptor(descriptor) {
-            if is_value_class_impl_accessor(name, params.len(), ret != "V") {
-                if let Some(carrier) = params.first() {
-                    return crate::jvm::jvm_libraries::desc_to_ty(carrier);
-                }
-            }
-        }
+        return *receiver;
     }
     Ty::obj_name(owner)
 }
@@ -370,10 +348,19 @@ pub(super) fn property_store_slot(access: &crate::jvm::inline::PropertyAccess, c
     use crate::jvm::inline::PropertyAccess;
     let descriptor = match access {
         PropertyAccess::Field { descriptor, .. } => Some(descriptor.as_str()),
-        PropertyAccess::Accessor { descriptor, .. } => {
-            crate::jvm::names::parse_method_descriptor(descriptor)
-                .and_then(|(params, _)| params.first().copied())
-        }
+        PropertyAccess::Accessor {
+            descriptor,
+            static_receiver,
+            ..
+        } => crate::jvm::names::parse_method_descriptor(descriptor).and_then(
+            |(parameters, _)| {
+                if static_receiver.is_some() {
+                    parameters.last().copied()
+                } else {
+                    parameters.first().copied()
+                }
+            },
+        ),
         PropertyAccess::AccessBridge { descriptor, .. } => {
             crate::jvm::names::parse_method_descriptor(descriptor)
                 .and_then(|(params, _)| params.last().copied())
@@ -382,4 +369,38 @@ pub(super) fn property_store_slot(access: &crate::jvm::inline::PropertyAccess, c
     descriptor
         .map(|descriptor| crate::jvm::physical_type::operand_slot_ty(descriptor, Some(checked)))
         .unwrap_or_else(|| ir_ty_to_jvm(&checked))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn static_accessor_receiver_is_an_explicit_realization_fact() {
+        let owner = crate::types::type_name("review/OwnedValue");
+        let same_spelling = crate::jvm::inline::PropertyAccess::Accessor {
+            owner,
+            name: "owned-impl".to_string(),
+            descriptor: "(I)I".to_string(),
+            is_static: true,
+            is_interface: false,
+            static_receiver: None,
+        };
+        assert!(!accessor_takes_receiver(&same_spelling));
+        assert_eq!(
+            accessor_receiver_ty(&same_spelling, owner),
+            Ty::obj_name(owner)
+        );
+
+        let recorded = crate::jvm::inline::PropertyAccess::Accessor {
+            owner,
+            name: "owned-impl".to_string(),
+            descriptor: "(I)I".to_string(),
+            is_static: true,
+            is_interface: false,
+            static_receiver: Some(Ty::Int),
+        };
+        assert!(accessor_takes_receiver(&recorded));
+        assert_eq!(accessor_receiver_ty(&recorded, owner), Ty::Int);
+    }
 }
