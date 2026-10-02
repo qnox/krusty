@@ -8702,8 +8702,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   - a carrier on the left and a box on the right: `UInt.equals-impl(carrier, Object)` (`B`, `S`,
     or `J` for the other three);
   - a box on the left and a carrier on the right: a null check (`null` is not equal) then the
-    unboxed carrier compared with the right operand. An operand that is not a variable or a
-    constant is stored first, in source order.
+    unboxed carrier compared with the right operand. When the right operand is stored, the left
+    value is stored first as well, including when it is a local, so
+    `var left: UInt? = 1u; left == run { left = 2u; 1u }` compares the original `1u`. A constant
+    on the left is reloaded. kotlinc 2.4.20 re-reads that nullable local and returns false; the
+    test records both results.
   `!=` negates that result. Tests: `tests/unsigned_equality_e2e.rs`. Corpus:
   `inlineClasses/equalityForIndyLambdaParameter.kt`.
 

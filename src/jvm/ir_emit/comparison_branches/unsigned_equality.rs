@@ -8,9 +8,10 @@
 //!   compares the unboxed carrier with the right operand;
 //! - `!=` negates that result.
 //!
-//! Two carriers stay on the numeric comparison, and two boxes stay on `Intrinsics.areEqual`. An
-//! operand that is not a variable or a constant is stored before the null check, in source order,
-//! which the temporary elimination then folds the way kotlinc's does.
+//! Two carriers stay on the numeric comparison, and two boxes stay on `Intrinsics.areEqual`. When
+//! the right operand must be stored, the left value is stored first, including a local: that
+//! operand can assign the local. A constant on the left is reloaded. Temporary elimination then
+//! folds those stores the way an ordinary spill does.
 
 use super::*;
 use crate::ir::IrBinOp;
@@ -184,7 +185,10 @@ impl Emitter<'_> {
             .scalar_value_repr()
             .expect("an unsigned class has a primitive carrier");
         let right_stored = !Self::reloads_in_place(self.ir.expr(rhs));
-        let left_stored = right_stored && !Self::reloads_in_place(self.ir.expr(lhs));
+        // A local is not stable across the right operand. Capture it first, including a plain
+        // `GetValue`: `var left = 1u; left == run { left = 2u; 1u }` compares the original `1u`.
+        // A constant cannot observe the assignment.
+        let left_stored = right_stored && !matches!(self.ir.expr(lhs), IrExpr::Const(_));
         let mut releases = Vec::new();
         let left_local = if left_stored {
             self.emit_value(lhs, code);
@@ -247,7 +251,8 @@ impl Emitter<'_> {
         }
     }
 
-    /// A variable or a constant can be evaluated again, so it does not need a temporary.
+    /// A variable or a constant has no effects of its own. The left one is still captured when the
+    /// right operand is stored, because that operand can assign the variable.
     fn reloads_in_place(expr: &IrExpr) -> bool {
         matches!(expr, IrExpr::GetValue(_) | IrExpr::Const(_))
     }

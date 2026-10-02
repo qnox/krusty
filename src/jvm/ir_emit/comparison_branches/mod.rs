@@ -6,6 +6,8 @@
 use super::*;
 use crate::ir::ExprId;
 
+mod unsigned_equality;
+
 impl Emitter<'_> {
     /// Whether emitting a comparison introduces non-linear JVM control flow in its subtree.
     ///

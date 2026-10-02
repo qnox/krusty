@@ -43,7 +43,6 @@ mod class_literals;
 mod class_pool_seed;
 mod companion_blocks;
 mod comparison_branches;
-mod unsigned_equality;
 mod condition_emission;
 mod constant_emission;
 mod constructor_accessors;

@@ -29,6 +29,8 @@ fun ifBox(a: UInt?, b: UInt): String {
     return \"different\"
 }
 fun narrow(a: UByte?, b: UByte) = a == b
+fun shortBox(a: UShort?, b: UShort) = a == b
+fun shortCarrier(b: UShort, a: UShort?) = b == a
 fun wide(b: ULong, a: ULong?) = b == a
 fun zero(a: UInt?) = a == 0u
 fun box(): String {
@@ -45,6 +47,8 @@ fun box(): String {
     if (ifCarrier(2u, 2u) != \"equal\" || ifCarrier(2u, null) != \"different\") return \"if carrier\"
     if (ifBox(null, 0u) != \"different\" || ifBox(2u, 2u) != \"equal\") return \"if box\"
     if (narrow(null, 0u) || !narrow(2u, 2u)) return \"ubyte\"
+    if (shortBox(null, 0u) || !shortBox(2u, 2u)) return \"ushort\"
+    if (shortCarrier(0u, null) || !shortCarrier(2u, 2u)) return \"ushort carrier\"
     if (wide(0uL, null) || !wide(2uL, 2uL)) return \"ulong\"
     if (zero(null) || !zero(0u)) return \"zero\"
     val same = { arg: UInt -> 2u == arg }
@@ -80,6 +84,8 @@ fn unsigned_equality_matches_kotlinc_bytecode_and_result() {
         "ifCarrier-",
         "ifBox-",
         "narrow-",
+        "shortBox-",
+        "shortCarrier-",
         "wide-",
         "zero-",
         "box$lambda$0",
@@ -94,4 +100,32 @@ fn unsigned_equality_matches_kotlinc_bytecode_and_result() {
         );
     }
     common::expect_box_same_as_kotlinc(DIRECT, "UnsignedEquality");
+}
+
+const CAPTURED_LOCAL: &str = "\
+fun box(): String {\n\
+    var left: UInt? = 1u\n\
+    val equal = left == run { left = 2u; 1u }\n\
+    return if (equal) \"OK\" else \"wrong\"\n\
+}\n";
+
+#[test]
+fn a_nullable_local_is_captured_before_the_mutating_right_operand() {
+    // Left-to-right evaluation reads `left` before `run` assigns it, so the values are equal.
+    // kotlinc 2.4.20 re-reads the local after that assignment and returns false.
+    assert_eq!(
+        common::expect_box_run_with_stdlib(CAPTURED_LOCAL, "UnsignedCapturedLocal"),
+        "OK"
+    );
+    assert_eq!(common::kotlinc_box_result(CAPTURED_LOCAL), "wrong");
+}
+
+#[test]
+fn a_carrier_local_matches_kotlinc_when_the_right_operand_assigns_it() {
+    let src = "\
+fun box(): String {\n\
+    var left: UInt = 1u\n\
+    return if (left == run { left = 2u; 1u }) \"OK\" else \"wrong\"\n\
+}\n";
+    common::expect_box_same_as_kotlinc(src, "UnsignedCapturedCarrier");
 }
