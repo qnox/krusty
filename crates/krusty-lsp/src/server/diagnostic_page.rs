@@ -426,6 +426,7 @@ mod tests {
             }
         }));
         let message = "m".repeat(8 * 1024);
+        let wire_message = format!("M{}", &message[1..]);
         let files: Vec<IndexedFile> = (0..80)
             .map(|index| IndexedFile {
                 uri: format!("file:///w/F{index:03}.kt"),
@@ -465,7 +466,7 @@ mod tests {
                     "kind": "full",
                     "uri": uri,
                     "version": Value::Null,
-                    "resultId": "4744c3770f7a75e3",
+                    "resultId": "e398a187576c1bd3",
                     "items": [{
                         "range": {
                             "start": {"line": 0, "character": 0},
@@ -473,7 +474,7 @@ mod tests {
                         },
                         "severity": 1,
                         "source": "Kotlin",
-                        "message": message
+                        "message": wire_message
                     }]
                 })
             })
@@ -575,7 +576,7 @@ mod tests {
                     },
                     "severity": 1,
                     "source": "Kotlin",
-                    "message": format!("error {index} {}", "m".repeat(1024))
+                    "message": format!("Error {index} {}", "m".repeat(1024))
                 })
             })
             .collect::<Vec<_>>();
