@@ -173,4 +173,76 @@ pub(super) fn realize(ir: &mut IrFile) {
             }
         }
     }
+    realize_secondary_constructors(ir);
+}
+
+/// kotlinc guards a declared secondary constructor's non-null reference parameters like a
+/// function's, unless no source caller outside the class can reach it: a private one, an enum's, a
+/// sealed class's (private in the class file) and one the compiler generated.
+fn realize_secondary_constructors(ir: &mut IrFile) {
+    let generated = ir
+        .classes
+        .iter()
+        .map(|class| {
+            (0..class.secondary_ctors.len())
+                .map(|ordinal| {
+                    ir.is_generated_secondary_constructor(class.fq_name_id(), ordinal as u32)
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    for (class, generated) in ir.classes.iter_mut().zip(generated) {
+        if !class.is_source_declared || class.is_sealed || class.is_enum || class.is_value {
+            continue;
+        }
+        for (constructor, generated) in class.secondary_ctors.iter_mut().zip(generated) {
+            if generated
+                || constructor.synthetic
+                || constructor.metadata_visibility == Some(crate::types::Visibility::Private)
+            {
+                continue;
+            }
+            constructor.param_checks = constructor
+                .named_params
+                .iter()
+                .map(|(_, ty)| {
+                    requires_reference_guard(*ty).then_some(crate::ir::IrParameterCheck::NonNull)
+                })
+                .collect();
+        }
+    }
+}
+
+/// Finish secondary-constructor guards after value-class lowering has selected the physical ABI.
+/// A constructor with a value-class parameter is private and marker-disambiguated in the class
+/// file, so no external JVM caller can reach it and kotlinc emits no parameter guards.
+pub(super) fn finalize_after_value_class_lowering(ir: &mut IrFile) {
+    for class in &mut ir.classes {
+        for constructor in &mut class.secondary_ctors {
+            if constructor.vc_params {
+                constructor.param_checks.clear();
+            }
+        }
+    }
+}
+
+/// Drop every `Intrinsics.checkNotNullParameter` guard the lowering recorded.
+///
+/// `-Xno-param-assertions` removes the parameter null checks kotlinc emits at the entry of every
+/// function reachable from Java. Applied to the IR rather than at the emission site on purpose: the
+/// guards are also what the `LineNumberTable` and `LocalVariableTable` start offsets are computed
+/// from, so suppressing them at one site and not the other would emit debug tables pointing into the
+/// middle of the method.
+pub(super) fn strip(ir: &mut IrFile) {
+    for function in &mut ir.functions {
+        function.param_checks.fill(None);
+    }
+    for class in &mut ir.classes {
+        for parameter in &mut class.ctor_args {
+            parameter.check = None;
+        }
+        for constructor in &mut class.secondary_ctors {
+            constructor.param_checks.clear();
+        }
+    }
 }

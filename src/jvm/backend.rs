@@ -244,6 +244,7 @@ fn run_backend_passes_after_plugins(
     ) {
         return Err(SkipReason::ValueClasses);
     }
+    crate::jvm::parameter_assertions::finalize_after_value_class_lowering(ir);
     // Generic erasure and value-class projection have now fixed every declaration parameter's JVM
     // carrier. Consume and retarget the exact call-owned adapters before default/suspend/inline
     // transforms clone or wrap those calls; the provenance is a one-shot representation contract.
@@ -801,7 +802,7 @@ impl JvmBackend {
         } = ready;
         let mut outputs = Vec::new();
         if !self.param_assertions {
-            crate::jvm::ir_emit::strip_param_assertions(&mut ir);
+            crate::jvm::parameter_assertions::strip(&mut ir);
         }
         if !self.call_assertions {
             crate::jvm::ir_emit::strip_call_assertions(&mut ir);

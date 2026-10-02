@@ -454,6 +454,7 @@ pub(super) fn add_deserialization_constructor(
             // `DefaultConstructorMarker` accessor. The serialization constructor itself retains
             // only `SerializationConstructorMarker`, matching kotlinc's nestmate call target.
             vc_params: has_value_field,
+            param_checks: Vec::new(),
         });
     ir.record_generated_secondary_constructor(
         class_id,
