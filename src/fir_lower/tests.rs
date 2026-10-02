@@ -2105,11 +2105,12 @@ fn retained_inline_local_delegate_materializes_its_inline_convention_dependency(
         &[
             (
                 "inline operator fun String.getValue(owner: Any?, property: Any): String = this\n\
+                 inline fun <T, R> T.letValue(block: (T) -> R): R = block(this)\n\
                  object C {\n\
-                 \x20   inline fun inlineFun(): String {\n\
+                 \x20   inline fun inlineFun() = {\n\
                  \x20       val value by \"OK\"\n\
-                 \x20       return value\n\
-                 \x20   }\n\
+                 \x20       value\n\
+                 \x20   }.letValue { it() }\n\
                  }",
                 "Library",
             ),
@@ -2123,13 +2124,13 @@ fn retained_inline_local_delegate_materializes_its_inline_convention_dependency(
         .iter()
         .copied()
         .collect::<std::collections::HashSet<_>>();
-    assert_eq!(template_functions.len(), 2);
+    assert_eq!(template_functions.len(), 3);
     let mut template_names = template_functions
         .iter()
         .map(|function| ir.functions[*function as usize].name.as_str())
         .collect::<Vec<_>>();
     template_names.sort_unstable();
-    assert_eq!(template_names, ["getValue", "inlineFun"]);
+    assert_eq!(template_names, ["getValue", "inlineFun", "letValue"]);
     assert!(template_functions
         .iter()
         .all(|function| ir.functions[*function as usize].body.is_some()));
@@ -2139,7 +2140,7 @@ fn retained_inline_local_delegate_materializes_its_inline_convention_dependency(
         .iter()
         .filter_map(|(&target, function)| template_functions.contains(function).then_some(target))
         .collect::<std::collections::HashSet<_>>();
-    assert_eq!(template_targets.len(), 2);
+    assert_eq!(template_targets.len(), 3);
     assert!(ir.exprs.iter().all(|expression| !matches!(
         expression,
         IrExpr::Call {

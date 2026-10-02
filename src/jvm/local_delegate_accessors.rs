@@ -45,11 +45,17 @@ pub(crate) fn realize(ir: &mut IrFile, current_source: IrModuleSource) -> Result
         .filter_map(|(&expression, &physical_owner)| match ir.expr(expression) {
             IrExpr::LocalDelegateAccess(access) => {
                 let plan = plans.get(access.plan as usize)?;
-                let owner = if ir.is_inline_copy(expression) {
-                    physical_owner
-                } else {
-                    plan.reference.class
-                };
+                // A retained plan from another source can only be live through a call-site copy:
+                // its template function is inline-only and therefore is not an emitted root. A
+                // materialized lambda inside that template may replace the copied expression's
+                // immediate inline mark while keeping the foreign declaration plan, so source
+                // provenance is the stable proof that its helper belongs to the emitted owner.
+                let owner =
+                    if ir.is_inline_copy(expression) || plan.reference.source != current_source {
+                        physical_owner
+                    } else {
+                        plan.reference.class
+                    };
                 Some((expression, access.plan, owner))
             }
             _ => None,
