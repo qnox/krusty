@@ -3,7 +3,7 @@
    hundred million times wrapped negative and reported a "negative array size" nobody asked for,
    and other counts wrapped to a buffer smaller than the copies written into it. The test requires
    the runtime's abort; reaching the end of this driver fails it. */
-#include "standins.h"
+#include "driver_support.h"
 
 void kt_program_entry(void) {
     DRIVER_BEGIN();

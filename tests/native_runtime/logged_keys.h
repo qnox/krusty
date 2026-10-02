@@ -26,7 +26,7 @@
 #ifndef KRUSTY_TEST_LOGGED_KEYS_H
 #define KRUSTY_TEST_LOGGED_KEYS_H
 
-#include "collections_later_tiers.h"
+#include "driver_exceptions.h"
 
 typedef struct Key {
     KObjectHeader header;
@@ -38,14 +38,14 @@ typedef struct Key {
 static char call_log[1024];
 static kt_int call_log_length;
 
-static void log_text(const char *text) {
+static inline void log_text(const char *text) {
     for (; *text != 0 && call_log_length < (kt_int)sizeof(call_log); text++) {
         call_log[call_log_length++] = *text;
     }
 }
 
 /* Whether the calls written down since the last check are exactly `expected`; starts afresh. */
-static kt_boolean logged(const char *expected) {
+static inline kt_boolean logged(const char *expected) {
     kt_int length = 0;
     while (expected[length] != 0) {
         length++;
@@ -58,11 +58,11 @@ static kt_boolean logged(const char *expected) {
     return same;
 }
 
-static kt_boolean key_equals(KRef self, KRef other);
-static kt_int key_hash_code(KRef self);
-static KRef key_to_string(KRef self);
-static kt_boolean asymmetric_equals(KRef self, KRef other);
-static kt_int asymmetric_hash_code(KRef self);
+static inline kt_boolean key_equals(KRef self, KRef other);
+static inline kt_int key_hash_code(KRef self);
+static inline KRef key_to_string(KRef self);
+static inline kt_boolean asymmetric_equals(KRef self, KRef other);
+static inline kt_int asymmetric_hash_code(KRef self);
 
 static const kt_fn key_vtable[] = {(kt_fn)key_equals, (kt_fn)key_hash_code,
                                    (kt_fn)key_to_string};
@@ -87,7 +87,7 @@ static const KType asymmetric_type = {
     .vtable_length = 3,
 };
 
-static KRef key_of(const KType *type, kt_int n, kt_int h, const char *tag) {
+static inline KRef key_of(const KType *type, kt_int n, kt_int h, const char *tag) {
     Key *key = (Key *)kt_gc_allocate(type, sizeof(Key));
     key->n = n;
     key->h = h;
@@ -96,14 +96,16 @@ static KRef key_of(const KType *type, kt_int n, kt_int h, const char *tag) {
 }
 
 /* `K(n, h, tag)` and `A(n, tag)`. */
-static KRef key(kt_int n, kt_int h, const char *tag) { return key_of(&key_type, n, h, tag); }
-static KRef asymmetric(kt_int n, const char *tag) { return key_of(&asymmetric_type, n, 7, tag); }
+static inline KRef key(kt_int n, kt_int h, const char *tag) { return key_of(&key_type, n, h, tag); }
+static inline KRef asymmetric(kt_int n, const char *tag) {
+    return key_of(&asymmetric_type, n, 7, tag);
+}
 
 static const Key *as_key(KRef value) {
     return value != NULL && type_of(value) == &key_type ? (const Key *)value : NULL;
 }
 
-static kt_boolean key_equals(KRef self, KRef other) {
+static inline kt_boolean key_equals(KRef self, KRef other) {
     log_text("eq(");
     log_text(((const Key *)self)->tag);
     log_text(",");
@@ -112,14 +114,14 @@ static kt_boolean key_equals(KRef self, KRef other) {
     return as_key(other) != NULL && as_key(other)->n == ((const Key *)self)->n;
 }
 
-static kt_int key_hash_code(KRef self) {
+static inline kt_int key_hash_code(KRef self) {
     log_text("hash(");
     log_text(((const Key *)self)->tag);
     log_text(") ");
     return ((const Key *)self)->h;
 }
 
-static KRef key_to_string(KRef self) {
+static inline KRef key_to_string(KRef self) {
     const char *tag = ((const Key *)self)->tag;
     kt_int length = 0;
     while (tag[length] != 0) {
@@ -128,18 +130,27 @@ static KRef key_to_string(KRef self) {
     return kt_string_utf8(tag, length);
 }
 
-static kt_boolean asymmetric_equals(KRef self, KRef other) {
+static inline kt_boolean asymmetric_equals(KRef self, KRef other) {
     log_text("eqA(");
     log_text(((const Key *)self)->tag);
     log_text(") ");
     return as_key(other) != NULL && as_key(other)->n == ((const Key *)self)->n;
 }
 
-static kt_int asymmetric_hash_code(KRef self) {
+static inline kt_int asymmetric_hash_code(KRef self) {
     log_text("hashA(");
     log_text(((const Key *)self)->tag);
     log_text(") ");
     return ((const Key *)self)->h;
+}
+
+/* Whether `text`, a string the runtime rendered, is exactly `expected`. */
+static inline kt_boolean renders(KRef text, const char *expected) {
+    kt_int length = 0;
+    while (expected[length] != 0) {
+        length++;
+    }
+    return text != NULL && text_is(text, expected, length);
 }
 
 #endif

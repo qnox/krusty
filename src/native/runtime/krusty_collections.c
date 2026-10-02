@@ -747,7 +747,8 @@ static KRef kt_array_element(KRef array, kt_int at) {
    local the conservative scan reads. */
 static KRef kt_array_snapshot(KRef array, int reversed) {
     if (array == NULL) {
-        KT_FAIL("krusty: a list of a null array\n");
+        kt_null_receiver();
+        return NULL;
     }
     kt_int length = ((const KArray *)array)->length;
     KRef elements = kt_array_new(&kt_type_array, length);
@@ -764,7 +765,8 @@ KRef kt_array_to_list(KRef array) { return kt_array_snapshot(array, 0); }
    is the same question for a reference array and a primitive one. */
 kt_boolean kt_array_is_empty(KRef array) {
     if (array == NULL) {
-        KT_FAIL("krusty: member access on a null receiver\n");
+        kt_null_receiver();
+        return false;
     }
     return ((const KArray *)array)->length == 0;
 }
@@ -800,7 +802,8 @@ KRef kt_array_reversed(KRef array) { return kt_array_snapshot(array, 1); }
    by width is the one answer that serves a reference array and a `DoubleArray` alike. */
 KRef kt_array_reversed_array(KRef array) {
     if (array == NULL) {
-        KT_FAIL("krusty: member access on a null receiver\n");
+        kt_null_receiver();
+        return NULL;
     }
     const KType *type = array->header.type;
     kt_int length = ((const KArray *)array)->length;
@@ -1028,14 +1031,16 @@ KRef kt_indexed_value(kt_int index, KRef value) {
 
 kt_int kt_indexed_value_index(KRef self) {
     if (self == NULL) {
-        KT_FAIL("krusty: member access on a null receiver\n");
+        kt_null_receiver();
+        return 0;
     }
     return ((const KIndexedValue *)self)->index;
 }
 
 KRef kt_indexed_value_value(KRef self) {
     if (self == NULL) {
-        KT_FAIL("krusty: member access on a null receiver\n");
+        kt_null_receiver();
+        return NULL;
     }
     return ((const KIndexedValue *)self)->value;
 }
@@ -1264,7 +1269,8 @@ static KRef kt_invoke_one(KRef function, KRef argument) {
    transform cannot change; a mutable one is walked by its iterator (see `kt_iterable_map`). */
 static kt_int kt_iterable_size(KRef iterable) {
     if (iterable == NULL) {
-        KT_FAIL("krusty: member access on a null receiver\n");
+        kt_null_receiver();
+        return 0;
     }
     if (iterable->header.type == &kt_type_list || kt_is_mutable_list(iterable)) {
         return kt_list_size(iterable);
@@ -1329,6 +1335,9 @@ static KRef kt_frozen(KRef growing, kt_boolean reversed);
 
 KRef kt_iterable_map(KRef iterable, KRef transform) {
     kt_int size = kt_iterable_size(iterable);
+    if (kt_raised()) {
+        return NULL;
+    }
     if (size < 0 || kt_is_mutable_list(iterable) || kt_is_set(iterable) || kt_is_map(iterable)) {
         /* A receiver whose count is not known without walking it (see `kt_iterable_size`), or one
            the transform can change while it is walked. Kotlin's `map` is a `for` loop over the
@@ -1906,7 +1915,8 @@ kt_double kt_iterable_sum_of_double(KRef iterable, KRef selector) {
 
 KRef kt_iterator_next(KRef iterator) {
     if (iterator == NULL) {
-        KT_FAIL("krusty: member access on a null receiver\n");
+        kt_null_receiver();
+        return NULL;
     }
     if (kt_is_list_iterator(iterator)) {
         return kt_list_iterator_next(iterator);

@@ -3,7 +3,7 @@
    which is undefined in C, and under the harness's trapping build the add that took it there ended
    the driver with SIGILL. A list is set to the count directly, through the layout it shares with
    this mirror, rather than modified 2^31 times. */
-#include "collections_later_tiers.h"
+#include "driver_exceptions.h"
 
 typedef struct MirrorList {
     KObjectHeader header;

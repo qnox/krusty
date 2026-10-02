@@ -37,7 +37,7 @@ use std::sync::OnceLock;
 /// leave the missing symbols unresolved (a driver that reaches one crashes, it does not pass). The
 /// tier that completes the runtime turns this on, and from then on a missing definition fails the
 /// link.
-const RUNTIME_COMPLETE: bool = false;
+const RUNTIME_COMPLETE: bool = true;
 
 /// Warnings a tier below the last one cannot help giving. Such a tier DECLARES the internal
 /// functions a later tier defines, and defines helpers only a later tier's code calls; the tier that
@@ -258,7 +258,9 @@ fn kotlin_programs() -> &'static HashMap<String, PathBuf> {
     static PROGRAMS: OnceLock<HashMap<String, PathBuf>> = OnceLock::new();
     PROGRAMS.get_or_init(|| {
         let work = common::scratch_dir().expect("scratch directory");
-        let mut batches: BTreeMap<Vec<String>, Vec<(String, PathBuf)>> = BTreeMap::new();
+        // Each batch's kotlinc arguments and class path, and its drivers' packaged programs.
+        type Batch = Vec<(String, PathBuf)>;
+        let mut batches: BTreeMap<(Vec<String>, Vec<PathBuf>), Batch> = BTreeMap::new();
         for entry in fs::read_dir(driver_dir()).expect("read the driver directory") {
             let program = entry.expect("driver directory entry").path();
             if program
@@ -282,13 +284,14 @@ fn kotlin_programs() -> &'static HashMap<String, PathBuf> {
             fs::create_dir_all(file.parent().expect("program directory"))
                 .expect("create the program directory");
             fs::write(&file, packaged).expect("write the packaged program");
-            batches
-                .entry(common::language_directives::kotlinc_args(&source))
-                .or_default()
-                .push((driver, file));
+            let key = (
+                common::language_directives::kotlinc_args(&source),
+                program_classpath(&source),
+            );
+            batches.entry(key).or_default().push((driver, file));
         }
         let mut programs = HashMap::new();
-        for (index, (arguments, members)) in batches.into_iter().enumerate() {
+        for (index, ((arguments, classpath), members)) in batches.into_iter().enumerate() {
             let output = work.join(format!("out-{index}"));
             let mut kotlinc: Vec<String> = members
                 .iter()
@@ -296,6 +299,15 @@ fn kotlin_programs() -> &'static HashMap<String, PathBuf> {
                 .collect();
             kotlinc.extend(["-d".to_string(), output.to_string_lossy().into_owned()]);
             kotlinc.extend(arguments);
+            if !classpath.is_empty() {
+                kotlinc.push("-cp".to_string());
+                kotlinc.push(
+                    std::env::join_paths(&classpath)
+                        .expect("build the program class path")
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+            }
             if !matches!(common::kotlinc_compile(&kotlinc), Some((0, _))) {
                 continue;
             }
@@ -309,6 +321,17 @@ fn kotlin_programs() -> &'static HashMap<String, PathBuf> {
         }
         programs
     })
+}
+
+/// What a Kotlin program beside a driver compiles and runs against besides the stdlib: a program
+/// that asserts with kotlin.test runs with kotlin-test on its class path, as a program compiled
+/// against it does.
+fn program_classpath(source: &str) -> Vec<PathBuf> {
+    if source.contains("import kotlin.test.") {
+        vec![common::kotlin_test_jar().expect("kotlin-test.jar for the Kotlin program")]
+    } else {
+        Vec::new()
+    }
 }
 
 /// `source` in package `package`, the declaration opening the line after the file annotations so no
@@ -416,14 +439,16 @@ fn run_driver_against_kotlin_with(driver: &str, divergences: &[Divergence]) {
     let program = driver_dir().join(format!("{driver}.kt"));
     let source = fs::read_to_string(&program)
         .unwrap_or_else(|error| panic!("{driver}: read {}: {error}", program.display()));
+    let classpath = program_classpath(&source);
     let kotlin = match kotlin_programs().get(driver) {
-        Some(classes) => common::run_box(
-            &[],
-            &format!("{driver}.MainKt"),
-            &[classes.clone(), common::stdlib_jar(), common::jdk_modules()],
-        )
-        .expect("run kotlinc-built box fixture"),
-        None => common::kotlinc_box_result(&source),
+        Some(classes) => {
+            let mut runtime = vec![classes.clone()];
+            runtime.extend_from_slice(&classpath);
+            runtime.extend([common::stdlib_jar(), common::jdk_modules()]);
+            common::run_box(&[], &format!("{driver}.MainKt"), &runtime)
+                .expect("run kotlinc-built box fixture")
+        }
+        None => common::kotlinc_box_result_with_classpath(&source, &classpath),
     };
     assert!(
         !kotlin.starts_with("ERROR:") && kotlin.ends_with('\n'),
@@ -1739,6 +1764,181 @@ fn a_map_iterator_is_kotlin_natives_class_for_what_it_hands_out() {
     );
 }
 
+#[test]
+fn unboxing_a_null_unsigned_records_a_null_pointer_exception_and_returns() {
+    run_driver_against_kotlin("unsigned_unbox_null");
+}
+
+#[test]
+fn equal_callable_references_hash_on_the_wrapping_ring() {
+    run_driver("reference_hash_code");
+}
+
+#[test]
+fn string_literals_share_one_root_and_stay_interned_and_alive() {
+    run_driver("string_literal_roots");
+}
+
+#[test]
+fn a_throwable_subclass_is_allocated_at_its_own_size() {
+    run_driver_against_kotlin("throwable_subclass_size");
+}
+
+#[test]
+fn integer_arithmetic_and_exceptions_answer_as_kotlin_does() {
+    // Kotlin/Native names a class kotlin.X where the JVM names java.lang.X: Throwable(cause) takes
+    // cause?.toString() as its message, and Throwable.toString starts with
+    // this::class.qualifiedName (kotlin-native/runtime/src/main/kotlin/kotlin/Throwable.kt,
+    // JetBrains/kotlin v2.4.10); assertFailsWith reports the expected KClass and the thrown
+    // Throwable through their toString
+    // (libraries/kotlin.test/common/src/main/kotlin/kotlin/test/Assertions.kt). The rest of each
+    // message is the JVM's.
+    run_driver_against_kotlin_with(
+        "arithmetic_and_exceptions",
+        &[
+            Divergence::native_behaviour(
+                "RuntimeException(bare).message = java.lang.IllegalStateException",
+                "RuntimeException(bare).message = kotlin.IllegalStateException",
+            ),
+            Divergence::native_behaviour(
+                "assertFailsWith<IllegalStateException> completing = AssertionError: Expected \
+                 an exception of class java.lang.IllegalStateException to be thrown, but was \
+                 completed successfully.",
+                "assertFailsWith<IllegalStateException> completing = AssertionError: Expected \
+                 an exception of class kotlin.IllegalStateException to be thrown, but was \
+                 completed successfully.",
+            ),
+            Divergence::native_behaviour(
+                "assertFailsWith<IllegalStateException>(\"m\") throwing = AssertionError: m. \
+                 Expected an exception of class java.lang.IllegalStateException to be thrown, \
+                 but was java.lang.ArithmeticException: / by zero",
+                "assertFailsWith<IllegalStateException>(\"m\") throwing = AssertionError: m. \
+                 Expected an exception of class kotlin.IllegalStateException to be thrown, but \
+                 was kotlin.ArithmeticException: / by zero",
+            ),
+        ],
+    );
+}
+
+#[test]
+fn a_program_member_that_raises_inside_a_runtime_call_keeps_its_exception_in_flight() {
+    // Kotlin/Native's KFunctionImpl.hashCode asks receiver.hashCode()
+    // (kotlin-native/runtime/src/main/kotlin/kotlin/native/internal/KFunctionImpl.kt,
+    // JetBrains/kotlin v2.4.10), so a bound reference whose receiver's hashCode throws propagates
+    // it, where the JVM's FunctionReference.hashCode never asks the receiver.
+    run_driver_against_kotlin_with(
+        "user_code_raise_keeps_first_exception",
+        &[Divergence::native_behaviour(
+            "(u::f).hashCode() = completed",
+            "(u::f).hashCode() = threw Boom",
+        )],
+    );
+}
+
+#[test]
+fn a_print_whose_to_string_raises_writes_nothing() {
+    // The driver's stdout is compared whole with Kotlin's transcript: a byte before its first line
+    // is one `print` or `println` wrote after the rendering raised.
+    run_driver_against_kotlin("print_of_raising_to_string_writes_nothing");
+}
+
+#[test]
+fn the_uncaught_report_runs_to_string_with_nothing_in_flight() {
+    run_driver_expecting_failure(
+        "uncaught_report_runs_to_string_with_nothing_pending",
+        "Exception in thread \"main\" Failure: disk full\n",
+    );
+}
+
+#[test]
+fn an_uncaught_exception_whose_to_string_raises_is_reported_as_the_jvm_reports_it() {
+    run_driver_expecting_failure(
+        "uncaught_report_whose_to_string_throws",
+        "Exception in thread \"main\" \nException: kotlin.IllegalStateException thrown from the \
+         UncaughtExceptionHandler in thread \"main\"\n",
+    );
+}
+
+#[test]
+fn a_negative_array_size_raises_illegal_argument_exception() {
+    // Kotlin/Native's type: its array constructors allocate through AllocArrayInstance, which
+    // calls ThrowIllegalArgumentException for a negative size (disassembly of the Kotlin/Native
+    // 2.4.10 linux_x64 stdlib cache, as for StringBuilder(-1)). The message is the JVM's, the
+    // size.
+    run_driver_against_kotlin_with(
+        "array_new_negative_size",
+        &[
+            Divergence::native_behaviour(
+                "Array<Any?>(-1) threw NegativeArraySizeException: -1",
+                "Array<Any?>(-1) threw IllegalArgumentException: -1",
+            ),
+            Divergence::native_behaviour(
+                "ByteArray(-1) threw NegativeArraySizeException: -1",
+                "ByteArray(-1) threw IllegalArgumentException: -1",
+            ),
+            Divergence::native_behaviour(
+                "IntArray(-1) threw NegativeArraySizeException: -1",
+                "IntArray(-1) threw IllegalArgumentException: -1",
+            ),
+            Divergence::native_behaviour(
+                "LongArray(-1) threw NegativeArraySizeException: -1",
+                "LongArray(-1) threw IllegalArgumentException: -1",
+            ),
+            Divergence::native_behaviour(
+                "CharArray(-1) threw NegativeArraySizeException: -1",
+                "CharArray(-1) threw IllegalArgumentException: -1",
+            ),
+            Divergence::native_behaviour(
+                "DoubleArray(-1) threw NegativeArraySizeException: -1",
+                "DoubleArray(-1) threw IllegalArgumentException: -1",
+            ),
+            Divergence::native_behaviour(
+                "ULongArray(-1) threw NegativeArraySizeException: -1",
+                "ULongArray(-1) threw IllegalArgumentException: -1",
+            ),
+            Divergence::native_behaviour(
+                "ByteArray(Int.MIN_VALUE) threw NegativeArraySizeException: -2147483648",
+                "ByteArray(Int.MIN_VALUE) threw IllegalArgumentException: -2147483648",
+            ),
+        ],
+    );
+}
+
+#[test]
+fn an_unmatched_exhaustive_when_raises_no_when_branch_matched_exception() {
+    run_driver_against_kotlin("no_when_branch_matched");
+}
+
+#[test]
+fn a_member_access_on_null_raises_null_pointer_exception() {
+    run_driver_against_kotlin("null_receiver_raises");
+}
+
+#[test]
+fn a_call_through_dispatch_on_null_stops_at_the_pending_check() {
+    run_driver("dispatch_on_null");
+}
+
+#[test]
+fn callable_references_are_equal_by_declaration_and_receiver() {
+    // Kotlin/Native's KFunctionImpl.hashCode folds receiver.hashCode() into the hash
+    // (kotlin-native/runtime/src/main/kotlin/kotlin/native/internal/KFunctionImpl.kt,
+    // JetBrains/kotlin v2.4.10), so hashing a bound reference asks its receiver; the JVM's
+    // FunctionReference.hashCode reads the owner, name and signature only.
+    run_driver_against_kotlin_with(
+        "reference_identity",
+        &[Divergence::native_behaviour(
+            "equal bound references hash alike = true []",
+            "equal bound references hash alike = true [hash(1) hash(1)]",
+        )],
+    );
+}
+
+#[test]
+fn a_failed_assertion_reports_kotlin_tests_wording() {
+    run_driver_against_kotlin("assertion_wording");
+}
+
 fn compiled_build_script() -> PathBuf {
     static BUILD_SCRIPT: OnceLock<PathBuf> = OnceLock::new();
     BUILD_SCRIPT
@@ -1788,6 +1988,7 @@ fn a_missing_runtime_compiler_leaves_the_native_target_unavailable() {
              cargo:rerun-if-changed=src/native/runtime/krusty_collections.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_maps.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_classes.c\n\
+             cargo:rerun-if-changed=src/native/runtime/krusty_lang.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_fp.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_gc.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_start.c\n\
@@ -1841,6 +2042,7 @@ fn a_failing_runtime_compiler_fails_the_build() {
          cargo:rerun-if-changed=src/native/runtime/krusty_collections.c\n\
          cargo:rerun-if-changed=src/native/runtime/krusty_maps.c\n\
          cargo:rerun-if-changed=src/native/runtime/krusty_classes.c\n\
+         cargo:rerun-if-changed=src/native/runtime/krusty_lang.c\n\
          cargo:rerun-if-changed=src/native/runtime/krusty_fp.c\n\
          cargo:rerun-if-changed=src/native/runtime/krusty_gc.c\n\
          cargo:rerun-if-changed=src/native/runtime/krusty_start.c\n\

@@ -6,7 +6,7 @@
    The driver prints each iterator's class, and the harness compares the lines with what
    `map_iterator_identity.kt` answers under the reference kotlinc. The JVM's six `java.util`
    classes differ; each line is a declared divergence. */
-#include "collections_later_tiers.h"
+#include "driver_exceptions.h"
 #include "transcript.h"
 
 static void show(const char *label, KRef iterator) {

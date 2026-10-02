@@ -6,7 +6,7 @@
    The driver prints each companion's class names, how many of the thirteen each one is, and whether
    the unsigned types' are their signed types', and the harness compares the lines with what
    `companion_objects.kt` answers under the reference kotlinc. */
-#include "collections_later_tiers.h"
+#include "driver_exceptions.h"
 #include "transcript.h"
 
 #define COMPANIONS 13
