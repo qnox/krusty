@@ -14,6 +14,9 @@ pub mod project;
 mod server;
 pub mod uri;
 mod worker;
+mod worker_lifecycle;
+mod worker_resident;
+pub mod workspace_index_input;
 
 pub use analysis::*;
 pub use compiler_analysis::LibraryRef;
@@ -30,6 +33,7 @@ pub use project::{
 };
 pub use server::*;
 pub use worker::*;
+pub use worker_resident::{ResidentSample, WorkerResidentPolicy, DEFAULT_WORKER_RSS_BYTES};
 
 /// Progress of the workspace file-tree scan that feeds background indexing. The scan walks every
 /// module source root on the engine thread, which can take minutes on a large tree; these events

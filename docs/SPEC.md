@@ -1686,7 +1686,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     of any function reachable from Java, including constructors that store a property. krusty honors
     it in three places, because a guard has three origins and each must agree or the class is
     malformed: the lowered guards are cleared from the IR before emission
-    (`jvm::ir_emit::strip_param_assertions`); a property SETTER's `<set-?>` guard, derived at emission
+    (`jvm::parameter_assertions::strip`); a property SETTER's `<set-?>` guard, derived at emission
     from the property type, is gated by `EmitOptions::param_assertions`; and the same option stops
     `ClassWriter` seeding the pool with the guard's `Methodref` and `String` constants. Every
     debug-table offset measured PAST a guard is gated too — the primary constructor's
@@ -3116,6 +3116,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   OUT OF SCOPE (documented residuals): inline-function SMAP line mapping, `LocalVariableTable` for
   top-level fns (next slice), the loop-head extra StackMapTable `same` frame.
   `tests/lnt_parity_e2e.rs` (6 full-byte + 3 javap-level pins).
+- **An `init` block opens on `init` and closes on `}`.** Each of those lines is its own
+  `LineNumberTable` entry, with a `nop` when no instruction of the block sits on that line. A
+  property assigned inside the block is marked on the assignment statement, including the receiver
+  load; the property's declaration line is only the fallback when that store has no statement line.
+  `tests/init_block_lines_e2e.rs`.
 - **A `for` loop's generated control carries the loop's line.** kotlinc's `ForLoopsLowering` builds
   a `for` loop's update, exit test and the bottom condition of its `do…while` shape at the loop's
   offsets, and codegen marks them like any other expression, so after the body the `for` line comes
@@ -10972,6 +10977,23 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/custom_floating_range_membership_e2e.rs`, box
   `ranges/contains/inComparableRange.kt`.
 
+- **Open-end membership names `rangeUntil`.** `x in a..<b`, `x in a until b`, and
+  `x in a downTo b` first select that syntax's operator. The result then uses `contains` unless the
+  exact selected declaration carries a provider role authorizing direct primitive comparison.
+  `RangeKind` records the operator name (`rangeTo`, `rangeUntil`, `until`, `downTo`); rendering `..`
+  and `..<` is a separate presentation spelling. A mixed value such as `3.0f in 1.0..<3.0` is
+  outside the range. Primitive `in` becomes a direct comparison only after ordinary selection picks
+  the exact provider declaration carrying the matching range-construction or floating-membership
+  realization. A nearer custom `Double`/`Float` operator instead calls its returned range's
+  `contains`, for both `..` and `..<`. Tests:
+  `mixed_open_end_membership_selects_range_until`,
+  `uniform_open_end_double_membership_stays_a_comparison`,
+  `uniform_open_end_double_range_until_can_be_shadowed`,
+  `membership_uses_the_operator_named_by_range_syntax`,
+  `open_end_range_membership_e2e::float_in_open_end_double_range_matches_kotlinc`,
+  `open_end_range_membership_e2e::shadowed_uniform_double_range_until_matches_kotlinc`,
+  box `ranges/contains/generated/doubleRangeUntil.kt`.
+
 - **Source generic signatures participate in call-site substitution.** Module callables retain
   their declared type parameters, receiver, parameters, bounds, and return type. Receiver-call
   resolution uses that signature to specialize higher-order parameters, so a declaration such as
@@ -11503,16 +11525,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     each masked parameter on that parameter's default, returns to the keyword for the branch, and
     delegates on the declaration's closing line; krusty's table is identical, pinned by a multiline
     ledger in `tests/enum_secondary_constructor_e2e.rs` whose three facts are on three lines.
-  - Still open: a NON-private secondary constructor's own single entry sits at pc 0 where kotlinc
-    puts it at pc 6. kotlinc enters such a constructor through an `Intrinsics.checkNotNullParameter`
-    guard per non-null reference parameter; krusty emits those only for PRIMARY constructor
-    parameters. The line is the same on both sides — only the prologue it follows differs — and the
-    synthetic overload, which has no such prologue, matches exactly. Pinned to that exact size by
-    `a_non_private_secondary_constructor_differs_only_by_its_missing_null_check`.
-  - Still open: the declared constructor's table is one entry even when its delegation spans lines,
-    where kotlinc marks each argument's own line and returns to the delegation's. That is
-    expression-line provenance for a constructor body, the same boundary as an ordinary call's
-    dispatch line, not a declaration fact.
+  - A source-reachable secondary constructor guards each non-null reference parameter with
+    `Intrinsics.checkNotNullParameter` before its delegation and publishes the matching parameter
+    nullability annotations. Private, enum, sealed, value-class-carrier, and generated constructors
+    emit no such guards. The guard is a typed `IrParameterCheck` fact; the JVM quotes the already
+    recorded source parameter identity and `-Xno-param-assertions` removes the fact before debug
+    offsets are finalized.
+  - A declared secondary constructor retains its own complete debug tables. Its `LineNumberTable`
+    starts on the delegation after the guard prologue, follows multiline delegation arguments and
+    body statements, and returns to the declaration's closing line. Its `LocalVariableTable` keeps
+    body locals live through the return, followed by `this` and the exact physical parameter list.
+    Repository-owned `Token`/`Envelope` fixtures compare the complete class set with kotlinc, both
+    with default assertions and with `-Xno-param-assertions`. Tests:
+    `tests/secondary_constructor_shape_e2e.rs`, `tests/no_assertions_flags_e2e.rs`, and
+    `tests/enum_secondary_constructor_e2e.rs`.
   - An enum declaring ONLY secondary constructors has no primary to emit: every entry names one of
     the secondaries, and registering the synthesized primary anyway collided with a no-argument
     secondary — both are `(String, int)V` — failing to load with `ClassFormatError: Duplicate

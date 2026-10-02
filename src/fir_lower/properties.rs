@@ -1193,6 +1193,10 @@ fn materialize_member_property(
                 value: initializer,
             });
             ir.property_initializer_stores.insert(store);
+            // kotlinc's initializer store sits at its initializer expression, not the declaration.
+            if let Some(&line) = ir.expr_source_lines.get(&initializer) {
+                ir.expr_lines.insert(store, line);
+            }
             initialization.entry(class_id).or_default().push((
                 property.initialization_order.ok_or(
                     FirFileLoweringFailure::UnsupportedPropertyShape(property.declaration),

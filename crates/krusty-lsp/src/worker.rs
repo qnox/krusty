@@ -9,8 +9,8 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::rc::Rc;
-use std::sync::mpsc;
-use std::time::Duration;
+use std::sync::mpsc::RecvTimeoutError;
+use std::time::{Duration, Instant};
 
 use krusty::diag::{Diagnostic, DiagnosticKind, Severity, Span};
 use krusty::features::LangFeatures;
@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use crate::compiler_analysis::{
     self, CompletionSymbols, DefinitionSymbols, HighlightSymbols, LibraryRef, SignatureHelpSymbols,
 };
+use crate::worker_resident::{WorkerResidentPolicy, DEFAULT_WORKER_RSS_BYTES};
 use crate::{
     finalize_navigation, read_framed, write_framed, AnalysisBudgets, CompletionIndex,
     DefinitionIndex, DocumentAnalysis, DocumentSymbolIndex, FoldingRangeIndex, HoverIndex,
@@ -40,6 +41,26 @@ const ANALYSIS_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const READINESS_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const WORKER_READY: &[u8] = b"ready";
 
+/// Classpath override and whether the worker should skip navigation indexes.
+///
+/// Indexing sets `diagnostics_only` so closed files do not pay for hover, tokens, and navigation
+/// the index store discards. Interactive analysis leaves the flag false and still passes the
+/// module classpath.
+#[derive(Copy, Clone)]
+pub struct WorkerAnalysisOptions<'a> {
+    pub classpath: Option<&'a [PathBuf]>,
+    pub diagnostics_only: bool,
+}
+
+impl WorkerAnalysisOptions<'static> {
+    fn full() -> Self {
+        Self {
+            classpath: None,
+            diagnostics_only: false,
+        }
+    }
+}
+
 #[derive(Serialize)]
 struct AnalysisRequest<'a, J> {
     sources: &'a [&'a str],
@@ -49,6 +70,10 @@ struct AnalysisRequest<'a, J> {
     language_features: &'a [&'a str],
     java_sources: &'a [J],
     classpath: Option<&'a [PathBuf]>,
+    /// Background indexing publishes diagnostics only. Navigation indexes for those files are built
+    /// and then discarded, so the worker skips them and keeps the response to the diagnostic list.
+    #[serde(default, skip_serializing_if = "is_false")]
+    diagnostics_only: bool,
 }
 
 #[derive(Deserialize)]
@@ -65,6 +90,13 @@ struct OwnedAnalysisRequest {
     java_sources: Vec<String>,
     #[serde(default)]
     classpath: Option<Vec<PathBuf>>,
+    /// Absent means a full analysis. Older supervisors, and every interactive request, omit it.
+    #[serde(default)]
+    diagnostics_only: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Deserialize)]
@@ -292,9 +324,10 @@ impl AnalysisResponse {
 }
 
 struct WorkerProcess {
-    child: Child,
+    child: Option<Child>,
     stdin: ChildStdin,
     stdout: Option<BufReader<ChildStdout>>,
+    inflight: Option<crate::worker_lifecycle::FrameReader<BufReader<ChildStdout>>>,
 }
 
 /// Borrowed send shape: a many-thousand-entry classpath must stream into the bounded writer without
@@ -354,7 +387,7 @@ fn encode_request<J: AsRef<str> + Serialize>(
     inferred_count: usize,
     features: &LangFeatures,
     java_sources: &[J],
-    classpath: Option<&[PathBuf]>,
+    options: WorkerAnalysisOptions<'_>,
 ) -> io::Result<Vec<u8>> {
     if !source_set_fits(
         inputs
@@ -389,7 +422,8 @@ fn encode_request<J: AsRef<str> + Serialize>(
             inferred_count,
             language_features: &language_features,
             java_sources,
-            classpath,
+            classpath: options.classpath,
+            diagnostics_only: options.diagnostics_only,
         },
     )
     .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
@@ -468,6 +502,7 @@ fn encode_dump_request(
             language_features: &language_features,
             java_sources: target.java_sources,
             classpath: target.classpath,
+            diagnostics_only: false,
         },
         target: target.target,
         label: target.label,
@@ -486,23 +521,11 @@ fn language_feature_names(features: &LangFeatures) -> Vec<&str> {
     names
 }
 
-fn framed_read_receiver<R>(
-    mut reader: R,
-    max_bytes: usize,
-) -> mpsc::Receiver<(R, io::Result<Option<Vec<u8>>>)>
-where
-    R: BufRead + Send + 'static,
-{
-    let (sender, receiver) = mpsc::sync_channel(1);
-    std::thread::spawn(move || {
-        let response = read_framed(&mut reader, max_bytes);
-        let _ = sender.send((reader, response));
-    });
-    receiver
-}
-
 impl WorkerProcess {
     fn spawn(executable: &Path, classpath: &[PathBuf]) -> io::Result<Self> {
+        if !crate::worker_lifecycle::replacement_permitted() {
+            return Err(crate::worker_lifecycle::still_live());
+        }
         let configuration = encode_launch_configuration(classpath)?;
         let mut child = Command::new(executable)
             .arg("--analysis-worker")
@@ -523,9 +546,10 @@ impl WorkerProcess {
             .take()
             .ok_or_else(|| io::Error::other("analysis worker stdout unavailable"))?;
         let mut process = Self {
-            child,
+            child: Some(child),
             stdin,
             stdout: Some(BufReader::new(stdout)),
+            inflight: None,
         };
         write_framed(&mut process.stdin, &configuration)?;
         process.wait_until_ready()?;
@@ -557,28 +581,35 @@ impl WorkerProcess {
         timeout: Duration,
         timeout_message: &'static str,
     ) -> io::Result<Option<Vec<u8>>> {
+        if self.inflight.is_some() || self.child.is_none() {
+            return Err(crate::worker_lifecycle::still_live());
+        }
         let stdout = self
             .stdout
             .take()
             .ok_or_else(|| io::Error::other("analysis worker stdout unavailable"))?;
-        let receiver = framed_read_receiver(stdout, max_bytes);
-        match receiver.recv_timeout(timeout) {
+        let reader = crate::worker_lifecycle::spawn_frame_reader(move || {
+            let mut stdout = stdout;
+            let response = read_framed(&mut stdout, max_bytes);
+            (stdout, response)
+        });
+        match reader.recv_timeout(timeout) {
             Ok((stdout, response)) => {
+                reader.join();
                 self.stdout = Some(stdout);
                 response
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                let _ = self.child.kill();
-                let _ = self.child.wait();
-                if let Ok((stdout, _)) = receiver.recv() {
-                    self.stdout = Some(stdout);
-                }
+            Err(RecvTimeoutError::Timeout) => {
+                self.inflight = Some(reader);
                 Err(io::Error::new(io::ErrorKind::TimedOut, timeout_message))
             }
-            Err(mpsc::RecvTimeoutError::Disconnected) => Err(io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "analysis worker response reader stopped",
-            )),
+            Err(RecvTimeoutError::Disconnected) => {
+                reader.join();
+                Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "analysis worker response reader stopped",
+                ))
+            }
         }
     }
 
@@ -589,7 +620,7 @@ impl WorkerProcess {
             "analysis worker timed out",
         )? {
             Some(response) => Ok(response),
-            None => match self.child.wait() {
+            None => match self.observed_exit() {
                 Ok(status) if status.success() => Err(io::Error::new(
                     io::ErrorKind::Interrupted,
                     "analysis worker classpath changed",
@@ -598,12 +629,50 @@ impl WorkerProcess {
                     io::ErrorKind::UnexpectedEof,
                     format!("analysis worker exited with {status}"),
                 )),
-                Err(error) => Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    format!("analysis worker exited: {error}"),
-                )),
+                Err(error) => Err(error),
             },
         }
+    }
+
+    fn observed_exit(&mut self) -> io::Result<std::process::ExitStatus> {
+        let deadline = Instant::now()
+            .checked_add(crate::worker_lifecycle::WORKER_REAP_GRACE)
+            .unwrap_or_else(Instant::now);
+        let mut child = self
+            .child
+            .take()
+            .ok_or_else(|| io::Error::other("analysis worker is not running"))?;
+        loop {
+            match crate::worker_lifecycle::classify_wait(child.try_wait()) {
+                crate::worker_lifecycle::WaitClass::Exited(status) => return Ok(status),
+                crate::worker_lifecycle::WaitClass::NotAChild => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "analysis worker is not a child",
+                    ));
+                }
+                crate::worker_lifecycle::WaitClass::Failed(error) => {
+                    self.child = Some(child);
+                    let _ = self.release(Duration::ZERO);
+                    return Err(error);
+                }
+                crate::worker_lifecycle::WaitClass::Running if Instant::now() >= deadline => {
+                    self.child = Some(child);
+                    self.release(Duration::ZERO)?;
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "analysis worker closed stdout and did not exit before the reap deadline",
+                    ));
+                }
+                crate::worker_lifecycle::WaitClass::Running => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
+        }
+    }
+
+    fn release(&mut self, grace: Duration) -> io::Result<()> {
+        crate::worker_lifecycle::release_worker(&mut self.child, &mut self.inflight, grace)
     }
 
     fn analyze<J: AsRef<str> + Serialize>(
@@ -613,7 +682,7 @@ impl WorkerProcess {
         inferred_count: usize,
         language_features: &LangFeatures,
         java_sources: &[J],
-        classpath: Option<&[PathBuf]>,
+        options: WorkerAnalysisOptions<'_>,
     ) -> io::Result<Vec<DocumentAnalysis>> {
         let request = encode_request(
             inputs,
@@ -621,7 +690,7 @@ impl WorkerProcess {
             inferred_count,
             language_features,
             java_sources,
-            classpath,
+            options,
         )?;
         write_framed(&mut self.stdin, &request)?;
         drop(request);
@@ -655,15 +724,33 @@ impl WorkerProcess {
 
 impl Drop for WorkerProcess {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        if self
+            .release(crate::worker_lifecycle::WORKER_REAP_GRACE)
+            .is_err()
+        {
+            if let Some(child) = self.child.take() {
+                crate::worker_lifecycle::quarantine_child(child);
+            }
+        }
     }
+}
+
+/// Kill one worker child and join the thread reading its stdout, under a single grace period.
+pub fn release_worker_child(child: Child, stdout: ChildStdout, grace: Duration) -> io::Result<()> {
+    let mut child = Some(child);
+    let mut reader = Some(crate::worker_lifecycle::spawn_frame_reader(move || {
+        let mut stdout = BufReader::new(stdout);
+        let response = read_framed(&mut stdout, MAX_WORKER_MESSAGE_BYTES);
+        (stdout, response)
+    }));
+    crate::worker_lifecycle::release_worker(&mut child, &mut reader, grace)
 }
 
 pub struct AnalysisWorker {
     executable: PathBuf,
     classpath: Vec<PathBuf>,
     process: WorkerProcess,
+    resident: WorkerResidentPolicy,
     restart_required: bool,
     analyses: usize,
     max_analyses: usize,
@@ -672,11 +759,26 @@ pub struct AnalysisWorker {
 
 impl AnalysisWorker {
     pub fn spawn(executable: PathBuf, classpath: Vec<PathBuf>) -> io::Result<Self> {
+        Self::spawn_with_resident_policy(
+            executable,
+            classpath,
+            WorkerResidentPolicy::platform(DEFAULT_WORKER_RSS_BYTES),
+        )
+    }
+
+    /// Start a worker under `resident`. The supervisor passes its ceiling here; tests pass a
+    /// scripted sample. The sample runs before each request and does not cover growth inside it.
+    pub fn spawn_with_resident_policy(
+        executable: PathBuf,
+        classpath: Vec<PathBuf>,
+        resident: WorkerResidentPolicy,
+    ) -> io::Result<Self> {
         let process = WorkerProcess::spawn(&executable, &classpath)?;
         Ok(Self {
             executable,
             classpath,
             process,
+            resident,
             restart_required: false,
             analyses: 0,
             max_analyses: DEFAULT_ANALYSES_PER_WORKER,
@@ -684,10 +786,18 @@ impl AnalysisWorker {
         })
     }
 
+    pub fn process_id(&self) -> u32 {
+        self.process.id()
+    }
+
     fn restart(&mut self) -> io::Result<()> {
-        let _ = self.process.child.kill();
-        let _ = self.process.child.wait();
+        if !crate::worker_lifecycle::replacement_permitted() {
+            self.restart_required = true;
+            return Err(crate::worker_lifecycle::still_live());
+        }
         self.restart_required = true;
+        self.process
+            .release(crate::worker_lifecycle::WORKER_REAP_GRACE)?;
         let replacement = WorkerProcess::spawn(&self.executable, &self.classpath)?;
         self.process = replacement;
         self.restart_required = false;
@@ -716,9 +826,13 @@ impl AnalysisWorker {
                 Ok(())
             };
         }
-        let _ = self.process.child.kill();
-        let _ = self.process.child.wait();
+        if !crate::worker_lifecycle::replacement_permitted() {
+            self.restart_required = true;
+            return Err(crate::worker_lifecycle::still_live());
+        }
         self.restart_required = true;
+        self.process
+            .release(crate::worker_lifecycle::WORKER_REAP_GRACE)?;
         let replacement = WorkerProcess::spawn(&self.executable, &classpath)?;
         self.classpath = classpath;
         self.process = replacement;
@@ -750,7 +864,7 @@ impl AnalysisWorker {
                 inferred_count,
                 &features,
                 java_sources,
-                None,
+                WorkerAnalysisOptions::full(),
             )
         })
     }
@@ -762,7 +876,7 @@ impl AnalysisWorker {
         inferred_count: usize,
         java_sources: &[J],
         language_arguments: &[String],
-        classpath: Option<&[PathBuf]>,
+        options: WorkerAnalysisOptions<'_>,
     ) -> io::Result<Vec<DocumentAnalysis>> {
         let mut features = LangFeatures::new();
         for argument in language_arguments {
@@ -775,7 +889,7 @@ impl AnalysisWorker {
                 inferred_count,
                 &features,
                 java_sources,
-                classpath,
+                options,
             )
         })
     }
@@ -805,7 +919,12 @@ impl AnalysisWorker {
         &mut self,
         mut operation: impl FnMut(&mut WorkerProcess) -> io::Result<T>,
     ) -> io::Result<T> {
-        if self.restart_required || self.analyses >= self.max_analyses {
+        // Previous residue only. This request can still pass the ceiling; a crash then uses the
+        // restart below. An unreadable sample does not restart.
+        if self.restart_required
+            || self.analyses >= self.max_analyses
+            || self.resident.over_budget(self.process.id())
+        {
             self.restart()?;
         }
         match operation(&mut self.process) {
@@ -815,7 +934,7 @@ impl AnalysisWorker {
             }
             Err(error) if error.kind() == io::ErrorKind::InvalidInput => Err(error),
             Err(error) if error.kind() == io::ErrorKind::TimedOut => {
-                self.restart_required = true;
+                self.restart()?;
                 Err(error)
             }
             Err(_) => {
@@ -1069,62 +1188,80 @@ pub fn run_analysis_worker<R: BufRead, W: Write>(
             platform,
             &language_features,
         );
-        let highlight_symbols =
-            HighlightSymbols::from_source_set(&source_set.files, &source_set.symbols);
-        let mut definition_symbols = DefinitionSymbols::from_source_set(
-            &sources,
-            &source_set.files,
-            &source_set.symbols,
-            crate::analysis::MAX_SOURCE_SET_NAVIGATION_ENTRIES,
-        );
-        crate::analysis::register_java_declarations(
-            &mut definition_symbols,
-            &sources,
-            &java_documents,
-        );
-        let completion_symbols =
-            CompletionSymbols::from_source_set_prefix(&source_set.files, inferred_count);
-        let signature_help_symbols =
-            SignatureHelpSymbols::from_source_set(&sources, &source_set.files, &source_set.symbols);
-        let workspace_symbols = WorkspaceSymbolIndex::from_source_set(&sources, &source_set.files);
-        let indexes = SourceSetIndexes::new(
-            &source_set.symbols,
-            &highlight_symbols,
-            &definition_symbols,
-            &completion_symbols,
-            &signature_help_symbols,
-        );
-        let mut budgets = AnalysisBudgets::new();
-        let pending = source_set
-            .files
-            .into_iter()
-            .zip(&sources)
-            .enumerate()
-            .take(request.result_count)
-            .map(|(file_index, (file, source))| {
-                DocumentAnalysis::from_file_analysis(
-                    source,
-                    file,
-                    file_index as u32,
-                    &indexes,
-                    &mut budgets,
-                )
-            })
-            .collect();
-        let implementation_relations =
-            compact_implementation_relations(definition_symbols.implementation_relations());
-        let mut analyses = finalize_navigation(pending, &mut budgets);
-        crate::analysis::apply_java_navigation(
-            &mut analyses,
-            &sources,
-            &java_documents,
-            &definition_symbols,
-            &mut budgets,
-        );
-        if let Some(first) = analyses.first_mut() {
-            first.workspace_symbols = workspace_symbols;
-        }
-        crate::retain_analysis_wire_budget(&mut analyses, MAX_WORKER_MESSAGE_BYTES);
+        let (analyses, implementation_relations) = if request.diagnostics_only {
+            // The compiler still checks the file. Hover, tokens, and navigation are what the index
+            // store throws away, and they dominate the worker response for a chunk of closed files.
+            let mut analyses = source_set
+                .files
+                .into_iter()
+                .take(request.result_count)
+                .map(|file| DocumentAnalysis::with_diagnostics(file.diagnostics))
+                .collect::<Vec<_>>();
+            crate::retain_analysis_wire_budget(&mut analyses, MAX_WORKER_MESSAGE_BYTES);
+            (analyses, Vec::new())
+        } else {
+            let highlight_symbols =
+                HighlightSymbols::from_source_set(&source_set.files, &source_set.symbols);
+            let mut definition_symbols = DefinitionSymbols::from_source_set(
+                &sources,
+                &source_set.files,
+                &source_set.symbols,
+                crate::analysis::MAX_SOURCE_SET_NAVIGATION_ENTRIES,
+            );
+            crate::analysis::register_java_declarations(
+                &mut definition_symbols,
+                &sources,
+                &java_documents,
+            );
+            let completion_symbols =
+                CompletionSymbols::from_source_set_prefix(&source_set.files, inferred_count);
+            let signature_help_symbols = SignatureHelpSymbols::from_source_set(
+                &sources,
+                &source_set.files,
+                &source_set.symbols,
+            );
+            let workspace_symbols =
+                WorkspaceSymbolIndex::from_source_set(&sources, &source_set.files);
+            let indexes = SourceSetIndexes::new(
+                &source_set.symbols,
+                &highlight_symbols,
+                &definition_symbols,
+                &completion_symbols,
+                &signature_help_symbols,
+            );
+            let mut budgets = AnalysisBudgets::new();
+            let pending = source_set
+                .files
+                .into_iter()
+                .zip(&sources)
+                .enumerate()
+                .take(request.result_count)
+                .map(|(file_index, (file, source))| {
+                    DocumentAnalysis::from_file_analysis(
+                        source,
+                        file,
+                        file_index as u32,
+                        &indexes,
+                        &mut budgets,
+                    )
+                })
+                .collect();
+            let implementation_relations =
+                compact_implementation_relations(definition_symbols.implementation_relations());
+            let mut analyses = finalize_navigation(pending, &mut budgets);
+            crate::analysis::apply_java_navigation(
+                &mut analyses,
+                &sources,
+                &java_documents,
+                &definition_symbols,
+                &mut budgets,
+            );
+            if let Some(first) = analyses.first_mut() {
+                first.workspace_symbols = workspace_symbols;
+            }
+            crate::retain_analysis_wire_budget(&mut analyses, MAX_WORKER_MESSAGE_BYTES);
+            (analyses, implementation_relations)
+        };
         let mut analyses = analyses
             .into_iter()
             .map(AnalysisResponse::from)
@@ -1282,6 +1419,15 @@ fn json_io(error: serde_json::Error) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, error)
 }
 
+impl WorkerProcess {
+    fn id(&self) -> u32 {
+        self.child
+            .as_ref()
+            .map(Child::id)
+            .expect("analysis worker is running")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::{BufRead, Cursor, Read};
@@ -1290,6 +1436,21 @@ mod tests {
     use super::java_stub_memo::{java_stub_generations, reset_java_stub_generations};
     use super::*;
     use crate::analysis::MAX_SOURCE_SET_NAVIGATION_ENTRIES;
+
+    #[test]
+    fn a_parked_worker_blocks_fresh_analysis_worker_creation() {
+        let _parked = crate::worker_lifecycle::park_live_child_for_test();
+
+        let error = AnalysisWorker::spawn(PathBuf::from("replacement-must-not-spawn"), Vec::new())
+            .err()
+            .expect("the process-lifetime park must refuse a fresh worker");
+
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(
+            error.to_string(),
+            "analysis worker is still live after the reap deadline"
+        );
+    }
 
     /// Java texts are serialized from the caller's borrow. A cache hit and a dump must not build
     /// an intermediate copy of those strings just to encode the request.
@@ -1325,22 +1486,19 @@ mod tests {
             },
         ];
         let inputs = [SourceInput::kotlin("fun main() {}")];
-        let encoded = encode_request(&inputs, 1, 1, &LangFeatures::new(), &java, None).unwrap();
+        let encoded = encode_request(
+            &inputs,
+            1,
+            1,
+            &LangFeatures::new(),
+            &java,
+            WorkerAnalysisOptions::full(),
+        )
+        .unwrap();
         assert_eq!(visits.load(Ordering::Relaxed), java.len());
         let text = String::from_utf8(encoded).unwrap();
         assert!(text.contains("class A {}"));
         assert!(text.contains("class B {}"));
-    }
-
-    struct DelayedEof {
-        delay: Duration,
-    }
-
-    impl Read for DelayedEof {
-        fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
-            std::thread::sleep(self.delay);
-            Ok(0)
-        }
     }
 
     struct MutatingReader {
@@ -1496,15 +1654,29 @@ mod tests {
         assert!(!source_set_fits([MAX_SOURCE_SET_BYTES, 1]));
         let inputs = [SourceInput::kotlin("fun use() = 1")];
         assert_eq!(
-            encode_request(&inputs, 1, 0, &LangFeatures::new(), &[] as &[&str], None)
-                .unwrap_err()
-                .kind(),
+            encode_request(
+                &inputs,
+                1,
+                0,
+                &LangFeatures::new(),
+                &[] as &[&str],
+                WorkerAnalysisOptions::full(),
+            )
+            .unwrap_err()
+            .kind(),
             io::ErrorKind::InvalidInput
         );
         assert_eq!(
-            encode_request(&inputs, 0, 2, &LangFeatures::new(), &[] as &[&str], None)
-                .unwrap_err()
-                .kind(),
+            encode_request(
+                &inputs,
+                0,
+                2,
+                &LangFeatures::new(),
+                &[] as &[&str],
+                WorkerAnalysisOptions::full(),
+            )
+            .unwrap_err()
+            .kind(),
             io::ErrorKind::InvalidInput
         );
         assert_eq!(
@@ -1514,7 +1686,7 @@ mod tests {
                 1,
                 &LangFeatures::new(),
                 &[String::from_utf8(vec![b'x'; MAX_SOURCE_SET_BYTES]).unwrap()],
-                None,
+                WorkerAnalysisOptions::full(),
             )
             .unwrap_err()
             .kind(),
@@ -1541,8 +1713,15 @@ mod tests {
         std::fs::create_dir(&directory).expect("create classpath directory");
 
         let inputs = [SourceInput::kotlin("fun use() = 1")];
-        let request =
-            encode_request(&inputs, 1, 1, &LangFeatures::new(), &[] as &[&str], None).unwrap();
+        let request = encode_request(
+            &inputs,
+            1,
+            1,
+            &LangFeatures::new(),
+            &[] as &[&str],
+            WorkerAnalysisOptions::full(),
+        )
+        .unwrap();
         let mut framed = Vec::new();
         write_framed(&mut framed, &request).unwrap();
         let generated = directory.join("generated");
@@ -1603,7 +1782,10 @@ mod tests {
             1,
             &LangFeatures::new(),
             &[] as &[&str],
-            Some(&classpath),
+            WorkerAnalysisOptions {
+                classpath: Some(&classpath),
+                diagnostics_only: false,
+            },
         )
         .unwrap();
         let dump = encode_dump_request(
@@ -1687,22 +1869,6 @@ mod tests {
         );
         std::fs::remove_dir_all(&directory).expect("remove classpath directory");
         std::fs::remove_dir_all(&cache_root).expect("remove dump cache");
-    }
-
-    #[test]
-    fn framed_worker_read_times_out_when_no_readiness_frame_arrives() {
-        let receiver = framed_read_receiver(
-            BufReader::new(DelayedEof {
-                delay: Duration::from_millis(50),
-            }),
-            WORKER_READY.len(),
-        );
-        assert!(matches!(
-            receiver.recv_timeout(Duration::from_millis(1)),
-            Err(mpsc::RecvTimeoutError::Timeout)
-        ));
-        let (_, result) = receiver.recv_timeout(Duration::from_secs(1)).unwrap();
-        assert!(result.unwrap().is_none());
     }
 
     #[test]
@@ -1981,6 +2147,7 @@ mod tests {
         assert_eq!(dump.analysis.java_sources, java_sources);
         assert_eq!(dump.analysis.classpath.as_deref(), Some(&classpath[..]));
         assert_eq!(dump.analysis.result_count, 1);
+        assert!(!dump.analysis.diagnostics_only);
         assert_eq!(dump.analysis.inferred_count, Some(2));
         let mut module_features = LangFeatures::new();
         for argument in &language_arguments {
@@ -2183,6 +2350,7 @@ mod tests {
             language_features: &[],
             java_sources: &[] as &[&str],
             classpath: None,
+            diagnostics_only: false,
         })
         .unwrap();
         let mut input = Vec::new();
@@ -2209,6 +2377,79 @@ mod tests {
     }
 
     #[test]
+    fn worker_protocol_diagnostics_only_keeps_errors_and_skips_navigation() {
+        let omitted: OwnedAnalysisRequest =
+            serde_json::from_str(r#"{"sources":["fun answer(): Int = 42"],"result_count":1}"#)
+                .unwrap();
+        assert!(!omitted.diagnostics_only);
+
+        let sources = ["fun answer(): Int = 42\nfun broken(value: Missing) = value\n"];
+        let request = serde_json::to_vec(&AnalysisRequest {
+            sources: &sources,
+            source_kinds: &[0],
+            result_count: 1,
+            inferred_count: 1,
+            language_features: &[],
+            java_sources: &[] as &[&str],
+            classpath: None,
+            diagnostics_only: true,
+        })
+        .unwrap();
+        let mut input = Vec::new();
+        write_framed(&mut input, &request).unwrap();
+        let mut output = Vec::new();
+        run_analysis_worker(&mut Cursor::new(input), &mut output, Vec::new()).unwrap();
+
+        let diagnostics_only_bytes = output.len();
+        let analysis = decode_worker_output(output)
+            .into_iter()
+            .last()
+            .unwrap()
+            .into_document_analysis();
+        assert_eq!(analysis.diagnostics.len(), 1);
+        let diagnostic = &analysis.diagnostics[0];
+        assert_eq!(diagnostic.file, 0);
+        assert_eq!(diagnostic.span, Span::new(41, 48));
+        assert_eq!(diagnostic.severity, Severity::Error);
+        assert_eq!(diagnostic.kind, DiagnosticKind::Compiler);
+        assert_eq!(diagnostic.msg, "unresolved reference 'Missing'.");
+        assert!(analysis.library_definitions.is_empty());
+        assert!(analysis.implementation_relations.is_empty());
+        assert_eq!(analysis.hover.entry_count(), 0);
+        assert_eq!(analysis.completion.entry_count(), 0);
+        assert_eq!(analysis.signature_help.entry_count(), 0);
+        assert_eq!(analysis.semantic_tokens.entry_count(), 0);
+        assert_eq!(analysis.definitions.entry_count(), 0);
+        assert_eq!(analysis.type_definitions.entry_count(), 0);
+        assert_eq!(analysis.implementations.entry_count(), 0);
+        assert_eq!(analysis.document_symbols.entry_count(), 0);
+        assert_eq!(analysis.folding_ranges.entry_count(), 0);
+        assert_eq!(analysis.workspace_symbols.entry_count(), 0);
+
+        let full = serde_json::to_vec(&AnalysisRequest {
+            sources: &sources,
+            source_kinds: &[0],
+            result_count: 1,
+            inferred_count: 1,
+            language_features: &[],
+            java_sources: &[] as &[&str],
+            classpath: None,
+            diagnostics_only: false,
+        })
+        .unwrap();
+        let mut full_input = Vec::new();
+        write_framed(&mut full_input, &full).unwrap();
+        let mut full_output = Vec::new();
+        run_analysis_worker(&mut Cursor::new(full_input), &mut full_output, Vec::new()).unwrap();
+        assert!(
+            diagnostics_only_bytes < full_output.len(),
+            "diagnostics-only indexing must not serialize the navigation indexes, {} vs {}",
+            diagnostics_only_bytes,
+            full_output.len()
+        );
+    }
+
+    #[test]
     fn worker_request_classpath_overrides_the_session_classpath() {
         let directory = std::env::temp_dir().join(format!(
             "krusty-worker-module-classpath-{}",
@@ -2230,6 +2471,7 @@ mod tests {
             language_features: &[],
             java_sources: &[] as &[&str],
             classpath: Some(&[]),
+            diagnostics_only: false,
         })
         .unwrap();
         let mut input = Vec::new();
@@ -2348,6 +2590,7 @@ mod tests {
             language_features: &[],
             java_sources,
             classpath,
+            diagnostics_only: false,
         })
         .unwrap();
         write_framed(input, &request).unwrap();
@@ -2400,6 +2643,7 @@ mod tests {
             language_features: &[],
             java_sources: &[] as &[&str],
             classpath: None,
+            diagnostics_only: false,
         })
         .unwrap();
         let mut input = Vec::new();
@@ -2432,6 +2676,7 @@ mod tests {
             language_features: &[],
             java_sources: &java_sources,
             classpath: None,
+            diagnostics_only: false,
         })
         .unwrap();
         let mut input = Vec::new();
@@ -2491,6 +2736,7 @@ fun combine(entries: Array<Entry>): String {
             language_features: &["NameBasedDestructuring"],
             java_sources: &[] as &[&str],
             classpath: None,
+            diagnostics_only: false,
         })
         .unwrap();
         let mut input = Vec::new();
@@ -2515,6 +2761,7 @@ fun combine(entries: Array<Entry>): String {
             language_features: &[],
             java_sources: &[] as &[&str],
             classpath: None,
+            diagnostics_only: false,
         })
         .unwrap();
         let mut input = Vec::new();

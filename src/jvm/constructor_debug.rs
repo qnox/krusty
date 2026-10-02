@@ -18,12 +18,50 @@ pub(super) struct PropertyStore {
 /// property's own getter stays on the `val` line. A BODY property is not the same shape — its
 /// initializer store stays on its own line, annotation or not. Constructor properties and the
 /// delegates of delegated properties (whose field is not named after the property) carry
-/// `constructor_store_line`; other body-property stores retain the older declaration-line map until
-/// that broader debug-metadata migration moves onto exact field coordinates too.
+/// `constructor_store_line`. An explicit body-property store goes through [`property_store_line`]
+/// so its exact expression identity selects the initializer line recorded by common lowering.
 pub(super) fn property_line(ir: &IrFile, class: &IrClass, field: u32) -> Option<u32> {
     let field = class.fields.get(field as usize)?;
     if field.constructor_store_line != 0 {
         return Some(field.constructor_store_line);
+    }
+    ir.prop_decl_lines
+        .get(&(class.fq_name_id(), field.name.clone()))
+        .copied()
+        .filter(|&line| line != 0)
+}
+
+/// The source line owned by one constructor field store.
+///
+/// An explicit body-property initializer is identified by its exact `SetField`; lowering records
+/// that store's initializer line in common IR. Constructor-property parameters and delegated
+/// storage instead carry the field-level line used by their implicit or synthesized store.
+pub(super) fn property_store_line(
+    ir: &IrFile,
+    class: &IrClass,
+    field: u32,
+    expression: ExprId,
+) -> Option<u32> {
+    let field = class.fields.get(field as usize)?;
+    if field.constructor_store_line != 0 {
+        return Some(field.constructor_store_line);
+    }
+    if ir.property_initializer_stores.contains(&expression) {
+        return ir
+            .expr_lines
+            .get(&expression)
+            .copied()
+            .filter(|&line| line != 0);
+    }
+    // An `init` assignment already records the statement line. The property's declaration line is
+    // only the fallback for a store lowering did not attach to a source statement.
+    if let Some(line) = ir
+        .expr_lines
+        .get(&expression)
+        .copied()
+        .filter(|&line| line != 0)
+    {
+        return Some(line);
     }
     ir.prop_decl_lines
         .get(&(class.fq_name_id(), field.name.clone()))
@@ -58,7 +96,7 @@ pub(super) fn initializer_property_stores(
                 };
                 PropertyStore {
                     expression,
-                    line: property_line(ir, class, *index),
+                    line: property_store_line(ir, class, *index, expression),
                 }
             })
             .collect(),

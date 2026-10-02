@@ -312,10 +312,25 @@ struct BodyLowering<'a> {
     lowered_root_block: Option<ExprId>,
 }
 
-/// The block a body's single root evaluates, through the implicit conversions checking put on its
-/// result (a lambda's `Unit` coercion).
+/// The block a body's executable root evaluates, through the implicit conversions checking put on
+/// its result (a lambda's `Unit` coercion). A secondary constructor owns a leading delegation
+/// statement in addition to that executable root; the delegation is its entry contract, not a
+/// lexical scope boundary for the following body.
 fn root_scope_block(body: &FirBody) -> Option<FirExprId> {
-    let [root] = body.roots() else {
+    let mut roots = body.roots();
+    if roots
+        .first()
+        .and_then(|root| body.statement(*root))
+        .is_some_and(|statement| {
+            matches!(
+                &statement.kind,
+                crate::fir::FirStatementKind::ConstructorDelegation(_)
+            )
+        })
+    {
+        roots = &roots[1..];
+    }
+    let [root] = roots else {
         return None;
     };
     let crate::fir::FirStatementKind::Expression(mut expression) = body.statement(*root)?.kind

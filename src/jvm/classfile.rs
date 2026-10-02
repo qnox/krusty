@@ -1270,6 +1270,11 @@ impl ClassWriter {
                 panic!("cannot compute JVM frames for {name}{desc}: {decline:?}")
             })
         });
+        let lvt = if name == "<init>" || name == "<clinit>" {
+            Vec::new()
+        } else {
+            self.local_table(code)
+        };
         self.methods.push(MethodInfo {
             access,
             name: n,
@@ -1294,34 +1299,7 @@ impl ClassWriter {
             } else {
                 code.line_marks().to_vec()
             },
-            lvt: if name == "<init>" || name == "<clinit>" {
-                Vec::new()
-            } else {
-                code.local_entries()
-                    .iter()
-                    // A `LocalVariableTable` `start_pc` must index the code array (JVMS §4.7.13) —
-                    // HotSpot's class-file parser rejects the whole class otherwise. A local DECLARED
-                    // in a region the emitter dropped as unreachable (`val y: Int = boom() ?: 1`) has
-                    // its start recorded past the last instruction and describes no live range, so it
-                    // goes with the code. An empty range stays until the method is written, as in
-                    // kotlinc (`prepareForEmitting`): the store before it is a named local's.
-                    .filter(|(start, len, ..)| {
-                        let start = usize::from(*start);
-                        let end =
-                            len.map_or(code.bytes.len(), |length| start + usize::from(length));
-                        start < code.bytes.len() && end <= code.bytes.len()
-                    })
-                    .map(|(start, len, slot, nm, ds)| {
-                        (
-                            self.cp.utf8(nm),
-                            self.cp.utf8(ds),
-                            *slot,
-                            Some(*start),
-                            *len,
-                        )
-                    })
-                    .collect()
-            },
+            lvt,
             visible_anns: Vec::new(),
             invisible_anns: Vec::new(),
             param_anns: Vec::new(),
@@ -2164,10 +2142,8 @@ pub struct CodeBuilder {
     /// stand in, which a bytecode rewrite that inserts an instruction between them needs.
     bind_sequence: Vec<u32>,
     next_bind: u32,
-    /// The next line mark is written even if its line is the one already in effect: an inlined
-    /// call's own lines ended, so the caller's line must be stated again (see
-    /// [`CodeBuilder::forget_line`]).
-    line_forgotten: bool,
+    /// Pending line-mark obligations (see [`line_numbers::PendingLines`]).
+    pending_lines: line_numbers::PendingLines,
 }
 
 impl CodeBuilder {
@@ -2190,7 +2166,7 @@ impl CodeBuilder {
             dead_bound: Vec::new(),
             bind_sequence: Vec::new(),
             next_bind: 0,
-            line_forgotten: false,
+            pending_lines: Default::default(),
         }
     }
 

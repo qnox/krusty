@@ -76,13 +76,96 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
         } else {
             Vec::new()
         };
+        let declared_access = match sc.metadata_visibility {
+            Some(crate::types::Visibility::Private) => 0x0002,
+            Some(crate::types::Visibility::Protected) => 0x0004,
+            _ => 0x0001,
+        };
+        let enum_entry_subclass_target = !owner_prefix_tys.is_empty()
+            && c.enum_entries.iter().any(|entry| {
+                entry.subclass.is_some()
+                    && jvm_tys(&entry.constructor_parameter_types) == sc_source_tys
+            });
+        let semantically_private =
+            super::constructor_accessors::hides_secondary(ir, c, secondary_ordinal)
+                || sc.vc_params
+                || !owner_prefix_tys.is_empty()
+                || declared_access == 0x0002;
+        let sc_access = (if enum_entry_subclass_target {
+            // Kotlin uses nestmate access for an entry-body subclass. Krusty does not emit
+            // nestmate attributes yet, so use the same package-private synthetic bridge contract
+            // as the enum primary constructor instead of emitting an inaccessible private target.
+            0x1000
+        } else if semantically_private {
+            0x0002
+        } else {
+            declared_access
+        }) | if sc.synthetic { 0x1000 } else { 0 }
+            | super::method_access::secondary_constructor_varargs(sc);
+        let generated =
+            ir.is_generated_secondary_constructor(c.fq_name_id(), secondary_ordinal as u32);
+        // A declared constructor a source caller can reach annotates each reference parameter with
+        // its nullability, as a function does.
+        let nullability = if generated || semantically_private || sc.annotations.deprecated_hidden()
+        {
+            Vec::new()
+        } else {
+            sc.named_params
+                .iter()
+                .zip(&sc_source_tys)
+                .map(|((_, semantic), physical)| parameter_nullability(*semantic, *physical))
+                .collect::<Vec<_>>()
+        };
+        let nullability_types = nullability.iter().flatten().copied().collect::<Vec<_>>();
+        let sc_desc = method_descriptor(&sc_param_tys, Ty::Unit);
+        // A constructor whose OWNER prepends parameters has a descriptor its declaration did not
+        // write, so kotlinc records the source shape in a generic `Signature` — `()V` for an enum's
+        // `constructor()`, `(Ljava/lang/String;)V` for `constructor(label: String)`. Without it
+        // reflection (and `javap`) reports the ABI prefix as if the source had declared it. The
+        // primary already carried one; the secondary path did not.
+        // Formatted from the SEMANTIC parameter types, not from descriptors: a `Signature` exists
+        // precisely to say what a descriptor cannot, so concatenating descriptors would drop every
+        // type argument and type variable — `constructor(values: List<String>)` would sign
+        // `(Ljava/util/List;)V` where kotlinc signs `(Ljava/util/List<Ljava/lang/String;>;)V`.
+        // A COMPILER-GENERATED constructor records none, for the same reason a compiler-invented
+        // accessor does not: the attribute exists for a source or Java caller, and nothing in
+        // source can name this constructor to call it. kotlinc declares the serialization
+        // plugin's deserialization constructor with its erased descriptor alone.
+        let formatter = super::JvmSignatureFormatter::new(ir, env);
+        let sc_signature = (|| -> Option<String> {
+            if generated {
+                return None;
+            }
+            let mut signature = String::from("(");
+            for (_, semantic) in &sc.named_params {
+                signature.push_str(&formatter.method_ty(semantic, super::Wildcards::Declared)?);
+            }
+            signature.push_str(")V");
+            // A `Signature` that spells the descriptor back carries nothing and kotlinc omits it —
+            // which is every constructor whose source types are already erased and whose owner
+            // prepends nothing. A synthetic constructor carries none either. A capture prefix (an
+            // inner class's outer instance, a local class's captured values) is left out of the
+            // signature without forcing one, so the comparison skips it; an owner prefix (an
+            // enum's name and ordinal) still does.
+            let unprefixed = owner_prefix_tys
+                .iter()
+                .chain(&sc_source_tys)
+                .copied()
+                .collect::<Vec<_>>();
+            super::method_signatures::written_signature(
+                sc_access,
+                false,
+                &method_descriptor(&unprefixed, Ty::Unit),
+                Some(signature),
+            )
+        })();
         // Reserve this constructor's header — its declared annotations included — before its body
         // interns anything, matching the order kotlinc's writer produces.
         cw.reserve_method_pool_with_annotations(
             "<init>",
-            &method_descriptor(&sc_param_tys, Ty::Unit),
-            None,
-            &[],
+            &sc_desc,
+            sc_signature.as_deref(),
+            &nullability_types,
             &sc.annotations,
             &method_parameters,
         );
@@ -90,7 +173,7 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
         let mut sctor = CodeBuilder::new(1 + sc_words);
         let sec_max;
         let mut sec_diverges = false;
-        let delegation_pc;
+        let body_locals;
         {
             let mut e = Emitter::new(
                 ir,
@@ -107,6 +190,9 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                     .chain(sc.body),
             );
             e.this_uninitialized = true;
+            // A secondary constructor can own the class-initialization body when no primary
+            // constructor exists. Only exact initializer block identities render boundaries.
+            e.render_initializer_boundaries = true;
             let receiver = e.frame.enter(FrameKey::Receiver, Ty::obj(fq_name));
             e.slots.insert(0, (receiver, Ty::obj(fq_name)));
             // The enum name/ordinal are backend-owned physical parameters, not common-IR value
@@ -123,6 +209,26 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                 let value = vi as u32 + 1;
                 let s = e.frame.enter(FrameKey::Value(value), *t);
                 e.slots.insert(value, (s, *t));
+            }
+            e.record_locals = !generated;
+            // kotlinc guards each checked parameter at the very start, ahead of the delegation.
+            for (ordinal, check) in sc.param_checks.iter().enumerate() {
+                let Some(crate::ir::IrParameterCheck::NonNull) = check else {
+                    continue;
+                };
+                let name = &sc.named_params[ordinal].0;
+                let value = (sc_prefix_tys.len() + ordinal) as u32 + 1;
+                if let Some(&(slot, _)) = e.slots.get(&value) {
+                    e.checked_parameters.insert(value);
+                    sctor.aload(slot);
+                    sctor.push_string(name, e.cw);
+                    let check = e.cw.methodref(
+                        "kotlin/jvm/internal/Intrinsics",
+                        "checkNotNullParameter",
+                        "(Ljava/lang/Object;Ljava/lang/String;)V",
+                    );
+                    sctor.invokestatic(check, 2, 0);
+                }
             }
             // The checker selected the exact delegation descriptor; lowering only materialized operands.
             use crate::ir::CtorDelegateTarget;
@@ -199,10 +305,16 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                     sctor.putfield(reference, slot_words(field.ty) as i32);
                 }
             }
-            // kotlinc gives a declared secondary constructor one line entry, at the delegation it
-            // was written with — after whatever prologue precedes it, which is why the pc is taken
-            // here rather than assumed to be 0.
-            delegation_pc = Some(sctor.bytes.len() as u16);
+            // A declared constructor's table opens after whatever prologue precedes its delegation,
+            // at the delegation's line, or at the `constructor` keyword when it is implicit.
+            let delegation_line = if sc.lines.delegation_line != 0 {
+                sc.lines.delegation_line
+            } else {
+                sc.lines.decl_line
+            };
+            if !generated && delegation_line != 0 {
+                sctor.mark_line(delegation_line);
+            }
             for &statement in &sc.delegate_prelude {
                 e.emit(statement, &mut sctor);
             }
@@ -264,6 +376,10 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                 .unwrap_or_else(|| method_descriptor(&target_jvm_tys, Ty::Unit));
             let delegate_init =
                 e.cw.methodref(&target_class, "<init>", &delegate_descriptor);
+            // The call itself is back on the delegation's line after an argument on another.
+            if !generated && delegation_line != 0 {
+                sctor.mark_line(delegation_line);
+            }
             sctor.invokespecial(delegate_init, aw, 0);
             e.this_uninitialized = false;
             if !delegates_to_this {
@@ -304,10 +420,37 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                 e.emit(body, &mut sctor);
                 sec_diverges = e.diverges(body);
             }
+            // The constructor returns at the end of its declaration: a block body's closing `}`,
+            // else the delegation call's last line.
+            if !generated && !sec_diverges && sc.lines.decl_end_line != 0 {
+                sctor.mark_line(sc.lines.decl_end_line);
+            }
             sec_max = e.frame.max();
+            body_locals = std::mem::take(&mut e.open_locals);
         }
         if !sec_diverges {
             sctor.ret_void();
+        }
+        // Body locals precede `this` and the parameters in kotlinc's table, as in a method, and
+        // stay in scope through the return.
+        for local in body_locals {
+            local.record(None, &mut sctor);
+        }
+        if !generated {
+            sctor.add_local_entry(0, None, 0, "this", &format!("L{fq_name};"));
+            let names = crate::jvm::method_parameters::secondary_constructor_identities(
+                c,
+                sc,
+                self.owner_prefix,
+                &sc_param_tys,
+            );
+            let mut slot = 1;
+            for (name, ty) in names.iter().zip(&sc_param_tys) {
+                if let Some(name) = name {
+                    sctor.add_local_entry(0, None, slot, name, &super::local_variable_desc(*ty));
+                }
+                slot += slot_words(*ty);
+            }
         }
         sctor.ensure_locals(sec_max);
         sctor.link();
@@ -320,76 +463,6 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
         // Otherwise the declaration's own visibility decides, exactly as it does for a method:
         // a `private constructor` is `ACC_PRIVATE`, a `protected` one `ACC_PROTECTED`, and
         // `internal` is public bytecode with the visibility recorded in metadata.
-        let declared_access = match sc.metadata_visibility {
-            Some(crate::types::Visibility::Private) => 0x0002,
-            Some(crate::types::Visibility::Protected) => 0x0004,
-            _ => 0x0001,
-        };
-        let enum_entry_subclass_target = !owner_prefix_tys.is_empty()
-            && c.enum_entries.iter().any(|entry| {
-                entry.subclass.is_some()
-                    && jvm_tys(&entry.constructor_parameter_types) == sc_source_tys
-            });
-        let semantically_private =
-            super::constructor_accessors::hides_secondary(ir, c, secondary_ordinal)
-                || sc.vc_params
-                || !owner_prefix_tys.is_empty()
-                || declared_access == 0x0002;
-        let sc_access = (if enum_entry_subclass_target {
-            // Kotlin uses nestmate access for an entry-body subclass. Krusty does not emit
-            // nestmate attributes yet, so use the same package-private synthetic bridge contract
-            // as the enum primary constructor instead of emitting an inaccessible private target.
-            0x1000
-        } else if semantically_private {
-            0x0002
-        } else {
-            declared_access
-        }) | if sc.synthetic { 0x1000 } else { 0 }
-            | super::method_access::secondary_constructor_varargs(sc);
-        let sc_desc = method_descriptor(&sc_param_tys, Ty::Unit);
-        // A constructor whose OWNER prepends parameters has a descriptor its declaration did not
-        // write, so kotlinc records the source shape in a generic `Signature` — `()V` for an enum's
-        // `constructor()`, `(Ljava/lang/String;)V` for `constructor(label: String)`. Without it
-        // reflection (and `javap`) reports the ABI prefix as if the source had declared it. The
-        // primary already carried one; the secondary path did not.
-        // Formatted from the SEMANTIC parameter types, not from descriptors: a `Signature` exists
-        // precisely to say what a descriptor cannot, so concatenating descriptors would drop every
-        // type argument and type variable — `constructor(values: List<String>)` would sign
-        // `(Ljava/util/List;)V` where kotlinc signs `(Ljava/util/List<Ljava/lang/String;>;)V`.
-        // A COMPILER-GENERATED constructor records none, for the same reason a compiler-invented
-        // accessor does not: the attribute exists for a source or Java caller, and nothing in
-        // source can name this constructor to call it. kotlinc declares the serialization
-        // plugin's deserialization constructor with its erased descriptor alone.
-        let generated =
-            ir.is_generated_secondary_constructor(c.fq_name_id(), secondary_ordinal as u32);
-        let formatter = super::JvmSignatureFormatter::new(ir, env);
-        let sc_signature = (|| -> Option<String> {
-            if generated {
-                return None;
-            }
-            let mut signature = String::from("(");
-            for (_, semantic) in &sc.named_params {
-                signature.push_str(&formatter.method_ty(semantic, super::Wildcards::Declared)?);
-            }
-            signature.push_str(")V");
-            // A `Signature` that spells the descriptor back carries nothing and kotlinc omits it —
-            // which is every constructor whose source types are already erased and whose owner
-            // prepends nothing. A synthetic constructor carries none either. A capture prefix (an
-            // inner class's outer instance, a local class's captured values) is left out of the
-            // signature without forcing one, so the comparison skips it; an owner prefix (an
-            // enum's name and ordinal) still does.
-            let unprefixed = owner_prefix_tys
-                .iter()
-                .chain(&sc_source_tys)
-                .copied()
-                .collect::<Vec<_>>();
-            super::method_signatures::written_signature(
-                sc_access,
-                false,
-                &method_descriptor(&unprefixed, Ty::Unit),
-                Some(signature),
-            )
-        })();
         // The debug locals are built BEFORE the method is added so their names and descriptors can
         // be interned first: `add_method` computes the `StackMapTable`, which interns each
         // parameter's verification type, and kotlinc's writer visits the locals before the frames.
@@ -425,10 +498,11 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
             &sctor,
             sc_signature.as_deref(),
         );
-        if let Some((pc, line)) =
-            delegation_pc.zip((sc.lines.delegation_line != 0).then_some(sc.lines.delegation_line))
-        {
-            cw.set_method_lines("<init>", &sc_desc, &[(pc, line)]);
+        if !generated {
+            cw.keep_method_debug("<init>", &sc_desc, &sctor);
+        }
+        if nullability.iter().any(Option::is_some) {
+            cw.set_method_nullability("<init>", &sc_desc, None, &nullability);
         }
         cw.set_method_parameters("<init>", &sc_desc, &method_parameters);
         if let Some(locals) = &debug_locals {
@@ -535,6 +609,20 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                 cw,
             );
         }
+    }
+}
+
+/// kotlinc's nullability annotation on a declared constructor parameter: none on a primitive or on
+/// a type parameter whose bound admits null, `@Nullable` on a nullable reference, else `@NotNull`.
+fn parameter_nullability(semantic: Ty, physical: Ty) -> Option<&'static str> {
+    let descriptor = type_descriptor(physical);
+    if !(descriptor.starts_with('L') || descriptor.starts_with('[')) {
+        return None;
+    }
+    match semantic {
+        Ty::TyParam(_, bound) if bound.is_nullable() => None,
+        _ if semantic.is_nullable() => Some("Lorg/jetbrains/annotations/Nullable;"),
+        _ => Some("Lorg/jetbrains/annotations/NotNull;"),
     }
 }
 

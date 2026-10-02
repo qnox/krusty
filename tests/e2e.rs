@@ -951,6 +951,8 @@ mod infix_newline_operand_e2e;
 mod inheritance_e2e;
 #[path = "inherited_interface_default_e2e.rs"]
 mod inherited_interface_default_e2e;
+#[path = "init_block_lines_e2e.rs"]
+mod init_block_lines_e2e;
 #[path = "inline_crossinline_object_e2e.rs"]
 mod inline_crossinline_object_e2e;
 #[path = "inline_deep_coverage_e2e.rs"]
@@ -1325,6 +1327,8 @@ mod nothing_type_argument_signature_e2e;
 mod nullable_double_type_param_equality_e2e;
 #[path = "nullable_uint_property_e2e.rs"]
 mod nullable_uint_property_e2e;
+#[path = "open_end_range_membership_e2e.rs"]
+mod open_end_range_membership_e2e;
 #[path = "primitive_hash_code_e2e.rs"]
 mod primitive_hash_code_e2e;
 #[path = "result_generic_override_argument_e2e.rs"]
@@ -1864,6 +1868,8 @@ mod sealed_interface_nested_e2e;
 mod sealed_object_value_match_e2e;
 #[path = "secondary_constructor_member_order_e2e.rs"]
 mod secondary_constructor_member_order_e2e;
+#[path = "secondary_constructor_shape_e2e.rs"]
+mod secondary_constructor_shape_e2e;
 #[path = "secondary_ctor_noprimary_e2e.rs"]
 mod secondary_ctor_noprimary_e2e;
 #[path = "secondary_ctor_this_sibling_e2e.rs"]
