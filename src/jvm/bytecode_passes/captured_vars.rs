@@ -388,12 +388,10 @@ fn track_pops(
                     add_once(&mut vars[var].wrappers, index);
                 }
             }
-            Node::Insn(Insn::Op(POP2)) => {
-                if top(0).is_some_and(|value| value.size() == 1) {
-                    for depth in [0, 1] {
-                        if let Some(var) = top(depth).and_then(TrackedValue::proper) {
-                            vars[var].hazard = true;
-                        }
+            Node::Insn(Insn::Op(POP2)) if top(0).is_some_and(|value| value.size() == 1) => {
+                for depth in [0, 1] {
+                    if let Some(var) = top(depth).and_then(TrackedValue::proper) {
+                        vars[var].hazard = true;
                     }
                 }
             }

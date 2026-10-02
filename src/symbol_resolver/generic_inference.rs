@@ -1133,10 +1133,9 @@ pub(crate) fn merge_inferred_ty_from_symbols(
     // parameter identity and tightened bound agree. Keep the provenance-bearing form at that join
     // so substituting the inferred result through `R?` can reopen the original caller `T?`.
     let same_parameter_dnn = |provenance: Ty, compact: Ty| match provenance {
-        Ty::DefinitelyNotNull(original) => match *original {
-            Ty::TyParam(name, bound) => compact == Ty::ty_param(name, bound.definitely_non_null()),
-            _ => false,
-        },
+        Ty::DefinitelyNotNull(&Ty::TyParam(name, bound)) => {
+            compact == Ty::ty_param(name, bound.definitely_non_null())
+        }
         _ => false,
     };
     if same_parameter_dnn(current, actual) {

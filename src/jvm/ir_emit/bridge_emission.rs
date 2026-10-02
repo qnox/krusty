@@ -40,7 +40,7 @@ fn finish_bridge(
 fn barrier_instanceof_name(semantic: Ty, jvm: Ty) -> String {
     semantic.jvm_boxed_ref().map_or_else(
         || crate::jvm::names::instanceof_internal_name(jvm),
-        |boxed| crate::jvm::names::instanceof_internal_name(boxed),
+        crate::jvm::names::instanceof_internal_name,
     )
 }
 

@@ -1716,11 +1716,7 @@ impl BodyLowering<'_> {
                         // function value, not to this literal.
                         nullable: false,
                         kotlin_interface: conversion.kotlin_interface,
-                        parameter_identities: conversion
-                            .parameter_identities
-                            .iter()
-                            .cloned()
-                            .collect(),
+                        parameter_identities: conversion.parameter_identities.to_vec(),
                     };
                     self.ir.lambda_sam_signature.insert(
                         *impl_fn,

@@ -282,15 +282,16 @@ fn physical_parameters(ir: &IrFile, call: ExprId) -> Result<Option<Vec<Ty>>, Str
 
 fn source_function(ir: &IrFile, call: ExprId) -> Option<u32> {
     match ir.expr(call) {
-        IrExpr::Call { callee, .. } => match callee {
-            Callee::Local(function)
-            | Callee::LocalDefault(function)
-            | Callee::LocalWithDefaults { function, .. }
-            | Callee::ClassStatic { function, .. }
-            | Callee::ClassStaticDefault { function, .. }
-            | Callee::ClassStaticWithDefaults { function, .. } => Some(*function),
-            _ => None,
-        },
+        IrExpr::Call {
+            callee:
+                Callee::Local(function)
+                | Callee::LocalDefault(function)
+                | Callee::LocalWithDefaults { function, .. }
+                | Callee::ClassStatic { function, .. }
+                | Callee::ClassStaticDefault { function, .. }
+                | Callee::ClassStaticWithDefaults { function, .. },
+            ..
+        } => Some(*function),
         IrExpr::MethodCall { class, index, .. } => ir
             .classes
             .get(*class as usize)

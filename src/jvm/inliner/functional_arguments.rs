@@ -226,13 +226,12 @@ pub(super) fn mark_places(
                     .len();
                 invokes.push(top(Some(frame), arguments).and_then(ArgumentValue::lambda));
             }
-            Node::Insn(Insn::Op(POP)) => {
+            Node::Insn(Insn::Op(POP))
                 if top(Some(frame), 0)
                     .and_then(ArgumentValue::lambda)
-                    .is_some()
-                {
-                    delete[at] = true;
-                }
+                    .is_some() =>
+            {
+                delete[at] = true;
             }
             _ => {}
         }

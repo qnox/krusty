@@ -1439,7 +1439,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             for (pos, init) in c.init_order.iter().enumerate() {
                                 if let (true, ClassInit::Block(b)) = (pos < last_prop, init) {
                                     if let Expr::Block { stmts, trailing } = file.expr(*b) {
-                                        let calls_own = trailing.is_some_and(&is_own_call)
+                                        let calls_own = trailing.is_some_and(is_own_call)
                                             || stmts.iter().any(|&st| matches!(file.stmt(st), Stmt::Expr(ce) if is_own_call(*ce)));
                                         if calls_own {
                                             diags.error(c.span, "krusty: an init block that calls a member method before a later property initializer is not supported (init order)".to_string());

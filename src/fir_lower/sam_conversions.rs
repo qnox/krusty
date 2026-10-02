@@ -130,7 +130,7 @@ impl BodyLowering<'_> {
                     wraps_function_value: !function_adapter,
                     nullable: conversion.nullable,
                     kotlin_interface: conversion.kotlin_interface,
-                    parameter_identities: conversion.parameter_identities.iter().cloned().collect(),
+                    parameter_identities: conversion.parameter_identities.to_vec(),
                 }),
                 inline_body: None,
             }),

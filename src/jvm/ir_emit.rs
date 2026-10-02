@@ -3292,18 +3292,16 @@ fn emit_class(
         if continuation_metadata.is_some() {
             let mut ctor_locals: Vec<(String, String, u16)> =
                 vec![("this".to_string(), format!("L{fq_name};"), 0)];
-            let mut slot = 1u16;
             let identities = crate::jvm::parameter_names::constructor_identities(&c.ctor_args);
             assert_eq!(
                 identities.len(),
                 c.ctor_args.len(),
                 "a continuation constructor's local identities must match its parameters"
             );
-            for (argument, identity) in c.ctor_args.iter().zip(&identities) {
+            for (slot, (argument, identity)) in (1u16..).zip(c.ctor_args.iter().zip(&identities)) {
                 let name = crate::jvm::parameter_names::local_variable(identity, "<init>")
                     .expect("a continuation constructor parameter has a JVM local name");
                 ctor_locals.push((name, ir_type_desc(&argument.ty), slot));
-                slot += 1;
             }
             cw.set_method_debug("<init>", &ctor_desc, None, &ctor_locals);
         }
@@ -3623,7 +3621,7 @@ fn verif_for_jvm_free(cw: &mut ClassWriter, t: Ty) -> VerifType {
         Ty::String => VerifType::Object(cw.class_ref("java/lang/String")),
         t if t.is_array() => VerifType::Object(cw.class_ref(&type_descriptor(t))),
         Ty::Obj(n, _) => {
-            VerifType::Object(cw.class_ref(&crate::jvm::names::classfile_internal_name_of(n)))
+            VerifType::Object(cw.class_ref(crate::jvm::names::classfile_internal_name_of(n)))
         }
         Ty::Null => VerifType::Null,
         _ => VerifType::Top,
@@ -9715,7 +9713,7 @@ impl<'a> Emitter<'a> {
                 );
                 let owner = crate::jvm::names::classfile_internal_name_of(owner);
                 let ty = crate::jvm::names::classfile_internal_name_of(*ty);
-                let f = self.cw.fieldref(&owner, &field, &format!("L{ty};"));
+                let f = self.cw.fieldref(owner, &field, &format!("L{ty};"));
                 code.getstatic(f, 1);
             }
             IrExpr::ExternalStaticField {

@@ -461,17 +461,18 @@ mod tests {
         (vec![file], expression, diagnostics)
     }
 
-    fn diagnostic_rows(
-        diagnostics: &crate::diag::DiagSink,
-    ) -> Vec<(
+    /// One diagnostic as a comparable row.
+    type DiagnosticRow<'a> = (
         u32,
         Span,
         Option<Span>,
         Severity,
         DiagnosticKind,
-        &str,
+        &'a str,
         Option<crate::diag::DiagnosticIdentity>,
-    )> {
+    );
+
+    fn diagnostic_rows(diagnostics: &crate::diag::DiagSink) -> Vec<DiagnosticRow<'_>> {
         diagnostics
             .diags
             .iter()

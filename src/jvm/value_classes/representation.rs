@@ -105,9 +105,7 @@ pub(super) fn primitive_array_value_class(
     classifier: TypeName,
     under: &crate::value_classes::UnderlyingTypes,
 ) -> Option<(TypeName, Ty)> {
-    if crate::types::prim_array_element(classifier).is_none() {
-        return None;
-    }
+    crate::types::prim_array_element(classifier)?;
     let carrier = under.get(&classifier).copied()?.non_null();
     carrier.is_array().then_some((classifier, carrier))
 }

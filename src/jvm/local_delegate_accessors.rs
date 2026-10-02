@@ -273,13 +273,11 @@ fn emitted_expression_owners(ir: &IrFile) -> Result<HashMap<ExprId, Option<TypeN
             if matches!(
                 ir.expr(expression),
                 IrExpr::LocalDelegateAccess(_) | IrExpr::LocalPropertyReference(_)
-            ) {
-                if relevant
-                    .insert(expression, owner)
-                    .is_some_and(|seen| seen != owner)
-                {
-                    return Err(());
-                }
+            ) && relevant
+                .insert(expression, owner)
+                .is_some_and(|seen| seen != owner)
+            {
+                return Err(());
             }
             match ir.expr(expression) {
                 IrExpr::Lambda { captures, .. } => pending.extend(captures.iter().copied()),

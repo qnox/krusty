@@ -572,7 +572,7 @@ fn external_property(
         .transpose()?;
     let getter_field = getter_constant
         .is_none()
-        .then(|| field_access(&getter.1, callable.physical_ret))
+        .then(|| field_access(getter.1, callable.physical_ret))
         .flatten();
     let setter_field = setter
         .as_ref()

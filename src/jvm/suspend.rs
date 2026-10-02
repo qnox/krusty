@@ -566,7 +566,7 @@ pub(crate) fn lower_suspend(
                 &suspend_set,
                 returned,
                 orig_rets[fid as usize],
-                &mut outputs.suspended_result_returns,
+                outputs.suspended_result_returns,
             );
             // The body may hold EARLY returns besides the forwarded tail (`if (n == 0) return true;
             // return odd(n - 1)`) — the CPS method returns `Object`, so a primitive early return must

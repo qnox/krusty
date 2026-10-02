@@ -188,7 +188,7 @@ impl<'a> BoxingInterpreter<'a> {
             return BoxingValue::Boxed {
                 id: *id,
                 tainted: true,
-                ty: *ty,
+                ty,
             };
         }
         self.candidates.remove(*id);
