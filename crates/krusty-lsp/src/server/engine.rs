@@ -1530,9 +1530,9 @@ mod tests {
             Vec::new(),
             false,
         );
-        assert_eq!(batch.documents[0].version, 3);
-        assert_eq!(batch.documents[0].text.as_deref(), Some("fun a(){}"));
-        assert!(batch.complete);
+        assert_eq!(batch.documents()[0].version(), 3);
+        assert_eq!(batch.documents()[0].text(), Some("fun a(){}"));
+        assert!(batch.is_complete());
     }
 
     #[test]
@@ -1560,8 +1560,8 @@ mod tests {
             match rx.recv().unwrap() {
                 Incoming::Engine(EngineEvent::AnalysisComplete(batch)) => {
                     assert_eq!(batch.versions(), vec![("file:///a.kt".to_string(), 2)]);
-                    assert_eq!(batch.documents[0].text.as_deref(), Some("fun a(){}"));
-                    assert!(batch.complete);
+                    assert_eq!(batch.documents()[0].text(), Some("fun a(){}"));
+                    assert!(batch.is_complete());
                     found = true;
                     break;
                 }
@@ -1679,7 +1679,7 @@ mod tests {
         loop {
             match rx.recv_timeout(std::time::Duration::from_secs(2)) {
                 Ok(Incoming::Engine(EngineEvent::AnalysisComplete(batch))) => {
-                    support = Some(batch.support_documents);
+                    support = Some(batch.support_documents().to_vec());
                     break;
                 }
                 Ok(_) => {}

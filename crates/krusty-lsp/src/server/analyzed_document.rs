@@ -8,24 +8,69 @@ use crate::DocumentAnalysis;
 
 /// The open document an analysis completion is about.
 pub struct AnalyzedDocument {
-    pub uri: String,
-    pub version: i64,
+    uri: String,
+    version: i64,
     /// Text the analysis thread owned for this URI and version.
     ///
     /// `Some` is the buffer that was analyzed, including `Some("")` for an empty file. `None`
     /// means the caller did not carry a buffer; applying the batch uses the live editor text.
-    pub text: Option<String>,
+    text: Option<String>,
     /// Absent for every document when the worker's result count does not match.
-    pub analysis: Option<DocumentAnalysis>,
+    analysis: Option<DocumentAnalysis>,
 }
 
 /// A completed analysis of one open-document set.
+///
+/// Fields stay private so a batch can only be built by [`AnalysisBatch::from_job`] or
+/// [`AnalysisBatch::from_versions`], which keep each analysis paired with its document.
 pub struct AnalysisBatch {
-    pub documents: Vec<AnalyzedDocument>,
+    documents: Vec<AnalyzedDocument>,
     /// `false` when `analyses` and `documents` had different lengths. Every analysis is then absent.
-    pub complete: bool,
-    pub support_documents: Vec<(String, String)>,
-    pub pending: bool,
+    complete: bool,
+    support_documents: Vec<(String, String)>,
+    pending: bool,
+}
+
+impl AnalyzedDocument {
+    pub(crate) fn uri(&self) -> &str {
+        &self.uri
+    }
+
+    pub(crate) fn version(&self) -> i64 {
+        self.version
+    }
+
+    #[cfg(test)]
+    pub(crate) fn text(&self) -> Option<&str> {
+        self.text.as_deref()
+    }
+
+    pub(crate) fn into_result(self) -> (String, Option<String>, Option<DocumentAnalysis>) {
+        (self.uri, self.text, self.analysis)
+    }
+}
+
+impl AnalysisBatch {
+    pub(crate) fn is_complete(&self) -> bool {
+        self.complete
+    }
+
+    pub(crate) fn is_pending(&self) -> bool {
+        self.pending
+    }
+
+    pub(crate) fn documents(&self) -> &[AnalyzedDocument] {
+        &self.documents
+    }
+
+    #[cfg(test)]
+    pub(crate) fn support_documents(&self) -> &[(String, String)] {
+        &self.support_documents
+    }
+
+    pub(crate) fn into_documents(self) -> (Vec<AnalyzedDocument>, Vec<(String, String)>) {
+        (self.documents, self.support_documents)
+    }
 }
 
 impl AnalysisBatch {
@@ -257,15 +302,36 @@ mod tests {
             Vec::new(),
             false,
         ));
-        let published = messages
-            .iter()
-            .filter_map(|message| message["params"]["diagnostics"][0]["message"].as_str())
-            .collect::<Vec<_>>();
+        let diagnostic = serde_json::json!({
+            "range": {
+                "start": {"line": 0, "character": 0},
+                "end": {"line": 0, "character": 0},
+            },
+            "severity": 1,
+            "source": "Kotlin",
+            "message": "Analysis worker returned an incomplete source set",
+        });
         assert_eq!(
-            published,
+            messages,
             vec![
-                "Analysis worker returned an incomplete source set",
-                "Analysis worker returned an incomplete source set",
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": "textDocument/publishDiagnostics",
+                    "params": {
+                        "uri": "file:///a.kt",
+                        "version": 1,
+                        "diagnostics": [diagnostic.clone()],
+                    }
+                }),
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": "textDocument/publishDiagnostics",
+                    "params": {
+                        "uri": "file:///b.kt",
+                        "version": 1,
+                        "diagnostics": [diagnostic],
+                    }
+                }),
             ]
         );
         assert!(service.source_set_for_test().is_empty());
