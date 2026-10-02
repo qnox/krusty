@@ -28,7 +28,7 @@ pub use super::line_index::{byte_offset_to_position, position_to_byte_offset, Po
 use super::line_index::{position_to_byte_offset_with_budget, LineIndex};
 use super::response_page::{
     array_messages, fit_completion_items, limit_signature_help, limit_text, location_messages,
-    partial_result_token, HOVER_TEXT_BYTES,
+    partial_result_token, too_large, HOVER_TEXT_BYTES,
 };
 use super::semantic_token_response;
 use super::workspace_index::{WorkspaceDiagnosticStore, WorkspaceDiagnostics};
@@ -2428,7 +2428,9 @@ where
                 item
             })
             .collect();
-        let (items, truncated) = fit_completion_items(&id, items);
+        let Ok((items, truncated)) = fit_completion_items(&id, items) else {
+            return Dispatch::messages(vec![too_large(&id)]);
+        };
         Dispatch::messages(vec![rpc_result(
             id,
             json!({"isIncomplete": is_incomplete || truncated, "items": items}),
@@ -2448,10 +2450,12 @@ where
         let Some(offset) = open.offset_at(params.position) else {
             return invalid_params(Some(id));
         };
-        let help = limit_signature_help(
+        let Ok(help) = limit_signature_help(
             &id,
             open.signature_help.encode(offset).unwrap_or(Value::Null),
-        );
+        ) else {
+            return Dispatch::messages(vec![too_large(&id)]);
+        };
         Dispatch::messages(vec![rpc_result(id, help)])
     }
 

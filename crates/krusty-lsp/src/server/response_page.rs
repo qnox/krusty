@@ -58,14 +58,17 @@ pub(super) fn limit_text(text: &str, max_bytes: usize) -> Cow<'_, str> {
 
 /// Whole completion items that fit in one result frame. Dropped items are not rewritten; the
 /// caller marks the list incomplete.
-pub(super) fn fit_completion_items(id: &Value, items: Vec<Value>) -> (Vec<Value>, bool) {
+pub(super) fn fit_completion_items(
+    id: &Value,
+    items: Vec<Value>,
+) -> Result<(Vec<Value>, bool), ()> {
     let shell = json!({
         "jsonrpc": "2.0",
         "id": id,
         "result": {"isIncomplete": false, "items": []}
     });
     let Some(budget) = array_budget(&shell) else {
-        return (Vec::new(), !items.is_empty());
+        return Err(());
     };
     let mut kept = Vec::new();
     let mut used = 2usize;
@@ -75,40 +78,40 @@ pub(super) fn fit_completion_items(id: &Value, items: Vec<Value>) -> (Vec<Value>
         if len.saturating_add(2) > budget
             || used.saturating_add(separator).saturating_add(len) > budget
         {
-            return (kept, true);
+            return Ok((kept, true));
         }
         used = used.saturating_add(separator).saturating_add(len);
         kept.push(item);
     }
-    (kept, false)
+    Ok((kept, false))
 }
 
 /// Signature help that fits one result frame. Extra signatures are dropped whole and
 /// `activeSignature` stays inside the remaining array. Labels are not rewritten.
-pub(super) fn limit_signature_help(id: &Value, value: Value) -> Value {
+pub(super) fn limit_signature_help(id: &Value, value: Value) -> Result<Value, ()> {
     let Some(budget) = result_value_budget(id) else {
-        return Value::Null;
+        return Err(());
     };
     if json_len(&value) <= budget {
-        return value;
+        return Ok(value);
     }
     let Value::Object(object) = value else {
-        return Value::Null;
+        return Ok(Value::Null);
     };
     let mut object = object;
     let Some(Value::Array(mut signatures)) = object.remove("signatures") else {
-        return Value::Null;
+        return Ok(Value::Null);
     };
     while !signatures.is_empty() {
         clamp_active_signature(&mut object, signatures.len());
         object.insert("signatures".to_string(), Value::Array(signatures.clone()));
         let candidate = Value::Object(object.clone());
         if json_len(&candidate) <= budget {
-            return candidate;
+            return Ok(candidate);
         }
         signatures.pop();
     }
-    Value::Null
+    Ok(Value::Null)
 }
 
 pub(super) fn array_messages(id: Value, items: Vec<Value>, token: Option<&Value>) -> Vec<Value> {
@@ -249,7 +252,7 @@ fn progress_message(token: &Value, value: Value) -> Value {
     })
 }
 
-fn too_large(id: &Value) -> Value {
+pub(super) fn too_large(id: &Value) -> Value {
     let message = error_message(
         id,
         SERVER_CANCELLED,
@@ -283,6 +286,38 @@ fn json_len(value: &Value) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn completion_and_signature_help_fail_when_the_empty_envelope_does_not_fit() {
+        use super::super::implementation::LspService;
+        use crate::DocumentAnalysis;
+
+        let mut service = LspService::new(|sources: &[&str]| {
+            sources
+                .iter()
+                .map(|_| DocumentAnalysis::empty())
+                .collect::<Vec<_>>()
+        });
+        service.force_initialized_for_test();
+        let uri = "file:///w/Main.kt";
+        service.open_document_for_test(uri, "fun main() = Unit\n", 1);
+        let id = Value::String("i".repeat(RESPONSE_PAGE_BYTES));
+
+        for method in ["textDocument/completion", "textDocument/signatureHelp"] {
+            let dispatch = service.handle(json!({
+                "jsonrpc": "2.0",
+                "id": id.clone(),
+                "method": method,
+                "params": {
+                    "textDocument": {"uri": uri},
+                    "position": {"line": 0, "character": 0}
+                }
+            }));
+            assert_eq!(dispatch.messages.len(), 1, "{method}");
+            assert_eq!(dispatch.messages[0]["error"]["code"], -32802, "{method}");
+            assert!(dispatch.messages[0].get("result").is_none(), "{method}");
+        }
+    }
 
     fn symbol(name: &str) -> Value {
         json!({
@@ -425,7 +460,7 @@ mod tests {
         let items: Vec<Value> = (0..400)
             .map(|index| json!({"label": format!("item{index:04}{}", "x".repeat(2 * 1024))}))
             .collect();
-        let (kept, truncated) = fit_completion_items(&json!(1), items.clone());
+        let (kept, truncated) = fit_completion_items(&json!(1), items.clone()).unwrap();
         assert!(truncated);
         assert!(!kept.is_empty());
         assert!(kept.len() < items.len());
@@ -446,7 +481,7 @@ mod tests {
             )
             .collect();
         let value = json!({"signatures": signatures, "activeSignature": 799});
-        let limited = limit_signature_help(&json!("sig"), value);
+        let limited = limit_signature_help(&json!("sig"), value).unwrap();
         let kept = limited["signatures"].as_array().unwrap();
         assert!(!kept.is_empty());
         assert!(kept.len() < 800);
@@ -466,6 +501,6 @@ mod tests {
             "signatures": [{"label": "L".repeat(RESPONSE_PAGE_BYTES)}],
             "activeSignature": 0
         });
-        assert_eq!(limit_signature_help(&json!(1), value), Value::Null);
+        assert_eq!(limit_signature_help(&json!(1), value), Ok(Value::Null));
     }
 }
