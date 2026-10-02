@@ -16627,49 +16627,48 @@ impl<'a> Checker<'a> {
                 return None;
             }
             let argument_kind = self.call_arg_kind(scope, argument);
-            let contextual_expected_type_callable =
-                contextual_call_result && argument_kind.is_expected_type_callable();
-            (contextual_expected_type_callable && !argument_kind.result_is_input_constrained())
-                .then_some(0)
-                .or_else(|| self.member_argument_score(expected, semantic_actual))
-                .or_else(|| contextual_call_result.then_some(0))
-                .or_else(|| {
-                    self.unbound_call_result_signature(argument)
-                        .is_some_and(|generic| {
-                            crate::symbol_resolver::infer_generic_return_bindings(
-                                generic,
-                                expected,
-                                |actual, bound| self.receiver_is_assignable(actual, bound),
-                            )
-                            .is_some()
-                        })
-                        .then_some(0)
-                })
-                .or_else(|| {
-                    matches!(expected.non_null(), Ty::Fun(_))
-                        .then(|| {
-                            self.generic_function_constructor_arg_fits(expected, semantic_actual)
-                                .then_some(1)
-                        })
-                        .flatten()
-                })
-                .or_else(|| {
-                    call_arg_kind(self.file, argument, semantic_actual)
-                        .adapts_integer_literal_to(expected)
-                        .then_some(1)
-                })
-                .or_else(|| {
-                    self.implicit_integer_coercion_applies(
-                        argument,
-                        expected,
-                        call_sig
-                            .implicit_integer_coercion
-                            .get(parameter)
-                            .copied()
-                            .unwrap_or(false),
-                    )
+            (argument_kind.is_expected_type_callable()
+                && !argument_kind.result_is_input_constrained())
+            .then_some(0)
+            .or_else(|| self.member_argument_score(expected, semantic_actual))
+            .or_else(|| contextual_call_result.then_some(0))
+            .or_else(|| {
+                self.unbound_call_result_signature(argument)
+                    .is_some_and(|generic| {
+                        crate::symbol_resolver::infer_generic_return_bindings(
+                            generic,
+                            expected,
+                            |actual, bound| self.receiver_is_assignable(actual, bound),
+                        )
+                        .is_some()
+                    })
+                    .then_some(0)
+            })
+            .or_else(|| {
+                matches!(expected.non_null(), Ty::Fun(_))
+                    .then(|| {
+                        self.generic_function_constructor_arg_fits(expected, semantic_actual)
+                            .then_some(1)
+                    })
+                    .flatten()
+            })
+            .or_else(|| {
+                call_arg_kind(self.file, argument, semantic_actual)
+                    .adapts_integer_literal_to(expected)
                     .then_some(1)
-                })
+            })
+            .or_else(|| {
+                self.implicit_integer_coercion_applies(
+                    argument,
+                    expected,
+                    call_sig
+                        .implicit_integer_coercion
+                        .get(parameter)
+                        .copied()
+                        .unwrap_or(false),
+                )
+                .then_some(1)
+            })
         };
         // A not-yet-checked lambda slot (a plan's partial pass leaves it untyped): a function-type
         // or erased-top parameter binds the lambda without conversion; a JAVA SAM parameter only
