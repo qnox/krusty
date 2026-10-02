@@ -9,8 +9,8 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::rc::Rc;
-use std::sync::mpsc;
-use std::time::Duration;
+use std::sync::mpsc::RecvTimeoutError;
+use std::time::{Duration, Instant};
 
 use krusty::diag::{Diagnostic, DiagnosticKind, Severity, Span};
 use krusty::features::LangFeatures;
@@ -324,9 +324,10 @@ impl AnalysisResponse {
 }
 
 struct WorkerProcess {
-    child: Child,
+    child: Option<Child>,
     stdin: ChildStdin,
     stdout: Option<BufReader<ChildStdout>>,
+    inflight: Option<crate::worker_lifecycle::FrameReader<BufReader<ChildStdout>>>,
 }
 
 /// Borrowed send shape: a many-thousand-entry classpath must stream into the bounded writer without
@@ -520,23 +521,11 @@ fn language_feature_names(features: &LangFeatures) -> Vec<&str> {
     names
 }
 
-fn framed_read_receiver<R>(
-    mut reader: R,
-    max_bytes: usize,
-) -> mpsc::Receiver<(R, io::Result<Option<Vec<u8>>>)>
-where
-    R: BufRead + Send + 'static,
-{
-    let (sender, receiver) = mpsc::sync_channel(1);
-    std::thread::spawn(move || {
-        let response = read_framed(&mut reader, max_bytes);
-        let _ = sender.send((reader, response));
-    });
-    receiver
-}
-
 impl WorkerProcess {
     fn spawn(executable: &Path, classpath: &[PathBuf]) -> io::Result<Self> {
+        if !crate::worker_lifecycle::replacement_permitted() {
+            return Err(crate::worker_lifecycle::still_live());
+        }
         let configuration = encode_launch_configuration(classpath)?;
         let mut child = Command::new(executable)
             .arg("--analysis-worker")
@@ -557,9 +546,10 @@ impl WorkerProcess {
             .take()
             .ok_or_else(|| io::Error::other("analysis worker stdout unavailable"))?;
         let mut process = Self {
-            child,
+            child: Some(child),
             stdin,
             stdout: Some(BufReader::new(stdout)),
+            inflight: None,
         };
         write_framed(&mut process.stdin, &configuration)?;
         process.wait_until_ready()?;
@@ -591,28 +581,35 @@ impl WorkerProcess {
         timeout: Duration,
         timeout_message: &'static str,
     ) -> io::Result<Option<Vec<u8>>> {
+        if self.inflight.is_some() || self.child.is_none() {
+            return Err(crate::worker_lifecycle::still_live());
+        }
         let stdout = self
             .stdout
             .take()
             .ok_or_else(|| io::Error::other("analysis worker stdout unavailable"))?;
-        let receiver = framed_read_receiver(stdout, max_bytes);
-        match receiver.recv_timeout(timeout) {
+        let reader = crate::worker_lifecycle::spawn_frame_reader(move || {
+            let mut stdout = stdout;
+            let response = read_framed(&mut stdout, max_bytes);
+            (stdout, response)
+        });
+        match reader.recv_timeout(timeout) {
             Ok((stdout, response)) => {
+                reader.join();
                 self.stdout = Some(stdout);
                 response
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                let _ = self.child.kill();
-                let _ = self.child.wait();
-                if let Ok((stdout, _)) = receiver.recv() {
-                    self.stdout = Some(stdout);
-                }
+            Err(RecvTimeoutError::Timeout) => {
+                self.inflight = Some(reader);
                 Err(io::Error::new(io::ErrorKind::TimedOut, timeout_message))
             }
-            Err(mpsc::RecvTimeoutError::Disconnected) => Err(io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "analysis worker response reader stopped",
-            )),
+            Err(RecvTimeoutError::Disconnected) => {
+                reader.join();
+                Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "analysis worker response reader stopped",
+                ))
+            }
         }
     }
 
@@ -623,7 +620,7 @@ impl WorkerProcess {
             "analysis worker timed out",
         )? {
             Some(response) => Ok(response),
-            None => match self.child.wait() {
+            None => match self.observed_exit() {
                 Ok(status) if status.success() => Err(io::Error::new(
                     io::ErrorKind::Interrupted,
                     "analysis worker classpath changed",
@@ -632,12 +629,50 @@ impl WorkerProcess {
                     io::ErrorKind::UnexpectedEof,
                     format!("analysis worker exited with {status}"),
                 )),
-                Err(error) => Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    format!("analysis worker exited: {error}"),
-                )),
+                Err(error) => Err(error),
             },
         }
+    }
+
+    fn observed_exit(&mut self) -> io::Result<std::process::ExitStatus> {
+        let deadline = Instant::now()
+            .checked_add(crate::worker_lifecycle::WORKER_REAP_GRACE)
+            .unwrap_or_else(Instant::now);
+        let mut child = self
+            .child
+            .take()
+            .ok_or_else(|| io::Error::other("analysis worker is not running"))?;
+        loop {
+            match crate::worker_lifecycle::classify_wait(child.try_wait()) {
+                crate::worker_lifecycle::WaitClass::Exited(status) => return Ok(status),
+                crate::worker_lifecycle::WaitClass::NotAChild => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "analysis worker is not a child",
+                    ));
+                }
+                crate::worker_lifecycle::WaitClass::Failed(error) => {
+                    self.child = Some(child);
+                    let _ = self.release(Duration::ZERO);
+                    return Err(error);
+                }
+                crate::worker_lifecycle::WaitClass::Running if Instant::now() >= deadline => {
+                    self.child = Some(child);
+                    self.release(Duration::ZERO)?;
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "analysis worker closed stdout and did not exit before the reap deadline",
+                    ));
+                }
+                crate::worker_lifecycle::WaitClass::Running => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
+        }
+    }
+
+    fn release(&mut self, grace: Duration) -> io::Result<()> {
+        crate::worker_lifecycle::release_worker(&mut self.child, &mut self.inflight, grace)
     }
 
     fn analyze<J: AsRef<str> + Serialize>(
@@ -689,9 +724,26 @@ impl WorkerProcess {
 
 impl Drop for WorkerProcess {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        if self
+            .release(crate::worker_lifecycle::WORKER_REAP_GRACE)
+            .is_err()
+        {
+            if let Some(child) = self.child.take() {
+                crate::worker_lifecycle::quarantine_child(child);
+            }
+        }
     }
+}
+
+/// Kill one worker child and join the thread reading its stdout, under a single grace period.
+pub fn release_worker_child(child: Child, stdout: ChildStdout, grace: Duration) -> io::Result<()> {
+    let mut child = Some(child);
+    let mut reader = Some(crate::worker_lifecycle::spawn_frame_reader(move || {
+        let mut stdout = BufReader::new(stdout);
+        let response = read_framed(&mut stdout, MAX_WORKER_MESSAGE_BYTES);
+        (stdout, response)
+    }));
+    crate::worker_lifecycle::release_worker(&mut child, &mut reader, grace)
 }
 
 pub struct AnalysisWorker {
@@ -739,9 +791,13 @@ impl AnalysisWorker {
     }
 
     fn restart(&mut self) -> io::Result<()> {
-        let _ = self.process.child.kill();
-        let _ = self.process.child.wait();
+        if !crate::worker_lifecycle::replacement_permitted() {
+            self.restart_required = true;
+            return Err(crate::worker_lifecycle::still_live());
+        }
         self.restart_required = true;
+        self.process
+            .release(crate::worker_lifecycle::WORKER_REAP_GRACE)?;
         let replacement = WorkerProcess::spawn(&self.executable, &self.classpath)?;
         self.process = replacement;
         self.restart_required = false;
@@ -770,9 +826,13 @@ impl AnalysisWorker {
                 Ok(())
             };
         }
-        let _ = self.process.child.kill();
-        let _ = self.process.child.wait();
+        if !crate::worker_lifecycle::replacement_permitted() {
+            self.restart_required = true;
+            return Err(crate::worker_lifecycle::still_live());
+        }
         self.restart_required = true;
+        self.process
+            .release(crate::worker_lifecycle::WORKER_REAP_GRACE)?;
         let replacement = WorkerProcess::spawn(&self.executable, &classpath)?;
         self.classpath = classpath;
         self.process = replacement;
@@ -874,7 +934,7 @@ impl AnalysisWorker {
             }
             Err(error) if error.kind() == io::ErrorKind::InvalidInput => Err(error),
             Err(error) if error.kind() == io::ErrorKind::TimedOut => {
-                self.restart_required = true;
+                self.restart()?;
                 Err(error)
             }
             Err(_) => {
@@ -1361,7 +1421,10 @@ fn json_io(error: serde_json::Error) -> io::Error {
 
 impl WorkerProcess {
     fn id(&self) -> u32 {
-        self.child.id()
+        self.child
+            .as_ref()
+            .map(Child::id)
+            .expect("analysis worker is running")
     }
 }
 
@@ -1373,6 +1436,21 @@ mod tests {
     use super::java_stub_memo::{java_stub_generations, reset_java_stub_generations};
     use super::*;
     use crate::analysis::MAX_SOURCE_SET_NAVIGATION_ENTRIES;
+
+    #[test]
+    fn a_parked_worker_blocks_fresh_analysis_worker_creation() {
+        let _parked = crate::worker_lifecycle::park_live_child_for_test();
+
+        let error = AnalysisWorker::spawn(PathBuf::from("replacement-must-not-spawn"), Vec::new())
+            .err()
+            .expect("the process-lifetime park must refuse a fresh worker");
+
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(
+            error.to_string(),
+            "analysis worker is still live after the reap deadline"
+        );
+    }
 
     /// Java texts are serialized from the caller's borrow. A cache hit and a dump must not build
     /// an intermediate copy of those strings just to encode the request.
@@ -1421,17 +1499,6 @@ mod tests {
         let text = String::from_utf8(encoded).unwrap();
         assert!(text.contains("class A {}"));
         assert!(text.contains("class B {}"));
-    }
-
-    struct DelayedEof {
-        delay: Duration,
-    }
-
-    impl Read for DelayedEof {
-        fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
-            std::thread::sleep(self.delay);
-            Ok(0)
-        }
     }
 
     struct MutatingReader {
@@ -1802,22 +1869,6 @@ mod tests {
         );
         std::fs::remove_dir_all(&directory).expect("remove classpath directory");
         std::fs::remove_dir_all(&cache_root).expect("remove dump cache");
-    }
-
-    #[test]
-    fn framed_worker_read_times_out_when_no_readiness_frame_arrives() {
-        let receiver = framed_read_receiver(
-            BufReader::new(DelayedEof {
-                delay: Duration::from_millis(50),
-            }),
-            WORKER_READY.len(),
-        );
-        assert!(matches!(
-            receiver.recv_timeout(Duration::from_millis(1)),
-            Err(mpsc::RecvTimeoutError::Timeout)
-        ));
-        let (_, result) = receiver.recv_timeout(Duration::from_secs(1)).unwrap();
-        assert!(result.unwrap().is_none());
     }
 
     #[test]

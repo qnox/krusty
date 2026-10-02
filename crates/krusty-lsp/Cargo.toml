@@ -22,6 +22,10 @@ pprof = { version = "0.15", features = ["flamegraph"], optional = true }
 name = "memprofile"
 path = "tools/memprofile.rs"
 
+[[bin]]
+name = "reap-child"
+path = "tools/reap_child.rs"
+
 [features]
 dhat-heap = ["dep:dhat"]
 cpu-profile = ["dep:pprof"]

@@ -272,37 +272,13 @@ fn required_value(name: &str, args: &mut impl Iterator<Item = String>) -> Result
     let value = args
         .next()
         .ok_or_else(|| format!("{name} requires a value"))?;
-    if value.is_empty() || is_recognized_option(&value) {
+    // A separate token beginning with `-` is ambiguous with an option. Reject it instead of
+    // swallowing an unknown/future option as a path or setting. `--name=-value` remains the
+    // explicit spelling for long options when a leading dash really is part of the value.
+    if value.is_empty() || value.starts_with('-') {
         return Err(format!("{name} requires a value"));
     }
     Ok(value)
-}
-
-fn is_recognized_option(token: &str) -> bool {
-    let name = token.split_once('=').map_or(token, |(name, _)| name);
-    matches!(
-        name,
-        "--stdio"
-            | "--socket"
-            | "--client"
-            | "--multi-client"
-            | "--system-path"
-            | "--log-level"
-            | "--log-category"
-            | "--dev"
-            | "--help"
-            | "-h"
-            | "-cp"
-            | "-classpath"
-            | "-class-path"
-            | "-jdk-home"
-            | "-no-jdk"
-            | "-deps-cache-dir"
-            | "-deps-cache-max-age-days"
-            | "-deps-cache-max-bytes"
-            | "-deps-sources"
-            | "-no-deps-sources"
-    ) || name.starts_with("-X")
 }
 
 fn set_cache_dir(slot: &mut Option<PathBuf>, path: PathBuf) -> Result<(), String> {
@@ -365,10 +341,14 @@ fn push_one_category(categories: &mut Vec<(String, LogLevel)>, value: &str) -> R
     let Some((category, level)) = value.split_once(':') else {
         return Err(category_level_error(value));
     };
-    if category.is_empty() || level.is_empty() || category.trim() != category {
+    if category.is_empty()
+        || level.is_empty()
+        || category.trim() != category
+        || level.trim() != level
+    {
         return Err(category_level_error(value));
     }
-    categories.push((category.to_string(), LogLevel::parse(level.trim())?));
+    categories.push((category.to_string(), LogLevel::parse(level)?));
     Ok(())
 }
 
@@ -683,6 +663,30 @@ mod tests {
             invalid(&["--system-path", "--stdio"]),
             "--system-path requires a value"
         );
+        for option in [
+            "--socket",
+            "--system-path",
+            "--log-level",
+            "--log-category",
+            "-cp",
+            "-jdk-home",
+        ] {
+            assert_eq!(
+                invalid(&[option, "--not-a-real-option"]),
+                format!("{option} requires a value"),
+                "{option} must not consume an unknown option as its value"
+            );
+        }
+        for value in ["editor: DEBUG", "editor:DEBUG "] {
+            let argument = format!("--log-category={value}");
+            assert_eq!(
+                invalid(&["--stdio", &argument]),
+                format!(
+                    "'{value}' is not a valid category:level. Expected format \
+                     <category>:<level>, e.g. com.example:DEBUG"
+                )
+            );
+        }
     }
 
     #[test]
