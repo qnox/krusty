@@ -116,8 +116,13 @@ fun box(): String {
 }
 "#;
 
-    let Some(out) = common::expect_box_run_against("classpath_vararg_tie", LIB, MAIN) else {
+    let Some(reference_library) = common::kotlinc_library(LIB) else {
         return;
     };
-    assert_eq!(out.trim(), "OK", "box() = {out:?}");
+    let reference = common::kotlinc_box_result_with_classpath(MAIN, &[reference_library]);
+    assert_eq!(reference, "OK", "kotlinc box() = {reference:?}");
+    let Some(actual) = common::expect_box_run_against("classpath_vararg_tie", LIB, MAIN) else {
+        return;
+    };
+    assert_eq!(actual, reference, "krusty and kotlinc box results differ");
 }
