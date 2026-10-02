@@ -186,6 +186,9 @@ impl BodyLowering<'_> {
             substitutions,
             extension_receiver_parameter: None,
             dispatch_receiver,
+            dispatch_class: (!target_is_extension)
+                .then(|| Self::static_class(receiver))
+                .flatten(),
             extension_receiver,
             arguments: &arguments,
         });

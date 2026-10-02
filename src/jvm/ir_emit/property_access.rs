@@ -81,6 +81,9 @@ impl Emitter<'_> {
     ) {
         use crate::jvm::inline::PropertyAccess;
         let access = access_bridges::protected_property_access(self.run, operation, access);
+        let Some(access) = self.checked_dispatched_accessor(operation, access) else {
+            return;
+        };
         let exact_field = matches!(&access, PropertyAccess::Field { .. });
         // Kotlin treats the expression to the left of a static `@JvmField` READ as a qualifier and
         // does not evaluate it.  A write is observably different and still evaluates an explicit
@@ -146,6 +149,7 @@ impl Emitter<'_> {
                 descriptor,
                 is_static,
                 is_interface,
+                static_receiver: _,
             } => {
                 let owner = owner.render();
                 // A `void` accessor (a `Unit` property) leaves NOTHING on the stack. The descriptor's
@@ -164,7 +168,13 @@ impl Emitter<'_> {
                 // `getfield`, exactly as kotlinc records it.
                 self.mark_dispatch_line(operation, code);
                 if is_static {
-                    code.invokestatic(m, 0, words);
+                    let arguments = crate::jvm::names::parse_method_descriptor(&descriptor)
+                        .expect("a planned property accessor has a valid JVM descriptor")
+                        .0
+                        .iter()
+                        .map(|parameter| slot_words(ty_from_field_descriptor(parameter)) as i32)
+                        .sum();
+                    code.invokestatic(m, arguments, words);
                 } else if is_interface {
                     code.invokeinterface(m, 0, words);
                 } else {
@@ -257,6 +267,79 @@ impl Emitter<'_> {
             self.narrow_on_stack(physical, *ty, code);
         }
     }
+
+    /// An instance accessor call names the class its dispatch receiver statically has, as any
+    /// virtual call does (`Leaf.getBase`, not `Base.getBase`).
+    pub(super) fn dispatched_accessor(
+        &self,
+        operation: crate::ir::ExprId,
+        access: crate::jvm::inline::PropertyAccess,
+    ) -> Result<crate::jvm::inline::PropertyAccess, crate::jvm::member_dispatch::MissingClassifier>
+    {
+        use crate::jvm::inline::PropertyAccess;
+        match access {
+            PropertyAccess::Accessor {
+                owner,
+                name,
+                descriptor,
+                is_static: false,
+                is_interface,
+                static_receiver,
+            } => {
+                let (owner, is_interface) = crate::jvm::member_dispatch::call_owner(
+                    self.dispatch_classifiers.as_ref(),
+                    owner,
+                    is_interface,
+                    self.ir.dispatch_classes.get(&operation).copied(),
+                )?;
+                Ok(PropertyAccess::Accessor {
+                    owner,
+                    name,
+                    descriptor,
+                    is_static: false,
+                    is_interface,
+                    static_receiver,
+                })
+            }
+            access => Ok(access),
+        }
+    }
+}
+
+/// Whether a realized property accessor consumes the receiver as an operand. An instance accessor
+/// always does. A static one does only when its provider/declaration recorded the physical carrier
+/// parameter explicitly; an ordinary `@JvmStatic` accessor consumes no receiver.
+pub(super) fn accessor_takes_receiver(access: &crate::jvm::inline::PropertyAccess) -> bool {
+    use crate::jvm::inline::PropertyAccess;
+    match access {
+        PropertyAccess::Field { is_static, .. } => !is_static,
+        PropertyAccess::Accessor {
+            is_static,
+            static_receiver,
+            ..
+        } => !is_static || static_receiver.is_some(),
+        // An instance bridge takes the receiver; a named object's static field bridge does not.
+        PropertyAccess::AccessBridge { takes_receiver, .. } => *takes_receiver,
+    }
+}
+
+/// The type the receiver must hold ON THE STACK for `access`, given the property's `owner`.
+///
+/// Normally the owner itself. A static value-class accessor records its erased carrier explicitly;
+/// narrowing that operand to the semantic owner would emit a `checkcast` no unboxed carrier can pass.
+pub(super) fn accessor_receiver_ty(
+    access: &crate::jvm::inline::PropertyAccess,
+    owner: TypeName,
+) -> Ty {
+    use crate::jvm::inline::PropertyAccess;
+    if let PropertyAccess::Accessor {
+        static_receiver: Some(receiver),
+        ..
+    } = access
+    {
+        return *receiver;
+    }
+    Ty::obj_name(owner)
 }
 
 /// Physical type a property write stores. A class descriptor is a reference slot even when its
@@ -265,10 +348,17 @@ pub(super) fn property_store_slot(access: &crate::jvm::inline::PropertyAccess, c
     use crate::jvm::inline::PropertyAccess;
     let descriptor = match access {
         PropertyAccess::Field { descriptor, .. } => Some(descriptor.as_str()),
-        PropertyAccess::Accessor { descriptor, .. } => {
-            crate::jvm::names::parse_method_descriptor(descriptor)
-                .and_then(|(params, _)| params.first().copied())
-        }
+        PropertyAccess::Accessor {
+            descriptor,
+            static_receiver,
+            ..
+        } => crate::jvm::names::parse_method_descriptor(descriptor).and_then(|(parameters, _)| {
+            if static_receiver.is_some() {
+                parameters.last().copied()
+            } else {
+                parameters.first().copied()
+            }
+        }),
         PropertyAccess::AccessBridge { descriptor, .. } => {
             crate::jvm::names::parse_method_descriptor(descriptor)
                 .and_then(|(params, _)| params.last().copied())
@@ -277,4 +367,38 @@ pub(super) fn property_store_slot(access: &crate::jvm::inline::PropertyAccess, c
     descriptor
         .map(|descriptor| crate::jvm::physical_type::operand_slot_ty(descriptor, Some(checked)))
         .unwrap_or_else(|| ir_ty_to_jvm(&checked))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn static_accessor_receiver_is_an_explicit_realization_fact() {
+        let owner = crate::types::type_name("review/OwnedValue");
+        let same_spelling = crate::jvm::inline::PropertyAccess::Accessor {
+            owner,
+            name: "owned-impl".to_string(),
+            descriptor: "(I)I".to_string(),
+            is_static: true,
+            is_interface: false,
+            static_receiver: None,
+        };
+        assert!(!accessor_takes_receiver(&same_spelling));
+        assert_eq!(
+            accessor_receiver_ty(&same_spelling, owner),
+            Ty::obj_name(owner)
+        );
+
+        let recorded = crate::jvm::inline::PropertyAccess::Accessor {
+            owner,
+            name: "owned-impl".to_string(),
+            descriptor: "(I)I".to_string(),
+            is_static: true,
+            is_interface: false,
+            static_receiver: Some(Ty::Int),
+        };
+        assert!(accessor_takes_receiver(&recorded));
+        assert_eq!(accessor_receiver_ty(&recorded, owner), Ty::Int);
+    }
 }

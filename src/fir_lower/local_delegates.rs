@@ -306,7 +306,7 @@ impl BodyLowering<'_> {
             let expression = self
                 .same_file_call(
                     target,
-                    dispatch_receiver,
+                    super::source_calls::DispatchOperand::plain(dispatch_receiver),
                     extension_receiver,
                     &checked,
                     &selected_parameters,

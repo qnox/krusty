@@ -43,6 +43,9 @@ impl Emitter<'_> {
                 descriptor: ir_method_desc(&f.params, &f.ret),
                 is_static: f.is_static,
                 is_interface: interface,
+                static_receiver: (f.is_static && f.dispatch_receiver == Some(owner))
+                    .then(|| f.params.first().map(jvm_declared_ty))
+                    .flatten(),
             });
         }
         let field = property_access::declared_property_field(class, declared, name);
@@ -80,6 +83,9 @@ impl Emitter<'_> {
                 descriptor: ir_method_desc(&accessor.params, &accessor.ret),
                 is_static: accessor.is_static,
                 is_interface: interface,
+                static_receiver: (accessor.is_static && accessor.dispatch_receiver == Some(owner))
+                    .then(|| accessor.params.first().map(jvm_declared_ty))
+                    .flatten(),
             });
         }
         // A private property reached from outside its class goes through the synthetic bridge; there is no
@@ -107,6 +113,7 @@ impl Emitter<'_> {
                 descriptor: ir_method_desc(&[], &stored_value_ty(ty)),
                 is_static: false,
                 is_interface: interface,
+                static_receiver: None,
             });
         };
         // Outside the declaring class the backing field is private, so the read goes through the
@@ -123,6 +130,7 @@ impl Emitter<'_> {
                 ),
                 is_static: false,
                 is_interface: interface,
+                static_receiver: None,
             });
         }
         Some(PropertyAccess::Field {

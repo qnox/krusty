@@ -435,7 +435,7 @@ impl BodyLowering<'_> {
             .expect("too many callable-reference adapter parameters");
         let call = self.same_file_call(
             callable.id,
-            dispatch_receiver,
+            super::source_calls::DispatchOperand::plain(dispatch_receiver),
             extension_receiver,
             &arguments,
             &signature_parameters,
@@ -581,6 +581,7 @@ impl BodyLowering<'_> {
         call: &FirCall,
         source_line: u32,
     ) -> Result<ExprId, FirLoweringFailure> {
+        let dispatch_class = self.dispatch_class(call.dispatch_receiver);
         let dispatch_receiver = self.receiver(call.dispatch_receiver)?;
         let extension_receiver = self.receiver(call.extension_receiver)?;
         match &call.target {
@@ -597,7 +598,10 @@ impl BodyLowering<'_> {
                 if let Some(call) = self
                     .same_file_call(
                         *target,
-                        dispatch_receiver,
+                        super::source_calls::DispatchOperand {
+                            receiver: dispatch_receiver,
+                            class: dispatch_class,
+                        },
                         extension_receiver,
                         &arguments,
                         &parameter_types,
@@ -615,7 +619,9 @@ impl BodyLowering<'_> {
                     arguments,
                     substitutions: lower_substitutions(&call.substitutions),
                 };
-                Ok(self.ir.add_expr(IrExpr::Checked(operation)))
+                let call = self.ir.add_expr(IrExpr::Checked(operation));
+                self.record_dispatch_class(call, dispatch_class);
+                Ok(call)
             }
             FirCallTarget::External {
                 declaration,
@@ -647,6 +653,7 @@ impl BodyLowering<'_> {
                     substitutions: &call.substitutions,
                     extension_receiver_parameter: *extension_receiver_parameter,
                     dispatch_receiver,
+                    dispatch_class,
                     extension_receiver,
                     arguments: &arguments,
                 })
@@ -1092,6 +1099,7 @@ impl BodyLowering<'_> {
                 self.index
                     .property(*target)
                     .ok_or(FirLoweringFailure::MissingProperty(*target))?;
+                let dispatch_class = self.dispatch_class(dispatch_receiver);
                 let operation = IrCheckedOperation::PropertyRead {
                     target: *target,
                     dispatch_receiver: self.receiver(dispatch_receiver)?,
@@ -1107,6 +1115,7 @@ impl BodyLowering<'_> {
                 };
                 let expression = self.ir.add_expr(IrExpr::Checked(operation));
                 self.record_inline_property_splice(expression, inline_splice);
+                self.record_dispatch_class(expression, dispatch_class);
                 Ok(expression)
             }
             FirPropertyTarget::External {
@@ -1127,20 +1136,24 @@ impl BodyLowering<'_> {
                     })
                     .collect::<Vec<_>>();
                 let arguments = self.external_arguments(&arguments, parameters)?;
+                let dispatch_class = self.dispatch_class(dispatch_receiver);
                 let dispatch_receiver = self.receiver(dispatch_receiver)?;
                 let extension_receiver = self.receiver(extension_receiver)?;
-                self.external_property_access(
-                    *property,
-                    dispatch.clone(),
-                    *receiver,
+                self.external_property_access(super::source_calls::ExternalPropertyRequest {
+                    target: *property,
+                    dispatch: dispatch.clone(),
+                    receiver_ty: *receiver,
                     parameters,
-                    *result,
-                    *extension_receiver_parameter,
-                    dispatch_receiver,
+                    result: *result,
+                    extension_receiver_parameter: *extension_receiver_parameter,
+                    dispatch_receiver: super::source_calls::DispatchOperand {
+                        receiver: dispatch_receiver,
+                        class: dispatch_class,
+                    },
                     extension_receiver,
-                    &arguments,
-                    false,
-                )
+                    arguments: &arguments,
+                    write: false,
+                })
                 .ok_or(FirLoweringFailure::UnsupportedExternalProperty(*property))
             }
         }
@@ -1164,6 +1177,7 @@ impl BodyLowering<'_> {
                 self.index
                     .property(*target)
                     .ok_or(FirLoweringFailure::MissingProperty(*target))?;
+                let dispatch_class = self.dispatch_class(dispatch_receiver);
                 let operation = IrCheckedOperation::PropertyWrite {
                     target: *target,
                     dispatch_receiver: self.receiver(dispatch_receiver)?,
@@ -1180,6 +1194,7 @@ impl BodyLowering<'_> {
                 };
                 let expression = self.ir.add_expr(IrExpr::Checked(operation));
                 self.record_inline_property_splice(expression, inline_splice);
+                self.record_dispatch_class(expression, dispatch_class);
                 Ok(expression)
             }
             FirPropertyTarget::External {
@@ -1214,20 +1229,24 @@ impl BodyLowering<'_> {
                     }))
                     .collect::<Vec<_>>();
                 let arguments = self.external_arguments(&arguments, parameters)?;
+                let dispatch_class = self.dispatch_class(dispatch_receiver);
                 let dispatch_receiver = self.receiver(dispatch_receiver)?;
                 let extension_receiver = self.receiver(extension_receiver)?;
-                self.external_property_access(
-                    *property,
-                    dispatch.clone(),
-                    *receiver,
+                self.external_property_access(super::source_calls::ExternalPropertyRequest {
+                    target: *property,
+                    dispatch: dispatch.clone(),
+                    receiver_ty: *receiver,
                     parameters,
-                    *result,
-                    *extension_receiver_parameter,
-                    dispatch_receiver,
+                    result: *result,
+                    extension_receiver_parameter: *extension_receiver_parameter,
+                    dispatch_receiver: super::source_calls::DispatchOperand {
+                        receiver: dispatch_receiver,
+                        class: dispatch_class,
+                    },
                     extension_receiver,
-                    &arguments,
-                    true,
-                )
+                    arguments: &arguments,
+                    write: true,
+                })
                 .ok_or(FirLoweringFailure::UnsupportedExternalProperty(*property))
             }
         }

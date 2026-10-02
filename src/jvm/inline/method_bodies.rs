@@ -33,6 +33,10 @@ pub enum PropertyAccess {
         descriptor: String,
         is_static: bool,
         is_interface: bool,
+        /// The physical receiver consumed as the leading parameter of a static accessor. This is
+        /// present for a value-class member's static realization and absent for an ordinary JVM
+        /// static. Instance accessors consume `owner` directly and leave this absent.
+        static_receiver: Option<crate::types::Ty>,
     },
     /// `invokestatic <owner>.<name>…` — a synthetic static access bridge. An instance member's
     /// bridge takes the receiver as its first argument; a named object's static field does not.
