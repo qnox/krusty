@@ -8436,6 +8436,9 @@ impl<'a> Emitter<'a> {
                     // stack), then build. An ordinary branch keeps them, as kotlinc does.
                     let temps = self.spill_to_temps(&args, code);
                     let ci = self.cw.class_ref(&owner);
+                    crate::jvm::reified_anonymous::guard_reified_construction(
+                        self.ir, self.cw, code, *internal,
+                    );
                     code.new_obj(ci);
                     code.dup();
                     let mut supplied = temps.iter().zip(args.iter());
@@ -8495,6 +8498,9 @@ impl<'a> Emitter<'a> {
                     code.invokespecial(m, aw, 0);
                 } else {
                     let ci = self.cw.class_ref(&owner);
+                    crate::jvm::reified_anonymous::guard_reified_construction(
+                        self.ir, self.cw, code, *internal,
+                    );
                     code.new_obj(ci);
                     code.dup();
                     let mut supplied = args.iter().copied();

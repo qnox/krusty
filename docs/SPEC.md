@@ -4660,9 +4660,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   identities in reified declarations and the exact recorded lambda-method domain, including after
   a lambda node becomes a class value. Closure realization preserves implementation identities
   and their owned nested/helper methods across that boundary; an anonymous object's ordinary
-  generic members are not in this domain merely because they use the same semantic parameter.
-  The enum-bound anonymous delegate negative control executes its erased cast without a marker
+  generic members are not in this lambda domain merely because they use the same semantic parameter.
+  The enum-bound anonymous delegate's call-site copy executes its cast without a reification marker
   (`erased_anonymous_delegate_member_is_not_a_reified_closure_method`).
+  Those members are still reified operations of the anonymous class. The declaration class keeps
+  the marker, and the inline method calls `needClassReification` before constructing it. A
+  same-module inline call copies the class and substitutes the call's reified arguments, so the
+  copy executes the specialized operation with no marker. The copy joins the caller's
+  `{owner}${caller}$$inlined${callee}$N` sequence, shared with a specialized lambda of the same
+  expansion. Mentioning only an ordinary type parameter does not copy the class.
+  Tests: `fir_lower::inlining::escaping_reified_object`, `tests/reified_anonymous_object_e2e.rs`,
+  boxes `reified/capture.kt` and `reified/innerObject.kt`.
   A singleton closure whose owned methods retain typed reified operations emits
   `needClassReification()` before creating its instance; a concrete specialized copy does not.
   Common lowering records the nearest source lambda identity and containing checked inline
