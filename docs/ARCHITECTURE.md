@@ -105,10 +105,10 @@ Build correctness rests on these contracts:
 - The LSP supervisor never runs the compiler in its own long-lived process. It sends source sets to
   a compiler worker that is restarted after 64 analyses. This bounds growth from the compiler's
   process-lifetime name/type interners while amortizing JVM classpath initialization across edits.
-  Before each request the worker starts a new compilation epoch, so declaration type-parameter
-  identities reuse the strings already interned for those coordinates instead of leaking a new
-  one on every edit. The epoch is taken only in the worker process, where one request is the only
-  live compilation.
+  Before each request the worker seals the previous response, which is owned bytes, and only then
+  starts a compilation epoch at id 1. Declaration type-parameter identities reuse the strings
+  already interned for those coordinates instead of leaking a new one on every edit. A live
+  compilation lease refuses the reset. The epoch is taken only in the worker process.
   The request also carries the bounded set of enabled language-feature names derived from project
   compilation arguments and explicit LSP flags; per-source directives are applied inside the worker.
   The worker is not a second server-CLI consumer: `exec` carries only its private mode marker and

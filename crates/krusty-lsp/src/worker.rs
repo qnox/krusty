@@ -965,18 +965,15 @@ fn analysis_worker_loop<R: BufRead, W: Write>(
     recycle_compilation_ids: bool,
 ) -> io::Result<()> {
     let mut prepared = PreparedClasspath::launch(classpath);
+    let mut epoch = krusty::CompilationEpoch::start();
     write_framed(writer, WORKER_READY)?;
     while let Some(body) = read_framed(reader, MAX_WORKER_MESSAGE_BYTES)? {
-        // The previous request's symbol table and pass-two symbols are dropped with that
-        // iteration. `PreparedClasspath` keeps jar indexes only, not compilation-scoped
-        // declaration identities, so the next request may reuse compilation 1. The reset is
-        // refused while a compilation lease is still alive; this process then stops instead of
-        // aliasing two live tables. In-process tests leave the counter monotonic so parallel
-        // compilations in one process cannot alias.
-        if recycle_compilation_ids && !krusty::begin_compilation_epoch() {
-            return Err(io::Error::other(
-                "compilation epoch reset refused because a compilation is still live",
-            ));
+        // The previous iteration dropped its symbol table and pass-two symbols, then sealed the
+        // response bytes. `PreparedClasspath` keeps jar indexes only. The next request may reuse
+        // compilation 1 only after that seal; a live lease refuses the reset and this process
+        // stops. In-process tests leave the counter monotonic so parallel compilations cannot alias.
+        if recycle_compilation_ids {
+            epoch.begin_request().map_err(io::Error::other)?;
         }
         let request: OwnedWorkerRequest = serde_json::from_slice(&body).map_err(json_io)?;
         drop(body);
@@ -1005,7 +1002,12 @@ fn analysis_worker_loop<R: BufRead, W: Write>(
                 });
                 let mut encoded = BoundedVec::new(MAX_WORKER_MESSAGE_BYTES);
                 serde_json::to_writer(&mut encoded, &response).map_err(json_io)?;
-                write_framed(writer, &encoded.bytes)?;
+                let bytes = if recycle_compilation_ids {
+                    epoch.seal_response(encoded.bytes)
+                } else {
+                    encoded.bytes
+                };
+                write_framed(writer, &bytes)?;
                 continue;
             }
             OwnedWorkerRequest::Dump { dump } => {
@@ -1018,7 +1020,12 @@ fn analysis_worker_loop<R: BufRead, W: Write>(
                 let response = dump.and_then(UnpublishedDump::publish);
                 let mut encoded = BoundedVec::new(MAX_WORKER_MESSAGE_BYTES);
                 serde_json::to_writer(&mut encoded, &response).map_err(json_io)?;
-                write_framed(writer, &encoded.bytes)?;
+                let bytes = if recycle_compilation_ids {
+                    epoch.seal_response(encoded.bytes)
+                } else {
+                    encoded.bytes
+                };
+                write_framed(writer, &bytes)?;
                 continue;
             }
         };
@@ -1155,6 +1162,11 @@ fn analysis_worker_loop<R: BufRead, W: Write>(
         if !classpath.snapshot_is_current() {
             return Ok(());
         }
+        let response = if recycle_compilation_ids {
+            epoch.seal_response(response)
+        } else {
+            response
+        };
         write_framed(writer, &response)?;
     }
     Ok(())

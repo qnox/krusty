@@ -42,13 +42,7 @@ impl Drop for CompilationLease {
     }
 }
 
-/// Number the next compilation from 1.
-///
-/// Returns false, and leaves the counter unchanged, when any compilation lease is still alive.
-/// The analysis worker calls this before a request, after the previous request's tables have been
-/// dropped. A caller that resets between two live compilations does not alias their declaration
-/// identities.
-pub fn begin_compilation_epoch() -> bool {
+fn try_begin_compilation_epoch() -> bool {
     let mut epoch = lock_epoch();
     if epoch.live != 0 {
         return false;
@@ -57,18 +51,74 @@ pub fn begin_compilation_epoch() -> bool {
     true
 }
 
+/// One worker's compilation epoch.
+///
+/// `Ty` and declaration identities are `Copy` and interned for the process, so a caller can keep
+/// one after the symbol table drops. Recycling is therefore not a free function: the worker must
+/// seal the previous response, which is owned bytes, before the next compilation starts at id 1.
+/// A live compilation lease still refuses the reset.
+pub struct CompilationEpoch {
+    response_sealed: bool,
+}
+
+impl CompilationEpoch {
+    pub fn start() -> Self {
+        Self {
+            response_sealed: true,
+        }
+    }
+
+    /// Start the next compilation at id 1.
+    ///
+    /// Fails when the previous response has not been sealed, or when a compilation lease is still
+    /// alive. The counter is left unchanged in both cases.
+    pub fn begin_request(&mut self) -> Result<(), &'static str> {
+        if !self.response_sealed {
+            return Err("previous compilation response was not sealed");
+        }
+        if !try_begin_compilation_epoch() {
+            return Err("compilation epoch reset refused because a compilation is still live");
+        }
+        self.response_sealed = false;
+        Ok(())
+    }
+
+    /// Record that this compilation published owned bytes and nothing else.
+    pub fn seal_response(&mut self, bytes: Vec<u8>) -> Vec<u8> {
+        self.response_sealed = true;
+        bytes
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn a_live_compilation_refuses_the_epoch_reset() {
+        let mut epoch = CompilationEpoch::start();
+        epoch.begin_request().expect("the first request is sealed");
         let table = crate::resolve::SymbolTable::default();
-        assert!(
-            !begin_compilation_epoch(),
+        epoch.seal_response(Vec::new());
+        assert_eq!(
+            epoch.begin_request(),
+            Err("compilation epoch reset refused because a compilation is still live"),
             "a live symbol table must keep its compilation id"
         );
         drop(table);
+        epoch.begin_request().expect("dropped tables can recycle");
+    }
+
+    #[test]
+    fn an_unsealed_response_refuses_the_next_compilation() {
+        let mut epoch = CompilationEpoch::start();
+        epoch.begin_request().expect("start");
+        assert_eq!(
+            epoch.begin_request(),
+            Err("previous compilation response was not sealed")
+        );
+        epoch.seal_response(b"[]".to_vec());
+        epoch.begin_request().expect("sealed bytes can recycle");
     }
 
     #[test]
@@ -111,7 +161,10 @@ mod tests {
                 "without an epoch reset each edit interns a new declaration identity"
             );
         }
-        assert!(begin_compilation_epoch());
+        let mut epoch = CompilationEpoch::start();
+        epoch
+            .begin_request()
+            .expect("the grown tables have been dropped");
 
         let mut seen = Vec::new();
         for _ in 0..32 {
@@ -120,10 +173,16 @@ mod tests {
                 crate::types::declaration_type_parameter(table.compilation_id(), 0, 0, 0, "T");
             let other = crate::resolve::SymbolTable::default();
             assert_ne!(table.compilation_id(), other.compilation_id());
-            assert!(!begin_compilation_epoch());
+            epoch.seal_response(Vec::new());
+            assert_eq!(
+                epoch.begin_request(),
+                Err("compilation epoch reset refused because a compilation is still live")
+            );
             drop(table);
             drop(other);
-            assert!(begin_compilation_epoch());
+            epoch
+                .begin_request()
+                .expect("both tables are dropped before the next compilation");
             seen.push(identity);
         }
         assert!(

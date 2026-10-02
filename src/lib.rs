@@ -18,7 +18,7 @@ pub mod backend;
 mod callable_access;
 mod compilation_epoch;
 pub mod compiler;
-pub use compilation_epoch::begin_compilation_epoch;
+pub use compilation_epoch::CompilationEpoch;
 pub mod conformance;
 mod context_parameters;
 pub mod contracts;
