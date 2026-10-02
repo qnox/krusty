@@ -174,12 +174,6 @@ pub(super) fn route(
         default_prefix_count: 0,
     };
     ir.logical_types.insert(site.node, Ty::obj_name(internal));
-    // The class is declared by the function that builds its value. A nested lambda's containing
-    // function is the outer lambda, which becomes that class's `invokeSuspend` before emission.
-    // A property initializer has no function body and keeps the enclosure lowering recorded.
-    if let Some(owner) = crate::jvm::lambda_classes::function_containing(ir, site.node) {
-        ir.classes[class as usize].enclosure = Some(crate::ir::IrEnclosure::Function(owner));
-    }
 
     let mut declared_spill_fields: Vec<(String, usize)> = Vec::new();
     for field in parameters

@@ -701,3 +701,57 @@ fun install() {\n\
         )))
     );
 }
+
+#[test]
+fn nested_specialized_suspend_lambdas_keep_their_exact_enclosure_chain() {
+    let ir = lower(
+        "\
+interface Item\n\
+class Token : Item\n\
+var check: suspend (Item) -> Boolean = { false }\n\
+inline fun <reified T : Item> defineFunc() {\n\
+    check = { value ->\n\
+        val nested: suspend (Item) -> Boolean = { candidate -> candidate is T }\n\
+        nested(value)\n\
+    }\n\
+}\n\
+fun install() { defineFunc<Token>() }\n",
+        "NestedSuspendEscapingReifiedLambda",
+    );
+    let install = function_named(&ir, "install");
+    let outer = ir
+        .specialized_functions
+        .iter()
+        .find_map(|(&function, specialization)| {
+            (specialization.caller == Some(crate::ir::IrEnclosure::Function(install))
+                && specialization.parent.is_none()
+                && ir.suspend_funs.contains(&function))
+            .then_some(function)
+        })
+        .expect("the call site has one outer specialized suspend lambda");
+    let nested = ir
+        .specialized_functions
+        .iter()
+        .find_map(|(&function, specialization)| {
+            (specialization.parent == Some(outer) && ir.suspend_funs.contains(&function))
+                .then_some(function)
+        })
+        .expect("the outer specialization has one nested suspend lambda");
+    let expression_for = |implementation| {
+        ir.exprs
+            .iter()
+            .position(
+                |expression| matches!(expression, IrExpr::Lambda { impl_fn, .. } if *impl_fn == implementation),
+            )
+            .expect("the implementation has one lambda value") as u32
+    };
+    assert_eq!(
+        ir.callable_reference_enclosures.get(&expression_for(outer)),
+        Some(&crate::ir::IrEnclosure::Function(install))
+    );
+    assert_eq!(
+        ir.callable_reference_enclosures
+            .get(&expression_for(nested)),
+        Some(&crate::ir::IrEnclosure::Lambda(outer))
+    );
+}

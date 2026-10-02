@@ -237,22 +237,6 @@ fn class_shape(
     Ok((site, body, captures))
 }
 
-pub(in crate::jvm) fn function_containing(ir: &IrFile, node: ExprId) -> Option<FunId> {
-    ir.functions
-        .iter()
-        .enumerate()
-        .find_map(|(index, function)| {
-            function
-                .body
-                .is_some_and(|body| {
-                    crate::ir::value_namespace_expressions(ir, body)
-                        .iter()
-                        .any(|&expression| expression == node)
-                })
-                .then_some(index as FunId)
-        })
-}
-
 /// Whether `ty`, a parameter or the result of a lambda's function type, is one `LambdaMetafactory`
 /// cannot adapt: a value class whose declared underlying type is neither nullable nor a primitive
 /// (kotlinc's `computeParameterTypeAdaptationConstraint`). A type-parameter underlying is
