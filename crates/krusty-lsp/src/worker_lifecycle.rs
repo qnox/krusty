@@ -620,6 +620,36 @@ fn test_lock() -> TestGuard {
 }
 
 #[cfg(test)]
+pub(crate) struct ParkedWorkerTestGuard {
+    running: Arc<AtomicBool>,
+    _test: TestGuard,
+}
+
+#[cfg(test)]
+impl Drop for ParkedWorkerTestGuard {
+    fn drop(&mut self) {
+        self.running.store(false, Ordering::SeqCst);
+        let _ = replacement_permitted();
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn park_live_child_for_test() -> ParkedWorkerTestGuard {
+    let test = test_lock();
+    let running = Arc::new(AtomicBool::new(true));
+    let mut child = Some(Simulated::survives(Arc::clone(&running)));
+    let mut reader = None;
+    let error = release_simulated(&mut child, &mut reader, Duration::ZERO)
+        .expect_err("the simulated child must occupy the process-lifetime park");
+    assert_eq!(error.kind(), ErrorKind::TimedOut);
+    assert!(child.is_none(), "the process-lifetime park owns the child");
+    ParkedWorkerTestGuard {
+        running,
+        _test: test,
+    }
+}
+
+#[cfg(test)]
 impl Drop for TestGuard {
     fn drop(&mut self) {
         shutdown_parked_for_test();

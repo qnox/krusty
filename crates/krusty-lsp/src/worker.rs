@@ -490,6 +490,9 @@ fn language_feature_names(features: &LangFeatures) -> Vec<&str> {
 
 impl WorkerProcess {
     fn spawn(executable: &Path, classpath: &[PathBuf]) -> io::Result<Self> {
+        if !crate::worker_lifecycle::replacement_permitted() {
+            return Err(crate::worker_lifecycle::still_live());
+        }
         let configuration = encode_launch_configuration(classpath)?;
         let mut child = Command::new(executable)
             .arg("--analysis-worker")
@@ -1382,6 +1385,21 @@ mod tests {
     use super::java_stub_memo::{java_stub_generations, reset_java_stub_generations};
     use super::*;
     use crate::analysis::MAX_SOURCE_SET_NAVIGATION_ENTRIES;
+
+    #[test]
+    fn a_parked_worker_blocks_fresh_analysis_worker_creation() {
+        let _parked = crate::worker_lifecycle::park_live_child_for_test();
+
+        let error = AnalysisWorker::spawn(PathBuf::from("replacement-must-not-spawn"), Vec::new())
+            .err()
+            .expect("the process-lifetime park must refuse a fresh worker");
+
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(
+            error.to_string(),
+            "analysis worker is still live after the reap deadline"
+        );
+    }
 
     /// Java texts are serialized from the caller's borrow. A cache hit and a dump must not build
     /// an intermediate copy of those strings just to encode the request.
