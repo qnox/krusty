@@ -182,15 +182,23 @@ impl<R> FrameReader<R> {
 
 impl<R> Drop for FrameReader<R> {
     fn drop(&mut self) {
-        // `into_wait` and `join` take the handle first. Dropping a still-running handle detaches
-        // the thread, so a forgotten one stays owned by the process instead.
-        if let Some(join) = self.join.take() {
-            if join.is_finished() {
-                let _ = join.join();
-            } else {
-                std::mem::forget(join);
-            }
+        // `into_wait` and `join` take the handle first. A still-running reader moves into the
+        // process park: dropping the `JoinHandle` would detach it, and forgetting it would
+        // abandon the join.
+        let Some(join) = self.join.take() else {
+            return;
+        };
+        if join.is_finished() {
+            let _ = join.join();
+            return;
         }
+        let done = self.done.take().expect("frame reader done");
+        retain_reader(ReaderWait {
+            join,
+            done,
+            #[cfg(test)]
+            unblock: None,
+        });
     }
 }
 
@@ -353,6 +361,43 @@ fn with_slot<T>(body: impl FnOnce(&mut Option<Parked>) -> T) -> T {
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     body(&mut slot)
+}
+
+/// Keep `reader` joinable until it has finished or the one park slot holds it.
+fn retain_reader(reader: ReaderWait) {
+    let mut reader = Some(reader);
+    loop {
+        let current = reader.take().expect("unjoined reader");
+        if current.join.is_finished() {
+            let _ = current.join.join();
+            return;
+        }
+        let rejected = with_slot(|slot| place_reader(slot, current));
+        match rejected {
+            None => return,
+            Some(returned) => {
+                reader = Some(returned);
+                std::thread::sleep(WAIT_POLL);
+            }
+        }
+    }
+}
+
+/// Attach `reader` to the one park slot, or hand it back when that slot already has a reader.
+fn place_reader(slot: &mut Option<Parked>, reader: ReaderWait) -> Option<ReaderWait> {
+    if slot_occupied(slot) {
+        let parked = slot.as_mut().expect("occupied park");
+        if parked.reader.is_none() {
+            parked.reader = Some(reader);
+            return None;
+        }
+        return Some(reader);
+    }
+    *slot = Some(Parked {
+        child: None,
+        reader: Some(reader),
+    });
+    None
 }
 
 /// Last-resort shutdown for a child the one slot could not take during `release`.
@@ -730,6 +775,39 @@ mod tests {
         }
         assert!(replacement_permitted());
         assert_eq!(parked_processes(), 0);
+        assert_eq!(readers.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn a_dropped_frame_reader_stays_joinable_after_its_thread_returns() {
+        let _guard = test_lock();
+        let readers = Arc::new(AtomicUsize::new(0));
+        let (unblock, gate) = mpsc::channel();
+        let readers_in_dropper = Arc::clone(&readers);
+        let dropper = std::thread::spawn(move || {
+            readers_in_dropper.fetch_add(1, Ordering::SeqCst);
+            let count = LiveCount(Arc::clone(&readers_in_dropper));
+            let reader = spawn_frame_reader(move || {
+                let _count = count;
+                let _ = gate.recv();
+                ((), Ok(None))
+            });
+            drop(reader);
+        });
+        dropper.join().expect("dropper thread");
+
+        assert!(
+            !replacement_permitted(),
+            "dropping the reader parks its join instead of forgetting it"
+        );
+        assert_eq!(readers.load(Ordering::SeqCst), 1);
+
+        unblock.send(()).expect("unblock the parked reader");
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while Instant::now() < deadline && !replacement_permitted() {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(replacement_permitted());
         assert_eq!(readers.load(Ordering::SeqCst), 0);
     }
 
