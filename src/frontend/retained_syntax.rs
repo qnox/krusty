@@ -164,6 +164,32 @@ fn fun_body_root(body: &FunBody) -> Option<ExprId> {
     }
 }
 
+/// Whether the class declares a signature-owned default anywhere the SignatureDefaults pass
+/// checks: primary-constructor property parameters, member methods, secondary constructors, and
+/// enum-entry methods.
+fn class_owns_signature_default(class: &ClassDecl) -> bool {
+    class
+        .props
+        .iter()
+        .any(|parameter| parameter.default.is_some())
+        || class
+            .methods
+            .iter()
+            .flat_map(|method| &method.params)
+            .any(|parameter| parameter.default.is_some())
+        || class
+            .secondary_ctors
+            .iter()
+            .flat_map(|constructor| &constructor.params)
+            .any(|parameter| parameter.default.is_some())
+        || class
+            .enum_entries
+            .iter()
+            .flat_map(|entry| &entry.methods)
+            .flat_map(|method| &method.params)
+            .any(|parameter| parameter.default.is_some())
+}
+
 fn retain_parameter_defaults<'a>(
     retained: &mut Reachable,
     file: &File,
@@ -237,6 +263,21 @@ fn collect_pass_one_roots(file: &File) -> Reachable {
                     for method in &entry.methods {
                         retain_parameter_defaults(&mut retained, file, &method.params);
                     }
+                }
+                if class_owns_signature_default(class) {
+                    // Checking any signature default of this class re-enters it in
+                    // SignatureDefaults mode, whose primary-constructor header check evaluates the
+                    // `super(…)` arguments and each interface-delegation value unconditionally.
+                    // Those expressions must survive compaction; init blocks, property
+                    // initializers, and constructor delegation arguments stay per-selection.
+                    retained.roots(file, class.base_args.iter().copied());
+                    retained.roots(
+                        file,
+                        class
+                            .interface_delegations
+                            .iter()
+                            .map(|delegation| delegation.value),
+                    );
                 }
                 let has_inline_body = class.methods.iter().any(FunDecl::is_inline)
                     || class.body_props.iter().any(|property| {
@@ -350,27 +391,7 @@ fn collect_pass_one_roots(file: &File) -> Reachable {
             let Decl::Class(class) = declaration else {
                 return None;
             };
-            let has_defaults = class
-                .props
-                .iter()
-                .any(|parameter| parameter.default.is_some())
-                || class
-                    .methods
-                    .iter()
-                    .flat_map(|method| &method.params)
-                    .any(|parameter| parameter.default.is_some())
-                || class
-                    .secondary_ctors
-                    .iter()
-                    .flat_map(|constructor| &constructor.params)
-                    .any(|parameter| parameter.default.is_some())
-                || class
-                    .enum_entries
-                    .iter()
-                    .flat_map(|entry| &entry.methods)
-                    .flat_map(|method| &method.params)
-                    .any(|parameter| parameter.default.is_some());
-            has_defaults.then_some(class.span)
+            class_owns_signature_default(class).then_some(class.span)
         })
         .filter_map(|local_span| {
             file.decls
@@ -1092,6 +1113,48 @@ mod tests {
                 .map(|argument| file.const_string_value(*argument).unwrap().to_lossy())
                 .collect::<Vec<_>>(),
             ["INVISIBLE_MEMBER", "INVISIBLE_REFERENCE"],
+        );
+    }
+
+    #[test]
+    fn default_owning_class_retains_super_arguments_and_delegation_values() {
+        // The SignatureDefaults pass re-enters a class that owns any default and evaluates its
+        // primary-constructor header (`super(…)` arguments, interface-delegation values); those
+        // expressions must survive compaction.
+        let source = "interface Iface { fun f(): Int }\n\
+            open class Base(val n: Int)\n\
+            class Impl : Iface { override fun f(): Int = 1 }\n\
+            class Deleg private constructor(val p: Impl) : Base(1), Iface by p {\n\
+            \x20 constructor(s: String = \"d\") : this(Impl())\n\
+            }\n";
+        let mut diagnostics = crate::diag::DiagSink::new();
+        let mut file =
+            crate::frontend::parse_source_with_detected_features(source, &mut diagnostics);
+        assert!(!diagnostics.has_errors(), "{:#?}", diagnostics.diags);
+
+        compact(&mut file);
+
+        let deleg = file
+            .decl_arena
+            .iter()
+            .find_map(|declaration| match declaration {
+                Decl::Class(class) if class.name == "Deleg" => Some(class),
+                _ => None,
+            })
+            .expect("Deleg class");
+        assert!(
+            deleg
+                .base_args
+                .iter()
+                .all(|argument| (argument.0 as usize) < file.expr_arena.len()),
+            "super-constructor arguments must be retained",
+        );
+        assert!(
+            deleg
+                .interface_delegations
+                .iter()
+                .all(|delegation| (delegation.value.0 as usize) < file.expr_arena.len()),
+            "interface-delegation values must be retained",
         );
     }
 
