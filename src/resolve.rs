@@ -42425,13 +42425,11 @@ impl<'a> Checker<'a> {
             } else {
                 inferred.tightest_upper_bindings(&source)
             };
-            // Snapshot the denotable upper before `inferred.bindings` moves. A later `or_insert`
-            // publishes it only for formals the expected result has not already fixed, so
+            // Snapshot the denotable upper before `inferred.bindings` moves. Publishing it does
+            // not replace a binding the expected result already fixed, so
             // `(): Nothing = intersect(...)` stays `Nothing` while an unconstrained
             // `intersect(In<Int>(), In<String>())` becomes `Int & String`.
-            let denotable_upper_bindings = if candidate.projected_return_hazard {
-                Vec::new()
-            } else {
+            let denotable_upper_bindings = {
                 let formals = inferred.upper_only.iter().cloned().collect::<Vec<_>>();
                 formals
                     .into_iter()
@@ -42643,14 +42641,14 @@ impl<'a> Checker<'a> {
                     inferred_nested,
                 );
             }
-            // A projected-return input that contributes only upper constraints has bottom as its
-            // most specific solution. Preserve that parameter-side solution before contextual
-            // result constraints are merged: the result may be approximated to its expected type,
-            // but `Context<in Nothing>` must not become `Context<in Expected>`. Ordinary generic
-            // calls still let an expected result contextualize their parameters (for example,
-            // `Continuation<String>` determines its callback's `Result<String>` parameter).
+            // A projected-return input contributes only upper constraints. `Nothing` is the
+            // placeholder an expected result can still replace (`select(Context<Any>()): String`).
+            // An incompatible expected type must not turn `Context<out T>` passed to
+            // `Context<in U>` into `Context<in Expected>`. A concrete upper is published below,
+            // after that replacement, and only when the expected result did not fix the variable
+            // (`select(Context<Any>())` is `Any`).
             if candidate.projected_return_hazard {
-                for formal in &inferred.upper_only {
+                for (formal, _) in &denotable_upper_bindings {
                     bindings.entry(formal.clone()).or_insert(Ty::Nothing);
                 }
             }
@@ -42755,7 +42753,21 @@ impl<'a> Checker<'a> {
                 }
             }
             for (formal, binding) in denotable_upper_bindings {
-                bindings.entry(formal).or_insert(binding);
+                let expected_fixed = expected_return_intersection_bindings
+                    .as_ref()
+                    .and_then(|result| result.get(&formal))
+                    .copied();
+                match bindings.get(&formal).copied() {
+                    None => {
+                        bindings.insert(formal, binding);
+                    }
+                    // The hazard placeholder is `Nothing`. Keep it when the expected result chose
+                    // `Nothing`, and replace it when no expected result fixed the variable.
+                    Some(Ty::Nothing) if binding != Ty::Nothing && expected_fixed.is_none() => {
+                        bindings.insert(formal, binding);
+                    }
+                    _ => {}
+                }
             }
             // Join bottom bindings against `where`-clause subtype constraints IN the real
             // bindings — the return type substitutes from them (`ifBlank { null }` must select

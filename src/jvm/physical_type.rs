@@ -304,6 +304,9 @@ pub fn ir_ty_to_jvm(t: &Ty) -> Ty {
         // `T : Int` is `Integer`, never `int`.
         Ty::TyParam(_, bound) if t.is_nullable() => ir_ty_to_jvm(&Ty::nullable(*bound)),
         Ty::TyParam(_, bound) => ir_ty_to_jvm(bound),
+        // `Int & String` has no single carrier. The value is the erased reference; a bound that
+        // already determines a primitive is published as that bound, not an intersection.
+        Ty::Intersection(_) => Ty::obj_name(crate::types::wk::java_object()),
         _ => Ty::Error,
     }
 }

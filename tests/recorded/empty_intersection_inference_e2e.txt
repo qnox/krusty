@@ -1,0 +1,6 @@
+# kotlinc output recorded per Kotlin version by tests/common/recorded.rs. A version with
+# no value is recorded from its kotlinc on the next local run; KRUSTY_RECORD=1 re-records.
+
+[an_intersection_is_not_nothing_without_an_expected_nothing]
+2.4.20:
+  EmptyIntersectionNothing.kt:6:6: argument type mismatch: actual type is 'Int & String', but 'Nothing' was expected.

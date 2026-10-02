@@ -15,7 +15,10 @@ fun box(): String {\n\
     val a = intersect(In<Int>(), In<String>())\n\
     val b = intersect(In<Int>(), *arrayOf(In<String>()))\n\
     val c = intersect(x = arrayOf(In<Int>(), In<String>()))\n\
-    return if (a == null && a == b && b == c) \"OK\" else \"NOT_OK\"\n\
+    val d = intersect(x = *arrayOf(In<Int>(), In<String>()))\n\
+    val e = intersect(In<Int>(), *arrayOf(In<String>()), In<Long>())\n\
+    val f = intersect(*arrayOf(In<Int>()), In<String>(), *arrayOf(In<Long>()))\n\
+    return if (a == null && a == b && b == c && c == d && d == e && e == f) \"OK\" else \"NOT_OK\"\n\
 }\n";
 
 #[test]
