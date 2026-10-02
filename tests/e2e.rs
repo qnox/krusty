@@ -1864,6 +1864,8 @@ mod sealed_interface_nested_e2e;
 mod sealed_object_value_match_e2e;
 #[path = "secondary_constructor_member_order_e2e.rs"]
 mod secondary_constructor_member_order_e2e;
+#[path = "secondary_constructor_shape_e2e.rs"]
+mod secondary_constructor_shape_e2e;
 #[path = "secondary_ctor_noprimary_e2e.rs"]
 mod secondary_ctor_noprimary_e2e;
 #[path = "secondary_ctor_this_sibling_e2e.rs"]

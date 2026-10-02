@@ -7,7 +7,7 @@
 
 use super::{
     ClassId, CtorDelegateTarget, DeclarationAnnotations, ExprId, IrFile,
-    IrGeneratedDeclarationDebug, Ty,
+    IrGeneratedDeclarationDebug, IrParameterCheck, Ty,
 };
 use crate::types::TypeName;
 
@@ -100,6 +100,9 @@ pub struct IrSecondaryCtor {
     /// the ctor gets kotlinc's PRIVATE + public synthetic `(…, DefaultConstructorMarker)` ABI, and
     /// its metadata record names the marker form.
     pub vc_params: bool,
+    /// Per DECLARED parameter, the entry check a JVM backend realized for it (see
+    /// `crate::jvm::parameter_assertions`); the backend quotes the parameter's name when emitting it.
+    pub param_checks: Vec<Option<IrParameterCheck>>,
 }
 
 /// The source lines a secondary constructor's DECLARATION owns, each recorded where the syntax was

@@ -16,6 +16,7 @@ pub mod uri;
 mod worker;
 mod worker_lifecycle;
 mod worker_resident;
+pub mod workspace_index_input;
 
 pub use analysis::*;
 pub use compiler_analysis::LibraryRef;

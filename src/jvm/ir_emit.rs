@@ -57,6 +57,7 @@ mod declaration_annotations;
 mod declaration_types;
 mod declared_nullability;
 mod declared_property_access;
+mod declared_property_accessor;
 mod delegated_property_array;
 mod field_nullability;
 use field_nullability::{
@@ -135,8 +136,8 @@ mod value_class_override_metadata;
 mod value_class_signatures;
 use crate::jvm::private_static_access::StaticOwner;
 use class_pool_seed::{
-    seed_enum_constructor_locals, seed_plain_class_pool, seed_plain_constructor_tail,
-    PlainClassPoolSeed,
+    seed_accessor_locals, seed_enum_constructor_locals, seed_plain_class_pool,
+    seed_plain_constructor_tail, PlainClassPoolSeed,
 };
 pub(super) use enclosure::{class_enclosure, property_accessor_function};
 use primary_constructor_parameters::{
@@ -617,24 +618,6 @@ impl JvmDefaultMode {
     }
 }
 
-/// Drop every `Intrinsics.checkNotNullParameter` guard the lowering recorded.
-///
-/// `-Xno-param-assertions` removes the parameter null checks kotlinc emits at the entry of every
-/// function reachable from Java. Applied to the IR rather than at the emission site on purpose: the
-/// guards are also what the `LineNumberTable` and `LocalVariableTable` start offsets are computed
-/// from, so suppressing them at one site and not the other would emit debug tables pointing into the
-/// middle of the method.
-pub(crate) fn strip_param_assertions(ir: &mut IrFile) {
-    for function in &mut ir.functions {
-        function.param_checks.fill(None);
-    }
-    for class in &mut ir.classes {
-        for parameter in &mut class.ctor_args {
-            parameter.check = None;
-        }
-    }
-}
-
 /// Drop every `Intrinsics.checkNotNullExpressionValue` guard on a narrowed platform value.
 ///
 /// `-Xno-call-assertions` removes the null checks kotlinc emits where a Java call's `T!` result is
@@ -691,7 +674,7 @@ pub struct EmitOptions {
     /// Emit the `Intrinsics.checkNotNullParameter` guards (`-Xno-param-assertions` clears this).
     ///
     /// Most guards are recorded by lowering and removed from the IR before emission
-    /// ([`strip_param_assertions`]), which keeps them consistent with the debug-table offsets
+    /// ([`crate::jvm::parameter_assertions::strip`]), which keeps them consistent with the debug-table offsets
     /// measured past them. A PROPERTY SETTER's `<set-?>` guard has no IR record — it is derived here
     /// from the property's type — so those sites read this flag instead.
     pub param_assertions: bool,
@@ -2485,175 +2468,6 @@ enum PropertyAccessorSide {
     Setter,
 }
 
-fn emit_declared_property_accessor(
-    ir: &IrFile,
-    c: &crate::ir::IrClass,
-    property: &crate::ir::IrProperty,
-    side: PropertyAccessorSide,
-    fq_name: &str,
-    cw: &mut ClassWriter,
-    formatter: &JvmSignatureFormatter<'_>,
-    param_assertions: bool,
-) {
-    // `@JvmField` IS the declaration's realization: the field is the property's public face and
-    // kotlinc emits no accessor beside it. Synthesizing one here would advertise a method the
-    // metadata (correctly) never records.
-    if property.is_private || is_jvm_field(c, &property.name) {
-        return;
-    }
-    let Some(field_index) = property.backing_field else {
-        return;
-    };
-    let Some(field) = c.fields.get(field_index as usize) else {
-        return;
-    };
-    let type_parameter = ir
-        .field_signatures(fq_name)
-        .and_then(|signatures| {
-            signatures
-                .iter()
-                .find(|(name, _)| *name == field.name)
-                .map(|(_, parameter)| parameter.as_str())
-        })
-        .or(field.type_param.as_deref());
-    let signatures = property_jvm_signatures(formatter, &field.ty, type_parameter);
-    let field_jt = jvm_declared_ty(&field.ty);
-    let field_desc = type_descriptor(field_jt);
-    let accessor_jt = declared_property_accessor_jvm(ir, property, field);
-    let accessor_desc = type_descriptor(accessor_jt);
-    // Only an `open`/`override` PROPERTY's accessor is overridable — a plain `val` on an open
-    // class keeps its FINAL accessor (kotlinc: `open class Engine(val name: String)` emits
-    // `public final getName()`); Kotlin rejects overriding a non-open property, so the flag is
-    // safe. Interface accessors stay non-final (their default bodies dispatch virtually).
-    let overridable = property.is_open || c.is_interface;
-    let getter = property
-        .getter_jvm_name
-        .clone()
-        .unwrap_or_else(|| crate::names::property_getter_name(&property.name));
-    let occupied = |name: &str, descriptor: &str| {
-        c.methods.iter().any(|&fid| {
-            let function = &ir.functions[fid as usize];
-            function.name == name && ir_method_desc(&function.params, &function.ret) == descriptor
-        })
-    };
-    let getter_desc = format!("(){accessor_desc}");
-    if matches!(side, PropertyAccessorSide::Getter) && !occupied(&getter, &getter_desc) {
-        // Visit the method header before constructing its code. This is especially observable for a
-        // setter guard (`<set-?>`) and for a generic accessor Signature.
-        let sig = &signatures.getter;
-        let getter_ann = (accessor_jt.is_reference() && field.type_param.is_none()).then(|| {
-            if property.ty.is_nullable() {
-                "Lorg/jetbrains/annotations/Nullable;"
-            } else {
-                "Lorg/jetbrains/annotations/NotNull;"
-            }
-        });
-        cw.reserve_method_pool(
-            &getter,
-            &getter_desc,
-            sig.as_deref(),
-            &getter_ann.into_iter().collect::<Vec<_>>(),
-        );
-        let mut g = CodeBuilder::new(1);
-        let physical_name = instance_field_jvm_name(ir, c, field);
-        let fref = cw.fieldref(fq_name, &physical_name, &field_desc);
-        if static_storage(ir, c) {
-            g.getstatic(fref, slot_words(field_jt) as i32);
-        } else {
-            g.aload(0);
-            g.getfield(fref, slot_words(field_jt) as i32);
-        }
-        // A `lateinit var` read throws while the field is still null — kotlinc inserts this at every
-        // access, and the accessor is an access like any other.
-        if field.is_lateinit() {
-            g.dup();
-            let lbl = g.new_label();
-            g.ifnonnull(lbl);
-            g.push_string(&field.name, cw);
-            let m = cw.methodref(
-                "kotlin/jvm/internal/Intrinsics",
-                "throwUninitializedPropertyAccessException",
-                "(Ljava/lang/String;)V",
-            );
-            g.invokestatic(m, 1, 0);
-            // The join needs a stackmap frame: `this` in local 0, the (non-null on the taken path)
-            // field value on the stack.
-            g.bind(lbl);
-        }
-        emit_backing_field_read_adaptation(ir, cw, &mut g, property, field_jt, accessor_jt);
-        emit_return(accessor_jt, &mut g);
-        g.ensure_locals(1);
-        g.link();
-        let access = default_accessor_access(property.visibility, overridable);
-        cw.add_method_sig(access, &getter, &getter_desc, &g, sig.as_deref());
-    }
-    if matches!(side, PropertyAccessorSide::Setter) && property.is_var {
-        let setter = property
-            .setter_jvm_name
-            .clone()
-            .unwrap_or_else(|| crate::names::property_setter_name(&property.name));
-        let setter_desc = format!("({accessor_desc})V");
-        if !occupied(&setter, &setter_desc) {
-            let sig = &signatures.setter;
-            let setter_ann =
-                (accessor_jt.is_reference() && field.type_param.is_none()).then(|| {
-                    if property.ty.is_nullable() {
-                        "Lorg/jetbrains/annotations/Nullable;"
-                    } else {
-                        "Lorg/jetbrains/annotations/NotNull;"
-                    }
-                });
-            cw.reserve_method_pool(
-                &setter,
-                &setter_desc,
-                sig.as_deref(),
-                &setter_ann.into_iter().collect::<Vec<_>>(),
-            );
-            // `<set-?>` is the setter value parameter's JVM debug name even when no non-null guard
-            // uses it as a String constant. Its UTF8 belongs to this method's header/debug window,
-            // before the following declared member.
-            cw.seed_utf8("<set-?>");
-            let words = slot_words(accessor_jt);
-            let mut st = CodeBuilder::new(1 + words);
-            // kotlinc guards a non-null REFERENCE setter parameter, naming it `<set-?>`. A primitive
-            // cannot be null, and neither is a type parameter that admits null (an unbounded `<T>` is
-            // `Any?`); a NON-null-bounded one (`<T : Cargo>`) is guarded like any other reference.
-            let guarded = param_assertions
-                && accessor_jt.is_reference()
-                && !property.ty.is_nullable()
-                && is_nonnull_reference_field(ir, fq_name, &field.name, field.ty);
-            if guarded {
-                st.aload(1);
-                st.push_string("<set-?>", cw);
-                let m = cw.methodref(
-                    "kotlin/jvm/internal/Intrinsics",
-                    "checkNotNullParameter",
-                    "(Ljava/lang/Object;Ljava/lang/String;)V",
-                );
-                st.invokestatic(m, 2, 0);
-            }
-            let statics_storage = static_storage(ir, c);
-            if !statics_storage {
-                st.aload(0);
-            }
-            load(accessor_jt, 1, &mut st);
-            emit_backing_field_write_adaptation(ir, cw, &mut st, property, accessor_jt, field_jt);
-            let physical_name = instance_field_jvm_name(ir, c, field);
-            let fref = cw.fieldref(fq_name, &physical_name, &field_desc);
-            if statics_storage {
-                st.putstatic(fref, slot_words(field_jt) as i32);
-            } else {
-                st.putfield(fref, slot_words(field_jt) as i32);
-            }
-            st.ret_void();
-            st.ensure_locals(1 + words);
-            st.link();
-            let access = default_accessor_access(property.setter_visibility, overridable);
-            cw.add_method_sig(access, &setter, &setter_desc, &st, sig.as_deref());
-        }
-    }
-}
-
 /// What emitting one class's property accessors (and the `$annotations` markers beside them) needs
 /// besides the IR: the class's JVM name, its file facade, the signature formatter, and the emit
 /// environment. Grouped so the accessor walk stays within the argument-count limit, like
@@ -2679,26 +2493,25 @@ fn emit_declared_property_accessors(
         emit.param_assertions,
         emit.env,
     );
+    let accessor_owner = declared_property_accessor::AccessorOwner {
+        ir,
+        class: c,
+        fq_name,
+        formatter,
+        param_assertions,
+    };
     for property in &c.properties {
-        emit_declared_property_accessor(
-            ir,
-            c,
+        declared_property_accessor::emit(
+            &accessor_owner,
             property,
             PropertyAccessorSide::Getter,
-            fq_name,
             cw,
-            formatter,
-            param_assertions,
         );
-        emit_declared_property_accessor(
-            ir,
-            c,
+        declared_property_accessor::emit(
+            &accessor_owner,
             property,
             PropertyAccessorSide::Setter,
-            fq_name,
             cw,
-            formatter,
-            param_assertions,
         );
         // The property's own annotations ride a synthetic marker method, emitted right here so the
         // method table (and the constant pool behind it) matches kotlinc's.
@@ -2752,28 +2565,27 @@ fn emit_scheduled_member(
     } = *emission;
     let fid = match member {
         SourceOrderedMember::Property(property) => {
-            emit_declared_property_accessor(
+            let accessor_owner = declared_property_accessor::AccessorOwner {
                 ir,
-                c,
+                class: c,
+                fq_name,
+                formatter: signature_formatter,
+                param_assertions,
+            };
+            declared_property_accessor::emit(
+                &accessor_owner,
                 property,
                 PropertyAccessorSide::Getter,
-                fq_name,
                 cw,
-                signature_formatter,
-                param_assertions,
             );
             if let Some(getter) = property.getter {
                 emit_scheduled_member(emission, SourceOrderedMember::Function(getter), cw);
             }
-            emit_declared_property_accessor(
-                ir,
-                c,
+            declared_property_accessor::emit(
+                &accessor_owner,
                 property,
                 PropertyAccessorSide::Setter,
-                fq_name,
                 cw,
-                signature_formatter,
-                param_assertions,
             );
             if let Some(setter) = property.setter {
                 emit_scheduled_member(emission, SourceOrderedMember::Function(setter), cw);
@@ -3081,7 +2893,7 @@ fn emit_class(
         fq_name: &fq_name,
         ctor_signature: ctor_signature.as_deref(),
     };
-    if byte_parity {
+    if byte_parity && c.has_primary_ctor {
         seed_plain_class_pool(pool_seed(), &mut cw);
     }
     // Access: an extended or abstract class must not be `final`; a class with an emitted abstract
