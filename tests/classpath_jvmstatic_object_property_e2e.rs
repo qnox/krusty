@@ -62,6 +62,33 @@ fn jvmstatic_object_property_write_then_read() {
     common::expect_box_ok_against("jvmstatic_obj_prop_write", LIB, main);
 }
 
+/// A value class's own member accessor consumes its carrier, but a companion `@JvmStatic`
+/// accessor emitted on the same class does not. In particular, the setter's one parameter is the
+/// assigned value; it must not be reinterpreted as a dispatch receiver merely because the physical
+/// owner is a value class.
+#[test]
+fn value_class_companion_jvmstatic_property_has_no_carrier_receiver() {
+    let library = r#"
+package lib
+
+@JvmInline
+value class Stamp(val raw: Int) {
+    companion object {
+        @JvmStatic var counter: Int = 1
+    }
+}
+"#;
+    let main = r#"
+import lib.Stamp
+
+fun box(): String {
+    Stamp.counter = 7
+    return if (Stamp.counter == 7) "OK" else "Fail: ${Stamp.counter}"
+}
+"#;
+    common::expect_box_ok_against("value_class_companion_jvmstatic_prop", library, main);
+}
+
 /// The receiver carries no value for a static accessor, but it is still an expression: a bare
 /// singleton/local read is elided (kotlinc emits neither), while a receiver that can have an EFFECT is
 /// evaluated and popped. Both reads and writes go through the same emitter path.

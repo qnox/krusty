@@ -701,11 +701,9 @@ pub(super) fn private_member_read_access(
             descriptor: method_descriptor(&parameters, result),
             is_static: true,
             is_interface: false,
-            static_receiver: ir
-                .classes
-                .iter()
-                .find(|class| class.fq_name == owner && class.is_value)
-                .and_then(|_| parameters.first().copied()),
+            static_receiver: (function.dispatch_receiver == Some(owner))
+                .then(|| parameters.first().copied())
+                .flatten(),
         };
     }
     let mut bridge_parameters = vec![Ty::obj_name(owner)];

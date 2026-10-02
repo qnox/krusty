@@ -352,15 +352,13 @@ pub(super) fn property_store_slot(access: &crate::jvm::inline::PropertyAccess, c
             descriptor,
             static_receiver,
             ..
-        } => crate::jvm::names::parse_method_descriptor(descriptor).and_then(
-            |(parameters, _)| {
-                if static_receiver.is_some() {
-                    parameters.last().copied()
-                } else {
-                    parameters.first().copied()
-                }
-            },
-        ),
+        } => crate::jvm::names::parse_method_descriptor(descriptor).and_then(|(parameters, _)| {
+            if static_receiver.is_some() {
+                parameters.last().copied()
+            } else {
+                parameters.first().copied()
+            }
+        }),
         PropertyAccess::AccessBridge { descriptor, .. } => {
             crate::jvm::names::parse_method_descriptor(descriptor)
                 .and_then(|(params, _)| params.last().copied())
