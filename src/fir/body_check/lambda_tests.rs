@@ -1230,3 +1230,189 @@ fn a_provider_member_without_an_identity_fails_as_missing_stable_call_target() {
         )
     );
 }
+
+#[test]
+fn an_object_that_is_the_fun_interface_is_not_sam_converted() {
+    let (body, _) = checked_function_body(
+        "interface Mark\n\
+         object Token : Mark\n\
+         fun interface Foo : () -> Mark\n\
+         fun id(foo: Foo): Foo = foo\n\
+         fun use(): Foo {\n\
+             val value = object : Foo { override fun invoke() = Token }\n\
+             return id(value)\n\
+         }\n",
+        "use",
+    );
+    assert!(
+        sam_conversions(&body).is_empty(),
+        "an object that is already Foo must not be wrapped: {:?}",
+        sam_conversions(&body)
+    );
+}
+
+#[test]
+fn a_class_that_implements_a_fun_interface_and_a_function_type_is_not_sam_converted() {
+    let (body, _) = checked_function_body(
+        "interface Mark\n\
+         fun interface Worker { fun onStart(scope: Mark) }\n\
+         class Impl : Worker, (Mark) -> Unit {\n\
+             override fun onStart(scope: Mark) {}\n\
+             override fun invoke(value: Mark) {}\n\
+         }\n\
+         fun foo(worker: Worker) {}\n\
+         fun use() { foo(Impl()) }\n",
+        "use",
+    );
+    assert!(
+        sam_conversions(&body).is_empty(),
+        "Impl already is Worker: {:?}",
+        sam_conversions(&body)
+    );
+}
+
+#[test]
+fn a_generic_fun_interface_subtype_is_not_sam_converted() {
+    let (body, _) = checked_function_body(
+        "interface Mark\n\
+         fun interface Worker<E> { fun onStart(scope: E) }\n\
+         class Impl<F> : Worker<F>, (Mark) -> Unit {\n\
+             override fun onStart(scope: F) {}\n\
+             override fun invoke(value: Mark) {}\n\
+         }\n\
+         fun <T> foo(worker: Worker<T>) {}\n\
+         fun use() { foo(Impl<Mark>()) }\n",
+        "use",
+    );
+    assert!(
+        sam_conversions(&body).is_empty(),
+        "Impl<Mark> already is Worker<Mark>: {:?}",
+        sam_conversions(&body)
+    );
+}
+
+#[test]
+fn a_mismatched_fun_interface_instantiation_still_converts() {
+    let (body, _) = checked_function_body(
+        "interface TokenA\n\
+         interface TokenB\n\
+         fun interface Worker<E> { fun onStart(scope: E) }\n\
+         class Impl : Worker<TokenA>, (TokenB) -> Unit {\n\
+             override fun onStart(scope: TokenA) {}\n\
+             override fun invoke(value: TokenB) {}\n\
+         }\n\
+         fun take(worker: Worker<TokenB>) {}\n\
+         fun use() { take(Impl()) }\n",
+        "use",
+    );
+    let [conversion] = &sam_conversions(&body)[..] else {
+        panic!(
+            "Worker<TokenA> is not Worker<TokenB>, got {:?}",
+            sam_conversions(&body)
+        )
+    };
+    assert_eq!(conversion.classifier, crate::types::type_name("Worker"));
+    assert_eq!(
+        conversion
+            .parameters
+            .iter()
+            .map(|parameter| parameter.get())
+            .collect::<Vec<_>>(),
+        vec![Ty::obj("TokenB")]
+    );
+}
+
+#[test]
+fn a_star_projected_fun_interface_subtype_is_not_sam_converted() {
+    let (body, _) = checked_function_body(
+        "interface Token\n\
+         interface Mark\n\
+         fun interface Worker<E> { fun onStart(scope: E) }\n\
+         class Impl : Worker<Token>, (Mark) -> Unit {\n\
+             override fun onStart(scope: Token) {}\n\
+             override fun invoke(value: Mark) {}\n\
+         }\n\
+         fun take(worker: Worker<*>) {}\n\
+         fun use() { take(Impl()) }\n",
+        "use",
+    );
+    assert!(
+        sam_conversions(&body).is_empty(),
+        "Impl is Worker<*>: {:?}",
+        sam_conversions(&body)
+    );
+}
+
+#[test]
+fn a_contravariant_fun_interface_supertype_is_not_sam_converted() {
+    let (body, _) = checked_function_body(
+        "interface Token\n\
+         interface Sub : Token\n\
+         fun interface Worker<in E> { fun onStart(scope: E) }\n\
+         class Impl : Worker<Token>, (Sub) -> Unit {\n\
+             override fun onStart(scope: Token) {}\n\
+             override fun invoke(value: Sub) {}\n\
+         }\n\
+         fun take(worker: Worker<Sub>) {}\n\
+         fun use() { take(Impl()) }\n",
+        "use",
+    );
+    assert!(
+        sam_conversions(&body).is_empty(),
+        "Worker<in Token> is Worker<Sub>: {:?}",
+        sam_conversions(&body)
+    );
+}
+
+#[test]
+fn a_direct_fun_interface_overload_beats_a_sam_adapted_one() {
+    let (body, _) = checked_function_body(
+        "interface Mark\n\
+         fun interface Worker { fun onStart(scope: Mark) }\n\
+         fun interface Adapter { fun onStart(scope: Mark) }\n\
+         class Impl : Worker, (Mark) -> Unit {\n\
+             override fun onStart(scope: Mark) {}\n\
+             override fun invoke(value: Mark) {}\n\
+         }\n\
+         fun take(worker: Worker): Worker = worker\n\
+         fun take(adapter: Adapter): Adapter = adapter\n\
+         fun use(value: Impl): Worker = take(value)\n",
+        "use",
+    );
+    assert!(
+        sam_conversions(&body).is_empty(),
+        "the direct Worker overload must not adapt Impl: {:?}",
+        sam_conversions(&body)
+    );
+    let parameters = (0..body.expression_count())
+        .filter_map(|raw| {
+            let expression = FirExprId::from_raw(u32::try_from(raw).ok()?);
+            let FirExprKind::Call(call) = &body.expr(expression)?.kind else {
+                return None;
+            };
+            let [parameter] = call.parameter_types.as_ref() else {
+                return None;
+            };
+            Some(parameter.get())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(parameters, vec![Ty::obj("Worker")]);
+}
+
+#[test]
+fn a_function_value_passed_to_a_fun_interface_still_converts() {
+    let (body, _) = checked_function_body(
+        "interface Mark\n\
+         fun interface Foo : () -> Mark\n\
+         fun id(foo: Foo): Foo = foo\n\
+         fun use(f: () -> Mark): Foo = id(f)\n",
+        "use",
+    );
+    let [conversion] = &sam_conversions(&body)[..] else {
+        panic!(
+            "a function value still converts to Foo, got {:?}",
+            sam_conversions(&body)
+        )
+    };
+    assert_eq!(conversion.classifier, crate::types::type_name("Foo"));
+}
