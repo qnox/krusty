@@ -8,6 +8,7 @@
 //! location, and edit strings are never rewritten to make a value fit.
 
 use std::borrow::Cow;
+use std::collections::VecDeque;
 
 use serde_json::{json, Map, Value};
 
@@ -115,23 +116,14 @@ pub(super) fn limit_signature_help(id: &Value, value: Value) -> Result<Value, ()
 }
 
 pub(super) fn array_messages(id: Value, items: Vec<Value>, token: Option<&Value>) -> Vec<Value> {
-    let Some(result_budget) = array_budget(&result_message(&id, Value::Array(Vec::new()))) else {
-        return vec![too_large(&id)];
-    };
-    if fits_one(&items, result_budget) {
-        return vec![result_message(&id, Value::Array(items))];
-    }
-    let Some(token) = token else {
-        return vec![too_large(&id)];
-    };
-    let Some(progress_budget) = array_budget(&progress_message(token, Value::Array(Vec::new())))
-    else {
-        return vec![too_large(&id)];
-    };
-    match pack_values(items, progress_budget, MAX_RESPONSE_PAGES) {
-        Ok(pages) => streamed_array(id, token, pages),
-        Err(()) => vec![too_large(&id)],
-    }
+    paged_array_messages(
+        id,
+        items,
+        token,
+        |id, items| result_message(id, Value::Array(items)),
+        |token, items| progress_message(token, Value::Array(items)),
+        too_large,
+    )
 }
 
 pub(super) fn location_messages(
@@ -146,13 +138,68 @@ pub(super) fn location_messages(
     }
 }
 
-fn streamed_array(id: Value, token: &Value, pages: Vec<Vec<Value>>) -> Vec<Value> {
-    let mut messages = Vec::with_capacity(pages.len().saturating_add(1));
-    for page in pages {
-        messages.push(progress_message(token, Value::Array(page)));
+pub(super) enum ArrayPagePlan {
+    One(Vec<Value>),
+    Pages(VecDeque<Vec<Value>>),
+    TooLarge,
+}
+
+pub(super) fn paged_array_plan<ResultFrame, ProgressFrame>(
+    id: &Value,
+    items: Vec<Value>,
+    token: Option<&Value>,
+    result_frame: &ResultFrame,
+    progress_frame: &ProgressFrame,
+) -> ArrayPagePlan
+where
+    ResultFrame: Fn(&Value, Vec<Value>) -> Value,
+    ProgressFrame: Fn(&Value, Vec<Value>) -> Value,
+{
+    let Some(result_budget) = array_budget(&result_frame(id, Vec::new())) else {
+        return ArrayPagePlan::TooLarge;
+    };
+    if fits_one(&items, result_budget) {
+        return ArrayPagePlan::One(items);
     }
-    messages.push(result_message(&id, Value::Array(Vec::new())));
-    messages
+    let Some(token) = token else {
+        return ArrayPagePlan::TooLarge;
+    };
+    let Some(progress_budget) = array_budget(&progress_frame(token, Vec::new())) else {
+        return ArrayPagePlan::TooLarge;
+    };
+    match pack_values(items, progress_budget, MAX_RESPONSE_PAGES) {
+        Ok(pages) => ArrayPagePlan::Pages(pages.into()),
+        Err(()) => ArrayPagePlan::TooLarge,
+    }
+}
+
+/// Build one bounded array result or an all-or-nothing partial-result stream. The caller owns only
+/// the protocol-specific shape around the array; token validation, envelope budgets, page packing,
+/// the page cap, and failure shape stay common to every editor response.
+pub(super) fn paged_array_messages<ResultFrame, ProgressFrame, TooLarge>(
+    id: Value,
+    items: Vec<Value>,
+    token: Option<&Value>,
+    result_frame: ResultFrame,
+    progress_frame: ProgressFrame,
+    too_large: TooLarge,
+) -> Vec<Value>
+where
+    ResultFrame: Fn(&Value, Vec<Value>) -> Value,
+    ProgressFrame: Fn(&Value, Vec<Value>) -> Value,
+    TooLarge: Fn(&Value) -> Value,
+{
+    match paged_array_plan(&id, items, token, &result_frame, &progress_frame) {
+        ArrayPagePlan::One(items) => vec![result_frame(&id, items)],
+        ArrayPagePlan::Pages(pages) => {
+            let token = token.expect("a page plan requires a partial-result token");
+            let mut messages = Vec::with_capacity(pages.len().saturating_add(1));
+            messages.extend(pages.into_iter().map(|page| progress_frame(token, page)));
+            messages.push(result_frame(&id, Vec::new()));
+            messages
+        }
+        ArrayPagePlan::TooLarge => vec![too_large(&id)],
+    }
 }
 
 fn clamp_active_signature(object: &mut Map<String, Value>, len: usize) {
@@ -253,31 +300,36 @@ fn progress_message(token: &Value, value: Value) -> Value {
 }
 
 pub(super) fn too_large(id: &Value) -> Value {
-    let message = error_message(
-        id,
-        SERVER_CANCELLED,
-        "response exceeds the editor page limit",
-    );
-    if json_len(&message) <= MAX_MESSAGE_BYTES {
-        message
+    server_cancelled(id, "response exceeds the editor page limit", None)
+}
+
+/// A bounded server-cancelled response. A request id that cannot fit is replaced by `null`, so an
+/// error path never violates the stdout queue's frame invariant while reporting that violation.
+pub(super) fn server_cancelled(id: &Value, message: &str, data: Option<Value>) -> Value {
+    let response = error_message(id, SERVER_CANCELLED, message, data.as_ref());
+    if json_len(&response) <= MAX_MESSAGE_BYTES {
+        response
     } else {
-        error_message(
-            &Value::Null,
-            SERVER_CANCELLED,
-            "response exceeds the editor page limit",
-        )
+        error_message(&Value::Null, SERVER_CANCELLED, message, data.as_ref())
     }
 }
 
-fn error_message(id: &Value, code: i32, message: &str) -> Value {
+fn error_message(id: &Value, code: i32, message: &str, data: Option<&Value>) -> Value {
+    let mut error = json!({
+        "code": code,
+        "message": message
+    });
+    if let (Value::Object(error), Some(data)) = (&mut error, data) {
+        error.insert("data".to_string(), data.clone());
+    }
     json!({
         "jsonrpc": "2.0",
         "id": id,
-        "error": {"code": code, "message": message}
+        "error": error
     })
 }
 
-fn json_len(value: &Value) -> usize {
+pub(super) fn json_len(value: &Value) -> usize {
     serde_json::to_vec(value)
         .map(|encoded| encoded.len())
         .unwrap_or(usize::MAX)
