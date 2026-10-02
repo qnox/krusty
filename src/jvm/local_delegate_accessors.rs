@@ -55,10 +55,10 @@ pub(crate) fn realize(
     classifiers: &crate::backend::CheckedBackendClassifiers<'_>,
 ) -> Result<HelperAccess, ()> {
     let plans = std::mem::take(&mut ir.local_delegate_plans);
-    let live = emitted_expression_owners(ir)?;
+    let live = emitted_expressions(ir);
     let mut accesses = live
         .iter()
-        .filter_map(|(&expression, _)| match ir.expr(expression) {
+        .filter_map(|&expression| match ir.expr(expression) {
             IrExpr::LocalDelegateAccess(access) => Some((expression, access.plan)),
             _ => None,
         })
@@ -199,10 +199,10 @@ pub(crate) fn realize(
 
     // Property-reference realization scans the arena. Do not let dead retained inline templates
     // publish metadata or arrays; only references reachable from emitted code survive.
-    let live = emitted_expression_owners(ir)?;
+    let live = emitted_expressions(ir);
     for raw in 0..ir.exprs.len() {
         if matches!(ir.exprs[raw], IrExpr::LocalPropertyReference(_))
-            && !live.contains_key(&(raw as ExprId))
+            && !live.contains(&(raw as ExprId))
         {
             ir.exprs[raw] = IrExpr::UnitInstance;
         }
@@ -210,48 +210,37 @@ pub(crate) fn realize(
     Ok(helper_access)
 }
 
-/// The physical classifier containing every relevant expression reachable from emitted code.
+/// Expressions reachable from emitted code, independent of the caller's physical owner.
 /// Inline-only templates are deliberately not roots; their call-site copies are.
-fn emitted_expression_owners(ir: &IrFile) -> Result<HashMap<ExprId, Option<TypeName>>, ()> {
-    let mut class_functions = HashMap::new();
-    for class in &ir.classes {
-        for &function in &class.methods {
-            class_functions.insert(function, class.fq_name_id());
-        }
-    }
-
+fn emitted_expressions(ir: &IrFile) -> HashSet<ExprId> {
     let mut roots = Vec::new();
     for (function, declaration) in ir.functions.iter().enumerate() {
         let function = function as u32;
         if !ir.inline_only_fns.contains(&function) {
-            let owner = class_functions.get(&function).copied();
-            roots.extend(declaration.body.map(|body| (body, owner)));
+            roots.extend(declaration.body);
             if let Some(defaults) = ir
                 .fn_params
                 .get(&function)
                 .and_then(|parameters| parameters.defaults.as_ref())
             {
-                roots.extend(defaults.iter().flatten().map(|&body| (body, owner)));
+                roots.extend(defaults.iter().flatten().copied());
             }
         }
     }
     for class in &ir.classes {
-        let owner = Some(class.fq_name_id());
-        roots.extend(class.init_body.map(|body| (body, owner)));
+        roots.extend(class.init_body);
         roots.extend(
             class
                 .super_arg_prelude
                 .iter()
                 .chain(&class.super_args)
-                .copied()
-                .map(|body| (body, owner)),
+                .copied(),
         );
         roots.extend(
             class
                 .properties
                 .iter()
-                .filter_map(|property| property.initializer)
-                .map(|body| (body, owner)),
+                .filter_map(|property| property.initializer),
         );
         for constructor in &class.secondary_ctors {
             roots.extend(
@@ -261,55 +250,24 @@ fn emitted_expression_owners(ir: &IrFile) -> Result<HashMap<ExprId, Option<TypeN
                     .chain(constructor.defaults.iter().flatten())
                     .chain(&constructor.delegate_prelude)
                     .chain(&constructor.delegate_args)
-                    .copied()
-                    .map(|body| (body, owner)),
+                    .copied(),
             );
         }
         for entry in &class.enum_entries {
-            roots.extend(
-                entry
-                    .argument_prelude
-                    .iter()
-                    .chain(&entry.args)
-                    .copied()
-                    .map(|body| (body, owner)),
-            );
+            roots.extend(entry.argument_prelude.iter().chain(&entry.args).copied());
         }
-        roots.extend(
-            ir.statics
-                .iter()
-                .filter(|property| property.owner == owner)
-                .filter_map(|property| property.init)
-                .map(|body| (body, owner)),
-        );
     }
-    roots.extend(
-        ir.statics
-            .iter()
-            .filter(|property| property.owner.is_none())
-            .filter_map(|property| property.init)
-            .map(|body| (body, None)),
-    );
+    roots.extend(ir.statics.iter().filter_map(|property| property.init));
     if let Some(body) = ir.checked_script_body {
-        roots.push((body, None));
+        roots.push(body);
     }
 
-    let mut relevant = HashMap::new();
     let mut visited = HashSet::new();
-    for (root, owner) in roots {
+    for root in roots {
         let mut pending = vec![root];
         while let Some(expression) = pending.pop() {
-            if !visited.insert((expression, owner)) {
+            if !visited.insert(expression) {
                 continue;
-            }
-            if matches!(
-                ir.expr(expression),
-                IrExpr::LocalDelegateAccess(_) | IrExpr::LocalPropertyReference(_)
-            ) && relevant
-                .insert(expression, owner)
-                .is_some_and(|seen| seen != owner)
-            {
-                return Err(());
             }
             match ir.expr(expression) {
                 IrExpr::Lambda { captures, .. } => pending.extend(captures.iter().copied()),
@@ -319,7 +277,7 @@ fn emitted_expression_owners(ir: &IrFile) -> Result<HashMap<ExprId, Option<TypeN
             }
         }
     }
-    Ok(relevant)
+    visited
 }
 
 fn realize_accessor(
@@ -404,4 +362,56 @@ fn realize_accessor(
         ir.class_static_local_functions.insert(function, owner);
     }
     Ok(function)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{type_name, Ty};
+
+    #[test]
+    fn a_shared_delegate_access_is_reachable_from_facade_and_class_roots() {
+        let mut ir = IrFile::default();
+        let delegate = ir.add_expr(IrExpr::UnitInstance);
+        let access = ir.add_expr(IrExpr::LocalDelegateAccess(
+            crate::ir::IrLocalDelegateAccess {
+                plan: 0,
+                delegate,
+                dispatch_receiver: None,
+                value: None,
+            },
+        ));
+        ir.add_fun(IrFunction {
+            name: "read".to_owned(),
+            params: Vec::new(),
+            param_checks: Vec::new(),
+            ret: Ty::Unit,
+            body: Some(access),
+            is_static: true,
+            dispatch_receiver: None,
+        });
+        let mut class = crate::ir::IrClass::synthetic(type_name("ReaderHost"));
+        class.init_body = Some(access);
+        ir.classes.push(class);
+
+        assert_eq!(emitted_expressions(&ir), HashSet::from([delegate, access]));
+    }
+
+    #[test]
+    fn an_inline_only_template_is_not_an_emitted_root() {
+        let mut ir = IrFile::default();
+        let body = ir.add_expr(IrExpr::UnitInstance);
+        let function = ir.add_fun(IrFunction {
+            name: "template".to_owned(),
+            params: Vec::new(),
+            param_checks: Vec::new(),
+            ret: Ty::Unit,
+            body: Some(body),
+            is_static: true,
+            dispatch_receiver: None,
+        });
+        ir.inline_only_fns.insert(function);
+
+        assert_eq!(emitted_expressions(&ir), HashSet::new());
+    }
 }
