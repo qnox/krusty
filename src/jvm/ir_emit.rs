@@ -76,6 +76,7 @@ mod frame_map;
 mod function_annotations;
 mod function_debug;
 mod function_invocation;
+mod static_function_calls;
 use function_invocation::{
     is_high_arity_function, jvm_function_interface, jvm_function_invoke_descriptor,
 };
@@ -473,6 +474,7 @@ pub(super) struct EmitEnv<'a> {
         &'a crate::jvm::property_references::PropertyReferenceRealizations,
     /// JVM-only construction plans for Kotlin function-value SAM wrappers.
     sam_wrapper_realizations: &'a crate::jvm::sam_wrappers::SamWrapperRealizations,
+    local_delegate_access: &'a crate::jvm::local_delegate_accessors::HelperAccess,
     /// Per-call JVM placeholder/mask/marker plans produced during default-call realization.
     default_call_operands: &'a crate::jvm::default_call_operands::DefaultCallOperands,
     /// File-wide `InnerClasses` candidates prepared once from stable classifier identities.
@@ -1494,6 +1496,7 @@ pub(crate) fn emit_all_with_checked_classifiers(
         property_realizations: facts.property_realizations,
         property_reference_realizations: facts.property_reference_realizations,
         sam_wrapper_realizations: facts.sam_wrapper_realizations,
+        local_delegate_access: facts.local_delegate_access,
         default_call_operands: facts.default_call_operands,
         inner_classes: crate::jvm::inner_classes::InnerClasses::new(
             ir,
@@ -6541,6 +6544,7 @@ struct Emitter<'a> {
     property_realizations: &'a crate::jvm::property_realizations::PropertyRealizations,
     default_call_operands: &'a crate::jvm::default_call_operands::DefaultCallOperands,
     sam_wrapper_realizations: &'a crate::jvm::sam_wrappers::SamWrapperRealizations,
+    local_delegate_access: &'a crate::jvm::local_delegate_accessors::HelperAccess,
     suspended_result_returns: &'a crate::jvm::suspend::SuspendedResultReturns,
     intrinsic_probe_continuations: &'a crate::jvm::suspend::IntrinsicProbeContinuations,
     /// The exact source class whose code this emitter is writing. A generated holder has no
@@ -6690,6 +6694,7 @@ impl<'a> Emitter<'a> {
             property_realizations: env.property_realizations,
             default_call_operands: env.default_call_operands,
             sam_wrapper_realizations: env.sam_wrapper_realizations,
+            local_delegate_access: env.local_delegate_access,
             suspended_result_returns: env.suspended_result_returns,
             self_companion: singleton_instance_load::self_companion(ir, static_owner),
             intrinsic_probe_continuations: env.intrinsic_probe_continuations,
@@ -8900,77 +8905,10 @@ impl<'a> Emitter<'a> {
                     unreachable!("a super call must be realized before JVM emission")
                 }
                 Callee::Local(fid) => {
-                    let f = &self.ir.functions[*fid as usize];
-                    let param_tys = jvm_function_params(self.ir, *fid);
-                    let ret = jvm_declared_ty(&f.ret);
-                    // A PRIVATE facade function can't be invoked from another class (a lambda impl on
-                    // its enclosing class, a continuation class, any class member) — kotlinc routes
-                    // those callers through the facade's `access$<name>` accessor.
-                    let name = if static_accessors::routes_through_accessor(
-                        self.ir,
-                        self.static_owner == Some(StaticOwner::Facade),
-                        *fid,
-                    ) {
-                        format!("access${}", f.name)
-                    } else {
-                        f.name.clone()
-                    };
-                    let args = args.clone();
-                    // Same arity/descriptor contract as `MethodCall` above: an unthreaded suspend
-                    // call must bail the file, never emit an unverifiable invocation.
-                    if let Err(mismatch) =
-                        self.emit_source_call_operands(e, 0, &args, &param_tys, code)
-                    {
-                        self.bail_descriptor_arity(&mismatch, ret, code);
-                        return;
-                    }
-                    let aw: i32 = param_tys.iter().map(|t| slot_words(*t) as i32).sum();
-                    let owner = self.facade.clone();
-                    let m = self
-                        .cw
-                        .methodref(&owner, &name, &method_descriptor(&param_tys, ret));
-                    self.mark_call_start(e, code);
-                    code.invokestatic(m, aw, physical_call_result_words(ret));
+                    self.emit_static_function_call(e, *fid, None, args, code);
                 }
                 Callee::ClassStatic { owner, function } => {
-                    let f = &self.ir.functions[*function as usize];
-                    let param_tys = jvm_function_params(self.ir, *function);
-                    let ret = jvm_declared_ty(&f.ret);
-                    if let Err(mismatch) =
-                        self.emit_source_call_operands(e, 0, args, &param_tys, code)
-                    {
-                        self.bail_descriptor_arity(&mismatch, ret, code);
-                        return;
-                    }
-                    let argument_words: i32 =
-                        param_tys.iter().map(|ty| slot_words(*ty) as i32).sum();
-                    let descriptor = method_descriptor(&param_tys, ret);
-                    let static_owner = StaticOwner::Class(*owner);
-                    let source_owner_is_interface = static_owner.is_interface(self.ir);
-                    // The classpath answers whether a library owner is an interface; a static
-                    // declared on an interface being compiled right now is not there. An
-                    // `invokestatic` naming an interface must use an InterfaceMethodref, so the
-                    // file's own classes answer too.
-                    let owner_is_interface =
-                        source_owner_is_interface || self.bodies.owner_is_interface_name(*owner);
-                    let owner = owner.render();
-                    // A private one reached from another class goes through its owner's accessor.
-                    let name = if static_accessors::routes_through_accessor(
-                        self.ir,
-                        self.static_owner == Some(static_owner),
-                        *function,
-                    ) {
-                        format!("access${}", f.name)
-                    } else {
-                        f.name.clone()
-                    };
-                    let method = if owner_is_interface {
-                        self.cw.interface_methodref(&owner, &name, &descriptor)
-                    } else {
-                        self.cw.methodref(&owner, &name, &descriptor)
-                    };
-                    self.mark_call_start(e, code);
-                    code.invokestatic(method, argument_words, physical_call_result_words(ret));
+                    self.emit_static_function_call(e, *function, Some(*owner), args, code);
                 }
                 Callee::ClassStaticDefault { owner, function } => {
                     let f = &self.ir.functions[*function as usize];
@@ -11240,6 +11178,7 @@ mod invariant_tests {
         let override_results = crate::jvm::override_results::OverrideResults::default();
         let collection_method_entry_barriers =
             crate::jvm::collection_barriers::MethodEntryBarriers::default();
+        let local_delegate_access = crate::jvm::local_delegate_accessors::HelperAccess::default();
         emit_all_with_checked_classifiers(
             ir,
             (crate::types::type_name(facade), facade),
@@ -11261,6 +11200,7 @@ mod invariant_tests {
                 property_reference_realizations: &property_reference_realizations,
                 default_call_operands: &default_call_operands,
                 sam_wrapper_realizations: &sam_wrapper_realizations,
+                local_delegate_access: &local_delegate_access,
             },
             &EmitOptions::default(),
             run,

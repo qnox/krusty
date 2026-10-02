@@ -63,6 +63,7 @@ pub(crate) struct BackendPassFacts {
     property_reference_realizations: crate::jvm::property_references::PropertyReferenceRealizations,
     /// Physical constructions selected for Kotlin function-value SAM wrappers.
     sam_wrapper_realizations: crate::jvm::sam_wrappers::SamWrapperRealizations,
+    local_delegate_access: crate::jvm::local_delegate_accessors::HelperAccess,
 }
 
 /// THE post-lowering, pre-emit JVM pass pipeline — the single definition every consumer (the real
@@ -726,6 +727,7 @@ impl JvmBackend {
         property_realizations: crate::jvm::property_realizations::PropertyRealizations,
         property_reference_realizations: crate::jvm::property_references::PropertyReferenceRealizations,
         default_call_operands: crate::jvm::default_call_operands::DefaultCallOperands,
+        local_delegate_access: crate::jvm::local_delegate_accessors::HelperAccess,
         state: &mut JvmState,
         diags: &mut DiagSink,
     ) -> Vec<Artifact> {
@@ -745,6 +747,7 @@ impl JvmBackend {
         let mut pass_facts = BackendPassFacts {
             default_call_operands,
             property_reference_realizations,
+            local_delegate_access,
             ..BackendPassFacts::default()
         };
         if let Err(reason) = run_backend_passes(
@@ -865,6 +868,7 @@ impl JvmBackend {
                 property_reference_realizations: &pass_facts.property_reference_realizations,
                 default_call_operands: &pass_facts.default_call_operands,
                 sam_wrapper_realizations: &pass_facts.sam_wrapper_realizations,
+                local_delegate_access: &pass_facts.local_delegate_access,
             },
             &emit_opts,
             &run,
@@ -988,21 +992,24 @@ impl Backend for JvmBackend {
         if self.lambda_modes.lambdas == crate::jvm::ir_emit::LambdaMode::Indy {
             crate::jvm::lambda_classes::realize(&mut file.ir, &file.classifiers, &facade);
         }
-        if crate::jvm::local_delegate_accessors::realize(
+        let local_delegate_access = match crate::jvm::local_delegate_accessors::realize(
             &mut file.ir,
             crate::ir::IrModuleSource {
                 source: file.source,
                 package: facade_class.namespace(),
             },
-        )
-        .is_err()
-        {
-            diags.error(
-                crate::diag::Span::new(0, 0),
-                "internal error: invalid JVM local delegated-property accessor plan",
-            );
-            return Vec::new();
-        }
+            file.stems,
+            &file.classifiers,
+        ) {
+            Ok(access) => access,
+            Err(()) => {
+                diags.error(
+                    crate::diag::Span::new(0, 0),
+                    "internal error: invalid JVM local delegated-property accessor plan",
+                );
+                return Vec::new();
+            }
+        };
         let mut property_reference_realizations = match crate::jvm::property_references::realize(
             &mut file.ir,
             file.stems,
@@ -1073,6 +1080,7 @@ impl Backend for JvmBackend {
             property_realizations,
             property_reference_realizations,
             default_call_operands,
+            local_delegate_access,
             state,
             diags,
         )

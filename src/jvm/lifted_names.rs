@@ -7,6 +7,7 @@
 //! taken in the sequence. `N` counts the lambdas and name-clashing local functions of the sequence
 //! in source order, including lambdas that are spliced at inline call sites and so never become a
 //! method. A suspend lambda becomes a class of its own and takes no number.
+//! A local delegated-property accessor takes that sequence's next number as `lambda-N`.
 //!
 //! Every lambda numbers what it contains on its own, local functions nested in it included, and
 //! spells a lambda among them as the bare number: `one$lambda$0$0`, `one$lambda$0$lf$1`. A local
@@ -29,8 +30,7 @@ pub(crate) fn number(ir: &mut IrFile) {
             }
             let (next, used) = scopes.entry(entry.scope).or_default();
             let segment = match entry.kind {
-                crate::lifting_provenance::LiftingCallableKind::Lambda
-                | crate::lifting_provenance::LiftingCallableKind::LocalDelegatedPropertyAccessor => {
+                crate::lifting_provenance::LiftingCallableKind::Lambda => {
                     assert!(
                         entry.name.is_none(),
                         "an unnamed lifting role gained a spelling"
@@ -39,6 +39,13 @@ pub(crate) fn number(ir: &mut IrFile) {
                         None => format!("lambda${}", take(next)),
                         Some(_) => take(next).to_string(),
                     }
+                }
+                crate::lifting_provenance::LiftingCallableKind::LocalDelegatedPropertyAccessor => {
+                    assert!(
+                        entry.name.is_none(),
+                        "a delegated accessor gained a spelling"
+                    );
+                    format!("lambda-{}", take(next))
                 }
                 crate::lifting_provenance::LiftingCallableKind::LocalFunction => {
                     let name = entry
@@ -97,6 +104,11 @@ pub(crate) fn realize(
         let mut holders = HashMap::<(Option<usize>, &str, &str), Vec<u32>>::new();
         for (index, function) in ir.functions.iter().enumerate() {
             let id = index as u32;
+            // Foreign inline templates and typed helper prototypes have a declaration owner in
+            // another file. They cannot collide with members emitted by this facade.
+            if ir.inline_only_fns.contains(&id) {
+                continue;
+            }
             let name = renames
                 .get(&id)
                 .map_or(function.name.as_str(), String::as_str);

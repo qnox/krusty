@@ -4448,9 +4448,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   A local delegated property keeps the checker-selected declaration accessor plan across those
   copies. Kotlin emits that convention helper with the declaration's erased signature and reuses
   it across call-site type substitutions; common lowering therefore specializes the copied access
-  expression's recorded facts, but does not clone or mutate the declaration plan. The JVM may
-  rehome the same plan when an inline copy is emitted under another physical owner, and owns the
-  resulting erased helper identity.
+  expression's recorded facts, but does not clone or mutate the declaration plan. The JVM emits
+  that helper exactly once at its declaration owner, with the declaration's reflection metadata.
+  Inline copies call its public synthetic accessor instead of duplicating the helper or metadata
+  in the caller. A cross-file copy retains a typed, non-emitting prototype through generic and
+  value-class representation; JVM-only facts bind its exact declaration facade or classifier to
+  the private-static access boundary. No helper or owner is recovered by source spelling.
   The checked convention's substitutions include its receiver classifier's type parameters as
   well as callable parameters. The selected declaration's lexical scope fixes their stable
   identities: a callable parameter shadows the enclosing parameter, and an unrelated declaration
