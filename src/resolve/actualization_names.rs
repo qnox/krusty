@@ -26,7 +26,9 @@ impl SymbolSource for HeaderModuleClassifiers<'_> {
                 std::rc::Rc::new(crate::libraries::ResolvedSymbols {
                     builtin_classifier: false,
                     classifier_name: Some(classifier),
-                    classifier_declaration_name: Some(classifier),
+                    classifier_declaration: Some(
+                        crate::libraries::ClassifierDeclaration::Ordinary(classifier),
+                    ),
                     classifier: Some(std::sync::Arc::new(
                         crate::libraries::LibraryType::declaration_header(),
                     )),
@@ -421,7 +423,9 @@ mod tests {
                     std::rc::Rc::new(crate::libraries::ResolvedSymbols {
                         builtin_classifier: false,
                         classifier_name: Some(classifier),
-                        classifier_declaration_name: Some(classifier),
+                        classifier_declaration: Some(
+                            crate::libraries::ClassifierDeclaration::Ordinary(classifier),
+                        ),
                         classifier: Some(std::sync::Arc::new(
                             crate::libraries::LibraryType::declaration_header(),
                         )),

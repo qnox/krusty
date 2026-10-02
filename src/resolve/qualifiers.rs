@@ -1,6 +1,7 @@
 //! Left-to-right qualified-name resolution over the common symbol-source boundary.
 
 use crate::ast::ExprId;
+use crate::libraries::ClassifierDeclaration;
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
 use crate::types::TypeName;
 
@@ -67,7 +68,7 @@ fn walk_qualifier_with_declaration_identity<S: SymbolSource + ?Sized>(
     source: &S,
     mut prefix: ResolvedQualifier,
     segments: &[(Option<ExprId>, String)],
-) -> Result<(ResolvedQualifier, Option<TypeName>), QualifierError> {
+) -> Result<(ResolvedQualifier, Option<ClassifierDeclaration>), QualifierError> {
     let mut declaration_identity = None;
     for (segment_expression, segment) in segments {
         prefix = match prefix {
@@ -76,9 +77,7 @@ fn walk_qualifier_with_declaration_identity<S: SymbolSource + ?Sized>(
                 let namespace = SymbolNamespace::Package(package);
                 let record = source.symbols(namespace, segment);
                 if let Some(classifier) = record.classifier_name {
-                    declaration_identity = record
-                        .classifier_declaration_name
-                        .or(record.classifier_name);
+                    declaration_identity = record.classifier_declaration.clone();
                     ResolvedQualifier::Classifier(classifier)
                 } else if source.package_exists(package, segment) {
                     declaration_identity = None;
@@ -99,9 +98,7 @@ fn walk_qualifier_with_declaration_identity<S: SymbolSource + ?Sized>(
                         name: segment.clone(),
                     });
                 };
-                declaration_identity = record
-                    .classifier_declaration_name
-                    .or(record.classifier_name);
+                declaration_identity = record.classifier_declaration.clone();
                 ResolvedQualifier::Classifier(classifier)
             }
         };
@@ -140,7 +137,7 @@ pub(super) fn walk_qualifier_namespace_facets_with_declaration_identity<
     root_expression: Option<ExprId>,
     root_name: &str,
     segments: &[(Option<ExprId>, String)],
-) -> Result<(ResolvedQualifier, Option<TypeName>), QualifierError> {
+) -> Result<(ResolvedQualifier, Option<ClassifierDeclaration>), QualifierError> {
     if let Some(classifier) = classifier_root {
         return walk_qualifier_with_declaration_identity(
             source,
@@ -213,7 +210,7 @@ pub(super) fn classifier_path_with_declaration_identity<S: SymbolSource + ?Sized
     path: &str,
     source: &S,
     scoped_root: Option<TypeName>,
-) -> Result<(TypeName, Option<TypeName>), QualifierError> {
+) -> Result<(TypeName, Option<ClassifierDeclaration>), QualifierError> {
     let segments = path
         .split(['.', '/'])
         .filter(|segment| !segment.is_empty())
@@ -233,7 +230,7 @@ pub(super) fn classifier_path_with_declaration_identity<S: SymbolSource + ?Sized
         if let Some(classifier) = record.classifier_name {
             (
                 ResolvedQualifier::Classifier(classifier),
-                record.classifier_declaration_name,
+                record.classifier_declaration.clone(),
             )
         } else if source.package_exists(TypeName::ROOT, root_name) {
             (
@@ -289,7 +286,9 @@ mod tests {
             if namespace == SymbolNamespace::Package(package) && name == "Tail" {
                 return std::rc::Rc::new(crate::libraries::ResolvedSymbols {
                     classifier_name: Some(crate::types::type_name("Clash/Tail")),
-                    classifier_declaration_name: Some(crate::types::type_name("Clash/Tail")),
+                    classifier_declaration: Some(ClassifierDeclaration::Ordinary(
+                        crate::types::type_name("Clash/Tail"),
+                    )),
                     classifier: Some(std::sync::Arc::new(
                         crate::libraries::LibraryType::declaration_header(),
                     )),
@@ -336,8 +335,14 @@ mod tests {
                 if namespace == SymbolNamespace::Package(package) && name == "Transform" {
                     return std::rc::Rc::new(crate::libraries::ResolvedSymbols {
                         classifier_name: Some(crate::types::type_name("fixture/Target")),
-                        classifier_declaration_name: Some(crate::types::type_name(
-                            "fixture/Transform",
+                        classifier_declaration: Some(ClassifierDeclaration::TypeAlias(
+                            crate::libraries::AliasExpansion {
+                                identity: crate::types::type_name("fixture/Transform"),
+                                target: crate::types::type_name("fixture/Target"),
+                                formals: Vec::new(),
+                                expansion: crate::types::Ty::obj("fixture/Target"),
+                                expansion_spelling: Default::default(),
+                            },
                         )),
                         classifier: Some(std::sync::Arc::new(
                             crate::libraries::LibraryType::declaration_header(),
@@ -359,7 +364,18 @@ mod tests {
                 "fixture",
                 &[(None, "Transform".to_string())],
             ),
-            Ok((ResolvedQualifier::Classifier(target), Some(alias))),
+            Ok((
+                ResolvedQualifier::Classifier(target),
+                Some(ClassifierDeclaration::TypeAlias(
+                    crate::libraries::AliasExpansion {
+                        identity: alias,
+                        target,
+                        formals: Vec::new(),
+                        expansion: crate::types::Ty::obj("fixture/Target"),
+                        expansion_spelling: Default::default(),
+                    }
+                ))
+            )),
         );
     }
 }

@@ -4363,9 +4363,13 @@ impl JvmLibraries {
         let from_builtins = classifier.is_some()
             && classifier_name
                 .is_some_and(|identity| self.cp.builtin_classifier_name(identity).is_some());
-        let classifier_declaration_name = classifier
-            .as_ref()
-            .and_then(|_| alias_identity.or(classifier_name));
+        let classifier_declaration = classifier.as_ref().and_then(|_| match alias_identity {
+            Some(identity) => {
+                <Self as crate::libraries::SemanticPlatform>::type_alias_expansion(self, identity)
+                    .map(crate::libraries::ClassifierDeclaration::TypeAlias)
+            }
+            None => classifier_name.map(crate::libraries::ClassifierDeclaration::Ordinary),
+        });
         let classifier_name = classifier.as_ref().map(|classifier| {
             classifier
                 .alias_target
@@ -4721,18 +4725,18 @@ impl JvmLibraries {
         // stdlib. Federate that classifier source with the platform record here; platform metadata wins
         // when present, while callables remain exclusively metadata/platform declarations.
         let core = EmptySymbolSource.symbols(namespace, name);
-        let (classifier_name, classifier_declaration_name, classifier, builtin_classifier) =
+        let (classifier_name, classifier_declaration, classifier, builtin_classifier) =
             if classifier.is_some() {
                 (
                     classifier_name,
-                    classifier_declaration_name,
+                    classifier_declaration,
                     classifier,
                     from_builtins,
                 )
             } else {
                 (
                     core.classifier_name,
-                    core.classifier_declaration_name.or(core.classifier_name),
+                    core.classifier_declaration.clone(),
                     core.classifier.clone(),
                     false,
                 )
@@ -4754,7 +4758,7 @@ impl JvmLibraries {
             name,
             ResolvedSymbols {
                 classifier_name,
-                classifier_declaration_name,
+                classifier_declaration,
                 classifier,
                 builtin_classifier,
                 callables,

@@ -358,7 +358,9 @@ impl SymbolSource for DependencyPlatform {
                 });
                 Rc::new(ResolvedSymbols {
                     classifier_name: Some(alias.target),
-                    classifier_declaration_name: source_alias_identity,
+                    classifier_declaration: Some(
+                        crate::libraries::ClassifierDeclaration::TypeAlias(alias.clone()),
+                    ),
                     classifier,
                     importable_declaration: true,
                     ..ResolvedSymbols::default()
@@ -410,14 +412,10 @@ impl SymbolSource for DependencyPlatform {
         }
         let (source_functions, source_properties) = source.callables.clone().into_parts();
         let classifier_name = primary.classifier_name.or(source.classifier_name);
-        let classifier_declaration_name = if primary.classifier_name.is_some() {
-            primary
-                .classifier_declaration_name
-                .or(primary.classifier_name)
+        let classifier_declaration = if primary.classifier_name.is_some() {
+            primary.classifier_declaration.clone()
         } else {
-            source
-                .classifier_declaration_name
-                .or(source.classifier_name)
+            source.classifier_declaration.clone()
         };
         let builtin_classifier = if primary.classifier_name.is_some() {
             primary.builtin_classifier
@@ -426,7 +424,7 @@ impl SymbolSource for DependencyPlatform {
         };
         let merged = Rc::new(ResolvedSymbols {
             classifier_name,
-            classifier_declaration_name,
+            classifier_declaration,
             builtin_classifier,
             classifier,
             callables: Callables::from_parts(
@@ -600,6 +598,10 @@ mod tests {
                 .map(|&is_public| std::sync::Arc::new(type_shape(is_public)));
             Rc::new(ResolvedSymbols {
                 classifier_name: classifier.as_ref().and(classifier_name),
+                classifier_declaration: classifier
+                    .as_ref()
+                    .and(classifier_name)
+                    .map(crate::libraries::ClassifierDeclaration::Ordinary),
                 classifier,
                 ..ResolvedSymbols::default()
             })

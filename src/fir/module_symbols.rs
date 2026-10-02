@@ -1679,7 +1679,8 @@ impl SymbolSource for StreamedModuleSymbols<'_> {
         std::rc::Rc::new(ResolvedSymbols {
             builtin_classifier: false,
             classifier_name: stable_classifier_name,
-            classifier_declaration_name: stable_classifier_name,
+            classifier_declaration: stable_classifier_name
+                .map(crate::libraries::ClassifierDeclaration::Ordinary),
             classifier,
             callables,
             importable_declaration: stable_classifier_name.is_some(),

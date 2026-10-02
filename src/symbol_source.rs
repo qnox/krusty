@@ -203,7 +203,7 @@ impl SymbolSource for CompositeSource<'_> {
             _ => {
                 let mut classifier = None;
                 let mut classifier_name = None;
-                let mut classifier_declaration_name = None;
+                let mut classifier_declaration = None;
                 let mut builtin_classifier = false;
                 let mut fns = Vec::new();
                 let mut props = Vec::new();
@@ -214,8 +214,7 @@ impl SymbolSource for CompositeSource<'_> {
                     if classifier_name.is_none() {
                         classifier = r.classifier.clone();
                         classifier_name = r.classifier_name;
-                        classifier_declaration_name =
-                            r.classifier_declaration_name.or(r.classifier_name);
+                        classifier_declaration = r.classifier_declaration.clone();
                         builtin_classifier = r.builtin_classifier;
                     }
                     match &r.callables {
@@ -243,7 +242,7 @@ impl SymbolSource for CompositeSource<'_> {
                 };
                 std::rc::Rc::new(ResolvedSymbols {
                     classifier_name,
-                    classifier_declaration_name,
+                    classifier_declaration,
                     classifier,
                     builtin_classifier,
                     callables,
@@ -335,8 +334,8 @@ impl SymbolSource for CachedCompositeSource<'_> {
 mod tests {
     use super::*;
     use crate::libraries::{
-        Callables, FnKind, FunctionInfo, LibraryCallable, LibraryType, PropKind, PropertyInfo,
-        Visibility,
+        Callables, ClassifierDeclaration, FnKind, FunctionInfo, LibraryCallable, LibraryType,
+        PropKind, PropertyInfo, Visibility,
     };
     use crate::types::Ty;
     use std::cell::Cell;
@@ -509,7 +508,10 @@ mod tests {
                 crate::libraries::Callables::None
             };
             std::rc::Rc::new(ResolvedSymbols {
-                classifier_declaration_name: classifier.as_ref().and(classifier_name),
+                classifier_declaration: classifier
+                    .as_ref()
+                    .and(classifier_name)
+                    .map(crate::libraries::ClassifierDeclaration::Ordinary),
                 classifier_name: classifier.as_ref().map(|classifier| {
                     classifier
                         .alias_target
@@ -769,6 +771,7 @@ mod tests {
             };
             std::rc::Rc::new(ResolvedSymbols {
                 classifier_name: Some(identity),
+                classifier_declaration: Some(ClassifierDeclaration::Ordinary(identity)),
                 classifier: Some(std::sync::Arc::new(LibraryType::declaration_header())),
                 builtin_classifier: self.builtin,
                 ..ResolvedSymbols::default()
@@ -836,7 +839,9 @@ mod tests {
             }
             std::rc::Rc::new(ResolvedSymbols {
                 classifier_name: Some(self.target),
-                classifier_declaration_name: Some(self.declaration),
+                classifier_declaration: Some(crate::libraries::ClassifierDeclaration::Ordinary(
+                    self.declaration,
+                )),
                 ..ResolvedSymbols::default()
             })
         }
@@ -860,7 +865,12 @@ mod tests {
             "Alias",
         );
         assert_eq!(record.classifier_name, Some(target));
-        assert_eq!(record.classifier_declaration_name, Some(declaration));
+        assert_eq!(
+            record.classifier_declaration,
+            Some(crate::libraries::ClassifierDeclaration::Ordinary(
+                declaration
+            ))
+        );
         assert!(record.classifier.is_none());
     }
 }

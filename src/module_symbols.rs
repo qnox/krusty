@@ -1199,7 +1199,14 @@ impl SymbolSource for ModuleSymbols<'_> {
             None => declaration.filter(|&internal| self.classifier_record(internal).is_some()),
         };
         let classifier = classifier_name.and_then(|internal| self.classifier_record(internal));
-        let classifier_declaration_name = classifier_name.and(declaration);
+        let classifier_declaration = classifier_name.and_then(|_| {
+            declaration.map(|identity| {
+                self.type_alias_binding(identity).map_or(
+                    crate::libraries::ClassifierDeclaration::Ordinary(identity),
+                    crate::libraries::ClassifierDeclaration::TypeAlias,
+                )
+            })
+        });
         let name = name.to_string();
         let associated_owner = match namespace {
             SymbolNamespace::Classifier(owner) => Some(owner),
@@ -1523,7 +1530,7 @@ impl SymbolSource for ModuleSymbols<'_> {
         let record = std::rc::Rc::new(ResolvedSymbols {
             builtin_classifier: false,
             classifier_name,
-            classifier_declaration_name,
+            classifier_declaration,
             classifier,
             callables,
             importable_declaration,

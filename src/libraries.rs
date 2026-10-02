@@ -6,6 +6,7 @@ pub(crate) mod builtin_member_realization;
 pub(crate) mod builtin_top_level_realization;
 mod call_realization;
 mod classifier_callables;
+mod classifier_declaration;
 mod classifier_kind;
 mod classifier_role;
 mod compiler_intrinsic;
@@ -19,6 +20,7 @@ mod property_producer;
 pub use call_realization::{DefaultCallRealization, NonvirtualCallRealization};
 pub(crate) use classifier_callables::constructor_generic_signature;
 pub use classifier_callables::BoundInnerConstructor;
+pub use classifier_declaration::{AliasExpansion, ClassifierDeclaration};
 pub use classifier_kind::TypeKind;
 pub use physical_parameter_plan::PhysicalParameterSlot;
 pub use platform_contract::{
@@ -450,28 +452,6 @@ impl SingletonDispatch {
     pub fn ty(self) -> Ty {
         Ty::obj_name(self.classifier)
     }
-}
-
-/// Source-level services exposed by compiled libraries.
-/// A classpath `typealias`'s expansion, as a use site needs it.
-#[derive(Clone, Debug, PartialEq)]
-pub struct AliasExpansion {
-    /// Stable qualified identity of the alias declaration. Source spelling is resolved to this
-    /// identity before the template is selected.
-    pub identity: TypeName,
-    /// The alias's TARGET classifier. A template applies only when the spelling that named it
-    /// actually resolved to this classifier — otherwise a same-named class, a user alias, or a
-    /// different package's alias would inherit an expansion that does not describe it.
-    pub target: TypeName,
-    /// The alias's own type-parameter names, in declaration order — the substitution domain.
-    pub formals: Vec<String>,
-    /// The target applied to its own arguments, with the alias's parameters as `Ty::TyParam`.
-    pub expansion: Ty,
-    /// How the alias's right-hand side SPELLED the arguments it passes to its target — see
-    /// [`crate::spelling`]. A use site inherits these into its expansion, so
-    /// `typealias CargoBox = PBox<Cargo, Cargo>` abbreviates both expanded arguments as `Cargo`
-    /// however it is spelled.
-    pub expansion_spelling: crate::spelling::Spelled,
 }
 
 /// The source classifier denoted by a resolved type-alias expansion.
@@ -2569,11 +2549,11 @@ pub struct ResolvedSymbols {
     /// `pkg/Owner$Local`, and a typealias spelling denotes its target. Providers and scopes therefore
     /// return exactly the same record and the selection loop does not need an origin-specific branch.
     pub classifier_name: Option<TypeName>,
-    /// Stable identity of the declaration that supplied `classifier_name`. For an ordinary class
-    /// this is the same identity; for a typealias it is the alias declaration while
-    /// `classifier_name` is its expanded target. Resolution carries this provenance from the
-    /// provider record instead of reconstructing it from the lookup spelling.
-    pub classifier_declaration_name: Option<TypeName>,
+    /// Exact declaration that supplied `classifier_name`, including a typealias's already-decoded
+    /// expansion. Providers record whether the declaration was ordinary or an alias; consumers do
+    /// not infer that semantic fact from identity equality or perform another lookup after
+    /// selection.
+    pub classifier_declaration: Option<ClassifierDeclaration>,
     /// Shared with the type-name memo, so cloning a record never deep-clones the classifier.
     pub classifier: Option<std::sync::Arc<LibraryType>>,
     /// The winning classifier was declared in a `.kotlin_builtins` fragment.

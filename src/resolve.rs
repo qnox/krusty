@@ -2732,6 +2732,11 @@ pub struct ClassNames {
     unresolved_segments: HashMap<String, String>,
 }
 
+enum ClassifierBindingError<'a> {
+    Ambiguous(&'a str),
+    Unresolved(&'a str),
+}
+
 impl ClassNames {
     pub fn new(base: std::rc::Rc<HashMap<String, TypeName>>) -> ClassNames {
         ClassNames {
@@ -2800,15 +2805,21 @@ impl ClassNames {
     fn contains_binding(&self, k: &str) -> bool {
         self.ambiguous.contains(k) || self.user.contains_key(k) || self.base.contains_key(k)
     }
-    fn classifier_binding<'a>(&'a self, spelling: &'a str) -> Result<TypeName, &'a str> {
+    fn classifier_binding<'a>(
+        &'a self,
+        spelling: &'a str,
+    ) -> Result<TypeName, ClassifierBindingError<'a>> {
         if let Some(classifier) = self.get_class(spelling) {
             return Ok(classifier);
+        }
+        if self.ambiguous.contains(spelling) {
+            return Err(ClassifierBindingError::Ambiguous(spelling));
         }
         let mut segments = spelling
             .split(['.', '/'])
             .filter(|segment| !segment.is_empty());
         let Some(root) = segments.next() else {
-            return Err(spelling);
+            return Err(ClassifierBindingError::Unresolved(spelling));
         };
         let scoped_root = if self.ambiguous.contains(root) {
             None
@@ -2820,19 +2831,28 @@ impl ClassNames {
                 let Some(child) = crate::types::existing_type_name_nested_child(owner, segment)
                     .filter(|&child| self.has_internal(child))
                 else {
-                    return Err(segment);
+                    return Err(ClassifierBindingError::Unresolved(segment));
                 };
                 owner = child;
             }
             return Ok(owner);
         }
-        Err(self
-            .unresolved_segments
-            .get(spelling)
-            .map_or(root, String::as_str))
+        if self.ambiguous.contains(root) {
+            Err(ClassifierBindingError::Ambiguous(root))
+        } else {
+            Err(ClassifierBindingError::Unresolved(
+                self.unresolved_segments
+                    .get(spelling)
+                    .map_or(root, String::as_str),
+            ))
+        }
     }
     fn unresolved_segment<'a>(&'a self, spelling: &'a str) -> &'a str {
-        self.classifier_binding(spelling).err().unwrap_or(spelling)
+        match self.classifier_binding(spelling) {
+            Ok(_) => spelling,
+            Err(ClassifierBindingError::Ambiguous(segment))
+            | Err(ClassifierBindingError::Unresolved(segment)) => segment,
+        }
     }
     fn has_internal(&self, internal: TypeName) -> bool {
         self.user.values().any(|&value| value == internal)
@@ -9680,9 +9700,9 @@ fn ty_of_ref_with(
         );
         return Ty::Error;
     }
-    let (resolved_classifier, failed_segment) = match classes.classifier_binding(&r.name) {
+    let (resolved_classifier, failed_binding) = match classes.classifier_binding(&r.name) {
         Ok(classifier) => (Some(classifier), None),
-        Err(segment) => (None, Some(segment)),
+        Err(failure) => (None, Some(failure)),
     };
     let scoped = if tparams.contains(&r.name) {
         Some(tparams.bound(&r.name))
@@ -9765,8 +9785,17 @@ fn ty_of_ref_with(
             )
         }
     } else {
-        let segment = failed_segment.unwrap_or(&r.name);
-        diags.error(r.span, format!("unresolved reference '{segment}'."));
+        match failed_binding {
+            Some(ClassifierBindingError::Ambiguous(_)) => {
+                diags.error(r.span, "overload resolution ambiguity between candidates:");
+            }
+            Some(ClassifierBindingError::Unresolved(segment)) => {
+                diags.error(r.span, format!("unresolved reference '{segment}'."));
+            }
+            None => {
+                diags.error(r.span, format!("unresolved reference '{}'.", r.name));
+            }
+        }
         Ty::Error
     };
     let base = if r.definitely_non_null() {
@@ -26813,7 +26842,7 @@ val result = object { fun value(): String = captured }
                 return std::rc::Rc::new(crate::libraries::ResolvedSymbols {
                     builtin_classifier: false,
                     classifier_name: None,
-                    classifier_declaration_name: None,
+                    classifier_declaration: None,
                     classifier: None,
                     callables: crate::libraries::Callables::Functions(
                         crate::libraries::FunctionSet {
@@ -26844,7 +26873,10 @@ val result = object { fun value(): String = captured }
             let classifier = internal.and_then(import_classifier);
             std::rc::Rc::new(crate::libraries::ResolvedSymbols {
                 builtin_classifier: false,
-                classifier_declaration_name: classifier.as_ref().and(internal),
+                classifier_declaration: classifier
+                    .as_ref()
+                    .and(internal)
+                    .map(crate::libraries::ClassifierDeclaration::Ordinary),
                 classifier_name: internal.map(|internal| {
                     classifier
                         .as_ref()
@@ -29318,7 +29350,7 @@ fun box(): String {
                 return std::rc::Rc::new(crate::libraries::ResolvedSymbols {
                     builtin_classifier: false,
                     classifier_name: None,
-                    classifier_declaration_name: None,
+                    classifier_declaration: None,
                     classifier: None,
                     callables: crate::libraries::Callables::None,
                     importable_declaration: false,
@@ -29361,7 +29393,7 @@ fun box(): String {
                 return std::rc::Rc::new(crate::libraries::ResolvedSymbols {
                     builtin_classifier: false,
                     classifier_name: None,
-                    classifier_declaration_name: None,
+                    classifier_declaration: None,
                     classifier: None,
                     callables: crate::libraries::Callables::Functions(
                         crate::libraries::FunctionSet {
@@ -29532,7 +29564,7 @@ fun box(): String {
             std::rc::Rc::new(crate::libraries::ResolvedSymbols {
                 builtin_classifier: false,
                 classifier_name: None,
-                classifier_declaration_name: None,
+                classifier_declaration: None,
                 classifier: None,
                 callables: crate::libraries::Callables::Functions(crate::libraries::FunctionSet {
                     overloads: vec![info],
@@ -29870,6 +29902,12 @@ fun box(): String {
                 .classifier
                 .as_ref()
                 .and(internal.or(core.classifier_name));
+            record.classifier_declaration = record.classifier.as_ref().and_then(|_| {
+                internal
+                    .map(crate::libraries::ClassifierDeclaration::Ordinary)
+                    .or_else(|| core.classifier_declaration.clone())
+            });
+            record.builtin_classifier = internal.is_none() && core.builtin_classifier;
             std::rc::Rc::new(record)
         }
     }
@@ -49450,7 +49488,7 @@ impl<'a> Checker<'a> {
     fn explicit_import_classifier_binding(
         &self,
         name: &str,
-    ) -> Option<(TypeName, Option<TypeName>)> {
+    ) -> Option<(TypeName, Option<crate::libraries::ClassifierDeclaration>)> {
         let path = self.imports.get(name)?;
         classifier_path_with_declaration_identity(path, &self.fed_source(), None).ok()
     }

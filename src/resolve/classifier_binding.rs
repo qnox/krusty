@@ -19,25 +19,33 @@ type SelectedAliasProvenance = Result<Option<SelectedTypeAlias>, InvalidAliasPro
 #[derive(Clone, Copy)]
 struct InvalidAliasProvenance;
 
-fn selected_alias_from_binding(
+fn selected_alias_from_expansion(
     identity: TypeName,
     classifier: TypeName,
     binding: Option<crate::libraries::AliasExpansion>,
-) -> SelectedAliasProvenance {
-    // An ordinary classifier publishes its own identity in both record fields. Do not query
-    // another provider for an equally qualified alias after that classifier has won.
-    if identity == classifier {
-        return Ok(None);
-    }
+) -> Result<SelectedTypeAlias, InvalidAliasProvenance> {
     let binding = binding.ok_or(InvalidAliasProvenance)?;
     if binding.identity != identity || binding.target != classifier {
         return Err(InvalidAliasProvenance);
     }
-    Ok(Some(SelectedTypeAlias {
+    Ok(SelectedTypeAlias {
         identity: Some(binding.identity),
         formals: binding.formals,
         expansion: binding.expansion,
-    }))
+    })
+}
+
+fn selected_alias_from_declaration(
+    classifier: TypeName,
+    declaration: Option<&crate::libraries::ClassifierDeclaration>,
+) -> SelectedAliasProvenance {
+    match declaration.ok_or(InvalidAliasProvenance)? {
+        crate::libraries::ClassifierDeclaration::Ordinary(_) => Ok(None),
+        crate::libraries::ClassifierDeclaration::TypeAlias(binding) => {
+            selected_alias_from_expansion(binding.identity, classifier, Some(binding.clone()))
+                .map(Some)
+        }
+    }
 }
 
 impl Checker<'_> {
@@ -96,9 +104,8 @@ impl Checker<'_> {
                     if let Some((classifier, declaration)) =
                         self.explicit_import_classifier_binding(root_name)
                     {
-                        let provenance = declaration.map_or(Ok(None), |identity| {
-                            self.selected_alias_from_identity(identity, classifier)
-                        });
+                        let provenance =
+                            selected_alias_from_declaration(classifier, declaration.as_ref());
                         let Ok(alias) = provenance else {
                             return Self::invalid_alias_selection(root_name);
                         };
@@ -136,6 +143,7 @@ impl Checker<'_> {
                         );
                         match imported {
                             InheritedNestedClassifier::Found(internal) => {
+                                let internal = self.libraries.canonical_source_type_name(internal);
                                 let Ok(alias) =
                                     self.selected_imported_type_alias(root_name, internal)
                                 else {
@@ -199,8 +207,9 @@ impl Checker<'_> {
         ) {
             Ok((ResolvedQualifier::Classifier(internal), declaration_identity)) => {
                 let internal = self.libraries.canonical_source_type_name(internal);
-                if let Some(identity) = declaration_identity {
-                    let Ok(alias) = self.selected_alias_from_identity(identity, internal) else {
+                if let Some(declaration) = declaration_identity {
+                    let Ok(alias) = selected_alias_from_declaration(internal, Some(&declaration))
+                    else {
                         let failed = segments
                             .last()
                             .map_or(root_name.as_str(), |(_, segment)| segment);
@@ -258,7 +267,8 @@ impl Checker<'_> {
         identity: TypeName,
         classifier: TypeName,
     ) -> SelectedAliasProvenance {
-        selected_alias_from_binding(identity, classifier, self.source_alias_binding(identity))
+        selected_alias_from_expansion(identity, classifier, self.source_alias_binding(identity))
+            .map(Some)
     }
 
     /// Classifier and alias provenance from the current-package rung. The package namespace and
@@ -274,11 +284,8 @@ impl Checker<'_> {
         let classifier = self
             .libraries
             .canonical_source_type_name(record.classifier_name?);
-        let alias = record
-            .classifier_declaration_name
-            .map_or(Ok(None), |identity| {
-                self.selected_alias_from_identity(identity, classifier)
-            });
+        let alias =
+            selected_alias_from_declaration(classifier, record.classifier_declaration.as_ref());
         Some((classifier, alias))
     }
 
@@ -303,7 +310,7 @@ impl Checker<'_> {
                         .filter(|_| !level.builtins_only || record.builtin_classifier)
                         .map(|target| {
                             (
-                                record.classifier_declaration_name,
+                                record.classifier_declaration.clone(),
                                 self.libraries.canonical_source_type_name(target),
                             )
                         })
@@ -320,18 +327,19 @@ impl Checker<'_> {
             }
             let mut ordinary = false;
             let mut selected: Option<SelectedTypeAlias> = None;
-            for (identity, _) in candidates {
-                let Some(identity) = identity else {
+            for (declaration, _) in candidates {
+                let Some(declaration) = declaration else {
                     // The selected provider did not publish alias provenance. Do not reinterpret
                     // that classifier through an equally named declaration from another source.
                     return Err(InvalidAliasProvenance);
                 };
-                let Some(alias) = self.selected_alias_from_identity(identity, classifier)? else {
+                let Some(alias) = selected_alias_from_declaration(classifier, Some(&declaration))?
+                else {
                     // An ordinary classifier is the complete selected declaration, not missing
-                    // alias provenance. Multiple provider/package records may normalize onto the
-                    // same common classifier (for example java.lang.Object and kotlin.Any); the
-                    // target-equality check above has already proved that they are one semantic
-                    // identity. A same-target alias still conflicts with that ordinary identity.
+                    // alias provenance. Multiple provider/package records may normalize onto one
+                    // common semantic classifier; the target-equality check above has already
+                    // proved that identity. A same-target alias still conflicts with the ordinary
+                    // declaration.
                     if selected.is_some() {
                         return Err(InvalidAliasProvenance);
                     }
@@ -344,7 +352,8 @@ impl Checker<'_> {
                 match &selected {
                     None => selected = Some(alias),
                     Some(previous)
-                        if previous.formals == alias.formals
+                        if previous.identity == alias.identity
+                            && previous.formals == alias.formals
                             && previous.expansion == alias.expansion => {}
                     Some(_) => return Err(InvalidAliasProvenance),
                 }
@@ -406,8 +415,8 @@ mod tests {
         let alias = crate::types::type_name("fixture/Alias");
         let target = crate::types::type_name("fixture/Target");
         let other = crate::types::type_name("fixture/Other");
-        assert!(selected_alias_from_binding(alias, target, None).is_err());
-        assert!(selected_alias_from_binding(
+        assert!(selected_alias_from_expansion(alias, target, None).is_err());
+        assert!(selected_alias_from_expansion(
             alias,
             target,
             Some(crate::libraries::AliasExpansion {
@@ -419,5 +428,20 @@ mod tests {
             }),
         )
         .is_err());
+    }
+
+    #[test]
+    fn ordinary_declaration_may_normalize_to_a_different_classifier_identity() {
+        let declaration = crate::types::type_name("platform/Declaration");
+        let classifier = crate::types::type_name("common/Classifier");
+        assert!(matches!(
+            selected_alias_from_declaration(
+                classifier,
+                Some(&crate::libraries::ClassifierDeclaration::Ordinary(
+                    declaration
+                )),
+            ),
+            Ok(None)
+        ));
     }
 }

@@ -56,7 +56,8 @@ impl SymbolSource for BootstrapSymbolSource<'_> {
         }) {
             std::rc::Rc::new(crate::libraries::ResolvedSymbols {
                 classifier_name: declaration,
-                classifier_declaration_name: declaration,
+                classifier_declaration: declaration
+                    .map(crate::libraries::ClassifierDeclaration::Ordinary),
                 classifier: Some(std::sync::Arc::new(
                     crate::libraries::LibraryType::declaration_header(),
                 )),
@@ -329,6 +330,7 @@ pub(in crate::resolve) fn source_type_universe(
             let mut file_expansions: HashMap<String, crate::libraries::AliasExpansion> =
                 HashMap::new();
             let mut file_unresolved = HashMap::new();
+            let mut file_ambiguous = std::collections::HashSet::new();
             // Candidate simple names: every type referenced in the file (so a WILDCARD import can supply
             // it) plus the explicit-import names themselves.
             let mut names = std::collections::HashSet::new();
@@ -406,13 +408,13 @@ pub(in crate::resolve) fn source_type_universe(
                 // consulted in precedence order rather than flattened. Whether the template APPLIES
                 // is decided at the use site, against the classifier that actually resolved.
                 let expansion = if let Some(path) = imap.get(&source_name) {
-                    Some(crate::types::type_name(path))
-                        .and_then(|identity| libraries.type_alias_expansion(identity))
+                    Ok(Some(crate::types::type_name(path))
+                        .and_then(|identity| libraries.type_alias_expansion(identity)))
                 } else if source_name.contains('.') {
-                    Some(super::super::source_package::identity(Some(
+                    Ok(Some(super::super::source_package::identity(Some(
                         source_name.as_str(),
                     )))
-                    .and_then(|identity| libraries.type_alias_expansion(identity))
+                    .and_then(|identity| libraries.type_alias_expansion(identity)))
                 } else {
                     // Alias metadata follows the SAME winning classifier level. A higher-precedence
                     // class/source alias is final even when it has no classpath expansion; never skip
@@ -432,36 +434,56 @@ pub(in crate::resolve) fn source_type_universe(
                                     if level.builtins_only && !record.builtin_classifier {
                                         return None;
                                     }
-                                    Some((package, target))
+                                    Some((record.classifier_declaration.clone(), target))
                                 })
                                 .collect::<Vec<_>>();
                             if candidates.is_empty() {
                                 return None;
                             }
+                            let mut ordinary = false;
                             let mut selected: Option<crate::libraries::AliasExpansion> = None;
-                            for (package, target) in candidates {
+                            for (declaration, target) in candidates {
                                 if full != Some(libraries.canonical_source_type_name(target)) {
-                                    return Some(None);
+                                    return Some(Ok(None));
                                 }
-                                let expansion = {
-                                    let identity =
-                                        crate::types::type_name_child(package, &source_name);
-                                    libraries.type_alias_expansion(identity)
+                                let Some(declaration) = declaration else {
+                                    // A selected provider must publish the declaration that supplied
+                                    // its classifier facet. Do not recover it from the source spelling.
+                                    return Some(Err(()));
                                 };
-                                match (&selected, expansion) {
-                                    (None, Some(expansion)) => selected = Some(expansion),
-                                    (Some(previous), Some(expansion)) if *previous == expansion => {
+                                let expansion = match declaration {
+                                    crate::libraries::ClassifierDeclaration::Ordinary(_) => {
+                                        if selected.is_some() {
+                                            return Some(Err(()));
+                                        }
+                                        ordinary = true;
+                                        continue;
                                     }
-                                    // A real classifier or a distinct alias declaration in the winning
-                                    // level means there is no single expansion identity to record.
-                                    _ => return Some(None),
+                                    crate::libraries::ClassifierDeclaration::TypeAlias(
+                                        expansion,
+                                    ) => expansion,
+                                };
+                                if ordinary {
+                                    return Some(Err(()));
+                                }
+                                match &selected {
+                                    None => selected = Some(expansion),
+                                    Some(previous) if *previous == expansion => {}
+                                    Some(_) => return Some(Err(())),
                                 }
                             }
-                            Some(selected)
+                            Some(Ok(if ordinary { None } else { selected }))
                         })
-                        .flatten()
+                        .unwrap_or(Ok(None))
                 }
-                .filter(|expansion| full == Some(expansion.target));
+                .map(|expansion| expansion.filter(|expansion| full == Some(expansion.target)));
+                let expansion = match expansion {
+                    Ok(expansion) => expansion,
+                    Err(()) => {
+                        file_ambiguous.insert(name.clone());
+                        None
+                    }
+                };
                 if let Some(expansion) = expansion {
                     // Module-wide agreement mirrors the classifier `consensus` beside it: a
                     // spelling two files bind to DIFFERENT aliases has no module-level answer, and
@@ -475,11 +497,16 @@ pub(in crate::resolve) fn source_type_universe(
                     }
                     file_expansions.insert(name.clone(), expansion);
                 }
-                if let Some(full) = full {
+                if let Some(full) = full.filter(|_| !file_ambiguous.contains(&name)) {
                     file_imports.insert(name, full);
                 }
             }
-            imports_by_file.push((file_imports, file_expansions, file_unresolved));
+            imports_by_file.push((
+                file_imports,
+                file_expansions,
+                file_unresolved,
+                file_ambiguous,
+            ));
         }
         for (simple, full) in consensus {
             if let Some(full) = full {
@@ -542,7 +569,7 @@ pub(in crate::resolve) fn source_type_universe(
     let class_names = class_names.into_shared();
     let file_class_names: Vec<ClassNames> = imports_by_file
         .into_iter()
-        .map(|(imports, expansions, unresolved)| {
+        .map(|(imports, expansions, unresolved, ambiguous)| {
             let mut names = class_names.clone();
             for (simple, full) in imports {
                 names.insert_name(simple, full);
@@ -554,6 +581,9 @@ pub(in crate::resolve) fn source_type_universe(
             }
             for (spelling, segment) in unresolved {
                 names.insert_unresolved_segment(spelling, segment);
+            }
+            for spelling in ambiguous {
+                names.mark_ambiguous(spelling);
             }
             expand_type_aliases(&mut names, &alias_map);
             names

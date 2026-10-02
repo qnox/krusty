@@ -562,6 +562,7 @@ impl crate::symbol_source::SymbolSource for EmptySymbolSource {
             let internal = function.identity();
             return std::rc::Rc::new(ResolvedSymbols {
                 classifier_name: Some(internal),
+                classifier_declaration: Some(ClassifierDeclaration::Ordinary(internal)),
                 classifier: Some(super::function_classifiers::synthetic(function)),
                 ..ResolvedSymbols::default()
             });
@@ -600,6 +601,7 @@ impl crate::symbol_source::SymbolSource for EmptySymbolSource {
                 TypeParameters::invariant(vec!["R".to_string()], vec![Vec::new()]);
             return std::rc::Rc::new(ResolvedSymbols {
                 classifier_name: Some(internal),
+                classifier_declaration: Some(ClassifierDeclaration::Ordinary(internal)),
                 classifier: Some(std::sync::Arc::new(classifier)),
                 ..ResolvedSymbols::default()
             });
@@ -630,7 +632,7 @@ impl crate::symbol_source::SymbolSource for EmptySymbolSource {
         std::rc::Rc::new(ResolvedSymbols {
             builtin_classifier: false,
             classifier_name: Some(internal),
-            classifier_declaration_name: Some(internal),
+            classifier_declaration: Some(ClassifierDeclaration::Ordinary(internal)),
             classifier: Some(std::sync::Arc::new(classifier)),
             callables,
             importable_declaration: false,
