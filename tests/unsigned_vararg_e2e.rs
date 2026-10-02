@@ -1,7 +1,8 @@
 //! Unsigned varargs on the JVM.
 //!
-//! `vararg us: UInt` is the carrier `int[]`. A spread of `UIntArray` passes that array to the
-//! spread builder; boxing it first makes `addSpread` cast a `kotlin.UIntArray` to `int[]`.
+//! `vararg us: UInt` is the carrier `int[]`. A sole spread of `UIntArray` is `Arrays.copyOf` of
+//! that carrier. A spread mixed with other elements goes to `IntSpreadBuilder.addSpread`. Boxing
+//! the array first makes `addSpread` cast a `kotlin.UIntArray` to `int[]`.
 //! `vararg us: UInt?` is `kotlin.UInt[]`: each non-null element is boxed once, and `null` is stored
 //! as `null`. A second `box-impl` rejects the reference the first one produced.
 
@@ -49,14 +50,10 @@ fn an_unsigned_array_spread_keeps_the_carrier() {
         "MainKt",
     );
     for method in ["callSpread--ajY-9A", "callMixed--ajY-9A"] {
-        let (_reference, krusty) = pair.method_code("MainKt", method);
-        assert!(
-            !krusty.contains("UIntArray.\"box-impl\""),
-            "{method} boxed the UIntArray spread:\n{krusty}"
-        );
-        assert!(
-            krusty.contains("addSpread") || krusty.contains("copyOf"),
-            "{method} did not pass the carrier array onward:\n{krusty}"
+        let (reference, krusty) = pair.method_code("MainKt", method);
+        assert_eq!(
+            krusty, reference,
+            "{method} instructions differ\n--- kotlinc ---\n{reference}--- krusty ---\n{krusty}"
         );
     }
 }

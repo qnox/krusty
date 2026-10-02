@@ -2,6 +2,7 @@
 //! rewrite construction and member calls onto `*-impl`, and box or unbox at representation boundaries.
 
 mod accessor_names;
+mod aggregate_boundaries;
 mod bridge_names;
 mod bridge_parameters;
 mod bridge_realization;
@@ -3125,46 +3126,7 @@ pub(crate) fn lower_value_classes(
                     }
                 }
             }
-            // Dynamic invokes, reference varargs, and string concatenations are the erased
-            // reference boundaries handled here. A spread contributes the array itself:
-            // `IntSpreadBuilder.addSpread` reads the carrier (`int[]` for `UIntArray`), so boxing
-            // that value class would hand the builder the box.
-            let aggregate = match &ir.exprs[id as usize] {
-                IrExpr::InvokeFunction { args, .. } => Some((args.clone(), Vec::new(), false)),
-                // A value-class part of a string template flows into `StringBuilder.append(Object)`,
-                // so it must box — unless it is a non-null unboxed value, which kotlinc renders
-                // through the static `toString-impl` over its carrier.
-                IrExpr::StringConcat(args) => Some((args.clone(), Vec::new(), true)),
-                IrExpr::Vararg {
-                    elements, spreads, ..
-                } => Some((elements.clone(), spreads.clone(), false)),
-                _ => None,
-            };
-            if let Some((args, spread_flags, template)) = aggregate {
-                for (index, a) in args.into_iter().enumerate() {
-                    if spread_flags.get(index).copied().unwrap_or(false) {
-                        continue;
-                    }
-                    let representation = repr_ctx.repr(a);
-                    crate::trace_compiler!(
-                        "value_classes",
-                        "reference aggregate expr {id} element {a} {:?} repr={}",
-                        &ir.exprs[a as usize],
-                        match representation {
-                            Repr::Unboxed(_) => "Unboxed",
-                            Repr::Boxed(_) => "Boxed",
-                            Repr::NotVc => "NotVc",
-                        }
-                    );
-                    if let Repr::Unboxed(x) = representation {
-                        let op = match repr_ctx.box_op(a, x) {
-                            BoxOp::Box(x) if template => BoxOp::StringOf(x),
-                            op => op,
-                        };
-                        ops.push((a, op));
-                    }
-                }
-            }
+            aggregate_boundaries::record(&ir.exprs, id, &repr_ctx, &mut ops);
             if let IrExpr::Call { callee, args, .. } = &ir.exprs[id as usize] {
                 call_arguments::record_boundaries(
                     callee,

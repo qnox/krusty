@@ -3339,7 +3339,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 
 - **An unsigned vararg is the carrier array; a nullable one is the boxed array.** `vararg us: UInt`
   is `int...`. Each element is stored with `iastore`, and a spread of `UIntArray` passes that same
-  `int[]` to `IntSpreadBuilder.addSpread` — the array value class is not boxed first. `vararg us:
+  `int[]` — the array value class is not boxed first. A sole spread of an existing array is
+  `Arrays.copyOf` of the carrier (`copyOf(int[], int)`); a local is loaded twice, and any other
+  producer is stored once then loaded twice. A fresh array built only for that spread is the
+  argument itself. A spread mixed with other elements stores `IntSpreadBuilder` in a local and
+  calls `add` / `addSpread` on that class. `vararg us:
   UInt?` is `kotlin.UInt...`. A non-null element is boxed once (`UInt.box-impl`); `null` is stored
   as `null`. A fused `if (a !is UIntArray)` names the box, the same record a value-position `is`
   reads, so the carrier is not tested with `instanceof [I` after `box-impl`. Tests:
