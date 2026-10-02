@@ -54,7 +54,27 @@ abstract class KrustyKotlinPlugin @Inject constructor(
             )
         }
         val aggregate = aggregateTask(project.rootProject)
-        replaceKotlinJvmCompiles(project, javaToolchains, aggregate)
+        // The compiler-plugin baseline and its hook realize no tasks, so they stay at apply time:
+        // a support plugin applied after krusty must be caught, wherever in the build script that
+        // happens.
+        val supplementalCompilerPluginIds =
+            project.objects.listProperty(String::class.java).convention(emptyList())
+        val compilerPluginBaseline =
+            project.plugins.withType(KotlinCompilerPluginSupportPlugin::class.java).toSet()
+        project.plugins.withType(KotlinCompilerPluginSupportPlugin::class.java).all {
+            if (this !in compilerPluginBaseline) {
+                supplementalCompilerPluginIds.add(getCompilerPluginId())
+            }
+        }
+        // Wire replacements at the end of project configuration, not during plugin application.
+        // Realizing a KotlinJvmCompile while a convention plugin is mid-apply reads — and so
+        // finalizes — KotlinTopLevelExtension.compilerVersion before that convention sets it (the
+        // Kotlin repository's gradle-plugin-common-configuration sets compilerVersion after
+        // applying the Kotlin JVM plugin), and Gradle forbids registering a task from inside a
+        // task configuration callback.
+        project.afterEvaluate {
+            replaceKotlinJvmCompiles(project, javaToolchains, aggregate, supplementalCompilerPluginIds)
+        }
     }
 }
 
@@ -78,16 +98,8 @@ private fun replaceKotlinJvmCompiles(
     project: Project,
     javaToolchains: JavaToolchainService,
     aggregate: TaskProvider<Task>,
+    supplementalCompilerPluginIds: ListProperty<String>,
 ) {
-    val supplementalCompilerPluginIds =
-        project.objects.listProperty(String::class.java).convention(emptyList())
-    val compilerPluginBaseline =
-        project.plugins.withType(KotlinCompilerPluginSupportPlugin::class.java).toSet()
-    project.plugins.withType(KotlinCompilerPluginSupportPlugin::class.java).all {
-        if (this !in compilerPluginBaseline) {
-            supplementalCompilerPluginIds.add(getCompilerPluginId())
-        }
-    }
     project.tasks.withType(KotlinJvmCompile::class.java).all {
         val kotlinTask = this
         val replacementName = "${kotlinTask.name}WithKrusty"

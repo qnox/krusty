@@ -75,7 +75,10 @@ and compile outputs. The public Kotlin task is disabled and depends on a typed, 
 task whose `ExecOperations` and `FileSystemOperations` are injected by Gradle. The replacement execs
 the krusty binary (`-Pkrusty.binary` or `KRUSTY_BIN`) with the task's complete `.kt` and same-module
 `.java` sources and normalized structured compiler options. kotlinc and the Kotlin compile daemon
-are not started. The plugin does not invoke krusty-build, inspect task implementation classes, or
+are not started. The replacement wiring runs at the end of project configuration: realizing a
+`KotlinJvmCompile` during plugin application reads and finalizes
+`KotlinTopLevelExtension.compilerVersion` before convention plugins set it, and Gradle forbids
+registering a task from inside a task configuration callback. The plugin does not invoke krusty-build, inspect task implementation classes, or
 mutate private action lists. `.kts` files are not compilation inputs.
 
 The adapter derives Kotlin semantics from `KotlinBasePlugin.pluginVersion`. It reads the experimental
