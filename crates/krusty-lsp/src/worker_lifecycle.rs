@@ -3,20 +3,21 @@
 //! `release_worker` kills, polls, and joins against a single deadline. `try_wait` reporting an
 //! exit, or an operating-system error that means this process is not a child, is the only
 //! proof the child is gone. Any other wait error, or a child that is still running at the
-//! deadline, stays in a one-slot park together with its reader. A replacement is not spawned
-//! while that slot is occupied.
+//! deadline, stays in a one-slot park together with its reader. That park outlives the thread
+//! that filled it. A replacement is not spawned while the slot is occupied, and the slot never
+//! drops or forgets the last child and reader handles.
 
-use std::cell::RefCell;
 use std::io::{self, ErrorKind};
 use std::process::{Child, ExitStatus};
 use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::Mutex;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 #[cfg(test)]
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 #[cfg(test)]
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, MutexGuard};
 
 /// How long one release may spend killing the child, polling it, and joining its reader.
 pub(crate) const WORKER_REAP_GRACE: Duration = Duration::from_secs(2);
@@ -36,8 +37,9 @@ const NOT_A_CHILD: i32 = 6;
 #[cfg(windows)]
 const NO_SUCH_PROCESS: i32 = 127;
 
-thread_local! {
-    static PARK: RefCell<Option<Parked>> = const { RefCell::new(None) };
+fn park_slot() -> &'static Mutex<Option<Parked>> {
+    static PARK: Mutex<Option<Parked>> = Mutex::new(None);
+    &PARK
 }
 
 pub(crate) enum WaitClass {
@@ -347,13 +349,18 @@ fn reclaim(parked: &mut Parked) -> bool {
 }
 
 fn with_slot<T>(body: impl FnOnce(&mut Option<Parked>) -> T) -> T {
-    PARK.with(|slot| body(&mut slot.borrow_mut()))
+    let mut slot = park_slot()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    body(&mut slot)
 }
 
-/// Last-resort shutdown for a child the one slot could not take.
+/// Last-resort shutdown for a child the one slot could not take during `release`.
 ///
-/// A normal child dies on `kill` and is reaped here. A child that is still running at the deadline
-/// is left unreaped in this thread rather than blocking `Child`'s destructor.
+/// A normal child dies on `kill` and is reaped here. A child that is still running, or whose wait
+/// failed, is moved into the process-lifetime slot when that slot has no child. The handle is not
+/// forgotten. When the slot already retains a different live child, this one is waited so the
+/// operating system can reap it instead of being dropped unreaped.
 pub(crate) fn quarantine_child(mut child: Child) {
     let _ = child.kill();
     let deadline = Instant::now()
@@ -364,10 +371,32 @@ pub(crate) fn quarantine_child(mut child: Child) {
             WaitClass::Exited(_) | WaitClass::NotAChild => return,
             WaitClass::Running if Instant::now() < deadline => std::thread::sleep(WAIT_POLL),
             WaitClass::Running | WaitClass::Failed(_) => {
-                std::mem::forget(child);
+                retain_os_child(child);
                 return;
             }
         }
+    }
+}
+
+fn retain_os_child(child: Child) {
+    let waiting = with_slot(|slot| {
+        if !slot_occupied(slot) {
+            *slot = Some(Parked {
+                child: Some(OwnedChild::Os(child)),
+                reader: None,
+            });
+            return None;
+        }
+        if let Some(parked) = slot.as_mut() {
+            if parked.child.is_none() {
+                parked.child = Some(OwnedChild::Os(child));
+                return None;
+            }
+        }
+        Some(child)
+    });
+    if let Some(mut child) = waiting {
+        let _ = child.wait();
     }
 }
 
@@ -526,11 +555,7 @@ fn shutdown_parked_for_test() {
     drop(parked.child.take());
     if let Some(reader) = parked.reader.take() {
         let _ = reader.done.recv_timeout(Duration::from_secs(1));
-        if reader.join.is_finished() {
-            let _ = reader.join.join();
-        } else {
-            std::mem::forget(reader.join);
-        }
+        let _ = reader.join.join();
     }
 }
 
@@ -659,6 +684,46 @@ mod tests {
 
         running.store(false, Ordering::SeqCst);
         let _ = unblock.send(());
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while Instant::now() < deadline && !replacement_permitted() {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(replacement_permitted());
+        assert_eq!(parked_processes(), 0);
+        assert_eq!(readers.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn a_parked_worker_outlives_the_thread_that_parked_it() {
+        let _guard = test_lock();
+        let running = Arc::new(AtomicBool::new(true));
+        let readers = Arc::new(AtomicUsize::new(0));
+        let (unblock, gate) = mpsc::channel();
+        let parked = std::thread::spawn({
+            let running = Arc::clone(&running);
+            let readers = Arc::clone(&readers);
+            let unblock = unblock.clone();
+            move || {
+                let mut child = Some(Simulated::survives(running));
+                let mut reader = Some(spawn_blocked_reader(gate, unblock, readers));
+                let error = release_simulated(&mut child, &mut reader, Duration::from_millis(30))
+                    .expect_err("surviving child stays parked");
+                assert_eq!(error.kind(), ErrorKind::TimedOut);
+                assert!(child.is_none(), "the slot owns the child");
+                assert!(reader.is_none(), "the slot owns the reader");
+            }
+        });
+        parked.join().expect("parking thread returns");
+
+        assert!(
+            !replacement_permitted(),
+            "the park remains occupied after the parking thread exits"
+        );
+        assert_eq!(parked_processes(), 1);
+        assert_eq!(readers.load(Ordering::SeqCst), 1);
+
+        running.store(false, Ordering::SeqCst);
+        unblock.send(()).expect("unblock the parked reader");
         let deadline = Instant::now() + Duration::from_secs(1);
         while Instant::now() < deadline && !replacement_permitted() {
             std::thread::sleep(Duration::from_millis(5));
