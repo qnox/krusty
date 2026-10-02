@@ -121,6 +121,25 @@ __attribute__((weak)) uint32_t kt_float_bits(kt_float value) {
     return value != value ? 0x7fc00000u : bits;
 }
 
+/* The two errors the stdlib throwers raise that no stand-in above covers. */
+__attribute__((weak)) const KType kt_type_assertion_error = {
+    .name = "kotlin.AssertionError",
+    .name_length = sizeof("kotlin.AssertionError") - 1,
+    .instance_size = sizeof(DriverThrowable),
+    .reference_count = sizeof(driver_throwable_offsets) / sizeof(driver_throwable_offsets[0]),
+    .reference_offsets = driver_throwable_offsets,
+    .super = &kt_type_any,
+};
+
+__attribute__((weak)) const KType kt_type_not_implemented_error = {
+    .name = "kotlin.NotImplementedError",
+    .name_length = sizeof("kotlin.NotImplementedError") - 1,
+    .instance_size = sizeof(DriverThrowable),
+    .reference_count = sizeof(driver_throwable_offsets) / sizeof(driver_throwable_offsets[0]),
+    .reference_offsets = driver_throwable_offsets,
+    .super = &kt_type_any,
+};
+
 __attribute__((weak)) const KType kt_type_arithmetic_exception = {
     .name = "kotlin.ArithmeticException",
     .name_length = sizeof("kotlin.ArithmeticException") - 1,

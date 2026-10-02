@@ -32,9 +32,6 @@ void *memset(void *destination, int value, size_t length) {
 
 /* ---- object model -------------------------------------------------------------------------- */
 
-static kt_boolean kt_builtin_equals(KRef self, KRef other);
-static kt_int kt_builtin_hash_code(KRef self);
-
 /* Every built-in value type shares one vtable: value equality, Kotlin's hash for that value, and
    the runtime's own rendering as toString. */
 static const kt_fn kt_builtin_vtable[] = {(kt_fn)kt_builtin_equals, (kt_fn)kt_builtin_hash_code,
@@ -265,11 +262,7 @@ void kt_no_such_enum_constant(KRef name) {
     kt_throw(kt_throwable_new(&kt_type_illegal_argument_exception, message));
 }
 
-typedef KArray KByteArray;
-
-static char *kt_bytes_of(KByteArray *array) { return (char *)(array + 1); }
-
-static KByteArray *kt_bytes_new(kt_int length) {
+KByteArray *kt_bytes_new(kt_int length) {
     return (KByteArray *)kt_array_new(&kt_type_byte_array, length);
 }
 
@@ -302,7 +295,7 @@ static KRef kt_new(const KType *type) { return (KRef)kt_gc_allocate(type, sizeof
 
 /* ---- strings ------------------------------------------------------------------------------- */
 
-static KRef kt_string_of(KRef storage, const char *bytes, kt_int byte_length) {
+KRef kt_string_of(KRef storage, const char *bytes, kt_int byte_length) {
     KRef object = kt_new(&kt_type_string);
     object->as.string.storage = storage;
     object->as.string.bytes = bytes;
@@ -958,8 +951,6 @@ static kt_int kt_render_char(kt_char unit, char *buffer) {
     buffer[2] = (char)(0x80 | (unit & 0x3F));
     return 3;
 }
-
-static KRef kt_object_to_string(KRef value);
 
 /* Render any value as bytes. `*storage` receives the heap object that owns the bytes (NULL when
    they are in static storage); a caller that allocates before it has finished with the bytes
@@ -1887,8 +1878,8 @@ static KRef kt_lazy_to_string(KRef self) {
    The message names the PROPERTY, as Kotlin's does. The name is a string the generator hands over,
    read at the call site from the `KProperty` operand the delegate convention passes: the runtime
    cannot ask the object for it, since a property reference answers `name` from a table of the
-   emitted code's own. */
-static void kt_raise_uninitialized_property(KRef name);
+   emitted code's own. The raise itself is `kt_raise_uninitialized_property`, with the other
+   stdlib throwers in `krusty_classes.c`. */
 
 typedef struct KNotNullVar {
     KObjectHeader header;
@@ -2641,11 +2632,6 @@ kt_long kt_range_iterator_next(KRef iterator) {
    `value >= start && value <= end`, so a NaN on either side answers false; `isEmpty` is
    `!(start <= end)`, so a range with a NaN bound is empty. Both fall out of IEEE comparison, which
    is what Kotlin's own `lessThanOrEquals` on these types is. */
-/* Defined with the rest of the value hashing further down: the bits `equals` and `hashCode` read
-   from a floating-point value, with every NaN collapsed to one. */
-static uint64_t kt_double_bits(kt_double value);
-static uint32_t kt_float_bits(kt_float value);
-
 typedef struct KFloatingRange {
     KObjectHeader header;
     kt_double start;

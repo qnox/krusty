@@ -15,11 +15,6 @@
 
    The list is IMMUTABLE, which is what makes sharing the vararg array sound: nothing a program can
    write through reaches it. `MutableList` is not this type and is not realized here. */
-typedef struct KList {
-    KObjectHeader header;
-    KRef elements;
-} KList;
-
 static const uint32_t kt_list_offsets[] = {offsetof(KList, elements)};
 
 /* The collection interfaces, as an `is` names them. None has instances of its own, exactly like
@@ -173,8 +168,6 @@ static kt_boolean kt_is_list_iterator(KRef value) {
     return value != NULL && (value->header.type == &kt_type_list_iterator ||
                              value->header.type == &kt_type_array_list_iterator);
 }
-
-static KRef *kt_elements_of(KRef array) { return (KRef *)((KArray *)array + 1); }
 
 KRef kt_list_of(KRef elements) {
     /* The allocation can collect, so the array has to be reachable across it; it is, in this
@@ -1190,16 +1183,6 @@ KRef kt_iterable_iterator(KRef iterable) {
         && (iterable->header.type == &kt_type_string || kt_is_string_builder(iterable))) {
         return kt_walk_of(&kt_type_chars_iterator, iterable);
     }
-    /* A SET is iterated as the list of its elements: that list IS the set's order, which is the
-       insertion order a `LinkedHashSet` promises. */
-    if (kt_is_set(iterable)) {
-        return kt_list_iterator(kt_map_keys_list(iterable));
-    }
-    /* A MAP is walked as its entries, which is what Kotlin's `Map.iterator()` extension answers
-       and what a `for ((k, v) in m)` destructures. */
-    if (kt_is_map(iterable)) {
-        return kt_iterable_iterator(kt_map_entries(iterable));
-    }
     /* A SEQUENCE is walked as its source: that is the whole of what the wrapper holds, and asking
        it for an iterator is the one member Kotlin's `Sequence` declares. */
     if (kt_is_sequence(iterable)) {
@@ -1214,8 +1197,11 @@ KRef kt_iterable_iterator(KRef iterable) {
         return (KRef)counting;
     }
     /* A class of the PROGRAM that implements `kotlin.collections.Iterable`: its own `iterator()`,
-       at the slot its descriptor records. Last, so that nothing this runtime makes is reached
-       through a dispatch when its own shape already answered. */
+       at the slot its descriptor records. The maps, sets and views of `krusty_maps.c` answer here
+       too, through the walk defined beside them, and a map walks its entries, which is what
+       Kotlin's `Map.iterator()` extension answers and what `for ((k, v) in m)` destructures. Last,
+       so that nothing this runtime makes is reached through a dispatch when its own shape already
+       answered. */
     if (iterable != NULL && iterable->header.type->walk_iterator != NULL) {
         return iterable->header.type->walk_iterator(iterable);
     }
@@ -1283,8 +1269,9 @@ static kt_int kt_iterable_size(KRef iterable) {
     if (iterable->header.type == &kt_type_list || kt_is_mutable_list(iterable)) {
         return kt_list_size(iterable);
     }
-    if (kt_is_set(iterable) || kt_is_map(iterable)) {
-        return kt_map_size(iterable);
+    kt_int held = kt_map_collection_size(iterable);
+    if (held >= 0) {
+        return held;
     }
     if (kt_is_array(iterable->header.type)) {
         return kt_length_of(iterable);
@@ -1816,7 +1803,12 @@ kt_int kt_iterable_index_of(KRef iterable, KRef value) {
     return -1;
 }
 
+/* Kotlin's `Iterable.contains` asks a `Collection` its own `contains`, which for a set or a map's
+   view is a hash lookup rather than this walk. A map is no `Iterable`, so it is not asked. */
 kt_boolean kt_iterable_contains(KRef iterable, KRef value) {
+    if (!kt_is_map(iterable) && kt_map_collection_size(iterable) >= 0) {
+        return kt_set_contains(iterable, value);
+    }
     return kt_iterable_index_of(iterable, value) >= 0;
 }
 

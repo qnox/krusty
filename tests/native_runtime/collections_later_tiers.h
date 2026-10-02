@@ -1,6 +1,6 @@
 /* What a driver of the list and iteration runtime needs from tiers above it, on top of the
-   exception slot `later_tiers.h` stands in for: the exceptions a list raises, the set and map
-   questions every walk asks before it reaches a range, and `equals` and `hashCode`.
+   exception slot `later_tiers.h` stands in for: the exceptions a list raises, and `equals` and
+   `hashCode`.
 
    Every definition is WEAK for the reason `later_tiers.h` gives: the tier that defines the real one
    wins the link, and the driver then runs against it unchanged. Each keeps the real contract and no
@@ -10,8 +10,8 @@
 
 #include "later_tiers.h"
 
-/* The two exceptions a list raises that `later_tiers.h` does not already stand in for, laid out as
-   its throwable is, so a pending one keeps its message. */
+/* The exceptions a list, a map or a set raises that `later_tiers.h` does not already stand in for,
+   laid out as its throwable is, so a pending one keeps its message. */
 #define STANDIN_EXCEPTION(identifier, kotlin_name)                                                 \
     __attribute__((weak)) const KType identifier = {                                               \
         .name = kotlin_name,                                                                       \
@@ -25,18 +25,8 @@
 STANDIN_EXCEPTION(kt_type_no_such_element_exception, "kotlin.NoSuchElementException")
 STANDIN_EXCEPTION(kt_type_concurrent_modification_exception,
                   "kotlin.ConcurrentModificationException")
-
-/* Nothing a driver here builds is a set or a map, and those types do not exist at this tier, so the
-   real answer for every receiver a driver can pass is `false`. */
-__attribute__((weak)) kt_boolean kt_is_set(KRef value) {
-    (void)value;
-    return 0;
-}
-
-__attribute__((weak)) kt_boolean kt_is_map(KRef value) {
-    (void)value;
-    return 0;
-}
+STANDIN_EXCEPTION(kt_type_unsupported_operation_exception, "kotlin.UnsupportedOperationException")
+STANDIN_EXCEPTION(kt_type_class_cast_exception, "kotlin.ClassCastException")
 
 /* `kt_equals` and `kt_hash_code` come from `later_tiers.h`, which this header includes. */
 
