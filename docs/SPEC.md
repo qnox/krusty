@@ -8376,6 +8376,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   carrier), same-arity overloads in either declaration order, a generic substitution, a sibling
   file, and a compiled dependency. Two `invoke` members can share the static name `invoke-impl`
   and an arity while their descriptors differ; the selected declaration decides the target. A
+  same-owner `fun invoke` participates only when it is that overriding declaration or is
+  itself declared `operator`. `ValueClass(1)(1)` against `fun invoke(n: Int)` without
+  `operator`, beside `override fun invoke()`, is rejected: the `operator` modifier is
+  required on that overload. A
   value whose static type is the function type (`val f: Int.() -> String = ValueClass(1); f(1)`)
   still boxes and calls `Function1.invoke`. Calling the interface method on the raw carrier is a
   `VerifyError`. A function-value call that still names a non-null value class, with no selected

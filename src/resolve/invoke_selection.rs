@@ -64,9 +64,11 @@ impl Checker<'_> {
         receiver_ty: Ty,
     ) -> Vec<crate::libraries::FunctionInfo> {
         let value_class = self.ty_is_value_class(receiver_ty) && !receiver_ty.is_nullable();
-        // `override fun invoke` implements the function-supertype convention without repeating
-        // `operator`. Those own members stay candidates; an inherited `FunctionN.invoke` does not,
-        // or the call would box and dispatch through the interface.
+        // `override fun invoke` inherits the operator convention from the function supertype
+        // even when the source omits `operator`; hierarchy normalization records that fact.
+        // A same-owner `invoke` that is not that override, and is not itself `operator`, is
+        // not a candidate. An inherited `FunctionN.invoke` stays out too, or the call would
+        // box and dispatch through the interface.
         let own_function_implementation = value_class
             && !self
                 .stable_classifier_callable_signatures(receiver_ty)
@@ -82,12 +84,8 @@ impl Checker<'_> {
             .unwrap_or_default()
             .into_iter()
             .filter(|candidate| {
-                if candidate.flags.operator {
-                    return !own_function_implementation || candidate.receiver_rank == 0;
-                }
-                own_function_implementation
-                    && candidate.kind == crate::libraries::FnKind::Member
-                    && candidate.receiver_rank == 0
+                candidate.flags.operator
+                    && (!own_function_implementation || candidate.receiver_rank == 0)
             })
             .collect()
     }
@@ -1238,6 +1236,17 @@ impl Checker<'_> {
                     let Some(selected) =
                         extension_selection.and_then(CallableCandidateSelection::available)
                     else {
+                        // A same-owner `invoke` can match the arguments without being an
+                        // operator. That is the modifier diagnostic, not an empty candidate list.
+                        if self.report_required_operator_modifier(
+                            scope,
+                            receiver_ty,
+                            CALLABLE_INVOKE_OPERATOR,
+                            arg_tys,
+                            span,
+                        ) {
+                            return InvokeResolution::Selected(Ty::Error);
+                        }
                         return if overloads.is_empty() {
                             if extensions.is_empty() {
                                 InvokeResolution::Absent

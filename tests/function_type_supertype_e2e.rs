@@ -338,6 +338,19 @@ fun box(): String {\n\
 }
 
 #[test]
+fn a_non_operator_invoke_overload_is_rejected() {
+    const SRC: &str = "@JvmInline\n\
+value class ValueClass(val s: Int) : () -> String {\n\
+    override fun invoke(): String = \"n\"\n\
+    fun invoke(n: Int): String = \"i$n\"\n\
+}\n\
+fun box() {\n\
+    ValueClass(1)(1)\n\
+}\n";
+    common::assert_errors_match_kotlinc(&[("NonOperatorInvoke.kt", SRC)], &[]);
+}
+
+#[test]
 fn a_compiled_dependency_value_class_invoke_uses_the_static_member() {
     const LIB: &str = "package lib\n\
 @JvmInline\n\
