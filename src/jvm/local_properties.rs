@@ -44,7 +44,8 @@ fn property_declaration_type(layout: &IrLocalPropertyLayout) -> Option<Ty> {
 
 /// A Kotlin-private member reached from a different source classifier needs a JVM access bridge.
 /// The decision consumes the exact operation and declaration layout; it performs no member lookup.
-/// A read of a property with a declared getter reaches that exact getter, which the backend bridges.
+/// A read of a property with a declared getter, and a write of one with a declared setter, reaches
+/// that exact accessor. Bridge collection reads the recorded function and does not scan by name.
 fn mark_private_cross_class_access(
     ir: &mut IrFile,
     layout: &IrLocalPropertyLayout,
@@ -69,8 +70,13 @@ fn mark_private_cross_class_access(
         .get_mut(*property as usize)
     {
         declaration.needs_access_bridge = true;
-        if let Some(getter) = declaration.getter.filter(|_| read) {
-            ir.jvm_member_targets.insert(operation, getter);
+        let accessor = if read {
+            declaration.getter
+        } else {
+            declaration.setter
+        };
+        if let Some(function) = accessor {
+            ir.jvm_member_targets.insert(operation, function);
         }
     }
 }
