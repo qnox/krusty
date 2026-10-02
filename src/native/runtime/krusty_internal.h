@@ -133,4 +133,18 @@ void kt_raise_uninitialized_property(KRef name);
    its result asks. Defined in `krusty_maps.c`. */
 kt_int kt_map_collection_size(KRef value);
 
+/* A built-in value of `type`, fields zeroed: the one allocation every box makes. Defined in
+   `krusty_rt.c`. */
+KRef kt_new(const KType *type);
+
+/* The text `value` renders as, for `print`, string templates and the uncaught report: its bytes,
+   their count through `byte_length`, and through `storage` what keeps them alive. An object of the
+   program renders through its own `toString`, which may raise; the caller asks the pending slot
+   before it reads the answer. Defined in `krusty_rt.c`. */
+const char *kt_render(KRef value, kt_int *byte_length, KRef *storage);
+
+/* An unsigned 64-bit value in decimal, into `buffer` (at least 20 bytes); answers the length
+   written. Defined in `krusty_lang.c`. */
+kt_int kt_render_ulong(uint64_t value, char *buffer);
+
 #endif /* KRUSTY_INTERNAL_H */

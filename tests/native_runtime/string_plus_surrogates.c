@@ -2,7 +2,7 @@
    it: `"" + '\uD83D' + '\uDE00' == "😀"`. A lone surrogate is stored as the three bytes its code
    unit encodes to — UTF-8 has no form for half a character — and concatenation used to leave two
    such halves side by side, six bytes that no literal holds and that are not UTF-8 on output. */
-#include "standins.h"
+#include "driver_support.h"
 
 #define GRINNING "\xF0\x9F\x98\x80" /* U+1F600, which UTF-16 writes as D83D DE00 */
 #define HIGH "\xED\xA0\xBD"          /* the lone high surrogate D83D */

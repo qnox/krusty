@@ -5,10 +5,6 @@
 
 void kt_exit(kt_int status) { kt_sys_exit(status); }
 
-static void kt_write(kt_int fd, const char *bytes, size_t length) {
-    kt_sys_write(fd, bytes, length);
-}
-
 /* ---- freestanding C support --------------------------------------------------------------- */
 
 /* A compiler may synthesize calls to these from ordinary assignments and loops even under
@@ -180,9 +176,16 @@ KT_ARRAY_TYPE(kt_type_ushort_array, "kotlin.", "UShortArray", 2, 0)
 KT_ARRAY_TYPE(kt_type_uint_array, "kotlin.", "UIntArray", 4, 0)
 KT_ARRAY_TYPE(kt_type_ulong_array, "kotlin.", "ULongArray", 8, 0)
 
+/* A NEGATIVE length is `IllegalArgumentException`, which a program may catch, with the JVM's
+   message, the length; no array is made and the NULL answered is never read, the caller checking
+   the pending slot first. The type is Kotlin/Native's, whose array constructors allocate through
+   `AllocArrayInstance` and its `ThrowIllegalArgumentException`, as `StringBuilder(-1)` does here
+   too; Kotlin/JVM throws Java's `NegativeArraySizeException`, a type Kotlin does not declare. */
 KRef kt_array_new(const KType *type, kt_int length) {
     if (length < 0) {
-        KT_FAIL("krusty: negative array size\n");
+        kt_throw(kt_throwable_new(&kt_type_illegal_argument_exception,
+                                  kt_to_string(kt_box_int(length))));
+        return NULL;
     }
     /* Sized in 64 bits: a length Kotlin allows can need more bytes than the allocator's 32-bit
        request holds, and a size that wrapped would hand back an array far smaller than its length
@@ -250,10 +253,10 @@ typedef struct KEnum {
 KRef kt_enum_to_string(KRef self) { return ((KEnum *)self)->name; }
 
 /* An exhaustive `when` used as a value has no `else` to fall into. Kotlin's own answer for the
-   case its exhaustiveness check missed is `NoWhenBranchMatchedException`; without exceptions, this
-   is the same statement, made loudly. */
+   case its exhaustiveness check missed -- an enum constant or a sealed subclass added after the
+   `when` was compiled -- is `NoWhenBranchMatchedException`, which a program may catch. */
 void kt_no_when_branch_matched(void) {
-    KT_FAIL("krusty: no branch of an exhaustive `when` matched\n");
+    kt_throw(kt_throwable_new(&kt_type_no_when_branch_matched_exception, NULL));
 }
 
 /* `Color.valueOf("NOPE")` — Kotlin's `IllegalArgumentException`, naming the constant asked for. */
@@ -291,7 +294,7 @@ KT_TYPE_WITH(kt_type_ulong, "kotlin.", "ULong", sizeof(KObject), 0, NULL, kt_com
 
 #undef KT_TYPE
 
-static KRef kt_new(const KType *type) { return (KRef)kt_gc_allocate(type, sizeof(KObject)); }
+KRef kt_new(const KType *type) { return (KRef)kt_gc_allocate(type, sizeof(KObject)); }
 
 /* ---- strings ------------------------------------------------------------------------------- */
 
@@ -909,8 +912,6 @@ kt_char kt_string_last(KRef self) {
     return kt_string_get(self, kt_string_length(self) - 1);
 }
 
-static kt_int kt_render_ulong(uint64_t value, char *buffer);
-
 /* Render a signed 64-bit value into `buffer` (at least 20 bytes); returns the length written. */
 static kt_int kt_render_long(kt_long value, char *buffer) {
     char digits[20];
@@ -955,7 +956,7 @@ static kt_int kt_render_char(kt_char unit, char *buffer) {
 /* Render any value as bytes. `*storage` receives the heap object that owns the bytes (NULL when
    they are in static storage); a caller that allocates before it has finished with the bytes
    must keep it in a local, so the collector sees a root. */
-static const char *kt_render(KRef value, kt_int *byte_length, KRef *storage) {
+const char *kt_render(KRef value, kt_int *byte_length, KRef *storage) {
     *storage = NULL;
     if (value == NULL) {
         *byte_length = 4;
@@ -1627,7 +1628,8 @@ KRef kt_class_literal(const KType *type) {
 
 KRef kt_class_of(KRef value) {
     if (value == NULL) {
-        KT_FAIL("krusty: member access on a null receiver\n");
+        kt_null_receiver();
+        return NULL;
     }
     return kt_class_literal(value->header.type);
 }
@@ -1954,7 +1956,8 @@ KRef kt_observable(KRef initial, KRef on_change) {
    because an observable passes it to the callback. */
 KRef kt_rw_property_get(KRef self, KRef name) {
     if (self == NULL) {
-        KT_FAIL("krusty: member access on a null receiver\n");
+        kt_null_receiver();
+        return NULL;
     }
     if (self->header.type == &kt_type_observable) {
         return ((const KObservable *)self)->value;
@@ -1974,7 +1977,8 @@ KRef kt_rw_property_get(KRef self, KRef name) {
 
 void kt_rw_property_set(KRef self, KRef property, KRef value) {
     if (self == NULL) {
-        KT_FAIL("krusty: member access on a null receiver\n");
+        kt_null_receiver();
+        return;
     }
     if (self->header.type == &kt_type_not_null_var) {
         ((KNotNullVar *)self)->value = value;
@@ -2499,6 +2503,10 @@ static kt_boolean kt_is_range_iterator(KRef value) {
 }
 
 KRef kt_range_iterator(KRef range) {
+    if (range == NULL) {
+        kt_null_receiver();
+        return NULL;
+    }
     if (!kt_is_range(range)) {
         KT_FAIL("krusty: this value cannot be walked\n");
     }
@@ -2577,6 +2585,10 @@ KRef kt_ulong_range_down_to(kt_long first, kt_long last) {
    is. */
 
 kt_boolean kt_range_iterator_has_next(KRef iterator) {
+    if (iterator == NULL) {
+        kt_null_receiver();
+        return false;
+    }
     if (kt_walk_is(iterator)) {
         return kt_walk_has_next(iterator);
     }
@@ -2587,6 +2599,10 @@ kt_boolean kt_range_iterator_has_next(KRef iterator) {
 }
 
 kt_long kt_range_iterator_next(KRef iterator) {
+    if (iterator == NULL) {
+        kt_null_receiver();
+        return 0;
+    }
     if (kt_walk_is(iterator)) {
         return kt_walk_next_long(iterator);
     }
@@ -2915,7 +2931,8 @@ static KRef kt_range_to_string(KRef self) {
    the caller's array. */
 kt_int kt_array_copy_into(KRef destination, kt_int at, KRef source) {
     if (destination == NULL || source == NULL) {
-        KT_FAIL("krusty: a spread of null\n");
+        kt_null_receiver();
+        return at;
     }
     /* Both are arrays of one kind — a spread into a `vararg` is a spread of the same type — or the
        lengths and stride read below would come from fields that are not there. */

@@ -1,7 +1,7 @@
 /* A class whose descriptor publishes no reflection names has no answer to `simpleName` that is not
    a guess, so asking is a loud failure that names the descriptor, rather than a name made up by
    splitting its rendered one. */
-#include "standins.h"
+#include "driver_support.h"
 
 static const KType unpublished_type = {.name = "pkg.Unpublished",
                                        .name_length = sizeof("pkg.Unpublished") - 1,

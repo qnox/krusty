@@ -3,7 +3,7 @@
    the program's own members, and this runtime has no way to call them: answering `false` would be
    a guess that a map of the same entries contradicts. Before, a map was equal only to one of its
    own class, so such a comparison quietly answered false. */
-#include "collections_later_tiers.h"
+#include "driver_exceptions.h"
 
 static const KType *const program_map_interfaces[] = {&kt_type_map_interface};
 

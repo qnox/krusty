@@ -3,7 +3,7 @@
    to be multiplied out in 32 bits, so `LongArray(600_000_000)` — 4.8e9 bytes — wrapped to about
    half a gigabyte, the allocation succeeded, and the array claimed six hundred million elements
    over it. The test requires the runtime's abort; reaching the end of this driver fails it. */
-#include "standins.h"
+#include "driver_support.h"
 
 void kt_program_entry(void) {
     DRIVER_BEGIN();

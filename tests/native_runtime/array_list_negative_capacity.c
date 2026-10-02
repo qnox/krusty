@@ -5,7 +5,7 @@
 
    The driver prints what each capacity answered, and the harness compares the lines with what
    `array_list_negative_capacity.kt` answers under the reference kotlinc. */
-#include "collections_later_tiers.h"
+#include "driver_exceptions.h"
 #include "transcript.h"
 
 static void say_capacity(const char *label, kt_int capacity) {

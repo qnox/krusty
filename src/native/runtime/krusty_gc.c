@@ -285,8 +285,9 @@ static uintptr_t kt_stack_bottom;
 /* Global reference slots the emitted program declares (top-level properties). Registered rather
    than discovered, because a freestanding program has no portable way to find its own data
    section, and guessing at one would either miss roots or scan unrelated memory. The program
-   registers one per string literal, enum entry, top-level property and `object`, so the count is
-   the program's size, and the registry grows in raw mapped memory like the chunk registry does. */
+   registers one per enum entry, top-level property and `object`, and the runtime one for all the
+   string literals together, so the count is the size of the program's declarations; the registry
+   grows in raw mapped memory like the chunk registry does. */
 static void ***kt_globals;
 static size_t kt_global_count;
 static size_t kt_global_capacity;
@@ -511,6 +512,8 @@ void *kt_gc_allocate(const KType *type, uint32_t size) {
 }
 
 /* ---- introspection, for tests ---------------------------------------------------------------- */
+
+size_t kt_gc_global_roots(void) { return kt_global_count; }
 
 size_t kt_gc_live_objects(void) {
     size_t objects = 0;

@@ -11,11 +11,11 @@
    part of the claim; an integer the claim is not about the rendering of is written here. What has
    no Kotlin counterpart -- which object is pending, the exact calls made into the program, the
    message the runtime ends a program with -- stays a `CHECK` in the driver. The transcript ends
-   before the driver's `OK`. Include this from exactly one file per driver, as `later_tiers.h`. */
+   before the driver's `OK`. Include this from exactly one file per driver, as `driver_checks.h`. */
 #ifndef KRUSTY_TEST_TRANSCRIPT_H
 #define KRUSTY_TEST_TRANSCRIPT_H
 
-#include "later_tiers.h"
+#include "driver_checks.h"
 
 /* `length` bytes, as they are. */
 static inline void say_bytes(const char *bytes, kt_int length) {
@@ -34,7 +34,7 @@ static inline void say(const char *text) {
 /* The text of a string (or builder) the runtime handed back. */
 static inline void say_text(KRef text) {
     kt_int length = 0;
-    const char *bytes = kt_text_of(text, &length);
+    const char *bytes = driver_text_of(text, &length);
     say_bytes(bytes, length);
 }
 
@@ -92,5 +92,61 @@ static inline void say_thrown(KRef thrown) {
         say_text(message);
     }
 }
+
+/* `label = value` and the line's end, the value as a string template renders it. */
+static inline void say_line(const char *label, KRef value) {
+    say(label);
+    say(" = ");
+    say_value(value);
+    say("\n");
+}
+
+/* `SimpleName: message`, as `"${e::class.simpleName}: ${e.message}"` renders a throwable. */
+static inline void say_throwable(KRef thrown) {
+    say_simple_name(type_of(thrown));
+    say(": ");
+    say_value(kt_throwable_message(thrown));
+}
+
+/* `label = SimpleName: message` for the exception in flight, which it takes, as
+   `"${e::class.simpleName}: ${e.message}"` renders one; `label = <none>` when nothing is, which no
+   Kotlin program answers. */
+static inline void say_raised(const char *label) {
+    KRef thrown = kt_pending_exception();
+    kt_clear_pending();
+    say(label);
+    say(" = ");
+    if (thrown == NULL) {
+        say("<none>\n");
+        return;
+    }
+    say_throwable(thrown);
+    say("\n");
+}
+
+/* `length` bytes of a descriptor's name, as they are. */
+static inline void say_bytes_of(const char *bytes, uint32_t length) {
+    say_bytes(bytes, (kt_int)length);
+}
+
+/* An exception class of the program's own, `class <simple> : Exception(...)`, as the generator
+   declares one: the throwable's layout, `Exception` its superclass, its names published. */
+#define PROGRAM_EXCEPTION(identifier, simple)                                                      \
+    static const kt_fn identifier##_vtable[] = {(kt_fn)kt_any_equals, (kt_fn)kt_any_hash_code,    \
+                                                (kt_fn)kt_throwable_to_string};                    \
+    static const KType identifier = {                                                              \
+        .name = simple,                                                                            \
+        .name_length = sizeof(simple) - 1,                                                         \
+        .instance_size = sizeof(DriverThrowable),                                                  \
+        .reference_count = 2,                                                                      \
+        .reference_offsets = driver_throwable_offsets,                                             \
+        .super = &kt_type_exception,                                                               \
+        .vtable = identifier##_vtable,                                                             \
+        .vtable_length = 3,                                                                        \
+        .qualified_name = simple,                                                                  \
+        .qualified_name_length = sizeof(simple) - 1,                                               \
+        .simple_name = simple,                                                                     \
+        .simple_name_length = sizeof(simple) - 1,                                                  \
+        .class_names = KT_CLASS_NAMES_MEMBER};
 
 #endif

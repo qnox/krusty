@@ -3,7 +3,7 @@
    whatever arrived, which on a builder name its storage array and its length rather than its text.
    A string cut from a builder must also be a COPY: a view into the builder's storage would change
    under the program the next time the builder does. */
-#include "standins.h"
+#include "driver_support.h"
 
 #define GRINNING "\xF0\x9F\x98\x80" /* U+1F600, which UTF-16 writes as D83D DE00 */
 #define HIGH "\xED\xA0\xBD"          /* the lone high surrogate D83D */

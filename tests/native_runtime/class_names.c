@@ -23,7 +23,7 @@
 
    which prints `Top pkg.Top`, `Nested pkg.Top.Nested`, `a$b pkg.a$b`, `Local null`,
    `null null`, `String kotlin.String` and `Int kotlin.Int`. */
-#include "later_tiers.h"
+#include "driver_checks.h"
 
 /* Descriptors as a compiler emits them for those classes: each `name` is the rendered name, which
    for the nested, local and anonymous classes is deliberately not the identity, so that an answer

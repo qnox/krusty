@@ -3,7 +3,7 @@
    controls. The runtime's table used to include it, so `"\u0085".isBlank()` answered true and
    `trim` removed it. Every code point the JVM does count is checked alongside, so the table is held
    to the JVM's set in both directions. */
-#include "standins.h"
+#include "driver_support.h"
 
 /* The UTF-8 encoding of `code`, which is below U+10000. */
 static kt_int encode(uint32_t code, char *out) {

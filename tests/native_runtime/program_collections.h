@@ -7,11 +7,11 @@
    eight elements, reached the way the runtime reaches any program collection: through the
    `iterator`, `hasNext` and `next` thunks its descriptor records. A thrown exception is fresh each
    time and remembered in `thrown`, so a driver checks the pending exception by identity. Include
-   this, and not `collections_later_tiers.h` beside it, from exactly one file per driver. */
+   this, and not `driver_exceptions.h` beside it, from exactly one file per driver. */
 #ifndef KRUSTY_TEST_PROGRAM_COLLECTIONS_H
 #define KRUSTY_TEST_PROGRAM_COLLECTIONS_H
 
-#include "collections_later_tiers.h"
+#include "driver_exceptions.h"
 
 /* ---- the call log ---------------------------------------------------------------------------- */
 
@@ -20,7 +20,7 @@ static kt_int call_log_length;
 /* The exception the last throwing call threw; a collector root once `program_begin` has run. */
 static KRef thrown;
 
-static void log_text(const char *text) {
+static inline void log_text(const char *text) {
     for (kt_int at = 0; text[at] != 0; at++) {
         if (call_log_length == (kt_int)sizeof(call_log)) {
             KT_SYS_FAIL("the call log overflowed\n");
@@ -29,7 +29,7 @@ static void log_text(const char *text) {
     }
 }
 
-static void log_int(kt_int value) {
+static inline void log_int(kt_int value) {
     char digits[12];
     kt_int count = 0;
     do {
@@ -43,7 +43,7 @@ static void log_int(kt_int value) {
 }
 
 /* Whether the log is exactly `expected`; it is cleared either way. */
-static kt_boolean log_is(const char *expected) {
+static inline kt_boolean log_is(const char *expected) {
     kt_int length = 0;
     while (expected[length] != 0) {
         length++;
@@ -56,13 +56,13 @@ static kt_boolean log_is(const char *expected) {
     return same;
 }
 
-static void throw_fresh(void) {
+static inline void throw_fresh(void) {
     thrown = kt_throwable_new(&kt_type_illegal_state_exception, NULL);
     kt_throw(thrown);
 }
 
 /* The exception pending is exactly the last one thrown; the slot is cleared. */
-static kt_boolean threw_last(void) {
+static inline kt_boolean threw_last(void) {
     kt_boolean same = thrown != NULL && kt_pending_exception() == thrown;
     kt_clear_pending();
     thrown = NULL;
@@ -80,7 +80,7 @@ typedef struct Tag {
 
 static const KType tag_type;
 
-static kt_boolean tag_throws(KRef self, char member) {
+static inline kt_boolean tag_throws(KRef self, char member) {
     for (const char *at = ((const Tag *)self)->throws; *at != 0; at++) {
         if (*at == member) {
             throw_fresh();
@@ -90,7 +90,7 @@ static kt_boolean tag_throws(KRef self, char member) {
     return 0;
 }
 
-static kt_boolean tag_equals(KRef self, KRef other) {
+static inline kt_boolean tag_equals(KRef self, KRef other) {
     log_text("eq(");
     log_int(((const Tag *)self)->n);
     log_text(") ");
@@ -101,7 +101,7 @@ static kt_boolean tag_equals(KRef self, KRef other) {
            ((const Tag *)other)->n == ((const Tag *)self)->n;
 }
 
-static kt_int tag_hash_code(KRef self) {
+static inline kt_int tag_hash_code(KRef self) {
     log_text("hash(");
     log_int(((const Tag *)self)->n);
     log_text(") ");
@@ -112,7 +112,7 @@ static kt_int tag_hash_code(KRef self) {
 }
 
 /* `kt_string_utf8` names its bytes without copying, so each rendering is a literal. */
-static KRef tag_to_string(KRef self) {
+static inline KRef tag_to_string(KRef self) {
     static const char *const names[] = {"T0", "T1", "T2", "T3", "T4", "T5", "T6", "T7"};
     kt_int n = ((const Tag *)self)->n;
     log_text("str(");
@@ -138,7 +138,7 @@ static const KType tag_type = {
     .vtable_length = 3,
 };
 
-static KRef tag(kt_int n, const char *throwing) {
+static inline KRef tag(kt_int n, const char *throwing) {
     Tag *made = (Tag *)kt_gc_allocate(&tag_type, sizeof(Tag));
     made->n = n;
     made->throws = throwing;
@@ -172,7 +172,7 @@ static const uint32_t seq_offsets[] = {offsetof(Seq, elements[0]), offsetof(Seq,
                                        offsetof(Seq, elements[6]), offsetof(Seq, elements[7])};
 static const uint32_t seq_iterator_offsets[] = {offsetof(SeqIterator, seq)};
 
-static kt_boolean seq_throws(const Seq *seq, char call, kt_int at) {
+static inline kt_boolean seq_throws(const Seq *seq, char call, kt_int at) {
     if (at != seq->throw_at) {
         return 0;
     }
@@ -187,7 +187,7 @@ static kt_boolean seq_throws(const Seq *seq, char call, kt_int at) {
 
 static const KType seq_iterator_type;
 
-static KRef seq_iterator(KRef self) {
+static inline KRef seq_iterator(KRef self) {
     Seq *seq = (Seq *)self;
     log_text("iterator ");
     if (seq_throws(seq, 'i', seq->throw_at)) {
@@ -199,7 +199,7 @@ static KRef seq_iterator(KRef self) {
     return (KRef)iterator;
 }
 
-static kt_boolean seq_has_next(KRef self) {
+static inline kt_boolean seq_has_next(KRef self) {
     SeqIterator *iterator = (SeqIterator *)self;
     const Seq *seq = (const Seq *)iterator->seq;
     log_text("hasNext ");
@@ -209,7 +209,7 @@ static kt_boolean seq_has_next(KRef self) {
     return iterator->at < seq->size;
 }
 
-static KRef seq_next(KRef self) {
+static inline KRef seq_next(KRef self) {
     SeqIterator *iterator = (SeqIterator *)self;
     const Seq *seq = (const Seq *)iterator->seq;
     log_text("next ");
@@ -265,7 +265,7 @@ static const KType seq_list_type = {
 
 /* A program collection over `count` elements (at most eight) of `type`, with nothing that throws
    until `seq_throwing` says so. */
-static KRef seq_of(const KType *type, KRef *elements, kt_int count) {
+static inline KRef seq_of(const KType *type, KRef *elements, kt_int count) {
     Seq *seq = (Seq *)kt_gc_allocate(type, sizeof(Seq));
     for (kt_int at = 0; at < count; at++) {
         seq->elements[at] = elements[at];
@@ -277,7 +277,7 @@ static KRef seq_of(const KType *type, KRef *elements, kt_int count) {
     return (KRef)seq;
 }
 
-static KRef seq_throwing(KRef seq, const char *calls, kt_int at, kt_boolean placeholder) {
+static inline KRef seq_throwing(KRef seq, const char *calls, kt_int at, kt_boolean placeholder) {
     ((Seq *)seq)->throws = calls;
     ((Seq *)seq)->throw_at = at;
     ((Seq *)seq)->placeholder = placeholder;

@@ -5,7 +5,7 @@
 
    The rule is a join at the tail: a low surrogate arriving right after a stored high one becomes
    one character with it. Anything else stays as it came. */
-#include "later_tiers.h"
+#include "driver_checks.h"
 
 #define HIGH 0xD83D /* the leading half of U+1F600 */
 #define LOW 0xDE00  /* its trailing half */

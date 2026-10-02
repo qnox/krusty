@@ -1,6 +1,6 @@
 /* `reversed` on a value that is not one of the runtime's ranges or progressions ends the program
    with the same refusal as `step`, before reading that value through the range layout. */
-#include "standins.h"
+#include "driver_support.h"
 
 void kt_program_entry(void) {
     DRIVER_BEGIN();

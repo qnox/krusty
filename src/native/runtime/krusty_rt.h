@@ -165,11 +165,12 @@ void kt_gc_collect(void);
    an element as bytes, never through an lvalue of a type the slot was not declared with. */
 void kt_gc_add_global_root(void **slot);
 
-/* Introspection, for tests: allocated objects, bytes mapped for the heap, and bytes held by
-   allocated objects. */
+/* Introspection, for tests: allocated objects, bytes mapped for the heap, bytes held by allocated
+   objects, and global slots registered as roots. */
 size_t kt_gc_live_objects(void);
 size_t kt_gc_heap_bytes(void);
 size_t kt_gc_live_bytes(void);
+size_t kt_gc_global_roots(void);
 
 /* ---- values ---------------------------------------------------------------------------------- */
 
@@ -252,21 +253,23 @@ typedef struct KArray {
 } KArray;
 
 /* Allocate a zeroed array of `length` elements. Zero is the right initial value for every element
-   kind Kotlin has here: `0`, `false`, `\u0000`, `0.0` and `null` are all zero bits. */
+   kind Kotlin has here: `0`, `false`, `\u0000`, `0.0` and `null` are all zero bits. A negative
+   length raises `IllegalArgumentException` and answers NULL, as Kotlin/Native's allocation does. */
 KRef kt_array_new(const KType *type, kt_int length);
 
 /* Copy `source`'s elements into `destination` at `at`, answering where the next element goes. What
    a spread needs: `f(a, *xs, b)` builds one array whose size only run time knows. */
 kt_int kt_array_copy_into(KRef destination, kt_int at, KRef source);
 
-/* An index outside `0 until size`. Kotlin throws IndexOutOfBoundsException; with no exception
-   machinery yet the honest realization is a diagnosable exit. */
+/* An index outside `0 until size`: raises Kotlin's `IndexOutOfBoundsException`, with the JVM's
+   wording, and returns; the caller returns too. */
 void kt_index_out_of_bounds(kt_int index, kt_int size);
 
 /* `Enum.toString()`: the constant's name, read from the storage `kotlin.Enum` contributes. */
 KRef kt_enum_to_string(KRef self);
 
-/* The failure an exhaustive `when` makes when none of its branches matched after all. */
+/* An exhaustive `when` none of whose branches matched after all: Kotlin's
+   `NoWhenBranchMatchedException`, raised and returned from. */
 void kt_no_when_branch_matched(void);
 
 /* The failure `Color.valueOf` makes when no constant has that name. */
@@ -697,14 +700,15 @@ kt_int kt_hash_code(KRef value);
 /* `obj is type`: false for null, else true when `type` is on the object's superclass chain. */
 kt_boolean kt_is_instance(KRef object, const KType *type);
 /* `obj as type?` — null passes; `obj as type` — null fails; `obj as? type` — the object or null.
-   A failed cast exits loudly, naming both types: the placeholder for ClassCastException until the
-   runtime has exceptions. */
+   A failed cast raises `ClassCastException` naming both classes, and `null as T` for a non-null
+   `T` raises `NullPointerException` naming the target, both with kotlinc's wording; each returns
+   its operand, which the caller never reads before it checks the pending slot. */
 KRef kt_cast(KRef object, const KType *type);
 KRef kt_cast_non_null(KRef object, const KType *type);
 KRef kt_safe_cast(KRef object, const KType *type);
 
-/* `x!!` — yields `x`, or fails when it is null. Kotlin throws a NullPointerException here; with no
-   exception machinery yet the honest realization is a diagnosable exit. */
+/* `x!!` — yields `x`, or, when it is null, raises Kotlin's `NullPointerException` and returns the
+   null, which the caller never reads before it checks the pending slot. */
 KRef kt_not_null(KRef value);
 
 /* The vtable entry for an abstract method: never reached in a type-correct program, but a loud
@@ -712,10 +716,10 @@ KRef kt_not_null(KRef value);
 void kt_abstract_method_called(void);
 
 /* The standard-library throws a program writes on purpose: `TODO()`, `error(message)`, and a
-   failed `require`/`check`. There are no exceptions on this target yet, so each is the same
-   diagnosable exit `!!` on null and a failed cast already give — and no program that could CATCH
-   one of these compiles here, so nothing observable is lost by not raising it. The message is the
-   program's own, rendered the way `"$message"` renders it. */
+   failed `require`/`check`. Each raises the exception Kotlin specifies — `NotImplementedError`,
+   `IllegalStateException`, `IllegalArgumentException` — with Kotlin's own message, the program's
+   message rendered the way `"$message"` renders it, and returns. A message whose `toString` raises
+   propagates that exception instead, which is what Kotlin's does. */
 void kt_not_implemented(void);
 void kt_not_implemented_reason(KRef reason);
 void kt_illegal_state(KRef message);
@@ -730,18 +734,27 @@ void kt_throw_index_overflow(void);
    and is invoked here; NULL is the form that wrote none, whose text Kotlin fixes. */
 void kt_assertion_failed(KRef lazy_message);
 void kt_nothing_value_returned(void);
-/* A member access on `null`: the placeholder for NullPointerException. */
+/* A member access on `null`: raises Kotlin's `NullPointerException`, with no message, and returns;
+   the caller returns too, and its caller's check of the pending slot propagates it. */
 void kt_null_receiver(void);
 
 static inline const KType *kt_type_of(KRef object) {
     return ((const KObjectHeader *)object)->type;
 }
 
-/* The implementation of `slot` for `receiver`'s dynamic type. The call site casts the result to
-   the slot's signature and passes `receiver` as the first argument. */
+/* The implementation of `slot` for `receiver`'s dynamic type; for a `null` receiver, NULL, with
+   `NullPointerException` raised and nothing read through the null.
+
+   The emitter's obligation, at EVERY call through a dispatched member: dispatch; then check the
+   pending slot, and when an exception is pending, propagate it and make no call; only then cast
+   the result to the slot's own signature and call it, passing `receiver` as the first argument.
+   So nothing is ever called through NULL, and no call is made through a function type other than
+   the member's own, which C leaves undefined. The NULL is a sentinel for the check to stop at, not
+   a member: a call site that skipped the check would jump to address zero. */
 static inline kt_fn kt_dispatch(KRef receiver, uint32_t slot) {
     if (receiver == NULL) {
         kt_null_receiver();
+        return NULL;
     }
     return kt_type_of(receiver)->vtable[slot];
 }
@@ -958,6 +971,7 @@ extern const KType kt_type_number_format_exception;
 extern const KType kt_type_no_such_element_exception;
 extern const KType kt_type_concurrent_modification_exception;
 extern const KType kt_type_uninitialized_property_access_exception;
+extern const KType kt_type_no_when_branch_matched_exception;
 
 /* Allocate one. `message` may be NULL, which is Kotlin's `null` message. */
 KRef kt_throwable_new(const KType *type, KRef message);
@@ -1032,7 +1046,8 @@ void kt_check_uncaught(void);
 
    The assertions the box corpus checks itself with. Each raises the `AssertionError` Kotlin
    specifies, with Kotlin's wording, so a failing assertion reports what kotlinc would report.
-   `message` may be NULL, which is the form without one. */
+   `message` may be NULL, which is the form without one; given, it prefixes the report as
+   `message. `, except for `assertTrue`/`assertFalse`, whose report it replaces. */
 void kt_assert_equals(KRef expected, KRef actual, KRef message);
 /* `assertSame`/`assertNotSame`: IDENTITY, which is what separates them from `assertEquals` — two
    strings with the same text are equal and are not the same object. */

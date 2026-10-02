@@ -7,7 +7,7 @@
    Each bad call must come back with the exception pending, and afterwards the list must hold what
    it held, and an iterator made before the calls must walk it without a concurrent modification:
    a call that changed nothing is not a modification. */
-#include "collections_later_tiers.h"
+#include "driver_exceptions.h"
 
 static void expect_unchanged(KRef list, KRef first, KRef second) {
     CHECK(kt_list_size(list) == 2, "a rejected write changed the list's size\n");

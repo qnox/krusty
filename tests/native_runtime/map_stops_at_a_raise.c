@@ -12,7 +12,7 @@
 
    Every hostile element hashes alike, so a lookup's probe reaches it and the others, and compares
    them; its `hashCode` raises only in the cases that arm it. */
-#include "collections_later_tiers.h"
+#include "driver_exceptions.h"
 
 /* Whether the hostile element's `equals` and `toString` raise, and whether its `hashCode` does;
    off while a driver builds what it then checks. */

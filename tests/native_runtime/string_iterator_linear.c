@@ -6,7 +6,7 @@
    Both protocols are walked: the general one, which answers boxed `Char`s, and the narrow one a
    `CharIterator` is used through. A builder is still walked by index, because a builder can be
    written to while it is walked and a place in its bytes would then point into the wrong text. */
-#include "collections_later_tiers.h"
+#include "driver_exceptions.h"
 
 /* One of each width: 'a', U+00E9, U+20AC and U+1F600, which is five UTF-16 units in ten bytes. */
 static const char pattern[] = "a\xC3\xA9\xE2\x82\xAC\xF0\x9F\x98\x80";

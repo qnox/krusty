@@ -3,7 +3,7 @@
    used to walk the argument with an iterator while appending to it, so the second step saw its own
    list modified, recorded a `ConcurrentModificationException`, appended the NULL `next` came back
    with, and never advanced -- the walk ran forever, growing the list until the heap gave out. */
-#include "collections_later_tiers.h"
+#include "driver_exceptions.h"
 
 void kt_program_entry(void) {
     int stack_bottom;
