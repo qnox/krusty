@@ -2,6 +2,7 @@
 //! rewrite construction and member calls onto `*-impl`, and box or unbox at representation boundaries.
 
 mod accessor_names;
+mod aggregate_boundaries;
 mod bridge_names;
 mod bridge_parameters;
 mod bridge_realization;
@@ -3125,38 +3126,7 @@ pub(crate) fn lower_value_classes(
                     }
                 }
             }
-            // Dynamic invokes, reference varargs, and string concatenations are the erased
-            // reference boundaries handled here.
-            if let IrExpr::InvokeFunction { args, .. }
-            | IrExpr::Vararg { elements: args, .. }
-            // A value-class part of a string template flows into `StringBuilder.append(Object)` /
-            // `String.valueOf(Object)`, so it must box (→ the value class's `toString`) — unless it
-            // is a non-null unboxed value, which kotlinc renders directly through the static
-            // `toString-impl` over its carrier.
-            | IrExpr::StringConcat(args) = &ir.exprs[id as usize]
-            {
-                let template = matches!(&ir.exprs[id as usize], IrExpr::StringConcat(_));
-                for a in args.clone() {
-                    let representation = repr_ctx.repr(a);
-                    crate::trace_compiler!(
-                        "value_classes",
-                        "reference aggregate expr {id} element {a} {:?} repr={}",
-                        &ir.exprs[a as usize],
-                        match representation {
-                            Repr::Unboxed(_) => "Unboxed",
-                            Repr::Boxed(_) => "Boxed",
-                            Repr::NotVc => "NotVc",
-                        }
-                    );
-                    if let Repr::Unboxed(x) = representation {
-                        let op = match repr_ctx.box_op(a, x) {
-                            BoxOp::Box(x) if template => BoxOp::StringOf(x),
-                            op => op,
-                        };
-                        ops.push((a, op));
-                    }
-                }
-            }
+            aggregate_boundaries::record(&ir.exprs, id, &repr_ctx, &mut ops);
             if let IrExpr::Call { callee, args, .. } = &ir.exprs[id as usize] {
                 call_arguments::record_boundaries(
                     callee,
