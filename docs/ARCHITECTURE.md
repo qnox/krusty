@@ -105,6 +105,9 @@ Build correctness rests on these contracts:
 - The LSP supervisor never runs the compiler in its own long-lived process. It sends source sets to
   a compiler worker that is restarted after 64 analyses. This bounds growth from the compiler's
   process-lifetime name/type interners while amortizing JVM classpath initialization across edits.
+  Replacing that process is one transition: kill, poll, and join its stdout reader share a single
+  deadline. A child that is still running, or a wait that fails for a reason other than the process
+  no longer being a child, stays in a one-slot park and blocks the next spawn.
   The request also carries the bounded set of enabled language-feature names derived from project
   compilation arguments and explicit LSP flags; per-source directives are applied inside the worker.
   The worker is not a second server-CLI consumer: `exec` carries only its private mode marker and

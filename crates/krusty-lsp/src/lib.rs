@@ -14,6 +14,7 @@ pub mod project;
 mod server;
 pub mod uri;
 mod worker;
+mod worker_lifecycle;
 
 pub use analysis::*;
 pub use compiler_analysis::LibraryRef;
