@@ -314,6 +314,54 @@ fun box(): String {\n\
 }
 
 #[test]
+fn an_inherited_var_owns_every_property_access_form() {
+    // Both components contribute a mutable property, but the canonical-earlier component inherits
+    // its declaration. Pin the symbolic getter/setter owners for a read, a direct write, and both
+    // accessors of a bound mutable reference; the shared runtime override cannot reveal the owner.
+    const SRC: &str = "\
+interface Shared { var mark: Int }\n\
+interface Left : Shared\n\
+interface Right { var mark: Int }\n\
+class In<in K>\n\
+class Both : Left, Right { override var mark: Int = 0 }\n\
+fun <E> intersect(vararg x: In<E>): E = Both() as E\n\
+fun read(): Int {\n\
+    val value = intersect(In<Left>(), In<Right>())\n\
+    return value.mark\n\
+}\n\
+fun write() {\n\
+    val value = intersect(In<Left>(), In<Right>())\n\
+    value.mark = 3\n\
+}\n\
+fun ref(): Int {\n\
+    val value = intersect(In<Left>(), In<Right>())\n\
+    val property = value::mark\n\
+    property.set(4)\n\
+    return property.get()\n\
+}\n";
+    for (class, method) in [
+        (
+            "InheritedIntersectionMutablePropertyKt",
+            "public static final int read(",
+        ),
+        (
+            "InheritedIntersectionMutablePropertyKt",
+            "public static final void write(",
+        ),
+        (
+            "InheritedIntersectionMutablePropertyKt$ref$property$1",
+            "public java.lang.Object get(",
+        ),
+        (
+            "InheritedIntersectionMutablePropertyKt$ref$property$1",
+            "public void set(java.lang.Object)",
+        ),
+    ] {
+        expect_method_matches("InheritedIntersectionMutableProperty", SRC, class, method);
+    }
+}
+
+#[test]
 fn an_intersection_of_vals_cannot_be_reassigned() {
     const SRC: &str = "\
 interface Shared { val mark: Int get() = 1 }\n\

@@ -3159,12 +3159,12 @@ impl<'a> SymbolResolver<'a> {
                 let read = member_property
                     .as_ref()
                     .and_then(|property| member_property_read_from_declaration(ty, property));
-                // Read and write facets of an inherited intersection need not come from the same
-                // declaration. `C : A, B` may inherit `A.val x` and `B.var x` at the same receiver
-                // rung; Kotlin's fake override is readable through either getter and writable
-                // through B's setter. A nearer declared `val` still blocks a farther inherited
-                // setter, so restrict the setter search to the minimum property receiver rank.
-                let write = member_property_write_from_callables(&callables);
+                // The canonical property selector already accounts for an intersection's `var`
+                // overriding a `val`. Derive both accessors from that one semantic declaration so
+                // a direct write and a mutable reference cannot disagree about their owner.
+                let write = member_property
+                    .as_ref()
+                    .and_then(member_property_write_from_declaration);
                 let method_ref = member_dispatch
                     .then(|| select_instance_reference_from_functions(ty, callables.functions()))
                     .flatten();
@@ -4918,24 +4918,6 @@ fn member_property_write_from_declaration(
             .setter_declaration
             .or(declaration.stable_declaration),
     })
-}
-
-fn member_property_write_from_callables(callables: &Callables) -> Option<ResolvedPropertySetter> {
-    let rank = callables
-        .properties()
-        .iter()
-        .filter(|property| property.kind == PropKind::Member && property.context_count == 0)
-        .map(|property| property.receiver_rank)
-        .min()?;
-    callables
-        .properties()
-        .iter()
-        .filter(|property| {
-            property.kind == PropKind::Member
-                && property.context_count == 0
-                && property.receiver_rank == rank
-        })
-        .find_map(member_property_write_from_declaration)
 }
 
 fn select_instance_info(
