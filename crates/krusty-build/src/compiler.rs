@@ -27,8 +27,9 @@ use crate::driver::{BuildEnvironment, CompiledModule, PublishedAbi};
 use crate::model::Module;
 
 /// Disable toolchain discovery whose selected bytes are not represented by `Module::classpath`.
-/// The ambient JDK selection is resolved once, keyed by exact `lib/modules` contents, and then
-/// supplied as an explicit classpath entry while `-no-jdk` keeps the subprocess from reselecting it.
+/// The ambient JDK selection is resolved once, keyed by the exact bootclasspath root contents
+/// (`lib/modules`, or `jre/lib/rt.jar` on a pre-jimage JDK), and then supplied as an explicit
+/// classpath entry while `-no-jdk` keeps the subprocess from reselecting it.
 const HERMETIC_CLASSPATH_ARGS: &[&str] = &["-no-stdlib", "-no-reflect", "-no-jdk"];
 
 /// Drives `krusty` as a subprocess.
