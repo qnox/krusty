@@ -40,8 +40,9 @@ mod annotation_applications;
 mod anonymous_extension_functions;
 mod anonymous_object_capture;
 use anonymous_object_capture::{
-    merge_local_receiver_capture, record_anonymous_construction_captures,
-    AnonymousCaptureCandidate, SelectedLocalCallableCaptures,
+    drop_unused_implicit_receivers, merge_local_receiver_capture,
+    record_anonymous_construction_captures, AnonymousCaptureCandidate,
+    SelectedLocalCallableCaptures,
 };
 pub use anonymous_object_capture::{
     AnonymousObjectCapture, AnonymousObjectCaptureSource, AnonymousObjectReceiverSource,
@@ -24226,9 +24227,21 @@ impl<'a> Checker<'a> {
                 capture_field_order::order_receivers_by_first_use(
                     &mut captures.values,
                     &mut capture_bindings,
-                    used_receivers,
+                    used_receivers.clone(),
                 );
-                if !captures.values.is_empty() {
+                // The inventory above includes the nearest implicit receiver before the body is
+                // checked, so a member that reads it can resolve while the enclosing scope still
+                // exists. A body that never reads it must not keep that receiver: the constructor
+                // and a constructor reference would otherwise take it as a real parameter.
+                drop_unused_implicit_receivers(
+                    &mut captures.values,
+                    &mut capture_bindings,
+                    &used_receivers,
+                );
+                if captures.values.is_empty() {
+                    self.discovered_local_class_captures.remove(&d);
+                    self.discovered_local_class_capture_bindings.remove(&d);
+                } else {
                     self.discovered_local_class_captures
                         .insert(d, captures.values);
                     self.discovered_local_class_capture_bindings

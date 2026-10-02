@@ -340,6 +340,33 @@ pub(super) fn merge_local_receiver_capture(
     bindings.push(None);
 }
 
+/// Drop an implicit receiver the local-class inventory held only so the body check could see it.
+///
+/// A receiver whose use count increased stays, in the field the body check already numbered.
+/// One the body never read is not a constructor parameter: kotlinc omits it, and a constructor
+/// reference would otherwise take the receiver as its first value.
+pub(super) fn drop_unused_implicit_receivers(
+    captures: &mut Vec<AnonymousObjectCapture>,
+    bindings: &mut Vec<Option<u32>>,
+    used: &[(usize, AnonymousObjectCaptureSource)],
+) {
+    let mut kept_captures = Vec::with_capacity(captures.len());
+    let mut kept_bindings = Vec::with_capacity(bindings.len());
+    for (capture, binding) in captures.drain(..).zip(bindings.drain(..)) {
+        let unused_receiver = matches!(
+            capture.source,
+            AnonymousObjectCaptureSource::ImplicitReceiver { .. }
+        ) && !used.iter().any(|(_, source)| *source == capture.source);
+        if unused_receiver {
+            continue;
+        }
+        kept_captures.push(capture);
+        kept_bindings.push(binding);
+    }
+    *captures = kept_captures;
+    *bindings = kept_bindings;
+}
+
 #[derive(Clone, Copy)]
 pub(super) struct SelectedLocalCallableCaptures<'a> {
     pub(super) calls: &'a HashMap<ExprId, ResolvedCall>,

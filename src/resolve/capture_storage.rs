@@ -725,9 +725,9 @@ impl Checker<'_> {
         }
         // A local classifier is emitted as a separate body unit, so an enclosing receiver-lambda
         // or extension receiver must cross the same constructor/field boundary as a lexical value.
-        // Keep the exact receiver-tower coordinate selected at the declaration site. Capturing it
-        // conservatively is harmless when no member ultimately reads it and prevents a later body
-        // callback from attempting source-scope lookup after the enclosing body has been dropped.
+        // The nearest receiver is recorded before the body is checked, at the coordinate selected
+        // here. The local-class statement drops it afterwards when the body never reads it, so an
+        // unused extension receiver does not become a constructor parameter.
         if let Some((receiver, receiver_name, receiver_capture)) = implicit_receiver_capture {
             result.values.push(AnonymousObjectCapture {
                 name: "this$receiver".to_string(),

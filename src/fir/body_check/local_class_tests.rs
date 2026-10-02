@@ -1023,6 +1023,38 @@ fn local_class_captures_an_enclosing_extension_receiver_by_checked_coordinate() 
 }
 
 #[test]
+fn local_class_does_not_capture_an_unused_extension_receiver() {
+    let source = "class Rec<T>(val rt: T)\n\
+                  fun <FT> Rec<FT>.fn(): Any {\n\
+                      class Local<LT>(val pt: FT)\n\
+                      return Local<FT>(rt)\n\
+                  }\n";
+    let (outer, _) = checked_function_body(source, "fn");
+    let FirExprKind::Block { statements, .. } = &outer
+        .expr(root_expression(&outer))
+        .expect("extension body block")
+        .kind
+    else {
+        panic!("extension function must retain its checked block")
+    };
+    let captures = statements
+        .iter()
+        .filter_map(|statement| outer.statement(*statement))
+        .find_map(|statement| match &statement.kind {
+            FirStatementKind::LocalDeclaration { captures, .. } => Some(captures.as_ref()),
+            _ => None,
+        })
+        .expect("local class declaration");
+    assert!(
+        captures.iter().all(|capture| !matches!(
+            capture.source,
+            FirLocalClassCaptureSource::ImplicitReceiver { .. }
+        )),
+        "an unused extension receiver is not a constructor parameter: {captures:?}"
+    );
+}
+
+#[test]
 fn local_class_captures_both_extension_and_outer_dispatch_receivers() {
     let source = "class Outer(val suffix: String) {\n\
                       fun Receiver.call(): String {\n\
