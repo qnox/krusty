@@ -25,7 +25,8 @@ use super::super::{
     MAX_WORKSPACE_SYMBOL_WIRE_BYTES, SEMANTIC_TOKEN_MODIFIERS, SEMANTIC_TOKEN_TYPES,
 };
 use super::diagnostic_page::{
-    limit_diagnostic_items, page_workspace_diagnostics, wire_diagnostic_message,
+    limit_diagnostic_items, partial_result_token, wire_diagnostic_message,
+    workspace_diagnostic_messages,
 };
 pub use super::line_index::{byte_offset_to_position, position_to_byte_offset, Position};
 use super::line_index::{position_to_byte_offset_with_budget, LineIndex};
@@ -1264,7 +1265,7 @@ where
         Some(job)
     }
 
-    fn apply_analysis_batch(&mut self, batch: AnalysisBatch) -> Vec<Value> {
+    pub(crate) fn apply_analysis_batch(&mut self, batch: AnalysisBatch) -> Vec<Value> {
         self.analysis_in_flight = false;
         let resubmit = std::mem::take(&mut self.resubmit_pending);
         let changed = std::mem::take(&mut self.changed_identities);
@@ -3061,6 +3062,10 @@ where
         let Some(id) = id else {
             return Dispatch::none();
         };
+        let token = match partial_result_token(&params) {
+            Ok(token) => token,
+            Err(()) => return invalid_params(Some(id)),
+        };
         let Ok(params) = serde_json::from_value::<WorkspaceDiagnosticParams>(params) else {
             return invalid_params(Some(id));
         };
@@ -3119,13 +3124,7 @@ where
             };
             items.push(item);
         }
-        let paged = page_workspace_diagnostics(items, params.partial_result_token.as_ref());
-        let mut messages = paged.progress;
-        messages.push(rpc_result(id, json!({"items": paged.items})));
-        if paged.omitted_full_reports {
-            messages.extend(self.diagnostic_refresh());
-        }
-        Dispatch::messages(messages)
+        Dispatch::messages(workspace_diagnostic_messages(id, items, token.as_ref()))
     }
 
     fn semantic_tokens(&self, id: Option<Value>, params: Value, range: bool) -> Dispatch {
@@ -3272,10 +3271,6 @@ struct DocumentDiagnosticParams {
 struct WorkspaceDiagnosticParams {
     #[serde(default)]
     previous_result_ids: Vec<WorkspacePreviousResultId>,
-    /// Zed always sends one. Pages travel as `$/progress` before the final result so a large
-    /// workspace never becomes a single message or a server-cancelled error.
-    #[serde(default)]
-    partial_result_token: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -7999,194 +7994,6 @@ mod tests {
             json!([]),
             "the current open buffer must win over an older sweep snapshot"
         );
-    }
-
-    #[test]
-    fn one_file_diagnostic_list_stays_inside_a_single_page() {
-        let mut service = LspService::new(|sources: &[&str]| {
-            sources
-                .iter()
-                .map(|_| DocumentAnalysis::empty())
-                .collect::<Vec<_>>()
-        });
-        service.force_initialized_for_test();
-        service.open_document_for_test("file:///a.kt", "bad", 1);
-        let diagnostics = (0..400)
-            .map(|index| Diagnostic {
-                span: krusty::diag::Span::new(0, 1),
-                editor_span: None,
-                identity: None,
-                severity: Severity::Error,
-                kind: DiagnosticKind::Compiler,
-                msg: format!("error {index} {}", "m".repeat(1024)),
-                file: 0,
-            })
-            .collect();
-        let messages = service.apply_analysis_batch(AnalysisBatch {
-            analyzed: vec![("file:///a.kt".into(), 1)],
-            analyses: vec![DocumentAnalysis {
-                diagnostics,
-                ..DocumentAnalysis::empty()
-            }],
-            support_documents: Vec::new(),
-            pending: false,
-        });
-        let published = messages
-            .iter()
-            .find(|message| message["method"] == "textDocument/publishDiagnostics")
-            .expect("push diagnostics");
-        let items = published["params"]["diagnostics"]
-            .as_array()
-            .expect("diagnostic list");
-        let encoded = serde_json::to_vec(items).unwrap();
-        assert!(encoded.len() <= super::super::diagnostic_page::DIAGNOSTIC_ITEMS_PAGE_BYTES);
-        assert!(items.len() < 400);
-        assert_eq!(
-            items.last().unwrap()["message"],
-            super::super::diagnostic_page::DIAGNOSTIC_OMISSION_MESSAGE
-        );
-    }
-
-    #[test]
-    fn workspace_diagnostics_page_instead_of_failing_the_pull() {
-        let mut service = LspService::new(|sources: &[&str]| {
-            sources
-                .iter()
-                .map(|_| DocumentAnalysis::empty())
-                .collect::<Vec<_>>()
-        });
-        service.handle(json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "capabilities": {
-                    "textDocument": { "diagnostic": {} },
-                    "workspace": { "diagnostics": { "refreshSupport": true } }
-                }
-            }
-        }));
-        let message = "m".repeat(8 * 1024);
-        let files: Vec<IndexedFile> = (0..80)
-            .map(|index| IndexedFile {
-                uri: format!("file:///w/F{index:03}.kt"),
-                diagnostics: vec![Diagnostic {
-                    span: krusty::diag::Span::new(0, 1),
-                    editor_span: None,
-                    identity: None,
-                    severity: Severity::Error,
-                    kind: DiagnosticKind::Compiler,
-                    msg: message.clone(),
-                    file: 0,
-                }],
-                text_hash: 1,
-                text: "x".into(),
-            })
-            .collect();
-        let uris: Vec<String> = files.iter().map(|file| file.uri.clone()).collect();
-        let indexed = service.apply_index_batch(IndexBatch {
-            generation: 0,
-            attempted: uris.clone(),
-            conclusive: true,
-            files,
-        });
-        assert!(indexed
-            .iter()
-            .any(|message| message["method"] == "workspace/diagnostic/refresh"));
-        // The index batch already asked for a refresh. Answer it so the paged report can ask again
-        // when its first page leaves files behind; a second request is not sent while one is in flight.
-        service.handle(json!({
-            "jsonrpc": "2.0",
-            "id": DIAGNOSTIC_REFRESH_REQUEST_ID,
-            "result": null,
-        }));
-
-        let streamed = service.workspace_diagnostic(
-            Some(json!(2)),
-            json!({ "partialResultToken": "workspace/diagnostic/2" }),
-        );
-        assert!(
-            streamed
-                .messages
-                .iter()
-                .all(|message| message.get("error").is_none()),
-            "a large report must stream, not fail: {:?}",
-            streamed.messages
-        );
-        let mut seen = Vec::new();
-        for message in &streamed.messages {
-            let items = message
-                .pointer("/params/value/items")
-                .or_else(|| message.pointer("/result/items"))
-                .and_then(Value::as_array)
-                .unwrap_or_else(|| panic!("diagnostic page missing items: {message}"));
-            let encoded = serde_json::to_vec(items).unwrap();
-            assert!(
-                encoded.len() <= super::super::diagnostic_page::DIAGNOSTIC_PAGE_BYTES
-                    || items.len() == 1,
-                "page is {} bytes",
-                encoded.len()
-            );
-            if message["method"] == "$/progress" {
-                assert_eq!(message["params"]["token"], "workspace/diagnostic/2");
-            }
-            seen.extend(
-                items
-                    .iter()
-                    .filter_map(|item| item["uri"].as_str().map(str::to_string)),
-            );
-        }
-        assert!(streamed
-            .messages
-            .iter()
-            .any(|message| message["method"] == "$/progress"));
-        assert_eq!(seen, uris);
-
-        let first = service.workspace_diagnostic(Some(json!(3)), json!({}));
-        assert!(
-            first
-                .messages
-                .iter()
-                .any(|message| message["method"] == "workspace/diagnostic/refresh"),
-            "a client without a partial-result token must be asked for the next page"
-        );
-        let result = first
-            .messages
-            .iter()
-            .find(|message| message.get("result").is_some())
-            .expect("first page");
-        assert!(result.get("error").is_none());
-        let page: Vec<String> = result["result"]["items"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|item| item["uri"].as_str().unwrap().to_string())
-            .collect();
-        assert!(!page.is_empty() && page.len() < uris.len());
-        let previous: Vec<Value> = result["result"]["items"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|item| json!({ "uri": item["uri"], "value": item["resultId"] }))
-            .collect();
-        let second =
-            service.workspace_diagnostic(Some(json!(4)), json!({ "previousResultIds": previous }));
-        let second_full: Vec<String> = second
-            .messages
-            .iter()
-            .find(|message| message.get("result").is_some())
-            .unwrap()["result"]["items"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|item| item["kind"] == "full")
-            .map(|item| item["uri"].as_str().unwrap().to_string())
-            .collect();
-        assert!(
-            !second_full.is_empty(),
-            "the next pull must advance past the page already delivered"
-        );
-        assert!(second_full.iter().all(|uri| !page.contains(uri)));
     }
 
     #[test]

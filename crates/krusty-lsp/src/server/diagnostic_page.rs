@@ -1,10 +1,10 @@
 //! Bounded diagnostic payloads.
 //!
-//! Zed applies workspace diagnostics as they stream and freezes when one message is
-//! multi-megabyte. A report that does not fit used to fail the whole request, which Zed logs
-//! and then stops pulling, so the rest of the workspace never arrived. Pages stay small enough
-//! to apply, and a client that cannot stream still receives a full-report page plus a refresh
-//! for whatever did not fit.
+//! A workspace report that fits in one [`DIAGNOSTIC_PAGE_BYTES`] frame is the JSON-RPC result.
+//! A client that sends a `partialResultToken` and a report that does not fit receives every page
+//! through `$/progress`, and the final result is an empty item list. A report that still does
+//! not fit, including one file that cannot fit a frame, is server-cancelled. A refresh is not
+//! used as a cursor for the omitted files.
 
 use serde_json::{json, Value};
 
@@ -28,18 +28,7 @@ pub(super) const DIAGNOSTIC_MESSAGE_WIRE_BYTES: usize = 8 * 1024;
 pub(super) const DIAGNOSTIC_OMISSION_MESSAGE: &str =
     "Additional diagnostics omitted (response page limit).";
 
-pub(super) struct PagedWorkspaceDiagnostics {
-    /// `$/progress` notifications carrying earlier pages. Empty when the report fits in the
-    /// final result, or when the client did not offer a partial-result token.
-    pub progress: Vec<Value>,
-    /// Items for the JSON-RPC result. With a partial-result token this is the last page;
-    /// without one it is the first page, preferring reports the client does not already have.
-    pub items: Vec<Value>,
-    /// `true` when a non-streaming response left out a `full` report. The caller asks the
-    /// client to pull again; reports already delivered come back as `unchanged` and sort behind
-    /// the ones still missing, so the next page advances.
-    pub omitted_full_reports: bool,
-}
+const SERVER_CANCELLED: i32 = -32802;
 
 pub(super) fn wire_diagnostic_message(message: &str) -> std::borrow::Cow<'_, str> {
     if message.len() <= DIAGNOSTIC_MESSAGE_WIRE_BYTES {
@@ -60,60 +49,81 @@ pub(super) fn limit_diagnostic_items(items: Vec<Value>) -> Vec<Value> {
     fit_json_array(items, DIAGNOSTIC_ITEMS_PAGE_BYTES, true)
 }
 
-pub(super) fn page_workspace_diagnostics(
+/// `partialResultToken` when it is a string or integer. Any other JSON shape is invalid params.
+pub(super) fn partial_result_token(params: &Value) -> Result<Option<Value>, ()> {
+    match params.get("partialResultToken") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(text)) => Ok(Some(Value::String(text.clone()))),
+        Some(Value::Number(number)) if number.is_i64() || number.is_u64() => {
+            Ok(Some(Value::Number(number.clone())))
+        }
+        Some(_) => Err(()),
+    }
+}
+
+pub(super) fn workspace_diagnostic_messages(
+    id: Value,
     items: Vec<Value>,
-    partial_result_token: Option<&Value>,
-) -> PagedWorkspaceDiagnostics {
-    if let Some(token) =
-        partial_result_token.filter(|token| matches!(*token, Value::String(_) | Value::Number(_)))
-    {
-        let mut pages = split_pages(items);
-        let last = pages.pop().unwrap_or_default();
-        let progress = pages
-            .into_iter()
-            .map(|page| progress_notification(token, page))
-            .collect();
-        return PagedWorkspaceDiagnostics {
-            progress,
-            items: last,
-            omitted_full_reports: false,
-        };
-    }
-
-    let mut pages = split_pages(full_reports_first(items));
-    let first = if pages.is_empty() {
-        Vec::new()
-    } else {
-        pages.remove(0)
+    token: Option<&Value>,
+) -> Vec<Value> {
+    let Some(result_budget) = items_budget(&result_report(&id, &[])) else {
+        return vec![too_large(&id)];
     };
-    let omitted_full_reports = pages
-        .iter()
-        .flatten()
-        .any(|item| item.get("kind").and_then(Value::as_str) == Some("full"));
-    PagedWorkspaceDiagnostics {
-        progress: Vec::new(),
-        items: first,
-        omitted_full_reports,
+    if fits_one(&items, result_budget) {
+        return vec![result_report(&id, &items)];
+    }
+    let Some(token) = token else {
+        return vec![too_large(&id)];
+    };
+    let Some(progress_budget) = items_budget(&progress_report(token, &[])) else {
+        return vec![too_large(&id)];
+    };
+    match pack_reports(items, progress_budget) {
+        Ok(pages) => {
+            let mut messages = Vec::with_capacity(pages.len().saturating_add(1));
+            for page in pages {
+                messages.push(progress_report(token, &page));
+            }
+            messages.push(result_report(&id, &[]));
+            messages
+        }
+        Err(()) => vec![too_large(&id)],
     }
 }
 
-fn full_reports_first(items: Vec<Value>) -> Vec<Value> {
-    let (full, unchanged): (Vec<Value>, Vec<Value>) = items
-        .into_iter()
-        .partition(|item| item.get("kind").and_then(Value::as_str) == Some("full"));
-    full.into_iter().chain(unchanged).collect()
+fn fits_one(items: &[Value], budget: usize) -> bool {
+    if budget < 2 {
+        return items.is_empty();
+    }
+    let mut used = 2usize;
+    for item in items {
+        let len = json_len(item);
+        if len.saturating_add(2) > budget {
+            return false;
+        }
+        let separator = usize::from(used > 2);
+        if used.saturating_add(separator).saturating_add(len) > budget {
+            return false;
+        }
+        used = used.saturating_add(separator).saturating_add(len);
+    }
+    true
 }
 
-fn split_pages(items: Vec<Value>) -> Vec<Vec<Value>> {
+fn pack_reports(items: Vec<Value>, budget: usize) -> Result<Vec<Vec<Value>>, ()> {
+    if budget < 2 {
+        return Err(());
+    }
     let mut pages = Vec::new();
     let mut page = Vec::new();
     let mut used = 2usize;
     for item in items {
         let len = json_len(&item);
+        if len.saturating_add(2) > budget {
+            return Err(());
+        }
         let separator = usize::from(!page.is_empty());
-        if !page.is_empty()
-            && used.saturating_add(separator).saturating_add(len) > DIAGNOSTIC_PAGE_BYTES
-        {
+        if used.saturating_add(separator).saturating_add(len) > budget {
             pages.push(std::mem::take(&mut page));
             used = 2;
         }
@@ -121,13 +131,29 @@ fn split_pages(items: Vec<Value>) -> Vec<Vec<Value>> {
         used = used.saturating_add(separator).saturating_add(len);
         page.push(item);
     }
-    if !page.is_empty() || pages.is_empty() {
+    if pages.is_empty() || !page.is_empty() {
         pages.push(page);
     }
-    pages
+    Ok(pages)
 }
 
-fn progress_notification(token: &Value, items: Vec<Value>) -> Value {
+fn items_budget(empty_frame: &Value) -> Option<usize> {
+    let frame = json_len(empty_frame);
+    if frame > DIAGNOSTIC_PAGE_BYTES {
+        return None;
+    }
+    Some(DIAGNOSTIC_PAGE_BYTES - frame + 2)
+}
+
+fn result_report(id: &Value, items: &[Value]) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": { "items": items }
+    })
+}
+
+fn progress_report(token: &Value, items: &[Value]) -> Value {
     json!({
         "jsonrpc": "2.0",
         "method": "$/progress",
@@ -136,6 +162,31 @@ fn progress_notification(token: &Value, items: Vec<Value>) -> Value {
             "value": { "items": items }
         }
     })
+}
+
+fn too_large(id: &Value) -> Value {
+    let message = json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": {
+            "code": SERVER_CANCELLED,
+            "message": "workspace diagnostic report exceeds the bounded non-streaming response limit",
+            "data": {"retriggerRequest": false}
+        }
+    });
+    if json_len(&message) <= super::implementation::MAX_MESSAGE_BYTES {
+        message
+    } else {
+        json!({
+            "jsonrpc": "2.0",
+            "id": Value::Null,
+            "error": {
+                "code": SERVER_CANCELLED,
+                "message": "workspace diagnostic report exceeds the bounded non-streaming response limit",
+                "data": {"retriggerRequest": false}
+            }
+        })
+    }
 }
 
 fn omission_diagnostic() -> Value {
@@ -254,38 +305,56 @@ mod tests {
         );
     }
 
+    fn assert_frames_fit(messages: &[Value]) {
+        for message in messages {
+            let encoded = serde_json::to_vec(message).unwrap();
+            assert!(
+                encoded.len() <= DIAGNOSTIC_PAGE_BYTES,
+                "frame is {} bytes",
+                encoded.len()
+            );
+        }
+    }
+
     #[test]
-    fn a_partial_result_token_streams_every_report_without_an_error() {
+    fn partial_result_token_accepts_string_and_integer_only() {
+        assert_eq!(partial_result_token(&json!({})).unwrap(), None);
+        assert_eq!(
+            partial_result_token(&json!({"partialResultToken": null})).unwrap(),
+            None
+        );
+        assert_eq!(
+            partial_result_token(&json!({"partialResultToken": "workspace/diagnostic/1"})).unwrap(),
+            Some(json!("workspace/diagnostic/1"))
+        );
+        assert_eq!(
+            partial_result_token(&json!({"partialResultToken": 7})).unwrap(),
+            Some(json!(7))
+        );
+        assert!(partial_result_token(&json!({"partialResultToken": true})).is_err());
+        assert!(partial_result_token(&json!({"partialResultToken": {"t": 1}})).is_err());
+        assert!(partial_result_token(&json!({"partialResultToken": 1.5})).is_err());
+    }
+
+    #[test]
+    fn a_token_streams_every_report_and_the_final_result_is_empty() {
         let message = "m".repeat(8 * 1024);
         let items: Vec<Value> = (0..80)
             .map(|index| full_item(&format!("file:///w/F{index:03}.kt"), &message))
             .collect();
         let token = json!("workspace/diagnostic/1");
-        let paged = page_workspace_diagnostics(items.clone(), Some(&token));
-        assert!(!paged.omitted_full_reports);
-        assert!(!paged.progress.is_empty());
-
+        let messages = workspace_diagnostic_messages(json!(2), items, Some(&token));
+        assert!(messages.len() > 2);
+        assert_frames_fit(&messages);
+        assert_eq!(messages.last().unwrap()["result"], json!({"items": []}));
         let mut seen = Vec::new();
-        for message in paged
-            .progress
-            .iter()
-            .chain(std::iter::once(&json!({"items": paged.items})))
-        {
-            let items = message
-                .pointer("/params/value/items")
-                .or_else(|| message.get("items"))
-                .and_then(Value::as_array)
-                .unwrap();
-            let encoded = serde_json::to_vec(items).unwrap();
-            assert!(
-                encoded.len() <= DIAGNOSTIC_PAGE_BYTES || items.len() == 1,
-                "page is {} bytes across {} items",
-                encoded.len(),
-                items.len()
-            );
+        for message in &messages[..messages.len() - 1] {
+            assert_eq!(message["method"], "$/progress");
+            assert_eq!(message["params"]["token"], token);
+            let page = message["params"]["value"]["items"].as_array().unwrap();
+            assert!(!page.is_empty());
             seen.extend(
-                items
-                    .iter()
+                page.iter()
                     .map(|item| item["uri"].as_str().unwrap().to_string()),
             );
         }
@@ -293,22 +362,195 @@ mod tests {
             .map(|index| format!("file:///w/F{index:03}.kt"))
             .collect();
         assert_eq!(seen, expected);
-        assert_eq!(paged.progress[0]["method"], "$/progress");
-        assert_eq!(paged.progress[0]["params"]["token"], token);
     }
 
     #[test]
-    fn without_a_token_the_first_page_prefers_full_reports_still_missing() {
+    fn a_report_that_fits_stays_in_the_result() {
+        let items = vec![unchanged_item("file:///w/One.kt")];
+        let messages = workspace_diagnostic_messages(json!(1), items.clone(), Some(&json!("tok")));
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["result"]["items"], Value::Array(items));
+    }
+
+    #[test]
+    fn without_a_token_an_oversized_report_is_server_cancelled() {
         let message = "m".repeat(8 * 1024);
-        let mut items = vec![unchanged_item("file:///w/Already.kt")];
-        items
-            .extend((0..80).map(|index| full_item(&format!("file:///w/F{index:03}.kt"), &message)));
-        let paged = page_workspace_diagnostics(items, None);
-        assert!(paged.progress.is_empty());
-        assert!(paged.omitted_full_reports);
-        assert!(paged.items.iter().all(|item| item["kind"] == "full"));
-        assert!(paged.items.len() < 80);
-        let encoded = serde_json::to_vec(&Value::Array(paged.items)).unwrap();
-        assert!(encoded.len() <= DIAGNOSTIC_PAGE_BYTES);
+        let items: Vec<Value> = (0..80)
+            .map(|index| full_item(&format!("file:///w/F{index:03}.kt"), &message))
+            .collect();
+        let messages = workspace_diagnostic_messages(json!(3), items, None);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["error"]["code"], SERVER_CANCELLED);
+        assert_eq!(messages[0]["error"]["data"]["retriggerRequest"], false);
+        assert!(messages[0].get("result").is_none());
+        assert!(messages[0].get("method").is_none());
+    }
+
+    #[test]
+    fn one_report_that_does_not_fit_a_frame_is_not_sent() {
+        let huge = full_item("file:///w/Huge.kt", &"m".repeat(DIAGNOSTIC_PAGE_BYTES));
+        let messages = workspace_diagnostic_messages(json!(1), vec![huge], Some(&json!("tok")));
+        assert_eq!(messages[0]["error"]["code"], SERVER_CANCELLED);
+        let encoded = serde_json::to_vec(&messages[0]).unwrap();
+        assert!(!encoded.windows(4).any(|window| window == b"Huge"));
+    }
+
+    #[test]
+    fn a_large_request_id_is_charged_in_the_frame() {
+        let id = Value::String("i".repeat(DIAGNOSTIC_PAGE_BYTES));
+        let messages =
+            workspace_diagnostic_messages(id, vec![unchanged_item("file:///w/A.kt")], None);
+        assert_eq!(messages[0]["error"]["code"], SERVER_CANCELLED);
+        assert!(
+            serde_json::to_vec(&messages[0]).unwrap().len()
+                <= super::super::implementation::MAX_MESSAGE_BYTES
+        );
+    }
+
+    #[test]
+    fn workspace_diagnostics_stream_on_the_session_and_fail_closed_without_a_token() {
+        use super::super::implementation::LspService;
+        use crate::{DocumentAnalysis, IndexedFile};
+        use krusty::diag::{Diagnostic, DiagnosticKind, Severity};
+
+        let mut service = LspService::new(|sources: &[&str]| {
+            sources
+                .iter()
+                .map(|_| DocumentAnalysis::empty())
+                .collect::<Vec<_>>()
+        });
+        service.handle(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "capabilities": {
+                    "textDocument": { "diagnostic": {} },
+                    "workspace": { "diagnostics": { "refreshSupport": true } }
+                }
+            }
+        }));
+        let message = "m".repeat(8 * 1024);
+        let files: Vec<IndexedFile> = (0..80)
+            .map(|index| IndexedFile {
+                uri: format!("file:///w/F{index:03}.kt"),
+                diagnostics: vec![Diagnostic {
+                    span: krusty::diag::Span::new(0, 1),
+                    editor_span: None,
+                    identity: None,
+                    severity: Severity::Error,
+                    kind: DiagnosticKind::Compiler,
+                    msg: message.clone(),
+                    file: 0,
+                }],
+                text_hash: 1,
+                text: "x".into(),
+            })
+            .collect();
+        let uris: Vec<String> = files.iter().map(|file| file.uri.clone()).collect();
+        service.apply_index_batch(super::super::engine::IndexBatch {
+            generation: 0,
+            attempted: uris.clone(),
+            conclusive: true,
+            files,
+        });
+
+        let streamed = service.handle(json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "workspace/diagnostic",
+            "params": { "partialResultToken": "workspace/diagnostic/2" }
+        }));
+        assert!(streamed.messages.len() > 2);
+        assert_frames_fit(&streamed.messages);
+        assert_eq!(
+            streamed.messages.last().unwrap()["result"],
+            json!({"items": []})
+        );
+        let mut seen = Vec::new();
+        for message in &streamed.messages[..streamed.messages.len() - 1] {
+            assert_eq!(message["method"], "$/progress");
+            assert_eq!(message["params"]["token"], "workspace/diagnostic/2");
+            seen.extend(
+                message["params"]["value"]["items"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|item| item["uri"].as_str().unwrap().to_string()),
+            );
+        }
+        assert_eq!(seen, uris);
+
+        let refused = service.handle(json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "workspace/diagnostic",
+            "params": {}
+        }));
+        assert_eq!(refused.messages.len(), 1);
+        assert_eq!(refused.messages[0]["error"]["code"], SERVER_CANCELLED);
+        assert!(refused
+            .messages
+            .iter()
+            .all(|message| message["method"] != "workspace/diagnostic/refresh"));
+
+        let invalid = service.handle(json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "workspace/diagnostic",
+            "params": { "partialResultToken": true }
+        }));
+        assert_eq!(invalid.messages[0]["error"]["code"], -32602);
+    }
+
+    #[test]
+    fn one_file_diagnostic_list_stays_inside_a_single_page() {
+        use super::super::implementation::LspService;
+        use crate::server::AnalysisBatch;
+        use crate::DocumentAnalysis;
+        use krusty::diag::{Diagnostic, DiagnosticKind, Severity};
+
+        let mut service = LspService::new(|sources: &[&str]| {
+            sources
+                .iter()
+                .map(|_| DocumentAnalysis::empty())
+                .collect::<Vec<_>>()
+        });
+        service.force_initialized_for_test();
+        service.open_document_for_test("file:///a.kt", "bad", 1);
+        let diagnostics = (0..400)
+            .map(|index| Diagnostic {
+                span: krusty::diag::Span::new(0, 1),
+                editor_span: None,
+                identity: None,
+                severity: Severity::Error,
+                kind: DiagnosticKind::Compiler,
+                msg: format!("error {index} {}", "m".repeat(1024)),
+                file: 0,
+            })
+            .collect();
+        let messages = service.apply_analysis_batch(AnalysisBatch {
+            analyzed: vec![("file:///a.kt".into(), 1)],
+            analyses: vec![DocumentAnalysis {
+                diagnostics,
+                ..DocumentAnalysis::empty()
+            }],
+            support_documents: Vec::new(),
+            pending: false,
+        });
+        let published = messages
+            .iter()
+            .find(|message| message["method"] == "textDocument/publishDiagnostics")
+            .expect("push diagnostics");
+        let items = published["params"]["diagnostics"]
+            .as_array()
+            .expect("diagnostic list");
+        let encoded = serde_json::to_vec(items).unwrap();
+        assert!(encoded.len() <= DIAGNOSTIC_ITEMS_PAGE_BYTES);
+        assert!(items.len() < 400);
+        assert_eq!(
+            items.last().unwrap()["message"],
+            DIAGNOSTIC_OMISSION_MESSAGE
+        );
     }
 }
