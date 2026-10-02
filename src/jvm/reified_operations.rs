@@ -12,7 +12,7 @@ use super::reified_arguments::ReifiedArgument;
 use crate::ir::{ExprId, IrExpr, IrFile, IrTypeOp, IrTypeParameter};
 use crate::types::{stored_value_ty, Ty, TypeName};
 
-#[derive(Clone)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct ReifiedParameter {
     source_name: String,
     erased: TypeName,
@@ -184,62 +184,29 @@ fn realize_expression_dag(
 }
 
 pub(super) fn realize(ir: &mut IrFile) {
-    let functions = ir
-        .signatures
-        .iter()
-        .filter_map(|(&function, signature)| {
-            let parameters = reified_parameters(&signature.type_params);
-            (!parameters.is_empty()).then_some((function, parameters))
-        })
-        .collect::<Vec<_>>();
-    for (function, parameters) in functions {
-        let Some(root) = ir
-            .functions
-            .get(function as usize)
-            .and_then(|function| function.body)
-        else {
-            continue;
-        };
-        realize_expression_dag(ir, root, &parameters);
-        // A lambda's implementation is a separate function. Its `as? T` / `is T` still names this
-        // declaration's reified parameter, and the call-site copy is specialized before it gets here.
-        for implementation in lambda_implementations(ir, root) {
-            let Some(body) = ir
-                .functions
-                .get(implementation as usize)
-                .and_then(|function| function.body)
-            else {
-                continue;
-            };
-            realize_expression_dag(ir, body, &parameters);
-        }
-    }
-}
-
-fn lambda_implementations(ir: &IrFile, root: ExprId) -> Vec<u32> {
-    let mut pending = vec![root];
-    let mut seen_exprs = HashSet::new();
-    let mut seen_functions = HashSet::new();
-    let mut implementations = Vec::new();
-    while let Some(expression) = pending.pop() {
-        if !seen_exprs.insert(expression) {
-            continue;
-        }
-        if let IrExpr::Lambda { impl_fn, .. } = ir.expr(expression) {
-            if seen_functions.insert(*impl_fn) {
-                implementations.push(*impl_fn);
-                if let Some(body) = ir
-                    .functions
-                    .get(*impl_fn as usize)
-                    .and_then(|function| function.body)
-                {
-                    pending.push(body);
-                }
+    // Type operands already carry declaration-qualified semantic parameter identities. Realizing a
+    // closure can replace its Lambda node with a class value, but cannot change those identities.
+    // Normalize every implementation from that checked map rather than rediscovering lexical
+    // implementations through expression nodes that representation passes have already consumed.
+    let mut parameters = HashMap::new();
+    for signature in ir.signatures.values() {
+        for (identity, parameter) in reified_parameters(&signature.type_params) {
+            if let Some(previous) = parameters.insert(identity, parameter.clone()) {
+                assert_eq!(
+                    previous, parameter,
+                    "one semantic reified parameter has consistent declaration facts"
+                );
             }
         }
-        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
     }
-    implementations
+    let bodies = ir
+        .functions
+        .iter()
+        .filter_map(|function| function.body)
+        .collect::<Vec<_>>();
+    for body in bodies {
+        realize_expression_dag(ir, body, &parameters);
+    }
 }
 
 #[cfg(test)]
@@ -392,5 +359,50 @@ mod tests {
                 erased,
             } if *arg == operand && name == "T" && erased.matches("java/lang/Object")
         ));
+    }
+
+    #[test]
+    fn realized_methods_keep_checked_reification_without_lambda_nodes() {
+        let identity = "T@declaration";
+        let mut ir = IrFile::default();
+        let declaration = ir.add_expr(IrExpr::UnitInstance);
+        function(&mut ir, declaration, identity);
+        let argument = ir.add_expr(IrExpr::GetValue(0));
+        let source = ir.add_expr(IrExpr::TypeOp {
+            op: IrTypeOp::Cast,
+            arg: argument,
+            type_operand: Ty::ty_param(identity, Ty::obj("kotlin/Any")),
+        });
+        let concrete_copy = ir.add_expr(IrExpr::TypeOp {
+            op: IrTypeOp::Cast,
+            arg: argument,
+            type_operand: Ty::String,
+        });
+        let ordinary = ir.add_expr(IrExpr::TypeOp {
+            op: IrTypeOp::Cast,
+            arg: argument,
+            type_operand: Ty::ty_param("T@ordinary", Ty::obj("kotlin/Any")),
+        });
+        for body in [source, concrete_copy, ordinary] {
+            let mut implementation = ir.functions[0].clone();
+            implementation.name = "invoke".to_owned();
+            implementation.body = Some(body);
+            ir.functions.push(implementation);
+        }
+
+        realize(&mut ir);
+
+        assert!(matches!(
+            ir.expr(source),
+            IrExpr::ReifiedTypeOp { cast: true, name, .. } if name == "T"
+        ));
+        assert!(matches!(
+            ir.expr(concrete_copy),
+            IrExpr::TypeOp {
+                type_operand: Ty::String,
+                ..
+            }
+        ));
+        assert!(matches!(ir.expr(ordinary), IrExpr::TypeOp { .. }));
     }
 }

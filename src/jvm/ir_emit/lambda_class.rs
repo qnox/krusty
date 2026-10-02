@@ -221,6 +221,20 @@ fn emit_initialization(
     let mut code = CodeBuilder::new(0);
     emitter.emit_delegated_property_array(env, class.fq_name, internal, &mut code);
     if singleton {
+        // Retained typed operations still require class reification. A concrete call-site copy
+        // contains ordinary specialized operations and therefore has no declaration marker.
+        if class.methods.iter().any(|&method| {
+            ir.functions[method as usize]
+                .body
+                .is_some_and(|body| body_has_reified_markers(ir, body))
+        }) {
+            let marker = emitter.cw.methodref(
+                "kotlin/jvm/internal/Intrinsics",
+                "needClassReification",
+                "()V",
+            );
+            code.invokestatic(marker, 0, 0);
+        }
         let classifier = emitter.cw.class_ref(internal);
         let constructor = emitter.cw.methodref(internal, "<init>", "()V");
         let field = emitter

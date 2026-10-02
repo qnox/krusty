@@ -4464,6 +4464,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   A regenerated closure preserves a source type-variable's physical return
   slot (`Object` for an unbounded parameter), while its generic signature records the specialized
   result; no concrete-return method or extra erased bridge is invented.
+  Reified operations are normalized by their checked declaration-qualified type-parameter
+  identities in every realized method, including after a lambda node becomes a class value.
+  A singleton closure whose owned methods retain typed reified operations emits
+  `needClassReification()` before creating its instance; a concrete specialized copy does not.
   Common lowering records the nearest source lambda identity and containing checked inline
   declaration identity/visibility, retaining them through nested local functions. Inline
   property accessors publish the same provenance. The JVM consumes that recorded exposure when

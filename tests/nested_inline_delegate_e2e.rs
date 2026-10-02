@@ -136,7 +136,13 @@ fn cross_file_nested_delegates_match_private_closure_and_direct_export_abi() {
                 complete_method_abi(&reference),
                 "complete closure ABI, including erased invoke and generic signature, in {owner}"
             );
-            assert_closure_initializer(&classes, owner, "NestedOwner", "nestedResult");
+            assert_closure_initializer(
+                &classes,
+                owner,
+                "NestedOwner",
+                "nestedResult",
+                owner == "NestedOwner$readNested$1",
+            );
         }
         if owner == "NestedDeclarationsKt" {
             use krusty::jvm::classreader::{ACC_PUBLIC, ACC_STATIC, ACC_SYNTHETIC};
@@ -234,7 +240,7 @@ fun box(): String = if (ForceOutOfOrder.callInline() == \"OK\") \"OK\" else \"Fa
                 )]
             );
             assert_eq!(complete_method_abi(&ours), complete_method_abi(&reference));
-            assert_closure_initializer(&classes, owner, "C", "O");
+            assert_closure_initializer(&classes, owner, "C", "O", false);
         }
     }
 }
@@ -279,6 +285,7 @@ fn assert_closure_initializer(
     closure: &str,
     declaration: &str,
     property: &str,
+    reified: bool,
 ) {
     let (reference, ours) = classes.method_listing(closure, "static {};");
     // `method_listing` returns the body; the instruction extractor starts at a declaration.
@@ -300,6 +307,22 @@ fn assert_closure_initializer(
             "String <v#0>".to_owned(),
         ],
         "reference fixture pins the source reflection owner/name/signature in {closure}"
+    );
+    let markers = reference
+        .iter()
+        .filter_map(|instruction| instruction.split_once(" // ").map(|(_, target)| target))
+        .filter(|target| {
+            *target == "Method kotlin/jvm/internal/Intrinsics.needClassReification:()V"
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        markers,
+        if reified {
+            vec!["Method kotlin/jvm/internal/Intrinsics.needClassReification:()V"]
+        } else {
+            vec![]
+        },
+        "only the retained reified source closure carries the class marker in {closure}"
     );
     assert_eq!(
         ours, reference,
