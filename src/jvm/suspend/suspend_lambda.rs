@@ -70,7 +70,7 @@ pub(super) fn route(
     body: ExprId,
     mut route: Route<'_, '_, '_>,
 ) -> Routed {
-    let Some(site) = site(ir, fid) else {
+    let Some(mut site) = site(ir, fid) else {
         crate::trace_compiler!("suspend", "suspend lambda fid={fid}: no class site");
         return Routed::NotEligible;
     };
@@ -93,8 +93,15 @@ pub(super) fn route(
         return Routed::Failed;
     };
     let unit_return = route.context.orig_rets[fid as usize] == Ty::Unit;
+    let specialized = ir.specialized_functions.contains_key(&fid);
+    if specialized {
+        site.class = super::specialized_lambda_classes::placeholder(route.facade, fid);
+    }
     let class = declare_class(ir, &site, &captures, &parameters);
     let internal = site.class;
+    if specialized {
+        route.outputs.specialized_lambda_classes.record(fid, class);
+    }
 
     // The body moves into `invokeSuspend`: `this` takes value 0 and `$result` value 1.
     let expressions = crate::ir::value_namespace_expressions(ir, body);
@@ -151,6 +158,7 @@ pub(super) fn route(
     become_invoke_suspend(ir, fid, internal);
     enclose_in_invoke_suspend(ir, fid);
     ir.classes[class as usize].methods.push(fid);
+    ir.note_class_method(class, fid);
 
     // The lambda value is a fresh instance with no completion. Its type is the class's: a
     // consumer that needs its `FunctionN` casts it, one that takes `Any` does not.
@@ -550,6 +558,7 @@ fn become_invoke_suspend(ir: &mut IrFile, fid: u32, class: TypeName) {
     for owner in &mut ir.classes {
         owner.methods.retain(|&method| method != fid);
     }
+    ir.class_method_owners.remove(&fid);
     let function = &mut ir.functions[fid as usize];
     function.name = "invokeSuspend".to_string();
     function.params = vec![object];
@@ -563,6 +572,7 @@ fn become_invoke_suspend(ir: &mut IrFile, fid: u32, class: TypeName) {
     ir.lambda_own_params_from.remove(&fid);
     ir.lambda_origins.remove(&fid);
     ir.lifted_functions.remove(&fid);
+    ir.lifted_names.remove(&fid);
     ir.shared_capture_parameters
         .retain(|&(function, _), _| function != fid);
     ir.fn_debug_locals.insert(fid);

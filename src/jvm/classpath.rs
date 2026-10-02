@@ -12,6 +12,7 @@
 
 mod builtin_inventory;
 mod builtin_signatures;
+use builtin_members::BuiltinPackageFunction;
 mod builtins_validation;
 mod call_metadata;
 mod candidate_union;
@@ -1007,30 +1008,12 @@ struct BuiltinFunction {
     visibility: crate::types::Visibility,
     is_inline: bool,
     has_reified_type_params: bool,
+    reified_type_parameter_ordinals: Vec<u32>,
     is_suspend: bool,
     is_operator: bool,
     is_infix: bool,
     context_count: usize,
     annotations: Vec<TypeName>,
-}
-
-#[derive(Clone)]
-pub(super) struct BuiltinPackageFunction {
-    pub generic_sig: GenericSig,
-    pub only_input_type_formals: Vec<String>,
-    pub params: Vec<Ty>,
-    pub ret: Ty,
-    pub param_names: Vec<String>,
-    pub param_defaults: Vec<bool>,
-    pub vararg: Option<usize>,
-    pub visibility: crate::types::Visibility,
-    pub is_inline: bool,
-    pub has_reified_type_params: bool,
-    pub is_suspend: bool,
-    pub is_operator: bool,
-    pub is_infix: bool,
-    pub context_count: usize,
-    pub annotations: Vec<TypeName>,
 }
 
 struct BuiltinClass {
@@ -1122,6 +1105,17 @@ impl BuiltinsFile {
                 visibility: function.visibility,
                 is_inline: function.is_inline,
                 has_reified_type_params: function.has_reified_type_params,
+                reified_type_parameter_ordinals: function
+                    .formals
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(ordinal, parameter)| {
+                        parameter
+                            .reified
+                            .then(|| u32::try_from(ordinal).ok())
+                            .flatten()
+                    })
+                    .collect(),
                 is_suspend: function.is_suspend,
                 is_operator: function.is_operator,
                 is_infix: function.is_infix,

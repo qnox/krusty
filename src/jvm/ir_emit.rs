@@ -76,6 +76,7 @@ mod frame_map;
 mod function_annotations;
 mod function_debug;
 mod function_invocation;
+mod static_function_calls;
 use function_invocation::{
     is_high_arity_function, jvm_function_interface, jvm_function_invoke_descriptor,
 };
@@ -94,7 +95,7 @@ mod interface_compatibility;
 mod interface_hierarchy;
 mod intrinsic_probes;
 mod lambda_class;
-mod lambda_class_names;
+pub(super) mod lambda_class_names;
 mod local_updates;
 mod local_variable_representation;
 mod loop_emission;
@@ -322,8 +323,9 @@ pub(crate) struct EmitRun {
     /// paired with its JVM owner. A source lambda lowered into multiple constructors still
     /// contributes one class. The discovery pass is discarded when dead implementations require a
     /// second emit, so this set is cleared with the pending plans at each pass boundary.
-    lambda_classes_written:
-        std::cell::RefCell<std::collections::HashSet<(String, LambdaClassIdentity)>>,
+    lambda_classes_written: std::cell::RefCell<
+        std::collections::HashSet<(String, lambda_class_names::LambdaClassIdentity)>,
+    >,
     /// Private instance members reached from another emitted JVM class. Kotlin permits this across
     /// lexical nesting, while Java 8 bytecode does not; the declaring class owns one synthetic
     /// static access bridge and every cross-owner call targets it.
@@ -363,31 +365,6 @@ impl EmitRun {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum LambdaClassIdentity {
-    Source(u32),
-    Synthetic(u32),
-}
-
-/// Realize backend-private implementation names from the semantic lambda origins produced by
-/// common lowering. The common IR deliberately keeps its opaque temporary function name; only the
-/// JVM boundary owns kotlinc's `$lambda$N` spelling.
-pub(crate) fn realize_lambda_impl_names(ir: &mut IrFile) {
-    let names = ir
-        .lambda_origins
-        .iter()
-        .map(|(&function, origin)| {
-            (
-                function,
-                super::debug_local_names::lambda_implementation_name(origin),
-            )
-        })
-        .collect::<Vec<_>>();
-    for (function, name) in names {
-        ir.functions[function as usize].name = name;
-    }
-}
-
 /// One synthetic lambda class to write under [`LambdaMode::Class`].
 ///
 /// The lambda body stays where the indy strategy put it — a private static on the enclosing class —
@@ -419,7 +396,7 @@ struct LambdaClassPlan {
     /// Whether the body lives on an INTERFACE: a static call to one needs an `InterfaceMethodref`
     /// constant, not a `Methodref` (`IncompatibleClassChangeError` otherwise).
     owner_is_interface: bool,
-    identity: LambdaClassIdentity,
+    identity: lambda_class_names::LambdaClassIdentity,
 }
 
 impl EmitRun {
@@ -497,6 +474,7 @@ pub(super) struct EmitEnv<'a> {
         &'a crate::jvm::property_references::PropertyReferenceRealizations,
     /// JVM-only construction plans for Kotlin function-value SAM wrappers.
     sam_wrapper_realizations: &'a crate::jvm::sam_wrappers::SamWrapperRealizations,
+    local_delegate_access: &'a crate::jvm::local_delegate_accessors::HelperAccess,
     /// Per-call JVM placeholder/mask/marker plans produced during default-call realization.
     default_call_operands: &'a crate::jvm::default_call_operands::DefaultCallOperands,
     /// File-wide `InnerClasses` candidates prepared once from stable classifier identities.
@@ -1473,6 +1451,7 @@ pub fn reparent_lambda_impls(ir: &mut IrFile) {
                 {
                     owned.insert(fid);
                     ir.classes[cid].methods.push(fid);
+                    ir.note_class_method(cid as u32, fid);
                     // The impl's own body now emits in this class too — walk it for nested lambdas.
                     if let Some(b) = ir.functions.get(fid as usize).and_then(|f| f.body) {
                         stack.push(b);
@@ -1517,6 +1496,7 @@ pub(crate) fn emit_all_with_checked_classifiers(
         property_realizations: facts.property_realizations,
         property_reference_realizations: facts.property_reference_realizations,
         sam_wrapper_realizations: facts.sam_wrapper_realizations,
+        local_delegate_access: facts.local_delegate_access,
         default_call_operands: facts.default_call_operands,
         inner_classes: crate::jvm::inner_classes::InnerClasses::new(
             ir,
@@ -6564,6 +6544,7 @@ struct Emitter<'a> {
     property_realizations: &'a crate::jvm::property_realizations::PropertyRealizations,
     default_call_operands: &'a crate::jvm::default_call_operands::DefaultCallOperands,
     sam_wrapper_realizations: &'a crate::jvm::sam_wrappers::SamWrapperRealizations,
+    local_delegate_access: &'a crate::jvm::local_delegate_accessors::HelperAccess,
     suspended_result_returns: &'a crate::jvm::suspend::SuspendedResultReturns,
     intrinsic_probe_continuations: &'a crate::jvm::suspend::IntrinsicProbeContinuations,
     /// The exact source class whose code this emitter is writing. A generated holder has no
@@ -6713,6 +6694,7 @@ impl<'a> Emitter<'a> {
             property_realizations: env.property_realizations,
             default_call_operands: env.default_call_operands,
             sam_wrapper_realizations: env.sam_wrapper_realizations,
+            local_delegate_access: env.local_delegate_access,
             suspended_result_returns: env.suspended_result_returns,
             self_companion: singleton_instance_load::self_companion(ir, static_owner),
             intrinsic_probe_continuations: env.intrinsic_probe_continuations,
@@ -8923,77 +8905,10 @@ impl<'a> Emitter<'a> {
                     unreachable!("a super call must be realized before JVM emission")
                 }
                 Callee::Local(fid) => {
-                    let f = &self.ir.functions[*fid as usize];
-                    let param_tys = jvm_function_params(self.ir, *fid);
-                    let ret = jvm_declared_ty(&f.ret);
-                    // A PRIVATE facade function can't be invoked from another class (a lambda impl on
-                    // its enclosing class, a continuation class, any class member) — kotlinc routes
-                    // those callers through the facade's `access$<name>` accessor.
-                    let name = if static_accessors::routes_through_accessor(
-                        self.ir,
-                        self.static_owner == Some(StaticOwner::Facade),
-                        *fid,
-                    ) {
-                        format!("access${}", f.name)
-                    } else {
-                        f.name.clone()
-                    };
-                    let args = args.clone();
-                    // Same arity/descriptor contract as `MethodCall` above: an unthreaded suspend
-                    // call must bail the file, never emit an unverifiable invocation.
-                    if let Err(mismatch) =
-                        self.emit_source_call_operands(e, 0, &args, &param_tys, code)
-                    {
-                        self.bail_descriptor_arity(&mismatch, ret, code);
-                        return;
-                    }
-                    let aw: i32 = param_tys.iter().map(|t| slot_words(*t) as i32).sum();
-                    let owner = self.facade.clone();
-                    let m = self
-                        .cw
-                        .methodref(&owner, &name, &method_descriptor(&param_tys, ret));
-                    self.mark_call_start(e, code);
-                    code.invokestatic(m, aw, physical_call_result_words(ret));
+                    self.emit_static_function_call(e, *fid, None, args, code);
                 }
                 Callee::ClassStatic { owner, function } => {
-                    let f = &self.ir.functions[*function as usize];
-                    let param_tys = jvm_function_params(self.ir, *function);
-                    let ret = jvm_declared_ty(&f.ret);
-                    if let Err(mismatch) =
-                        self.emit_source_call_operands(e, 0, args, &param_tys, code)
-                    {
-                        self.bail_descriptor_arity(&mismatch, ret, code);
-                        return;
-                    }
-                    let argument_words: i32 =
-                        param_tys.iter().map(|ty| slot_words(*ty) as i32).sum();
-                    let descriptor = method_descriptor(&param_tys, ret);
-                    let static_owner = StaticOwner::Class(*owner);
-                    let source_owner_is_interface = static_owner.is_interface(self.ir);
-                    // The classpath answers whether a library owner is an interface; a static
-                    // declared on an interface being compiled right now is not there. An
-                    // `invokestatic` naming an interface must use an InterfaceMethodref, so the
-                    // file's own classes answer too.
-                    let owner_is_interface =
-                        source_owner_is_interface || self.bodies.owner_is_interface_name(*owner);
-                    let owner = owner.render();
-                    // A private one reached from another class goes through its owner's accessor.
-                    let name = if static_accessors::routes_through_accessor(
-                        self.ir,
-                        self.static_owner == Some(static_owner),
-                        *function,
-                    ) {
-                        format!("access${}", f.name)
-                    } else {
-                        f.name.clone()
-                    };
-                    let method = if owner_is_interface {
-                        self.cw.interface_methodref(&owner, &name, &descriptor)
-                    } else {
-                        self.cw.methodref(&owner, &name, &descriptor)
-                    };
-                    self.mark_call_start(e, code);
-                    code.invokestatic(method, argument_words, physical_call_result_words(ret));
+                    self.emit_static_function_call(e, *function, Some(*owner), args, code);
                 }
                 Callee::ClassStaticDefault { owner, function } => {
                     let f = &self.ir.functions[*function as usize];
@@ -9836,7 +9751,17 @@ impl<'a> Emitter<'a> {
                 self.run.used_lambdas.borrow_mut().insert(*impl_fn);
                 let function_adapter = sam.as_ref().is_some_and(|target| target.function_adapter);
                 let boxed_sam_result = sam.as_ref().is_some_and(boxes_sam_result);
-                let lambda_mode = self.lambda_modes.for_lambda(sam.as_ref(), *arity);
+                let mut lambda_mode = self.lambda_modes.for_lambda(sam.as_ref(), *arity);
+                // This implementation executes a runtime reified operation. The common IR records
+                // that semantic requirement; the JVM realizes it as a class independently of the
+                // file's ordinary lambda strategy.
+                if self
+                    .ir
+                    .runtime_reified_lambda_implementations
+                    .contains(impl_fn)
+                {
+                    lambda_mode = LambdaMode::Class;
+                }
                 if lambda_mode == LambdaMode::Indy {
                     if self.ir.jvm_unrealized_lambda_classes.contains(impl_fn) {
                         // The class is discarded; a placeholder keeps its frames computable.
@@ -9989,8 +9914,14 @@ impl<'a> Emitter<'a> {
                     .map(|c| c.fq_name())
                     .unwrap_or_else(|| self.facade.clone());
                 if lambda_mode == LambdaMode::Class {
-                    let (internal, identity) =
-                        lambda_class_names::class_name(self.ir, *impl_fn, &impl_name, &impl_owner);
+                    let (internal, identity) = lambda_class_names::class_name(
+                        self.ir,
+                        *impl_fn,
+                        &impl_name,
+                        &impl_owner,
+                        &self.facade,
+                        self.lambda_modes,
+                    );
                     self.run.lambda_classes.borrow_mut().push(LambdaClassPlan {
                         internal: internal.clone(),
                         iface: iface.clone(),
@@ -10212,7 +10143,9 @@ impl<'a> Emitter<'a> {
                 ret,
             } => {
                 self.emit_function_invocation(e, *func, args, params, code);
-                if !self.erased_invocations.remove(&e) {
+                // A transformed suspension materializes its declared result when the point
+                // closes. Narrowing here would checkcast the erased `Object` first.
+                if self.transformed_result(e).is_none() && !self.erased_invocations.remove(&e) {
                     self.narrow_invocation_result(*ret, code);
                 }
             }
@@ -11245,6 +11178,7 @@ mod invariant_tests {
         let override_results = crate::jvm::override_results::OverrideResults::default();
         let collection_method_entry_barriers =
             crate::jvm::collection_barriers::MethodEntryBarriers::default();
+        let local_delegate_access = crate::jvm::local_delegate_accessors::HelperAccess::default();
         emit_all_with_checked_classifiers(
             ir,
             (crate::types::type_name(facade), facade),
@@ -11266,6 +11200,7 @@ mod invariant_tests {
                 property_reference_realizations: &property_reference_realizations,
                 default_call_operands: &default_call_operands,
                 sam_wrapper_realizations: &sam_wrapper_realizations,
+                local_delegate_access: &local_delegate_access,
             },
             &EmitOptions::default(),
             run,

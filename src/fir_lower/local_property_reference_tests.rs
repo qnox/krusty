@@ -12,20 +12,25 @@ const DELEGATE: &str = "class Delegate(val value: String) {
 }
 ";
 
+fn plan_reference(ir: &IrFile, plan: u32) -> (String, LocalDelegatedPropertyId) {
+    let plan = &ir.local_delegate_plans[plan as usize];
+    let mut pending = vec![plan.getter.body];
+    let mut reference = None;
+    while let Some(expression) = pending.pop() {
+        if let IrExpr::LocalPropertyReference(value) = ir.expr(expression) {
+            assert!(reference.is_none(), "one reference per accessor template");
+            reference = Some((value.name.to_string(), value.declaration));
+        }
+        for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+    }
+    reference.expect("local delegate getter reference")
+}
+
 fn plan_references(ir: &IrFile) -> Vec<(String, LocalDelegatedPropertyId)> {
-    ir.local_delegate_plans
-        .iter()
+    (0..ir.local_delegate_plans.len())
         .map(|plan| {
-            let mut pending = vec![plan.getter.body];
-            let mut reference = None;
-            while let Some(expression) = pending.pop() {
-                if let IrExpr::LocalPropertyReference(value) = ir.expr(expression) {
-                    assert!(reference.is_none(), "one reference per accessor template");
-                    reference = Some((value.name.to_string(), value.declaration));
-                }
-                for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
-            }
-            reference.expect("local delegate getter reference")
+            let plan = u32::try_from(plan).expect("local delegate plan id fits u32");
+            plan_reference(ir, plan)
         })
         .collect()
 }
@@ -220,7 +225,118 @@ fn two_inline_copies_keep_the_checked_declaration_identity() {
             .map(|(_, plans)| plans.as_slice())
             .unwrap_or_else(|| panic!("{name} must carry an inlined local delegate access"))
     };
+    assert_eq!(ir.local_delegate_plans.len(), 1);
     assert_eq!(plans("first"), &[0]);
     assert_eq!(plans("second"), &[0]);
+    assert_eq!(plan_reference(&ir, 0), (name.clone(), *declaration));
     assert_eq!(declaration.ordinal(), 0);
+}
+
+#[test]
+fn generic_inline_copies_keep_one_declaration_plan_across_substitutions() {
+    let ir = lower_single_source(
+        "import kotlin.reflect.KProperty
+        interface Root
+        class Token : Root
+        class Carrier<T : Root>(private val value: T) {
+            operator fun getValue(owner: Any?, property: KProperty<*>): T = value
+        }
+        inline fun <reified T : Root> delegated(value: T): T {
+            val local by Carrier(value)
+            return local
+        }
+        fun exact(value: Token): Root = delegated<Token>(value)
+        fun erased(value: Root): Root = delegated<Root>(value)
+        ",
+        "GenericInlineLocalDelegate",
+    );
+
+    assert_eq!(ir.local_delegate_plans.len(), 1);
+    let functions = accesses_by_function(&ir);
+    let plans = |name: &str| {
+        functions
+            .iter()
+            .find(|(function, _)| function == name)
+            .map(|(_, plans)| plans.as_slice())
+            .unwrap_or_else(|| panic!("{name} must carry an inlined local delegate access"))
+    };
+    assert_eq!(plans("exact"), &[0]);
+    assert_eq!(plans("erased"), &[0]);
+}
+
+#[test]
+fn nested_delegate_plans_retain_the_containing_checked_inline_declaration() {
+    let ir = lower_single_source(
+        &format!(
+            "{DELEGATE}
+            inline fun nested(): String {{
+                val first = {{ val firstValue by Delegate(\"a\"); firstValue }}
+                val second = {{ val secondValue by Delegate(\"b\"); secondValue }}
+                return first() + second()
+            }}
+            inline val propertyValue: String
+                get() {{ val accessorValue by Delegate(\"c\"); return accessorValue }}
+            fun ordinary(): String {{
+                fun localReader(): String {{
+                    val ordinaryValue by Delegate(\"d\")
+                    return ordinaryValue
+                }}
+                return localReader()
+            }}"
+        ),
+        "NestedInlineDeclarationProvenance",
+    );
+    let plans = &ir.local_delegate_plans;
+    assert_eq!(plans.len(), 4);
+    let declarations = plan_references(&ir)
+        .into_iter()
+        .zip(plans)
+        .map(|((name, _), plan)| {
+            (
+                name,
+                plan.inline_declaration.map(|inline| inline.declaration),
+            )
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    assert_eq!(
+        declarations.len(),
+        4,
+        "one declaration record for each distinct fixture property"
+    );
+    let declaration = declarations["firstValue"].expect("checked inline function");
+    assert_eq!(declarations["secondValue"], Some(declaration));
+    let accessor = declarations["accessorValue"].expect("checked inline accessor");
+    assert_ne!(accessor, declaration);
+    assert_eq!(declarations["ordinaryValue"], None);
+    let lambdas = plan_references(&ir)
+        .into_iter()
+        .zip(plans)
+        .map(|((name, _), plan)| (name, plan.declaration_lambda))
+        .collect::<std::collections::HashMap<_, _>>();
+    let first = lambdas["firstValue"].expect("first exact source lambda");
+    let second = lambdas["secondValue"].expect("second exact source lambda");
+    assert_ne!(first, second);
+    assert_eq!(lambdas["accessorValue"], None);
+    assert_eq!(lambdas["ordinaryValue"], None);
+}
+
+#[test]
+fn delegate_declaration_lambda_is_inherited_through_a_local_function() {
+    let ir = lower_single_source(
+        &format!(
+            "{DELEGATE}
+        inline fun declaration(): String = {{
+            val direct by Delegate(\"a\")
+            fun localRead(): String {{ val nested by Delegate(\"b\"); return nested }}
+            direct + localRead()
+        }}.invoke()"
+        ),
+        "DelegateDeclarationLambdaIdentity",
+    );
+    assert_eq!(ir.local_delegate_plans.len(), 2);
+    let first = &ir.local_delegate_plans[0];
+    let second = &ir.local_delegate_plans[1];
+    assert!(first.declaration_lambda.is_some());
+    assert_eq!(first.declaration_lambda, second.declaration_lambda);
+    assert_eq!(first.inline_declaration, second.inline_declaration);
 }

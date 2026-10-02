@@ -18,6 +18,9 @@ pub(super) struct InnerClasses {
     paths: DeclarationPaths,
     /// The class each class declared in executable code is declared in, by internal name.
     declaring: Rc<HashMap<String, String>>,
+    /// Specialized lambdas regenerated at a call site. kotlinc's inliner copies the
+    /// `new` into the caller without giving that caller an `InnerClasses` row.
+    call_sites: Rc<HashSet<String>>,
 }
 
 impl InnerClasses {
@@ -174,12 +177,17 @@ impl InnerClasses {
             } else {
                 name
             };
+            let suspend_lambda = is_suspend_lambda_class(class);
             specs.push(InnerClassSpec {
                 inner: identity.render(),
                 outer: (!coroutine && !local).then_some(outer),
                 name: (!coroutine).then_some(name),
                 access: if coroutine {
-                    0x0008 | 0x0010
+                    let public = u16::from(
+                        (suspend_lambda && suspend_lambda_is_public(ir, class))
+                            || published_inline_lambda(ir, class),
+                    );
+                    0x0008 | 0x0010 | public
                 } else {
                     class_access(ir, class)
                 },
@@ -211,6 +219,7 @@ impl InnerClasses {
             specs,
             paths: Rc::new(paths),
             declaring: Rc::new(declaring),
+            call_sites: Rc::new(call_site_regenerated_lambdas(ir)),
         }
     }
 
@@ -220,6 +229,7 @@ impl InnerClasses {
         }
         writer.set_declaration_paths(self.paths.clone());
         writer.set_declaring_classes(self.declaring.clone());
+        writer.set_call_site_classes(self.call_sites.clone());
     }
 }
 
@@ -277,6 +287,167 @@ fn is_coroutine_state_machine(class: &IrClass) -> bool {
     ]
     .iter()
     .any(|superclass| class.superclass.matches(superclass))
+}
+
+fn is_suspend_lambda_class(class: &IrClass) -> bool {
+    [
+        "kotlin/coroutines/jvm/internal/SuspendLambda",
+        "kotlin/coroutines/jvm/internal/RestrictedSuspendLambda",
+    ]
+    .iter()
+    .any(|superclass| class.superclass.matches(superclass))
+}
+
+/// A suspend lambda class is public when its body can be copied into another package: it is a
+/// specialized call-site copy, or its enclosure chain reaches an inline declaration.
+pub(in crate::jvm) fn suspend_lambda_is_public(ir: &IrFile, class: &IrClass) -> bool {
+    class
+        .methods
+        .iter()
+        .any(|method| ir.specialized_functions.contains_key(method))
+        || enclosure_reaches_inline(ir, class.enclosure)
+}
+
+/// A retained or regenerated lambda class exposed by an inline declaration. kotlinc publishes it
+/// (`ACC_PUBLIC`) because an inline caller in another package constructs it.
+fn published_inline_lambda(ir: &IrFile, class: &IrClass) -> bool {
+    class
+        .lambda
+        .as_ref()
+        .is_some_and(|lambda| lambda.public_inline)
+        || class
+            .methods
+            .iter()
+            .any(|method| ir.runtime_reified_lambda_implementations.contains(method))
+}
+
+/// Specialized lambdas regenerated into a caller. The caller's `new` does not add an
+/// `InnerClasses` row; the class itself, and a class that encloses it, still list the row.
+fn call_site_regenerated_lambdas(ir: &IrFile) -> HashSet<String> {
+    call_site_suspend_lambdas(ir)
+        .into_iter()
+        .chain(call_site_reified_function_classes(ir))
+        .collect()
+}
+
+/// Specialized non-suspend reified function classes. A copy nested in another such class stays
+/// listed by its enclosing class.
+fn call_site_reified_function_classes(ir: &IrFile) -> HashSet<String> {
+    ir.classes
+        .iter()
+        .filter(|class| {
+            class.lambda.is_some()
+                && !is_suspend_lambda_class(class)
+                && class.methods.iter().any(|method| {
+                    ir.specialized_functions.contains_key(method)
+                        && ir.runtime_reified_lambda_implementations.contains(method)
+                })
+                && !enclosed_by_specialized_reified_lambda(ir, class)
+        })
+        .map(|class| class.fq_name())
+        .collect()
+}
+
+fn enclosed_by_specialized_reified_lambda(ir: &IrFile, class: &IrClass) -> bool {
+    let function = match class.enclosure {
+        Some(
+            crate::ir::IrEnclosure::Function(function) | crate::ir::IrEnclosure::Lambda(function),
+        ) => function,
+        _ => return false,
+    };
+    ir.specialized_functions.contains_key(&function)
+        && ir
+            .runtime_reified_lambda_implementations
+            .contains(&function)
+        && ir.class_method_owners.get(&function).is_some_and(|owners| {
+            owners.iter().any(|&owner| {
+                ir.classes
+                    .get(owner as usize)
+                    .is_some_and(|owner| owner.lambda.is_some() && !is_suspend_lambda_class(owner))
+            })
+        })
+}
+
+/// Specialized suspend lambdas whose enclosing method is not itself a suspend-lambda
+/// implementation. The caller's `new` does not add an `InnerClasses` row.
+fn call_site_suspend_lambdas(ir: &IrFile) -> HashSet<String> {
+    ir.classes
+        .iter()
+        .filter(|class| {
+            is_suspend_lambda_class(class)
+                && class
+                    .methods
+                    .iter()
+                    .any(|method| ir.specialized_functions.contains_key(method))
+                && !enclosed_by_specialized_suspend_lambda(ir, class)
+        })
+        .map(|class| class.fq_name())
+        .collect()
+}
+
+fn enclosed_by_specialized_suspend_lambda(ir: &IrFile, class: &IrClass) -> bool {
+    let function = match class.enclosure {
+        Some(
+            crate::ir::IrEnclosure::Function(function) | crate::ir::IrEnclosure::Lambda(function),
+        ) => function,
+        _ => return false,
+    };
+    ir.specialized_functions.contains_key(&function)
+        && ir.class_method_owners.get(&function).is_some_and(|owners| {
+            owners.iter().any(|&owner| {
+                ir.classes
+                    .get(owner as usize)
+                    .is_some_and(is_suspend_lambda_class)
+            })
+        })
+}
+
+fn enclosure_reaches_inline(ir: &IrFile, start: Option<crate::ir::IrEnclosure>) -> bool {
+    let mut functions = HashSet::new();
+    let mut classes = HashSet::new();
+    let mut pending = vec![start];
+    while let Some(scope) = pending.pop() {
+        let Some(scope) = scope else {
+            continue;
+        };
+        match scope {
+            crate::ir::IrEnclosure::Function(function)
+            | crate::ir::IrEnclosure::Lambda(function) => {
+                if !functions.insert(function) {
+                    continue;
+                }
+                if ir.public_inline_functions.contains(&function)
+                    || ir.top_level_inline_functions.contains(&function)
+                {
+                    return true;
+                }
+                if let Some(outer) = ir.lambda_enclosures.get(&function) {
+                    pending.push(Some(*outer));
+                }
+                if let Some(owners) = ir.class_method_owners.get(&function) {
+                    for &owner in owners {
+                        if classes.insert(owner) {
+                            pending.push(ir.classes[owner as usize].enclosure);
+                        }
+                    }
+                }
+            }
+            crate::ir::IrEnclosure::PropertyAccessor { property, setter } => {
+                let function =
+                    crate::jvm::ir_emit::property_accessor_function(ir, property, setter);
+                pending.push(Some(crate::ir::IrEnclosure::Function(function)));
+            }
+            crate::ir::IrEnclosure::Constructor { class, .. }
+            | crate::ir::IrEnclosure::ClassInitializer(class)
+            | crate::ir::IrEnclosure::Classifier(class) => {
+                if classes.insert(class) {
+                    pending.push(ir.classes[class as usize].enclosure);
+                }
+            }
+            crate::ir::IrEnclosure::File => {}
+        }
+    }
+    false
 }
 
 pub(super) fn class_access(ir: &IrFile, class: &IrClass) -> u16 {

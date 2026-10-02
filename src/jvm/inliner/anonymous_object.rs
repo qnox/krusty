@@ -97,6 +97,9 @@ pub(crate) struct Regeneration<'a> {
     pub call_site: CallSite<'a>,
     /// The inline function's type arguments at the call, each as `(parameter name, signature)`.
     pub type_arguments: &'a [(String, String)],
+    /// Anonymous classes already regenerated earlier in the same inlined body. A later copy can
+    /// capture or otherwise name one of them and must point at the call-site class.
+    pub prior_classes: &'a [(String, String)],
     /// The call's reified arguments, which specialize `reifiedOperationMarker` in the copy.
     pub(in crate::jvm) reified: &'a crate::jvm::reified_arguments::ReifiedArguments,
     /// The caller's class-file major version.
@@ -139,6 +142,9 @@ pub(crate) fn regenerate(
     let new = regeneration.new_class;
     check_supported(original, regeneration.classes)?;
     let mut remapper = TypeRemapper::with_type_arguments(regeneration.type_arguments);
+    for (original, copy) in regeneration.prior_classes {
+        remapper.add_mapping(original, copy);
+    }
     remapper.add_mapping(old, new);
 
     let super_name = original
@@ -243,6 +249,10 @@ pub(crate) fn regenerate(
         regeneration.constructor_desc,
     )?;
     let lambdas = plan_lambdas(&mut plan, regeneration)?;
+    plan.desc = remapper.map_desc(&plan.desc)?;
+    for field in &mut plan.fields {
+        field.desc = remapper.map_desc(&field.desc)?;
+    }
     // `generateConstructorAndFields`: the constructor is declared, then each captured field, then
     // the constructor's body is written.
     cw.seed_utf8("<init>");
@@ -251,7 +261,7 @@ pub(crate) fn regenerate(
         cw.add_copied_field(&FieldNode {
             access: CAPTURED_FIELD_ACCESS,
             name: field.name.clone(),
-            desc: remapper.map_desc(&field.desc)?,
+            desc: field.desc.clone(),
             signature: None,
             value: None,
             visible_annotations: Vec::new(),

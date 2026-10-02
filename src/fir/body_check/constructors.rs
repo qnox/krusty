@@ -878,14 +878,15 @@ impl BodyFirChecker<'_> {
             .copied()
             .zip(expression_ty.type_args().iter().copied())
             .map(|(parameter, value)| {
-                if self.index.type_parameter_header(parameter).is_none() {
+                let Some(header) = self.index.type_parameter_header(parameter) else {
                     return Err(self.failure(
                         self.file.expr_span(expression),
                         BodyCheckFailureKind::MissingStableCallTarget,
                     ));
-                }
+                };
                 Ok(FirTypeSubstitution {
                     parameter: parameter.into(),
+                    reified: header.flags.is_reified(),
                     value: ResolvedTy::new(value).map_err(|error| {
                         self.failure(
                             self.file.expr_span(expression),

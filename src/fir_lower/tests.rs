@@ -4,8 +4,8 @@ use crate::fir::{
     FirCallableReferenceTarget, FirCapture, FirCatch, FirConstant, FirConstructorCall,
     FirConstructorTarget, FirConversion, FirConversionKind, FirExpr, FirExprKind, FirIntrinsic,
     FirJumpKind, FirLocalCallableRef, FirPropertyReferenceTarget, FirPropertyTarget,
-    FirRangeOperation, FirReceiver, FirStatement, FirStatementKind, FirTypeParameterRef,
-    FirTypeSubstitution, FirVarargElement, OriginId, ResolvedModuleIndex, ResolvedTy,
+    FirRangeOperation, FirReceiver, FirStatement, FirStatementKind, FirVarargElement, OriginId,
+    ResolvedModuleIndex, ResolvedTy,
 };
 use crate::ir::{
     Callee, IrBinOp, IrCheckedArgument, IrCheckedOperation, IrConst, IrExpr, IrFile, IrIntrinsic,
@@ -15,6 +15,7 @@ use crate::types::Ty;
 
 mod callable_body_returns;
 mod catch_clauses;
+mod checked_substitutions;
 mod integral_constants;
 mod local_classifier_provenance;
 mod lowering_temporaries;
@@ -672,67 +673,6 @@ fn checked_call_keeps_stable_target_and_final_argument_mapping() {
                 elements
             }
         ] if *array_type == Ty::obj("kotlin/IntArray") && elements == &vec![(1, false)]
-    ));
-}
-
-#[test]
-fn external_call_keeps_checked_type_substitutions_until_provider_realization() {
-    let origin = OriginId::from_raw(0);
-    let declaration = ExternalCallableId::from_raw(23);
-    let mut body = FirBody::new(BodyOwnerId::from_raw(4));
-    let call = body.add_expr(FirExpr {
-        origin,
-        ty: resolved(Ty::String),
-        kind: FirExprKind::Call(FirCall {
-            target: crate::fir::FirCallTarget::External {
-                declaration,
-                default_provider: None,
-                receiver: None,
-                declared_receiver: None,
-                parameters: Box::new([]),
-                result: resolved(Ty::String),
-                declared_result: None,
-                overridden_results: Box::new([]),
-                suspend: false,
-                can_inline: true,
-                inline_plan: None,
-                extension_receiver_parameter: None,
-            },
-            dispatch_receiver: None,
-            extension_receiver: None,
-            parameter_types: Box::new([]),
-            arguments: Box::new([]),
-            substitutions: Box::new([FirTypeSubstitution {
-                parameter: FirTypeParameterRef::External {
-                    callable: declaration,
-                    ordinal: 0,
-                },
-                value: resolved(Ty::String),
-                additional_bounds: Box::new([]),
-            }]),
-        }),
-    });
-    let statement = body.add_statement(FirStatement {
-        origin,
-        kind: FirStatementKind::Expression(call),
-    });
-    body.push_root(statement);
-
-    let mut ir = IrFile::default();
-    let lowered = lower_body(body, &ResolvedModuleIndex::default(), &mut ir).unwrap();
-    assert!(matches!(
-        ir.expr(lowered.roots[0]),
-        IrExpr::Call {
-            callee: crate::ir::Callee::External { substitutions, .. },
-            ..
-        } if matches!(
-            substitutions.as_slice(),
-            [crate::ir::IrCheckedSubstitution {
-                parameter: FirTypeParameterRef::External { callable, ordinal: 0 },
-                value: Ty::String,
-                additional_bounds,
-            }] if *callable == declaration && additional_bounds.is_empty()
-        )
     ));
 }
 

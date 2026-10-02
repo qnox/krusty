@@ -41,6 +41,13 @@ pub(crate) struct DelegatedPropertyArrays {
 }
 
 impl DelegatedPropertyArrays {
+    pub(super) fn remap_owners(&mut self, names: &HashMap<TypeName, TypeName>) {
+        self.by_owner = std::mem::take(&mut self.by_owner)
+            .into_iter()
+            .map(|(owner, elements)| (names.get(&owner).copied().unwrap_or(owner), elements))
+            .collect();
+    }
+
     /// The elements of `owner`'s array, or `None` when it has none.
     pub(crate) fn elements(&self, owner: TypeName) -> Option<&[ExprId]> {
         self.by_owner.get(&owner).map(Vec::as_slice)

@@ -496,6 +496,7 @@ pub(super) fn emit_func_ref_class(
     let static_call_name = if function_reference_target(ir, fr).is_some_and(|target| {
         static_accessors::routes_through_accessor(
             ir,
+            env.local_delegate_access,
             static_owner == StaticOwner::Class(c.fq_name),
             target,
         )

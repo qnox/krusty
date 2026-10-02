@@ -105,6 +105,7 @@ pub(super) fn realize(
     stems: &[String],
     callables: &crate::backend::CheckedBackendCallables,
     current_facade: &str,
+    delegate_helpers: &super::local_delegate_accessors::HelperAccess,
 ) -> Result<PropertyReferenceRealizations, PropertyReferenceRealizationTarget> {
     let mut realizations = PropertyReferenceRealizations::default();
     realizations.local_delegated =
@@ -115,7 +116,11 @@ pub(super) fn realize(
     for raw in 0..expression_count {
         if let IrExpr::LocalPropertyReference(reference) = &ir.exprs[raw] {
             let reference = reference.clone();
-            let (owner, element) = local_property_reference(ir, stems, &reference)?;
+            let (declaration, element) = local_property_reference(ir, stems, &reference)?;
+            let owner = match delegate_helpers.closure_property_owner(raw as u32) {
+                Some(closure) => closure,
+                None => declaration,
+            };
             delegated_operands.push(delegated_arrays::DelegatedOperand {
                 operand: raw as u32,
                 owner,

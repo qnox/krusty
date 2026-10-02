@@ -31,7 +31,6 @@ coroutines/inlineClasses/direct/boxReturnValueOfSuspendFunctionReference.kt
 coroutines/inlineClasses/direct/boxUnboxInsideCoroutine_suspendFunType.kt
 coroutines/inlineClasses/kt84305.kt
 coroutines/inlineClasses/resume/boxUnboxInsideCoroutine_suspendFunType.kt
-coroutines/inlineGenericFunCalledFromSubclass.kt
 coroutines/kt28844.kt
 coroutines/kt49168.kt
 coroutines/localFunctions/named/defaultArgument.kt
@@ -60,14 +59,11 @@ inline/localDeclarationsClash.kt
 inlineSizeReduction/lastBreak.kt
 innerNested/nestedInPackage.kt
 ir/privateSignatures/privateLeakThroughInline.kt
-ir/recursiveGeneric.kt
-ir/recursiveGeneric2.kt
 multiDecl/nameBasedDestructuringUnderscoreWithRenaming.kt
 multiplatform/k2/defaultArguments/bothInExpectAndActual.kt
 multiplatform/k2/defaultArguments/bothInExpectAndActual2.kt
 multiplatform/k2/kt66970.kt
 nonLocalReturns/suspendConversion.kt
-nullCheckOptimization/kt22410.kt
 reflection/functions/genericOverriddenFunction.kt
 reflection/functions/typeParameterInReturnType.kt
 reflection/noReflectAtRuntime/methodsFromAny/delegatedProperty.kt
@@ -78,10 +74,7 @@ reflection/typeOf/reifiedAsNestedArgument.kt
 reflection/typeOf/typeAliasedType.kt
 reified/capture.kt
 reified/catchParameter/tryCatchReifiedType.kt
-reified/extensionLambda.kt
 reified/innerObject.kt
-reified/lambda.kt
-reified/lambdaNameClash.kt
 reified/reifiedTypeArgumentWithIntersectionTypeAsTypeArgument.kt
 sam/constructors/sameWrapperClass.kt
 secondaryConstructors/localClasses.kt

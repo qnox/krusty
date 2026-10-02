@@ -925,6 +925,7 @@ fn fn_info(
         params.insert(sig.context_count.min(params.len()), r);
     }
     let declared_params = Some(params.clone().into_boxed_slice());
+    let call_sig = sig.call_sig();
     let callable = LibraryCallable {
         external_identity: None,
         external_default_provider: None,
@@ -963,7 +964,11 @@ fn fn_info(
         // Representation lowering needs the declaration receiver before erasure.
         source_receiver,
         declared_params,
-        inline_modifiers: sig.call_sig().inline_modifiers.into_boxed_slice(),
+        inline_modifiers: call_sig.inline_modifiers.clone().into_boxed_slice(),
+        reified_type_parameter_ordinals: call_sig
+            .reified_type_parameter_ordinals
+            .clone()
+            .into_boxed_slice(),
         context_count: sig.context_count,
         contract: sig.contract.clone(),
         equality_bound: sig.equality_bound,
@@ -981,7 +986,7 @@ fn fn_info(
         receiver_rank: rank,
         generic_sig: sig.generic_sig.clone(),
         projected_return_hazard: sig.projected_return_hazard,
-        call_sig: sig.call_sig(),
+        call_sig,
         default_values: sig.param_default_values.clone(),
         context_count: sig.context_count,
         source_file: sig.source_file,
@@ -1081,6 +1086,7 @@ fn source_callable(
         source_receiver: None,
         declared_params,
         inline_modifiers: Box::new([]),
+        reified_type_parameter_ordinals: Box::new([]),
         context_count: 0,
         contract: None,
         equality_bound: None,

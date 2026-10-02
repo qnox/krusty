@@ -1713,7 +1713,7 @@ pub fn decode_metadata(
     } else {
         Vec::new()
     };
-    let class_flags = (k == Some(1)).then(|| class_flags(&ctx));
+    let class_flags = (k == Some(1)).then(|| class_identity::class_flags(&ctx));
     // `@Deprecated(level = HIDDEN)` lives on the JVM realization (a `kotlin.Deprecated` runtime
     // annotation), not in the protobuf. A declaration whose realization method carries it exists
     // for binary compatibility only — kotlinc drops it from resolution — so stamp the fact here,
@@ -1765,7 +1765,7 @@ pub fn decode_metadata(
         class_visibility: class_flags
             .map(flags_visibility)
             .map(crate::types::Visibility::from_metadata),
-        class_kind: class_flags.map(metadata_class_kind),
+        class_kind: class_flags.map(class_identity::class_kind),
         is_fun_interface: class_flags.is_some_and(|flags| flags & (1u64 << 14) != 0),
         class_type_parameters: crate::types::TypeParameters::new(
             class_type_params,
@@ -1790,16 +1790,6 @@ pub fn decode_metadata(
         multifile_parts: Vec::new(),
         package,
     })
-}
-
-fn metadata_class_kind(flags: u64) -> TypeKind {
-    match (flags >> 6) & 0x7 {
-        1 => TypeKind::Interface,
-        2 => TypeKind::Enum,
-        4 => TypeKind::Annotation,
-        5 | 6 => TypeKind::Object,
-        _ => TypeKind::Class,
-    }
 }
 
 /// What [`decode_class_signature`] reads off a Class proto: the class's own type-parameter NAMES,
@@ -2033,25 +2023,6 @@ fn decode_metadata_type(
     } else {
         ty
     })
-}
-
-/// Kotlin `Class.flags`. The protobuf default is PUBLIC FINAL (`6`); decode the word once through
-/// this boundary helper so every individual class flag uses identical wire-format defaulting.
-fn class_flags(ctx: &MetaCtx<'_>) -> u64 {
-    let mut flags = 6u64;
-    let mut pb = Pb::new(ctx.msg);
-    while !pb.at_end() {
-        let Some(tag) = pb.varint() else { break };
-        match (tag >> 3, tag & 7) {
-            (1, 0) => flags = pb.varint().unwrap_or(6),
-            (_, wire) => {
-                if pb.skip(wire).is_none() {
-                    break;
-                }
-            }
-        }
-    }
-    flags
 }
 
 /// Decode every `Function` (proto field `fn_field`: 9 in a `Class`, 3 in a `Package`) of this class's
@@ -2422,6 +2393,17 @@ fn decode_functions(
                             })
                             .filter_map(|parameter| {
                                 resolve_string(records, d2, parameter.name_id as usize)
+                            })
+                            .collect(),
+                        reified_type_parameter_ordinals: pf
+                            .type_params
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(ordinal, parameter)| {
+                                parameter
+                                    .reified
+                                    .then(|| u32::try_from(ordinal).ok())
+                                    .flatten()
                             })
                             .collect(),
                         context_params,
@@ -2915,6 +2897,7 @@ pub struct BuiltinTypeParam {
     pub bounds: Vec<BuiltinTy>,
     pub variance: crate::types::TypeVariance,
     pub only_input: bool,
+    pub reified: bool,
 }
 
 /// A builtin `Class` decoded from a `.kotlin_builtins` fragment: its direct supertypes and declared

@@ -1254,14 +1254,34 @@ impl BodyFirChecker<'_> {
         declaration: DeclarationId,
         selected: &crate::libraries::PropertyInfo,
     ) -> Result<Box<[FirTypeSubstitution]>, BodyCheckFailure> {
-        let Some(generic) = selected.getter.generic_sig.as_deref() else {
+        self.selected_getter_substitutions(
+            expression,
+            declaration,
+            &selected.getter,
+            selected.receiver,
+            selected.ty,
+        )
+    }
+
+    /// Type arguments of a selected getter, recovered from its generic signature and the receiver
+    /// and result the reference or read already specialized. A callable reference does not carry
+    /// `resolved_call_type_args`, so this is the same record a property read publishes.
+    pub(super) fn selected_getter_substitutions(
+        &self,
+        expression: ExprId,
+        declaration: DeclarationId,
+        getter: &crate::libraries::LibraryCallable,
+        selected_receiver: Option<Ty>,
+        selected_type: Ty,
+    ) -> Result<Box<[FirTypeSubstitution]>, BodyCheckFailure> {
+        let Some(generic) = getter.generic_sig.as_deref() else {
             return Ok(Box::new([]));
         };
         let mut bindings = crate::symbol_resolver::GSigBinds::new();
-        if let (Some(declared), Some(actual)) = (generic.receiver, selected.receiver) {
+        if let (Some(declared), Some(actual)) = (generic.receiver, selected_receiver) {
             crate::symbol_resolver::unify_inferred_ty(declared, actual, &mut bindings);
         }
-        crate::symbol_resolver::unify_inferred_ty(generic.ret, selected.ty, &mut bindings);
+        crate::symbol_resolver::unify_inferred_ty(generic.ret, selected_type, &mut bindings);
         generic
             .formals
             .iter()
@@ -1285,8 +1305,15 @@ impl BodyFirChecker<'_> {
                                 BodyCheckFailureKind::MissingStablePropertyTarget,
                             )
                         })?;
+                let header = self.index.type_parameter_header(parameter).ok_or_else(|| {
+                    self.failure(
+                        self.file.expr_span(expression),
+                        BodyCheckFailureKind::MissingStablePropertyTarget,
+                    )
+                })?;
                 Ok(FirTypeSubstitution {
                     parameter: parameter.into(),
+                    reified: header.flags.is_reified(),
                     value: self.resolved_type(
                         self.file.expr_span(expression).ok_or_else(|| {
                             self.failure(None, BodyCheckFailureKind::MissingSourceSpan)
@@ -1302,7 +1329,7 @@ impl BodyFirChecker<'_> {
 
     /// Record an inline accessor and the names of its already-checked type arguments.
     /// Expansion reads this record and does not ask the index whether the accessor is inline.
-    fn inline_accessor_splice(
+    pub(super) fn inline_accessor_splice(
         &self,
         span: Option<Span>,
         declaration: DeclarationId,
@@ -1334,13 +1361,12 @@ impl BodyFirChecker<'_> {
                 .ok_or_else(|| {
                     self.failure(span, BodyCheckFailureKind::MissingStablePropertyTarget)
                 })?;
-            let reified = self
-                .index
-                .type_parameter_header(parameter)
-                .is_some_and(|header| header.flags.is_reified());
+            let header = self.index.type_parameter_header(parameter).ok_or_else(|| {
+                self.failure(span, BodyCheckFailureKind::MissingStablePropertyTarget)
+            })?;
             recorded.push(crate::fir::FirInlineTypeSubstitution {
                 name: Box::from(name),
-                reified,
+                reified: header.flags.is_reified(),
                 value: substitution.value,
             });
         }

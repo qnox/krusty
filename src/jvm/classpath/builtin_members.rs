@@ -4,6 +4,27 @@
 use super::*;
 use super::{builtin_declared_return, builtin_descriptor, builtin_erased};
 
+/// Provider-normalized projection of one package callable decoded from a builtins resource.
+#[derive(Clone)]
+pub(in crate::jvm) struct BuiltinPackageFunction {
+    pub(in crate::jvm) generic_sig: GenericSig,
+    pub(in crate::jvm) only_input_type_formals: Vec<String>,
+    pub(in crate::jvm) params: Vec<Ty>,
+    pub(in crate::jvm) ret: Ty,
+    pub(in crate::jvm) param_names: Vec<String>,
+    pub(in crate::jvm) param_defaults: Vec<bool>,
+    pub(in crate::jvm) vararg: Option<usize>,
+    pub(in crate::jvm) visibility: crate::types::Visibility,
+    pub(in crate::jvm) is_inline: bool,
+    pub(in crate::jvm) has_reified_type_params: bool,
+    pub(in crate::jvm) reified_type_parameter_ordinals: Vec<u32>,
+    pub(in crate::jvm) is_suspend: bool,
+    pub(in crate::jvm) is_operator: bool,
+    pub(in crate::jvm) is_infix: bool,
+    pub(in crate::jvm) context_count: usize,
+    pub(in crate::jvm) annotations: Vec<TypeName>,
+}
+
 impl Classpath {
     /// Kotlin BUILTIN members (`String.length`, `List.get`, `Number.toInt`, …) as regular
     /// `LibraryMember` facts. The source name stays in `name`; JVM realization details stay in the JVM

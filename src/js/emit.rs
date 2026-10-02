@@ -65,7 +65,7 @@ pub fn emit_file(ir: &IrFile) -> String {
             let static_prefix = if f.is_static { "static " } else { "" };
             out.push_str(&format!(
                 "  {static_prefix}{}({}) {{\n",
-                f.name,
+                emitted_function_name(ir, fid, &f.name),
                 params.join(", ")
             ));
             emit_default_initializers(
@@ -102,7 +102,11 @@ pub fn emit_file(ir: &IrFile) -> String {
         let Some(body) = f.body else { continue };
         let _ = i;
         let params: Vec<String> = (0..f.params.len()).map(|i| format!("v{i}")).collect();
-        out.push_str(&format!("function {}({}) {{\n", f.name, params.join(", ")));
+        out.push_str(&format!(
+            "function {}({}) {{\n",
+            emitted_function_name(ir, i as u32, &f.name),
+            params.join(", ")
+        ));
         let function = i as u32;
         emit_default_initializers(
             ir,
@@ -118,6 +122,63 @@ pub fn emit_file(ir: &IrFile) -> String {
         out.push_str("}\n");
     }
     out
+}
+
+fn specialization_ordinal(ir: &IrFile, implementation: u32) -> Option<u32> {
+    let specialization = ir.specialized_functions.get(&implementation)?;
+    let mut ordinal = 0u32;
+    for function in 0..=implementation {
+        let Some(candidate) = ir.specialized_functions.get(&function) else {
+            continue;
+        };
+        let same_group = match specialization.parent {
+            Some(parent) => candidate.parent == Some(parent),
+            None => {
+                candidate.parent.is_none()
+                    && candidate.caller == specialization.caller
+                    && (candidate.caller.is_some()
+                        || candidate.caller_declaration == specialization.caller_declaration)
+                    && candidate.caller_is_default == specialization.caller_is_default
+                    && candidate.inline_callee == specialization.inline_callee
+            }
+        };
+        if same_group {
+            ordinal = ordinal.saturating_add(1);
+        }
+    }
+    (ordinal != 0).then_some(ordinal)
+}
+
+fn specialization_caller_name(specialization: &crate::ir::IrSpecializedFunction) -> String {
+    specialization.caller_source_name.clone()
+}
+
+/// A specialized copy keeps semantic expansion and containment provenance in common IR. JavaScript
+/// derives its own unique declaration name from that provenance; no target spelling is recorded by
+/// common lowering.
+fn emitted_function_name(ir: &IrFile, function: u32, name: &str) -> String {
+    match ir.specialized_functions.get(&function) {
+        Some(specialization) => match specialization.parent {
+            Some(parent) => format!(
+                "{}${}",
+                emitted_function_name(ir, parent, &ir.functions[parent as usize].name),
+                specialization_ordinal(ir, function)
+                    .expect("a specialized function retains its sibling position")
+            ),
+            None => {
+                let caller = specialization_caller_name(specialization);
+                let ordinal = specialization_ordinal(ir, function)
+                    .expect("a specialized function retains its expansion position");
+                format!("{name}${caller}${ordinal}")
+            }
+        },
+        None => name.to_string(),
+    }
+}
+
+/// Declaration and every identity-bearing reference use the same physical name.
+fn emitted_callable_name(ir: &IrFile, function: u32) -> String {
+    emitted_function_name(ir, function, &ir.functions[function as usize].name)
 }
 
 fn emit_default_initializers(
@@ -569,7 +630,7 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
             args,
         } => {
             let fid = ir.classes[*class as usize].methods[*index as usize];
-            let name = &ir.functions[fid as usize].name;
+            let name = emitted_callable_name(ir, fid);
             // An omitted argument (`None`) takes its default — `undefined` lets JS apply the native default.
             let a: Vec<String> = args
                 .iter()
@@ -628,11 +689,11 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
             args,
         } => match callee {
             Callee::Local(fid) => {
-                let name = &ir.functions[*fid as usize].name;
+                let name = emitted_callable_name(ir, *fid);
                 format!("{}({})", name, emit_args(ir, args, inst))
             }
             Callee::ClassStatic { owner, function } => {
-                let name = &ir.functions[*function as usize].name;
+                let name = emitted_callable_name(ir, *function);
                 let owner = owner.render();
                 format!(
                     "{}.{}({})",
@@ -646,7 +707,7 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
                 function,
                 defaults,
             } => {
-                let name = &ir.functions[*function as usize].name;
+                let name = emitted_callable_name(ir, *function);
                 let owner = owner.render();
                 let parameter_count = ir.functions[*function as usize].params.len();
                 format!(
@@ -657,7 +718,7 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
                 )
             }
             Callee::ClassStaticDefault { owner, function } => {
-                let name = format!("{}$default", ir.functions[*function as usize].name);
+                let name = format!("{}$default", emitted_callable_name(ir, *function));
                 let owner = owner.render();
                 format!(
                     "{}.{}({})",
@@ -667,14 +728,14 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
                 )
             }
             Callee::LocalDefault(fid) => {
-                let name = format!("{}$default", ir.functions[*fid as usize].name);
+                let name = format!("{}$default", emitted_callable_name(ir, *fid));
                 format!("{}({})", name, emit_args(ir, args, inst))
             }
             Callee::LocalWithDefaults { function, defaults } => {
                 let declaration = &ir.functions[*function as usize];
                 format!(
                     "{}({})",
-                    declaration.name,
+                    emitted_callable_name(ir, *function),
                     emit_args_with_defaults(ir, args, defaults, declaration.params.len(), inst,)
                 )
             }
@@ -964,6 +1025,27 @@ fn emit_expr_node(ir: &IrFile, node: &IrExpr, inst: bool) -> String {
                 .collect();
             format!("[{}]", items.join(", "))
         }
+        // A non-capturing lambda is the function that holds its body. A specialized copy keeps
+        // that function's source name in common IR; the physical name is the one every reference
+        // and the declaration share. Captures are still a closure the JS subset does not build.
+        IrExpr::Lambda {
+            impl_fn, captures, ..
+        } => {
+            if captures.is_empty() {
+                emitted_callable_name(ir, *impl_fn)
+            } else {
+                unsupported_expression("Lambda")
+            }
+        }
+        // `f(args)` where `f` is a function value. The callee is already a lowered expression;
+        // calling it is the JavaScript realization of `FunctionN.invoke`.
+        IrExpr::InvokeFunction { func, args, .. } => {
+            format!(
+                "({})({})",
+                emit_expr(ir, *func, inst),
+                emit_args(ir, args, inst)
+            )
+        }
         // The JS backend covers a subset of the IR. A node it cannot represent must NOT masquerade as a
         // value: `undefined` silently compiles a wrong program (a property read read back as `undefined`
         // instead of the value, with no error anywhere). JS has no compile step of its own, so the honest
@@ -1179,6 +1261,66 @@ mod tests {
         assert!(js.contains("Outer.access$super(null)"), "{js}");
         assert!(js.contains("Base.prototype.value.call(v0)"), "{js}");
         assert!(!js.contains("function access$super"), "{js}");
+    }
+
+    #[test]
+    fn a_specialized_copy_is_not_declared_under_the_source_name() {
+        use crate::ir::{Callee, IrExpr, IrSpecializedFunction};
+
+        let mut ir = IrFile::default();
+        let body = ir.add_expr(IrExpr::Block {
+            stmts: vec![],
+            value: None,
+        });
+        let source = ir.add_fun(IrFunction {
+            name: "check".to_string(),
+            params: vec![],
+            ret: Ty::Unit,
+            body: Some(body),
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: vec![],
+        });
+        let call = ir.add_expr(IrExpr::Call {
+            callee: Callee::Local(0),
+            dispatch_receiver: None,
+            args: vec![],
+        });
+        let copy_body = ir.add_expr(IrExpr::Block {
+            stmts: vec![call],
+            value: None,
+        });
+        let copy = ir.add_fun(IrFunction {
+            name: "check".to_string(),
+            params: vec![],
+            ret: Ty::Unit,
+            body: Some(copy_body),
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: vec![],
+        });
+        if let IrExpr::Call { callee, .. } = &mut ir.exprs[call as usize] {
+            *callee = Callee::Local(copy);
+        }
+        ir.fn_source_names.insert(source, "box".to_string());
+        ir.specialized_functions.insert(
+            copy,
+            IrSpecializedFunction {
+                source,
+                caller_declaration: crate::fir::DeclarationId::from_raw(3),
+                caller: Some(crate::ir::IrEnclosure::Function(source)),
+                caller_is_default: false,
+                caller_source_name: "box".to_string(),
+                inline_callee: crate::fir::CallableId::from_raw(5),
+                inline_callee_source_name: "defineFunc".to_string(),
+                parent: None,
+            },
+        );
+        let js = emit_file(&ir);
+        assert_eq!(
+            js,
+            "function check() {\n}\nfunction check$box$1() {\n  check$box$1();\n}\n"
+        );
     }
 
     #[test]

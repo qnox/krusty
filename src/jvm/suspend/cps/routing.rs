@@ -125,4 +125,18 @@ impl EmitTimeMachines {
     ) -> Option<&SuspendLambdaClass> {
         self.suspend_lambdas.get(&class)
     }
+
+    pub(crate) fn remap_suspend_lambda_class(
+        &mut self,
+        function: u32,
+        from: crate::types::TypeName,
+        to: crate::types::TypeName,
+    ) {
+        if let Some(lambda) = self.suspend_lambdas.remove(&from) {
+            self.suspend_lambdas.insert(to, lambda);
+        }
+        if let Some(machine) = self.transformed.get_mut(&function) {
+            machine.continuation_class = to.render();
+        }
+    }
 }

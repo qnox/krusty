@@ -699,7 +699,7 @@ impl ProductionSignatureSemantics<'_> {
             }
             let visible = (context_count..signature.params.len()).collect::<Vec<_>>();
             let mut projected = candidate.clone();
-            projected.call_sig = super::call_sig_for_parameters(&candidate.call_sig, &visible);
+            projected.call_sig = candidate.call_sig.select_parameters(&visible);
             projected.context_count = 0;
             signature.params = signature.params[context_count..].to_vec();
             projected.generic_sig = Some(signature);
@@ -1229,7 +1229,7 @@ impl ProductionSignatureSemantics<'_> {
                     crate::symbol_resolver::ty_subst_keep_unbound(signature.ret, &bindings);
                 let visible =
                     (context_count..candidate.call_sig.param_names.len()).collect::<Vec<_>>();
-                candidate.call_sig = super::call_sig_for_parameters(&candidate.call_sig, &visible);
+                candidate.call_sig = candidate.call_sig.select_parameters(&visible);
                 candidate.generic_sig = Some(signature);
                 candidate.context_count = 0;
                 crate::trace_compiler!(
@@ -1453,7 +1453,7 @@ impl ProductionSignatureSemantics<'_> {
             let parameter_indices = (context_count..semantic.params.len())
                 .chain((0..context_count).filter(|&parameter| explicitly_named(parameter)))
                 .collect::<Vec<_>>();
-            let call_sig = super::call_sig_for_parameters(&candidate.call_sig, &parameter_indices);
+            let call_sig = candidate.call_sig.select_parameters(&parameter_indices);
             let slots = crate::libraries::map_call_args(
                 &source_indices,
                 Some(&names),

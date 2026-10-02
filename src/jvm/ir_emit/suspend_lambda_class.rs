@@ -166,7 +166,11 @@ pub(super) fn emit_suspend_lambda_class(
     let class_signature = class_signature(&formatter, &shape, &result);
     let mut cw = new_writer_generic(&shape.class, Some(&class_signature), SUSPEND_LAMBDA, opts);
     cw.set_signature(&class_signature);
-    cw.set_access(0x0010 | 0x0020); // FINAL | SUPER
+    // An inline or specialized suspend lambda is public: its body is copied into other packages.
+    // A lambda outside an inline declaration stays package-private.
+    let public = crate::jvm::inner_classes::suspend_lambda_is_public(ir, c);
+    let visibility = if public { 0x0001 } else { 0 };
+    cw.set_access(visibility | 0x0010 | 0x0020); // [PUBLIC |] FINAL | SUPER
     if let Some((owner, method)) = class_enclosure(ir, env.override_results, c, facade) {
         match method {
             Some((name, descriptor)) => cw.set_enclosing_method(&owner, &name, &descriptor),
@@ -188,7 +192,7 @@ pub(super) fn emit_suspend_lambda_class(
         cw.add_field_late(0x1010, &field.name, &field.descriptor, None, None);
     }
 
-    emit_constructor(&mut cw, &formatter, &shape, lambda);
+    emit_constructor(&mut cw, &formatter, &shape, lambda, public);
     emit_method(
         ir,
         lambda.invoke_suspend,
@@ -280,6 +284,7 @@ fn emit_constructor(
     formatter: &JvmSignatureFormatter,
     shape: &Shape,
     lambda: &SuspendLambdaClass,
+    public: bool,
 ) {
     let descriptor = shape.constructor_desc();
     let mut signature = String::from("(");
@@ -322,14 +327,25 @@ fn emit_constructor(
         completion,
     ));
     cw.reserve_method_lvt(&locals);
-    finish_code_sig::<0x0000>(
-        cw,
-        "<init>",
-        &descriptor,
-        &mut code,
-        completion + 1,
-        Some(&signature),
-    );
+    if public {
+        finish_code_sig::<0x0001>(
+            cw,
+            "<init>",
+            &descriptor,
+            &mut code,
+            completion + 1,
+            Some(&signature),
+        );
+    } else {
+        finish_code_sig::<0x0000>(
+            cw,
+            "<init>",
+            &descriptor,
+            &mut code,
+            completion + 1,
+            Some(&signature),
+        );
+    }
     cw.set_method_debug("<init>", &descriptor, None, &locals);
 }
 

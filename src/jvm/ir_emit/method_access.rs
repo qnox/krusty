@@ -122,8 +122,13 @@ fn varargs_access(ir: &IrFile, fid: u32) -> u16 {
 /// Whether `fid` is the implementation selected for a class-realized closure. This consumes the
 /// explicit IR edge from a lambda to its implementation; generated method spelling is never used as
 /// identity, and mixed `-Xlambdas`/`-Xsam-conversions` modes select only the matching closure kind.
-fn lambda_impl_uses_class_strategy(ir: &IrFile, fid: u32, modes: LambdaModes) -> bool {
-    ir.exprs.iter().any(|expression| {
+pub(super) fn class_realized_lambda_method<'a>(
+    ir: &'a IrFile,
+    fid: u32,
+    modes: LambdaModes,
+) -> Option<&'a str> {
+    let runtime_reified = ir.runtime_reified_lambda_implementations.contains(&fid);
+    ir.exprs.iter().find_map(|expression| {
         let IrExpr::Lambda {
             impl_fn,
             arity,
@@ -131,10 +136,19 @@ fn lambda_impl_uses_class_strategy(ir: &IrFile, fid: u32, modes: LambdaModes) ->
             ..
         } = expression
         else {
-            return false;
+            return None;
         };
-        *impl_fn == fid && modes.for_lambda(sam.as_ref(), *arity) == LambdaMode::Class
+        (*impl_fn == fid
+            && (runtime_reified || modes.for_lambda(sam.as_ref(), *arity) == LambdaMode::Class))
+            .then_some(
+                sam.as_ref()
+                    .map_or("invoke", |target| target.method.as_str()),
+            )
     })
+}
+
+pub(super) fn lambda_impl_uses_class_strategy(ir: &IrFile, fid: u32, modes: LambdaModes) -> bool {
+    class_realized_lambda_method(ir, fid, modes).is_some()
 }
 
 /// `ACC_VARARGS` for a primary constructor whose last physical parameter is its `vararg`.

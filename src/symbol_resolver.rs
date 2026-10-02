@@ -8027,7 +8027,6 @@ mod tests {
             receiver: None,
             info: top_level_nullable_string_info(),
         };
-
         let selected = select_constructor_declaration_from_type(
             &source,
             &source,
@@ -8168,6 +8167,7 @@ mod tests {
             source_receiver: None,
             declared_params: None,
             inline_modifiers: Box::new([]),
+            reified_type_parameter_ordinals: Box::new([]),
             context_count: 0,
             contract: None,
             equality_bound: None,

@@ -7,6 +7,12 @@
 use super::{ExprId, IrCapturedReceiver, IrParameterIdentity, IrTypeParameter};
 use crate::types::Ty;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct IrInlineDeclaration {
+    pub(crate) declaration: crate::fir::DeclarationId,
+    pub(crate) visibility: crate::types::Visibility,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct IrLocalDelegateAccessorPlan {
     pub(crate) body: ExprId,
@@ -25,8 +31,15 @@ pub(crate) struct IrLocalDelegateAccessorPlan {
 
 #[derive(Clone, Debug)]
 pub(crate) struct IrLocalDelegatePlan {
-    /// Lexical declaration identity and source order of the property. A copied inline accessor may
-    /// be realized at another physical owner, but an ordinary nested-class use remains owned here.
+    /// The checked inline declaration whose copied body exposes this property, retained through
+    /// nested local functions and lambdas. Targets must not rediscover it from containment.
+    pub(crate) inline_declaration: Option<IrInlineDeclaration>,
+    /// Exact source lambda whose executable body contains this declaration, inherited through
+    /// nested local functions. A target may realize that lambda and its copied implementations as
+    /// distinct closure classes; their private helpers belong to those closure realizations.
+    pub(crate) declaration_lambda: Option<super::FunId>,
+    /// Lexical declaration identity and source order of the property. Inline copies retain this
+    /// identity rather than creating another declaration at the caller.
     pub(crate) reference: super::IrLocalPropertyReference,
     pub(crate) storage_name: Box<str>,
     pub(crate) getter: IrLocalDelegateAccessorPlan,

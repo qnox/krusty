@@ -697,6 +697,7 @@ impl SemanticTables<'_> {
                     ParsedVariance::Invariant => crate::types::TypeVariance::Invariant,
                 },
                 only_input,
+                reified: parameter.reified,
             });
         }
         Ok((parameters, names))

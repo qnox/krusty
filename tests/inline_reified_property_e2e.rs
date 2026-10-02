@@ -32,6 +32,56 @@ fun box(): String {\n\
     common::expect_box_same_as_kotlinc(SRC, "inlineReifiedPropertySetter");
 }
 
+/// A function-valued property reference still invokes the checker-selected inline getter. The
+/// generated adapter is lowering machinery, not a second resolution site, so it must carry the
+/// exact reified substitution published for the reference.
+#[test]
+fn an_inline_reified_property_reference_uses_the_checked_type_argument() {
+    const SRC: &str = "\
+interface Root\n\
+class Token : Root\n\
+inline val <reified T : Root> T.identity: T\n\
+    get() = (this as Root) as T\n\
+fun apply(read: (Token) -> Token, value: Token): Token = read(value)\n\
+fun box(): String {\n\
+    val token = Token()\n\
+    return if (apply(Token::identity, token) === token) \"OK\" else \"fail\"\n\
+}\n";
+    common::expect_box_same_as_kotlinc(SRC, "inlineReifiedPropertyReference");
+}
+
+/// `String::kind` is the direct property reference from `inline/kt67866.kt`'s shape: the getter's
+/// reified class literal must be the call-site class, not the erased accessor's `Object`.
+#[test]
+fn an_inline_reified_property_reference_reports_the_call_site_class() {
+    const SRC: &str = "\
+inline val <reified T> T.kind: String\n\
+    get() = T::class.simpleName ?: \"anonymous\"\n\
+fun apply(read: (String) -> String): String = read(\"OK\")\n\
+fun box(): String = if (apply(String::kind) == \"String\") \"OK\" else \"fail\"\n";
+    common::expect_box_same_as_kotlinc(SRC, "inlineReifiedPropertyReferenceClass");
+}
+
+#[test]
+fn a_cross_file_inline_reified_property_reference_retains_its_checked_getter() {
+    const LIB: &str = "\
+interface Root\n\
+class Token : Root\n\
+inline val <reified T : Root> T.identity: T\n\
+    get() = (this as Root) as T\n";
+    const MAIN: &str = "\
+fun apply(read: (Token) -> Token, value: Token): Token = read(value)\n\
+fun box(): String {\n\
+    val token = Token()\n\
+    return if (apply(Token::identity, token) === token) \"OK\" else \"fail\"\n\
+}\n";
+    let sources = [("lib.kt", LIB), ("main.kt", MAIN)];
+    assert_eq!(
+        run_box_files(&sources),
+        common::kotlinc_box_files_result(&sources, "MainKt")
+    );
+}
+
 /// The extension receiver and the stored value each run once. The setter sees that value.
 #[test]
 fn an_inline_setter_evaluates_its_receiver_and_value_once() {

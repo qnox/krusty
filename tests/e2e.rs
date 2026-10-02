@@ -713,6 +713,8 @@ mod enum_vararg_e2e;
 mod error_branch_join_e2e;
 #[path = "error_receiver_cascade_e2e.rs"]
 mod error_receiver_cascade_e2e;
+#[path = "escaping_reified_lambda_e2e.rs"]
+mod escaping_reified_lambda_e2e;
 #[path = "expect_default_lambda_marker_e2e.rs"]
 mod expect_default_lambda_marker_e2e;
 #[path = "expected_return_invariant_binding_e2e.rs"]
@@ -1636,6 +1638,8 @@ mod library_function_reference_class_e2e;
 mod loop_backedge_narrowing_e2e;
 #[path = "nested_data_class_tostring_recipe_e2e.rs"]
 mod nested_data_class_tostring_recipe_e2e;
+#[path = "nested_inline_delegate_e2e.rs"]
+mod nested_inline_delegate_e2e;
 #[path = "nullable_sam_e2e.rs"]
 mod nullable_sam_e2e;
 #[path = "operator_expected_result_seeding_e2e.rs"]
@@ -1778,6 +1782,8 @@ mod reified_inline_check_e2e;
 mod reified_inline_return_infer_e2e;
 #[path = "reified_inline_splice_ldc_wide_e2e.rs"]
 mod reified_inline_splice_ldc_wide_e2e;
+#[path = "reified_local_delegate_e2e.rs"]
+mod reified_local_delegate_e2e;
 #[path = "reified_parameter_forwarding_e2e.rs"]
 mod reified_parameter_forwarding_e2e;
 #[path = "reified_primitive_safecast_e2e.rs"]

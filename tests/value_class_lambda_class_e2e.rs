@@ -83,6 +83,58 @@ fn lambda_classes_run() {
     common::expect_box_same_as_kotlinc(SRC, "ValueClassLambdaClass");
 }
 
+/// A constructor-reference adapter in a static delegated-property initializer is already shaped
+/// for the callable-reference ABI. Discovering reified source closures in every emitted root must
+/// not reclassify that adapter as an ordinary source lambda.
+#[test]
+fn a_value_class_constructor_reference_in_a_static_initializer_keeps_its_adapter_abi() {
+    const SRC: &str = "class Marker\n\
+        object Expected { val marker = Marker() }\n\
+        interface Source {\n\
+        companion object { val default: Token by lazy(::Token) }\n\
+    }\n\
+    @JvmInline value class Token(val marker: Marker = Expected.marker) : Source\n\
+    fun box(): String = if (Source.default.marker === Expected.marker) \"OK\" else \"fail\"\n";
+    common::expect_box_same_as_kotlinc(SRC, "StaticValueClassConstructorReference");
+}
+
+#[test]
+fn a_source_value_class_lambda_in_a_static_initializer_is_realized_as_a_class() {
+    const SRC: &str = "class Marker\n\
+        object Expected { val marker = Marker() }\n\
+        @JvmInline value class Token(val marker: Marker)\n\
+        val factory: () -> Token = { Token(Expected.marker) }\n\
+        fun box(): String = if (factory().marker === Expected.marker) \"OK\" else \"fail\"\n";
+    let built = common::compare_with_kotlinc_plugin(
+        "StaticValueClassLambda",
+        SRC,
+        "StaticValueClassLambdaKt$factory$1",
+        &[common::stdlib_jar()],
+        "25",
+        &[],
+    )
+    .expect("reference kotlinc is provisioned");
+    assert!(
+        !built.reference_bytes.is_empty(),
+        "kotlinc writes the source lambda class"
+    );
+    assert_eq!(built.krusty_bytes, built.reference_bytes);
+    common::expect_box_same_as_kotlinc(SRC, "StaticValueClassLambdaRun");
+}
+
+#[test]
+fn a_generic_value_class_constructor_reference_in_a_static_initializer_keeps_its_adapter_abi() {
+    const SRC: &str = "open class Marker\n\
+        class ExactMarker : Marker()\n\
+        object Expected { val marker = ExactMarker() }\n\
+        interface Source {\n\
+        companion object { val default: Token<ExactMarker> by lazy(::Token) }\n\
+    }\n\
+    @JvmInline value class Token<T : Marker>(val marker: T = Expected.marker as T) : Source\n\
+    fun box(): String = if (Source.default.marker === Expected.marker) \"OK\" else \"fail\"\n";
+    common::expect_box_same_as_kotlinc(SRC, "StaticGenericValueClassConstructorReference");
+}
+
 /// A lambda passed to a same-file inline function's `noinline` parameter is a value that function
 /// receives, not a body it splices. The expansion materializes the value before lambda classes are
 /// realized, so it is the class kotlinc writes.

@@ -2,7 +2,7 @@
 
 use crate::fir::{
     FirCallableReferenceBinding, FirPropertyReferenceTarget, FirPropertyTarget,
-    FirReferenceAdaptation,
+    FirReferenceAdaptation, FirTypeSubstitution,
 };
 use crate::ir::{ExprId, IrCheckedOperation, IrExpr, IrFunction, IrTypeOp};
 use crate::types::Ty;
@@ -16,6 +16,7 @@ impl BodyLowering<'_> {
         binding: FirCallableReferenceBinding,
         dispatch_capture: Option<ExprId>,
         extension_capture: Option<ExprId>,
+        substitutions: &[FirTypeSubstitution],
         adaptation: Option<&FirReferenceAdaptation>,
         reference_ty: Ty,
     ) -> Result<Option<ExprId>, FirLoweringFailure> {
@@ -149,15 +150,22 @@ impl BodyLowering<'_> {
                         substitutions: Vec::new(),
                     }))
             }
-            FirPropertyReferenceTarget::SpecializedModule { property, .. } => {
-                self.ir
+            FirPropertyReferenceTarget::SpecializedModule {
+                property,
+                getter_inline_splice,
+                ..
+            } => {
+                let read = self
+                    .ir
                     .add_expr(IrExpr::Checked(IrCheckedOperation::PropertyRead {
                         target: *property,
                         dispatch_receiver,
                         extension_receiver,
                         context_arguments: Vec::new(),
-                        substitutions: Vec::new(),
-                    }))
+                        substitutions: super::checked::lower_substitutions(substitutions),
+                    }));
+                self.record_inline_property_splice(read, getter_inline_splice);
+                read
             }
             FirPropertyReferenceTarget::Classifier { .. } => {
                 return Err(FirLoweringFailure::UnsupportedPropertyReferenceTarget);

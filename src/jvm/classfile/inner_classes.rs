@@ -16,6 +16,9 @@ pub(super) struct LocalDeclarations {
     /// The internal name of the class each is declared in, by its own: kotlinc's `ClassCodegen`
     /// lists every class it generates from its own code, whether or not that code names it.
     declaring: Rc<HashMap<String, String>>,
+    /// Specialized suspend lambdas regenerated into a caller. The caller references them without
+    /// an `InnerClasses` row; the class itself and classes it encloses still list the row.
+    call_sites: Rc<std::collections::HashSet<String>>,
 }
 
 /// How a class's `InnerClasses` table is built.
@@ -70,6 +73,16 @@ impl ClassWriter {
         }
     }
 
+    /// Specialized suspend lambdas a caller constructs without listing them.
+    pub(crate) fn set_call_site_classes(
+        &mut self,
+        call_sites: Rc<std::collections::HashSet<String>>,
+    ) {
+        if let InnerClassTable::Referenced(own) = &mut self.inner_class_table {
+            own.call_sites = call_sites;
+        }
+    }
+
     /// Write every registered entry, in registration order: the table of a class copied from a
     /// compiled one, whose writer is handed the rows one by one (`ClassVisitor.visitInnerClass`).
     pub(crate) fn keep_visited_inner_classes(&mut self) {
@@ -92,12 +105,33 @@ impl ClassWriter {
         spec: &InnerClassSpec,
         inner_present: bool,
     ) -> bool {
+        if self.call_site_regenerated(&spec.inner) {
+            return self.internal_name == spec.inner || self.declared_in_class(&spec.inner);
+        }
         self.inner_class_table == InnerClassTable::Visited
             || spec.outer.as_deref() == Some(self.internal_name.as_str())
             || inner_present
             || self.declares(&spec.inner)
             || self.annotation_class_refs.contains(&spec.inner)
             || self.descriptor_mentions(&spec.inner)
+    }
+
+    /// Whether `inner` is a call-site suspend lambda the referencing class must not list.
+    fn call_site_regenerated(&self, inner: &str) -> bool {
+        match &self.inner_class_table {
+            InnerClassTable::Referenced(local) => local.call_sites.contains(inner),
+            InnerClassTable::Visited => false,
+        }
+    }
+
+    /// Whether this class is declared inside `owner`.
+    fn declared_in_class(&self, owner: &str) -> bool {
+        match &self.inner_class_table {
+            InnerClassTable::Referenced(local) => {
+                local.declaring.get(&self.internal_name).map(String::as_str) == Some(owner)
+            }
+            InnerClassTable::Visited => false,
+        }
     }
 
     /// Whether this class's code declares the local or anonymous class `inner`.

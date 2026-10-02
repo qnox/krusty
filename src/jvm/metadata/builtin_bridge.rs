@@ -73,6 +73,7 @@ fn type_param_from_common(parameter: common::KotlinTypeParameter) -> super::Buil
         bounds: parameter.bounds.into_iter().map(ty_from_common).collect(),
         variance: parameter.variance,
         only_input: parameter.only_input,
+        reified: parameter.reified,
     }
 }
 

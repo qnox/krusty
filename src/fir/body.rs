@@ -171,6 +171,8 @@ impl From<TypeParameterId> for FirTypeParameterRef {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FirTypeSubstitution {
     pub parameter: FirTypeParameterRef,
+    /// Whether this exact declaration parameter carries Kotlin's `reified` capability.
+    pub reified: bool,
     pub value: ResolvedTy,
     /// Additional constituents of an inferred flow-intersection type argument. `value` is the
     /// primary/JVM-erasure constituent; these bounds retain the rest of the checked Kotlin type for
@@ -2635,6 +2637,16 @@ impl FirBody {
                     if let Some(splice) = target.inline_splice() {
                         callables.insert(splice.callable);
                     }
+                }
+                FirExprKind::PropertyReference {
+                    target:
+                        FirPropertyReferenceTarget::SpecializedModule {
+                            getter_inline_splice: Some(splice),
+                            ..
+                        },
+                    ..
+                } => {
+                    callables.insert(splice.callable);
                 }
                 FirExprKind::Lambda { body, .. } => {
                     body.collect_referenced_module_callables(callables);

@@ -53,12 +53,17 @@ pub(crate) trait AnonymousObjects {
         class: &str,
         constructor_desc: &str,
         lambdas: &[ObjectLambda<'_>],
+        prior_classes: &[(String, String)],
     ) -> Result<RegeneratedObject, InlineError>;
 
     /// Regenerate `class`, which the body loads with `getstatic INSTANCE` rather than `new`. The
     /// copy's constructor is the original's; nothing at this instruction passes a lambda.
-    fn regenerate_singleton(&mut self, class: &str) -> Result<RegeneratedObject, InlineError> {
-        let _ = class;
+    fn regenerate_singleton(
+        &mut self,
+        class: &str,
+        prior_classes: &[(String, String)],
+    ) -> Result<RegeneratedObject, InlineError> {
+        let _ = (class, prior_classes);
         Err(InlineError::Regeneration(RegenerationError::Unsupported(
             "an anonymous singleton",
         )))
@@ -92,12 +97,15 @@ pub(super) fn regenerate_objects(
     let mut pending = Vec::new();
     // The copy and its constructor descriptor, by the index of the `new` that made it.
     let mut copies: HashMap<usize, (String, String)> = HashMap::new();
+    // An object regenerated later in this body can capture one regenerated earlier. Its fields,
+    // constructor, and methods must name the earlier copy, not the dependency class.
+    let mut prior_classes = Vec::new();
     // `new` / `getstatic INSTANCE` sites whose copy still uses a reified parameter.
     let mut reemit_markers = Vec::new();
     let marker_sites = need_class_reification_sites(node);
     for at in 0..node.nodes.len() {
         if let Some(owner) = anonymous_singleton_owner(node, at, classes) {
-            let copy = objects.regenerate_singleton(&owner)?;
+            let copy = objects.regenerate_singleton(&owner, &prior_classes)?;
             crate::trace_compiler!(
                 "splice",
                 "singleton {owner} -> {} remain={}",
@@ -105,6 +113,7 @@ pub(super) fn regenerate_objects(
                 copy.reified_parameters_remain
             );
             remapper.add_mapping(&owner, &copy.name);
+            prior_classes.push((owner, copy.name.clone()));
             if copy.reified_parameters_remain {
                 reemit_markers.push(at);
             }
@@ -133,6 +142,7 @@ pub(super) fn regenerate_objects(
                 class,
                 &constructions.descriptors[&constructor],
                 &object_lambdas,
+                &prior_classes,
             )?;
             if !passed.is_empty() {
                 pending.push(PendingConstructor {
@@ -145,6 +155,7 @@ pub(super) fn regenerate_objects(
                 reemit_markers.push(at);
             }
             remapper.add_mapping(class, &copy.name);
+            prior_classes.push((class.clone(), copy.name.clone()));
             *class = copy.name.clone();
             copies.insert(at, (copy.name, copy.constructor_desc));
         } else if let Some(new) = constructions.by_constructor.get(&at) {

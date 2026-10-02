@@ -2,6 +2,196 @@
 
 use super::*;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(super) enum LambdaClassIdentity {
+    /// Source-lambda identity plus the exact specialized implementation when this class realizes a
+    /// generated copy. Two copies of one source lambda do not share a class identity.
+    Source {
+        identity: u32,
+        expansion: Option<u32>,
+    },
+    Synthetic(u32),
+}
+
+fn function_owner(ir: &IrFile, function: u32, facade: &str) -> Option<String> {
+    let owners = ir.class_method_owners.get(&function);
+    let first = owners.and_then(|owners| owners.first()).copied();
+    if owners.is_some_and(|owners| owners.iter().any(|owner| Some(*owner) != first)) {
+        return None;
+    }
+    match first {
+        Some(class) => Some(ir.classes.get(class as usize)?.fq_name()),
+        None => Some(facade.to_owned()),
+    }
+}
+
+fn semantic_owner(
+    ir: &IrFile,
+    specialization: &crate::ir::IrSpecializedFunction,
+    facade: &str,
+) -> Option<String> {
+    use crate::ir::IrEnclosure;
+    let class = match specialization.caller {
+        Some(IrEnclosure::Function(function) | IrEnclosure::Lambda(function)) => {
+            return function_owner(ir, function, facade);
+        }
+        Some(IrEnclosure::PropertyAccessor { property, .. }) => {
+            ir.checked_properties.get(&property)?.class
+        }
+        Some(
+            IrEnclosure::Constructor { class, .. }
+            | IrEnclosure::ClassInitializer(class)
+            | IrEnclosure::Classifier(class),
+        ) => Some(class),
+        Some(IrEnclosure::File) | None => None,
+    };
+    match class {
+        Some(class) => Some(ir.classes.get(class as usize)?.fq_name()),
+        None => Some(facade.to_owned()),
+    }
+}
+
+fn semantic_caller_name(
+    ir: &IrFile,
+    specialization: &crate::ir::IrSpecializedFunction,
+) -> Option<String> {
+    let name = match specialization.caller {
+        Some(crate::ir::IrEnclosure::Function(function)) => {
+            let realized = ir.functions.get(function as usize)?.name.as_str();
+            if ir
+                .lifted_names
+                .get(&function)
+                .is_some_and(|lifted| lifted == realized)
+            {
+                realized
+            } else {
+                specialization.caller_source_name.as_str()
+            }
+        }
+        Some(crate::ir::IrEnclosure::Lambda(function)) => {
+            ir.functions.get(function as usize)?.name.as_str()
+        }
+        Some(
+            crate::ir::IrEnclosure::PropertyAccessor { .. }
+            | crate::ir::IrEnclosure::Constructor { .. },
+        ) => "special",
+        Some(crate::ir::IrEnclosure::ClassInitializer(_))
+            if specialization.caller_source_name.is_empty() =>
+        {
+            "special"
+        }
+        _ => specialization.caller_source_name.as_str(),
+    };
+    if specialization.caller_is_default
+        && matches!(
+            specialization.caller,
+            Some(crate::ir::IrEnclosure::Function(_))
+        )
+    {
+        Some(format!("{name}$default"))
+    } else if specialization.caller_is_default && specialization.caller.is_none() {
+        None
+    } else {
+        Some(name.to_string())
+    }
+}
+
+pub(in crate::jvm) fn specialization_location(
+    ir: &IrFile,
+    specialization: &crate::ir::IrSpecializedFunction,
+    facade: &str,
+    modes: LambdaModes,
+) -> Option<(String, String)> {
+    if let Some(crate::ir::IrEnclosure::Lambda(function)) = specialization.caller {
+        // A plain lambda realized as a class is only an emit plan, not an IrClass. Its specialized
+        // child therefore nests under the generated caller class and its physical `invoke` method.
+        // Suspend lowering removes the source lambda origin when it creates a real IrClass, so that
+        // already-realized case continues through the ordinary owner/name path below.
+        if let Some(method) = ir
+            .lambda_origins
+            .contains_key(&function)
+            .then(|| super::method_access::class_realized_lambda_method(ir, function, modes))
+            .flatten()
+        {
+            let implementation = ir.functions.get(function as usize)?;
+            let implementation_owner = function_owner(ir, function, facade)?;
+            let (owner, _) = class_name(
+                ir,
+                function,
+                &implementation.name,
+                &implementation_owner,
+                facade,
+                modes,
+            );
+            return Some((owner, method.to_string()));
+        }
+    }
+    Some((
+        semantic_owner(ir, specialization, facade)?,
+        semantic_caller_name(ir, specialization)?,
+    ))
+}
+
+pub(in crate::jvm) fn specialization_ordinal(
+    ir: &IrFile,
+    implementation: u32,
+    facade: &str,
+    modes: LambdaModes,
+) -> Option<u32> {
+    let specialization = ir.specialized_functions.get(&implementation)?;
+    let location = specialization_location(ir, specialization, facade, modes)?;
+    let mut ordinal = 0u32;
+    for function in 0..=implementation {
+        let Some(candidate) = ir.specialized_functions.get(&function) else {
+            continue;
+        };
+        let same_stem = match specialization.parent {
+            Some(parent) => candidate.parent == Some(parent),
+            None => {
+                candidate.parent.is_none()
+                    && specialization_location(ir, candidate, facade, modes).as_ref()
+                        == Some(&location)
+                    && candidate.inline_callee_source_name
+                        == specialization.inline_callee_source_name
+            }
+        };
+        if same_stem {
+            ordinal = ordinal.saturating_add(1);
+        }
+    }
+    (ordinal != 0).then_some(ordinal)
+}
+
+fn specialized_class_name(
+    ir: &IrFile,
+    implementation: u32,
+    owner: &str,
+    caller: &str,
+    facade: &str,
+    modes: LambdaModes,
+) -> Option<String> {
+    let specialization = ir.specialized_functions.get(&implementation)?;
+    let ordinal = specialization_ordinal(ir, implementation, facade, modes)?;
+    match specialization.parent {
+        Some(parent) => Some(format!(
+            "{}${ordinal}",
+            specialized_class_name(ir, parent, owner, caller, facade, modes)?
+        )),
+        None => {
+            let mut name = owner.to_owned();
+            if !caller.is_empty() {
+                name.push('$');
+                name.push_str(caller);
+            }
+            name.push_str("$$inlined$");
+            name.push_str(&specialization.inline_callee_source_name);
+            name.push('$');
+            name.push_str(&ordinal.to_string());
+            Some(name)
+        }
+    }
+}
+
 /// The class name and identity of the lambda implemented by `impl_fn`, whose implementation
 /// method `impl_name` lives on `impl_owner`.
 pub(super) fn class_name(
@@ -9,17 +199,37 @@ pub(super) fn class_name(
     impl_fn: u32,
     impl_name: &str,
     impl_owner: &str,
+    facade: &str,
+    modes: LambdaModes,
 ) -> (String, LambdaClassIdentity) {
     // Common lowering records the source lambda's stable lexical origin. Consume that edge
     // directly: a source lambda lowered into multiple constructors keeps one name and identity,
     // and no generated method spelling or value table is searched here.
     let origin = ir.lambda_origins.get(&impl_fn);
+    // A generated copy is the call-site lambda kotlinc names
+    // `{owner}${caller}$$inlined${callee}$N`, not the declaration class with a private suffix.
+    if let Some(specialization) = ir.specialized_functions.get(&impl_fn) {
+        let (owner, caller) = specialization_location(ir, specialization, facade, modes)
+            .expect("a specialized lambda retains one physical caller location");
+        let name = specialized_class_name(ir, impl_fn, &owner, &caller, facade, modes)
+            .expect("a specialized lambda retains complete expansion provenance");
+        let identity = origin.map_or(LambdaClassIdentity::Synthetic(impl_fn), |origin| {
+            LambdaClassIdentity::Source {
+                identity: origin.identity,
+                expansion: Some(impl_fn),
+            }
+        });
+        return (name, identity);
+    }
     // The source's naming walk names a source lambda's class where it nests, as kotlinc does
     // (`Kt$box$1$1` inside `Kt$box$1`), whether or not its enclosing lambda became a class of its
     // own.
     if let Some(name) = crate::jvm::local_class_names::lambda_class_name(ir, impl_fn) {
         let identity = origin.map_or(LambdaClassIdentity::Synthetic(impl_fn), |origin| {
-            LambdaClassIdentity::Source(origin.identity)
+            LambdaClassIdentity::Source {
+                identity: origin.identity,
+                expansion: None,
+            }
         });
         return (name.render(), identity);
     }
@@ -42,7 +252,13 @@ pub(super) fn class_name(
         }
         internal.push('$');
         internal.push_str(&ordinal.to_string());
-        return (internal, LambdaClassIdentity::Source(origin.identity));
+        return (
+            internal,
+            LambdaClassIdentity::Source {
+                identity: origin.identity,
+                expansion: None,
+            },
+        );
     }
     // Backend-synthesized lambdas have no source expression. Their implementation id is already
     // the exact stable identity; its generated name is serialization input only for this JVM
@@ -55,4 +271,19 @@ pub(super) fn class_name(
         format!("{impl_owner}${enclosing}${}", index + 1),
         LambdaClassIdentity::Synthetic(impl_fn),
     )
+}
+
+/// JVM class name of a specialized lambda before a representation pass consumes its source
+/// `Lambda` node (notably suspend-lambda lowering). Common IR supplies only semantic expansion
+/// provenance; this boundary applies the active lambda strategy and physical owner.
+pub(in crate::jvm) fn specialized_name(
+    ir: &IrFile,
+    implementation: u32,
+    facade: &str,
+    modes: LambdaModes,
+) -> Option<String> {
+    ir.specialized_functions.get(&implementation)?;
+    let function = ir.functions.get(implementation as usize)?;
+    let owner = function_owner(ir, implementation, facade)?;
+    Some(class_name(ir, implementation, &function.name, &owner, facade, modes).0)
 }

@@ -12,7 +12,7 @@ use super::reified_arguments::ReifiedArgument;
 use crate::ir::{ExprId, IrExpr, IrFile, IrTypeOp, IrTypeParameter};
 use crate::types::{stored_value_ty, Ty, TypeName};
 
-#[derive(Clone)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct ReifiedParameter {
     source_name: String,
     erased: TypeName,
@@ -183,24 +183,32 @@ fn realize_expression_dag(
     }
 }
 
-pub(super) fn realize(ir: &mut IrFile) {
-    let functions = ir
-        .signatures
-        .iter()
-        .filter_map(|(&function, signature)| {
-            let parameters = reified_parameters(&signature.type_params);
-            (!parameters.is_empty()).then_some((function, parameters))
-        })
+pub(super) fn realize(ir: &mut IrFile, lambdas: &super::lambda_classes::LambdaMethods) {
+    // Type operands already carry declaration-qualified semantic parameter identities. Realizing a
+    // closure can replace its Lambda node with a class value, but cannot change those identities.
+    // Normalize the exact declaration/closure method domain from that checked map rather than
+    // rediscovering implementations through expression nodes already consumed by representation.
+    // An ordinary object's member can use the same parameter through generic erasure; that is not
+    // a declaration or specialized lambda body and must not execute a reification marker.
+    let mut parameters = HashMap::new();
+    let mut functions = lambdas.functions().collect::<HashSet<_>>();
+    for (&function, signature) in &ir.signatures {
+        for (identity, parameter) in reified_parameters(&signature.type_params) {
+            functions.insert(function);
+            if let Some(previous) = parameters.insert(identity, parameter.clone()) {
+                assert_eq!(
+                    previous, parameter,
+                    "one semantic reified parameter has consistent declaration facts"
+                );
+            }
+        }
+    }
+    let bodies = functions
+        .into_iter()
+        .filter_map(|function| ir.functions[function as usize].body)
         .collect::<Vec<_>>();
-    for (function, parameters) in functions {
-        let Some(root) = ir
-            .functions
-            .get(function as usize)
-            .and_then(|function| function.body)
-        else {
-            continue;
-        };
-        realize_expression_dag(ir, root, &parameters);
+    for body in bodies {
+        realize_expression_dag(ir, body, &parameters);
     }
 }
 
@@ -318,7 +326,7 @@ mod tests {
         });
         function(&mut ir, body, identity);
 
-        realize(&mut ir);
+        realize(&mut ir, &Default::default());
 
         assert!(matches!(
             ir.expr(body),
@@ -342,7 +350,7 @@ mod tests {
         });
         function(&mut ir, body, identity);
 
-        realize(&mut ir);
+        realize(&mut ir, &Default::default());
 
         assert!(matches!(
             ir.expr(body),
@@ -353,6 +361,61 @@ mod tests {
                 name,
                 erased,
             } if *arg == operand && name == "T" && erased.matches("java/lang/Object")
+        ));
+    }
+
+    #[test]
+    fn realized_methods_keep_checked_reification_without_lambda_nodes() {
+        let identity = "T@declaration";
+        let mut ir = IrFile::default();
+        let declaration = ir.add_expr(IrExpr::UnitInstance);
+        function(&mut ir, declaration, identity);
+        let argument = ir.add_expr(IrExpr::GetValue(0));
+        let source = ir.add_expr(IrExpr::TypeOp {
+            op: IrTypeOp::Cast,
+            arg: argument,
+            type_operand: Ty::ty_param(identity, Ty::obj("kotlin/Any")),
+        });
+        let concrete_copy = ir.add_expr(IrExpr::TypeOp {
+            op: IrTypeOp::Cast,
+            arg: argument,
+            type_operand: Ty::String,
+        });
+        let ordinary = ir.add_expr(IrExpr::TypeOp {
+            op: IrTypeOp::Cast,
+            arg: argument,
+            type_operand: Ty::ty_param("T@ordinary", Ty::obj("kotlin/Any")),
+        });
+        let erased_object_member = ir.add_expr(IrExpr::TypeOp {
+            op: IrTypeOp::Cast,
+            arg: argument,
+            type_operand: Ty::ty_param(identity, Ty::obj("kotlin/Any")),
+        });
+        for body in [source, concrete_copy, ordinary, erased_object_member] {
+            let mut implementation = ir.functions[0].clone();
+            implementation.name = "invoke".to_owned();
+            implementation.body = Some(body);
+            ir.functions.push(implementation);
+        }
+
+        let lambdas = super::super::lambda_classes::LambdaMethods::for_test([1, 2, 3]);
+        realize(&mut ir, &lambdas);
+
+        assert!(matches!(
+            ir.expr(source),
+            IrExpr::ReifiedTypeOp { cast: true, name, .. } if name == "T"
+        ));
+        assert!(matches!(
+            ir.expr(concrete_copy),
+            IrExpr::TypeOp {
+                type_operand: Ty::String,
+                ..
+            }
+        ));
+        assert!(matches!(ir.expr(ordinary), IrExpr::TypeOp { .. }));
+        assert!(matches!(
+            ir.expr(erased_object_member),
+            IrExpr::TypeOp { .. }
         ));
     }
 }

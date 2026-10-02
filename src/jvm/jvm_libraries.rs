@@ -13,6 +13,8 @@ mod mapped_builtin_member_status;
 mod parameter_plans;
 #[cfg(test)]
 mod provider_normalization_tests;
+mod return_types;
+use return_types::{java_collection_return_lower_bound, metadata_declared_nonnull_return};
 mod static_properties;
 mod unsigned_intrinsics;
 use static_properties::StaticAccessor;
@@ -252,33 +254,6 @@ pub(crate) fn inherited_by_delegation(
         && (!has_kotlin_metadata || annotations.contains(&crate::types::wk::platform_dependent()))
 }
 
-/// The declaration-level return fact shared by both classpath member construction loops. Keep this
-/// normalization at the metadata boundary: ordinary descriptor members and source-name aliases for
-/// mangled members must not disagree about whether the later value-class representation pass may see
-/// a declared return.
-///
-/// Nullable returns are genuine boxes, and suspend descriptors return the CPS `Object` regardless of
-/// the declared type (including primitive-underlying value classes, which the callee boxes). In both
-/// cases recording the classifier as an erased carrier would be unsound, so neither is handed off.
-/// Value-class identification itself intentionally remains downstream; probing it while a classpath
-/// type is being built can recursively re-enter type resolution on cyclic class graphs.
-///
-/// A declaration returning its own type parameter is recorded as that parameter, as top-level
-/// callables and source declarations are: `fun <T : A?> f(): T` hands back `A`'s carrier, while a
-/// `T : Any?` result is a box read out of an erased slot. Only the declaration can tell them apart.
-fn metadata_declared_nonnull_return(function: &super::metadata::MetaFn) -> Option<Ty> {
-    if function.ret_nullable() {
-        return None;
-    }
-    function.ret_class.map(Ty::obj_name).or_else(|| {
-        function
-            .generic_sig
-            .as_ref()
-            .map(|signature| signature.ret)
-            .filter(|ret| matches!(ret, Ty::TyParam(..)))
-    })
-}
-
 fn java_type_nullability(ty: Ty, nullability: Option<JavaNullability>) -> Ty {
     if !ty.is_reference() {
         return ty;
@@ -324,45 +299,6 @@ fn java_type_argument_nullability(ty: Ty) -> Ty {
         Ty::OutProjection(inner) => Ty::out_projection(java_type_argument_nullability(*inner)),
         Ty::StarProjection(inner) => Ty::star_projection(java_type_argument_nullability(*inner)),
         _ => java_type_nullability(ty, None),
-    }
-}
-
-/// The lower bound of a Java collection return's flexible mutability interval. A Java
-/// `Iterator<T>` result is usable as both Kotlin `Iterator<T>` and `MutableIterator<T>`; publishing
-/// the mutable face here supplies that lower bound, whose ordinary Kotlin supertypes include the
-/// read-only face. Parameters deliberately keep their read-only upper-bound spelling, so this
-/// direction-specific normalization does not make a Kotlin read-only collection satisfy a mutable
-/// Kotlin parameter.
-fn java_collection_return_lower_bound(ty: Ty) -> Ty {
-    match ty {
-        Ty::Obj(owner, arguments) => {
-            let arguments = arguments
-                .iter()
-                .map(|argument| java_collection_return_lower_bound(*argument))
-                .collect::<Vec<_>>();
-            let physical = super::jvm_class_map::to_jvm_type_name(owner);
-            let owner = super::jvm_class_map::jvm_collection_to_kotlin_mutable_type_name(physical)
-                .unwrap_or(owner);
-            Ty::obj_args_name(owner, &arguments)
-        }
-        Ty::Nullable(inner) => Ty::nullable(java_collection_return_lower_bound(*inner)),
-        Ty::PlatformNullable(inner) => {
-            Ty::platform_nullable(java_collection_return_lower_bound(*inner))
-        }
-        Ty::InProjection(inner) => Ty::in_projection(java_collection_return_lower_bound(*inner)),
-        Ty::OutProjection(inner) => Ty::out_projection(java_collection_return_lower_bound(*inner)),
-        Ty::StarProjection(inner) => {
-            Ty::star_projection(java_collection_return_lower_bound(*inner))
-        }
-        Ty::TyParam(name, bound) => Ty::ty_param(name, java_collection_return_lower_bound(*bound)),
-        Ty::Fun(signature) => Ty::fun_with_shape(
-            signature.params.clone(),
-            java_collection_return_lower_bound(signature.ret),
-            signature.context_count,
-            signature.has_receiver,
-            signature.suspend,
-        ),
-        _ => ty,
     }
 }
 
@@ -737,6 +673,10 @@ impl JvmLibraries {
                 generic_sig: generic_sig_for_callable.clone().map(Box::new),
                 declared_params,
                 declared_ret,
+                reified_type_parameter_ordinals: call_sig
+                    .reified_type_parameter_ordinals
+                    .clone()
+                    .into_boxed_slice(),
                 // Selected by its Kotlin name, which reflection names (see the extension path).
                 reflection_name: Some(source_name.clone()),
                 physical_name: (c.name != source_name).then(|| c.name.clone()),
@@ -810,6 +750,10 @@ impl JvmLibraries {
             callable.suspend = builtin.is_suspend;
             callable.source_receiver = builtin.generic_sig.receiver;
             callable.generic_sig = Some(Box::new(builtin.generic_sig.clone()));
+            callable.reified_type_parameter_ordinals = builtin
+                .reified_type_parameter_ordinals
+                .clone()
+                .into_boxed_slice();
             let kind = if builtin.generic_sig.receiver.is_some() {
                 FnKind::Extension
             } else {
@@ -833,6 +777,8 @@ impl JvmLibraries {
                     };
             }
             function.call_sig.only_input_type_formals = builtin.only_input_type_formals;
+            function.call_sig.reified_type_parameter_ordinals =
+                builtin.reified_type_parameter_ordinals;
             function.context_count = builtin.context_count;
             function.callable.context_count = builtin.context_count;
             function.visibility = builtin.visibility;
@@ -997,6 +943,10 @@ impl JvmLibraries {
                 inline: function_inline,
                 context_count: function.context_count(),
                 generic_sig: generic_sig.clone().map(Box::new),
+                reified_type_parameter_ordinals: function
+                    .reified_type_parameter_ordinals()
+                    .to_vec()
+                    .into_boxed_slice(),
                 singleton_dispatch: Some(Box::new(singleton.clone())),
                 physical_name: (function.jvm_name != function.kotlin_name)
                     .then(|| function.jvm_name.clone()),
@@ -4548,6 +4498,10 @@ impl JvmLibraries {
                     context_count: mf.context_count(),
                     contract: mf.contract.clone(),
                     generic_sig: generic_sig.clone().map(Box::new),
+                    reified_type_parameter_ordinals: call_sig
+                        .reified_type_parameter_ordinals
+                        .clone()
+                        .into_boxed_slice(),
                     declared_params: generic_sig
                         .as_ref()
                         .map(|signature| signature.parameters_with_receiver(mf.context_count())),

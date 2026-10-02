@@ -81,6 +81,11 @@ impl FunctionInfo {
             .as_ref()
             .map(|signature| signature.parameters_with_receiver(member.context_count));
         callable.inline_modifiers = member.call_sig.inline_modifiers.clone().into_boxed_slice();
+        callable.reified_type_parameter_ordinals = member
+            .call_sig
+            .reified_type_parameter_ordinals
+            .clone()
+            .into_boxed_slice();
         callable.inline = member.inline;
         callable.inline_body_plan = member.inline_body_plan.clone();
         callable.suspend = member.suspend();
@@ -180,5 +185,19 @@ mod tests {
 
         assert_eq!(selected.name, "sourceName");
         assert_eq!(selected.physical_name.as_deref(), Some("platformName"));
+    }
+
+    #[test]
+    fn classifier_conversion_preserves_exact_reified_formals_on_both_candidate_handles() {
+        let owner = crate::types::type_name("sample/Owner");
+        let mut member =
+            LibraryMember::new("mixed".to_string(), Vec::new(), Ty::Unit, "()V".to_string());
+        member.call_sig.reified_type_parameter_ordinals = vec![1];
+        let candidate = FunctionInfo::classifier_member(FnKind::Member, owner, member);
+        assert_eq!(candidate.call_sig.reified_type_parameter_ordinals, [1]);
+        assert_eq!(
+            candidate.callable.reified_type_parameter_ordinals.as_ref(),
+            [1]
+        );
     }
 }
