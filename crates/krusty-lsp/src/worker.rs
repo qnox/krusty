@@ -967,12 +967,16 @@ fn analysis_worker_loop<R: BufRead, W: Write>(
     let mut prepared = PreparedClasspath::launch(classpath);
     write_framed(writer, WORKER_READY)?;
     while let Some(body) = read_framed(reader, MAX_WORKER_MESSAGE_BYTES)? {
-        // The previous request's tables are dropped with its stack. Reusing compilation numbers
-        // makes this request's declaration identities hit strings already interned for those
-        // coordinates instead of leaking a new one per edit. In-process tests leave the counter
-        // monotonic so parallel compilations in one process cannot alias.
-        if recycle_compilation_ids {
-            krusty::begin_compilation_epoch();
+        // The previous request's symbol table and pass-two symbols are dropped with that
+        // iteration. `PreparedClasspath` keeps jar indexes only, not compilation-scoped
+        // declaration identities, so the next request may reuse compilation 1. The reset is
+        // refused while a compilation lease is still alive; this process then stops instead of
+        // aliasing two live tables. In-process tests leave the counter monotonic so parallel
+        // compilations in one process cannot alias.
+        if recycle_compilation_ids && !krusty::begin_compilation_epoch() {
+            return Err(io::Error::other(
+                "compilation epoch reset refused because a compilation is still live",
+            ));
         }
         let request: OwnedWorkerRequest = serde_json::from_slice(&body).map_err(json_io)?;
         drop(body);
@@ -2364,6 +2368,56 @@ mod tests {
         assert_eq!(
             diagnostic_messages(&analyses[1]),
             vec!["unresolved reference 'p'."]
+        );
+    }
+
+    #[test]
+    fn sequential_worker_requests_reset_the_compilation_epoch() {
+        if std::env::var_os("KRUSTY_EPOCH_WORKER").is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "worker::tests::sequential_worker_requests_reset_the_compilation_epoch",
+                    "--test-threads=1",
+                ])
+                .env("KRUSTY_EPOCH_WORKER", "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "isolated worker epoch failed\n{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let source = "fun <T> id(value: T): T = value\n";
+        let mut input = Vec::new();
+        for _ in 0..8 {
+            write_analysis_request(&mut input, source, &[], None);
+        }
+        let mut output = Vec::new();
+        analysis_worker_loop(&mut Cursor::new(input), &mut output, Vec::new(), true).unwrap();
+        let analyses = decode_worker_analyses(output, 8);
+        let messages = analyses
+            .iter()
+            .map(|analysis| {
+                analysis
+                    .diagnostics
+                    .iter()
+                    .map(|diagnostic| diagnostic.message.clone())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            messages.windows(2).all(|pair| pair[0] == pair[1]),
+            "epoch reset changed the diagnostics of an unchanged edit: {messages:?}"
+        );
+        assert_eq!(
+            messages[0],
+            Vec::<String>::new(),
+            "the generic edit should analyze cleanly under a reused compilation id"
         );
     }
 

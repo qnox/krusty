@@ -3291,6 +3291,9 @@ pub struct SymbolTable {
     /// Opaque identity of this compilation. Declaration-owned generic variables include it so two
     /// concurrent modules with identical file offsets cannot alias in the process-wide type interner.
     compilation_id: u64,
+    /// Alive for this table and for the pass-two symbols that consume it. The compilation epoch
+    /// cannot restart while the lease is held.
+    compilation_lease: crate::compilation_epoch::CompilationLease,
     /// Module-owned declaration-query cache. It is never shared with another compilation session;
     /// dependency providers own their caches separately. The optional file component preserves
     /// private top-level visibility.
@@ -3464,6 +3467,7 @@ pub struct SymbolTable {
 /// reparsed.
 pub(crate) struct PassTwoSymbols {
     compilation_id: u64,
+    _compilation_lease: crate::compilation_epoch::CompilationLease,
     libraries: Box<dyn SemanticPlatform>,
     native_plugins: crate::plugins::registry::NativePlugins,
 }
@@ -3479,9 +3483,15 @@ impl PassTwoSymbols {
 }
 
 impl SymbolTable {
+    #[cfg(test)]
+    pub(crate) fn compilation_id(&self) -> u64 {
+        self.compilation_id
+    }
+
     pub(crate) fn into_pass_two_symbols(self) -> PassTwoSymbols {
         PassTwoSymbols {
             compilation_id: self.compilation_id,
+            _compilation_lease: self.compilation_lease,
             libraries: self.libraries,
             native_plugins: self.native_plugins,
         }
@@ -3490,8 +3500,10 @@ impl SymbolTable {
 
 impl Default for SymbolTable {
     fn default() -> SymbolTable {
+        let (compilation_id, compilation_lease) = crate::compilation_epoch::next_compilation_id();
         SymbolTable {
-            compilation_id: crate::compilation_epoch::next_compilation_id(),
+            compilation_id,
+            compilation_lease,
             module_symbol_cache: Default::default(),
             module_shape_cache: Default::default(),
             module_cache_enabled: std::cell::Cell::new(false),
