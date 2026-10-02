@@ -7,12 +7,13 @@ use super::common;
 #[test]
 fn init_blocks_keep_their_opening_and_closing_lines_like_kotlinc() {
     let src = r#"
-fun measure(s: String): Int = 1
+class Marker
+fun measure(value: Marker): Int = 1
 
 class Primary(p: Int) {
     var b = 0
     init {
-        val t = measure("a")
+        val t = measure(Marker())
         b = t
     }
     init { b = 2 }
@@ -30,13 +31,13 @@ class Primary(p: Int) {
 class OnlySecondary {
     var d = 0
     init {
-        d = measure("d")
+        d = measure(Marker())
     }
     val e: Int =
-        measure("e")
+        measure(Marker())
 
-    constructor(s: String) {
-        d = measure(s)
+    constructor(value: Marker) {
+        d = measure(value)
     }
 }
 "#;

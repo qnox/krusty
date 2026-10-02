@@ -4,10 +4,15 @@
 use super::*;
 
 impl Emitter<'_> {
+    /// Whether this exact semantic initializer block is being emitted as class initialization.
+    pub(super) fn renders_initializer_boundary(&self, block: u32) -> bool {
+        self.render_initializer_boundaries && self.ir.initializer_blocks.contains(&block)
+    }
+
     /// kotlinc's `init { … }` lines: the block opens on its `init` line and closes on its `}`, each
     /// an entry of its own even with no instruction there (see [`CodeBuilder::mark_line_occupied`]).
     pub(super) fn mark_initializer_line(&self, block: u32, closing: bool, code: &mut CodeBuilder) {
-        if !self.ir.initializer_blocks.contains(&block) {
+        if !self.renders_initializer_boundary(block) {
             return;
         }
         let lines = match closing {

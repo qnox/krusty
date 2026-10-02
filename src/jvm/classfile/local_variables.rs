@@ -97,29 +97,3 @@ impl ClassWriter {
         }
     }
 }
-
-/// A method body's own `LocalVariableTable` rows, interned where the body ends, for a method whose
-/// receiver and parameter rows are attached later.
-pub struct BodyLocals(Vec<LvtEntry>);
-
-impl ClassWriter {
-    /// Intern the locals `code` recorded now, where kotlinc visits them: right after the body.
-    pub fn intern_body_locals(&mut self, code: &CodeBuilder) -> BodyLocals {
-        BodyLocals(self.local_table(code))
-    }
-
-    /// Put a body's locals ahead of the rows already attached to `name desc`, as kotlinc orders a
-    /// method's table: the body's locals, then the receiver and parameters.
-    pub fn prepend_body_locals(&mut self, name: &str, desc: &str, locals: BodyLocals) {
-        let (Some(n), Some(d)) = (self.cp.lookup_utf8(name), self.cp.lookup_utf8(desc)) else {
-            return;
-        };
-        if let Some(method) = self
-            .methods
-            .iter_mut()
-            .find(|method| method.name == n && method.desc == d && method.code.is_some())
-        {
-            method.lvt.splice(0..0, locals.0);
-        }
-    }
-}

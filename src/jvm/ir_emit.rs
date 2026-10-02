@@ -3075,7 +3075,6 @@ fn emit_class(
     // is written so an unused local's store is not removed as a temporary.
     let mut init_locals: Vec<(u16, u16, u16, String, String)> = Vec::new();
     let mut primary_ctor_debug = None;
-    let mut ctor_body_locals = None;
     let param_tys = class_ctor_jvm_tys(c);
     crate::trace_compiler!(
         "lower",
@@ -3301,7 +3300,9 @@ fn emit_class(
                 let marks_before = ctor.line_marks().len();
                 e.record_locals = true;
                 e.constructor_initializer_class = Some(class_id);
+                e.render_initializer_boundaries = true;
                 e.emit_initializer_statements(&initializer_rest, &mut ctor);
+                e.render_initializer_boundaries = false;
                 e.constructor_initializer_class = None;
                 e.record_locals = false;
                 ctor_lines.extend(
@@ -3341,7 +3342,6 @@ fn emit_class(
             ctor_signature.as_deref(),
         );
         cw.set_method_parameters("<init>", &ctor_desc, &ctor_parameters);
-        ctor_body_locals = Some(cw.intern_body_locals(&ctor));
         if byte_parity {
             seed_plain_constructor_tail(pool_seed(), &mut cw);
         }
@@ -3618,9 +3618,6 @@ fn emit_class(
         );
         attach_declared_method_debug(ir, env.override_results, c, &mut cw);
         attach_synth_nullability(ir, c, &mut cw);
-    }
-    if let (Some((descriptor, _)), Some(locals)) = (&primary_ctor_debug, ctor_body_locals) {
-        cw.prepend_body_locals("<init>", descriptor, locals);
     }
     if continuation_metadata.is_some() {
         let self_desc = format!("L{fq_name};");
@@ -4489,7 +4486,9 @@ fn emit_enum_class(
             let s = e.frame.enter(FrameKey::Value(value), *t);
             e.slots.insert(value, (s, *t));
         }
+        e.render_initializer_boundaries = true;
         e.emit_constructor_init_body(c, init_body, &mut ctor, &mut store_lines);
+        e.render_initializer_boundaries = false;
         max_locals = max_locals.max(e.frame.max());
     }
     // The pc the trailing `return` starts at — kotlinc maps it back to the class HEADER line.
@@ -6803,6 +6802,11 @@ struct Emitter<'a> {
     /// currently being emitted. The checked class identity keeps physical field realization from
     /// recovering the class through its rendered JVM owner name.
     constructor_initializer_class: Option<ClassId>,
+    /// This physical body realizes source class initialization and therefore renders the exact
+    /// anonymous-initializer block identities recorded by common IR. Ordinary functions derived
+    /// from the same source body (notably a value class's `constructor-impl`) keep the provenance
+    /// but do not render constructor boundary entries.
+    render_initializer_boundaries: bool,
     /// kotlinc's `isInsideCondition`: a `when` branch condition is being emitted, so an inlined
     /// call in it marks its own line again after the inlined code.
     inside_condition: bool,
@@ -6883,6 +6887,7 @@ impl<'a> Emitter<'a> {
             comparison_line: None,
             record_locals: false,
             constructor_initializer_class: None,
+            render_initializer_boundaries: false,
             inside_condition: false,
             this_uninitialized: false,
             lambda_modes: env.lambda_modes,

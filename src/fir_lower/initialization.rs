@@ -41,12 +41,14 @@ pub(super) fn accept_non_callable_body(
                         declaration,
                     ))?;
             let class = class_for(class_declaration, ir)?;
+            let initializer_block =
+                lowered
+                    .root_block
+                    .ok_or(FirFileLoweringFailure::MissingInitializerRootBlock(
+                        declaration,
+                    ))?;
             let roots = lowered.roots.into_vec();
-            for &root in &roots {
-                if matches!(ir.expr(root), IrExpr::Block { .. }) {
-                    ir.initializer_blocks.insert(root);
-                }
-            }
+            ir.initializer_blocks.insert(initializer_block);
             let body = effect_block(roots, origin, ir);
             ir.checked_class_initializers
                 .push(IrCheckedClassInitializer {

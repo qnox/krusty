@@ -22,52 +22,16 @@ impl Emitter<'_> {
         self.link_safe_call_chain(block, code);
         let saved = self.open_slot_scope();
         let terminal_target = self.terminal_statement_target.take();
-        let boundary = self.constructor_initializer_block_lines(block);
-        let marked_initializer = self.ir.initializer_blocks.contains(&block);
-        if let Some((start, _)) = boundary.filter(|_| !marked_initializer) {
-            code.mark_line(start);
-            code.nop();
-        }
+        let marked_initializer = self.renders_initializer_boundary(block);
         self.mark_initializer_line(block, false, code);
         self.emit_open_block(stmts, value, terminal_target, code);
         self.mark_initializer_line(block, true, code);
         if !self.ir.callable_scopes.contains(&block) {
-            self.close_scope_locals(code, boundary.is_some() || marked_initializer);
+            self.close_scope_locals(code, marked_initializer);
             self.close_spliced_lambda_frame(block, code);
-        }
-        if let Some((_, end)) = boundary.filter(|_| !marked_initializer) {
-            code.mark_line(end);
-            code.nop();
         }
         self.block_depth -= 1;
         self.restore_slot_scope(saved);
-    }
-
-    /// The `init` keyword line and the block's closing brace, when this block is that initializer.
-    fn constructor_initializer_block_lines(&self, block: u32) -> Option<(u32, u32)> {
-        if self.constructor_initializer_class.is_none() {
-            return None;
-        }
-        let start = self
-            .ir
-            .expr_lines
-            .get(&block)
-            .copied()
-            .filter(|line| *line != 0)
-            .or_else(|| {
-                self.ir
-                    .expr_source_lines
-                    .get(&block)
-                    .copied()
-                    .filter(|line| *line != 0)
-            })?;
-        let end = self
-            .ir
-            .expr_end_lines
-            .get(&block)
-            .copied()
-            .filter(|line| *line != 0)?;
-        Some((start, end))
     }
 
     /// Emit a block in value position: its statements run for effect and its trailing value is
