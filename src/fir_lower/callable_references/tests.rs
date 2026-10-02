@@ -1071,9 +1071,11 @@ fn ordinary_inner_constructor_keeps_source_property_after_physical_outer_prefix(
 fn inner_property_initializer_offsets_source_parameters_after_enclosing_prefix() {
     let ir = lower_single_source(
         r#"
-            class Outer(val prefix: String) {
-                inner class Inner(val suffix: String) {
-                    val value = prefix + suffix
+            class Value
+            class Pair(val left: Value, val right: Value)
+            class Outer(val prefix: Value) {
+                inner class Inner(suffix: Value) {
+                    val value = Pair(prefix, suffix)
                 }
             }
         "#,

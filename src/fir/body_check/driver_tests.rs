@@ -478,17 +478,15 @@ fn enum_property_initializer_reads_a_prior_property_on_current_dispatch() {
 }
 
 #[test]
-fn local_class_init_captures_the_nearer_constructor_parameter_value() {
-    let source = "var result: String = \"Fail\"\n\
-                  class A<T : String>(val value: T) {\n\
-                      init {\n\
-                          class B { init { result = value } }\n\
-                          B()\n\
-                      }\n\
+fn class_initializer_keeps_property_parameter_slots_without_rebinding_their_names() {
+    let source = "class PropertyValue\n\
+                  class PlainValue\n\
+                  class A(val value: PropertyValue, plain: PlainValue) {\n\
+                      val direct = value\n\
                   }\n";
     let mut diagnostics = DiagSink::new();
     let mut analysis = crate::frontend::analyze_source_set_with_features(
-        &[SourceInput::kotlin(source).with_file_stem("CapturedClassInit")],
+        &[SourceInput::kotlin(source).with_file_stem("PropertyParameterSlot")],
         Box::new(EmptySymbolSource),
         &LangFeatures::new(),
         &mut diagnostics,
@@ -497,6 +495,125 @@ fn local_class_init_captures_the_nearer_constructor_parameter_value() {
 
     let streamed = analysis.streamed.take().expect("Pass 1 must finalize");
     let ordinary = streamed.ordinary_body_work(&analysis.files[0], SourceFileId::from_raw(0));
+    let value_property = (0..streamed.module.index().declaration_count())
+        .map(|raw| DeclarationId::from_raw(raw as u32))
+        .find(|declaration| {
+            streamed.module.index().declaration_name(*declaration) == Some("value")
+                && streamed
+                    .module
+                    .index()
+                    .declaration_anchor(*declaration)
+                    .and_then(|anchor| anchor.owner)
+                    .and_then(|owner| streamed.module.index().declaration_name(owner))
+                    == Some("A")
+        })
+        .and_then(|declaration| {
+            streamed
+                .module
+                .index()
+                .property_for_declaration(declaration)
+        })
+        .expect("stable constructor-property identity");
+    let direct = ordinary
+        .into_iter()
+        .find(|work| {
+            work.kind == BodyKind::Initializer
+                && streamed.module.index().declaration_name(work.declaration) == Some("direct")
+        })
+        .expect("direct property initializer body unit");
+    let (index, mut inline_bodies, _default_arguments, mut sources) = streamed.module.into_parts();
+    let mut sink = RecordingSink::default();
+    check_and_dispatch_body(
+        &analysis.files[0],
+        analysis.types[0].as_ref().expect("checked source"),
+        SourceFileId::from_raw(0),
+        direct,
+        &index,
+        sources.origins_mut(),
+        &mut inline_bodies,
+        &mut sink,
+    )
+    .expect("property initializer must become checked FIR");
+
+    let body = &sink.0[0].1;
+    assert_eq!(
+        body.parameters()
+            .iter()
+            .map(|parameter| parameter.ty.get())
+            .collect::<Vec<_>>(),
+        [Ty::obj("PropertyValue"), Ty::obj("PlainValue")],
+        "both physical constructor slots must survive in the initializer body",
+    );
+    assert_eq!(
+        body.debug_value_name(body.parameters()[0].value),
+        None,
+        "the constructor-property slot must not publish a lexical value name",
+    );
+    assert_eq!(
+        body.debug_value_name(body.parameters()[1].value),
+        Some("plain"),
+        "a plain constructor parameter remains a lexical value",
+    );
+    let root = root_expression(body);
+    let FirExprKind::PropertyRead {
+        target: FirPropertyTarget::Module {
+            property: target, ..
+        },
+        dispatch_receiver: Some(receiver),
+        ..
+    } = &body.expr(root).expect("direct initializer root").kind
+    else {
+        panic!("constructor-property read must retain its selected FIR property identity")
+    };
+    assert_eq!(*target, value_property);
+    assert!(matches!(
+        body.expr(receiver.value).map(|expression| &expression.kind),
+        Some(FirExprKind::ImplicitReceiver {
+            current: true,
+            depth: 0,
+        })
+    ));
+}
+
+#[test]
+fn local_class_init_reads_a_property_parameter_through_the_captured_outer_instance() {
+    let source = "class Value\n\
+                  class A(val value: Value) {\n\
+                      init {\n\
+                          class B { val captured = value }\n\
+                          B()\n\
+                      }\n\
+                  }\n";
+    let mut diagnostics = DiagSink::new();
+    let mut analysis = crate::frontend::analyze_source_set_with_features(
+        &[SourceInput::kotlin(source).with_file_stem("CapturedPropertyDispatch")],
+        Box::new(EmptySymbolSource),
+        &LangFeatures::new(),
+        &mut diagnostics,
+    );
+    assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+
+    let streamed = analysis.streamed.take().expect("Pass 1 must finalize");
+    let ordinary = streamed.ordinary_body_work(&analysis.files[0], SourceFileId::from_raw(0));
+    let value_property = (0..streamed.module.index().declaration_count())
+        .map(|raw| DeclarationId::from_raw(raw as u32))
+        .find(|declaration| {
+            streamed.module.index().declaration_name(*declaration) == Some("value")
+                && streamed
+                    .module
+                    .index()
+                    .declaration_anchor(*declaration)
+                    .and_then(|anchor| anchor.owner)
+                    .and_then(|owner| streamed.module.index().declaration_name(owner))
+                    == Some("A")
+        })
+        .and_then(|declaration| {
+            streamed
+                .module
+                .index()
+                .property_for_declaration(declaration)
+        })
+        .expect("stable outer property identity");
     let (mut index, mut inline_bodies, _default_arguments, mut sources) =
         streamed.module.into_parts();
     let info = analysis.types[0].as_ref().expect("checked source");
@@ -508,6 +625,9 @@ fn local_class_init_captures_the_nearer_constructor_parameter_value() {
         &mut index,
     )
     .expect("checked local signatures must publish before FIR body checking");
+    let local_class = index
+        .classifier_declaration(crate::types::type_name("A").nested_child("B"))
+        .expect("stable local-class identity");
     let mut session = BodyCheckSession::default();
     let mut sink = RecordingSink::default();
     for work in ordinary {
@@ -525,15 +645,38 @@ fn local_class_init_captures_the_nearer_constructor_parameter_value() {
         .expect("every class initializer must become checked FIR");
     }
 
-    assert!(sink.0.iter().any(|(_, body)| {
-        (0..body.expression_count()).any(|raw| {
-            matches!(
-                body.expr(FirExprId::from_raw(raw as u32))
-                    .map(|expression| &expression.kind),
-                Some(FirExprKind::ClassStorageRead { field: 0, .. })
-            )
+    let selected_receivers = sink
+        .0
+        .iter()
+        .flat_map(|(_, body)| {
+            (0..body.expression_count()).filter_map(|raw| {
+                let expression = body.expr(FirExprId::from_raw(raw as u32))?;
+                let FirExprKind::PropertyRead {
+                    target:
+                        FirPropertyTarget::Module {
+                            property: target, ..
+                        },
+                    dispatch_receiver: Some(receiver),
+                    ..
+                } = &expression.kind
+                else {
+                    return None;
+                };
+                if *target != value_property {
+                    return None;
+                }
+                let Some(FirExprKind::ClassStorageRead { owner, field }) =
+                    body.expr(receiver.value).map(|expression| &expression.kind)
+                else {
+                    panic!("outer property read must use the captured dispatch receiver")
+                };
+                Some((*owner, *field))
+            })
         })
-    }));
+        .collect::<Vec<_>>();
+    assert_eq!(selected_receivers.len(), 1);
+    assert_eq!(selected_receivers[0].0, local_class);
+    assert_eq!(selected_receivers[0].1, 0);
 }
 
 #[test]

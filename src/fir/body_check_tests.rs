@@ -457,6 +457,7 @@ fn block_body_parameters_and_returns_use_body_local_stable_targets() {
             span: function.params[0].ty.span,
             context_kind: crate::types::ContextParameterKind::None,
             inline_modifier: crate::types::InlineParameterModifier::None,
+            name_binding: CheckedBodyParameterNameBinding::Lexical,
         }],
         streamed.module.index(),
         &mut origins,
@@ -551,6 +552,7 @@ fn selected_source_member_call_keeps_stable_target_receiver_and_default_mapping(
             span: caller.params[0].ty.span,
             context_kind: crate::types::ContextParameterKind::None,
             inline_modifier: crate::types::InlineParameterModifier::None,
+            name_binding: CheckedBodyParameterNameBinding::Lexical,
         }],
         streamed.module.index(),
         &mut origins,
@@ -635,6 +637,7 @@ fn selected_source_operator_is_a_stable_fir_call_not_a_spelling_based_binary() {
             span: parameter.ty.span,
             context_kind: crate::types::ContextParameterKind::None,
             inline_modifier: crate::types::InlineParameterModifier::None,
+            name_binding: CheckedBodyParameterNameBinding::Lexical,
         })
         .collect::<Vec<_>>();
     let mut origins = OriginStore::default();
@@ -930,6 +933,7 @@ fn selected_compare_to_keeps_both_callable_identity_and_comparison_semantics() {
             span: parameter.ty.span,
             context_kind: crate::types::ContextParameterKind::None,
             inline_modifier: crate::types::InlineParameterModifier::None,
+            name_binding: CheckedBodyParameterNameBinding::Lexical,
         })
         .collect::<Vec<_>>();
     let mut origins = OriginStore::default();
@@ -1012,6 +1016,7 @@ fn selected_range_to_operator_is_a_stable_fir_call() {
             span: parameter.ty.span,
             context_kind: crate::types::ContextParameterKind::None,
             inline_modifier: crate::types::InlineParameterModifier::None,
+            name_binding: CheckedBodyParameterNameBinding::Lexical,
         })
         .collect::<Vec<_>>();
     let mut origins = OriginStore::default();
@@ -1072,6 +1077,7 @@ fn indexed_reads_distinguish_builtin_storage_from_selected_get_calls() {
                     span: parameter.ty.span,
                     context_kind: crate::types::ContextParameterKind::None,
                     inline_modifier: crate::types::InlineParameterModifier::None,
+                    name_binding: CheckedBodyParameterNameBinding::Lexical,
                 })
                 .collect::<Vec<_>>();
             check_expression_body_with_parameters(
@@ -1145,6 +1151,7 @@ fn builtin_index_assignment_is_an_explicit_checked_fir_write() {
             span: parameter.ty.span,
             context_kind: crate::types::ContextParameterKind::None,
             inline_modifier: crate::types::InlineParameterModifier::None,
+            name_binding: CheckedBodyParameterNameBinding::Lexical,
         })
         .collect::<Vec<_>>();
     let mut origins = OriginStore::default();
@@ -1206,6 +1213,7 @@ fn selected_index_set_operator_is_a_stable_fir_call() {
         span: function.params[0].ty.span,
         context_kind: crate::types::ContextParameterKind::None,
         inline_modifier: crate::types::InlineParameterModifier::None,
+        name_binding: CheckedBodyParameterNameBinding::Lexical,
     };
     let mut origins = OriginStore::default();
     let body = check_expression_body_with_parameters(
@@ -1261,6 +1269,7 @@ fn indexed_assignment_explicitly_discards_a_non_unit_set_result() {
         span: function.params[0].ty.span,
         context_kind: crate::types::ContextParameterKind::None,
         inline_modifier: crate::types::InlineParameterModifier::None,
+        name_binding: CheckedBodyParameterNameBinding::Lexical,
     };
     let mut origins = OriginStore::default();
     let body = check_expression_body_with_parameters(
@@ -1322,6 +1331,7 @@ fn selected_statement_inc_operator_is_a_stable_fir_call_before_writeback() {
         span: function.params[0].ty.span,
         context_kind: crate::types::ContextParameterKind::None,
         inline_modifier: crate::types::InlineParameterModifier::None,
+        name_binding: CheckedBodyParameterNameBinding::Lexical,
     };
     let mut origins = OriginStore::default();
     let body = check_expression_body_with_parameters(
@@ -1386,6 +1396,7 @@ fn custom_in_range_keeps_both_selected_convention_calls() {
             span: parameter.ty.span,
             context_kind: crate::types::ContextParameterKind::None,
             inline_modifier: crate::types::InlineParameterModifier::None,
+            name_binding: CheckedBodyParameterNameBinding::Lexical,
         })
         .collect::<Vec<_>>();
     let mut origins = OriginStore::default();
@@ -1736,6 +1747,7 @@ fn exact_selected_floating_range_role_carries_its_checked_comparison_type() {
         span: function.params[0].ty.span,
         context_kind: crate::types::ContextParameterKind::None,
         inline_modifier: crate::types::InlineParameterModifier::None,
+        name_binding: CheckedBodyParameterNameBinding::Lexical,
     };
     let mut origins = OriginStore::default();
     let body = check_expression_body_with_parameters(
@@ -1788,6 +1800,7 @@ fn a_nearer_double_range_to_is_a_contains_call() {
             span: parameter.ty.span,
             context_kind: crate::types::ContextParameterKind::None,
             inline_modifier: crate::types::InlineParameterModifier::None,
+            name_binding: CheckedBodyParameterNameBinding::Lexical,
         })
         .collect::<Vec<_>>();
     let mut origins = OriginStore::default();
@@ -1847,6 +1860,7 @@ fn statically_proven_suspend_function_tests_and_casts_build_checked_fir() {
             span: function.params[0].ty.span,
             context_kind: crate::types::ContextParameterKind::None,
             inline_modifier: crate::types::InlineParameterModifier::None,
+            name_binding: CheckedBodyParameterNameBinding::Lexical,
         };
         let mut origins = OriginStore::default();
         let body = check_expression_body_with_parameters(
