@@ -1361,6 +1361,77 @@ fn concurrent_versions_under_one_key_survive_publication_replay() {
 }
 
 #[test]
+fn dirty_publication_reloads_a_replacement_with_an_equal_cached_stamp() {
+    let root = temp_root("equal-stamp-publication");
+    let foreign_root = temp_root("equal-stamp-publication-foreign");
+    let key = "case|A|default|plain";
+    let fingerprint = fingerprint_parts(&[b"same inputs"]);
+    let local = version("2.4.10");
+    let foreign = version("2.4.20");
+
+    store_files(
+        &root,
+        "mod",
+        key,
+        version("2.4.0"),
+        fingerprint,
+        &files(b"base"),
+    );
+    flush_archive(&root);
+    store_files(&root, "mod", key, local, fingerprint, &files(b"local"));
+
+    store_files(
+        &foreign_root,
+        "mod",
+        key,
+        foreign,
+        fingerprint,
+        &files(b"foreign"),
+    );
+    flush_archive(&foreign_root);
+    let path = archive_path(&root);
+    std::fs::write(&path, std::fs::read(archive_path(&foreign_root)).unwrap()).unwrap();
+
+    // Filesystems and atomic replacements do not promise a unique `(mtime, len)` generation.
+    // Force the cached tuple to equal the replacement while retaining the stale archive snapshot.
+    // Publication must still reload the locked file before it replays the local pending record.
+    let replacement_stamp = file_stamp(&path).unwrap();
+    let mut cache = dump_cache().lock().unwrap();
+    let slot = cache.get_mut(&path).unwrap();
+    assert!(!slot.pending.is_empty());
+    assert!(
+        slot.archive
+            .modules
+            .get("mod")
+            .and_then(|entries| entries.get(key))
+            .is_some_and(|spans| spans.iter().all(|span| span.lo != foreign.version)),
+        "the in-memory snapshot must be stale for this regression"
+    );
+    slot.stamp = Some(replacement_stamp);
+    drop(cache);
+
+    flush_archive(&root);
+
+    assert_eq!(
+        load_files(&root, "mod", key, local, fingerprint)
+            .unwrap()
+            .get("pkg/A")
+            .unwrap(),
+        b"local"
+    );
+    assert_eq!(
+        load_files(&root, "mod", key, foreign, fingerprint)
+            .unwrap()
+            .get("pkg/A")
+            .unwrap(),
+        b"foreign",
+        "an equal metadata stamp must not hide another process's publication"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(&foreign_root);
+}
+
+#[test]
 fn deletion_and_corruption_never_resurrect_cached_archive_state() {
     let release = version("2.4.20");
     let fingerprint = fingerprint_parts(&[b"source"]);

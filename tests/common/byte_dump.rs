@@ -795,6 +795,23 @@ fn cached_archive<'a>(
 /// Pull a file written by another process into memory without dropping dumps this process has not
 /// published yet.
 fn reconcile(path: &Path, cache: &mut HashMap<PathBuf, CacheSlot>) {
+    reconcile_with(path, cache, ReconcileMode::Observe);
+}
+
+/// Reconcile while the publication lock is held. A dirty slot must read the archive even when its
+/// metadata stamp appears unchanged: another process can atomically publish a same-size file with
+/// the same coarse timestamp. Replaying over that file is what prevents a lost publication.
+fn reconcile_for_publication(path: &Path, cache: &mut HashMap<PathBuf, CacheSlot>) {
+    reconcile_with(path, cache, ReconcileMode::LockedPublication);
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReconcileMode {
+    Observe,
+    LockedPublication,
+}
+
+fn reconcile_with(path: &Path, cache: &mut HashMap<PathBuf, CacheSlot>, mode: ReconcileMode) {
     let on_disk = file_stamp(path);
     let Some(slot) = cache.remove(path) else {
         if let Some(stamp) = on_disk {
@@ -811,7 +828,8 @@ fn reconcile(path: &Path, cache: &mut HashMap<PathBuf, CacheSlot>) {
         }
         return;
     };
-    if slot.stamp == on_disk {
+    let reload_pending = mode == ReconcileMode::LockedPublication && !slot.pending.is_empty();
+    if slot.stamp == on_disk && !reload_pending {
         cache.insert(path.to_path_buf(), slot);
         return;
     }
@@ -936,7 +954,7 @@ fn flush_archive(root: &Path) {
         return;
     }
     let _lock = lock_directory(parent);
-    reconcile(&path, &mut cache);
+    reconcile_for_publication(&path, &mut cache);
     let Some(slot) = cache.get(&path) else {
         return;
     };
