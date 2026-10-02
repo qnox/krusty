@@ -116,6 +116,21 @@ impl super::Classpath {
                     && function.vararg.is_some() == candidate.call_sig.vararg
             })
             .and_then(|function| function.compiler_intrinsic)
+            .or_else(|| {
+                // `Double`/`Float` `rangeTo` and `rangeUntil` are `RangesKt` metadata, not records in
+                // the `.kotlin_builtins` fragment. The kotlin.ranges catalog still owns that signature.
+                if package != crate::types::wk::kotlin_ranges_package() {
+                    return None;
+                }
+                floating_range_membership(
+                    candidate.flags.operator,
+                    candidate.flags.suspend,
+                    candidate.flags.infix,
+                    candidate.context_count,
+                    candidate.call_sig.vararg,
+                    signature,
+                )
+            })
     }
 }
 

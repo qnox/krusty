@@ -10665,10 +10665,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **A nearer `Double`/`Float` range operator replaces primitive `in`.** `x in a..b` and
   `x in a..<b` for those primitives are direct IEEE comparisons only when overload resolution
   selects the exact catalog `kotlin.ranges` `rangeTo`/`rangeUntil` declaration returning
-  `ClosedFloatingPointRange`/`OpenEndRange`. The provider assigns `FloatingRangeMembership` while
-  decoding that trusted catalog, then copies it to a physical metadata declaration only through an
-  exact common-signature join. A declaration with the same shape but no catalog identity, and
-  `Comparable.rangeTo` returning `ClosedRange`, do not carry it (`-0.0 in 0.0..0.0` is true and
+  `ClosedFloatingPointRange`/`OpenEndRange`. Those operators are `RangesKt` metadata, not
+  `.kotlin_builtins` records. The provider assigns `FloatingRangeMembership` for that
+  `kotlin.ranges` signature and copies it onto the physical declaration. A declaration outside
+  that package, and `Comparable.rangeTo` returning `ClosedRange`, do not carry it (`-0.0 in 0.0..0.0` is true and
   `NaN in NaN..NaN` is false only for the catalog operator). A declaration in a nearer scope is an
   ordinary operator call followed by `contains`. The generic `Comparable.rangeTo` orders with
   `compareTo`, so `-0.0` is outside `0.0..0.0` and `NaN` is inside `NaN..NaN`. Integral ranges stay
