@@ -540,7 +540,7 @@ impl<'a> Checker<'a> {
                 self.span(operands.expression),
                 format!(
                     "operator 'contains' cannot be applied to range '{}' and '{}'",
-                    operands.start_ty.source_name(),
+                    range_ty.source_name(),
                     operands.value_ty.source_name()
                 ),
             );
