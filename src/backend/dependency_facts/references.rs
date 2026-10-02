@@ -91,7 +91,8 @@ impl ReferencedDependencies {
                 IrCallableReferenceTarget::Module(_)
                 | IrCallableReferenceTarget::Constructor { .. }
                 | IrCallableReferenceTarget::Local { .. }
-                | IrCallableReferenceTarget::FunctionValueConversion { .. } => {}
+                | IrCallableReferenceTarget::FunctionValueConversion { .. }
+                | IrCallableReferenceTarget::Classifier { .. } => {}
             },
             IrExpr::Checked(operation) => self.checked(operation),
             // A local delegated access carries expression templates selected by the frontend.

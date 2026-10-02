@@ -194,6 +194,7 @@ impl BodyLowering<'_> {
                 binding,
                 adaptation,
                 reference_ty,
+                reflective,
             );
         }
         if let crate::fir::FirCallableReferenceTarget::ArrayFactory {
