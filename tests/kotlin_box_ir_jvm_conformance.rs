@@ -44,8 +44,16 @@ import java.util.concurrent.*;
 
 public class BoxRunner {
     static final long TIMEOUT_MS = 2000; // 2s per test
+    // A fixed, small stack for box() threads: a case whose verdict rests on stack depth (an
+    // expected StackOverflowError) must not flap with JVM warmth — JIT-compiled frames are
+    // smaller than interpreted ones, so a warm runner could otherwise finish a recursion that
+    // overflows on a cold one (diagnostics/functions/tailRecursion/realStringRepeat.kt and
+    // coroutines/featureIntersection/tailrec/realStringRepeat.kt). A JVM may round the request
+    // up to its platform minimum stack; even that minimum overflows 10000 frames by a wide
+    // margin, so the verdict stays deterministic.
+    static final long BOX_STACK_BYTES = 256 * 1024;
     static final ExecutorService EXEC = Executors.newCachedThreadPool(r -> {
-        Thread t = new Thread(r);
+        Thread t = new Thread(null, r, "box", BOX_STACK_BYTES);
         t.setDaemon(true);
         return t;
     });
