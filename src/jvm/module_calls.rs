@@ -926,6 +926,7 @@ fn prepare_inherited_default_calls(ir: &mut IrFile) -> Result<(), ModuleRealizat
                 };
                 if let Some(receiver) = dispatch_receiver_ty {
                     ir.ext_call_source_receiver.insert(expression, receiver);
+                    ir.call_dispatch_owner.insert(expression, receiver);
                 }
             }
         }

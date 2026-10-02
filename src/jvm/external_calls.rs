@@ -747,7 +747,15 @@ pub(super) fn realize(
             continue;
         }
         let mut extension_receiver_at = None;
-        let dispatch_owner = declaration_dispatch_receiver(ir, expression);
+        // The declaration-selected class is the only dispatch authority. A source receiver
+        // recorded without it is an incomplete producer, not a substitute owner.
+        let dispatch_owner = match declaration_dispatch_receiver(ir, expression) {
+            Some(owner) => Some(owner),
+            None if ir.ext_call_source_receiver.contains_key(&expression) => {
+                return Err(target.into());
+            }
+            None => None,
+        };
         let IrExpr::Call {
             callee,
             dispatch_receiver,
@@ -1156,16 +1164,13 @@ fn primitive_iterator_next(
     Some((format!("next{element_name}"), element))
 }
 
-/// The class selected when the member was resolved. Inline expansion does not substitute it;
-/// the specialized [`IrFile::ext_call_source_receiver`] remains the value-class representation.
+/// The class selected when the member was resolved. Inline expansion does not substitute it.
+/// A missing entry stays missing: the specialized source receiver is a representation fact.
 fn declaration_dispatch_receiver(
     ir: &IrFile,
     expression: crate::ir::ExprId,
 ) -> Option<crate::types::Ty> {
-    ir.call_dispatch_owner
-        .get(&expression)
-        .copied()
-        .or_else(|| ir.ext_call_source_receiver.get(&expression).copied())
+    ir.call_dispatch_owner.get(&expression).copied()
 }
 
 fn call_site_owner(
@@ -1478,8 +1483,26 @@ fn align_inline_modifiers(
 
 #[cfg(test)]
 mod tests {
-    use super::align_inline_modifiers;
+    use super::{align_inline_modifiers, declaration_dispatch_receiver};
+    use crate::ir::{IrConst, IrExpr, IrFile};
     use crate::types::InlineParameterModifier as Modifier;
+    use crate::types::Ty;
+
+    #[test]
+    fn a_source_receiver_does_not_supply_a_missing_dispatch_owner() {
+        let mut ir = IrFile::default();
+        let expression = ir.add_expr(IrExpr::Const(IrConst::Null));
+        ir.ext_call_source_receiver
+            .insert(expression, Ty::obj("java/lang/Long"));
+        ir.call_dispatch_owner
+            .insert(expression, Ty::obj("java/lang/Number"));
+        assert_eq!(
+            declaration_dispatch_receiver(&ir, expression),
+            Some(Ty::obj("java/lang/Number"))
+        );
+        ir.call_dispatch_owner.remove(&expression);
+        assert_eq!(declaration_dispatch_receiver(&ir, expression), None);
+    }
 
     #[test]
     fn inline_modifiers_follow_realized_receiver_and_default_operands() {
