@@ -395,8 +395,15 @@ mod tests {
         std::fs::set_permissions(&wrapper, executable.clone()).expect("chmod gradlew");
         std::fs::set_permissions(&proxy, executable).expect("chmod recording krusty");
 
-        let user_home =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/cache/gradle-user-home");
+        // Keep CI's mutable Gradle workspace cache outside Cargo's target directory. The Rust
+        // cache action archives target as build output and may prune non-Cargo files from it,
+        // leaving Kotlin DSL workspaces without their metadata on the next restore. Local runs
+        // retain the repository cache unless the harness supplies an isolated home.
+        let user_home = std::env::var_os("KRUSTY_GRADLE_USER_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/cache/gradle-user-home")
+            });
         std::fs::create_dir_all(&user_home).expect("gradle user home");
         std::env::set_var("GRADLE_USER_HOME", &user_home);
 
