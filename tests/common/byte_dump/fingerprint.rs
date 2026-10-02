@@ -119,23 +119,8 @@ pub(super) fn basename(value: &str) -> String {
         .to_string()
 }
 
-pub(super) fn hash_tree(root: &Path) -> Result<u64, String> {
-    let mut files = Vec::new();
-    collect_files(root, &mut files)?;
-    files.sort();
-    let mut hash = 0xcbf29ce484222325u64;
-    for path in files {
-        if let Ok(relative) = path.strip_prefix(root) {
-            hash = fnv64(
-                hash,
-                relative.to_string_lossy().replace('\\', "/").as_bytes(),
-            );
-        }
-        let bytes = std::fs::read(&path)
-            .map_err(|err| format!("unreadable file {}: {err}", path.display()))?;
-        hash = fnv64(hash, &bytes);
-    }
-    Ok(hash)
+pub(super) fn hash_tree(root: &Path) -> Result<String, String> {
+    Ok(hex_sha256(&fingerprint_tree(root)?))
 }
 
 fn collect_files(root: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
@@ -251,7 +236,7 @@ pub(super) fn classpath_content_fingerprint_with_platform(
             continue;
         }
         if path.is_dir() {
-            rows.push(format!("dir:{:016x}", hash_tree(path)?));
+            rows.push(format!("dir:{}", hash_tree(path)?));
         } else {
             let bytes = std::fs::read(path)
                 .map_err(|err| format!("unreadable classpath entry {}: {err}", path.display()))?;

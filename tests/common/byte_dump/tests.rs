@@ -604,7 +604,7 @@ fn a_missing_plugin_or_classpath_entry_is_not_an_empty_fingerprint() {
         )
     );
     assert_ne!(
-        format!("dir:{empty_hash:016x}"),
+        format!("dir:{empty_hash}"),
         hash_tree(&missing_dir).unwrap_err()
     );
 
@@ -751,6 +751,25 @@ fn a_directory_classpath_ignores_its_own_name() {
     std::fs::write(&module, b"idx").unwrap();
     let shifted = class_dump_inputs("src", "default", &[], &[root.join("pid-111")]);
     assert_ne!(left.fingerprint, shifted.fingerprint);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn directory_classpath_identity_frames_names_and_bytes() {
+    let root = temp_root("framed-directory-cp");
+    let left = root.join("left");
+    let right = root.join("right");
+    std::fs::create_dir_all(&left).unwrap();
+    std::fs::create_dir_all(&right).unwrap();
+    std::fs::write(left.join("a"), b"bc").unwrap();
+    std::fs::write(right.join("ab"), b"c").unwrap();
+
+    let left = classpath_content_fingerprint_with_platform(&[left], None, None).unwrap();
+    let right = classpath_content_fingerprint_with_platform(&[right], None, None).unwrap();
+    assert_ne!(
+        left, right,
+        "relative names and file bytes must have independent hash boundaries"
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
 
