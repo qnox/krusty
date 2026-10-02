@@ -1,57 +1,40 @@
 //! Bounded editor responses.
 //!
-//! Zed parses each JSON-RPC frame on the UI path. A multi-megabyte array freezes that parse, and
-//! building the array can exhaust the process. List results are cut into pages of
-//! [`RESPONSE_PAGE_BYTES`]. A client that sends `partialResultToken` receives every page that fits
-//! in [`MAX_RESPONSE_PAGES`] as `$/progress`, then the last page as the result. A client that does
-//! not (Zed, for these methods) receives the first page as a normal result.
+//! A list that fits in one [`RESPONSE_PAGE_BYTES`] frame is the JSON-RPC result. A client that
+//! sends a `partialResultToken` and a list that does not fit is streamed with `$/progress`: every
+//! page, including the last, is a progress notification, and the final result is empty. LSP 3.17
+//! requires that split once any partial result is reported. A list that still does not fit, or a
+//! request with no token whose list does not fit one frame, is a server-cancelled error. Identity,
+//! location, and edit strings are never rewritten to make a value fit.
 
 use std::borrow::Cow;
 
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
-use crate::analysis::semantic_token_json_cost;
+use super::implementation::MAX_MESSAGE_BYTES;
 
-/// One editor-facing list page, including the JSON-RPC envelope.
+/// One editor-facing frame, including the JSON-RPC envelope, id, and progress token.
 pub(super) const RESPONSE_PAGE_BYTES: usize = 256 * 1024;
 
-const RESPONSE_ENVELOPE_BYTES: usize = 4 * 1024;
-
-/// JSON array (or semantic-token `data` array) inside one page.
-pub(super) const RESPONSE_ITEMS_PAGE_BYTES: usize = RESPONSE_PAGE_BYTES - RESPONSE_ENVELOPE_BYTES;
-
-/// How many pages one request may emit. Past this the rest is omitted so a streamed response
-/// cannot grow without a bound.
+/// How many progress pages one request may emit.
 pub(super) const MAX_RESPONSE_PAGES: usize = 32;
 
 /// Hover markdown kept on the wire. The stored hover text may be longer.
 pub(super) const HOVER_TEXT_BYTES: usize = 8 * 1024;
 
-pub(super) struct PagedJsonArray {
-    /// `$/progress` notifications for every page except the last.
-    pub progress: Vec<Value>,
-    /// Items for the JSON-RPC result.
-    pub items: Vec<Value>,
-}
+const SERVER_CANCELLED: i32 = -32802;
 
-pub(super) struct PagedSemanticTokens {
-    pub progress: Vec<Value>,
-    pub data: Vec<u32>,
-}
-
-pub(super) fn response_item_budget(streaming: bool) -> usize {
-    if streaming {
-        RESPONSE_ITEMS_PAGE_BYTES.saturating_mul(MAX_RESPONSE_PAGES)
-    } else {
-        RESPONSE_ITEMS_PAGE_BYTES
+/// `partialResultToken` when it is a string or integer. A missing token is absence. Any other
+/// JSON shape is invalid params.
+pub(super) fn partial_result_token(params: &Value) -> Result<Option<Value>, ()> {
+    match params.get("partialResultToken") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(text)) => Ok(Some(Value::String(text.clone()))),
+        Some(Value::Number(number)) if number.is_i64() || number.is_u64() => {
+            Ok(Some(Value::Number(number.clone())))
+        }
+        Some(_) => Err(()),
     }
-}
-
-/// `partialResultToken` when it is a string or number. Other JSON is ignored.
-pub(super) fn partial_result_token(params: &Value) -> Option<Value> {
-    params.get("partialResultToken").and_then(|token| {
-        matches!(token, Value::String(_) | Value::Number(_)).then(|| token.clone())
-    })
 }
 
 pub(super) fn limit_text(text: &str, max_bytes: usize) -> Cow<'_, str> {
@@ -73,257 +56,222 @@ pub(super) fn limit_text(text: &str, max_bytes: usize) -> Cow<'_, str> {
     }
 }
 
-pub(super) fn page_json_array(
-    items: Vec<Value>,
-    partial_result_token: Option<&Value>,
-) -> PagedJsonArray {
-    let Some(token) =
-        partial_result_token.filter(|token| matches!(*token, Value::String(_) | Value::Number(_)))
-    else {
-        return PagedJsonArray {
-            progress: Vec::new(),
-            items: fit_json_array(items, RESPONSE_ITEMS_PAGE_BYTES),
-        };
-    };
-    let mut pages = split_value_pages(items, RESPONSE_ITEMS_PAGE_BYTES, MAX_RESPONSE_PAGES);
-    let last = pages.pop().unwrap_or_default();
-    let progress = pages
-        .into_iter()
-        .map(|page| progress_notification(token, Value::Array(page)))
-        .collect();
-    PagedJsonArray {
-        progress,
-        items: last,
-    }
-}
-
-pub(super) fn page_semantic_token_data(
-    data: Vec<u32>,
-    partial_result_token: Option<&Value>,
-) -> PagedSemanticTokens {
-    let streaming =
-        partial_result_token.filter(|token| matches!(*token, Value::String(_) | Value::Number(_)));
-    let max_pages = if streaming.is_some() {
-        MAX_RESPONSE_PAGES
-    } else {
-        1
-    };
-    let mut pages = split_token_pages(&data, RESPONSE_ITEMS_PAGE_BYTES, max_pages);
-    let last = pages.pop().unwrap_or_default();
-    let progress = match streaming {
-        Some(token) => pages
-            .into_iter()
-            .map(|page| progress_notification(token, json!({ "data": page })))
-            .collect(),
-        None => Vec::new(),
-    };
-    PagedSemanticTokens {
-        progress,
-        data: last,
-    }
-}
-
-/// Running JSON-array size, so a collector can stop without encoding past the budget.
-pub(super) struct ArrayBudget {
-    used: usize,
-    limit: usize,
-}
-
-impl ArrayBudget {
-    pub(super) fn new(limit: usize) -> Self {
-        Self { used: 2, limit }
-    }
-
-    pub(super) fn admit(&mut self, item: &Value) -> bool {
-        let len = json_len(item);
-        let separator = usize::from(self.used > 2);
-        if self.used.saturating_add(separator).saturating_add(len) > self.limit {
-            return false;
-        }
-        self.used = self.used.saturating_add(separator).saturating_add(len);
-        true
-    }
-}
-
-pub(super) fn limit_signature_help(mut value: Value) -> Value {
-    if json_len(&value) <= RESPONSE_ITEMS_PAGE_BYTES {
-        return value;
-    }
-    shrink_value(&mut value, RESPONSE_ITEMS_PAGE_BYTES);
-    if json_len(&value) <= RESPONSE_ITEMS_PAGE_BYTES {
-        value
-    } else {
-        Value::Null
-    }
-}
-
-fn progress_notification(token: &Value, value: Value) -> Value {
-    json!({
+/// Whole completion items that fit in one result frame. Dropped items are not rewritten; the
+/// caller marks the list incomplete.
+pub(super) fn fit_completion_items(id: &Value, items: Vec<Value>) -> (Vec<Value>, bool) {
+    let shell = json!({
         "jsonrpc": "2.0",
-        "method": "$/progress",
-        "params": {
-            "token": token,
-            "value": value
-        }
-    })
-}
-
-fn fit_json_array(items: Vec<Value>, budget: usize) -> Vec<Value> {
-    if budget < 2 {
-        return Vec::new();
-    }
+        "id": id,
+        "result": {"isIncomplete": false, "items": []}
+    });
+    let Some(budget) = array_budget(&shell) else {
+        return (Vec::new(), !items.is_empty());
+    };
     let mut kept = Vec::new();
     let mut used = 2usize;
-    for mut item in items {
-        let mut len = json_len(&item);
-        if len.saturating_add(2) > budget {
-            shrink_value(&mut item, budget.saturating_sub(2));
-            len = json_len(&item);
-        }
+    for item in items {
+        let len = json_len(&item);
         let separator = usize::from(!kept.is_empty());
-        if used.saturating_add(separator).saturating_add(len) > budget {
-            break;
+        if len.saturating_add(2) > budget
+            || used.saturating_add(separator).saturating_add(len) > budget
+        {
+            return (kept, true);
         }
         used = used.saturating_add(separator).saturating_add(len);
         kept.push(item);
     }
-    kept
+    (kept, false)
 }
 
-fn split_value_pages(items: Vec<Value>, budget: usize, max_pages: usize) -> Vec<Vec<Value>> {
+/// Signature help that fits one result frame. Extra signatures are dropped whole and
+/// `activeSignature` stays inside the remaining array. Labels are not rewritten.
+pub(super) fn limit_signature_help(id: &Value, value: Value) -> Value {
+    let Some(budget) = result_value_budget(id) else {
+        return Value::Null;
+    };
+    if json_len(&value) <= budget {
+        return value;
+    }
+    let Value::Object(object) = value else {
+        return Value::Null;
+    };
+    let mut object = object;
+    let Some(Value::Array(mut signatures)) = object.remove("signatures") else {
+        return Value::Null;
+    };
+    while !signatures.is_empty() {
+        clamp_active_signature(&mut object, signatures.len());
+        object.insert("signatures".to_string(), Value::Array(signatures.clone()));
+        let candidate = Value::Object(object.clone());
+        if json_len(&candidate) <= budget {
+            return candidate;
+        }
+        signatures.pop();
+    }
+    Value::Null
+}
+
+pub(super) fn array_messages(id: Value, items: Vec<Value>, token: Option<&Value>) -> Vec<Value> {
+    let Some(result_budget) = array_budget(&result_message(&id, Value::Array(Vec::new()))) else {
+        return vec![too_large(&id)];
+    };
+    if fits_one(&items, result_budget) {
+        return vec![result_message(&id, Value::Array(items))];
+    }
+    let Some(token) = token else {
+        return vec![too_large(&id)];
+    };
+    let Some(progress_budget) = array_budget(&progress_message(token, Value::Array(Vec::new())))
+    else {
+        return vec![too_large(&id)];
+    };
+    match pack_values(items, progress_budget, MAX_RESPONSE_PAGES) {
+        Ok(pages) => streamed_array(id, token, pages),
+        Err(()) => vec![too_large(&id)],
+    }
+}
+
+pub(super) fn location_messages(
+    id: Value,
+    locations: Vec<Value>,
+    token: Option<&Value>,
+) -> Vec<Value> {
+    if locations.is_empty() {
+        vec![result_message(&id, Value::Null)]
+    } else {
+        array_messages(id, locations, token)
+    }
+}
+
+fn streamed_array(id: Value, token: &Value, pages: Vec<Vec<Value>>) -> Vec<Value> {
+    let mut messages = Vec::with_capacity(pages.len().saturating_add(1));
+    for page in pages {
+        messages.push(progress_message(token, Value::Array(page)));
+    }
+    messages.push(result_message(&id, Value::Array(Vec::new())));
+    messages
+}
+
+fn clamp_active_signature(object: &mut Map<String, Value>, len: usize) {
+    let Some(active) = object.get("activeSignature").and_then(Value::as_u64) else {
+        return;
+    };
+    if active >= len as u64 {
+        object.insert(
+            "activeSignature".to_string(),
+            Value::Number((len - 1).into()),
+        );
+    }
+}
+
+fn result_value_budget(id: &Value) -> Option<usize> {
+    let shell = result_message(id, Value::Null);
+    let frame = json_len(&shell);
+    if frame > RESPONSE_PAGE_BYTES {
+        return None;
+    }
+    // The shell measures a four-byte `null` result. The value replaces it.
+    Some(RESPONSE_PAGE_BYTES - frame + 4)
+}
+
+fn array_budget(empty_frame: &Value) -> Option<usize> {
+    let frame = json_len(empty_frame);
+    if frame > RESPONSE_PAGE_BYTES {
+        return None;
+    }
+    // `empty_frame` already contains `[]`. `used` starts at those two bytes.
+    Some(RESPONSE_PAGE_BYTES - frame + 2)
+}
+
+fn fits_one(items: &[Value], budget: usize) -> bool {
+    if budget < 2 {
+        return items.is_empty();
+    }
+    let mut used = 2usize;
+    for item in items {
+        let len = json_len(item);
+        if len.saturating_add(2) > budget {
+            return false;
+        }
+        let separator = usize::from(used > 2);
+        if used.saturating_add(separator).saturating_add(len) > budget {
+            return false;
+        }
+        used = used.saturating_add(separator).saturating_add(len);
+    }
+    true
+}
+
+fn pack_values(items: Vec<Value>, budget: usize, max_pages: usize) -> Result<Vec<Vec<Value>>, ()> {
+    if max_pages == 0 || budget < 2 {
+        return Err(());
+    }
     let mut pages = Vec::new();
     let mut page = Vec::new();
     let mut used = 2usize;
-    if max_pages == 0 || budget < 2 {
-        return vec![Vec::new()];
-    }
-    for mut item in items {
-        let mut len = json_len(&item);
+    for item in items {
+        let len = json_len(&item);
         if len.saturating_add(2) > budget {
-            shrink_value(&mut item, budget.saturating_sub(2));
-            len = json_len(&item);
-        }
-        let separator = usize::from(!page.is_empty());
-        if !page.is_empty() && used.saturating_add(separator).saturating_add(len) > budget {
-            if pages.len() + 1 >= max_pages {
-                break;
-            }
-            pages.push(std::mem::take(&mut page));
-            used = 2;
+            return Err(());
         }
         let separator = usize::from(!page.is_empty());
         if used.saturating_add(separator).saturating_add(len) > budget {
-            break;
+            pages.push(std::mem::take(&mut page));
+            if pages.len() == max_pages {
+                return Err(());
+            }
+            used = 2;
         }
+        let separator = usize::from(!page.is_empty());
         used = used.saturating_add(separator).saturating_add(len);
         page.push(item);
     }
-    if !page.is_empty() || pages.is_empty() {
+    if page.is_empty() && pages.is_empty() {
+        pages.push(page);
+    } else if !page.is_empty() {
+        if pages.len() == max_pages {
+            return Err(());
+        }
         pages.push(page);
     }
-    pages
+    Ok(pages)
 }
 
-fn split_token_pages(data: &[u32], budget: usize, max_pages: usize) -> Vec<Vec<u32>> {
-    let mut pages = Vec::new();
-    let mut page = Vec::new();
-    let mut used = 2usize;
-    if max_pages == 0 || budget < 2 {
-        return vec![Vec::new()];
-    }
-    for chunk in data.as_chunks::<5>().0 {
-        let mut cost = semantic_token_json_cost(chunk, page.is_empty());
-        if !page.is_empty() && used.saturating_add(cost) > budget {
-            if pages.len() + 1 >= max_pages {
-                break;
-            }
-            pages.push(std::mem::take(&mut page));
-            used = 2;
-            cost = semantic_token_json_cost(chunk, true);
-        }
-        if used.saturating_add(cost) > budget {
-            break;
-        }
-        used = used.saturating_add(cost);
-        page.extend_from_slice(chunk);
-    }
-    if !page.is_empty() || pages.is_empty() {
-        pages.push(page);
-    }
-    pages
+fn result_message(id: &Value, result: Value) -> Value {
+    json!({"jsonrpc": "2.0", "id": id, "result": result})
 }
 
-fn shrink_value(value: &mut Value, budget: usize) {
-    if json_len(value) <= budget {
-        return;
-    }
-    match value {
-        Value::Object(_) => {
-            shrink_object_array_field(value, "children", budget);
-            if json_len(value) > budget {
-                shrink_object_array_field(value, "signatures", budget);
-            }
-            if json_len(value) > budget {
-                shrink_object_array_field(value, "items", budget);
-            }
-            if json_len(value) > budget {
-                truncate_object_strings(value, budget);
-            }
-        }
-        Value::Array(items) => {
-            let fitted = fit_json_array(std::mem::take(items), budget);
-            *value = Value::Array(fitted);
-        }
-        Value::String(text) => {
-            *text = limit_text(text, budget.saturating_sub(2)).into_owned();
-        }
-        _ => {}
+fn progress_message(token: &Value, value: Value) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "method": "$/progress",
+        "params": {"token": token, "value": value}
+    })
+}
+
+fn too_large(id: &Value) -> Value {
+    let message = error_message(
+        id,
+        SERVER_CANCELLED,
+        "response exceeds the editor page limit",
+    );
+    if json_len(&message) <= MAX_MESSAGE_BYTES {
+        message
+    } else {
+        error_message(
+            &Value::Null,
+            SERVER_CANCELLED,
+            "response exceeds the editor page limit",
+        )
     }
 }
 
-fn shrink_object_array_field(value: &mut Value, field: &str, budget: usize) {
-    let Some(array_len) = value.get(field).map(json_len) else {
-        return;
-    };
-    let full = json_len(value);
-    if full <= budget {
-        return;
-    }
-    let array_budget = budget.saturating_sub(full.saturating_sub(array_len));
-    let Some(items) = value
-        .as_object_mut()
-        .and_then(|object| object.get_mut(field))
-        .and_then(Value::as_array_mut)
-    else {
-        return;
-    };
-    let fitted = fit_json_array(std::mem::take(items), array_budget);
-    *items = fitted;
-}
-
-fn truncate_object_strings(value: &mut Value, budget: usize) {
-    let keys: Vec<String> = value
-        .as_object()
-        .map(|object| object.keys().cloned().collect())
-        .unwrap_or_default();
-    for key in keys {
-        if json_len(value) <= budget {
-            return;
-        }
-        let Some(limited) = value
-            .get(&key)
-            .and_then(Value::as_str)
-            .map(|text| limit_text(text, 64).into_owned())
-        else {
-            continue;
-        };
-        if let Some(slot) = value
-            .as_object_mut()
-            .and_then(|object| object.get_mut(&key))
-        {
-            *slot = Value::String(limited);
-        }
-    }
+fn error_message(id: &Value, code: i32, message: &str) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": {"code": code, "message": message}
+    })
 }
 
 fn json_len(value: &Value) -> usize {
@@ -335,10 +283,9 @@ fn json_len(value: &Value) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::analysis::SemanticTokenIndex;
 
-    fn symbol(name: &str, children: Vec<Value>) -> Value {
-        let mut value = json!({
+    fn symbol(name: &str) -> Value {
+        json!({
             "name": name,
             "kind": 5,
             "range": {
@@ -349,14 +296,18 @@ mod tests {
                 "start": {"line": 0, "character": 0},
                 "end": {"line": 0, "character": 1}
             }
-        });
-        if !children.is_empty() {
-            value
-                .as_object_mut()
-                .unwrap()
-                .insert("children".to_string(), Value::Array(children));
+        })
+    }
+
+    fn assert_frames_fit(messages: &[Value]) {
+        for message in messages {
+            let encoded = serde_json::to_vec(message).unwrap();
+            assert!(
+                encoded.len() <= RESPONSE_PAGE_BYTES,
+                "frame is {} bytes",
+                encoded.len()
+            );
         }
-        value
     }
 
     #[test]
@@ -370,128 +321,151 @@ mod tests {
     }
 
     #[test]
-    fn semantic_token_pages_cover_every_token_and_each_page_fits() {
-        let mut data = Vec::new();
-        for _ in 0..80_000 {
-            data.extend_from_slice(&[1, 0, 1, 0, 0]);
-        }
-        let token = json!("sem/1");
-        let paged = page_semantic_token_data(data.clone(), Some(&token));
-        assert!(!paged.progress.is_empty());
-
-        let mut combined = Vec::new();
-        for message in paged
-            .progress
-            .iter()
-            .chain(std::iter::once(&json!({ "data": paged.data.clone() })))
-        {
-            let page = message
-                .pointer("/params/value/data")
-                .or_else(|| message.get("data"))
-                .and_then(Value::as_array)
-                .unwrap();
-            let encoded = serde_json::to_vec(page).unwrap();
-            assert!(encoded.len() <= RESPONSE_ITEMS_PAGE_BYTES);
-            assert_eq!(page.len() % 5, 0);
-            combined.extend(page.iter().map(|number| number.as_u64().unwrap() as u32));
-        }
-        assert_eq!(combined, data);
-
-        let first = page_semantic_token_data(data.clone(), None);
-        assert!(first.progress.is_empty());
-        assert!(first.data.len() < data.len());
-        assert_eq!(&data[..first.data.len()], first.data.as_slice());
-        assert!(serde_json::to_vec(&first.data).unwrap().len() <= RESPONSE_ITEMS_PAGE_BYTES);
+    fn partial_result_token_accepts_string_and_integer_only() {
+        assert_eq!(partial_result_token(&json!({})).unwrap(), None);
+        assert_eq!(
+            partial_result_token(&json!({"partialResultToken": null})).unwrap(),
+            None
+        );
+        assert_eq!(
+            partial_result_token(&json!({"partialResultToken": "sem/1"})).unwrap(),
+            Some(json!("sem/1"))
+        );
+        assert_eq!(
+            partial_result_token(&json!({"partialResultToken": 7})).unwrap(),
+            Some(json!(7))
+        );
+        assert!(partial_result_token(&json!({"partialResultToken": true})).is_err());
+        assert!(partial_result_token(&json!({"partialResultToken": {"t": 1}})).is_err());
+        assert!(partial_result_token(&json!({"partialResultToken": 1.5})).is_err());
+        assert!(partial_result_token(&json!({"partialResultToken": []})).is_err());
     }
 
     #[test]
-    fn encode_capped_stops_before_the_json_budget() {
-        let entries: Vec<[u32; 4]> = (0..80_000).map(|line| [line, 0, 1, 0]).collect();
-        let index = SemanticTokenIndex::from_entries_for_test(entries);
-        let capped = index.encode_capped(None, RESPONSE_ITEMS_PAGE_BYTES);
-        let full = index.encode(None);
-        assert!(capped.len() < full.len());
-        assert_eq!(capped.len() % 5, 0);
-        assert!(serde_json::to_vec(&capped).unwrap().len() <= RESPONSE_ITEMS_PAGE_BYTES);
-        assert_eq!(&full[..capped.len()], capped.as_slice());
-    }
-
-    #[test]
-    fn a_partial_result_token_streams_list_pages_and_a_missing_token_keeps_the_first() {
+    fn a_token_streams_every_page_and_the_final_result_is_empty() {
         let item = json!({"message": "m".repeat(8 * 1024)});
         let items = vec![item; 80];
+        let id = json!("list-1");
         let token = json!(7);
-        let paged = page_json_array(items.clone(), Some(&token));
-        assert!(!paged.progress.is_empty());
-        let mut seen = 0usize;
-        for message in paged
-            .progress
-            .iter()
-            .chain(std::iter::once(&json!(paged.items.clone())))
-        {
-            let page = message
-                .pointer("/params/value")
-                .or_else(|| message.as_array().map(|_| message))
-                .and_then(Value::as_array)
-                .unwrap();
-            assert!(serde_json::to_vec(page).unwrap().len() <= RESPONSE_ITEMS_PAGE_BYTES);
-            seen += page.len();
+        let messages = array_messages(id.clone(), items.clone(), Some(&token));
+        assert!(messages.len() > 2);
+        assert_frames_fit(&messages);
+        assert_eq!(messages.last().unwrap()["id"], id);
+        assert_eq!(messages.last().unwrap()["result"], json!([]));
+        let mut seen = Vec::new();
+        for message in &messages[..messages.len() - 1] {
+            assert_eq!(message["method"], "$/progress");
+            assert_eq!(message["params"]["token"], token);
+            let page = message["params"]["value"].as_array().unwrap();
+            assert!(!page.is_empty());
+            seen.extend(page.iter().cloned());
         }
-        assert_eq!(seen, items.len());
-
-        let first = page_json_array(items, None);
-        assert!(first.progress.is_empty());
-        assert!(first.items.len() < 80);
-        assert!(serde_json::to_vec(&first.items).unwrap().len() <= RESPONSE_ITEMS_PAGE_BYTES);
+        assert_eq!(seen, items);
     }
 
     #[test]
-    fn streaming_stops_after_the_page_cap() {
+    fn a_list_that_fits_one_frame_stays_in_the_result_even_with_a_token() {
+        let items = vec![json!({"name": "Answer"})];
+        let messages = array_messages(json!(1), items.clone(), Some(&json!("tok")));
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["result"], Value::Array(items));
+        assert!(messages[0].get("method").is_none());
+    }
+
+    #[test]
+    fn a_list_without_a_token_that_does_not_fit_is_an_error() {
         let item = json!({"message": "m".repeat(8 * 1024)});
-        let items = vec![item; 1_500];
-        let paged = page_json_array(items, Some(&json!("cap")));
-        let page_count = paged.progress.len() + usize::from(!paged.items.is_empty());
-        assert!(page_count <= MAX_RESPONSE_PAGES);
-        assert!(paged.progress.len() >= 2);
-        let kept: usize = paged
-            .progress
-            .iter()
-            .map(|message| {
-                message
-                    .pointer("/params/value")
-                    .and_then(Value::as_array)
-                    .unwrap()
-                    .len()
-            })
-            .sum::<usize>()
-            + paged.items.len();
-        assert!(kept < 1_500);
+        let messages = array_messages(json!("id"), vec![item; 80], None);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["error"]["code"], SERVER_CANCELLED);
+        assert!(messages[0].get("result").is_none());
     }
 
     #[test]
-    fn a_symbol_whose_children_exceed_the_page_keeps_a_fitting_prefix() {
-        let child = symbol(&"member".repeat(40), Vec::new());
-        let root = symbol("Root", vec![child; 2_000]);
-        let paged = page_json_array(vec![root], None);
-        assert_eq!(paged.items.len(), 1);
-        let encoded = serde_json::to_vec(&paged.items).unwrap();
-        assert!(encoded.len() <= RESPONSE_ITEMS_PAGE_BYTES);
-        let children = paged.items[0]["children"].as_array().unwrap();
-        assert!(!children.is_empty());
-        assert!(children.len() < 2_000);
+    fn streaming_past_the_page_cap_is_an_error_without_a_prefix() {
+        let item = json!({"message": "m".repeat(8 * 1024)});
+        let messages = array_messages(json!("cap"), vec![item; 1_500], Some(&json!("cap")));
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["error"]["code"], SERVER_CANCELLED);
+        assert!(messages[0].get("method").is_none());
     }
 
     #[test]
-    fn signature_help_shrinks_to_the_page() {
+    fn an_item_that_does_not_fit_one_page_is_not_rewritten() {
+        let root = json!({
+            "name": "Root",
+            "children": (0..2_000).map(|index| symbol(&format!("member{index:04}"))).collect::<Vec<_>>()
+        });
+        let messages = array_messages(json!(1), vec![root], None);
+        assert_eq!(messages[0]["error"]["code"], SERVER_CANCELLED);
+        let encoded = serde_json::to_vec(&messages[0]).unwrap();
+        assert!(!encoded.windows(6).any(|window| window == b"member"));
+    }
+
+    #[test]
+    fn a_large_request_id_is_charged_in_the_frame() {
+        let id = Value::String("i".repeat(RESPONSE_PAGE_BYTES));
+        let messages = array_messages(id, vec![json!(1)], None);
+        assert_eq!(messages[0]["error"]["code"], SERVER_CANCELLED);
+        assert!(serde_json::to_vec(&messages[0]).unwrap().len() <= MAX_MESSAGE_BYTES);
+    }
+
+    #[test]
+    fn a_large_token_cannot_stream_a_list_that_needs_another_page() {
+        let token = Value::String("t".repeat(RESPONSE_PAGE_BYTES));
+        let item = json!({"message": "m".repeat(8 * 1024)});
+        let messages = array_messages(json!(1), vec![item; 80], Some(&token));
+        assert_eq!(messages[0]["error"]["code"], SERVER_CANCELLED);
+        let encoded = serde_json::to_vec(&messages[0]).unwrap();
+        assert!(!encoded.windows(8).any(|window| window == b"tttttttt"));
+    }
+
+    #[test]
+    fn completion_items_are_dropped_whole_and_labels_stay_intact() {
+        let items: Vec<Value> = (0..400)
+            .map(|index| json!({"label": format!("item{index:04}{}", "x".repeat(2 * 1024))}))
+            .collect();
+        let (kept, truncated) = fit_completion_items(&json!(1), items.clone());
+        assert!(truncated);
+        assert!(!kept.is_empty());
+        assert!(kept.len() < items.len());
+        assert_eq!(kept[0]["label"], items[0]["label"]);
+        let shell = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {"isIncomplete": false, "items": kept}
+        });
+        assert!(json_len(&shell) <= RESPONSE_PAGE_BYTES);
+    }
+
+    #[test]
+    fn signature_help_drops_signatures_and_keeps_the_active_index_valid() {
         let signatures: Vec<Value> = (0..800)
             .map(
                 |index| json!({"label": format!("fun overloaded{index}({})", "Int, ".repeat(200))}),
             )
             .collect();
-        let value = json!({"signatures": signatures, "activeSignature": 0});
-        assert!(json_len(&value) > RESPONSE_ITEMS_PAGE_BYTES);
-        let limited = limit_signature_help(value);
-        assert!(json_len(&limited) <= RESPONSE_ITEMS_PAGE_BYTES);
-        assert!(limited["signatures"].as_array().unwrap().len() < 800);
+        let value = json!({"signatures": signatures, "activeSignature": 799});
+        let limited = limit_signature_help(&json!("sig"), value);
+        let kept = limited["signatures"].as_array().unwrap();
+        assert!(!kept.is_empty());
+        assert!(kept.len() < 800);
+        let active = limited["activeSignature"].as_u64().unwrap();
+        assert!(active < kept.len() as u64);
+        assert_eq!(
+            kept[0]["label"],
+            json!(format!("fun overloaded0({})", "Int, ".repeat(200)))
+        );
+        let shell = result_message(&json!("sig"), limited);
+        assert!(json_len(&shell) <= RESPONSE_PAGE_BYTES);
+    }
+
+    #[test]
+    fn one_signature_that_does_not_fit_is_absent() {
+        let value = json!({
+            "signatures": [{"label": "L".repeat(RESPONSE_PAGE_BYTES)}],
+            "activeSignature": 0
+        });
+        assert_eq!(limit_signature_help(&json!(1), value), Value::Null);
     }
 }

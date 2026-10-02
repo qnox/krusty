@@ -3241,7 +3241,7 @@ pub const SEMANTIC_TOKEN_MODIFIERS: [&str; 10] = [
 ///
 /// An array keeps the in-memory entry at 16 bytes and also serializes to compact JSON arrays on the
 /// worker wire instead of repeating five object-field names per source token.
-type SemanticTokenEntry = [u32; 4];
+pub(crate) type SemanticTokenEntry = [u32; 4];
 
 #[derive(Clone, Copy)]
 pub struct SemanticTokenRange {
@@ -3257,7 +3257,7 @@ pub struct SemanticTokenRange {
 /// encode directly from this array without retaining the AST or rescanning source text.
 #[derive(Clone, Default, Deserialize, Serialize)]
 pub struct SemanticTokenIndex {
-    entries: Vec<SemanticTokenEntry>,
+    pub(crate) entries: Vec<SemanticTokenEntry>,
 }
 
 impl SemanticTokenIndex {
@@ -3294,18 +3294,6 @@ impl SemanticTokenIndex {
     }
 
     pub fn encode(&self, range: Option<SemanticTokenRange>) -> Vec<u32> {
-        self.encode_capped(range, usize::MAX)
-    }
-
-    /// Delta-encoded tokens whose JSON array fits in `max_json_bytes`.
-    ///
-    /// Stops before the token that would cross the budget, so a highlight response can be cut to
-    /// one editor page without first building the array for the rest of the file.
-    pub fn encode_capped(
-        &self,
-        range: Option<SemanticTokenRange>,
-        max_json_bytes: usize,
-    ) -> Vec<u32> {
         let entries = if let Some(range) = range {
             let start = (range.start_line, range.start_character);
             let end = (range.end_line, range.end_character);
@@ -3317,8 +3305,7 @@ impl SemanticTokenIndex {
         } else {
             &self.entries
         };
-        let mut encoded = Vec::new();
-        let mut json_bytes = 2usize;
+        let mut encoded = Vec::with_capacity(entries.len().saturating_mul(5));
         let mut previous_line = 0;
         let mut previous_start = 0;
         for entry in entries {
@@ -3331,49 +3318,17 @@ impl SemanticTokenIndex {
                 start
             };
             let packed = entry[3];
-            let token = [
+            encoded.extend_from_slice(&[
                 delta_line,
                 delta_start,
                 entry[2],
                 packed & u8::MAX as u32,
                 packed >> 8,
-            ];
-            let cost = semantic_token_json_cost(&token, encoded.is_empty());
-            if json_bytes.saturating_add(cost) > max_json_bytes {
-                break;
-            }
-            json_bytes = json_bytes.saturating_add(cost);
-            encoded.extend_from_slice(&token);
+            ]);
             previous_line = line;
             previous_start = start;
         }
         encoded
-    }
-}
-
-#[cfg(test)]
-impl SemanticTokenIndex {
-    pub(crate) fn from_entries_for_test(entries: Vec<[u32; 4]>) -> Self {
-        Self { entries }
-    }
-}
-
-pub(crate) fn semantic_token_json_cost(token: &[u32], page_empty: bool) -> usize {
-    let digits = token
-        .iter()
-        .map(|number| json_u32_len(*number))
-        .sum::<usize>();
-    let commas = token.len().saturating_sub(1);
-    usize::from(!page_empty)
-        .saturating_add(digits)
-        .saturating_add(commas)
-}
-
-fn json_u32_len(number: u32) -> usize {
-    if number == 0 {
-        1
-    } else {
-        number.ilog10() as usize + 1
     }
 }
 
