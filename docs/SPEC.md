@@ -9426,6 +9426,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`IrFile::entry_point`); an unmapped one is an internal error. The entry is a Kotlin rule; a
   harness's `box(): String` is not, and a backend receives it as a driver-selected identity instead
   of finding it by name. Tests: `src/fir/entry_point_tests.rs`, `src/fir_lower/entry_point_tests.rs`.
+- **Native targets: every prebuilt runtime object is its target's, and the runtime is closed.**
+  `build.rs` compiles each runtime source once per supported target and, after each compile, reads
+  the object's ELF identity: it must be 64-bit (`EI_CLASS` 2), little-endian (`EI_DATA` 1), a
+  relocatable (`ET_REL`), and code for the target's `e_machine` (62 on x86_64, 183 on AArch64, 243
+  on RISC-V). Anything else fails krusty's build, as a compiler that exits non-zero does, with one
+  line naming the compiler, the source, the triple and what was written instead; nothing is
+  published. A `KRUSTY_RUNTIME_CC` wrapper that appends its own `--target` therefore cannot file one
+  architecture's code under another's name. Only a compiler that cannot be started leaves the native
+  targets unavailable. The unit test over the embedded table checks the same identity per object,
+  that each target carries one object per source in `build.rs`'s own order, and that every symbol a
+  target's objects leave undefined is defined by another of them, the program's `kt_program_entry`
+  aside, so a toolchain-injected helper (`__stack_chk_fail`) fails krusty's tests rather than a
+  user's link. Under `CI` an empty table fails that test instead of passing vacuously.
+  Tests: `tests/native_runtime_e2e.rs`
+  (`a_runtime_compiler_that_emits_another_machines_code_fails_the_build`),
+  `native::prebuilt::tests::a_prebuilt_runtime_is_every_source_as_a_closed_set_of_objects_for_its_arch`.
 
 - **Operations over constants fold (kotlinc's `ConstEvaluationLowering`).** kotlinc's JVM backend
   runs its IR interpreter in `OnlyIntrinsicConst` mode before any other lowering: a call to an
