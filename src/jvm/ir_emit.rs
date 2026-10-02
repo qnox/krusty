@@ -9427,7 +9427,7 @@ impl<'a> Emitter<'a> {
                                 expression: e,
                                 owner_identity,
                                 owner: &owner,
-                                name,
+                                name: &name,
                                 descriptor: &descriptor,
                                 parameters: &ptys,
                                 result: ret,

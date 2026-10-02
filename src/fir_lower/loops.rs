@@ -266,7 +266,7 @@ impl BodyLowering<'_> {
             target: *property,
             dispatch: dispatch.clone(),
             receiver_ty: *receiver,
-            parameters: parameters,
+            parameters,
             result: *result,
             extension_receiver_parameter: *extension_receiver_parameter,
             dispatch_receiver: super::source_calls::DispatchOperand {
