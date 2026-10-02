@@ -134,20 +134,41 @@ pub(super) fn finalize_interface_delegations(
         let Some(class) = ir.checked_classifier_classes.get(&declaration).copied() else {
             continue;
         };
+        // kotlinc stores the delegates in declaration order, ahead of the class's own
+        // initializers.
+        let mut parameter_stores = Vec::new();
         for (ordinal, delegation) in header.interface_delegations.iter().enumerate() {
-            materialize_delegation(declaration, class, ordinal, delegation, ir)?;
+            let delegate = DelegationSite {
+                declaration,
+                class,
+                ordinal,
+            };
+            materialize_delegation(delegate, delegation, &mut parameter_stores, ir)?;
         }
+        prepend_initializers(ir, class, parameter_stores);
     }
     Ok(())
 }
 
-fn materialize_delegation(
+/// One delegation of a classifier: the classifier, its class, and the delegation's ordinal.
+#[derive(Clone, Copy)]
+struct DelegationSite {
     declaration: DeclarationId,
     class: crate::ir::ClassId,
-    delegation_ordinal: usize,
+    ordinal: usize,
+}
+
+fn materialize_delegation(
+    site: DelegationSite,
     delegation: &ResolvedInterfaceDelegation,
+    parameter_stores: &mut Vec<u32>,
     ir: &mut IrFile,
 ) -> Result<(), FirFileLoweringFailure> {
+    let DelegationSite {
+        declaration,
+        class,
+        ordinal: delegation_ordinal,
+    } = site;
     delegation
         .interface
         .get()
@@ -184,7 +205,7 @@ fn materialize_delegation(
             let parameter_index = declared_parameter_index(declaration, ir, class, parameter)?;
             ir.classes[class as usize].fields[field as usize].ty =
                 ir.classes[class as usize].ctor_args[parameter_index].ty;
-            prepend_parameter_initializer(ir, class, field, parameter_index)?;
+            parameter_stores.push(parameter_initializer(ir, class, field, parameter_index)?);
         }
         ResolvedInterfaceDelegateSource::SyntheticConstructorParameter(parameter) => {
             let parameter_index = parameter as usize;
@@ -195,7 +216,7 @@ fn materialize_delegation(
             }
             ir.classes[class as usize].fields[field as usize].ty =
                 ir.classes[class as usize].ctor_args[parameter_index].ty;
-            prepend_parameter_initializer(ir, class, field, parameter_index)?;
+            parameter_stores.push(parameter_initializer(ir, class, field, parameter_index)?);
         }
         ResolvedInterfaceDelegateSource::ConstructorBodyInitializer => {
             if !ir
@@ -388,6 +409,9 @@ fn materialize_delegation(
                     getter,
                     crate::ir::FnParamInfo::identities(identities.clone()),
                 );
+                // kotlinc gives an accessor forwarder its receiver and parameters as locals.
+                ir.fn_debug_locals
+                    .extend(std::iter::once(getter).chain(setter));
                 if let Some(setter) = setter {
                     identities.push(crate::ir::IrParameterIdentity::property_setter_value());
                     ir.fn_params
@@ -448,7 +472,7 @@ fn materialize_delegation(
                             ty,
                             is_var: setter.is_some(),
                             is_abstract: false,
-                            modifiers: Default::default(),
+                            modifiers: DELEGATION_PROPERTY_MODIFIERS,
                             delegate_field: None,
                             getter,
                             setter,
@@ -472,7 +496,7 @@ fn materialize_delegation(
                     backing_field: None,
                     is_var: property.setter.is_some(),
                     is_open: true,
-                    modifiers: Default::default(),
+                    modifiers: DELEGATION_PROPERTY_MODIFIERS,
                     delegate_field: None,
                     is_private: false,
                     setter_visibility: crate::types::Visibility::Public,
@@ -489,12 +513,12 @@ fn materialize_delegation(
     Ok(())
 }
 
-fn prepend_parameter_initializer(
+fn parameter_initializer(
     ir: &mut IrFile,
     class: crate::ir::ClassId,
     field: u32,
     parameter_index: usize,
-) -> Result<(), FirFileLoweringFailure> {
+) -> Result<u32, FirFileLoweringFailure> {
     let receiver = ir.add_expr(IrExpr::GetValue(0));
     let value = ir.add_expr(IrExpr::GetValue(
         u32::try_from(parameter_index + 1)
@@ -506,8 +530,7 @@ fn prepend_parameter_initializer(
         index: field,
         value,
     });
-    prepend_initializer(ir, class, store);
-    Ok(())
+    Ok(store)
 }
 
 fn delegated_call(
@@ -603,11 +626,14 @@ fn delegated_call(
         args: arguments,
     });
     match &call.target {
-        ResolvedDelegatedCallTarget::Module { parameters, .. } => {
+        ResolvedDelegatedCallTarget::Module {
+            parameters, result, ..
+        } => {
             ir.call_declared_params.insert(
                 expression,
                 parameters.iter().map(|parameter| parameter.get()).collect(),
             );
+            ir.call_declared_ret.insert(expression, result.get());
         }
         ResolvedDelegatedCallTarget::External(_) => {
             ir.ext_call_source_receiver
@@ -621,20 +647,32 @@ fn delegated_call(
         ir.suspend_calls.insert(expression, call.result.get());
     }
     Ok(if physical_result != call.result.get() {
-        ir.add_expr(IrExpr::TypeOp {
+        // The declaration's result read at the forwarder's substitution, as at a source call.
+        let coercion = ir.add_expr(IrExpr::TypeOp {
             op: IrTypeOp::ImplicitCoercion,
             arg: expression,
             type_operand: call.result.get(),
-        })
+        });
+        ir.declaration_result_coercions.insert(coercion);
+        coercion
     } else {
         expression
     })
 }
 
-fn prepend_initializer(ir: &mut IrFile, class: crate::ir::ClassId, store: u32) {
+fn prepend_initializers(ir: &mut IrFile, class: crate::ir::ClassId, stores: Vec<u32>) {
+    if stores.is_empty() {
+        return;
+    }
+    // The stores open the existing initializer block rather than nesting it, so the constructor
+    // keeps the per-property statements whose source lines it maps.
     let previous = ir.classes[class as usize].init_body.take();
+    let previous = match previous.map(|body| ir.expr(body).clone()) {
+        Some(IrExpr::Block { stmts, value: None }) => stmts,
+        _ => previous.into_iter().collect(),
+    };
     let body = ir.add_expr(IrExpr::Block {
-        stmts: std::iter::once(store).chain(previous).collect(),
+        stmts: stores.into_iter().chain(previous).collect(),
         value: None,
     });
     ir.classes[class as usize].init_body = Some(body);
@@ -719,8 +757,21 @@ fn add_forwarder(
     ir.open_methods.insert(function);
     // kotlinc's forwarder has no source line, yet it names its receiver and parameters.
     ir.fn_debug_locals.insert(function);
+    ir.interface_delegation_forwarders.insert(function);
     function
 }
+
+/// A delegated property is an overridable override, whatever the delegating class's modality, and
+/// Kotlin metadata records it as a delegation member rather than a declaration.
+const DELEGATION_PROPERTY_MODIFIERS: crate::ir::IrPropertyModifiers =
+    crate::ir::IrPropertyModifiers {
+        modality: crate::ir::IrPropertyModality::Open,
+        declared_getter: false,
+        declared_setter: false,
+        delegated: false,
+        lateinit: false,
+        member_kind: crate::ir::IrMemberKind::Delegation,
+    };
 
 fn stamp_generated(ir: &mut IrFile, first: usize) {
     let cause = crate::fir::OriginId::from_raw(0);

@@ -106,9 +106,11 @@ impl BodyLowering<'_> {
         value: Option<crate::fir::FirExprId>,
     ) -> Result<ExprId, FirLoweringFailure> {
         let value = value.map(|value| self.expression(value)).transpose()?;
+        let classifier = classifier.map(crate::fir::ResolvedTy::get);
         Ok(self.ir.add_expr(IrExpr::KClassLiteral {
-            classifier: classifier.map(crate::fir::ResolvedTy::get),
+            classifier,
             value,
+            type_argument: classifier.is_some_and(|ty| ty.ty_param_name().is_some()),
         }))
     }
 
@@ -192,6 +194,7 @@ impl BodyLowering<'_> {
                 binding,
                 adaptation,
                 reference_ty,
+                reflective,
             );
         }
         if let crate::fir::FirCallableReferenceTarget::ArrayFactory {
@@ -437,6 +440,7 @@ impl BodyLowering<'_> {
             &arguments,
             &signature_parameters,
             substitutions,
+            None,
         );
         self.next_temporary = enclosing_temporary;
         let Some(call) = call.transpose()? else {
@@ -572,7 +576,11 @@ impl BodyLowering<'_> {
             })))
     }
 
-    pub(super) fn checked_call(&mut self, call: &FirCall) -> Result<ExprId, FirLoweringFailure> {
+    pub(super) fn checked_call(
+        &mut self,
+        call: &FirCall,
+        source_line: u32,
+    ) -> Result<ExprId, FirLoweringFailure> {
         let dispatch_receiver = self.receiver(call.dispatch_receiver)?;
         let extension_receiver = self.receiver(call.extension_receiver)?;
         match &call.target {
@@ -594,6 +602,7 @@ impl BodyLowering<'_> {
                         &arguments,
                         &parameter_types,
                         &call.substitutions,
+                        Some(source_line),
                     )
                     .transpose()?
                 {
@@ -742,7 +751,7 @@ impl BodyLowering<'_> {
                 if matches!(
                     operation,
                     crate::fir::FirIntrinsic::SuspendCoroutine
-                        | crate::fir::FirIntrinsic::SuspendCoroutineUninterceptedOrReturn
+                        | crate::fir::FirIntrinsic::SuspendCoroutineUninterceptedOrReturn { .. }
                 ) {
                     return self
                         .suspend_coroutine_primitive(
@@ -1359,7 +1368,7 @@ pub(super) fn lower_fir_intrinsic(operation: &crate::fir::FirIntrinsic) -> crate
                 "safe suspend coroutine blocks are structurally lowered before this mapping"
             )
         }
-        crate::fir::FirIntrinsic::SuspendCoroutineUninterceptedOrReturn => {
+        crate::fir::FirIntrinsic::SuspendCoroutineUninterceptedOrReturn { .. } => {
             unreachable!("suspend coroutine blocks are structurally lowered before this mapping")
         }
         crate::fir::FirIntrinsic::UnsignedToString { source } => {

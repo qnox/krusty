@@ -11,6 +11,12 @@ pub enum CompilerIntrinsic {
     /// The kind distinguishes reference/primitive varargs and the other language array creators;
     /// selected call-site types remain ordinary semantic types and are recorded in checked FIR.
     ArrayFactory(crate::types::ArrayFactoryKind),
+    /// An array classifier's own `operator fun get(index: Int)` (`IntArray.get`, `Array<T>.get`).
+    /// The array classifiers have no platform class, so a target reads the element directly.
+    ArrayGet,
+    /// An array classifier's own `operator fun set(index: Int, value)`, realized as a direct
+    /// element store for the same reason as [`Self::ArrayGet`].
+    ArraySet,
     ArraySize,
     CharCode,
     StringLength,
@@ -75,6 +81,11 @@ pub enum CompilerIntrinsic {
     Count,
     TrimIndent,
     TrimMargin,
+    /// The common stdlib `kotlin.ranges` `Double`/`Float` `rangeTo` declarations.
+    /// Membership is an IEEE comparison. The provider copies this role from the exact common
+    /// declaration onto its physical realization; a nearer operator and an otherwise identical
+    /// declaration from another dependency do not carry it.
+    FloatingRangeMembership,
     /// `kotlin.ranges` progression builders a counted `for` loop reads through instead of calling
     /// (kotlinc's `ForLoopsLowering` handlers). Outside a loop header they are ordinary calls.
     RangeDownTo,

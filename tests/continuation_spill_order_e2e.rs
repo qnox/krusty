@@ -596,11 +596,9 @@ fn disassemble(name: &str, src: &str, class: &str, verbose: bool) -> (String, St
 /// local variable table says what it is told while stepping. They are separate attributes and a
 /// change can reach one without the other, so the affected caller is pinned here too.
 ///
-/// Byte equality is not attainable and the reason is stated rather than worked around: since
-/// kotlinc's coroutine transformer builds this caller's machine, krusty's table carries the
-/// expansion's locals and the transformer's split ranges, but not the `$i$f` and `$i$a`
-/// inline-depth markers, which shift every slot after them. Pinning both projections is what makes
-/// closing that visible here.
+/// kotlinc's coroutine transformer builds this caller's machine, so krusty's table carries the
+/// expansion's locals, its `$i$f` and `$i$a` inline-depth markers and the transformer's split
+/// ranges: the whole table is kotlinc's, slots included.
 #[test]
 fn the_callers_local_variable_table_is_pinned_on_both_sides() {
     let src = "suspend fun step(v: String): String = v\n\
@@ -642,21 +640,7 @@ fn the_callers_local_variable_table_is_pinned_on_both_sides() {
     );
     assert_eq!(
         local_variable_table(&krusty, "public static final java.lang.Object run("),
-        [
-            "4 first Ljava/lang/String;",
-            "5 second Ljava/lang/String;",
-            "3 p Ljava/lang/String;",
-            "2 tag$iv Ljava/lang/String;",
-            "0 tag Ljava/lang/String;",
-            "1 $completion Lkotlin/coroutines/Continuation;",
-            "7 $continuation Lkotlin/coroutines/Continuation;",
-            "6 $result Ljava/lang/Object;",
-            "2 tag$iv Ljava/lang/String;",
-            "3 p Ljava/lang/String;",
-            "2 tag$iv Ljava/lang/String;",
-            "3 p Ljava/lang/String;",
-            "4 first Ljava/lang/String;",
-        ],
-        "krusty's complete table for the caller: the expansion's inline-depth markers are absent"
+        local_variable_table(&reference, "public static final java.lang.Object run("),
+        "krusty's complete table for the caller"
     );
 }

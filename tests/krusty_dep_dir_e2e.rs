@@ -89,6 +89,24 @@ fn same_name_extension_properties_from_dep_dir() {
 }
 
 #[test]
+fn value_class_member_extension_property_from_dep_dir_keeps_both_receivers() {
+    let dir = dep_dir(
+        "value_member_extprop",
+        "inline class A(val value: String) {\n\
+             val Char.value: String get() = this + nonExtensionValue()\n\
+             fun nonExtensionValue(): String = value\n\
+         }\n",
+    );
+    let stdlib = stdlib_jar();
+    let main = "fun box(): String = with(A(\"K\")) { 'O'.value }\n";
+    let out = compile_and_run_box(main, "Main", &[dir, stdlib], Some(jdk_modules().as_path()))
+        .expect(
+            "value-class member extension from a dependency keeps dispatch and extension slots",
+        );
+    assert_eq!(out, "OK");
+}
+
+#[test]
 fn extension_property_from_dep_dir() {
     let dir = dep_dir(
         "extprop",

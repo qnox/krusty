@@ -17,6 +17,9 @@ impl BodyLowering<'_> {
     ) -> Option<ExprId> {
         let function_adapter = matches!(self.ir.expr(function), IrExpr::CallableReference(_));
         let arity = u8::try_from(conversion.parameters.len()).ok()?;
+        // The captured value keeps its own function arity. A non-suspend value adapted to a
+        // suspend method is `FunctionN`; the implementation still receives the continuation.
+        let captured_suspend = conversion.suspend && conversion.source_suspend;
         let function_type = Ty::fun_with_shape(
             conversion
                 .parameters
@@ -26,7 +29,7 @@ impl BodyLowering<'_> {
             conversion.result.get(),
             conversion.context_count as usize,
             conversion.has_receiver,
-            conversion.suspend,
+            captured_suspend,
         );
         let callee = self.ir.add_expr(IrExpr::GetValue(0));
         let arguments = conversion
@@ -116,10 +119,18 @@ impl BodyLowering<'_> {
                     context_count: conversion.context_count,
                     has_receiver: conversion.has_receiver,
                     suspend: conversion.suspend,
+                    source_suspend: conversion.source_suspend,
                     overrides_non_primitive_result: conversion.overrides_non_primitive_result,
+                    overridden_non_primitive_results: conversion
+                        .overridden_non_primitive_results
+                        .iter()
+                        .map(|result| result.get())
+                        .collect(),
                     function_adapter,
-                    wraps_function_value: true,
+                    wraps_function_value: !function_adapter,
                     nullable: conversion.nullable,
+                    kotlin_interface: conversion.kotlin_interface,
+                    parameter_identities: conversion.parameter_identities.iter().cloned().collect(),
                 }),
                 inline_body: None,
             }),

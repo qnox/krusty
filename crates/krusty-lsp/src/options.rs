@@ -65,7 +65,7 @@ impl LspOptions {
         match Self::parse(argv) {
             Ok(options) => options,
             Err(OptionsError::Help(text)) => {
-                println!("{text}");
+                print!("{text}");
                 std::process::exit(0);
             }
             Err(OptionsError::Invalid(error)) => {

@@ -381,8 +381,42 @@ pub(crate) fn primitive_iterator_next(
     ))
 }
 
+/// The members an array classifier declares for its elements and length (`IntArray.get(Int): Int`,
+/// `Array<T>.set(Int, T)`, `val size: Int`). No platform class implements them; the declaration
+/// itself is the array operation. A reference array's element is its classifier's type parameter.
+fn array_access(facts: &BuiltinMemberDeclaration<'_>) -> Option<CompilerIntrinsic> {
+    let array = Ty::obj_name(facts.owner);
+    if !array.is_array() {
+        return None;
+    }
+    if facts.is_property {
+        return (facts.name == "size" && facts.params.is_empty() && facts.ret == Ty::Int)
+            .then_some(CompilerIntrinsic::ArraySize);
+    }
+    if !facts.is_operator {
+        return None;
+    }
+    let element = |ty: Ty| {
+        if array.is_reference_array() {
+            matches!(ty, Ty::TyParam(..))
+        } else {
+            array.array_elem() == Some(ty)
+        }
+    };
+    match (facts.name, facts.params) {
+        ("get", [Ty::Int]) if element(facts.ret) => Some(CompilerIntrinsic::ArrayGet),
+        ("set", [Ty::Int, value]) if facts.ret == Ty::Unit && element(*value) => {
+            Some(CompilerIntrinsic::ArraySet)
+        }
+        _ => None,
+    }
+}
+
 /// Attach a compiler realization only to an exact normalized builtin declaration.
 pub(crate) fn realization(facts: BuiltinMemberDeclaration<'_>) -> MemberRealization {
+    if let Some(intrinsic) = array_access(&facts) {
+        return MemberRealization::Intrinsic(intrinsic);
+    }
     if facts.is_property {
         return MemberRealization::Dispatch;
     }
@@ -514,6 +548,55 @@ mod tests {
             realization(declaration),
             MemberRealization::Intrinsic(CompilerIntrinsic::StringGet)
         );
+    }
+
+    #[test]
+    fn array_access_requires_the_array_declaration_signature() {
+        let element = Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")));
+        assert_eq!(
+            realization(facts("kotlin/IntArray", "get", &[Ty::Int], Ty::Int)),
+            MemberRealization::Intrinsic(CompilerIntrinsic::ArrayGet)
+        );
+        assert_eq!(
+            realization(facts("kotlin/Array", "get", &[Ty::Int], element)),
+            MemberRealization::Intrinsic(CompilerIntrinsic::ArrayGet)
+        );
+        assert_eq!(
+            realization(facts(
+                "kotlin/ByteArray",
+                "set",
+                &[Ty::Int, Ty::Byte],
+                Ty::Unit
+            )),
+            MemberRealization::Intrinsic(CompilerIntrinsic::ArraySet)
+        );
+        assert_eq!(
+            realization(facts("kotlin/Array", "set", &[Ty::Int, element], Ty::Unit)),
+            MemberRealization::Intrinsic(CompilerIntrinsic::ArraySet)
+        );
+        for declaration in [
+            facts("kotlin/IntArray", "get", &[Ty::Long], Ty::Int),
+            facts("kotlin/IntArray", "get", &[Ty::Int], Ty::Long),
+            facts("kotlin/ByteArray", "set", &[Ty::Int, Ty::Int], Ty::Unit),
+            facts("kotlin/Array", "get", &[Ty::Int], Ty::Int),
+            facts("sample/IntBox", "get", &[Ty::Int], Ty::Int),
+        ] {
+            assert_eq!(realization(declaration), MemberRealization::Dispatch);
+        }
+        let mut plain = facts("kotlin/IntArray", "get", &[Ty::Int], Ty::Int);
+        plain.is_operator = false;
+        assert_eq!(realization(plain), MemberRealization::Dispatch);
+
+        let mut size = facts("kotlin/CharArray", "size", &[], Ty::Int);
+        size.is_property = true;
+        size.is_operator = false;
+        assert_eq!(
+            realization(size),
+            MemberRealization::Intrinsic(CompilerIntrinsic::ArraySize)
+        );
+        let mut length = facts("kotlin/CharArray", "length", &[], Ty::Int);
+        length.is_property = true;
+        assert_eq!(realization(length), MemberRealization::Dispatch);
     }
 
     #[test]

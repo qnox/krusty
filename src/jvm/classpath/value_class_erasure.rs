@@ -2,8 +2,147 @@
 //! descriptor position recovers from it: the underlying for `X`, and for `X?` too when the
 //! underlying's own null can stand for the absent value.
 
-use super::{meta_descriptor_position, meta_ids};
+use super::meta_ids;
 use crate::types::{Ty, TypeName};
+
+pub(super) fn meta_descriptor_position(
+    index: usize,
+    context_count: usize,
+    extension: bool,
+) -> usize {
+    index + usize::from(extension && index >= context_count)
+}
+
+pub(super) fn meta_param_exact(
+    name: Option<TypeName>,
+    nullable: bool,
+    desc: &Ty,
+    value_underlying: &dyn Fn(TypeName) -> Option<Ty>,
+) -> bool {
+    let Some(name) = name else {
+        return super::ty_erases_to_object(*desc);
+    };
+    let ids = super::meta_ids();
+    if name == ids.array {
+        return matches!(desc, Ty::Obj(n, args)
+            if *n == ids.array && args.first().copied().is_some_and(super::ty_erases_to_object));
+    }
+    if let Some(width) = super::prim_array_width(name) {
+        return desc.obj_internal().and_then(super::prim_array_width) == Some(width);
+    }
+    if let Some(prim) = ids.prim.get(&name) {
+        if nullable {
+            return desc
+                .obj_internal()
+                .is_some_and(|actual| super::nullable_primitive_matches_descriptor(name, actual));
+        }
+        return match prim {
+            u if u.is_unsigned() => *desc == *u || Some(*desc) == u.scalar_value_repr(),
+            prim => desc == prim,
+        };
+    }
+    if let Some(erased) = metadata_value_class_underlying(name, nullable, value_underlying) {
+        return erased.non_null() == desc.non_null();
+    }
+    if name == ids.unit {
+        *desc == Ty::Unit
+    } else if name == ids.nothing {
+        *desc == Ty::Nothing
+    } else if matches!(*desc, Ty::String) {
+        name == ids.string_kotlin || name == ids.string_java
+    } else {
+        desc.obj_internal().is_some_and(|desc_internal| {
+            crate::jvm::jvm_class_map::type_names_map_to_same_jvm_internal(desc_internal, name)
+        })
+    }
+}
+
+/// JVM carrier of a metadata type parameter whose primary class bound is a value class.
+pub(super) fn metadata_value_class_bound_carrier(
+    ty: Ty,
+    signature: &crate::libraries::GenericSig,
+    is_interface: &dyn Fn(TypeName) -> bool,
+    value_underlying: &dyn Fn(TypeName) -> Option<Ty>,
+) -> Option<Ty> {
+    let mut current = ty;
+    let mut seen = std::collections::HashSet::new();
+    let class_bound = loop {
+        let Ty::TyParam(name, _) = current.non_null() else {
+            break current;
+        };
+        if !seen.insert(name) {
+            return None;
+        }
+        let bounds = signature
+            .formals
+            .iter()
+            .position(|formal| formal == name)
+            .and_then(|index| signature.formal_bounds.get(index))
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let next = bounds
+            .iter()
+            .copied()
+            .find(|bound| match bound.non_null() {
+                Ty::TyParam(..) => false,
+                concrete => concrete
+                    .obj_internal()
+                    .is_none_or(|classifier| !is_interface(classifier)),
+            })
+            .or_else(|| {
+                bounds
+                    .iter()
+                    .copied()
+                    .find(|bound| matches!(bound.non_null(), Ty::TyParam(..)))
+            })?;
+        let nullable = current.is_nullable() || next.is_nullable();
+        current = if nullable {
+            Ty::nullable(next.non_null())
+        } else {
+            next.non_null()
+        };
+    };
+    let nullable = class_bound.is_nullable();
+    let classifier = class_bound.non_null().obj_internal()?;
+    let projected = metadata_value_class_underlying(classifier, nullable, value_underlying)?;
+    Some(
+        if nullable && !projected.is_nullable() && projected.is_reference() {
+            Ty::nullable(projected)
+        } else {
+            projected
+        },
+    )
+}
+
+pub(super) fn metadata_carrier_matches(
+    carrier: Ty,
+    descriptor: &Ty,
+    exact: bool,
+    value_underlying: &dyn Fn(TypeName) -> Option<Ty>,
+) -> bool {
+    let scalar = carrier
+        .non_null()
+        .scalar_value_repr()
+        .filter(|_| !carrier.is_nullable());
+    if let Some(scalar) = scalar {
+        return descriptor.non_null() == scalar || descriptor.non_null() == carrier.non_null();
+    }
+    if exact {
+        meta_param_exact(
+            carrier.obj_internal(),
+            carrier.is_nullable(),
+            descriptor,
+            value_underlying,
+        )
+    } else {
+        super::meta_param_compat(
+            carrier.obj_internal(),
+            carrier.is_nullable(),
+            descriptor,
+            value_underlying,
+        )
+    }
+}
 
 /// The JVM representation recovered for a metadata-named value class. Keep unsigned normalization in
 /// this single semantic adapter so top-level, member, exact, and compatible alignment cannot drift.

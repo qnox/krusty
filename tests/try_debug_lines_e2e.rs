@@ -672,12 +672,12 @@ fn a_catch_parameter_is_named_where_it_is_declared() {
 /// `once` and `nested` differ only in how many expansions the catch is cloned into, so a name that
 /// were a constant suffix, or no suffix, would fail on one of the two.
 ///
-/// Byte equality is not attainable and the reason is stated rather than worked around: krusty emits
-/// no inline-depth markers (`$i$f`, `$i$a`), so it writes three rows where kotlinc writes five and
-/// four where it writes seven — every row kotlinc has for a real local is there, at the same slot,
-/// and only the markers between them are missing. That is a separate gap from this change, and
-/// pinning both projections is what makes closing it visible here. The offsets are left out for
-/// the same reason — they differ because the row counts do.
+/// Byte equality is not attainable and the reason is stated rather than worked around: the
+/// expansion of `guarded`, whose returns are not its tail, keeps its result in a local of its own
+/// that kotlinc does not have, so every row declared after that local sits one slot higher. Every
+/// row kotlinc writes is there, inline-depth markers included, in kotlinc's order and under its
+/// names; pinning both projections is what makes closing the slot gap visible here. The offsets
+/// are left out for the same reason.
 #[test]
 fn an_inlined_catch_parameter_is_named_at_its_expansion_depth() {
     let src = "inline fun guarded(tag: String, block: () -> String): String {\n\
@@ -709,7 +709,9 @@ fn an_inlined_catch_parameter_is_named_at_its_expansion_depth() {
     assert_eq!(
         table(&krusty, "java.lang.String once("),
         [
-            "3 e$iv Ljava/lang/IllegalStateException;",
+            "4 $i$a$-guarded-NestedCatchNamesKt$once$1 I",
+            "5 e$iv Ljava/lang/IllegalStateException;",
+            "2 $i$f$guarded I",
             "1 tag$iv Ljava/lang/String;",
             "0 tag Ljava/lang/String;",
         ],
@@ -731,8 +733,11 @@ fn an_inlined_catch_parameter_is_named_at_its_expansion_depth() {
     assert_eq!(
         table(&krusty, "java.lang.String nested("),
         [
-            "4 e$iv$iv Ljava/lang/IllegalStateException;",
-            "2 tag$iv$iv Ljava/lang/String;",
+            "6 $i$a$-twice-NestedCatchNamesKt$nested$1 I",
+            "7 e$iv$iv Ljava/lang/IllegalStateException;",
+            "4 $i$f$guarded I",
+            "3 tag$iv$iv Ljava/lang/String;",
+            "2 $i$f$twice I",
             "1 tag$iv Ljava/lang/String;",
             "0 tag Ljava/lang/String;",
         ],

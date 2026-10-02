@@ -43,10 +43,13 @@ pub(crate) use cps::{EmitTimeMachines, SuspendLambdaClass, TransformedMachine};
 mod debug_metadata;
 mod emission_facts;
 pub use emission_facts::{ContinuationMetadata, ContinuationMetadataMap};
+pub(crate) use emission_facts::{
+    IntrinsicProbeContinuations, SuspendedResultReturn, SuspendedResultReturns,
+};
 use emission_facts::{MachineOutputs, MachineSubject};
-pub(crate) use emission_facts::{SuspendedResultReturn, SuspendedResultReturns};
 mod get_or_create;
 mod hoisting;
+mod intrinsic_probes;
 mod live_scopes;
 use hoisting::{hoist_spliced_inline_bodies, hoist_suspensions};
 use live_scopes::{
@@ -85,7 +88,7 @@ use statement_normalization::{
     split_unit_conditional_returns,
 };
 use std::collections::{HashMap, HashSet};
-use tail_forward::{rewrite_forward_body, tail_forward};
+use tail_forward::{record_return_adaptations, rewrite_forward_body, tail_forward};
 use value_liveness::{kills_value, pending_reads_after};
 
 const I32_MIN: i32 = i32::MIN;
@@ -210,6 +213,7 @@ pub(crate) fn lower_suspend(
     default_call_operands: &mut crate::jvm::default_call_operands::DefaultCallOperands,
     emit_time_machines: &mut EmitTimeMachines,
     suspended_result_returns: &mut SuspendedResultReturns,
+    intrinsic_probe_continuations: &mut IntrinsicProbeContinuations,
     null_out_dead_spills: bool,
 ) -> bool {
     realize_safe_coroutine_points(ir);
@@ -217,6 +221,7 @@ pub(crate) fn lower_suspend(
         continuation_metadata,
         default_call_operands,
         suspended_result_returns,
+        intrinsic_probe_continuations,
     };
     let suspend_set: HashSet<u32> = ir.suspend_funs.iter().copied().collect();
     // Snapshot every function's *declared* (pre-CPS) return type, so hoisted suspension temps are typed
@@ -508,7 +513,12 @@ pub(crate) fn lower_suspend(
             // placeholder to the machine WRAPPER inside `build_state_machine` (cont_v), so
             // `c.resume(v)` re-enters this machine.
             if !has_susp && !emit_time_machine {
-                rewrite_current_continuation(ir, b, p_old);
+                intrinsic_probes::bind_current_continuation(
+                    ir,
+                    b,
+                    p_old,
+                    outputs.intrinsic_probe_continuations,
+                );
             }
             // The pre-splice scope lists (captured above) hold PRE-shift local indices — shift them
             // identically so they match the machine's value numbering.
@@ -549,17 +559,15 @@ pub(crate) fn lower_suspend(
             splice_return_blocks(ir, b);
             let returned =
                 rewrite_forward_body(ir, b, &suspend_set, orig_rets[fid as usize], &forward);
-            // Kotlin 2.4.20 answers a forwarded `Unit` function's result with `Unit` unless the
-            // callee suspended; earlier releases return whatever the callee returned.
-            if orig_rets[fid as usize] == Ty::Unit
-                && crate::kotlin_version::at_least(crate::kotlin_version::KotlinVersion::V2_4_20)
-            {
-                outputs.suspended_result_returns.extend(
-                    returned
-                        .into_iter()
-                        .map(|ret| (ret, SuspendedResultReturn::Unit)),
-                );
-            }
+            record_return_adaptations(
+                ir,
+                fid,
+                &forward,
+                &suspend_set,
+                returned,
+                orig_rets[fid as usize],
+                &mut outputs.suspended_result_returns,
+            );
             // The body may hold EARLY returns besides the forwarded tail (`if (n == 0) return true;
             // return odd(n - 1)`) — the CPS method returns `Object`, so a primitive early return must
             // box exactly as in a leaf body (kotlinc boxes it and keeps the tail-call shape). The tail
@@ -1747,6 +1755,7 @@ fn build_state_machine(
         continuation_metadata,
         default_call_operands,
         suspended_result_returns,
+        intrinsic_probe_continuations,
     } = outputs;
     crate::trace_compiler!(
         "suspend",
@@ -1836,9 +1845,8 @@ fn build_state_machine(
     // owner in `dispatch_receiver` so it remains a class member and names its continuation correctly,
     // but value-class lowering has already made it static and inserted the carrier as parameter zero.
     // Such a method has no JVM `this` slot and its continuation must not capture one.
-    let semantic_owner: Option<TypeName> = ir.functions[fid as usize].dispatch_receiver;
-    let receiver: Option<TypeName> =
-        semantic_owner.filter(|_| !ir.functions[fid as usize].is_static);
+    let semantic_owner = ir.functions[fid as usize].dispatch_receiver;
+    let (receiver, static_owner) = continuation_class::reentry_owners(ir, fid);
     let this_offset = u32::from(receiver.is_some());
     // Real value parameters (excluding the appended CPS `Continuation`), at value-indices
     // `this_offset .. this_offset + real_params.len()`.
@@ -2168,6 +2176,7 @@ fn build_state_machine(
         &layout,
         suspended_result_returns,
         receiver,
+        static_owner,
         &real_params,
     );
 
@@ -2175,7 +2184,7 @@ fn build_state_machine(
     // continuation parameter: bind it to the machine WRAPPER (`cont_v`) so `c.resume(v)`
     // re-enters THIS machine at the resume label (kotlinc's protocol; the raw incoming
     // `$completion` would resume the CALLER instead).
-    rewrite_current_continuation(ir, b, cont_v);
+    intrinsic_probes::bind_current_continuation(ir, b, cont_v, intrinsic_probe_continuations);
 
     // Flatten the body into a state graph.
     let mut flat = Flat {
@@ -4341,7 +4350,7 @@ fn reference_needs_checkcast(t: &Ty) -> bool {
         Ty::TyParam(_, inner) => reference_needs_checkcast(inner),
         Ty::String => true,
         Ty::Obj(i, _) => {
-            !i.matches("kotlin/Any") && !super::jvm_class_map::is_boxed_primitive_classifier(i)
+            i != crate::types::wk::any() && !super::jvm_class_map::is_boxed_primitive_classifier(i)
         }
         _ => false,
     }
@@ -4669,19 +4678,6 @@ fn shift_locals(ir: &mut IrFile, e: ExprId, threshold: u32) {
     // from 0 to 1, leaving `GetValue(1)` unallocated in the extracted lambda method (a class method escaped
     // because its lambda `it`=0 was below the threshold 1).
     crate::ir::shift_value_indices(ir, e, threshold, 1);
-}
-
-/// Resolve every current-coroutine placeholder in `e` against the continuation value at `slot` (the
-/// trailing `Continuation` parameter's value-index). `CurrentContinuation` becomes a direct local
-/// read; the checked `coroutineContext` intrinsic becomes the ordinary interface call on that same
-/// value. Neither realization repeats property lookup or invokes the stdlib's private throwing getter.
-fn rewrite_current_continuation(ir: &mut IrFile, e: ExprId, slot: u32) {
-    realize_coroutine_context(ir, e, IrExpr::GetValue(slot));
-    rewrite_subtree(ir, e, &mut |node| {
-        if matches!(node, IrExpr::CurrentContinuation) {
-            *node = IrExpr::GetValue(slot);
-        }
-    });
 }
 
 /// The maximum value-index referenced anywhere in the arena (params, locals). New state-machine locals

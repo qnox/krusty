@@ -324,7 +324,8 @@ impl BodyLowering<'_> {
                 })
             }
             FirExprKind::Call(call) => {
-                let lowered = self.checked_call(call)?;
+                let lowered = self
+                    .checked_call(call, self.body.expression_debug_lines(expression_id).source)?;
                 let declared_result = match call.target {
                     crate::fir::FirCallTarget::Module(target) => self
                         .index
@@ -347,7 +348,8 @@ impl BodyLowering<'_> {
             FirExprKind::ConstructorCall(call) => self.checked_constructor_call(call)?,
             FirExprKind::AnonymousObject(object) => self.anonymous_object(object)?,
             FirExprKind::ComparisonCall { operation, call } => {
-                let call = self.checked_call(call)?;
+                let call = self
+                    .checked_call(call, self.body.expression_debug_lines(expression_id).source)?;
                 if let IrExpr::Call {
                     callee:
                         Callee::Intrinsic {
@@ -371,7 +373,8 @@ impl BodyLowering<'_> {
                 })
             }
             FirExprKind::ContainmentCall { call, negated } => {
-                let call = self.checked_call(call)?;
+                let call = self
+                    .checked_call(call, self.body.expression_debug_lines(expression_id).source)?;
                 if *negated {
                     let false_value = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(false)));
                     self.ir.add_expr(IrExpr::PrimitiveBinOp {
@@ -421,13 +424,37 @@ impl BodyLowering<'_> {
                 name,
                 property_type,
                 declaration,
-            } => self.ir.add_expr(IrExpr::LocalPropertyReference(
-                crate::ir::IrLocalPropertyReference {
-                    name: name.clone(),
-                    property_type: property_type.get(),
-                    declaration: *declaration,
-                },
-            )),
+                mutable,
+                ordinal,
+            } => {
+                let reference = self.local_property_reference(
+                    *declaration,
+                    (name, property_type.get()),
+                    (*mutable, *ordinal),
+                )?;
+                self.ir.add_expr(IrExpr::LocalPropertyReference(reference))
+            }
+            FirExprKind::LocalDelegateAccess {
+                plan,
+                delegate,
+                dispatch_receiver,
+                value,
+            } => {
+                let plan = self.ir.local_delegate_plan_ids.get(plan).copied().ok_or(
+                    FirLoweringFailure::InvalidLocalDelegatePlan(self.body.owner()),
+                )?;
+                let delegate = self.expression(*delegate)?;
+                let dispatch_receiver = self.receiver(*dispatch_receiver)?;
+                let value = value.map(|value| self.expression(value)).transpose()?;
+                self.ir.add_expr(IrExpr::LocalDelegateAccess(
+                    crate::ir::IrLocalDelegateAccess {
+                        plan,
+                        delegate,
+                        dispatch_receiver,
+                        value,
+                    },
+                ))
+            }
             FirExprKind::PropertyReference {
                 target,
                 function_type,
@@ -591,21 +618,24 @@ impl BodyLowering<'_> {
                         })
                     }
                     FirUnaryOperation::Increment | FirUnaryOperation::Decrement => {
+                        // kotlinc's `inc`/`dec` intrinsic adds a signed delta: `dec` is `+ -1`.
                         let result = expression.ty.get();
-                        let one = self.ir.add_expr(IrExpr::Const(match result.non_null() {
-                            crate::types::Ty::Long | crate::types::Ty::ULong => IrConst::Long(1),
-                            crate::types::Ty::Float => IrConst::Float(1.0),
-                            crate::types::Ty::Double => IrConst::Double(1.0),
-                            _ => IrConst::Int(1),
+                        let delta: i8 = match operation {
+                            FirUnaryOperation::Increment => 1,
+                            _ => -1,
+                        };
+                        let delta = self.ir.add_expr(IrExpr::Const(match result.non_null() {
+                            crate::types::Ty::Long | crate::types::Ty::ULong => {
+                                IrConst::Long(delta.into())
+                            }
+                            crate::types::Ty::Float => IrConst::Float(delta.into()),
+                            crate::types::Ty::Double => IrConst::Double(delta.into()),
+                            _ => IrConst::Int(delta.into()),
                         }));
                         let updated = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                            op: if *operation == FirUnaryOperation::Increment {
-                                IrBinOp::Add
-                            } else {
-                                IrBinOp::Sub
-                            },
+                            op: IrBinOp::Add,
                             lhs: operand,
-                            rhs: one,
+                            rhs: delta,
                         });
                         self.ir.add_expr(IrExpr::TypeOp {
                             op: IrTypeOp::ImplicitCoercion,
@@ -1391,6 +1421,14 @@ impl BodyLowering<'_> {
                 );
                 let lambda = self.checked_lambda(*callable, body, suspend)?;
                 self.record_generated_class_provenance(expression_id, lambda as usize);
+                // Every lambda keeps its place in the naming walk, whether or not a target writes
+                // a class for it: a spliced lambda's inline-depth marker is spelled after it.
+                if let IrExpr::Lambda { impl_fn, .. } = self.ir.exprs[lambda as usize] {
+                    let provenance = self.generated_class_name_provenance(expression_id);
+                    if let Some(origin) = self.ir.lambda_origins.get_mut(&impl_fn) {
+                        origin.class_provenance = provenance;
+                    }
+                }
                 if suspend {
                     let &IrExpr::Lambda { impl_fn, .. } = &self.ir.exprs[lambda as usize] else {
                         unreachable!("a checked lambda lowers to a lambda")
@@ -1474,43 +1512,45 @@ impl BodyLowering<'_> {
                 .callable_reference_enclosures
                 .insert(node as u32, enclosure);
         }
-        let Some(provenance) = self.body.generated_class_provenance(expression_id) else {
-            return;
-        };
+        if let Some(provenance) = self.generated_class_name_provenance(expression_id) {
+            self.ir
+                .callable_reference_provenance
+                .insert(node as u32, provenance);
+        }
+    }
+
+    /// The naming walk's position for the class the source node `expression_id` compiles to, in
+    /// common-IR terms. `None` when the walk gave it none, or its owner has no identity here.
+    fn generated_class_name_provenance(
+        &self,
+        expression_id: crate::fir::FirExprId,
+    ) -> Option<crate::ir::IrLocalClassNameProvenance> {
+        let provenance = self.body.generated_class_provenance(expression_id)?;
         let lexical_owner = match provenance.lexical_owner {
             Some(owner) => match self.ir.checked_classifier_classes.get(&owner) {
                 Some(&class) => Some(crate::ir::IrLocalClassOwner::Class(class)),
-                None => match self
-                    .index
-                    .classifier_header(owner)
-                    .filter(|_| self.index.local_class_name_provenance(owner).is_none())
-                {
-                    Some(header) => Some(crate::ir::IrLocalClassOwner::External(header.classifier)),
-                    None => return,
-                },
+                None => {
+                    let header = self
+                        .index
+                        .classifier_header(owner)
+                        .filter(|_| self.index.local_class_name_provenance(owner).is_none())?;
+                    Some(crate::ir::IrLocalClassOwner::External(header.classifier))
+                }
             },
             None => None,
         };
-        let Some(source) = self
+        let source = self
             .index
-            .declaration_anchor(crate::fir::DeclarationId::from_raw(self.body.owner().raw()))
-            .map(|anchor| anchor.source)
-        else {
-            return;
-        };
-        let Some(package) = self.index.source_package(source) else {
-            return;
-        };
-        self.ir.callable_reference_provenance.insert(
-            node as u32,
-            crate::ir::IrLocalClassNameProvenance {
-                source: crate::ir::IrModuleSource { source, package },
-                lexical_owner,
-                segments: provenance.segments.clone(),
-                ordinal: provenance.ordinal,
-                parents: provenance.parents.clone(),
-            },
-        );
+            .declaration_anchor(crate::fir::DeclarationId::from_raw(self.body.owner().raw()))?
+            .source;
+        let package = self.index.source_package(source)?;
+        Some(crate::ir::IrLocalClassNameProvenance {
+            source: crate::ir::IrModuleSource { source, package },
+            lexical_owner,
+            segments: provenance.segments.clone(),
+            ordinal: provenance.ordinal,
+            parents: provenance.parents.clone(),
+        })
     }
 
     /// Preserve the checked semantic conversion from a declaration's result to its call-site
@@ -1662,12 +1702,24 @@ impl BodyLowering<'_> {
                         context_count: conversion.context_count,
                         has_receiver: conversion.has_receiver,
                         suspend: conversion.suspend,
+                        source_suspend: conversion.source_suspend,
                         overrides_non_primitive_result: conversion.overrides_non_primitive_result,
+                        overridden_non_primitive_results: conversion
+                            .overridden_non_primitive_results
+                            .iter()
+                            .map(|ty| ty.get())
+                            .collect(),
                         function_adapter: false,
                         wraps_function_value: false,
                         // The lambda object is created here. A null check applies to a captured
                         // function value, not to this literal.
                         nullable: false,
+                        kotlin_interface: conversion.kotlin_interface,
+                        parameter_identities: conversion
+                            .parameter_identities
+                            .iter()
+                            .cloned()
+                            .collect(),
                     };
                     self.ir.lambda_sam_signature.insert(
                         *impl_fn,
@@ -1818,6 +1870,10 @@ impl BodyLowering<'_> {
         let guarded = self.ir.add_expr(IrExpr::When {
             branches: vec![(Some(condition), null_result), (None, selector)],
         });
+        // The checker already selected the safe-call result. Record that semantic join on the
+        // common-IR `when`; a backend may choose its physical representation but must not
+        // reconstruct `Nothing`, nullability, or another result from the branch instructions.
+        self.ir.whens.exhaustive.insert(guarded, result_type);
         self.ir.null_guards.insert(guarded);
         Ok(self.ir.add_expr(IrExpr::Block {
             stmts: vec![variable],

@@ -24,12 +24,14 @@ const SRC: &str = "@JvmInline value class Text(val string: String)\n\
     \x20   return \"OK\"\n\
     }\n";
 
-/// An inner class of a value class: its outer instance is the value class's carrier.
+/// An inner class of a value class: its outer instance is the value class's carrier, and a read of
+/// the outer value class's property is that carrier.
 const INNER_SRC: &str = "@JvmInline value class Box(val n: Int) {\n\
     \x20   @Suppress(\"INNER_CLASS_INSIDE_VALUE_CLASS\")\n\
-    \x20   inner class Inner(val y: Int)\n\
+    \x20   inner class Inner(val y: Int) { val outer = n }\n\
     }\n\
-    fun inner(): Int = Box(1).Inner(2).y\n";
+    fun inner(): Int = Box(1).Inner(2).y\n\
+    fun box(): String = if (Box(3).Inner(4).outer == 3 && inner() == 2) \"OK\" else \"fail\"\n";
 
 /// `class`'s constructor declarations, as kotlinc and krusty write them, in classfile order.
 fn assert_same_constructors(name: &str, source: &str, class: &str) {
@@ -77,6 +79,27 @@ fn an_anonymous_object_capturing_a_value_class_keeps_a_plain_constructor() {
 #[test]
 fn an_inner_class_of_a_value_class_hides_its_constructor() {
     assert_same_constructors("InnerHiddenConstructor", INNER_SRC, "Box$Inner");
+}
+
+#[test]
+fn an_inner_class_reads_its_outer_value_class_as_the_carrier() {
+    let built = common::compare_with_kotlinc_plugin(
+        "InnerHiddenConstructor",
+        INNER_SRC,
+        "Box$Inner",
+        &[common::stdlib_jar()],
+        "25",
+        &[],
+    )
+    .expect("reference kotlinc is provisioned");
+    let constructor = "private Box$Inner(int, int)";
+    let reference = common::method_instructions(&built.reference, constructor);
+    assert!(!reference.is_empty(), "kotlinc writes {constructor}");
+    assert_eq!(
+        common::method_instructions(&built.krusty, constructor),
+        reference
+    );
+    common::expect_box_same_as_kotlinc(INNER_SRC, "InnerHiddenConstructor");
 }
 
 #[test]

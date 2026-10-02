@@ -1,5 +1,7 @@
 //! Realization of stable same-file callable identities as ordinary common-IR calls.
 
+mod argument_boundaries;
+
 use crate::fir::{
     CallableId, DeclarationKind, ExternalCallableId, ExternalPropertyId, FirAnnotationConstruction,
     FirAnnotationDefaultValue, FirConstant, ResolvedTy,
@@ -95,29 +97,6 @@ pub(super) struct ModuleConstructorRequest<'a> {
 /// Whether the checked source-order operand stream is already in selected parameter order. Missing
 /// defaults have no evaluation and therefore do not disturb the order; repeated vararg fragments
 /// remain adjacent at one parameter and are grouped without reordering their elements.
-fn arguments_follow_parameter_order(
-    arguments: &[IrCheckedArgument],
-    preceding_parameter: Option<u32>,
-) -> bool {
-    let mut previous = preceding_parameter;
-    for argument in arguments {
-        let parameter = match argument {
-            IrCheckedArgument::Expression { parameter, .. } => *parameter,
-            IrCheckedArgument::Vararg {
-                parameter,
-                elements,
-                ..
-            } if !elements.is_empty() => *parameter,
-            IrCheckedArgument::Default { .. } | IrCheckedArgument::Vararg { .. } => continue,
-        };
-        if previous.is_some_and(|previous| parameter < previous) {
-            return false;
-        }
-        previous = Some(parameter);
-    }
-    true
-}
-
 impl BodyLowering<'_> {
     /// Whether a checked common-IR operand contains a suspension that belongs to the current body.
     /// The checker/lowering maps are authoritative; this performs no callable lookup. A lambda body
@@ -236,16 +215,23 @@ impl BodyLowering<'_> {
             params: vec![continuation_ty],
             ret: self.ir.functions.get(implementation as usize)?.ret,
         });
-        self.splice_inline_lambda_invocation(invocation)?;
-        let kind = match operation {
+        // The unintercepted primitive is kotlinc's own inline intrinsic: the block it is given
+        // opens a frame named after it. The safe one wraps the block in a stdlib body whose frames
+        // this splice does not reproduce, so it declares none.
+        let (kind, callee) = match operation {
             crate::fir::FirIntrinsic::SuspendCoroutine => {
-                crate::ir::IrIntrinsicSuspensionKind::Safe
+                (crate::ir::IrIntrinsicSuspensionKind::Safe, None)
             }
-            crate::fir::FirIntrinsic::SuspendCoroutineUninterceptedOrReturn => {
-                crate::ir::IrIntrinsicSuspensionKind::Unintercepted
-            }
+            crate::fir::FirIntrinsic::SuspendCoroutineUninterceptedOrReturn { callee } => (
+                crate::ir::IrIntrinsicSuspensionKind::Unintercepted,
+                Some(&**callee),
+            ),
             _ => return None,
         };
+        self.splice_inline_lambda(
+            invocation,
+            super::inlining::LambdaParameterBinding::Declared { callee },
+        )?;
         self.ir.intrinsic_suspension_points.insert(
             invocation,
             crate::ir::IrIntrinsicSuspensionPoint {
@@ -392,6 +378,8 @@ impl BodyLowering<'_> {
                 extension_receiver_parameter,
                 mode: SelectedOperandMode::DirectWhenOrdered,
             })?;
+        let boundary_defaults = defaults.clone();
+        let boundary_parameters = parameter_types.clone();
         // The external FIR target temporarily inserts a MEMBER EXTENSION receiver into its parameter
         // vector so every operand has one checked slot. It is still a receiver, not a source value
         // parameter, and Kotlin default-mask ordinals count only value parameters. Publish the
@@ -419,6 +407,7 @@ impl BodyLowering<'_> {
             dispatch_receiver: receiver,
             args,
         });
+        argument_boundaries::record(&mut self.ir, call, &boundary_parameters, &boundary_defaults);
         if let Some(receiver) = source_receiver {
             self.ir
                 .ext_call_source_receiver
@@ -887,6 +876,7 @@ impl BodyLowering<'_> {
             dispatch_receiver: receiver,
             args,
         });
+        argument_boundaries::record(&mut self.ir, call, &parameter_types, &defaults);
         Some(self.wrap_call_statements(statements, call))
     }
 
@@ -918,7 +908,7 @@ impl BodyLowering<'_> {
         let direct = matches!(mode, SelectedOperandMode::DirectWhenOrdered)
             && !preserve_inline_lambdas
             && !self.checked_operands_suspend(dispatch_receiver, extension_receiver, arguments)
-            && arguments_follow_parameter_order(arguments, extension_receiver_parameter);
+            && argument_boundaries::follow_parameter_order(arguments, extension_receiver_parameter);
         let mut statements = Vec::new();
         let receiver = if member_extension {
             dispatch_receiver
@@ -1339,6 +1329,7 @@ impl BodyLowering<'_> {
         arguments: &[IrCheckedArgument],
         specialized_parameters: &[Ty],
         substitutions: &[crate::fir::FirTypeSubstitution],
+        source_line: Option<u32>,
     ) -> Option<Result<ExprId, FirLoweringFailure>> {
         let callable = self.index.callable(target)?;
         let declaration = self.index.declaration_anchor(callable.declaration)?;
@@ -1366,7 +1357,7 @@ impl BodyLowering<'_> {
         // evaluates every operand once, in source order.
         let direct =
             !self.checked_operands_suspend(dispatch_receiver, extension_receiver, arguments)
-                && arguments_follow_parameter_order(arguments, None);
+                && argument_boundaries::follow_parameter_order(arguments, None);
         let bindings = substitutions
             .iter()
             .filter_map(|substitution| match substitution.parameter {
@@ -1537,6 +1528,7 @@ impl BodyLowering<'_> {
             }
             operands.extend(slots.iter().copied());
             inlined_lambda_operands.extend(inline_lambdas.iter().copied());
+            let first_generated = self.ir.exprs.len();
             let Some(inlined) = self.inline_same_file_call(
                 target,
                 function,
@@ -1546,6 +1538,12 @@ impl BodyLowering<'_> {
             ) else {
                 return Some(Err(declined));
             };
+            if let Some(source_line) = source_line {
+                for expression in first_generated..self.ir.exprs.len() {
+                    self.ir
+                        .record_inline_copy_call_line(expression as u32, source_line);
+                }
+            }
             let expanded = if statements.is_empty() {
                 inlined
             } else {
@@ -1688,6 +1686,12 @@ impl BodyLowering<'_> {
             }),
             None => return None,
         };
+        argument_boundaries::record(
+            &mut self.ir,
+            call,
+            &selected_declaration_parameter_types,
+            &default_argument_positions,
+        );
         // Preserve the declaration's unspecialized result on the concrete call node. Value-class
         // realization needs this checked distinction: a member declared to return `X` yields X's raw
         // carrier, while a generic `T` merely specialized to `X` yields a boxed value across erasure.
@@ -1777,7 +1781,7 @@ impl BodyLowering<'_> {
                         {
                             inline_lambdas[parameter] = Some(value);
                         }
-                        let value = if preserve {
+                        let value = if preserve || self.ir.is_delegated_property_operand(value) {
                             value
                         } else if direct {
                             self.direct_call_operand(value, parameter_ty)
@@ -1790,15 +1794,17 @@ impl BodyLowering<'_> {
                                 ..
                             } => {
                                 let declared = *declared_parameters.get(parameter)?;
-                                if !parameter_ty.is_reference() && declared.is_reference() {
-                                    self.ir.add_expr(IrExpr::TypeOp {
-                                        op: IrTypeOp::ImplicitCoercion,
-                                        arg: value,
-                                        type_operand: declared,
-                                    })
-                                } else {
-                                    value
-                                }
+                                let value =
+                                    if !parameter_ty.is_reference() && declared.is_reference() {
+                                        self.ir.add_expr(IrExpr::TypeOp {
+                                            op: IrTypeOp::ImplicitCoercion,
+                                            arg: value,
+                                            type_operand: declared,
+                                        })
+                                    } else {
+                                        value
+                                    };
+                                value
                             }
                             CheckedArgumentPolicy::Selected { .. } => value,
                         })

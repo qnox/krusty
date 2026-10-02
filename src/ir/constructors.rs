@@ -150,6 +150,10 @@ pub enum IrCtorParameterProvenance {
     Capture,
     /// The enclosing instance of an inner class. A backend may format this as `this$0`.
     EnclosingInstance,
+    /// The completion parameter of a generated continuation constructor.
+    Continuation,
+    /// The dispatch receiver a generated continuation constructor stores.
+    ContinuationDispatchReceiver,
 }
 
 /// A constructor parameter that carries a value a local or anonymous class captures from its

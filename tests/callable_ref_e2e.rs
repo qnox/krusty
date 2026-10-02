@@ -5,6 +5,29 @@
 use super::common;
 
 #[test]
+fn reflective_enum_value_of_reference_returns_the_named_entry() {
+    const SRC: &str = "\
+enum class E { ENTRY }\n\
+fun box(): String {\n\
+    val f = E::valueOf\n\
+    val result = f(\"ENTRY\")\n\
+    return if (result == E.ENTRY) \"OK\" else \"Fail $result\"\n\
+}\n";
+    common::expect_box_same_as_kotlinc(SRC, "EnumValueOfMethod");
+}
+
+#[test]
+fn function_typed_enum_value_of_reference_invokes_the_member() {
+    const SRC: &str = "\
+enum class E { ENTRY }\n\
+fun apply(f: (String) -> E, name: String): E = f(name)\n\
+fun box(): String {\n\
+    return if (apply(E::valueOf, \"ENTRY\") == E.ENTRY) \"OK\" else \"Fail\"\n\
+}\n";
+    common::expect_box_same_as_kotlinc(SRC, "EnumValueOfFunction");
+}
+
+#[test]
 fn callable_refs_run() {
     const SRC: &str = "fun inc(n: Int): Int = n + 1\n\
 fun twice(n: Int): Int = n * 2\n\
@@ -435,4 +458,49 @@ fn an_applied_typealias_lhs_is_a_type_even_for_an_object() {
         ALIAS_LHS_SOURCE,
         "AliasLhsRunKt$box$unbound$1",
     );
+}
+
+/// The same-package classifier wins before a star-imported typealias even when that alias expands
+/// to the winning classifier. The selected declaration owns its two-argument arity; re-looking up
+/// `Pick` after selection would find the one-argument alias and reject the callable-reference LHS.
+#[test]
+fn an_applied_callable_reference_keeps_the_selected_classifier_rung() {
+    let sources = [
+        (
+            "Pick.kt",
+            "package sample\n\
+             interface Mark\n\
+             object First : Mark\n\
+             object Second : Mark\n\
+             class Pick<A : Mark, B : Mark>(val first: A, val second: B) {\n\
+             \x20   fun selected(): B = second\n\
+             }\n",
+        ),
+        (
+            "Alias.kt",
+            "package lower\n\
+             typealias Pick<T> = sample.Pick<T, T>\n",
+        ),
+        (
+            "Use.kt",
+            "package sample\n\
+             import lower.*\n\
+             fun box(): String {\n\
+             \x20   val selected = (Pick<First, Second>::selected)(Pick<First, Second>(First, Second))\n\
+             \x20   return if (selected === Second) \"OK\" else \"fail\"\n\
+             }\n",
+        ),
+    ];
+    let result = common::compiler_diagnostics(&sources, &[common::stdlib_jar()]);
+    assert_eq!(
+        (result.reference_code, result.reference_stderr.as_str()),
+        (0, ""),
+        "kotlinc rejected the same-spelling classifier/alias fixture"
+    );
+    assert_eq!(
+        (result.krusty_code, result.krusty_stderr.as_str()),
+        (0, ""),
+        "krusty must retain the classifier selected above the imported alias"
+    );
+    common::expect_box_ok_files_with_stdlib(&sources, "CallableReferenceClassifierRung");
 }

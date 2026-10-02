@@ -38,6 +38,20 @@ pub enum IrCallableReferenceTarget {
     FunctionValueConversion {
         ordinal: u32,
     },
+    /// A language-defined classifier callable. `operation` is the declaration the reference
+    /// reflects; `classifier` is that declaration's owner.
+    Classifier {
+        classifier: TypeName,
+        operation: IrClassifierCallable,
+    },
+}
+
+/// A language-defined classifier callable a reference reflects. The physical name and descriptor
+/// belong to the backend that realizes the carrier.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IrClassifierCallable {
+    /// The classifier's implicit `valueOf(String)` member.
+    EnumValueOf,
 }
 
 /// A checked callable-reference value after common invocation lowering. `adapter` is an exact
@@ -249,5 +263,22 @@ impl PropRef {
                 .map(|facade| facade.render())
                 .unwrap_or_else(|| facade.to_string())
         })
+    }
+}
+
+impl IrFile {
+    /// Whether `expression` is the reflected property a delegated-property operator receives, as
+    /// passed: the reference itself, or it adapted to the operator's declared parameter.
+    pub fn is_delegated_property_operand(&self, expression: ExprId) -> bool {
+        match self.expr(expression) {
+            IrExpr::Checked(IrCheckedOperation::PropertyReference { delegated, .. }) => *delegated,
+            IrExpr::LocalPropertyReference(_) => true,
+            IrExpr::TypeOp {
+                op: IrTypeOp::ImplicitCoercion,
+                arg,
+                ..
+            } => self.is_delegated_property_operand(*arg),
+            _ => false,
+        }
     }
 }

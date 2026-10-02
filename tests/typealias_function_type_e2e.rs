@@ -123,3 +123,40 @@ fun box(): String {\n\
     let out = run(SRC).expect("class-target alias with fn-type argument should compile + run");
     assert_eq!(out, "OK");
 }
+
+#[test]
+fn classpath_generic_function_typealias_substitutes_arguments() {
+    // A dependency typealias is published as kotlin/FunctionN. The use site still substitutes into
+    // the recorded function template: Bar<String> is (String) -> String, not Function1<String>.
+    const LIB: &str = "typealias Bar<T> = (T) -> String\n\
+class Foo<out T>(val t: T) {\n\
+    fun baz(b: Bar<T>) = b(t)\n\
+}\n";
+    const MAIN: &str = "class FooTest {\n\
+    fun baz(): String {\n\
+        val b: Bar<String> = { \"OK\" }\n\
+        return Foo(\"\").baz(b)\n\
+    }\n\
+}\n\
+fun box(): String = FooTest().baz()\n";
+    let out = common::expect_box_run_against_kotlinc(LIB, MAIN)
+        .expect("kotlinc function-typealias dependency");
+    assert_eq!(out, "OK");
+}
+
+#[test]
+fn classpath_suspend_function_typealias_substitutes_arguments() {
+    // Classpath metadata names `suspend (T) -> R` as Function{arity+1}. The decoded expansion is
+    // still the source suspend type, so Op<String> accepts a suspend (String) -> String value.
+    const LIB: &str = "typealias Op<T> = suspend (T) -> String\n\
+fun id(f: Op<String>): Op<String> = f\n";
+    const MAIN: &str = "fun box(): String {\n\
+    val f: Op<String> = { it }\n\
+    val g: suspend (String) -> String = id(f)\n\
+    if (g != f) return \"fail\"\n\
+    return \"OK\"\n\
+}\n";
+    let out = common::expect_box_run_against_kotlinc(LIB, MAIN)
+        .expect("kotlinc suspend function-typealias dependency");
+    assert_eq!(out, "OK");
+}

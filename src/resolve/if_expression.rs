@@ -147,7 +147,16 @@ impl Checker<'_> {
                         flows.push(else_flow);
                     }
                     CompletedFlow::publish_common(self, scope, &flows);
-                    conditional_branch::join_types(self, scope, wanted.expected, tt, et, e)
+                    conditional_branch::join_adapted_branches(
+                        self,
+                        scope,
+                        wanted.expected,
+                        then_branch,
+                        tt,
+                        eb,
+                        et,
+                        e,
+                    )
                 }
                 None => {
                     self.report_unbound_conditional_branch(scope, then_branch);

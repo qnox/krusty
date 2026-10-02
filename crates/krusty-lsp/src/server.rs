@@ -1,6 +1,7 @@
 mod engine;
 mod implementation;
 mod line_index;
+mod output_queue;
 mod status;
 mod workspace_index;
 pub use engine::{AnalysisBatch, AnalysisJob, DumpResult};
@@ -5875,7 +5876,7 @@ mod tests {
                     "uri": "file:///main.kt",
                     "languageId": "kotlin",
                     "version": 1,
-                    "text": "class Outer { inner class Item; fun Item(): Int = 1 }\nfun use(outer: Outer): Int = outer.Item()"
+                    "text": "class Outer { inner class Item(val marker: Int); fun Item(): Int = 1 }\nfun use(outer: Outer): Int = outer.Item()"
                 }
             }),
         ));
@@ -5915,8 +5916,8 @@ mod tests {
             json!([{
                 "uri": "file:///main.kt",
                 "range": {
-                    "start": {"line": 0, "character": 36},
-                    "end": {"line": 0, "character": 40}
+                    "start": {"line": 0, "character": 53},
+                    "end": {"line": 0, "character": 57}
                 }
             }])
         );

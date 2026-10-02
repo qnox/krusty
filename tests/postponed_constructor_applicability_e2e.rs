@@ -42,3 +42,23 @@ fun box(): String {\n\
 fn a_dependency_overload_whose_constructor_cannot_fit_does_not_shape_the_lambda() {
     common::expect_box_ok_against("postponed_constructor_overloads", OVERLOADS, OVERLOAD_MAIN);
 }
+
+/// A trailing lambda is postponed before constructor overload selection can run, so every
+/// constructor whose own parameter mapping consumes the call belongs to the family that shapes
+/// it, and the lambda receives the shape they share. `Box(2) { ... }` maps onto both
+/// `Box(tag: String, f)` and `Box(n: Int, f)`; both give `f` the type `(Int) -> T`, so the lambda
+/// is typed before final selection picks the secondary constructor and infers `trailing()`.
+const SHARED_CONSTRUCTOR_SHAPE: &str = "class Box<T>(val tag: String, val f: (Int) -> T) {\n\
+    \x20   constructor(n: Int, f: (Int) -> T) : this(\"n$n\", f)\n\
+    }\n\
+    fun trailing() = Box(2) { \"s$it\" }\n\
+    fun box(): String {\n\
+    \x20   val b = trailing()\n\
+    \x20   val r = b.tag + b.f(3)\n\
+    \x20   return if (r == \"n2s3\") \"OK\" else r\n\
+    }\n";
+
+#[test]
+fn constructors_mapping_a_trailing_lambda_shape_it_together() {
+    common::expect_box_same_as_kotlinc(SHARED_CONSTRUCTOR_SHAPE, "SharedConstructorShape");
+}

@@ -3,7 +3,8 @@
 use std::collections::HashMap;
 
 use super::frame_map::{FrameKey, Mark};
-use super::{debug_lines, CodeBuilder, Emitter, Label, Ty};
+use super::{CodeBuilder, Emitter, Label, Ty};
+use crate::ir::{IrDebugLocalProvenance, IrExpr};
 
 impl Emitter<'_> {
     /// Emit a block in statement position within its own lexical slot scope. Restoring the slot
@@ -29,6 +30,7 @@ impl Emitter<'_> {
         self.emit_open_block(stmts, value, terminal_target, code);
         if !self.ir.callable_scopes.contains(&block) {
             self.close_scope_locals(code, boundary.is_some());
+            self.close_spliced_lambda_frame(block, code);
         }
         if let Some((_, end)) = boundary {
             code.mark_line(end);
@@ -63,6 +65,78 @@ impl Emitter<'_> {
             .copied()
             .filter(|line| *line != 0)?;
         Some((start, end))
+    }
+
+    /// Emit a block in value position: its statements run for effect and its trailing value is
+    /// left on the stack. Its locals are scoped (the slot map restored) so they do not leak into an
+    /// outer frame.
+    pub(super) fn emit_value_block(
+        &mut self,
+        block: u32,
+        stmts: &[u32],
+        value: Option<u32>,
+        code: &mut CodeBuilder,
+    ) {
+        self.link_safe_call_chain(block, code);
+        let enclosing_statement_line = self.statement_line;
+        let saved = self.open_slot_scope();
+        self.block_depth += 1;
+        let mut dead = false;
+        for &statement in stmts {
+            self.mark_statement_line(statement, code);
+            // A statement nets zero on the operand stack (its value is stored/discarded). Reset the
+            // tracked height to that baseline afterward: raw spliced control flow is opaque to the
+            // builder's linear counter and can leave `cur_stack` drifted above the real,
+            // verified-balanced height. Later emission still relies on accurate physical stack
+            // accounting even though final-body analysis owns verifier frames.
+            let base = code.stack_height();
+            self.emit(statement, code);
+            if self.discarding_diverges(statement) {
+                dead = true;
+                break;
+            }
+            code.set_stack(base.max(0) as u16);
+        }
+        if !dead {
+            if let Some(value) = value {
+                self.mark_statement_line(value, code);
+                self.emit_value(value, code);
+            }
+        }
+        // A callable's own scope is its body. A value-returning lambda keeps those locals
+        // open through the return, the same way a statement-position callable scope does.
+        if !self.ir.callable_scopes.contains(&block) {
+            self.close_scope_locals(code, false);
+        }
+        self.close_spliced_lambda_frame(block, code);
+        self.block_depth -= 1;
+        self.restore_slot_scope(saved);
+        self.statement_line = enclosing_statement_line;
+    }
+
+    /// Close the frame of a lambda body spliced into an inline call, once its locals are closed.
+    ///
+    /// kotlinc's inliner returns to the inline body's own line at the invocation the lambda
+    /// replaced, with a `nop` to carry it. Its nop cleanup keeps that `nop` only where no other
+    /// instruction follows on the line before the next debug point, which is the same decision
+    /// the optimizer pipeline makes over this one.
+    fn close_spliced_lambda_frame(&mut self, block: u32, code: &mut CodeBuilder) {
+        let IrExpr::Block { stmts, .. } = self.ir.expr(block) else {
+            return;
+        };
+        let opens_frame = stmts.iter().any(|&statement| {
+            matches!(
+                self.ir.debug_local_provenance(statement),
+                Some(IrDebugLocalProvenance::LambdaFrameMarker { .. })
+            )
+        });
+        if !opens_frame || code.is_dead() {
+            return;
+        }
+        if let Some(&line) = self.ir.expr_source_lines.get(&block) {
+            self.mark_expression_line(block, line, code);
+        }
+        code.nop();
     }
 
     /// Emit one IR block while leaving its lexical slot scope open. The ordinary `Block` arm closes
@@ -107,7 +181,9 @@ impl Emitter<'_> {
     }
 
     pub(super) fn mark_statement_line(&mut self, statement: u32, code: &mut CodeBuilder) {
-        debug_lines::mark_statement(self.ir, statement, code);
+        if let Some(line) = self.ir.expr_lines.get(&statement).copied() {
+            self.mark_expression_line(statement, line, code);
+        }
         // A line stays in effect until another statement replaces it, exactly as the
         // `LineNumberTable` reads: a statement without a line of its own does not clear it.
         if let Some(line) = self.ir.expr_lines.get(&statement).copied() {
@@ -128,9 +204,10 @@ impl Emitter<'_> {
         let depth = self.block_depth;
         let mut i = 0;
         while i < self.open_locals.len() {
-            if self.open_locals[i].0 >= depth {
-                let (_, slot, start, name, desc) = self.open_locals.remove(i);
-                code.add_local_entry(start, Some(end.saturating_sub(start)), slot, &name, &desc);
+            if self.open_locals[i].depth >= depth {
+                let local = self.open_locals.remove(i);
+                let length = end.saturating_sub(local.start);
+                local.record(Some(length), code);
             } else {
                 i += 1;
             }
@@ -179,4 +256,31 @@ impl Emitter<'_> {
 pub(super) struct SlotScope {
     slots: HashMap<u32, (u16, Ty)>,
     frame: Mark,
+}
+
+/// A source local whose debug range is open: declared in the block at `depth`, live in `slot`
+/// from `start`.
+pub(super) struct OpenLocal {
+    pub(super) depth: usize,
+    pub(super) slot: u16,
+    pub(super) start: u16,
+    pub(super) name: String,
+    pub(super) descriptor: String,
+    /// This local binds an inline call operand and starts with the inline frame, after all operands
+    /// have been evaluated, rather than at its individual store.
+    pub(super) inline_operand: bool,
+    /// Where in the table the entry goes when it must precede entries recorded after it opened,
+    /// rather than follow them.
+    pub(super) table_position: Option<usize>,
+}
+
+impl OpenLocal {
+    /// Record the closed range in the method's `LocalVariableTable`.
+    pub(super) fn record(self, length: Option<u16>, code: &mut CodeBuilder) {
+        let entry = (self.start, length, self.slot, self.name, self.descriptor);
+        match self.table_position {
+            Some(position) => code.insert_local_entry(position, entry),
+            None => code.add_local_entry(entry.0, entry.1, entry.2, &entry.3, &entry.4),
+        }
+    }
 }

@@ -171,3 +171,36 @@ fn a_receiver_lambda_takes_the_label_of_the_call_it_is_written_in() {
         expected
     );
 }
+
+const RECEIVER_LAMBDA_GUARDS_SOURCE: &str = "class Buildee<T> { fun set(value: T) {} }\n\
+    fun build(block: Buildee<String>.() -> Unit): Buildee<String> {\n\
+    \x20 val b = Buildee<String>()\n\
+    \x20 b.block()\n\
+    \x20 return b\n\
+    }\n\
+    fun labelled() = build { set(\"O\") }\n\
+    fun relabelled() {\n\
+    \x20 build outer@{ this@outer.set(\"K\") }\n\
+    }\n\
+    fun unlabelled(): Int {\n\
+    \x20 val f: String.() -> Int = { length }\n\
+    \x20 return \"OK\".f()\n\
+    }\n\
+    fun box(): String {\n\
+    \x20 labelled()\n\
+    \x20 relabelled()\n\
+    \x20 return if (unlabelled() == 2) \"OK\" else \"fail\"\n\
+    }\n";
+
+/// A receiver lambda's lifted implementation takes its receiver as a value parameter named after
+/// the lambda's label (`$this$build`, `$this$outer`), and kotlinc's null guard quotes that name; a
+/// lambda without a label keeps `<this>`.
+#[test]
+fn receiver_lambda_guard_names_its_labelled_receiver() {
+    common::assert_class_code_matches_kotlinc(
+        "ReceiverLambdaGuards",
+        RECEIVER_LAMBDA_GUARDS_SOURCE,
+        "ReceiverLambdaGuardsKt",
+    );
+    common::expect_box_same_as_kotlinc(RECEIVER_LAMBDA_GUARDS_SOURCE, "ReceiverLambdaGuardsRun");
+}

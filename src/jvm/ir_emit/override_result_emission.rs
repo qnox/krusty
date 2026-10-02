@@ -11,12 +11,31 @@ use super::inline_call::parse_descriptor_params;
 use super::scalar_coercion::{box_prim_free, unbox_prim_from};
 use super::signature_formatter::JvmSignatureFormatter;
 use super::{
-    debug_lines, discard, ir_method_desc, jvm_declared_ty, method_descriptor, method_signature,
-    type_descriptor, CodeBuilder, Emitter,
+    discard, ir_method_desc, ir_ty_to_jvm, jvm_declared_ty, jvm_is_erased_top, method_descriptor,
+    method_signature, type_descriptor, CodeBuilder, Emitter,
 };
-use crate::ir::{ExprId, IrExpr, IrFile};
+use crate::ir::{ExprId, IrExpr, IrFile, IrTypeOp};
 use crate::jvm::override_results::OverrideResults;
 use crate::types::Ty;
+
+const NOT_NULL: &str = "Lorg/jetbrains/annotations/NotNull;";
+
+/// The declaration annotation for a result after the boxed-override representation is selected.
+///
+/// Common IR keeps the non-null primitive Kotlin result, which ordinarily has no JVM nullability
+/// annotation. When [`OverrideResults`] gives that declaration a wrapper result, the wrapper is a
+/// non-null reference at the class-file boundary and kotlinc publishes `@NotNull` on it.
+pub(super) fn declared_nullability(
+    ir: &IrFile,
+    override_results: &OverrideResults,
+    function: u32,
+) -> super::declared_nullability::DeclaredNullability {
+    let mut declared = super::declared_nullability::declared_nullability(ir, function);
+    if override_results.boxes(function) {
+        declared.result = Some(NOT_NULL);
+    }
+    declared
+}
 
 impl Emitter<'_> {
     /// The primitive Kotlin result of call `e`, when its callee's JVM result is the wrapper.
@@ -78,11 +97,51 @@ impl Emitter<'_> {
             && !returned.is_unsigned()
             && ret == jvm_declared_ty(&Ty::nullable(returned))
         {
+            if self.emit_boxed_boundary_return(value, returned, ret, code) {
+                return;
+            }
             self.emit_value(value, code);
             box_prim_free(self.cw, code, returned);
         } else {
             self.emit_value_as(value, ret, code);
         }
+    }
+
+    /// Return the reference slot under a checked declaration-result coercion directly from a
+    /// boxed-result override. A generic delegate may produce `Object`, so narrow it to the wrapper;
+    /// a dependency override already produces that wrapper and needs no unbox/box round trip.
+    fn emit_boxed_boundary_return(
+        &mut self,
+        value: ExprId,
+        primitive: Ty,
+        wrapper: Ty,
+        code: &mut CodeBuilder,
+    ) -> bool {
+        let IrExpr::TypeOp {
+            op: IrTypeOp::ImplicitCoercion,
+            arg,
+            type_operand,
+        } = self.ir.expr(value)
+        else {
+            return false;
+        };
+        if type_operand.non_null() != primitive.non_null() {
+            return false;
+        }
+        let arg = *arg;
+        let Some(physical) = self.ir.physical_types.get(&arg).copied() else {
+            return false;
+        };
+        let physical_jvm = ir_ty_to_jvm(&physical);
+        let wrapper_jvm = ir_ty_to_jvm(&wrapper);
+        if !physical_jvm.is_reference()
+            || (physical_jvm != wrapper_jvm && !jvm_is_erased_top(physical_jvm))
+        {
+            return false;
+        }
+        self.emit_value(arg, code);
+        self.narrow_on_stack(physical, wrapper, code);
+        true
     }
 
     /// Emit `e` for a consumer that takes a reference, when it is a call whose callee returns the
@@ -95,7 +154,7 @@ impl Emitter<'_> {
     ) -> Option<Ty> {
         let primitive = self.boxed_call_result(e)?;
         let node = self.ir.expr(e).clone();
-        debug_lines::mark_expression_start(self.ir, e, code);
+        self.mark_expression_start(e, code);
         self.emit_physical_value_node(e, &node, code);
         Some(jvm_declared_ty(&Ty::nullable(primitive)))
     }

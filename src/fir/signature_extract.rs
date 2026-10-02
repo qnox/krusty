@@ -4,6 +4,7 @@
 //! resolver/checker semantics remain behind `SignatureSemantics` during graph evaluation.
 
 mod evaluated_casts;
+mod integer_literals;
 mod safe_index;
 
 use crate::ast::{BinOp, Expr, ExprId, File, RangeKind, Stmt, TrFlags, TypeRef, UnOp};
@@ -459,13 +460,6 @@ impl SignatureConstraintExtractor {
     fn known(&mut self, ty: Ty) -> SigExprId {
         let ty = ResolvedTy::new(ty).expect("a built-in signature leaf must be publishable");
         self.graph.add_expr(SigExpr::Known(ty))
-    }
-
-    fn integer_literal(&mut self, value: i64) -> SigExprId {
-        match i32::try_from(value) {
-            Ok(value) => self.graph.add_expr(SigExpr::IntegerLiteral(value)),
-            Err(_) => self.known(Ty::Int),
-        }
     }
 
     fn lexical_receivers(&self) -> Vec<SigExprId> {
@@ -1536,7 +1530,7 @@ impl SignatureConstraintExtractor {
         let node = match file.expr(expression) {
             Expr::IntLit(value) => self.integer_literal(*value),
             Expr::LongLit(_) => self.known(Ty::Long),
-            Expr::UIntLit(_) => self.known(Ty::UInt),
+            Expr::UIntLit(value) => self.unsigned_integer_literal(*value),
             Expr::ULongLit(_) => self.known(Ty::ULong),
             Expr::DoubleLit(_) => self.known(Ty::Double),
             Expr::FloatLit(_) => self.known(Ty::Float),

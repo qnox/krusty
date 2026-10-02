@@ -131,3 +131,25 @@ fn a_local_class_body_properties_keep_their_own_identities() {
     // merely reads the wrong valid field and is observable only in the returned value.
     common::expect_box_ok_with_stdlib(SRC, "LocalClassBodyPropertyIdentity");
 }
+
+#[test]
+fn a_constructor_default_anonymous_object_overrides_its_local_class() {
+    // The local class and the anonymous object live in a constructor-parameter default, which is
+    // checked and lowered before ordinary bodies. The object's override is reachable only once
+    // that object's applied hierarchy is published with its header.
+    const SRC: &str = "\
+fun <T> eval(fn: () -> T) = fn()\n\
+class A(\n\
+    val a: String = eval {\n\
+        open class B {\n\
+            open fun s(): String = \"O\"\n\
+        }\n\
+        val o = object : B() {\n\
+            override fun s(): String = \"K\"\n\
+        }\n\
+        B().s() + o.s()\n\
+    }\n\
+)\n\
+fun box(): String = A().a\n";
+    common::expect_box_same_as_kotlinc(SRC, "LocalClassInParameterInitializer");
+}

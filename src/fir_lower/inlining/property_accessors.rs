@@ -250,8 +250,16 @@ fn expand_inline_accessor(
 
     let result_ty = ty_subst_keep_unbound(ir.functions[function as usize].ret, &bindings);
     let setter = access.value.is_some();
-    let produced =
-        finish_accessor_expansion(ir, cloned_root, &returns, result_ty, setter, next_temporary)?;
+    let close_line = ir.fn_close_lines.get(&function).copied();
+    let produced = finish_accessor_expansion(
+        ir,
+        cloned_root,
+        &returns,
+        result_ty,
+        setter,
+        close_line,
+        next_temporary,
+    )?;
     let mut statements = declarations;
     let value = match produced {
         ExpandedAccessor::Value(value) => value,
@@ -320,6 +328,7 @@ fn finish_accessor_expansion(
     returns: &[(ExprId, Option<ExprId>)],
     result_ty: Ty,
     setter: bool,
+    close_line: Option<u32>,
     next_temporary: &mut u32,
 ) -> Result<ExpandedAccessor, FirFileLoweringFailure> {
     if returns.is_empty() {
@@ -334,7 +343,7 @@ fn finish_accessor_expansion(
             let produced = value.unwrap_or_else(|| ir.add_expr(IrExpr::UnitInstance));
             return Ok(ExpandedAccessor::Value(produced));
         }
-        if produce_sole_tail_return(ir, cloned_root, tail, value) {
+        if produce_sole_tail_return(ir, cloned_root, tail, value, close_line) {
             return Ok(if setter {
                 ExpandedAccessor::Statement(cloned_root)
             } else {

@@ -42,8 +42,15 @@ impl Emitter<'_> {
         // which discards that `when` the same way. A discarded `Unit` is nothing at all.
         if !self.machine_suspensions.contains(&expression) {
             match node {
-                // kotlinc never materializes a discarded `Unit`.
-                IrExpr::UnitInstance => return,
+                // A copied inline body's terminal `Unit` carries its mapped closing line on a
+                // `nop`, even though the value itself is not materialized.
+                IrExpr::UnitInstance => {
+                    if self.has_retained_mapped_inline_unit_line(expression) {
+                        self.mark_expression_start(expression, code);
+                        code.nop();
+                    }
+                    return;
+                }
                 IrExpr::When { branches } => {
                     self.emit_when(expression, branches, true, code);
                     return;
@@ -114,6 +121,9 @@ impl Emitter<'_> {
         let suspension = self.machine_before(expression, code);
         self.open_transformed_suspension(expression, code);
         self.emit_value_node(expression, node, code);
+        // A statement still suspends. The probe reads the result before it is popped, the same
+        // way a used result is probed before its consumer.
+        self.probe_intrinsic_suspension(expression, code);
         self.machine_after(suspension, code);
         if self.transformed_result(expression).is_some() {
             // kotlinc discards the erased result itself, without coercing it first.

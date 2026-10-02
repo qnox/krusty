@@ -36,6 +36,20 @@ const SUBSYSTEM_CASES: &[&str] = &[
     "controlStructures/kt769.kt",
 ];
 
+/// Local delegate accessors remain valid when a convention has a callable fallback and when the
+/// declaring body is copied from a retained inline template into another source/classifier.
+const LOCAL_DELEGATE_CASES: &[&str] = &[
+    "delegatedProperty/local/localDelegatedPropertyCall.kt",
+    "delegatedProperty/optimizedDelegatedProperties/definedInSourcesWithNonNullParameter.kt",
+    "delegatedProperty/optimizedDelegatedProperties/kt42253.kt",
+    "delegatedProperty/provideDelegate/genericDelegateWithNoAdditionalInfo.kt",
+];
+
+#[test]
+fn local_delegate_corpus_cases_box_ok() {
+    assert_corpus_cases_box_ok(LOCAL_DELEGATE_CASES);
+}
+
 #[test]
 fn subsystem_corpus_cases_box_ok() {
     assert_corpus_cases_box_ok(SUBSYSTEM_CASES);
@@ -78,16 +92,17 @@ const NULLABLE_TPARAM_SUPPORTED_CASES: &[&str] = &[
     "functions/defaultargs1.kt",
 ];
 
-const NULLABLE_TPARAM_GATED_CASES: &[(&str, &str)] = &[
-    (
-        "coroutines/kt46813.kt",
-        "gate:suspend-generic-value-class-specialization",
-    ),
-    (
-        "nothingValue/nothingValueException.kt",
-        "gate:projected-generic-return-inference",
-    ),
-];
+const NULLABLE_TPARAM_GATED_CASES: &[(&str, &str)] = &[(
+    "coroutines/kt46813.kt",
+    "gate:suspend-generic-value-class-specialization",
+)];
+
+const NOTHING_VALUE_CASES: &[&str] = &["nothingValue/nothingValueException.kt"];
+
+#[test]
+fn nothing_value_exception_corpus_case_box_ok() {
+    assert_corpus_cases_box_ok(NOTHING_VALUE_CASES);
+}
 
 #[test]
 fn nullable_type_parameter_admitted_cases_do_not_miscompile() {

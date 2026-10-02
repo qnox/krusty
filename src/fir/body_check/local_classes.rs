@@ -357,13 +357,30 @@ impl BodyFirChecker<'_> {
             .min_by_key(|binding| binding.enclosing_depth)
     }
 
+    /// The local-class receiver fields a nested lambda or local function reads through this body.
+    /// The nested body's own receivers (`nested_owned`: a receiver lambda's receiver, its context
+    /// receivers) sit in front of this body's rungs in the resolver's receiver tower, so each
+    /// field's semantic coordinate moves out by that many rungs. `build { … }` inside a local-class
+    /// member names the local class's captured `this@outer` one rung further out than the member.
     pub(super) fn nested_class_receivers(
         &self,
+        nested_owned: u32,
     ) -> Result<Vec<ClassCaptureBinding>, BodyCheckFailure> {
         self.class_receivers
             .iter()
             .copied()
-            .map(|binding| self.nested_class_binding(binding))
+            .map(|binding| {
+                let mut binding = self.nested_class_binding(binding)?;
+                binding.semantic_receiver_depth = binding
+                    .semantic_receiver_depth
+                    .map(|depth| {
+                        depth.checked_add(nested_owned).ok_or_else(|| {
+                            self.failure(None, BodyCheckFailureKind::UnsupportedCallShape)
+                        })
+                    })
+                    .transpose()?;
+                Ok(binding)
+            })
             .collect()
     }
 
@@ -877,6 +894,8 @@ impl BodyFirChecker<'_> {
                 capture.capture_dependency.or(Some(field_identity))
             };
             let mut ty = self.resolved_type(span, capture.ty)?;
+            // A captured delegated property is its delegate's variable, named as such.
+            let mut name = capture.name.clone();
             let source = match capture.source {
                 AnonymousObjectCaptureSource::LexicalValue => {
                     let delegate = self
@@ -888,6 +907,7 @@ impl BodyFirChecker<'_> {
                             self.failure(Some(span), BodyCheckFailureKind::UnknownLocal)
                         })?;
                         ty = storage.ty;
+                        name = delegate.storage_name.to_string();
                         let source = if depth == u32::MAX {
                             FirLocalClassCaptureSource::Value(storage.value)
                         } else {
@@ -1161,7 +1181,7 @@ impl BodyFirChecker<'_> {
             };
             checked.push(FirLocalClassCapture {
                 origin,
-                name: capture.name.clone().into_boxed_str(),
+                name: name.into_boxed_str(),
                 ty,
                 shared_cell: capture.shared_cell,
                 capture_identity,

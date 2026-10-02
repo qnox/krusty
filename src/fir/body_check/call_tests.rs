@@ -23,6 +23,7 @@ impl crate::symbol_source::SymbolSource for DependencyDefaultSource {
         std::rc::Rc::new(crate::libraries::ResolvedSymbols {
             builtin_classifier: false,
             classifier_name: None,
+            classifier_declaration: None,
             classifier: None,
             callables: if matches {
                 crate::libraries::Callables::Functions(crate::libraries::FunctionSet {
@@ -1052,7 +1053,7 @@ fn unintercepted_coroutine_primitive_is_a_checked_fir_intrinsic() {
     assert!(matches!(
         call.target,
         FirCallTarget::Intrinsic {
-            operation: FirIntrinsic::SuspendCoroutineUninterceptedOrReturn,
+            operation: FirIntrinsic::SuspendCoroutineUninterceptedOrReturn { .. },
             receiver: None,
             ..
         }

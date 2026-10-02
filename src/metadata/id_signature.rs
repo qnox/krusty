@@ -51,6 +51,34 @@ impl KlibPublicIdSignature {
     pub fn mask(&self) -> u64 {
         self.mask
     }
+
+    /// Whether this is one exact externally serialized declaration identity.
+    ///
+    /// This is intentionally stricter than matching a declaration spelling: both qualified paths,
+    /// the ABI member id, and the semantic mask participate. Compiler-owned roles may therefore be
+    /// attached to a trusted KLIB declaration without granting the role to another declaration that
+    /// merely has the same name or source signature.
+    pub(crate) fn matches_exact(
+        &self,
+        package: &[&str],
+        declaration: &[&str],
+        member_id: u64,
+        mask: u64,
+    ) -> bool {
+        self.package
+            .segments()
+            .iter()
+            .map(String::as_str)
+            .eq(package.iter().copied())
+            && self
+                .declaration
+                .segments()
+                .iter()
+                .map(String::as_str)
+                .eq(declaration.iter().copied())
+            && self.member_id == Some(member_id)
+            && self.mask == mask
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

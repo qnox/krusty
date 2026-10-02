@@ -23,10 +23,12 @@ mod delegates;
 mod diagnostics;
 mod file_import_scopes;
 mod header_projection;
+mod integer_constants;
 mod local_signatures;
 mod lookups;
 mod postponed_calls;
 mod qualified_calls;
+mod receiver_member_level;
 mod semantics;
 mod source_contracts;
 mod stable_function_index;
@@ -111,18 +113,6 @@ struct ProductionSignatureDiagnostic {
     message: String,
     identity: Option<crate::diag::DiagnosticIdentity>,
     unconditional: bool,
-}
-
-fn emit_production_signature_diagnostic(
-    diagnostics: &mut crate::diag::DiagSink,
-    diagnostic: &ProductionSignatureDiagnostic,
-) {
-    diagnostics.set_file(diagnostic.file);
-    if let Some(identity) = diagnostic.identity {
-        diagnostics.error_with_identity(diagnostic.span, identity, diagnostic.message.clone());
-    } else {
-        diagnostics.error(diagnostic.span, diagnostic.message.clone());
-    }
 }
 
 struct ExplicitContextCall {
@@ -1042,12 +1032,14 @@ impl ProductionSignatureSemantics<'_> {
                 .anchor(declaration)
                 .and_then(|anchor| anchor.owner);
         }
+        let type_variables = self.active_postponed_type_variables(scope);
         let resolver = crate::symbol_resolver::SymbolResolver::new_import_scoped_with_module(
             self.table.libraries.as_ref(),
             &module,
             &imports,
         )
-        .with_access_context(package, scope.source.raw(), lexical_classes);
+        .with_access_context(package, scope.source.raw(), lexical_classes)
+        .with_type_variables(&type_variables);
         select(&resolver).ok_or_else(Self::failure)
     }
 
@@ -1268,8 +1260,8 @@ impl ProductionSignatureSemantics<'_> {
             return crate::symbol_resolver::CallArgKind::LambdaLiteral(argument.ty.get());
         }
         match argument.integer_literal {
-            Some(value) => {
-                crate::symbol_resolver::CallArgKind::integer_literal(argument.ty.get(), value)
+            Some(constant) => {
+                crate::symbol_resolver::CallArgKind::integer_constant(argument.ty.get(), constant)
             }
             None => crate::symbol_resolver::CallArgKind::Typed(argument.ty.get()),
         }
@@ -1827,86 +1819,6 @@ impl ProductionSignatureSemantics<'_> {
         }
     }
 
-    fn postponed_expectations(
-        arguments: &[crate::fir::SigCallArgumentProbe<'_>],
-        slots: &[Option<usize>],
-        parameters: &[Ty],
-    ) -> Box<[Option<crate::fir::ResolvedTy>]> {
-        let mut expectations = vec![None; arguments.len()];
-        for (slot, source) in slots.iter().enumerate() {
-            let Some(source) = *source else {
-                continue;
-            };
-            let contextual_call = matches!(
-                arguments.get(source),
-                Some(crate::fir::SigCallArgumentProbe::Typed(argument))
-                    if argument.contextual_call
-            );
-            let postponed_callable = matches!(
-                arguments.get(source),
-                Some(
-                    crate::fir::SigCallArgumentProbe::PostponedLambda { .. }
-                        | crate::fir::SigCallArgumentProbe::PostponedCallableReference { .. },
-                )
-            );
-            if contextual_call || postponed_callable {
-                expectations[source] = parameters.get(slot).copied().and_then(|parameter| {
-                    (contextual_call || matches!(parameter.non_null(), Ty::Fun(_)))
-                        .then(|| crate::fir::ResolvedTy::new(parameter).ok())
-                        .flatten()
-                });
-            }
-        }
-        expectations.into_boxed_slice()
-    }
-
-    /// Normalize selected declaration parameters into the callable shapes used to materialize
-    /// postponed lambdas and references. Package, top-level, classifier, and receiver expectation
-    /// paths all consume this operation; none may independently reinterpret SAMs or lambda receiver
-    /// metadata.
-    fn functional_parameter_shapes(
-        resolver: &crate::symbol_resolver::SymbolResolver<'_>,
-        selected: &crate::libraries::FunctionInfo,
-        parameters: impl IntoIterator<Item = Ty>,
-    ) -> Vec<Ty> {
-        parameters
-            .into_iter()
-            .enumerate()
-            .map(|(parameter_index, parameter)| {
-                let expectation = resolver
-                    .functional_expectation(parameter)
-                    .unwrap_or(parameter);
-                let Ty::Fun(signature) = expectation.non_null() else {
-                    return expectation;
-                };
-                let has_receiver = selected
-                    .call_sig
-                    .lambda_receiver_params
-                    .get(parameter_index)
-                    .copied()
-                    .unwrap_or(false);
-                let context_count = selected
-                    .call_sig
-                    .lambda_context_counts
-                    .get(parameter_index)
-                    .copied()
-                    .unwrap_or(signature.context_count);
-                Ty::fun_with_shape(
-                    signature.params.clone(),
-                    signature.ret,
-                    context_count,
-                    has_receiver || signature.has_receiver,
-                    signature.suspend,
-                )
-            })
-            .collect()
-    }
-
-    /// Project the selected callable's parameter types back onto postponed source arguments. The
-    /// shared argument mapper owns named/default/trailing-lambda placement; this inversion only
-    /// preserves the many-source-arguments-to-one-vararg relationship which a parameter-slot vector
-    /// cannot represent. Positional vararg arguments expect the element type, while named/spread
-    /// arguments expect the declared array type.
     fn postponed_call_expectations(
         arguments: &[crate::fir::SigCallArgumentProbe<'_>],
         parameters: &[Ty],
@@ -2103,6 +2015,7 @@ impl ProductionSignatureSemantics<'_> {
                 let Ok(extension) = extension else {
                     return Ok(None);
                 };
+                self.commit_postponed_property_receiver(scope, &extension, receiver);
                 if let Some(source) = extension.source_key {
                     if let Some(signature) = self.demanded_source_signature(
                         Some(scope),
@@ -2921,86 +2834,6 @@ impl ProductionSignatureSemantics<'_> {
             );
         }
         crate::fir::ResolvedTy::new(member.ret).map_err(|_| Self::failure())
-    }
-
-    /// Select an inner classifier inherited by a concrete outer receiver, then run its constructor
-    /// through the ordinary resolver candidate family. This is the signature-graph counterpart of
-    /// checked-body `outer.Inner(args)`/`super.Inner(args)` resolution; it returns only the compact
-    /// result type and retains no constructor body or syntax identity.
-    fn bound_inner_classifier(
-        &self,
-        scope: crate::fir::SignatureScope,
-        receiver: Ty,
-        spelling: &str,
-    ) -> Result<Option<crate::types::TypeName>, crate::fir::DiagnosticId> {
-        let Some(outer) = receiver.kotlin_class_internal() else {
-            return Ok(None);
-        };
-        let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-        let source = crate::symbol_source::CompositeSource::new(vec![
-            &module as &dyn crate::symbol_source::SymbolSource,
-            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
-        ]);
-        let selected = crate::symbol_resolver::inherited_nested_classifier_name(
-            spelling,
-            vec![outer],
-            |owner| {
-                crate::symbol_resolver::direct_supertypes(&source, Ty::obj_name(owner))
-                    .into_iter()
-                    .filter_map(Ty::kotlin_class_internal)
-                    .collect()
-            },
-            |candidate| {
-                crate::symbol_resolver::inherited_classifier_shape(&source, candidate, outer)
-                    .is_some()
-            },
-        );
-        match selected {
-            crate::symbol_resolver::InheritedNestedClassifier::NotFound => return Ok(None),
-            crate::symbol_resolver::InheritedNestedClassifier::Ambiguous => {
-                return Err(Self::failure())
-            }
-            crate::symbol_resolver::InheritedNestedClassifier::Found(internal) => {
-                Ok(Some(internal))
-            }
-        }
-    }
-
-    fn bound_inner_constructor_result(
-        &self,
-        scope: crate::fir::SignatureScope,
-        receiver: Ty,
-        spelling: &str,
-        arguments: &[crate::fir::ResolvedSigCallArgument<'_>],
-        type_arguments: &[Ty],
-    ) -> Result<Option<crate::fir::ResolvedTy>, crate::fir::DiagnosticId> {
-        let Some(internal) = self.bound_inner_classifier(scope, receiver, spelling)? else {
-            return Ok(None);
-        };
-        let argument_kinds = arguments
-            .iter()
-            .map(Self::call_argument_kind)
-            .collect::<Vec<_>>();
-        let argument_types = arguments
-            .iter()
-            .map(|argument| argument.ty.get())
-            .collect::<Vec<_>>();
-        let declaration = self.with_resolver(scope, |resolver| {
-            resolver.select_constructor_declaration_with_type_arguments(
-                internal,
-                &argument_kinds,
-                type_arguments,
-            )
-        })?;
-        self.constructor_result(
-            scope,
-            &declaration,
-            &argument_types,
-            Some(receiver),
-            type_arguments,
-            None,
-        )
-        .map(Some)
     }
 
     fn checked_binary(
@@ -4998,7 +4831,7 @@ pub(crate) fn finalized_streamed_signature_index(
         .iter()
         .filter(|diagnostic| diagnostic.unconditional)
     {
-        emit_production_signature_diagnostic(diags, diagnostic);
+        diagnostics::emit_production_signature_diagnostic(diags, diagnostic);
     }
     if !failed.is_empty() {
         crate::trace_compiler!(
@@ -5011,7 +4844,7 @@ pub(crate) fn finalized_streamed_signature_index(
             .iter()
             .filter(|diagnostic| !diagnostic.unconditional)
         {
-            emit_production_signature_diagnostic(diags, diagnostic);
+            diagnostics::emit_production_signature_diagnostic(diags, diagnostic);
         }
     }
 
@@ -5086,7 +4919,7 @@ pub(crate) fn finalized_streamed_signature_index(
         .iter()
         .filter(|diagnostic| diagnostic.unconditional)
     {
-        emit_production_signature_diagnostic(diags, diagnostic);
+        diagnostics::emit_production_signature_diagnostic(diags, diagnostic);
     }
     if !failed.is_empty() || !finalization_failures.is_empty() {
         crate::trace_compiler!(
@@ -5109,7 +4942,7 @@ pub(crate) fn finalized_streamed_signature_index(
             {
                 continue;
             }
-            emit_production_signature_diagnostic(diags, diagnostic);
+            diagnostics::emit_production_signature_diagnostic(diags, diagnostic);
         }
         failed.extend(
             finalization_failures
@@ -5721,13 +5554,21 @@ pub(crate) fn finalized_streamed_signature_index(
             );
             stop_with_failure!(stub.id);
         };
+        let Some(&target) = table.source_alias_fqns.get(&identity) else {
+            crate::trace_compiler!(
+                "fir",
+                "signature finalization declined {:?}: resolved type-alias target is missing",
+                stub.id,
+            );
+            stop_with_failure!(stub.id);
+        };
         let expansion_spelling = table
             .alias_expansion_spellings
             .get(&identity)
             .map(|(spelling, _, _)| spelling.clone())
             .unwrap_or_default();
         if index
-            .publish_type_alias_header(stub.id, identity, *expansion, expansion_spelling)
+            .publish_type_alias_header(stub.id, identity, target, *expansion, expansion_spelling)
             .is_err()
         {
             stop_with_failure!(stub.id);

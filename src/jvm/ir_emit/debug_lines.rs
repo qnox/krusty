@@ -17,57 +17,11 @@ pub(super) fn mark_statement(ir: &IrFile, expression: ExprId, code: &mut CodeBui
     }
 }
 
-/// Mark every value expression that begins on a different source line.
-///
-/// Operands of a multi-line call use this path independently. `CodeBuilder::mark_line` deduplicates
-/// a line already in effect and replaces a mark at the same bytecode offset. A callable's own scope
-/// block starts no line: the callable's entry marks its body line, and its statements their own
-/// (a lambda's destructured parameter is read before any of them, without a line).
-pub(super) fn mark_expression_start(ir: &IrFile, expression: ExprId, code: &mut CodeBuilder) {
-    if ir.callable_scopes.contains(&expression) {
-        return;
-    }
-    if let Some(&line) = ir.expr_source_lines.get(&expression) {
-        if line != 0 {
-            code.mark_line(line);
-        }
-    }
-}
-
 /// Withdraw a line marked where a positionless expression begins; see
 /// [`CodeBuilder::withdraw_line`].
 pub(super) fn begin_expression(ir: &IrFile, expression: ExprId, code: &mut CodeBuilder) {
     if ir.is_positionless(expression) {
         code.withdraw_line();
-    }
-}
-
-/// Mark a call's line at its physical dispatch: its own source line, or the line a generated call
-/// enters only there.
-pub(super) fn mark_dispatch(ir: &IrFile, expression: ExprId, code: &mut CodeBuilder) {
-    mark_expression_start(ir, expression, code);
-    if let Some(line) = ir.dispatch_line(expression) {
-        if line != 0 {
-            code.mark_line(line);
-        }
-    }
-}
-
-/// Mark the actual return instruction after any active `finally` blocks have run.
-///
-/// An implicit expression-body return uses the body's closing line. An explicit return uses its own
-/// source line, which matters when a finalizer changed the line in effect before control comes back
-/// to the pending return. A `return` written as a statement carries that line in the statement map
-/// rather than the per-expression one, so both are consulted.
-pub(super) fn mark_return(ir: &IrFile, returned: ExprId, code: &mut CodeBuilder) {
-    if let Some(line) = ir
-        .implicit_return_end_line(returned)
-        .or_else(|| ir.expr_source_lines.get(&returned).copied())
-        .or_else(|| ir.expr_lines.get(&returned).copied())
-    {
-        if line != 0 {
-            code.mark_line(line);
-        }
     }
 }
 
@@ -127,6 +81,113 @@ pub(super) fn mark_block_exit(ir: &IrFile, block: ExprId, code: &mut CodeBuilder
 }
 
 impl Emitter<'_> {
+    /// Mark the actual return instruction after any active `finally` blocks have run.
+    ///
+    /// An implicit expression-body return uses the body's closing line. An explicit return uses
+    /// its own source line, which matters when a finalizer changed the line in effect before
+    /// control comes back to the pending return. A copied inline return keeps that semantic line,
+    /// while this JVM boundary maps it through the enclosing class's source map like every other
+    /// copied expression.
+    pub(super) fn mark_return(&mut self, returned: ExprId, code: &mut CodeBuilder) {
+        if let Some(line) = self
+            .ir
+            .implicit_return_end_line(returned)
+            .or_else(|| self.ir.expr_source_lines.get(&returned).copied())
+            .or_else(|| self.ir.expr_lines.get(&returned).copied())
+        {
+            self.mark_expression_line(returned, line, code);
+        }
+    }
+
+    /// Mark one expression line, mapping a same-file inline copy through the class's SMAP. Common
+    /// IR supplies the semantic declaration owner and call line; this boundary chooses JVM source
+    /// paths and output line numbers.
+    pub(super) fn mark_expression_start(&mut self, expression: ExprId, code: &mut CodeBuilder) {
+        if self.ir.callable_scopes.contains(&expression) {
+            return;
+        }
+        let Some(&line) = self.ir.expr_source_lines.get(&expression) else {
+            return;
+        };
+        self.mark_expression_line(expression, line, code);
+    }
+
+    pub(super) fn mark_expression_line(
+        &mut self,
+        expression: ExprId,
+        line: u32,
+        code: &mut CodeBuilder,
+    ) {
+        if line == 0 {
+            return;
+        }
+        let Some(provenance) = self.ir.inline_copy_provenance(expression) else {
+            code.mark_line(line);
+            return;
+        };
+        let Some(call_line) = provenance.call_line else {
+            code.mark_line(line);
+            return;
+        };
+        let Some(source_file) = self.cw.source_file_name() else {
+            code.mark_line(line);
+            return;
+        };
+        let path = provenance.owner.map_or_else(
+            || self.facade.clone(),
+            |owner| crate::jvm::names::classfile_internal_name_of(owner).to_owned(),
+        );
+        let claimable = u16::try_from(self.ir.source_line_count)
+            .unwrap_or(u16::MAX)
+            .max(1);
+        let mapped = self.cw.source_map_for_inlining(claimable).and_then(|map| {
+            map.map_copied_line(
+                &source_file,
+                &path,
+                u16::try_from(line).unwrap_or(u16::MAX),
+                Some(u16::try_from(call_line).unwrap_or(u16::MAX)),
+            )
+        });
+        match mapped {
+            Some(line) => code.mark_line(line.into()),
+            None => code.mark_line(line),
+        }
+    }
+
+    pub(super) fn has_retained_mapped_inline_unit_line(&self, expression: ExprId) -> bool {
+        self.ir.retains_inline_unit_line(expression)
+            && self
+                .ir
+                .inline_copy_provenance(expression)
+                .is_some_and(|provenance| provenance.call_line.is_some())
+            && self.ir.expr_source_lines.contains_key(&expression)
+    }
+
+    /// Common IR identifies an operation whose source line owns its generated leading operand.
+    /// Retain that line at the operand's start so the positionless operand does not withdraw it and
+    /// move it to the later `invoke*`. Ordinary calls keep operand-then-dispatch marking.
+    pub(super) fn mark_generated_operand_start(
+        &self,
+        call: ExprId,
+        first_operand: Option<ExprId>,
+        code: &mut CodeBuilder,
+    ) {
+        if !self.ir.starts_at_generated_operand(call)
+            || !first_operand.is_some_and(|operand| self.ir.is_positionless(operand))
+        {
+            return;
+        }
+        if let Some(line) = self
+            .ir
+            .dispatch_line(call)
+            .or_else(|| self.ir.expr_source_lines.get(&call).copied())
+        {
+            if line != 0 {
+                code.mark_line_retained(line);
+            }
+        }
+    }
+
     /// Run `emit` as the emission of a `when` branch condition (kotlinc's `isInsideCondition`).
     pub(super) fn in_condition<R>(&mut self, emit: impl FnOnce(&mut Self) -> R) -> R {
         let outer = std::mem::replace(&mut self.inside_condition, true);
@@ -187,8 +248,13 @@ impl Emitter<'_> {
     /// or comparison instruction, and the reified `enumValueOf<E>` template — that one is an
     /// INLINE expansion, and kotlinc marks its call SITE instead (see
     /// [`Self::mark_inline_call_site_line`]).
-    pub(super) fn mark_dispatch_line(&self, expression: ExprId, code: &mut CodeBuilder) {
-        mark_dispatch(self.ir, expression, code);
+    pub(super) fn mark_dispatch_line(&mut self, expression: ExprId, code: &mut CodeBuilder) {
+        self.mark_expression_start(expression, code);
+        if let Some(line) = self.ir.dispatch_line(expression) {
+            if line != 0 {
+                self.mark_expression_line(expression, line, code);
+            }
+        }
     }
 
     /// kotlinc's `markLineNumberAfterInlineIfNeeded`, after a node that realizes an inlined call in

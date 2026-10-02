@@ -4,6 +4,20 @@
 
 use super::*;
 
+/// Result of trying the implicit `value()` spelling of a receiver-function value.
+pub(super) enum ImplicitReceiverFunctionInvoke {
+    Applicable,
+    /// Value-parameter arity does not match. The explicit form `value(receiver, args)` may.
+    TryExplicit,
+    /// The implicit spelling is this call's shape and it is not applicable. A later callable may
+    /// still own the name; the exact receiver/context failure is reported only when nothing else is.
+    Inapplicable {
+        signature: &'static crate::types::FnSig,
+        missing_receiver: bool,
+        missing_context: Vec<MissingContextParameter>,
+    },
+}
+
 /// A receiver-function signature's parameters split at kotlinc's function-type boundaries.
 pub(super) struct ReceiverFunctionParts {
     pub(super) context: &'static [Ty],
@@ -26,6 +40,7 @@ impl Checker<'_> {
                             receiver_identity,
                             declared_ty,
                             enum_entry_property,
+                            owner_storage,
                         } => {
                             let receivers = self.implicit_receivers(scope);
                             let recorded_is_owner = receivers.iter().any(|receiver| {
@@ -52,6 +67,7 @@ impl Checker<'_> {
                                 receiver_identity,
                                 declared_ty,
                                 enum_entry_property,
+                                owner_storage,
                             }
                         }
                         origin => origin,
@@ -79,6 +95,7 @@ impl Checker<'_> {
                             receiver_identity: receiver.identity,
                             declared_ty: property.ty,
                             enum_entry_property: property.enum_entry_property,
+                            owner_storage: false,
                         },
                     )),
                     _ => None,
@@ -262,5 +279,115 @@ impl Checker<'_> {
             },
         );
         Some(signature.ret)
+    }
+
+    /// Decide whether `name()` is an implicit invoke of this receiver-function value.
+    ///
+    /// Applicability requires the extension receiver and every context argument. A miss is not yet
+    /// a diagnostic: kotlinc keeps searching, so an applicable top-level `fun name()` wins over a
+    /// local `context(Needed) Receiver.() -> T` whose `Needed` is not in scope. The context gaps
+    /// are reported only when this value is the only candidate. Anonymous function-type context
+    /// parameters are `p1`, `p2`, … in source order.
+    pub(super) fn classify_implicit_receiver_function_invoke(
+        &self,
+        scope: &CheckerScope<'_>,
+        argument_count: usize,
+        signature: &'static crate::types::FnSig,
+    ) -> ImplicitReceiverFunctionInvoke {
+        let Some(parts) = Self::receiver_function_parts(signature) else {
+            return ImplicitReceiverFunctionInvoke::TryExplicit;
+        };
+        if parts.values.len() != argument_count {
+            return ImplicitReceiverFunctionInvoke::TryExplicit;
+        }
+        let missing_receiver = self
+            .receiver_function_implicit_receiver(
+                scope,
+                parts.receiver,
+                parts.values.len(),
+                argument_count,
+            )
+            .is_none();
+        let missing_context = self.unavailable_context_parameters(scope, parts.context);
+        if missing_receiver || !missing_context.is_empty() {
+            return ImplicitReceiverFunctionInvoke::Inapplicable {
+                signature,
+                missing_receiver,
+                missing_context,
+            };
+        }
+        ImplicitReceiverFunctionInvoke::Applicable
+    }
+
+    pub(super) fn report_function_value_context_gaps(
+        &mut self,
+        call: ExprId,
+        missing: &[MissingContextParameter],
+    ) {
+        let width = missing
+            .iter()
+            .map(|gap| gap.index)
+            .max()
+            .map_or(0, |index| index + 1);
+        let names = (0..width)
+            .map(|index| format!("p{}", index + 1))
+            .collect::<Vec<_>>();
+        for &gap in missing {
+            self.report_missing_context_parameter(call, gap, &names);
+        }
+    }
+
+    pub(super) fn report_function_value_invoke_gaps(
+        &mut self,
+        call: ExprId,
+        args: &[ExprId],
+        signature: &'static crate::types::FnSig,
+        missing_receiver: bool,
+        missing_context: &[MissingContextParameter],
+    ) {
+        if !missing_context.is_empty() {
+            self.report_function_value_context_gaps(call, missing_context);
+            return;
+        }
+        if !missing_receiver {
+            return;
+        }
+        let context_count = signature.context_count.min(signature.params.len());
+        let params = &signature.params[context_count..];
+        let param_names = (0..params.len())
+            .map(|index| format!("p{}", index + 1))
+            .collect::<Vec<_>>();
+        let defaults = vec![false; params.len()];
+        self.report_function_arity(
+            call,
+            DiagnosticFunction {
+                name: "invoke",
+                params,
+                param_names: &param_names,
+                param_defaults: &defaults,
+                required: params.len(),
+                vararg: false,
+                context_count: 0,
+                ret: signature.ret,
+                source_display: None,
+            },
+            args,
+        );
+    }
+
+    fn unavailable_context_parameters(
+        &self,
+        scope: &CheckerScope<'_>,
+        context: &[Ty],
+    ) -> Vec<MissingContextParameter> {
+        context
+            .iter()
+            .enumerate()
+            .filter(|(_, ty)| {
+                self.select_context_arguments_with_types(scope, &[**ty])
+                    .is_err()
+            })
+            .map(|(index, &ty)| MissingContextParameter { index, ty })
+            .collect()
     }
 }

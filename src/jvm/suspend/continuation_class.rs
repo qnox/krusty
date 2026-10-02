@@ -12,6 +12,18 @@ use crate::ir::{
 };
 use crate::types::{type_name, Ty, TypeName};
 
+/// The instance receiver captured by a continuation and the exact class owner used to re-enter a
+/// class-owned static function. A function has exactly one of these physical receiver routes.
+pub(super) fn reentry_owners(ir: &IrFile, function: u32) -> (Option<TypeName>, Option<TypeName>) {
+    let semantic_owner = ir.functions[function as usize].dispatch_receiver;
+    if !ir.functions[function as usize].is_static {
+        return (semantic_owner, None);
+    }
+    let static_owner =
+        semantic_owner.or_else(|| ir.class_static_local_functions.get(&function).copied());
+    (None, static_owner)
+}
+
 pub(super) fn build_continuation_class(
     ir: &mut IrFile,
     internal: &str,
@@ -19,6 +31,7 @@ pub(super) fn build_continuation_class(
     layout: &SpillLayout,
     suspended_result_returns: &mut SuspendedResultReturns,
     receiver: Option<TypeName>,
+    static_owner: Option<TypeName>,
     params: &[Ty],
 ) -> ClassId {
     let class_id = ir.classes.len() as ClassId;
@@ -66,13 +79,21 @@ pub(super) fn build_continuation_class(
     // correct placeholders, exactly as kotlinc passes `iconst_0`/`aconst_null`.
     let mut reentry_args: Vec<ExprId> = params.iter().map(|t| zero_value(ir, t)).collect();
     reentry_args.push(this_as_cont);
-    let call_outer = match receiver {
-        None => ir.add_expr(IrExpr::Call {
+    let call_outer = match (receiver, static_owner) {
+        (None, Some(owner)) => ir.add_expr(IrExpr::Call {
+            callee: Callee::ClassStatic {
+                owner,
+                function: outer_fid,
+            },
+            dispatch_receiver: None,
+            args: reentry_args,
+        }),
+        (None, None) => ir.add_expr(IrExpr::Call {
             callee: Callee::Local(outer_fid),
             dispatch_receiver: None,
             args: reentry_args,
         }),
-        Some(owner) => {
+        (Some(owner), None) => {
             // `((C)this.this$0).m(<params…>, (Continuation)this)` — invokevirtual the member on the receiver.
             let cont_this = ir.add_expr(IrExpr::GetValue(0));
             let recv = ir.add_expr(IrExpr::GetField {
@@ -132,6 +153,7 @@ pub(super) fn build_continuation_class(
                 })
             }
         }
+        (Some(_), Some(_)) => unreachable!("a static re-entry has no instance receiver"),
     };
     let ret = ir.add_expr(IrExpr::Return(Some(call_outer)));
     // The function returns a value class's carrier where kotlinc's value-class ABI says so; its
@@ -204,7 +226,7 @@ pub(super) fn build_continuation_class(
             check: None,
             anonymous_super_forward: None,
             capture: None,
-            provenance: crate::ir::IrCtorParameterProvenance::Value,
+            provenance: crate::ir::IrCtorParameterProvenance::ContinuationDispatchReceiver,
             capture_identity: None,
         });
         arg_idx += 1;
@@ -222,7 +244,7 @@ pub(super) fn build_continuation_class(
         check: None,
         anonymous_super_forward: None,
         capture: None,
-        provenance: crate::ir::IrCtorParameterProvenance::Value,
+        provenance: crate::ir::IrCtorParameterProvenance::Continuation,
         capture_identity: None,
     });
     let super_completion_idx = arg_idx;
@@ -276,6 +298,7 @@ pub(super) fn build_continuation_class(
         prop_ref: None,
         func_ref: None,
         lambda: None,
+        sam_wrapper: None,
         bridges: vec![],
         interfaces: Default::default(),
         is_object: false,
