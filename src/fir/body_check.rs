@@ -702,6 +702,7 @@ impl BodyFirChecker<'_> {
             | FirExprKind::LocalCallableReference { .. }
             | FirExprKind::PropertyReference { .. }
             | FirExprKind::LocalPropertyReference { .. }
+            | FirExprKind::LocalDelegateAccess { .. }
             | FirExprKind::ClassLiteral { .. }
             | FirExprKind::TypeOperation { .. }
             | FirExprKind::NullablePrimitiveComparison { .. }
@@ -3061,11 +3062,12 @@ impl BodyFirChecker<'_> {
                 name, dec, prefix, ..
             } => {
                 if let Some((depth, delegate)) = self.delegated_binding(name) {
-                    let write =
-                        self.delegated_inc_dec_statement(statement, *dec, depth, delegate, origin)?;
+                    let form = (*dec, *prefix);
+                    let update =
+                        self.delegated_inc_dec_statement(statement, form, depth, delegate, origin)?;
                     return Ok(self.body.add_statement(FirStatement {
                         origin,
-                        kind: FirStatementKind::Expression(write),
+                        kind: FirStatementKind::Expression(update),
                     }));
                 }
                 let target = self.local(name);

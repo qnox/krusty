@@ -159,6 +159,10 @@ impl BodyLowering<'_> {
         let line = self.body.statement_debug_line(statement_id);
         if line != 0 {
             self.ir.expr_lines.insert(lowered, line);
+            for expression in first_generated..self.ir.exprs.len() {
+                self.ir
+                    .record_inline_copy_call_line(expression as u32, line);
+            }
         }
         // An assignment's write dispatches where its lvalue is NAMED, not where the statement
         // begins: `b\n    .value =\n    x` puts the setter call on the `.value` line, exactly as a

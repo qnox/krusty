@@ -25,6 +25,11 @@ pub(super) fn emit_function_reference_access_bridge(
         bridge_parameters.push(Ty::obj(owner));
     }
     bridge_parameters.extend(parameters.iter().copied());
+    let name = format!("access${}", function.name);
+    let bridge_descriptor = method_descriptor(&bridge_parameters, result);
+    // kotlinc visits a method's name and descriptor before its body.
+    cw.reserve_method_name(&name);
+    cw.reserve_descriptor(&bridge_descriptor);
     let mut code = CodeBuilder::new(bridge_parameters.iter().map(|ty| slot_words(*ty)).sum());
     let mut slot = 0u16;
     if !function.is_static {
@@ -53,15 +58,13 @@ pub(super) fn emit_function_reference_access_bridge(
     emit_return(result, &mut code);
     code.ensure_locals(slot.max(1));
     code.link();
-    let name = format!("access${}", function.name);
-    let descriptor = method_descriptor(&bridge_parameters, result);
     cw.add_method(
         0x1019, /* PUBLIC | STATIC | FINAL | SYNTHETIC */
         &name,
-        &descriptor,
+        &bridge_descriptor,
         &code,
     );
-    set_bridge_locals(ir, fid, owner, &parameters, &name, &descriptor, cw);
+    set_bridge_locals(ir, fid, owner, &parameters, &name, &bridge_descriptor, cw);
 }
 
 /// kotlinc's whole-method locals of an `access$…` bridge: `$this` for an instance target, then the
@@ -854,6 +857,9 @@ pub(super) fn emit_private_member_access_bridge(
     bridge_parameters.extend(parameters.iter().copied());
     let bridge_descriptor = method_descriptor(&bridge_parameters, result);
     let bridge_name = format!("access${}", function.name);
+    // kotlinc visits a method's name and descriptor before its body.
+    cw.reserve_method_name(&bridge_name);
+    cw.reserve_descriptor(&bridge_descriptor);
     let mut code = CodeBuilder::new(
         bridge_parameters
             .iter()

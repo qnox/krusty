@@ -1081,6 +1081,7 @@ impl BodyLowering<'_> {
             body.local_callable()
                 .ok_or(FirLoweringFailure::MissingBodyLocalCallable(body.owner()))?,
         );
+        nested.prepare_local_delegate_plans()?;
         nested.prepare_local_functions()?;
         nested.realize_local_functions()?;
         let mut defaults = vec![None; local_function_parameters(body).len()];
@@ -1445,6 +1446,7 @@ fn lifting_sequence(
 ) -> Option<crate::ir::IrLiftingSequence> {
     let site = body.lifting_site()?;
     let declaration = crate::fir::DeclarationId::from_raw(body.owner().raw());
+    let _ = index.source_order(declaration)?;
     Some(crate::ir::IrLiftingSequence {
         source: index.declaration_anchor(declaration)?.source,
         owner: site.owner.clone(),
@@ -1466,25 +1468,30 @@ pub(super) fn record_lifting_sites(
     else {
         return;
     };
+    let Some(source_order) = index.source_order(declaration) else {
+        return;
+    };
     let mut sites = Vec::new();
     body.collect_lifting_sites(&mut sites);
     for site in sites {
         let Some(step) = site.path.last() else {
             continue;
         };
-        ir.lifting_sequences
-            .entry(crate::ir::IrLiftingSequence {
-                source,
-                owner: site.owner.clone(),
-                container: site.container.clone(),
-            })
-            .or_default()
-            .insert(
-                step.position,
-                crate::ir::IrLiftingEntry {
-                    name: step.name.clone(),
-                    lifted: site.lifted,
-                },
-            );
+        let sequence = crate::ir::IrLiftingSequence {
+            source,
+            owner: site.owner.clone(),
+            container: site.container.clone(),
+        };
+        ir.lifting_sequence_source_order
+            .entry(sequence.clone())
+            .and_modify(|earliest| *earliest = (*earliest).min(source_order))
+            .or_insert(source_order);
+        ir.lifting_sequences.entry(sequence).or_default().insert(
+            step.position,
+            crate::ir::IrLiftingEntry {
+                name: step.name.clone(),
+                lifted: site.lifted,
+            },
+        );
     }
 }

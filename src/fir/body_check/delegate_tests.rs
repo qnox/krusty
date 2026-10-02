@@ -81,6 +81,28 @@ fn covariant_extension_receiver_widens_from_a_nullable_lambda_result() {
     );
 }
 
+fn selected_name<'i>(
+    call: &FirDelegateCall,
+    index: &'i crate::fir::ResolvedModuleIndex,
+) -> Option<&'i str> {
+    call.target
+        .module()
+        .and_then(|target| index.callable(target))
+        .and_then(|callable| index.callable_name(callable.id))
+}
+
+fn delegate_accesses(body: &FirBody, write: bool) -> usize {
+    expressions(body)
+        .filter(|expression| {
+            matches!(
+                &expression.kind,
+                FirExprKind::LocalDelegateAccess { value, .. }
+                    if value.is_some() == write
+            )
+        })
+        .count()
+}
+
 #[test]
 fn local_delegate_read_keeps_selected_module_operator_and_semantic_property_reference() {
     let (body, index) = checked_function_body(
@@ -91,25 +113,22 @@ fn local_delegate_read_keeps_selected_module_operator_and_semantic_property_refe
         "box",
     );
 
-    let calls = expressions(&body)
-        .filter_map(|expression| match &expression.kind {
-            FirExprKind::Call(call) => Some(call),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    let get_value = calls
-        .iter()
-        .find(|call| {
-            call.target
-                .module()
-                .and_then(|target| index.callable(target))
-                .and_then(|callable| index.callable_name(callable.id))
-                == Some("getValue")
-        })
-        .expect("delegated read must keep the selected getValue identity");
-    assert!(get_value.dispatch_receiver.is_some());
-    assert!(get_value.extension_receiver.is_none());
-    assert_eq!(get_value.arguments.len(), 2);
+    let [plan] = body.local_delegate_plans() else {
+        panic!("a read-only local delegated property records exactly one semantic plan")
+    };
+    assert_eq!(selected_name(&plan.get_value, &index), Some("getValue"));
+    assert!(plan.get_value.dispatch_receiver.is_none());
+    assert!(!plan.get_value.extension);
+    assert_eq!(plan.get_value.parameters.len(), 2);
+    assert!(
+        (0..body.statement_count()).all(|raw| !matches!(
+            body.statement(FirStatementId::from_raw(raw as u32))
+                .map(|statement| &statement.kind),
+            Some(FirStatementKind::LocalFunction { .. })
+        )),
+        "the frontend must not manufacture a target helper"
+    );
+    assert_eq!(delegate_accesses(&body, false), 1);
     assert!(expressions(&body).any(|expression| {
         matches!(
             &expression.kind,
@@ -144,37 +163,29 @@ fn local_delegate_increments_keep_checked_getter_and_setter_calls() {
         "update",
     );
 
-    let selected_names = expressions(&body)
-        .filter_map(|expression| match &expression.kind {
-            FirExprKind::Call(call) => call
-                .target
-                .module()
-                .and_then(|target| index.callable(target))
-                .and_then(|callable| index.callable_name(callable.id)),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
+    let [plan] = body.local_delegate_plans() else {
+        panic!("a mutable local delegated property records one semantic plan")
+    };
+    assert_eq!(selected_name(&plan.get_value, &index), Some("getValue"));
     assert_eq!(
-        selected_names
-            .iter()
-            .filter(|&&name| name == "getValue")
-            .count(),
-        3,
-        "postfix reads once and prefix re-reads after its checked setter: {selected_names:?}"
+        selected_name(plan.set_value.as_ref().unwrap(), &index),
+        Some("setValue")
     );
     assert_eq!(
-        selected_names
-            .iter()
-            .filter(|&&name| name == "setValue")
-            .count(),
+        delegate_accesses(&body, false),
+        3,
+        "postfix reads once and prefix re-reads after its checked write"
+    );
+    assert_eq!(
+        delegate_accesses(&body, true),
         2,
-        "each increment must retain the selected delegated setter: {selected_names:?}"
+        "each increment must retain one selected delegated write"
     );
 }
 
 #[test]
 fn lambda_read_of_local_delegate_captures_storage_identity() {
-    let (body, _) = checked_function_body(
+    let (body, _index) = checked_function_body(
         "class Delegate {\n\
              operator fun getValue(owner: Any?, property: Any?): String = \"OK\"\n\
          }\n\
@@ -182,6 +193,9 @@ fn lambda_read_of_local_delegate_captures_storage_identity() {
         "make",
     );
 
+    let [_plan] = body.local_delegate_plans() else {
+        panic!("a read-only local delegated property records exactly one semantic plan")
+    };
     let lambda = expressions(&body)
         .find_map(|expression| match &expression.kind {
             FirExprKind::Lambda { body, .. } => Some(body.as_ref()),
@@ -193,15 +207,47 @@ fn lambda_read_of_local_delegate_captures_storage_identity() {
     };
     assert_eq!(capture.enclosing_depth, 0);
     assert!(!capture.shared_cell);
-    assert!(expressions(lambda).any(|expression| {
-        matches!(
-            expression.kind,
-            FirExprKind::CapturedValueRead {
-                enclosing_depth: 0,
-                source,
-            } if crate::fir::FirCaptureSource::Value(source) == capture.source
-        )
-    }));
+    assert_eq!(
+        delegate_accesses(lambda, false),
+        1,
+        "the lambda refers to its enclosing body's semantic delegate plan"
+    );
+}
+
+#[test]
+fn member_extension_delegate_keeps_its_independent_dispatch_receiver() {
+    let (body, index) = checked_function_body(
+        "class Delegate\n\
+         class Scope {\n\
+             operator fun Delegate.getValue(owner: Any?, property: Any?): String = \"OK\"\n\
+             fun read(): String { val value by Delegate(); return value }\n\
+         }\n",
+        "read",
+    );
+
+    let [plan] = body.local_delegate_plans() else {
+        panic!("the local delegated property records one semantic plan")
+    };
+    assert_eq!(selected_name(&plan.get_value, &index), Some("getValue"));
+    assert!(plan.get_value.extension);
+    assert!(plan.get_value.dispatch_receiver.is_some());
+    let accesses = expressions(&body)
+        .filter_map(|expression| match &expression.kind {
+            FirExprKind::LocalDelegateAccess {
+                dispatch_receiver,
+                value: None,
+                ..
+            } => Some(dispatch_receiver),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [access] = accesses.as_slice() else {
+        panic!("one delegated read is expected")
+    };
+    assert!(
+        access.is_some(),
+        "the selected dispatch receiver is an explicit operand"
+    );
 }
 
 #[test]
@@ -570,6 +616,32 @@ fn local_property_references(body: &FirBody) -> Vec<LocalDelegatedPropertyId> {
     references
 }
 
+fn local_delegate_plan_declarations(body: &FirBody) -> Vec<LocalDelegatedPropertyId> {
+    body.local_delegate_plans()
+        .iter()
+        .map(
+            |plan| match &body.expr(plan.reference).expect("plan reference").kind {
+                FirExprKind::LocalPropertyReference { declaration, .. } => *declaration,
+                kind => panic!("local delegate plan has non-reference operand {kind:?}"),
+            },
+        )
+        .collect()
+}
+
+fn local_delegate_access_plans(body: &FirBody) -> Vec<LocalDelegatedPropertyId> {
+    let mut accesses = Vec::new();
+    for expression in expressions(body) {
+        match &expression.kind {
+            FirExprKind::LocalDelegateAccess { plan, .. } => accesses.push(*plan),
+            FirExprKind::Lambda { body, .. } => {
+                accesses.extend(local_delegate_access_plans(body));
+            }
+            _ => {}
+        }
+    }
+    accesses
+}
+
 const DELEGATE: &str = "class Delegate(val value: String) {\n\
                             operator fun getValue(owner: Any?, property: Any?): String = value\n\
                         }\n";
@@ -585,9 +657,9 @@ fn same_named_local_delegates_in_sibling_scopes_are_different_properties() {
         ),
         "sibling",
     );
-    let references = local_property_references(&body);
-    let [first, second] = references[..] else {
-        panic!("two local property references, found {references:?}")
+    let declarations = local_delegate_plan_declarations(&body);
+    let [first, second] = declarations[..] else {
+        panic!("two local delegate plans, found {declarations:?}")
     };
     assert_ne!(first, second);
     assert_eq!(first.owner(), second.owner());
@@ -606,15 +678,17 @@ fn a_shadowing_local_delegate_is_a_different_property_from_the_one_it_shadows() 
         ),
         "nested",
     );
-    let mut references = local_property_references(&body);
-    references.sort_by_key(|declaration| declaration.ordinal());
-    let [outer, outer_again, inner] = references[..] else {
-        panic!("outer read twice and inner read once, found {references:?}")
+    let declarations = local_delegate_plan_declarations(&body);
+    let [outer, inner] = declarations[..] else {
+        panic!("outer and inner plans, found {declarations:?}")
     };
-    assert_eq!(outer, outer_again);
     assert_ne!(outer, inner);
     assert_eq!(outer.owner(), inner.owner());
     assert_eq!((outer.ordinal(), inner.ordinal()), (0, 1));
+    let accesses = local_delegate_access_plans(&body);
+    assert_eq!(accesses.len(), 3, "outer is read twice and inner once");
+    assert_eq!(accesses.iter().filter(|&&plan| plan == outer).count(), 2);
+    assert_eq!(accesses.iter().filter(|&&plan| plan == inner).count(), 1);
 }
 
 #[test]
@@ -629,12 +703,16 @@ fn a_captured_local_delegate_keeps_its_declaration_identity_inside_a_lambda() {
         ),
         "captured",
     );
-    let references = local_property_references(&body);
-    let [lambda_read, enclosing_read] = references[..] else {
-        panic!("exactly the lambda and its caller must read the property, found {references:?}")
+    let declarations = local_delegate_plan_declarations(&body);
+    let [declaration] = declarations[..] else {
+        panic!("one local delegated declaration, found {declarations:?}")
     };
-    assert_eq!(lambda_read, enclosing_read);
-    assert_eq!(lambda_read.ordinal(), 0);
+    assert_eq!(declaration.ordinal(), 0);
+    assert_eq!(
+        local_delegate_access_plans(&body),
+        [declaration, declaration],
+        "the lambda and enclosing read must both address the same semantic plan"
+    );
 }
 
 #[test]
@@ -656,10 +734,16 @@ fn provide_read_write_and_lambda_name_one_local_property() {
         "use",
     );
     let references = local_property_references(&body);
-    let [provided, read, written, lambda_read] = references[..] else {
+    let [provided, accessor_template] = references[..] else {
         panic!(
-            "exactly provideDelegate, read, write and lambda must name the property, found {references:?}"
+            "provideDelegate and the accessor template must name the property, found {references:?}"
         )
     };
-    assert_eq!([read, written, lambda_read], [provided; 3]);
+    assert_eq!(provided, accessor_template);
+    assert_eq!(local_delegate_plan_declarations(&body), [provided]);
+    assert_eq!(
+        local_delegate_access_plans(&body),
+        [provided, provided, provided],
+        "read, write and lambda read must all address the same semantic plan"
+    );
 }

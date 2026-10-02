@@ -47,6 +47,8 @@ pub enum FirLoweringFailure {
     UnsupportedIntrinsicCall,
     MissingProperty(PropertyId),
     MissingLocalClass(crate::fir::DeclarationId),
+    /// A declaration with no source file or no place in its source's declaration order.
+    MissingDeclarationSource(crate::fir::DeclarationId),
     InvalidConstructorCapture {
         owner: crate::fir::DeclarationId,
         field: u32,
@@ -94,4 +96,5 @@ pub enum FirLoweringFailure {
         first_parameter: u32,
     },
     ValueIdentityOverflow,
+    InvalidLocalDelegatePlan(crate::fir::BodyOwnerId),
 }

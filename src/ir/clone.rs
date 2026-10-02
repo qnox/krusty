@@ -298,6 +298,11 @@ fn remap_direct_children(expression: &mut IrExpr, mut map: impl FnMut(ExprId) ->
             exprs.iter_mut().for_each(|value| *value = map(*value));
         }
         IrExpr::KClassLiteral { value, .. } => map_option(value, &mut map),
+        IrExpr::LocalDelegateAccess(access) => {
+            access.delegate = map(access.delegate);
+            map_option(&mut access.dispatch_receiver, &mut map);
+            map_option(&mut access.value, &mut map);
+        }
         IrExpr::Const(_)
         | IrExpr::ClassConst { .. }
         | IrExpr::LocalPropertyReference(_)

@@ -182,7 +182,7 @@ pub(super) fn emit_enum_entry_subclass(
     emit_bridges(ir, c, &mut cw, env);
     if let Some(m) = opts
         .emit_class_metadata
-        .then(|| build_class_metadata(ir, env.override_results, c, opts))
+        .then(|| build_class_metadata(ir, env.override_results, c, opts, env.local_delegated()))
         .flatten()
     {
         cw.set_kotlin_metadata(m.k, &m.mv, m.xi, &m.d1, &m.d2);

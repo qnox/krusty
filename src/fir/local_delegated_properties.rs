@@ -7,12 +7,14 @@
 
 use std::collections::HashMap;
 
-use super::{BodyOwnerId, DelegateStorage, FirDelegateCall, ResolvedTy};
+use super::{BodyOwnerId, DelegateStorage, FirDelegateCall, FirExprId, FirLiftingSite, ResolvedTy};
 
 /// Checked binding shared by every read and write of one local delegated property.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct LocalDelegateBinding {
     pub(crate) storage: DelegateStorage,
+    /// The name of the variable holding the delegate, `<name>$delegate`.
+    pub(crate) storage_name: Box<str>,
     pub(crate) property_ty: ResolvedTy,
     pub(crate) get_value: FirDelegateCall,
     pub(crate) set_value: Option<FirDelegateCall>,
@@ -20,6 +22,26 @@ pub(crate) struct LocalDelegateBinding {
     /// Declaration identity allocated for this property. Convention references copy it; they do
     /// not recover it from the statement origin or the property's name.
     pub(crate) declaration: LocalDelegatedPropertyId,
+}
+
+/// Checked semantics and source provenance of one local delegated property. This records no
+/// target helper or physical representation; a backend may realize the selected conventions in
+/// the form appropriate for its target.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct FirLocalDelegatePlan {
+    /// Stable declaration identity used by every access, including accesses in nested callable
+    /// bodies that share this plan. Body-local vector positions are not semantic identities.
+    pub(crate) declaration: LocalDelegatedPropertyId,
+    pub(crate) storage_name: Box<str>,
+    pub(crate) storage_type: ResolvedTy,
+    pub(crate) property_type: ResolvedTy,
+    /// A checked reference carrying this property's stable declaration identity and source order.
+    /// Lowering gives every convention operand its own IR node rather than sharing this use.
+    pub(crate) reference: FirExprId,
+    pub(crate) get_value: FirDelegateCall,
+    pub(crate) set_value: Option<FirDelegateCall>,
+    pub(crate) accessor_sites: Box<[FirLiftingSite]>,
+    pub(crate) line: u32,
 }
 
 /// Declaration identity of one local delegated property.

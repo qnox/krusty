@@ -506,6 +506,7 @@ impl BodyLowering<'_> {
                     &arguments,
                     &context_parameter_types,
                     &[],
+                    None,
                 )
                 .unwrap_or(Err(FirLoweringFailure::MissingCallable(*target))),
             crate::fir::FirCallTarget::External {

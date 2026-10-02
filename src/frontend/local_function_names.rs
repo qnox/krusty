@@ -25,18 +25,24 @@ use std::collections::HashMap;
 
 use crate::ast::{
     ClassDecl, ClassInit, CtorDelegation, Decl, DeclId, Expr, ExprId, File, FunBody, FunDecl,
-    LiftingSite, LiftingStep, PropDecl, Stmt, StmtId,
+    LiftingSite, LiftingStep, LocalDelegateProvenance, PropDecl, Stmt, StmtId,
 };
 
-/// The next source position of each sequence, carried across the declaration units of one file.
-pub(super) type LiftingCounters = HashMap<(String, String), u32>;
+/// The counters of one file, carried across its declaration units.
+#[derive(Default)]
+pub(super) struct LiftingCounters {
+    /// The next source position of each sequence.
+    sequences: HashMap<(String, String), u32>,
+    /// The next ordinal of each lexical owner's local delegated properties.
+    delegated_locals: HashMap<String, u32>,
+}
 
 /// The sites one walk records for a file's lambdas and local functions.
 #[derive(Default)]
 pub(super) struct LiftingSites {
     pub lambdas: HashMap<u32, LiftingSite>,
     pub local_functions: HashMap<StmtId, LiftingSite>,
-    pub local_delegates: HashMap<StmtId, Vec<LiftingSite>>,
+    pub local_delegates: HashMap<StmtId, LocalDelegateProvenance>,
 }
 
 /// One sequence and the local callables enclosing the walk's current position in it.
@@ -66,6 +72,8 @@ struct Walker<'a> {
     file: &'a File,
     counters: &'a mut LiftingCounters,
     sites: LiftingSites,
+    /// Each local delegated property walked, with its lexical owner.
+    local_delegate_owners: Vec<(StmtId, String)>,
 }
 
 /// Record the lifting site of every lambda and local function `file` declares.
@@ -74,6 +82,7 @@ pub(super) fn record(file: &File, counters: &mut LiftingCounters) -> LiftingSite
         file,
         counters,
         sites: LiftingSites::default(),
+        local_delegate_owners: Vec::new(),
     };
     let anonymous = file
         .anonymous_object_classes
@@ -90,14 +99,32 @@ pub(super) fn record(file: &File, counters: &mut LiftingCounters) -> LiftingSite
             Decl::Class(class) => walker.class_body(class, &format!("class:{}", class.name), false),
         }
     }
+    walker.number_local_delegates();
     walker.sites
 }
 
 impl Walker<'_> {
+    /// Number the local delegated properties of each lexical owner in source order, which kotlinc
+    /// spells `<v#N>`. The walk itself visits a class's initializers before its functions, and the
+    /// file's declaration units arrive in source order.
+    fn number_local_delegates(&mut self) {
+        let spans = &self.file.stmt_spans;
+        let mut walked = std::mem::take(&mut self.local_delegate_owners);
+        walked.sort_by_key(|(statement, _)| spans.get(statement.0 as usize).map(|span| span.lo));
+        for (statement, owner) in walked {
+            let next = self.counters.delegated_locals.entry(owner).or_insert(0);
+            if let Some(provenance) = self.sites.local_delegates.get_mut(&statement) {
+                provenance.ordinal = *next;
+            }
+            *next += 1;
+        }
+    }
+
     /// `scope` extended by the next position of its sequence.
     fn next(&mut self, scope: &Scope, name: Option<&str>) -> Scope {
         let counter = self
             .counters
+            .sequences
             .entry((scope.owner.clone(), scope.container.clone()))
             .or_insert(0);
         let position = *counter;
@@ -324,10 +351,17 @@ impl Walker<'_> {
                 self.expr(*delegate, scope);
                 // Its accessors are local functions without a source name.
                 let accessors = if *is_var { 2 } else { 1 };
-                let sites = (0..accessors)
+                let accessors = (0..accessors)
                     .map(|_| Self::site(&self.next(scope, None)))
                     .collect();
-                self.sites.local_delegates.insert(statement, sites);
+                // Numbered once the whole unit is walked: see `number_local_delegates`.
+                let provenance = LocalDelegateProvenance {
+                    accessors,
+                    ordinal: 0,
+                };
+                self.sites.local_delegates.insert(statement, provenance);
+                self.local_delegate_owners
+                    .push((statement, scope.owner.clone()));
             }
             Stmt::LocalClass(_) => {
                 if let Some(&declaration) = file.local_class_decls.get(&statement) {

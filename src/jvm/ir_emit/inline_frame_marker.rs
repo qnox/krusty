@@ -13,6 +13,12 @@ impl Emitter<'_> {
         declaration: crate::ir::ExprId,
         code: &mut CodeBuilder,
     ) {
+        let frame_start = u16::try_from(code.bytes.len()).unwrap_or(u16::MAX);
+        for local in &mut self.open_locals {
+            if local.depth == self.block_depth && local.inline_operand {
+                local.start = frame_start;
+            }
+        }
         let slot = self
             .frame
             .enter(FrameKey::InlineFrameMarker(declaration), Ty::Int);

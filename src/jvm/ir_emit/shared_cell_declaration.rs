@@ -80,7 +80,7 @@ impl Emitter<'_> {
             // The element store is the declaration's statement: its value marks its own line,
             // and the `putfield` returns to the declaration's.
             load(holder, slot, code);
-            debug_lines::mark_expression_start(self.ir, value, code);
+            self.mark_expression_start(value, code);
             self.emit_value(value, code);
             debug_lines::mark_statement(self.ir, declaration, code);
             self.put_element(&elem, code);
@@ -157,12 +157,26 @@ impl Emitter<'_> {
             Some(crate::ir::IrDebugLocalProvenance::LambdaFrameMarker { .. })
         )
         .then(|| code.local_entry_count());
+        // A materialized inline parameter executes in a call-site-specialized slot, but kotlinc's
+        // LocalVariableTable retains the parameter declaration's erased type. Keep that debug
+        // representation separate from the verifier/storage type above.
+        let debug_ty = self
+            .ir
+            .inline_operand_declared_type(declaration)
+            .map(|declared| ir_ty_to_jvm(&stored_value_ty(declared)))
+            .unwrap_or(ty);
         let local = super::block_scope::OpenLocal {
             depth: self.block_depth,
             slot,
             start: code.bytes.len() as u16,
             name,
-            descriptor: local_variable_desc(ty),
+            descriptor: local_variable_desc(debug_ty),
+            inline_operand: self.ir.call_operand_bindings.contains(&declaration)
+                && matches!(
+                    provenance,
+                    Some(crate::ir::IrDebugLocalProvenance::InlineValue { .. })
+                        | Some(crate::ir::IrDebugLocalProvenance::InlineLambdaReceiver { .. })
+                ),
             table_position,
         };
         // kotlinc lists an inline frame's marker ahead of the locals binding that frame's operands,

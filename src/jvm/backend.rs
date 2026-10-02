@@ -8,6 +8,7 @@ use crate::backend::{
 use crate::diag::DiagSink;
 use crate::frontend::FrontendSymbols;
 use crate::jvm::names::{file_class_name, type_descriptor};
+use crate::metadata::local_properties::LocalPropertyMeta;
 use crate::types::{type_name, Ty};
 
 /// Why [`run_backend_passes`] declined a file: the named pass met a shape it can't lower yet, so the
@@ -680,6 +681,7 @@ struct BackendReadyIr<'a> {
     stem: &'a str,
     module_name: &'a str,
     facade_name: String,
+    facade_class: crate::types::TypeName,
     package: String,
     signature_symbols: &'a dyn BackendClassifierSource,
     inner_class_resolver: crate::jvm::classfile::InnerClassResolver,
@@ -711,6 +713,7 @@ impl JvmBackend {
         let stem = &stems[source.raw() as usize];
         let package = ir.package.clone().unwrap_or_default();
         let facade_name = file_class_name(stem, ir.package.as_deref());
+        let facade_class = crate::types::type_name(&facade_name);
         let mut pass_facts = BackendPassFacts {
             default_call_operands,
             property_reference_realizations,
@@ -744,7 +747,15 @@ impl JvmBackend {
         {
             return Vec::new();
         }
-        let metadata = facade_package_metadata_from_ir(&ir, module_name, self.param_assertions);
+        let facade_locals = pass_facts
+            .property_reference_realizations
+            .local_delegated
+            .of(facade_class);
+        let metadata = facade_package_metadata_from_ir(
+            &ir,
+            (module_name, facade_locals),
+            self.param_assertions,
+        );
         let has_facade_members = metadata.is_some();
         let inner_class_resolver =
             checked_module_inner_class_resolver(classifiers.module(), self.cp.clone());
@@ -754,6 +765,7 @@ impl JvmBackend {
                 stem,
                 module_name,
                 facade_name,
+                facade_class,
                 package,
                 signature_symbols: &classifiers,
                 inner_class_resolver,
@@ -778,6 +790,7 @@ impl JvmBackend {
             stem,
             module_name,
             facade_name,
+            facade_class,
             package,
             signature_symbols,
             inner_class_resolver,
@@ -812,9 +825,6 @@ impl JvmBackend {
             override_results: &pass_facts.override_results,
             collection_method_entry_barriers: &pass_facts.collection_method_entry_barriers,
         };
-        // The facade's identity, interned from the name the file's stem and package give it, as
-        // `module_calls::facade_for` interns it for the declarations it owns.
-        let facade_class = crate::types::type_name(&facade_name);
         let classes = crate::jvm::ir_emit::emit_all_with_checked_classifiers(
             &ir,
             (facade_class, &facade_name),
@@ -915,6 +925,7 @@ impl Backend for JvmBackend {
     ) -> Vec<Artifact> {
         let stem = &file.stems[file.source.raw() as usize];
         let facade = file_class_name(stem, file.ir.package.as_deref());
+        let facade_class = type_name(&facade);
         let stems = &file.stems;
         crate::jvm::local_class_names::realize(&mut file.ir, |source| {
             crate::jvm::module_calls::facade_for(source, stems)
@@ -947,6 +958,21 @@ impl Backend for JvmBackend {
         // is numbered, as kotlinc numbers only the lambdas it lifts.
         if self.lambda_modes.lambdas == crate::jvm::ir_emit::LambdaMode::Indy {
             crate::jvm::lambda_classes::realize(&mut file.ir, &file.classifiers);
+        }
+        if crate::jvm::local_delegate_accessors::realize(
+            &mut file.ir,
+            crate::ir::IrModuleSource {
+                source: file.source,
+                package: facade_class.namespace(),
+            },
+        )
+        .is_err()
+        {
+            diags.error(
+                crate::diag::Span::new(0, 0),
+                "internal error: invalid JVM local delegated-property accessor plan",
+            );
+            return Vec::new();
         }
         let mut property_reference_realizations = match crate::jvm::property_references::realize(
             &mut file.ir,
@@ -1042,7 +1068,7 @@ impl Backend for JvmBackend {
 /// function names/descriptors chosen by JVM representation passes.
 pub fn facade_package_metadata_from_ir(
     ir: &crate::ir::IrFile,
-    module_name: &str,
+    (module_name, locals): (&str, &[LocalPropertyMeta]),
     param_assertions: bool,
 ) -> Option<crate::jvm::ir_emit::KotlinMetadata> {
     let functions = ir
@@ -1282,7 +1308,7 @@ pub fn facade_package_metadata_from_ir(
         functions,
         properties,
         aliases,
-        module_name,
+        (module_name, locals),
         param_assertions,
     )
 }
@@ -1340,7 +1366,7 @@ fn build_facade_metadata(
     functions: Vec<crate::metadata::builder::FnMeta>,
     properties: Vec<crate::metadata::builder::PropMeta>,
     aliases: Vec<crate::metadata::builder::TypeAliasMeta>,
-    module_name: &str,
+    (module_name, locals): (&str, &[LocalPropertyMeta]),
     param_assertions: bool,
 ) -> Option<crate::jvm::ir_emit::KotlinMetadata> {
     (!functions.is_empty() || !properties.is_empty() || !aliases.is_empty()).then(|| {
@@ -1348,7 +1374,7 @@ fn build_facade_metadata(
             &functions,
             &properties,
             &aliases,
-            (module_name != "main").then_some(module_name),
+            ((module_name != "main").then_some(module_name), locals),
             param_assertions,
         );
         crate::jvm::ir_emit::KotlinMetadata {
@@ -1573,7 +1599,7 @@ mod tests {
             source_order: 0,
         });
 
-        let metadata = facade_package_metadata_from_ir(&ir, "main", true)
+        let metadata = facade_package_metadata_from_ir(&ir, ("main", &[]), true)
             .expect("a package property requires facade metadata");
         let decoded = crate::jvm::metadata::decode_metadata(
             &metadata.d1,

@@ -94,6 +94,19 @@ impl ReferencedDependencies {
                 | IrCallableReferenceTarget::FunctionValueConversion { .. } => {}
             },
             IrExpr::Checked(operation) => self.checked(operation),
+            // A local delegated access carries expression templates selected by the frontend.
+            // Walk every operand explicitly so dependency identities used by a delegate, an
+            // optional dispatch receiver, or a setter value remain frozen even if expression
+            // storage stops being a flat all-nodes arena.
+            IrExpr::LocalDelegateAccess(access) => {
+                self.expression(ir, ir.expr(access.delegate));
+                if let Some(receiver) = access.dispatch_receiver {
+                    self.expression(ir, ir.expr(receiver));
+                }
+                if let Some(value) = access.value {
+                    self.expression(ir, ir.expr(value));
+                }
+            }
             // Equality carries no declaration identity itself, but both operands are ordinary IR
             // expressions and may carry one. Visit them explicitly so this exhaustive inventory
             // remains correct if expression storage stops being a flat all-nodes arena.

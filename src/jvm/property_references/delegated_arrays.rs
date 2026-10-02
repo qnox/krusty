@@ -9,10 +9,8 @@
 
 use std::collections::HashMap;
 
-use crate::fir::PropertyId;
-use crate::ir::{
-    Callee, ExprId, IrCheckedOperation, IrConst, IrExpr, IrFile, IrIntrinsic, IrTypeOp,
-};
+use crate::fir::{LocalDelegatedPropertyId, PropertyId};
+use crate::ir::{Callee, ExprId, IrConst, IrExpr, IrFile, IrIntrinsic};
 use crate::jvm::inline::MethodBodies;
 use crate::jvm::method_node::MethodNode;
 use crate::types::{Ty, TypeName};
@@ -55,11 +53,20 @@ pub(super) struct DelegatedOperand {
     pub(super) operand: ExprId,
     /// The class whose array holds the reference: the class declaring the property's accessors.
     pub(super) owner: TypeName,
-    pub(super) property: PropertyId,
-    /// The property's position among its class's declarations.
-    pub(super) source_order: u32,
+    pub(super) property: DelegatedProperty,
+    /// The property's position among its class's delegated properties: its declaration's source
+    /// order, then, for a local one, its ordinal within the member declaring it.
+    pub(super) source_order: (u32, u32),
     /// The reflected property value, built once per property in its class's `<clinit>`.
     pub(super) element: IrExpr,
+}
+
+/// A delegated property of a class: a member or top-level one, or a local one by its stable
+/// frontend declaration identity.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(super) enum DelegatedProperty {
+    Declared(PropertyId),
+    Local(LocalDelegatedPropertyId),
 }
 
 /// Pass `null` for a delegated reference whose inline operator never reads it, as kotlinc does
@@ -69,11 +76,12 @@ pub(super) struct DelegatedOperand {
 /// A dependency's inline operator is judged by its bytecode. kotlinc always inlines, so it ignores
 /// the operator's own null check of the parameter; here a callee with a legal call fallback may
 /// still be called, so only one that must be inlined may null-check the parameter it is given
-/// `null` for. A current-module operator kept as a call can fall back the same way, and keeps its
-/// slot.
+/// `null` for. Discovering an unread dependency operand makes its inline splice mandatory; the
+/// emitter fails closed if it cannot perform that splice. A current-module operator kept as a call
+/// can fall back the same way, and keeps its slot.
 pub(super) fn elide_unread(ir: &mut IrFile, bodies: &dyn MethodBodies) {
     for raw in 0..ir.exprs.len() as ExprId {
-        if ir.is_unread_inline_operand(raw) && is_delegated_operand(ir, raw) {
+        if ir.is_unread_inline_operand(raw) && ir.is_delegated_property_operand(raw) {
             elide(ir, raw);
         }
     }
@@ -92,7 +100,11 @@ pub(super) fn elide_unread(ir: &mut IrFile, bodies: &dyn MethodBodies) {
         else {
             continue;
         };
-        if !inline.can_inline() || !args.iter().any(|&arg| is_delegated_operand(ir, arg)) {
+        if !inline.can_inline()
+            || !args
+                .iter()
+                .any(|&arg| ir.is_delegated_property_operand(arg))
+        {
             continue;
         }
         let unread = dependency_unread_arguments(
@@ -102,26 +114,11 @@ pub(super) fn elide_unread(ir: &mut IrFile, bodies: &dyn MethodBodies) {
             args,
         );
         for argument in unread {
-            if is_delegated_operand(ir, argument) {
+            if ir.is_delegated_property_operand(argument) {
                 ir.mark_unread_inline_operand(argument);
                 elide(ir, argument);
             }
         }
-    }
-}
-
-/// Whether `expression` is the reflected property a delegated-property operator receives, as
-/// passed: the reference itself, or it adapted to the operator's declared parameter.
-fn is_delegated_operand(ir: &IrFile, expression: ExprId) -> bool {
-    match ir.expr(expression) {
-        IrExpr::Checked(IrCheckedOperation::PropertyReference { delegated, .. }) => *delegated,
-        IrExpr::LocalPropertyReference { .. } => true,
-        IrExpr::TypeOp {
-            op: IrTypeOp::ImplicitCoercion,
-            arg,
-            ..
-        } => is_delegated_operand(ir, *arg),
-        _ => false,
     }
 }
 
@@ -166,7 +163,7 @@ fn dependency_unread_arguments(
 pub(super) fn place(ir: &mut IrFile, operands: Vec<DelegatedOperand>) -> DelegatedPropertyArrays {
     let operands: Vec<_> = operands
         .into_iter()
-        .filter(|operand| is_delegated_operand(ir, operand.operand))
+        .filter(|operand| ir.is_delegated_property_operand(operand.operand))
         .collect();
     // Owners in first-operand order, so the element expressions are allocated deterministically;
     // each property once, however many operands read it.

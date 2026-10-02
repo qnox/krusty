@@ -47,6 +47,7 @@ mod lambda_classes;
 mod lifted_names;
 mod local_class_names;
 mod local_classifiers;
+mod local_delegate_accessors;
 mod local_properties;
 mod mapped_builtin_declarations;
 pub mod metadata;

@@ -45,9 +45,11 @@ impl Emitter<'_> {
     /// (`ifnull`/`ifnonnull`), and the `Intrinsics.areEqual` call of structural equality. An operand
     /// on a later line therefore never leaves its own line on that instruction. A comparison with no
     /// line of its own returns to the enclosing statement's line instead, when an operand marked one.
-    pub(super) fn mark_comparison_decision(&self, operands: &[ExprId], code: &mut CodeBuilder) {
-        match self.comparison_line.filter(|&line| line != 0) {
-            Some(line) => code.mark_line(line),
+    /// A copied inline comparison uses the same mapped line as its operands, so a jump the constant
+    /// folder removes shares that line and does not survive as its own `nop`.
+    pub(super) fn mark_comparison_decision(&mut self, operands: &[ExprId], code: &mut CodeBuilder) {
+        match self.comparison_line.filter(|&(_, line)| line != 0) {
+            Some((expression, line)) => self.mark_expression_line(expression, line, code),
             None => self.return_to_statement_line(operands, code),
         }
     }
@@ -110,7 +112,12 @@ impl Emitter<'_> {
         expression: ExprId,
         emit: impl FnOnce(&mut Self) -> R,
     ) -> R {
-        let line = self.ir.expr_source_lines.get(&expression).copied();
+        let line = self
+            .ir
+            .expr_source_lines
+            .get(&expression)
+            .copied()
+            .map(|line| (expression, line));
         let outer = std::mem::replace(&mut self.comparison_line, line);
         let result = emit(self);
         self.comparison_line = outer;

@@ -23,6 +23,14 @@ pub(super) fn local_variable(
     {
         return Some(format!("${name}"));
     }
+    // A local delegated property's storage parameter keeps its source spelling (`x$delegate`) and
+    // kotlinc's local-variable `$` prefix. That role is checked before the plain source-name
+    // return: the storage identity publishes a name, and the prefix is still part of the JVM name.
+    if let IrParameterRole::Generated(IrGeneratedParameterRole::LocalDelegateStorage) =
+        identity.role
+    {
+        return identity.source_name.as_ref().map(|name| format!("${name}"));
+    }
     if let Some(name) = &identity.source_name {
         return Some(name.clone());
     }
@@ -56,6 +64,10 @@ pub(super) fn local_variable(
             IrGeneratedParameterRole::InterfaceDelegationValue { ordinal } => {
                 Some(format!("p{ordinal}"))
             }
+            IrGeneratedParameterRole::LocalDelegateStorage => {
+                identity.source_name.as_ref().map(|name| format!("${name}"))
+            }
+            IrGeneratedParameterRole::LocalDelegateDispatch => Some("this$0".to_string()),
         },
     }
 }
@@ -649,6 +661,29 @@ mod tests {
             assert_eq!(metadata(&parameter), Some(name));
             assert_eq!(assertion(&parameter), Some(name.to_string()));
         }
+    }
+
+    #[test]
+    fn a_local_delegate_storage_parameter_keeps_kotlincs_dollar_prefix() {
+        let storage = IrParameterIdentity::generated(
+            IrGeneratedParameterRole::LocalDelegateStorage,
+            Some("delegated$delegate".to_string()),
+        );
+        assert_eq!(
+            local_variable(&storage, "one$lambda$0$0"),
+            Some("$delegated$delegate".to_string())
+        );
+        assert_eq!(
+            method_parameter(&storage, "one$lambda$0$0"),
+            Some("$delegated$delegate".to_string())
+        );
+        assert_eq!(metadata(&storage), Some("delegated$delegate"));
+        let dispatch =
+            IrParameterIdentity::generated(IrGeneratedParameterRole::LocalDelegateDispatch, None);
+        assert_eq!(
+            local_variable(&dispatch, "read$lambda$0"),
+            Some("this$0".to_string())
+        );
     }
 
     #[test]
