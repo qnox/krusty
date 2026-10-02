@@ -9485,19 +9485,26 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `Tag_RISCV_stack_align` must be 16 and `Tag_RISCV_arch` must start `rv64i` (its extensions are
   not compared: a linker merges them, and whether the machine has them is the deployment's
   concern), and `Tag_RISCV_atomic_abi` A6C and A7, whose sequentially consistent loads and stores
-  use different fences, may not meet in one link. The remaining attributes are dropped: the
-  executable has no section headers to carry them and no loader reads them; unaligned-access and
-  privileged-spec tags do not change what a user-mode link must do, and `Tag_RISCV_x3_reg_usage`
-  matters only to a linker that relaxes to `gp`, which this one never does. A truncated attributes
-  section is a `Parse` error. The unit-test objects state the flags their code needs (0x4, or 0x5
-  for one with compressed instructions) rather than 0.
+  use different fences, may not meet in one link. Undefined atomic-ABI values are errors.
+  Explicitly different deprecated `Tag_RISCV_priv_spec*` version triples are incompatible.
+  `Tag_RISCV_x3_reg_usage` is merged with missing/UNKNOWN value 0 allowed to adopt only the global
+  pointer (1) or shadow-stack (2) use; every other pair of different uses is incompatible. An
+  unrecognized tag with `tag % 128 < 64` is mandatory under the psABI and is refused rather than
+  discarded; unknown optional tags are read by their odd/string or even/integer representation and
+  dropped because the executable has no section headers. A truncated attributes section is a
+  `Parse` error. The unit-test objects state the flags their code needs (0x4, or 0x5 for one with
+  compressed instructions) rather than 0.
   Tests: `native::linker::abi::tests` (`riscv64_output_flags_keep_the_float_abi_and_merge_rvc_and_tso`,
   `x86_64_and_aarch64_output_flags_are_zero`, `a_riscv64_object_with_another_float_abi_is_refused`,
   `a_riscv64_rve_object_is_refused`, `a_riscv64_ilp32_object_is_refused`,
   `a_riscv64_object_with_unknown_flags_is_refused`, `riscv64_attributes_for_the_target_link`,
   `a_riscv64_object_assuming_another_stack_alignment_is_refused`,
   `a_riscv64_object_for_another_base_isa_is_refused`,
+  `riscv64_objects_for_different_privileged_specifications_are_refused`,
   `riscv64_objects_with_conflicting_atomic_abis_are_refused`,
+  `a_riscv64_object_with_an_undefined_atomic_abi_is_refused`,
+  `riscv64_x3_usage_is_merged_only_as_the_psabi_permits`,
+  `an_unknown_mandatory_riscv64_attribute_is_refused`,
   `a_truncated_riscv64_attributes_section_is_a_parse_error`) and
   `native::linker::tests::a_program_links_against_the_runtime_on_every_target` (0x5 against
   the real runtime).

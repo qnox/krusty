@@ -33,17 +33,18 @@
 //! - `Tag_RISCV_arch` must name an RV64I instruction set (`rv64i…`). Its extensions are not
 //!   compared: an executable may use any extension the machine running it has, and a linker merges
 //!   the extension lists rather than refusing them.
+//! - `Tag_RISCV_priv_spec*` is deprecated, but two explicitly stated different versions still do
+//!   not combine.
 //! - `Tag_RISCV_atomic_abi` A6C and A7 map sequentially consistent loads and stores to different
-//!   fence sequences, so objects using the two cannot be combined; A6S and an unknown mapping
-//!   combine with either.
+//!   fence sequences, so objects using the two cannot be combined; A6S and UNKNOWN combine with
+//!   either. Values outside the four the psABI defines are errors.
+//! - `Tag_RISCV_x3_reg_usage` must agree across inputs, except UNKNOWN may combine with the global
+//!   pointer or shadow-stack uses exactly as the psABI permits.
 //!
-//! The other attributes are safe to drop in a static link that relaxes nothing: the executable has
-//! no section headers to carry them and no loader reads them; `Tag_RISCV_unaligned_access` only
-//! permits code to rely on fast unaligned accesses, which is between that code and the machine;
-//! `Tag_RISCV_priv_spec*` concern privileged code, which a user program is not; and
-//! `Tag_RISCV_x3_reg_usage` matters to a linker that relaxes accesses to be `gp`-relative, which
-//! this one never does. Unknown attributes are skipped by the psABI's rule that an odd tag carries
-//! a string and an even one an integer.
+//! The executable has no section headers to carry attributes and no loader reads them, so
+//! `Tag_RISCV_unaligned_access` can be dropped after compatibility checking. An unknown optional
+//! attribute is skipped after reading its odd/string or even/integer representation; an unknown
+//! mandatory one (`tag % 128 < 64`) is an error, so a future ABI constraint cannot disappear.
 
 use object::read::elf::{FileHeader, SectionHeader};
 use object::read::Object;
@@ -51,7 +52,7 @@ use object::LittleEndian;
 
 use super::super::target::Arch;
 use super::elf::Elf;
-use super::{AbiMismatch, ProgramLinkError, RiscvAtomicAbi, RiscvFloatAbi};
+use super::{AbiMismatch, ProgramLinkError, RiscvAtomicAbi, RiscvFloatAbi, RiscvPrivSpec};
 
 const EF_RISCV_RVC: u32 = object::elf::EF_RISCV_RVC.0;
 const EF_RISCV_FLOAT_ABI: u32 = object::elf::EF_RISCV_FLOAT_ABI;
@@ -69,7 +70,11 @@ const RISCV_STACK_ALIGN: u64 = 16;
 
 const TAG_RISCV_STACK_ALIGN: u64 = 4;
 const TAG_RISCV_ARCH: u64 = 5;
+const TAG_RISCV_PRIV_SPEC: u64 = 8;
+const TAG_RISCV_PRIV_SPEC_MINOR: u64 = 10;
+const TAG_RISCV_PRIV_SPEC_REVISION: u64 = 12;
 const TAG_RISCV_ATOMIC_ABI: u64 = 14;
+const TAG_RISCV_X3_REG_USAGE: u64 = 16;
 
 impl RiscvFloatAbi {
     fn from_flags(e_flags: u32) -> Self {
@@ -104,6 +109,10 @@ fn riscv_output_flags(files: &[Elf]) -> Result<u32, ProgramLinkError> {
     let mut output = RISCV_FLOAT_ABI.flags();
     // The first input with a definite atomic mapping (A6C or A7), and which one.
     let mut atomic: Option<(String, RiscvAtomicAbi)> = None;
+    // The first input to state each compatibility fact, so a mismatch names both sides.
+    let mut priv_spec: Option<(String, RiscvPrivSpec)> = None;
+    // Missing Tag_RISCV_x3_reg_usage means 0. Store the source of the merged nonzero use.
+    let mut x3_usage: Option<(String, u64)> = None;
     for (index, file) in files.iter().enumerate() {
         let input = format!("input {index}");
         let incompatible = |mismatch| {
@@ -133,6 +142,7 @@ fn riscv_output_flags(files: &[Elf]) -> Result<u32, ProgramLinkError> {
         output |= e_flags & (EF_RISCV_RVC | EF_RISCV_TSO);
 
         let attributes = riscv_attributes(&input, file)?;
+        let found_priv_spec = attributes.priv_spec();
         if let Some(found) = attributes.stack_align {
             if found != RISCV_STACK_ALIGN {
                 return incompatible(AbiMismatch::RiscvStackAlign {
@@ -144,6 +154,19 @@ fn riscv_output_flags(files: &[Elf]) -> Result<u32, ProgramLinkError> {
         if let Some(isa) = attributes.arch {
             if !isa.starts_with("rv64i") {
                 return incompatible(AbiMismatch::RiscvArch(isa));
+            }
+        }
+        if let Some(found) = found_priv_spec {
+            match &priv_spec {
+                Some((first, other)) if *other != found => {
+                    return incompatible(AbiMismatch::RiscvPrivSpec {
+                        found,
+                        other_input: first.clone(),
+                        other: *other,
+                    })
+                }
+                Some(_) => {}
+                None => priv_spec = Some((input.clone(), found)),
             }
         }
         if let Some(found) = attributes.atomic_abi {
@@ -159,6 +182,25 @@ fn riscv_output_flags(files: &[Elf]) -> Result<u32, ProgramLinkError> {
                 None => atomic = Some((input.clone(), found)),
             }
         }
+        let found = attributes.x3_usage.unwrap_or(0);
+        match &mut x3_usage {
+            None => x3_usage = Some((input.clone(), found)),
+            Some((_, other)) if *other == found => {}
+            // UNKNOWN combines only with global-pointer and shadow-stack use. The merged fact is
+            // the nonzero use, so retain the input that stated it for a later diagnostic.
+            Some((first, other)) if *other == 0 && matches!(found, 1 | 2) => {
+                *first = input.clone();
+                *other = found;
+            }
+            Some((_, other)) if found == 0 && matches!(*other, 1 | 2) => {}
+            Some((first, other)) => {
+                return incompatible(AbiMismatch::RiscvX3Usage {
+                    found,
+                    other_input: first.clone(),
+                    other: *other,
+                })
+            }
+        }
     }
     Ok(output)
 }
@@ -168,8 +210,25 @@ fn riscv_output_flags(files: &[Elf]) -> Result<u32, ProgramLinkError> {
 struct RiscvAttributes {
     stack_align: Option<u64>,
     arch: Option<String>,
-    /// A6C or A7; A6S and an unknown mapping combine with anything, so they are not recorded.
+    /// A6C or A7; A6S and UNKNOWN combine with anything, so they are not recorded.
     atomic_abi: Option<RiscvAtomicAbi>,
+    priv_spec_major: Option<u64>,
+    priv_spec_minor: Option<u64>,
+    priv_spec_revision: Option<u64>,
+    x3_usage: Option<u64>,
+}
+
+impl RiscvAttributes {
+    fn priv_spec(&self) -> Option<RiscvPrivSpec> {
+        (self.priv_spec_major.is_some()
+            || self.priv_spec_minor.is_some()
+            || self.priv_spec_revision.is_some())
+        .then(|| RiscvPrivSpec {
+            major: self.priv_spec_major.unwrap_or(0),
+            minor: self.priv_spec_minor.unwrap_or(0),
+            revision: self.priv_spec_revision.unwrap_or(0),
+        })
+    }
 }
 
 /// Read every `SHT_RISCV_ATTRIBUTES` section of `file` (described as `input`). Only the `riscv`
@@ -205,18 +264,45 @@ fn riscv_attributes(input: &str, file: &Elf) -> Result<RiscvAttributes, ProgramL
                             let isa = reader.read_string().map_err(malformed)?;
                             found.arch = Some(String::from_utf8_lossy(isa).into_owned());
                         }
+                        TAG_RISCV_PRIV_SPEC => {
+                            found.priv_spec_major = Some(reader.read_integer().map_err(malformed)?);
+                        }
+                        TAG_RISCV_PRIV_SPEC_MINOR => {
+                            found.priv_spec_minor = Some(reader.read_integer().map_err(malformed)?);
+                        }
+                        TAG_RISCV_PRIV_SPEC_REVISION => {
+                            found.priv_spec_revision =
+                                Some(reader.read_integer().map_err(malformed)?);
+                        }
                         TAG_RISCV_ATOMIC_ABI => {
-                            found.atomic_abi = match reader.read_integer().map_err(malformed)? {
+                            let value = reader.read_integer().map_err(malformed)?;
+                            found.atomic_abi = match value {
                                 1 => Some(RiscvAtomicAbi::A6C),
                                 3 => Some(RiscvAtomicAbi::A7),
-                                _ => None,
+                                0 | 2 => None,
+                                _ => {
+                                    return Err(ProgramLinkError::IncompatibleAbi {
+                                        input: input.to_string(),
+                                        mismatch: AbiMismatch::RiscvUnknownAtomicAbi(value),
+                                    })
+                                }
                             };
                         }
-                        odd if odd % 2 == 1 => {
-                            reader.read_string().map_err(malformed)?;
+                        TAG_RISCV_X3_REG_USAGE => {
+                            found.x3_usage = Some(reader.read_integer().map_err(malformed)?);
                         }
-                        _ => {
-                            reader.read_integer().map_err(malformed)?;
+                        unknown => {
+                            if unknown % 2 == 1 {
+                                reader.read_string().map_err(malformed)?;
+                            } else {
+                                reader.read_integer().map_err(malformed)?;
+                            }
+                            if unknown % 128 < 64 {
+                                return Err(ProgramLinkError::IncompatibleAbi {
+                                    input: input.to_string(),
+                                    mismatch: AbiMismatch::RiscvUnknownMandatoryAttribute(unknown),
+                                });
+                            }
                         }
                     }
                 }
@@ -435,6 +521,51 @@ mod tests {
         );
     }
 
+    /// Deprecated privileged-spec attributes still describe one compatibility version: two
+    /// explicitly different triples cannot be linked, while an input that states none imposes no
+    /// conflicting version.
+    #[test]
+    fn riscv64_objects_for_different_privileged_specifications_are_refused() {
+        let first = with_attributes(&[
+            (TAG_RISCV_PRIV_SPEC, Attribute::Integer(1)),
+            (TAG_RISCV_PRIV_SPEC_MINOR, Attribute::Integer(12)),
+            (TAG_RISCV_PRIV_SPEC_REVISION, Attribute::Integer(0)),
+        ]);
+        let second = with_attributes(&[
+            (TAG_RISCV_PRIV_SPEC, Attribute::Integer(1)),
+            (TAG_RISCV_PRIV_SPEC_MINOR, Attribute::Integer(13)),
+            (TAG_RISCV_PRIV_SPEC_REVISION, Attribute::Integer(0)),
+        ]);
+        let error = link(Arch::Riscv64, &[&first, &second])
+            .expect_err("different privileged specifications are incompatible");
+        assert_eq!(
+            error,
+            incompatible(
+                1,
+                AbiMismatch::RiscvPrivSpec {
+                    found: RiscvPrivSpec {
+                        major: 1,
+                        minor: 13,
+                        revision: 0,
+                    },
+                    other_input: "input 0".to_string(),
+                    other: RiscvPrivSpec {
+                        major: 1,
+                        minor: 12,
+                        revision: 0,
+                    },
+                }
+            )
+        );
+        assert_eq!(
+            error.to_string(),
+            "input 1 requires privileged specification 1.13.0 (Tag_RISCV_priv_spec*), which \
+             cannot be linked with input 0's 1.12.0"
+        );
+
+        linked(Arch::Riscv64, &[&first, &riscv(0x5)]);
+    }
+
     /// A6C and A7 are refused together, in either order, naming both inputs.
     #[test]
     fn riscv64_objects_with_conflicting_atomic_abis_are_refused() {
@@ -468,6 +599,72 @@ mod tests {
             "input 1 maps atomics by the A6C atomic ABI (Tag_RISCV_atomic_abi), which cannot be \
              linked with input 0's A7: they order sequentially consistent loads and stores with \
              different fences"
+        );
+    }
+
+    #[test]
+    fn a_riscv64_object_with_an_undefined_atomic_abi_is_refused() {
+        let object = with_attributes(&[(TAG_RISCV_ATOMIC_ABI, Attribute::Integer(42))]);
+        let error = link(Arch::Riscv64, &[&object])
+            .expect_err("an undefined atomic ABI must not be treated as neutral");
+        assert_eq!(
+            error,
+            incompatible(0, AbiMismatch::RiscvUnknownAtomicAbi(42))
+        );
+        assert_eq!(
+            error.to_string(),
+            "input 0 sets Tag_RISCV_atomic_abi to undefined value 42; the psABI defines only 0 \
+             (UNKNOWN), 1 (A6C), 2 (A6S) and 3 (A7)"
+        );
+    }
+
+    /// Missing x3 usage is UNKNOWN (0), which can adopt global-pointer or shadow-stack use. Any
+    /// other pair of different uses is incompatible because the same register cannot have both
+    /// process-wide meanings.
+    #[test]
+    fn riscv64_x3_usage_is_merged_only_as_the_psabi_permits() {
+        let global_pointer = with_attributes(&[(TAG_RISCV_X3_REG_USAGE, Attribute::Integer(1))]);
+        let shadow_stack = with_attributes(&[(TAG_RISCV_X3_REG_USAGE, Attribute::Integer(2))]);
+        let temporary = with_attributes(&[(TAG_RISCV_X3_REG_USAGE, Attribute::Integer(3))]);
+
+        linked(Arch::Riscv64, &[&riscv(0x5), &global_pointer]);
+        linked(Arch::Riscv64, &[&riscv(0x5), &shadow_stack]);
+
+        let error = link(Arch::Riscv64, &[&shadow_stack, &temporary])
+            .expect_err("shadow-stack and temporary-register x3 uses conflict");
+        assert_eq!(
+            error,
+            incompatible(
+                1,
+                AbiMismatch::RiscvX3Usage {
+                    found: 3,
+                    other_input: "input 0".to_string(),
+                    other: 2,
+                }
+            )
+        );
+        assert_eq!(
+            error.to_string(),
+            "input 1 uses x3/gp as a temporary register (Tag_RISCV_x3_reg_usage), which cannot \
+             be linked with input 0, which uses it as the shadow-stack pointer"
+        );
+    }
+
+    /// Tags whose value modulo 128 is below 64 are mandatory: an older linker must fail closed
+    /// instead of discarding a future ABI constraint it cannot interpret.
+    #[test]
+    fn an_unknown_mandatory_riscv64_attribute_is_refused() {
+        let object = with_attributes(&[(18, Attribute::Integer(7))]);
+        let error = link(Arch::Riscv64, &[&object])
+            .expect_err("unknown mandatory attributes must fail closed");
+        assert_eq!(
+            error,
+            incompatible(0, AbiMismatch::RiscvUnknownMandatoryAttribute(18))
+        );
+        assert_eq!(
+            error.to_string(),
+            "input 0 uses unrecognized mandatory RISC-V attribute tag 18; the psABI requires an \
+             error instead of ignoring tags whose value modulo 128 is below 64"
         );
     }
 

@@ -4376,9 +4376,10 @@ deliberately much less than a general linker; each limit below is a decision, no
 - **RISC-V ABI is checked, and `e_flags` merged** (`src/native/linker/abi.rs`). Every input must
   say `lp64d` (`EF_RISCV_FLOAT_ABI_DOUBLE`) with `EF_RISCV_RVE`, `EF_RISCV_RV64ILP32` and every
   reserved or vendor bit clear; `.riscv.attributes` must say a 16-byte stack and an `rv64i…` ISA,
-  and no two inputs may use the A6C and A7 atomic ABIs. The output is `lp64d` plus the union of
-  the inputs' `EF_RISCV_RVC` and `EF_RISCV_TSO` (0x5 against the runtime). x86_64 and AArch64
-  define no flags and use 0.
+  and no two inputs may state conflicting privileged-spec versions, A6C/A7 atomic ABIs, or `x3`/`gp`
+  uses. Undefined atomic-ABI values and unrecognized mandatory attributes are errors rather than
+  neutral facts. The output is `lp64d` plus the union of the inputs' `EF_RISCV_RVC` and
+  `EF_RISCV_TSO` (0x5 against the runtime). x86_64 and AArch64 define no flags and use 0.
 - **Relocations** implemented: x86_64 `64`, `PC32`, `PLT32` (PC-relative to S: no PLT), `32`, `32S`;
   AArch64 `ABS64`, `PREL32`, `ADR_PREL_PG_HI21`, `ADD_ABS_LO12_NC`, `LDST{8,16,32,64,128}_ABS_LO12_NC`
   (a target not aligned to the access size is refused, as `ld.lld` does), `CALL26`, `JUMP26`;

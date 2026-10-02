@@ -77,12 +77,36 @@ pub enum AbiMismatch {
     RiscvStackAlign { found: u64, expected: u64 },
     /// `Tag_RISCV_arch` names an instruction set that is not RV64I.
     RiscvArch(String),
+    /// Deprecated `Tag_RISCV_priv_spec*` attributes name different versions.
+    RiscvPrivSpec {
+        found: RiscvPrivSpec,
+        other_input: String,
+        other: RiscvPrivSpec,
+    },
     /// `Tag_RISCV_atomic_abi` is A6C where another input's is A7, or the other way round.
     RiscvAtomicAbi {
         found: RiscvAtomicAbi,
         other_input: String,
         other: RiscvAtomicAbi,
     },
+    /// `Tag_RISCV_atomic_abi` carries a value the psABI does not define.
+    RiscvUnknownAtomicAbi(u64),
+    /// `Tag_RISCV_x3_reg_usage` disagrees with another input's use of `x3`/`gp`.
+    RiscvX3Usage {
+        found: u64,
+        other_input: String,
+        other: u64,
+    },
+    /// An unrecognized RISC-V attribute whose tag makes it mandatory.
+    RiscvUnknownMandatoryAttribute(u64),
+}
+
+/// The deprecated privileged-specification version encoded by tags 8, 10 and 12.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RiscvPrivSpec {
+    pub major: u64,
+    pub minor: u64,
+    pub revision: u64,
 }
 
 /// A RISC-V floating-point calling convention, as `EF_RISCV_FLOAT_ABI` states it for RV64.
@@ -122,6 +146,24 @@ impl std::fmt::Display for RiscvAtomicAbi {
     }
 }
 
+impl std::fmt::Display for RiscvPrivSpec {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}.{}.{}", self.major, self.minor, self.revision)
+    }
+}
+
+fn riscv_x3_usage(value: u64) -> String {
+    match value {
+        0 => "a fixed register with unknown purpose".to_string(),
+        1 => "the global pointer".to_string(),
+        2 => "the shadow-stack pointer".to_string(),
+        3 => "a temporary register".to_string(),
+        4..=1023 => format!("reserved standard platform use {value}"),
+        1024..=2047 => format!("nonstandard platform use {value}"),
+        _ => format!("undefined use {value}"),
+    }
+}
+
 /// Read after the input's name: "input 1 is built for …".
 impl std::fmt::Display for AbiMismatch {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -154,6 +196,15 @@ impl std::fmt::Display for AbiMismatch {
                 formatter,
                 "is built for `{isa}` (Tag_RISCV_arch), which is not an RV64I instruction set"
             ),
+            Self::RiscvPrivSpec {
+                found,
+                other_input,
+                other,
+            } => write!(
+                formatter,
+                "requires privileged specification {found} (Tag_RISCV_priv_spec*), which cannot \
+                 be linked with {other_input}'s {other}"
+            ),
             Self::RiscvAtomicAbi {
                 found,
                 other_input,
@@ -163,6 +214,27 @@ impl std::fmt::Display for AbiMismatch {
                 "maps atomics by the {found} atomic ABI (Tag_RISCV_atomic_abi), which cannot be \
                  linked with {other_input}'s {other}: they order sequentially consistent loads and \
                  stores with different fences"
+            ),
+            Self::RiscvUnknownAtomicAbi(value) => write!(
+                formatter,
+                "sets Tag_RISCV_atomic_abi to undefined value {value}; the psABI defines only 0 \
+                 (UNKNOWN), 1 (A6C), 2 (A6S) and 3 (A7)"
+            ),
+            Self::RiscvX3Usage {
+                found,
+                other_input,
+                other,
+            } => write!(
+                formatter,
+                "uses x3/gp as {} (Tag_RISCV_x3_reg_usage), which cannot be linked with \
+                 {other_input}, which uses it as {}",
+                riscv_x3_usage(*found),
+                riscv_x3_usage(*other)
+            ),
+            Self::RiscvUnknownMandatoryAttribute(tag) => write!(
+                formatter,
+                "uses unrecognized mandatory RISC-V attribute tag {tag}; the psABI requires an \
+                 error instead of ignoring tags whose value modulo 128 is below 64"
             ),
         }
     }
