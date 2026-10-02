@@ -163,7 +163,7 @@ impl Emitter<'_> {
         // kotlinc opens every protected region with a `nop` carrying the `try` keyword's line, so the
         // region starts at an instruction of its own rather than sharing the body's first one. The
         // exception table's `from` is that `nop`.
-        debug_lines::mark_expression_start(self.ir, expression, code);
+        self.mark_expression_start(expression, code);
         code.nop();
         let body_diverges = if is_stmt {
             self.discarding_diverges(body)
@@ -502,7 +502,7 @@ impl Emitter<'_> {
             return;
         };
         let target = if brk { end } else { cont };
-        debug_lines::mark_expression_start(self.ir, transfer, code);
+        self.mark_expression_start(transfer, code);
         code.nop();
         let survives = self.emit_transfer_finalizers(depth, code);
         if survives {

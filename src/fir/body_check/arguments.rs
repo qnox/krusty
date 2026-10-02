@@ -16,6 +16,46 @@ fn property_platform_check_name(
     producer.platform_check_name(property, getter_name)
 }
 
+#[cfg(test)]
+thread_local! {
+    static OMIT_RECORDED_SAM_PUBLICATION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// While this guard is alive, a recorded fun-interface conversion does not materialize.
+///
+/// Production cannot build that mismatch today — the same map was just checked — so the
+/// regression arms it explicitly.
+#[cfg(test)]
+pub(super) struct OmitRecordedSamPublication;
+
+#[cfg(test)]
+impl OmitRecordedSamPublication {
+    pub(super) fn arm() -> Self {
+        OMIT_RECORDED_SAM_PUBLICATION.with(|flag| flag.set(true));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for OmitRecordedSamPublication {
+    fn drop(&mut self) {
+        OMIT_RECORDED_SAM_PUBLICATION.with(|flag| flag.set(false));
+    }
+}
+
+/// The expression a block chain actually yields. A recorded SAM conversion names that lambda, not
+/// the block written around it.
+fn sam_conversion_producer(file: &crate::ast::File, mut expression: ExprId) -> ExprId {
+    while let Expr::Block {
+        trailing: Some(trailing),
+        ..
+    } = file.expr(expression)
+    {
+        expression = *trailing;
+    }
+    expression
+}
+
 /// The selected parameters one source call's arguments are checked against: their types, the
 /// leading parameters no source argument names, and the vararg parameter, if any.
 #[derive(Clone, Copy)]
@@ -443,12 +483,17 @@ impl BodyFirChecker<'_> {
         argument: ExprId,
         cause: OriginId,
     ) -> Result<Option<FirConversion>, BodyCheckFailure> {
-        let Some(sam) = self.info.resolved_sam_conversions.get(&argument).cloned() else {
+        let Some(selected) = self.info.resolved_sam_conversions.get(&argument).cloned() else {
             return Ok(None);
         };
         let span = self.file.expr_span(argument);
         let nullable = self.info.semantic_ty(argument).is_nullable();
-        let conversion = self.published_sam_conversion(span, &sam, nullable)?;
+        let conversion = self.published_sam_conversion(
+            span,
+            &selected.signature,
+            nullable,
+            selected.source_suspend,
+        )?;
         let conversion = self.body.add_sam_conversion(conversion);
         Ok(Some(FirConversion {
             origin: cause,
@@ -839,6 +884,91 @@ impl BodyFirChecker<'_> {
         }))
     }
 
+    /// The value a block yields, including a fun-interface conversion recorded on a trailing lambda.
+    ///
+    /// The block's checked type may already be the interface while that lambda is still the
+    /// function value. Publishing the recorded conversion makes the block yield the interface
+    /// instance.
+    pub(super) fn trailing_value_with_recorded_sam(
+        &mut self,
+        block: ExprId,
+        trailing: ExprId,
+    ) -> Result<crate::fir::FirExprId, BodyCheckFailure> {
+        let value = self.expression(trailing)?;
+        if !self.branch_has_recorded_sam(trailing) {
+            return Ok(value);
+        }
+        let target = self.expression_type(block)?;
+        self.with_recorded_sam_conversion(trailing, value, target)
+    }
+
+    /// Whether `expression`, or the value a block chain yields, has a recorded fun-interface
+    /// conversion.
+    pub(super) fn branch_has_recorded_sam(&self, expression: ExprId) -> bool {
+        let producer = sam_conversion_producer(self.file, expression);
+        self.info.resolved_sam_conversions.contains_key(&producer)
+    }
+
+    /// Embed a checker-recorded fun-interface conversion on the value that produces it.
+    ///
+    /// `if` and `when` arms, and the block that is such an arm, type the lambda as the interface
+    /// while the published child is still the function. The conversion stays on the lambda, so the
+    /// arm has to carry it or the interface-typed join check-casts the function object. A recorded
+    /// conversion that cannot be published is a frontend error: a function-typed target, or a
+    /// record that does not materialize a conversion, must not degrade to the original value.
+    pub(super) fn with_recorded_sam_conversion(
+        &mut self,
+        producer: ExprId,
+        value: crate::fir::FirExprId,
+        target: ResolvedTy,
+    ) -> Result<crate::fir::FirExprId, BodyCheckFailure> {
+        let producer = sam_conversion_producer(self.file, producer);
+        if !self.info.resolved_sam_conversions.contains_key(&producer) {
+            return Ok(value);
+        }
+        if self.value_has_sam_conversion(value) {
+            return Ok(value);
+        }
+        let span = self.file.expr_span(producer);
+        if matches!(target.get().non_null(), Ty::Fun(_)) {
+            return Err(self.failure(span, BodyCheckFailureKind::UnpublishedRecordedSamConversion));
+        }
+        let origin = self.expression_origin(producer)?;
+        #[cfg(test)]
+        let conversion = if OMIT_RECORDED_SAM_PUBLICATION.with(|flag| flag.get()) {
+            None
+        } else {
+            self.selected_argument_conversion(producer, origin)?
+        };
+        #[cfg(not(test))]
+        let conversion = self.selected_argument_conversion(producer, origin)?;
+        let Some(conversion) = conversion else {
+            return Err(self.failure(span, BodyCheckFailureKind::UnpublishedRecordedSamConversion));
+        };
+        Ok(self.body.add_expr(crate::fir::FirExpr {
+            origin,
+            ty: target,
+            kind: crate::fir::FirExprKind::ImplicitConversion { value, conversion },
+        }))
+    }
+
+    fn value_has_sam_conversion(&self, value: crate::fir::FirExprId) -> bool {
+        let Some(expression) = self.body.expr(value) else {
+            return false;
+        };
+        match &expression.kind {
+            crate::fir::FirExprKind::ImplicitConversion { value, conversion } => {
+                matches!(conversion.kind, FirConversionKind::Sam(_))
+                    || self.value_has_sam_conversion(*value)
+            }
+            crate::fir::FirExprKind::Block {
+                result: Some(result),
+                ..
+            } => self.value_has_sam_conversion(*result),
+            _ => false,
+        }
+    }
+
     pub(super) fn selected_type_conversion(
         &self,
         actual: ResolvedTy,
@@ -1151,8 +1281,11 @@ impl BodyFirChecker<'_> {
         args: &[ExprId],
     ) -> Result<FirExprKind, BodyCheckFailure> {
         let span = self.file.expr_span(expression);
-        let Some(ExprLowering::SamConstructor { sam, .. }) =
-            self.info.expr_lowers.get(&expression).cloned()
+        let Some(ExprLowering::SamConstructor {
+            sam,
+            source_suspend,
+            ..
+        }) = self.info.expr_lowers.get(&expression).cloned()
         else {
             return Err(self.failure(span, BodyCheckFailureKind::UnsupportedCallShape));
         };
@@ -1160,7 +1293,7 @@ impl BodyFirChecker<'_> {
             return Err(self.failure(span, BodyCheckFailureKind::UnsupportedCallShape));
         };
         let cause = self.expression_origin(expression)?;
-        let conversion = self.published_sam_conversion(span, &sam, false)?;
+        let conversion = self.published_sam_conversion(span, &sam, false, source_suspend)?;
         let conversion = self.body.add_sam_conversion(conversion);
         let value = self.expression(*operand)?;
         Ok(FirExprKind::ImplicitConversion {
@@ -1180,6 +1313,7 @@ impl BodyFirChecker<'_> {
         span: Option<Span>,
         sam: &crate::symbol_resolver::SamSignature,
         nullable: bool,
+        source_suspend: bool,
     ) -> Result<FirSamConversion, BodyCheckFailure> {
         let resolved = |ty| {
             ResolvedTy::new(ty)
@@ -1227,8 +1361,12 @@ impl BodyFirChecker<'_> {
                 .map_err(|_| self.failure(span, BodyCheckFailureKind::UnsupportedCallShape))?,
             has_receiver: sam.has_receiver,
             suspend: sam.suspend,
+            source_suspend,
             overrides_non_primitive_result: sam.overrides_non_primitive_result,
+            overridden_non_primitive_results: resolved_all(&sam.overridden_non_primitive_results)?,
             nullable,
+            kotlin_interface: sam.kotlin_interface,
+            parameter_identities: sam.parameter_identities.clone(),
         })
     }
 }

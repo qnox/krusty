@@ -30,6 +30,7 @@ fn a_callable_body_block_is_its_scope_and_a_nested_block_is_not() {
          \x20   sink(own)\n\
          }\n\
          fun lambda(): () -> Unit = { val captured = 3; sink(captured) }\n\
+         fun value(): () -> Int = { val held = 5; held }\n\
          class Holder { init { val initialized = 4; sink(initialized) } }\n",
         "CallableScopes",
     );
@@ -39,4 +40,7 @@ fn a_callable_body_block_is_its_scope_and_a_nested_block_is_not() {
     // The lambda's implementation method, then the template a call site that inlines it copies:
     // an inlined copy is scoped by its call site, not by the lambda.
     assert_eq!(declaring_blocks(&ir, "captured"), [true, false]);
+    // A value-returning lambda's body is a block the return wraps. That block is still the
+    // callable's scope: its locals cover the `return`, not only the block.
+    assert_eq!(declaring_blocks(&ir, "held"), [true, false]);
 }

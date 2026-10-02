@@ -67,7 +67,11 @@ pub enum IrGeneratedParameterRole {
         ordinal: u32,
     },
     Continuation,
+    /// The dispatch receiver stored by a generated continuation class.
+    ContinuationDispatchReceiver,
     HolderReceiver,
+    /// The enclosing instance an inner class's constructor takes first.
+    OuterInstance,
     ValueClassCarrier,
     ValueClassEqualsOperand {
         ordinal: u8,
@@ -84,6 +88,11 @@ pub enum IrGeneratedParameterRole {
     InterfaceDelegationValue {
         ordinal: u32,
     },
+    /// Stored delegate operand of a target-generated local delegated-property accessor.
+    LocalDelegateStorage,
+    /// Enclosing instance a member-extension local delegated accessor receives ahead of the
+    /// delegate. The JVM spells it `this$0`.
+    LocalDelegateDispatch,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -104,6 +113,34 @@ pub struct IrParameterIdentity {
 }
 
 impl IrParameterIdentity {
+    /// Convert a frontend-published semantic identity without adding a target spelling.
+    pub fn resolved(identity: &crate::fir::ResolvedParameterIdentity) -> Self {
+        use crate::fir::ResolvedParameterIdentity as Resolved;
+
+        match identity {
+            Resolved::Source(name) => Self::source(name.as_ref()),
+            Resolved::InterfaceDelegationValue { ordinal } => Self::generated(
+                IrGeneratedParameterRole::InterfaceDelegationValue { ordinal: *ordinal },
+                None,
+            ),
+            Resolved::Unnamed { .. } => Self {
+                source_name: None,
+                role: IrParameterRole::Value,
+                provenance: IrParameterProvenance::SourceDeclared,
+            },
+            Resolved::ContextValue { source_name, .. } => Self::context_value(source_name.as_ref()),
+            Resolved::AnonymousContextParameter { ordinal } => {
+                Self::anonymous_context_parameter(*ordinal)
+            }
+            Resolved::LegacyContextReceiver { ordinal } => Self::context_receiver(*ordinal),
+            Resolved::ExtensionReceiver => Self::extension_receiver(),
+            Resolved::PropertySetterValue => Self::property_setter_value(),
+            Resolved::SuspendCompletion => {
+                Self::generated(IrGeneratedParameterRole::Continuation, None)
+            }
+        }
+    }
+
     pub fn source(name: impl Into<String>) -> Self {
         Self {
             source_name: Some(name.into()),

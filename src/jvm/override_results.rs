@@ -14,8 +14,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::fir::CallableId;
+use crate::fir::{CallableId, ExternalCallableId};
 use crate::ir::{is_kotlin_primitive, Callee, ExprId, FunId, IrExpr, IrFile};
+use crate::jvm::backend::SkipReason;
 use crate::types::Ty;
 
 /// The functions of this file whose JVM result is the wrapper of their primitive Kotlin result.
@@ -25,6 +26,25 @@ pub(crate) struct OverrideResults {
     /// Value-class member calls the value-class pass realized as a static call of a boxed
     /// member's `-impl`, with the primitive Kotlin result each reads out of the wrapper.
     static_member_calls: HashMap<ExprId, Ty>,
+}
+
+/// The primitive Kotlin result of the selected dependency member when its exact class-file slot is
+/// that primitive's wrapper. The identity is already frozen at the frontend/backend boundary; a
+/// missing fact is an invalid backend input, never a reason to guess from the semantic type.
+pub(crate) fn external_boxed_result(
+    callables: &crate::backend::CheckedBackendCallables,
+    target: ExternalCallableId,
+    declared: Ty,
+) -> Result<Option<Ty>, SkipReason> {
+    let callable = callables.callable(target).ok_or(SkipReason::Bridges)?;
+    if callable.kind != crate::libraries::ExternalCallableKind::Member
+        || !is_kotlin_primitive(declared)
+    {
+        return Ok(None);
+    }
+    let wrapper = crate::jvm::physical_type::ir_ty_to_jvm(&Ty::nullable(declared));
+    let physical = crate::jvm::physical_type::ir_ty_to_jvm(&callable.physical_ret);
+    Ok((physical == wrapper).then_some(declared))
 }
 
 impl OverrideResults {
@@ -102,8 +122,18 @@ impl OverrideResults {
 
 /// Choose the wrapper as the JVM result of every override whose primitive result replaces a
 /// non-primitive one. Common IR is read, never changed.
-pub(super) fn box_primitive_override_results(ir: &IrFile) -> OverrideResults {
+pub(super) fn box_primitive_override_results(
+    ir: &IrFile,
+    callables: &crate::backend::CheckedBackendCallables,
+) -> Result<OverrideResults, SkipReason> {
     let mut results = OverrideResults::default();
+    for class in &ir.classes {
+        if let Some(wrapper) = &class.sam_wrapper {
+            if wrapper.boxes_primitive_result {
+                results.boxed.insert(wrapper.method);
+            }
+        }
+    }
     for (class, declaration) in ir.classes.iter().enumerate() {
         // The classes whose override edges the bridge pass reads; see `derive_bridges`.
         if !declaration.is_source_declared && declaration.enum_entry_of.is_none() {
@@ -117,15 +147,21 @@ pub(super) fn box_primitive_override_results(ir: &IrFile) -> OverrideResults {
             let Some(function) = crate::jvm::bridges::implementation_function(ir, edge) else {
                 continue;
             };
+            let dependency_boxed_result = match edge.overridden {
+                crate::fir::ResolvedFunctionOverrideTarget::External(target) if !edge.suspend => {
+                    external_boxed_result(callables, target, edge.declared_result)?.is_some()
+                }
+                _ => false,
+            };
             if edge.implementation_owner == owner
                 && ir.classes[class].methods.contains(&function)
                 && is_kotlin_primitive(ir.functions[function as usize].ret)
                 && !ir.suspend_funs.contains(&function)
-                && edge.overrides_non_primitive_result()
+                && (edge.overrides_non_primitive_result() || dependency_boxed_result)
             {
                 results.boxed.insert(function);
             }
         }
     }
-    results
+    Ok(results)
 }

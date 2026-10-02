@@ -201,6 +201,14 @@ impl BodyLowering<'_> {
         substitutions: &[FirTypeSubstitution],
     ) -> Option<ExprId> {
         let template = self.ir.functions.get(function as usize)?.body?;
+        let close_line = self.ir.fn_close_lines.get(&function).copied();
+        // The name its inline frames are opened under.
+        let callee = self.index.callable_name(target)?.to_owned();
+        let source_owner = self
+            .index
+            .callable(target)
+            .and_then(|callable| self.index.enclosing_classifier(callable.declaration))
+            .map(|classifier| classifier.classifier);
         let function_shape = self.ir.functions.get(function as usize)?;
         let parameter_count = u32::try_from(
             function_shape.params.len() + usize::from(function_shape.dispatch_receiver.is_some()),
@@ -439,39 +447,43 @@ impl BodyLowering<'_> {
         let operand_slots = plans
             .into_iter()
             .zip(operands.iter())
-            .zip(&operand_types)
+            .zip(operand_types.iter().zip(&declared_operand_types))
             .enumerate()
-            .map(|(index, ((plan, operand), ty))| match plan {
-                InlineOperandPlan::Splice => None,
-                InlineOperandPlan::Reuse(slot) => Some(slot),
-                InlineOperandPlan::Default => {
-                    let slot = self.allocate_temporary();
-                    defaulted.push((index, slot));
-                    Some(slot)
-                }
-                InlineOperandPlan::Copy => {
-                    let operand = operand.expect("a copied operand is supplied");
-                    let slot = self.allocate_temporary();
-                    let declaration = self.ir.add_expr(IrExpr::Variable {
-                        index: slot,
-                        ty: stored_value_ty(*ty),
-                        init: Some(operand),
-                        named: true,
-                    });
-                    self.ir.call_operand_bindings.insert(declaration);
-                    if let Some(parameter) = parameter_names.get(index) {
-                        if let Some(source_name) = parameter.source_name.clone() {
-                            self.ir.value_names.insert(declaration, source_name);
-                        }
-                        self.ir.set_debug_local_provenance(
-                            declaration,
-                            IrDebugLocalProvenance::inline_value(parameter.local_role, 1),
-                        );
+            .map(
+                |(index, ((plan, operand), (specialized_ty, declared_ty)))| match plan {
+                    InlineOperandPlan::Splice => None,
+                    InlineOperandPlan::Reuse(slot) => Some(slot),
+                    InlineOperandPlan::Default => {
+                        let slot = self.allocate_temporary();
+                        defaulted.push((index, slot));
+                        Some(slot)
                     }
-                    operand_declarations.push(declaration);
-                    Some(slot)
-                }
-            })
+                    InlineOperandPlan::Copy => {
+                        let operand = operand.expect("a copied operand is supplied");
+                        let slot = self.allocate_temporary();
+                        let declaration = self.ir.add_expr(IrExpr::Variable {
+                            index: slot,
+                            ty: stored_value_ty(*specialized_ty),
+                            init: Some(operand),
+                            named: true,
+                        });
+                        self.ir.call_operand_bindings.insert(declaration);
+                        self.ir
+                            .record_inline_operand_declared_type(declaration, *declared_ty);
+                        if let Some(parameter) = parameter_names.get(index) {
+                            if let Some(source_name) = parameter.source_name.clone() {
+                                self.ir.value_names.insert(declaration, source_name);
+                            }
+                            self.ir.set_debug_local_provenance(
+                                declaration,
+                                IrDebugLocalProvenance::inline_value(parameter.local_role, 1),
+                            );
+                        }
+                        operand_declarations.push(declaration);
+                        Some(slot)
+                    }
+                },
+            )
             .collect::<Vec<_>>();
         let mut inline_lambdas = inline_lambdas.to_vec();
         // A copied lambda is a value. Leaving it in this table would replace every read with a
@@ -572,7 +584,7 @@ impl BodyLowering<'_> {
             .collect::<Vec<_>>();
         copies.sort_by_key(|&(_, copy)| copy);
         for &(source, copy) in &copies {
-            self.ir.mark_inline_copy(copy);
+            self.ir.record_inline_copy_owner(copy, source_owner);
             // A compiler temporary's synthetic zero is refreshed after its type specializes.
             // A deferred source local carries explicit declaration provenance instead: its
             // semantic type specializes normally, and each backend selects its physical zero.
@@ -688,7 +700,12 @@ impl BodyLowering<'_> {
             })
             .collect::<Vec<_>>();
         for invocation in inline_invocations {
-            self.splice_inline_lambda_invocation(invocation)?;
+            self.splice_inline_lambda(
+                invocation,
+                LambdaParameterBinding::Declared {
+                    callee: Some(&callee),
+                },
+            )?;
         }
         for (function, body, inline_only) in default_lambda_methods {
             self.ir.functions.get_mut(function as usize)?.body = body;
@@ -697,13 +714,17 @@ impl BodyLowering<'_> {
             }
         }
 
+        // kotlinc opens the expansion's frame once its operands are bound.
+        operand_declarations
+            .push(self.inline_marker(callee, IrDebugLocalProvenance::FunctionFrameMarker));
+
         // An expansion whose ONLY return is its tail needs neither a result local nor the loop that
         // carries a non-local return out: the value is simply the body's value, which is what kotlinc
         // emits — it leaves it on the operand stack. The loop form costs an unnamed local, and when
         // the expansion crosses a suspension that local takes a continuation field kotlinc has no
         // counterpart for.
         if let [(tail, value)] = returns[..] {
-            if produce_sole_tail_return(self.ir, cloned_root, tail, value) {
+            if produce_sole_tail_return(self.ir, cloned_root, tail, value, close_line) {
                 let mut statements = operand_declarations;
                 statements.push(cloned_root);
                 let value = statements.pop();
@@ -768,9 +789,18 @@ impl BodyLowering<'_> {
             post_test: false,
             label: Some(label),
         }));
-        let value = result_slot
-            .map(|slot| self.ir.add_expr(IrExpr::GetValue(slot)))
-            .or_else(|| Some(self.ir.add_expr(IrExpr::UnitInstance)));
+        let value = match result_slot {
+            None => {
+                let unit = self.ir.add_expr(IrExpr::UnitInstance);
+                self.ir.record_inline_copy_owner(unit, source_owner);
+                if let Some(line) = close_line {
+                    self.ir.expr_source_lines.insert(unit, line);
+                }
+                self.ir.retain_inline_unit_line(unit);
+                Some(unit)
+            }
+            Some(slot) => Some(self.ir.add_expr(IrExpr::GetValue(slot))),
+        };
         Some(self.ir.add_expr(IrExpr::Block {
             stmts: statements,
             value,
@@ -807,14 +837,20 @@ impl BodyLowering<'_> {
         expression
     }
 
-    pub(super) fn splice_inline_lambda_invocation(&mut self, invocation: ExprId) -> Option<()> {
-        self.splice_inline_lambda(invocation, LambdaParameterBinding::Declared)
+    /// Record an inline-depth frame boundary named `callee`, live to the end of the block that
+    /// declares it. It is not a value: the JVM debug boundary materializes the slot, the zero
+    /// store, and the spelling.
+    fn inline_marker(&mut self, callee: String, provenance: IrDebugLocalProvenance) -> ExprId {
+        let declaration = self.ir.add_expr(IrExpr::InlineFrameMarker);
+        self.ir.value_names.insert(declaration, callee);
+        self.ir.set_debug_local_provenance(declaration, provenance);
+        declaration
     }
 
     pub(super) fn splice_inline_lambda(
         &mut self,
         invocation: ExprId,
-        binding: LambdaParameterBinding,
+        binding: LambdaParameterBinding<'_>,
     ) -> Option<()> {
         let IrExpr::InvokeFunction {
             func,
@@ -918,6 +954,20 @@ impl BodyLowering<'_> {
             };
             formal_slots.push(slot);
         }
+        // Once its parameters are bound, the body opens its own frame, named after the inline
+        // callable it was passed to.
+        if let LambdaParameterBinding::Declared {
+            callee: Some(callee),
+        } = binding
+        {
+            declarations.push(self.inline_marker(
+                callee.to_owned(),
+                IrDebugLocalProvenance::LambdaFrameMarker {
+                    implementation: impl_fn,
+                    depth: 0,
+                },
+            ));
+        }
 
         let (body, _) = crate::ir::clone_expression_dag(self.ir, inline_body);
         let local_base = self.next_temporary;
@@ -943,10 +993,11 @@ impl BodyLowering<'_> {
 
 /// How a spliced lambda's parameters meet the arguments of its invocation.
 #[derive(Clone, Copy)]
-pub(super) enum LambdaParameterBinding {
+pub(super) enum LambdaParameterBinding<'callee> {
     /// A named parameter becomes a local of the splice holding its argument, as at an inline
-    /// function's call site.
-    Declared,
+    /// function's call site. `callee` names the inline callable whose frame the body opens inside,
+    /// when the splice realizes one: the body then declares that frame's inline-depth marker.
+    Declared { callee: Option<&'callee str> },
     /// Every argument is a read of a value the parameter simply becomes, with no local of its own:
     /// kotlinc's `IrInlinable.inline`, which remaps the lambda's parameters onto the variables it
     /// is given. An argument that is not such a read cannot be spliced this way.
@@ -1060,6 +1111,7 @@ fn specialize_types(expression: &mut IrExpr, bindings: &HashMap<String, Ty>) {
         IrExpr::LocalPropertyReference(reference) => {
             specialize_ty(&mut reference.property_type, bindings)
         }
+        IrExpr::LocalDelegateAccess(_) => {}
         IrExpr::Call { callee, .. } => specialize_callee(callee, bindings),
         IrExpr::TypeOp {
             op, type_operand, ..
@@ -1158,6 +1210,7 @@ fn specialize_types(expression: &mut IrExpr, bindings: &HashMap<String, Ty>) {
         | IrExpr::Lambda { sam: None, .. }
         | IrExpr::UnitInstance
         | IrExpr::CurrentContinuation
+        | IrExpr::InlineFrameMarker
         | IrExpr::NotNullAssert { .. }
         | IrExpr::LateinitCheck { .. }
         | IrExpr::ExternalStaticInstance { .. }
@@ -1531,11 +1584,29 @@ fn produce_sole_tail_return(
     root: ExprId,
     tail: ExprId,
     value: Option<ExprId>,
+    close_line: Option<u32>,
 ) -> bool {
     let Some(chain) = tail_statement_block_chain(ir, root, tail) else {
         return false;
     };
     let produced = value.unwrap_or_else(|| ir.add_expr(IrExpr::UnitInstance));
+    if matches!(ir.expr(produced), IrExpr::UnitInstance) {
+        ir.copy_inline_copy_mark(tail, produced);
+        if !ir.expr_source_lines.contains_key(&produced) {
+            if let Some(line) = ir
+                .expr_source_lines
+                .get(&tail)
+                .copied()
+                .or_else(|| ir.fallthrough_return_line(tail))
+                .or_else(|| ir.expr_end_lines.get(&tail).copied())
+                .or_else(|| ir.expr_end_lines.get(&root).copied())
+                .or(close_line)
+            {
+                ir.expr_source_lines.insert(produced, line);
+            }
+        }
+        ir.retain_inline_unit_line(produced);
+    }
     ir.exprs[tail as usize] = IrExpr::Block {
         stmts: Vec::new(),
         value: Some(produced),
@@ -1686,7 +1757,8 @@ mod tail_promotion_tests {
             &mut ir,
             block,
             tail,
-            Some(returned)
+            Some(returned),
+            None,
         ));
         assert_block(&ir, block, &[first], Some(tail));
         assert_block(&ir, tail, &[], Some(returned));
@@ -1708,7 +1780,8 @@ mod tail_promotion_tests {
             &mut ir,
             outer,
             tail,
-            Some(returned)
+            Some(returned),
+            None,
         ));
         assert_block(&ir, outer, &[], Some(inner));
         assert_block(&ir, inner, &[first], Some(tail));
@@ -1731,7 +1804,8 @@ mod tail_promotion_tests {
             &mut ir,
             block,
             tail,
-            Some(returned)
+            Some(returned),
+            None,
         ));
         assert_eq!(arena(&ir), before, "a refused promotion mutates nothing");
     }
@@ -1748,7 +1822,7 @@ mod tail_promotion_tests {
         let block = statement_block(&mut ir, vec![tail, after]);
         let before = arena(&ir);
 
-        assert!(!produce_sole_tail_return(&mut ir, block, tail, None));
+        assert!(!produce_sole_tail_return(&mut ir, block, tail, None, None,));
         assert_eq!(
             arena(&ir),
             before,
@@ -1772,7 +1846,8 @@ mod tail_promotion_tests {
             &mut ir,
             outer,
             tail,
-            Some(returned)
+            Some(returned),
+            None,
         ));
         assert_eq!(arena(&ir), before, "a refused promotion mutates nothing");
     }
@@ -1795,7 +1870,8 @@ mod tail_promotion_tests {
             &mut ir,
             block,
             tail,
-            Some(returned)
+            Some(returned),
+            None,
         ));
         assert_eq!(arena(&ir), before, "a refused promotion mutates nothing");
     }

@@ -1,8 +1,9 @@
-//! Common optional-expectation annotations absent from the JVM stdlib classfiles.
+//! Common semantic declarations distributed beside the JVM stdlib classfiles.
 //!
 //! Kotlin ships the common `expect` headers in the distribution KLIB next to `kotlin-stdlib.jar`.
-//! Only annotation classifiers whose metadata carries `IS_EXPECT_CLASS` are imported here; platform
-//! declarations in the same archive never enter the JVM symbol source.
+//! Optional annotation classifiers whose metadata carries `IS_EXPECT_CLASS` enter the symbol
+//! source. Exact public callable identities may authorize roles that are then joined to the paired
+//! platform realization; other platform declarations in the archive do not enter the JVM source.
 //!
 //! The authoritative metadata model and decoder are target-independent. This module is the JVM
 //! backend's *use* of that model and consumes it directly; no JVM builtins adapter participates in
@@ -14,9 +15,12 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::klib::{KlibArchive, KlibError};
 use crate::libraries::{
-    CallSig, ClassifierInheritance, LibraryMember, LibraryType, ParamList, TypeKind,
+    CallSig, ClassifierInheritance, CompilerIntrinsic, FnKind, FunctionInfo, GenericSig,
+    LibraryMember, LibraryType, ParamList, TypeKind,
 };
+use crate::metadata::id_signature::KlibPublicIdSignature;
 use crate::metadata::{decode, semantic};
+use crate::symbol_source::SymbolNamespace;
 use crate::types::{type_name, Ty, TypeName, TypeNameList, TypeParameters};
 
 #[derive(Debug)]
@@ -30,6 +34,10 @@ pub(super) enum CommonExpectationError {
         archive: PathBuf,
         entry: String,
         source: decode::PackageFragmentDecodeError,
+    },
+    InvalidIr {
+        path: PathBuf,
+        source: crate::metadata::klib_ir::KlibIrDecodeError,
     },
     PackageInventoryMismatch {
         path: PathBuf,
@@ -58,6 +66,9 @@ impl std::fmt::Display for CommonExpectationError {
                 "invalid KLIB metadata fragment {entry:?} in {}: {source}",
                 archive.display()
             ),
+            Self::InvalidIr { path, source } => {
+                write!(formatter, "invalid KLIB declaration identities in {}: {source}", path.display())
+            }
             Self::PackageInventoryMismatch {
                 path,
                 header,
@@ -78,6 +89,7 @@ impl std::error::Error for CommonExpectationError {
             Self::InvalidModuleHeader { source, .. } | Self::InvalidFragment { source, .. } => {
                 Some(source)
             }
+            Self::InvalidIr { source, .. } => Some(source),
             Self::PackageInventoryMismatch { .. } => None,
         }
     }
@@ -92,6 +104,29 @@ impl From<KlibError> for CommonExpectationError {
 #[derive(Default)]
 pub(super) struct CommonExpectationIndex {
     classifiers: HashMap<TypeName, Arc<LibraryType>>,
+    package_function_roles: Vec<CommonPackageFunctionRole>,
+}
+
+#[derive(Clone)]
+struct CommonPackageFunctionRole {
+    identity: CommonPackageFunctionIdentity,
+    package: TypeName,
+    name: &'static str,
+    generic_sig: GenericSig,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CommonPackageFunctionIdentity {
+    DoubleRangeTo,
+    FloatRangeTo,
+}
+
+impl CommonPackageFunctionIdentity {
+    fn compiler_intrinsic(self) -> CompilerIntrinsic {
+        match self {
+            Self::DoubleRangeTo | Self::FloatRangeTo => CompilerIntrinsic::FloatingRangeMembership,
+        }
+    }
 }
 
 impl CommonExpectationIndex {
@@ -126,9 +161,85 @@ impl CommonExpectationIndex {
         self.classifiers.contains_key(&internal)
     }
 
+    /// Role of the exact common declaration actualized by one normalized JVM callable.
+    ///
+    /// The caller must first prove that the physical callable came from the JVM stdlib paired with
+    /// this KLIB. Signature facts only join that realization to an already-role-bearing identity;
+    /// they never create the role themselves. Missing or ambiguous identity records fail closed.
+    pub(super) fn package_function_role(
+        &self,
+        common_metadata_source: bool,
+        package: TypeName,
+        name: &str,
+        candidate: &FunctionInfo,
+    ) -> Option<CompilerIntrinsic> {
+        if !common_metadata_source {
+            return None;
+        }
+        let signature = candidate.generic_sig.as_ref()?;
+        let mut matches = self.package_function_roles.iter().filter(|declaration| {
+            declaration.package == package
+                && declaration.name == name
+                && declaration.generic_sig == *signature
+                && candidate.kind == FnKind::Extension
+                && candidate.flags.operator
+                && !candidate.flags.suspend
+                && !candidate.flags.infix
+                && candidate.context_count == 0
+                && !candidate.call_sig.vararg
+        });
+        let declaration = matches.next()?;
+        matches
+            .next()
+            .is_none()
+            .then(|| declaration.identity.compiler_intrinsic())
+    }
+
+    pub(super) fn attach(
+        &self,
+        common_metadata_source: bool,
+        namespace: SymbolNamespace,
+        name: &str,
+        candidate: &mut FunctionInfo,
+    ) {
+        let SymbolNamespace::Package(package) = namespace else {
+            return;
+        };
+        candidate.callable.compiler_intrinsic =
+            self.package_function_role(common_metadata_source, package, name, candidate);
+    }
+
+    /// Attach the common role to the provider record that was just normalized and appended.
+    pub(super) fn attach_tail(
+        &self,
+        common_metadata_source: bool,
+        namespace: SymbolNamespace,
+        name: &str,
+        candidates: &mut [FunctionInfo],
+    ) {
+        let Some(candidate) = candidates.last_mut() else {
+            return;
+        };
+        self.attach(common_metadata_source, namespace, name, candidate);
+    }
+
     fn read(path: &Path) -> Result<Self, CommonExpectationError> {
         let archive = KlibArchive::open(path)?;
         archive.manifest()?;
+        let package_function_roles =
+            match crate::metadata::klib_ir::read_public_declaration_signatures(&archive) {
+                Ok(signatures) => signatures
+                    .into_iter()
+                    .filter_map(common_package_function_role)
+                    .collect(),
+                Err(crate::metadata::klib_ir::KlibIrDecodeError::Missing { .. }) => Vec::new(),
+                Err(source) => {
+                    return Err(CommonExpectationError::InvalidIr {
+                        path: path.to_path_buf(),
+                        source,
+                    });
+                }
+            };
         let module_header = archive.module_header()?;
         let module_header = decode::parse_module_header(&module_header).map_err(|source| {
             CommonExpectationError::InvalidModuleHeader {
@@ -172,8 +283,43 @@ impl CommonExpectationIndex {
                     .or_insert_with(|| Arc::new(annotation_type(declaration)));
             }
         }
-        Ok(Self { classifiers })
+        Ok(Self {
+            classifiers,
+            package_function_roles,
+        })
     }
+}
+
+/// Language role carried by exact public identities from the trusted common stdlib KLIB. The two
+/// member ids are Kotlin's stable public identities for the inclusive `Double.rangeTo` and
+/// `Float.rangeTo` declarations. A same-named or same-shaped declaration has a different complete
+/// identity and therefore never enters this inventory.
+fn common_package_function_role(
+    identity: KlibPublicIdSignature,
+) -> Option<CommonPackageFunctionRole> {
+    const DOUBLE_RANGE_TO: u64 = 692_997_638_542_153_957;
+    const FLOAT_RANGE_TO: u64 = 14_812_996_858_166_169_491;
+    let (identity, scalar) =
+        if identity.matches_exact(&["kotlin", "ranges"], &["rangeTo"], DOUBLE_RANGE_TO, 0) {
+            (CommonPackageFunctionIdentity::DoubleRangeTo, Ty::Double)
+        } else if identity.matches_exact(&["kotlin", "ranges"], &["rangeTo"], FLOAT_RANGE_TO, 0) {
+            (CommonPackageFunctionIdentity::FloatRangeTo, Ty::Float)
+        } else {
+            return None;
+        };
+    Some(CommonPackageFunctionRole {
+        identity,
+        package: crate::types::wk::kotlin_ranges_package(),
+        name: "rangeTo",
+        generic_sig: GenericSig {
+            formals: Vec::new(),
+            formal_bounds: Vec::new(),
+            receiver: Some(scalar),
+            params: vec![scalar],
+            ret: Ty::obj_args("kotlin/ranges/ClosedFloatingPointRange", &[scalar]),
+            return_policy: Default::default(),
+        },
+    })
 }
 
 fn annotation_type(declaration: semantic::KotlinClass) -> LibraryType {
@@ -294,15 +440,189 @@ fn annotation_type(declaration: semantic::KotlinClass) -> LibraryType {
 #[cfg(test)]
 mod tests {
     use super::super::{classpath::Classpath, jvm_libraries::JvmLibraries};
-    use super::{CommonExpectationError, CommonExpectationIndex};
+    use super::{common_package_function_role, CommonExpectationError, CommonExpectationIndex};
     use crate::diag::{DiagSink, Severity, Span};
     use crate::features::LangFeatures;
     use crate::klib::KlibError;
+    use crate::libraries::{CompilerIntrinsic, FnKind, FunctionInfo, LibraryCallable};
+    use crate::metadata::id_signature::decode_public_id_signature;
     use crate::source::SourceInput;
+    use crate::symbol_source::{SymbolNamespace, SymbolSource};
+    use crate::types::{type_name, Ty};
     use std::path::Path;
 
     const VALID_MODULE_HEADER: &[u8] = b"\x0a\x15<unpackedExampleKlib>\x3a\x00";
     const VALID_ROOT_FRAGMENT: &[u8] = b"\x0a\x1d\x0a\x04main\x0a\x06kotlin\x0a\x04Unit\x0a\x07main.kt\x12\x0c\x0a\x02\x10\x01\x0a\x06\x08\x00\x10\x02\x18\x00\x1a\x1c\x1a\x07\x10\x00\x38\x00\xe0\x0a\x03\xf2\x01\x04\x0a\x02\x30\x01\xd8\x0a\xff\xff\xff\xff\xff\xff\xff\xff\xff\x01\xe0\x0a\x00\xea\x0a\x00";
+
+    fn push_varint(mut value: u64, bytes: &mut Vec<u8>) {
+        loop {
+            let byte = (value & 0x7f) as u8;
+            value >>= 7;
+            bytes.push(byte | if value == 0 { 0 } else { 0x80 });
+            if value == 0 {
+                return;
+            }
+        }
+    }
+
+    fn bytes_field(number: u64, value: &[u8]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        push_varint((number << 3) | 2, &mut bytes);
+        push_varint(value.len() as u64, &mut bytes);
+        bytes.extend_from_slice(value);
+        bytes
+    }
+
+    fn floating_range_to_identity(
+        member_id: u64,
+    ) -> crate::metadata::id_signature::KlibPublicIdSignature {
+        let mut package = Vec::new();
+        push_varint(0, &mut package);
+        push_varint(1, &mut package);
+        let mut common = bytes_field(1, &package);
+        common.extend(bytes_field(2, &[2]));
+        push_varint((6 << 3) | 1, &mut common);
+        common.extend(member_id.to_le_bytes());
+        let encoded = bytes_field(1, &common);
+        decode_public_id_signature(
+            &encoded,
+            &["kotlin", "ranges", "rangeTo"].map(str::to_string),
+        )
+        .expect("valid public identity")
+        .expect("public identity")
+    }
+
+    fn floating_range_candidate(role: &super::CommonPackageFunctionRole) -> FunctionInfo {
+        let mut candidate = FunctionInfo::plain(
+            FnKind::Extension,
+            role.generic_sig.receiver,
+            LibraryCallable::library(
+                type_name("kotlin/ranges/RangesKt"),
+                "rangeTo",
+                vec![Ty::Double, Ty::Double],
+                role.generic_sig.ret,
+                role.generic_sig.ret,
+                "(DD)Lkotlin/ranges/ClosedFloatingPointRange;",
+            ),
+        );
+        candidate.generic_sig = Some(role.generic_sig.clone());
+        candidate.flags.operator = true;
+        candidate
+    }
+
+    #[test]
+    fn floating_range_role_requires_the_exact_common_declaration_identity() {
+        const DOUBLE_RANGE_TO: u64 = 692_997_638_542_153_957;
+        let exact = common_package_function_role(floating_range_to_identity(DOUBLE_RANGE_TO))
+            .expect("the exact common identity owns the role");
+        assert!(
+            common_package_function_role(floating_range_to_identity(DOUBLE_RANGE_TO + 1)).is_none()
+        );
+
+        let candidate = floating_range_candidate(&exact);
+        let missing_identity = CommonExpectationIndex::default();
+        assert_eq!(
+            missing_identity.package_function_role(
+                true,
+                crate::types::wk::kotlin_ranges_package(),
+                "rangeTo",
+                &candidate,
+            ),
+            None,
+            "a trusted JVM declaration with the same owner and shape has no role without the exact common identity",
+        );
+    }
+
+    #[test]
+    fn floating_range_role_requires_the_paired_jvm_dependency() {
+        const DOUBLE_RANGE_TO: u64 = 692_997_638_542_153_957;
+        let exact = common_package_function_role(floating_range_to_identity(DOUBLE_RANGE_TO))
+            .expect("the exact common identity owns the role");
+        let candidate = floating_range_candidate(&exact);
+        let index = CommonExpectationIndex {
+            package_function_roles: vec![exact],
+            ..CommonExpectationIndex::default()
+        };
+        assert_eq!(
+            index.package_function_role(
+                false,
+                crate::types::wk::kotlin_ranges_package(),
+                "rangeTo",
+                &candidate,
+            ),
+            None,
+            "an identical owner and signature from another JVM dependency cannot actualize the common identity",
+        );
+        assert_eq!(
+            index.package_function_role(
+                true,
+                crate::types::wk::kotlin_ranges_package(),
+                "rangeTo",
+                &candidate,
+            ),
+            Some(CompilerIntrinsic::FloatingRangeMembership),
+        );
+        assert_eq!(
+            index.package_function_role(
+                true,
+                crate::types::wk::kotlin_ranges_package(),
+                "otherRange",
+                &candidate,
+            ),
+            None,
+            "the paired owner and shape cannot actualize an identity under another source declaration name",
+        );
+    }
+
+    #[test]
+    fn paired_stdlib_provider_publishes_only_the_inclusive_floating_range_identities() {
+        let Some(stdlib) = crate::toolchain::stdlib_jar() else {
+            return;
+        };
+        let libraries = JvmLibraries::new(std::rc::Rc::new(Classpath::new(vec![stdlib])))
+            .expect("stdlib provider");
+        let symbols = libraries.symbols(
+            SymbolNamespace::Package(crate::types::wk::kotlin_ranges_package()),
+            "rangeTo",
+        );
+        let functions = match &symbols.callables {
+            crate::libraries::Callables::Functions(functions)
+            | crate::libraries::Callables::Both { functions, .. } => functions,
+            _ => panic!("rangeTo is missing from the paired stdlib provider"),
+        };
+
+        for scalar in [Ty::Double, Ty::Float] {
+            let expected_range = Ty::obj_args("kotlin/ranges/ClosedFloatingPointRange", &[scalar]);
+            let matches = functions
+                .overloads
+                .iter()
+                .filter(|function| {
+                    function.generic_sig.as_ref().is_some_and(|signature| {
+                        signature.receiver == Some(scalar)
+                            && signature.params == [scalar]
+                            && signature.ret == expected_range
+                    })
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(matches.len(), 1, "one exact {scalar:?}.rangeTo identity");
+            assert_eq!(
+                matches[0].callable.compiler_intrinsic,
+                Some(CompilerIntrinsic::FloatingRangeMembership),
+            );
+        }
+        assert_eq!(
+            functions
+                .overloads
+                .iter()
+                .filter(|function| {
+                    function.callable.compiler_intrinsic
+                        == Some(CompilerIntrinsic::FloatingRangeMembership)
+                })
+                .count(),
+            2,
+            "generic Comparable.rangeTo and unrelated overloads remain ordinary declarations",
+        );
+    }
 
     fn write_empty_zip(path: &Path) {
         // A complete empty archive. The tests select this path as kotlin-stdlib and then diagnose

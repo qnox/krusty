@@ -11,7 +11,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use super::scalar_coercion::{semantic_scalar_adapter, unbox_prim_from};
-use super::{debug_lines, jvm_declared_ty, EmitRun, Emitter};
+use super::{jvm_declared_ty, EmitRun, Emitter};
 use crate::ir::{ExprId, IrExpr, IrFile, IrTypeOp};
 use crate::jvm::bytecode_passes::coroutines::markers::SuspendMarker;
 use crate::jvm::classfile::{
@@ -83,7 +83,7 @@ impl Emitter<'_> {
         {
             return false;
         }
-        debug_lines::mark_expression_start(self.ir, e, code);
+        self.mark_expression_start(e, code);
         self.open_transformed_suspension(e, code);
         let node = self.ir.expr(e).clone();
         self.emit_value_node(e, &node, code);
@@ -95,7 +95,7 @@ impl Emitter<'_> {
     /// Mark where a call's own invoke starts: its line and, for a suspension point, the markers
     /// kotlinc's codegen writes right before the invoke, after the arguments.
     pub(super) fn mark_call_start(&mut self, e: ExprId, code: &mut CodeBuilder) {
-        debug_lines::mark_dispatch(self.ir, e, code);
+        self.mark_dispatch_line(e, code);
         let Some(result) = self.transformed_result(e) else {
             return;
         };
@@ -241,6 +241,12 @@ pub(super) type TransformedCoroutines = RefCell<HashMap<String, CoroutineOutcome
 impl EmitRun {
     /// Write `class`, transforming the coroutines its methods asked for, and keep what they found.
     pub(super) fn finish_class(&self, class: ClassWriter) -> Vec<u8> {
+        // A failed method can stop before restoring a valid operand stack. The whole emit pass is
+        // discarded once this flag is observed, so do not ask the frame computer to analyze that
+        // incomplete class in the meantime. These bytes cannot escape `emit_pass`.
+        if self.emission_failed() {
+            return Vec::new();
+        }
         let (bytes, coroutines) = class.finish_with_coroutines();
         self.record_transformed_coroutines(coroutines);
         bytes

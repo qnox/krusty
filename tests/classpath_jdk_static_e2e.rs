@@ -178,7 +178,8 @@ fn non_literal_int_does_not_match_long_parameter() {
     let Some((java_classes, temp_root)) = numeric_api() else {
         return;
     };
-    for expression in ["value", "1 / 0", "2_000_000_000 + 2_000_000_000"] {
+    let unresolved = ["unresolved Java static 'NumericApi.onlyLong' for given argument types"];
+    for expression in ["value", "value / 0"] {
         let source = format!(
             "import fixtures.NumericApi\n\
              fun f(value: Int): String = NumericApi.onlyLong({expression})\n"
@@ -188,12 +189,21 @@ fn non_literal_int_does_not_match_long_parameter() {
             std::slice::from_ref(&java_classes),
             Some(jdk.as_path()),
         );
-        assert!(
-            diagnostics
-                .iter()
-                .any(|message| message.contains("unresolved Java static")),
-            "{expression}: {diagnostics:?}"
+        assert_eq!(diagnostics, unresolved, "{expression}");
+    }
+    // `1 / 0` and an overflowing sum are `Int` constant expressions. They adapt to `Long` and
+    // are not rejected; division by zero still throws when the call runs.
+    for expression in ["1 / 0", "1 % 0", "2_000_000_000 + 2_000_000_000"] {
+        let source = format!(
+            "import fixtures.NumericApi\n\
+             fun f(): String = NumericApi.onlyLong({expression})\n"
         );
+        let diagnostics = common::front_end_diagnostics(
+            &source,
+            std::slice::from_ref(&java_classes),
+            Some(jdk.as_path()),
+        );
+        assert_eq!(diagnostics, [] as [&str; 0], "{expression}");
     }
     let _ = std::fs::remove_dir_all(temp_root);
 }

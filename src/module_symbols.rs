@@ -40,8 +40,25 @@ impl<'a> ModuleSymbols<'a> {
         }
     }
 
-    pub(crate) fn type_alias_expansion(&self, identity: TypeName) -> Option<(Vec<String>, Ty)> {
-        self.syms.source_alias_expansions.get(&identity).cloned()
+    pub(crate) fn type_alias_binding(
+        &self,
+        identity: TypeName,
+    ) -> Option<crate::libraries::AliasExpansion> {
+        let target = *self.syms.source_alias_fqns.get(&identity)?;
+        let (formals, expansion) = self.syms.source_alias_expansions.get(&identity)?;
+        let expansion_spelling = self
+            .syms
+            .alias_expansion_spellings
+            .get(&identity)
+            .map(|(spelling, _, _)| spelling.clone())
+            .unwrap_or_default();
+        Some(crate::libraries::AliasExpansion {
+            identity,
+            target,
+            formals: formals.clone(),
+            expansion: *expansion,
+            expansion_spelling,
+        })
     }
 
     pub(crate) fn type_parameter_extra_bounds(&self, identity: &str) -> Vec<Ty> {
@@ -922,6 +939,9 @@ fn fn_info(
         plugin_expression: sig.plugin_expression,
         descriptor: String::new(),
         physical_params: params.clone(),
+        physical_parameter_plan: Some(
+            crate::libraries::physical_parameter_plan::source_parameter_plan(params.len()),
+        ),
         params,
         ret: sig.ret,
         physical_ret: sig.ret,
@@ -1040,6 +1060,9 @@ fn source_callable(
         plugin_expression: None,
         descriptor: String::new(),
         physical_params: params.clone(),
+        physical_parameter_plan: Some(
+            crate::libraries::physical_parameter_plan::source_parameter_plan(params.len()),
+        ),
         params,
         ret,
         physical_ret: ret,
@@ -1168,14 +1191,21 @@ impl SymbolSource for ModuleSymbols<'_> {
         // visible on their type) plus the module's top-level/extension functions when the fqn's package is
         // their declaring package (a same-file function has no recorded facade — it lives in the file's own
         // package, which the resolver queries as the same-package candidate fqn).
-        let classifier_name = namespace
-            .existing_classifier(name)
-            .filter(|&internal| self.classifier_record(internal).is_some());
+        let declaration = namespace.existing_classifier(name);
+        let alias_target =
+            declaration.and_then(|identity| self.syms.source_alias_fqns.get(&identity).copied());
+        let classifier_name = match alias_target {
+            Some(target) => Some(target),
+            None => declaration.filter(|&internal| self.classifier_record(internal).is_some()),
+        };
         let classifier = classifier_name.and_then(|internal| self.classifier_record(internal));
-        let classifier_name = classifier.as_ref().map(|classifier| {
-            classifier
-                .alias_target
-                .unwrap_or_else(|| classifier_name.expect("classifier identity"))
+        let classifier_declaration = classifier_name.and_then(|_| {
+            declaration.map(|identity| {
+                self.type_alias_binding(identity).map_or(
+                    crate::libraries::ClassifierDeclaration::Ordinary(identity),
+                    crate::libraries::ClassifierDeclaration::TypeAlias,
+                )
+            })
         });
         let name = name.to_string();
         let associated_owner = match namespace {
@@ -1253,10 +1283,11 @@ impl SymbolSource for ModuleSymbols<'_> {
                 if !package.is_some_and(|package| package == sig.package) {
                     continue;
                 }
+                // `ext_funs` is keyed by the erased receiver; the candidate carries the declared one.
                 overloads.push(fn_info(
                     FnKind::Extension,
                     sig,
-                    Some(*recv),
+                    Some(sig.source_receiver.unwrap_or(*recv)),
                     owner,
                     &name,
                     rank,
@@ -1499,6 +1530,7 @@ impl SymbolSource for ModuleSymbols<'_> {
         let record = std::rc::Rc::new(ResolvedSymbols {
             builtin_classifier: false,
             classifier_name,
+            classifier_declaration,
             classifier,
             callables,
             importable_declaration,

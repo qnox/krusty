@@ -264,7 +264,10 @@ fn expression(expression: &mut IrExpr, names: &HashMap<TypeName, TypeName>) {
         IrExpr::Checked(operation) => checked_operation(operation, names),
         IrExpr::CallableReference(reference) => {
             match &mut reference.target {
-                IrCallableReferenceTarget::Constructor { classifier } => name(classifier, names),
+                IrCallableReferenceTarget::Constructor { classifier }
+                | IrCallableReferenceTarget::Classifier { classifier, .. } => {
+                    name(classifier, names)
+                }
                 IrCallableReferenceTarget::Local {
                     owner: Some(owner), ..
                 } => name(owner, names),
@@ -286,14 +289,17 @@ fn expression(expression: &mut IrExpr, names: &HashMap<TypeName, TypeName>) {
         | IrExpr::EnumValues { classifier }
         | IrExpr::EnumValueOf { classifier, .. }
         | IrExpr::EnumEntries { classifier } => name(classifier, names),
+        IrExpr::LocalPropertyReference(reference) => {
+            if let Some(class) = &mut reference.class {
+                name(class, names);
+            }
+            reference.property_type = ty(reference.property_type, names);
+        }
+        IrExpr::LocalDelegateAccess(_) => {}
         IrExpr::KClassLiteral {
             classifier: Some(classifier),
             ..
         }
-        | IrExpr::LocalPropertyReference(crate::ir::IrLocalPropertyReference {
-            property_type: classifier,
-            ..
-        })
         | IrExpr::TypeOp {
             type_operand: classifier,
             ..
@@ -402,7 +408,7 @@ fn annotations(
     annotations: &mut super::DeclarationAnnotations,
     names: &HashMap<TypeName, TypeName>,
 ) {
-    for retained in &mut annotations.0 {
+    for retained in annotations.iter_mut() {
         annotation_application(&mut retained.annotation, names);
     }
 }
@@ -524,11 +530,23 @@ impl super::IrFile {
         }
 
         annotations(&mut self.file_annotations, names);
+        self.remap_inline_copy_owners(names);
         for function in &mut self.functions {
             tys(&mut function.params, names);
             function.ret = ty(function.ret, names);
             if let Some(owner) = &mut function.dispatch_receiver {
                 name(owner, names);
+            }
+        }
+        for plan in &mut self.local_delegate_plans {
+            if let Some(class) = &mut plan.reference.class {
+                name(class, names);
+            }
+            plan.reference.property_type = ty(plan.reference.property_type, names);
+            for accessor in std::iter::once(&mut plan.getter).chain(plan.setter.iter_mut()) {
+                tys(&mut accessor.parameters, names);
+                type_parameters(&mut accessor.type_parameters, names);
+                accessor.result = ty(accessor.result, names);
             }
         }
         for class in &mut self.classes {
@@ -870,6 +888,8 @@ impl super::IrFile {
             .for_each(|value| *value = ty(*value, names));
         self.logical_types
             .values_mut()
+            .for_each(|value| *value = ty(*value, names));
+        self.inline_operand_declared_types_mut()
             .for_each(|value| *value = ty(*value, names));
         self.physical_types
             .values_mut()

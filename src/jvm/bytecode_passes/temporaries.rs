@@ -5,8 +5,8 @@
 //! an ordinary `store`/`load` pair, then this pass rewrites the pairs whose value can stay on the
 //! operand stack. In order:
 //!
-//! - `xload; pop` (`pop2` for a two-word value) is removed, and so is a `nop` next to an instruction
-//!   ([`trivial_cleanup`]);
+//! - `xload; pop` (`pop2` for a two-word value) becomes a `nop`, then every `nop` that need not
+//!   preserve a debug/protected boundary is removed ([`trivial_cleanup`]);
 //! - a null check whose value the path after it loads again keeps that value on the stack
 //!   ([`null_check_folds`]);
 //! - the temporaries are found ([`temporary_values`]) and each one's value is kept on the stack where

@@ -378,3 +378,114 @@ fn inherited_overload_beside_a_declared_one_actualizes_its_expect() {
     .expect("krusty compiles and runs the split source set");
     assert_eq!(got, "OK");
 }
+
+/// A member's header type resolves in its classifier's scope before the file's: `E` in the `expect`
+/// constructor names the nested `C.E`, not the top-level `E`, on both sides, so the constructors
+/// pair and a call omitting the argument takes the `expect` default `E.O`
+/// (multiplatform/k2/defaultArguments/nestedEnumEntryValue.kt). Differential: the reference compiler
+/// accepts the split source set, and krusty compiles and runs it.
+#[test]
+fn an_expect_constructor_parameter_names_a_nested_classifier() {
+    const COMMON: &str = "// LANGUAGE: +MultiPlatformProjects\n\
+        class E\n\
+        expect class C(e: E = E.O) {\n\
+        \x20   enum class E {\n\
+        \x20       O, K\n\
+        \x20   }\n\
+        }\n";
+    const PLATFORM: &str = "// LANGUAGE: +MultiPlatformProjects\n\
+        actual class C actual constructor(e: E) {\n\
+        \x20   val result = e\n\
+        \x20   actual enum class E {\n\
+        \x20       O, K\n\
+        \x20   }\n\
+        }\n\
+        fun box(): String = if (C().result == C.E.O && C(C.E.K).result == C.E.K) \"OK\" else \"fail\"\n";
+    let dir = common::scratch_dir().expect("scratch dir");
+    let common_path = dir.join("Common.kt");
+    let platform_path = dir.join("Platform.kt");
+    std::fs::write(&common_path, COMMON).expect("write the common fragment");
+    std::fs::write(&platform_path, PLATFORM).expect("write the platform fragment");
+    let reference_out = dir.join("reference");
+    std::fs::create_dir_all(&reference_out).expect("reference output directory");
+    let (code, reference) = common::kotlinc_compile(&[
+        "-Xmulti-platform".to_string(),
+        "-Xexpect-actual-classes".to_string(),
+        format!("-Xcommon-sources={}", common_path.to_string_lossy()),
+        "-d".to_string(),
+        reference_out.to_string_lossy().into_owned(),
+        "-cp".to_string(),
+        common::stdlib_jar().to_string_lossy().into_owned(),
+        common_path.to_string_lossy().into_owned(),
+        platform_path.to_string_lossy().into_owned(),
+    ])
+    .expect("reference kotlinc is provisioned");
+    assert_eq!(
+        (code, reference.as_str()),
+        (0, ""),
+        "the reference compiler accepts the split source set"
+    );
+    let got = common::compile_and_run_files_with_stdlib(&[
+        ("Common.kt", COMMON),
+        ("Platform.kt", PLATFORM),
+    ])
+    .expect("krusty compiles and runs the split source set");
+    assert_eq!(got, "OK");
+}
+
+/// A `companion { … }` block member claims its `expect` with the `actual` it writes itself: the
+/// member is hoisted to a file declaration, and its modifier travels with it
+/// (multiplatform/k2/expectStatic.kt). Differential: the reference compiler accepts the split
+/// source set, and krusty compiles and runs it.
+#[test]
+fn a_companion_block_member_actualizes_its_expect() {
+    const COMMON: &str = "// LANGUAGE: +MultiPlatformProjects, +CompanionBlocksAndExtensions\n\
+        class Input\n\
+        enum class Mark { Block, Fail }\n\
+        expect class A {\n\
+        \x20   companion {\n\
+        \x20       val a: Mark\n\
+        \x20       fun foo(input: Input): Mark\n\
+        \x20   }\n\
+        }\n\
+        fun common(): Mark = if (A.a == Mark.Block) A.foo(Input()) else Mark.Fail\n";
+    const PLATFORM: &str = "// LANGUAGE: +MultiPlatformProjects, +CompanionBlocksAndExtensions\n\
+        actual class A {\n\
+        \x20   companion {\n\
+        \x20       actual val a = Mark.Block\n\
+        \x20       actual fun foo(input: Input): Mark = Mark.Block\n\
+        \x20   }\n\
+        }\n\
+        fun box(): String = if (common() == Mark.Block) \"OK\" else \"fail\"\n";
+    let dir = common::scratch_dir().expect("scratch dir");
+    let common_path = dir.join("Common.kt");
+    let platform_path = dir.join("Platform.kt");
+    std::fs::write(&common_path, COMMON).expect("write the common fragment");
+    std::fs::write(&platform_path, PLATFORM).expect("write the platform fragment");
+    let reference_out = dir.join("reference");
+    std::fs::create_dir_all(&reference_out).expect("reference output directory");
+    let (code, reference) = common::kotlinc_compile(&[
+        "-Xmulti-platform".to_string(),
+        "-Xexpect-actual-classes".to_string(),
+        "-XXLanguage:+CompanionBlocksAndExtensions".to_string(),
+        format!("-Xcommon-sources={}", common_path.to_string_lossy()),
+        "-d".to_string(),
+        reference_out.to_string_lossy().into_owned(),
+        "-cp".to_string(),
+        common::stdlib_jar().to_string_lossy().into_owned(),
+        common_path.to_string_lossy().into_owned(),
+        platform_path.to_string_lossy().into_owned(),
+    ])
+    .expect("reference kotlinc is provisioned");
+    assert_eq!(
+        (code, common::reported(&reference)),
+        (0, Vec::new()),
+        "the reference compiler accepts the split source set"
+    );
+    let got = common::compile_and_run_files_with_stdlib(&[
+        ("Common.kt", COMMON),
+        ("Platform.kt", PLATFORM),
+    ])
+    .expect("krusty compiles and runs the split source set");
+    assert_eq!(got, "OK");
+}

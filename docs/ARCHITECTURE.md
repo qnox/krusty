@@ -64,6 +64,34 @@ sources, module name, processor inputs, per-module JDK selection, friend paths, 
 because silently ignoring any of those can cache a short or semantically different artifact. An
 environment that cannot honor a recorded input must refuse the unit before computing a cache key.
 
+Gradle projects are compiled by running that project's `./gradlew`, not by reimplementing the
+Kotlin plugin. `tools/krusty-gradle` is a Gradle plugin (`id("krusty")`, sources under
+`src/main/kotlin`). A build applies both its selected `org.jetbrains.kotlin.jvm` 2.4.x plugin and
+`krusty`; source sets, `kotlin {}`, compiler options, and `KotlinJvmCompile` stay. Source checkouts
+can use `--include-build`; releases include a portable local Maven repository with the implementation
+and plugin-marker publications. The Kotlin JVM plugin still owns source sets, `project()` edges,
+compiler options, classpaths, friend paths,
+and compile outputs. The public Kotlin task is disabled and depends on a typed, cacheable replacement
+task whose `ExecOperations` and `FileSystemOperations` are injected by Gradle. The replacement execs
+the krusty binary (`-Pkrusty.binary` or `KRUSTY_BIN`) with the task's complete `.kt` and same-module
+`.java` sources and normalized structured compiler options. kotlinc and the Kotlin compile daemon
+are not started. The plugin does not invoke krusty-build, inspect task implementation classes, or
+mutate private action lists. `.kts` files are not compilation inputs.
+
+The adapter derives Kotlin semantics from `KotlinBasePlugin.pluginVersion`. It reads the experimental
+Build Tools API `compilerVersion` property behind the two exact KGP/BTA opt-ins only to reject an
+override which would make those semantics diverge; it does not use the experimental compiler path.
+
+Gradle owns incremental invalidation. An unchanged replacement task is UP-TO-DATE and does not run
+krusty. Once any source, classpath, friend path, plugin, compiler option, or compiler binary changes,
+the task cleans its Kotlin output directory and recompiles the complete source set. That deliberately
+coarse boundary keeps source additions and removals, multifile facades, generated classes, and
+`.kotlin_module` metadata correct without reconstructing Kotlin's dependency graph from class files.
+Compiler plugins are outside this adapter boundary: applied public
+`KotlinCompilerPluginSupportPlugin` implementations and plugin CLI switches are rejected. KGP's raw
+`pluginClasspath` and `pluginOptions` collections are not treated as activation signals because a
+plain Kotlin/JVM compilation can populate them with implementation plumbing.
+
 Build correctness rests on these contracts:
 
 - A dependency graph edge is a relation. Providers may repeat an edge, but the graph canonicalizes
@@ -103,8 +131,13 @@ Build correctness rests on these contracts:
   or server-specific feature. Within the LSP package, `compiler_analysis` is the only module allowed
   to inspect checked frontend data; protocol/session modules consume compact snapshot contracts.
 - The LSP supervisor never runs the compiler in its own long-lived process. It sends source sets to
-  a compiler worker that is restarted after 64 analyses. This bounds growth from the compiler's
-  process-lifetime name/type interners while amortizing JVM classpath initialization across edits.
+  a compiler worker that is restarted after 64 analyses, or sooner when a Linux `VmRSS` sample
+  shows that process above the supervisor's ceiling (default 1 GiB). The sample is taken before a
+  request. It is not a host or cgroup budget: a tighter limit can still OOM-kill the child, and one
+  request can grow past the ceiling before the next sample. Those deaths use the existing crash
+  restart. An unreadable sample, including every non-Linux process, leaves the worker in place.
+  The ceiling bounds retained growth from the compiler's process-lifetime name/type interners
+  between requests, while JVM classpath initialization stays amortized across edits.
   Replacing that process is one transition: kill, poll, and join its stdout reader share a single
   deadline. A child that is still running, or a wait that fails for a reason other than the process
   no longer being a child, stays in a one-slot park and blocks the next spawn.

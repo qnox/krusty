@@ -213,6 +213,11 @@ pub fn for_each_child(exprs: &[IrExpr], e: ExprId, f: &mut impl FnMut(ExprId)) {
         }
         IrExpr::PluginPlaceholder { exprs: kids, .. } => kids.iter().for_each(|&k| f(k)),
         IrExpr::KClassLiteral { value, .. } => value.iter().for_each(|&value| f(value)),
+        IrExpr::LocalDelegateAccess(access) => {
+            f(access.delegate);
+            access.dispatch_receiver.iter().for_each(|&value| f(value));
+            access.value.iter().for_each(|&value| f(value));
+        }
         IrExpr::Const(_)
         | IrExpr::ClassConst { .. }
         | IrExpr::LocalPropertyReference(_)
@@ -230,7 +235,8 @@ pub fn for_each_child(exprs: &[IrExpr], e: ExprId, f: &mut impl FnMut(ExprId)) {
         | IrExpr::EnumEntries { .. }
         | IrExpr::ReifiedClassMarker { .. }
         | IrExpr::UnitInstance
-        | IrExpr::CurrentContinuation => {}
+        | IrExpr::CurrentContinuation
+        | IrExpr::InlineFrameMarker => {}
     }
 }
 
@@ -524,4 +530,17 @@ fn remap_value_indices(ir: &mut IrFile, e: ExprId, threshold: u32, map: &dyn Fn(
 
     let mut visited = std::collections::HashSet::new();
     shift(ir, e, threshold, map, &mut visited);
+}
+
+/// The values a `when` or a `try` selects its own value from: each branch's result, or the `try`
+/// body's and then each handler's. Any other expression selects none.
+pub fn selected_values(expr: &IrExpr) -> impl Iterator<Item = ExprId> + '_ {
+    let (branches, body, catches): (&[_], _, &[_]) = match expr {
+        IrExpr::When { branches } => (branches, None, &[]),
+        IrExpr::Try { body, catches, .. } => (&[], Some(*body), catches),
+        _ => (&[], None, &[]),
+    };
+    let branches = branches.iter().map(|(_, value)| *value);
+    let handlers = catches.iter().map(|catch| catch.body);
+    branches.chain(body).chain(handlers)
 }

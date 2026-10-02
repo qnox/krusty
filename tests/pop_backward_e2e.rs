@@ -34,9 +34,8 @@ fn a_discarded_inline_result_is_not_pushed_like_kotlincs() {
         &[],
     )
     .expect("reference kotlinc and javap are required");
-    // kotlinc also keeps its `$i$f$` marker local per inlined call (`iconst_0; istore`), which
-    // krusty's inliner does not write yet; otherwise the listings are the same.
-    for (member, reference, krusty) in [
+    // Every inline expansion opens with kotlinc's `$i$f$` marker local (`iconst_0; istore`).
+    for (member, expected) in [
         (
             "void discardSel(boolean, int, int)",
             &[
@@ -51,17 +50,6 @@ fn a_discarded_inline_result_is_not_pushed_like_kotlincs() {
                 "11: iload_3",
                 "12: ifeq 15",
                 "15: return",
-            ][..],
-            &[
-                "0: iload_0",
-                "1: istore_3",
-                "2: iload_1",
-                "3: istore 4",
-                "5: iload_2",
-                "6: istore 5",
-                "8: iload_3",
-                "9: ifeq 12",
-                "12: return",
             ][..],
         ),
         // The box of the discarded result goes first (RedundantBoxing), then its operands.
@@ -80,17 +68,6 @@ fn a_discarded_inline_result_is_not_pushed_like_kotlincs() {
                 "12: ifeq 15",
                 "15: return",
             ][..],
-            &[
-                "0: iload_0",
-                "1: istore_3",
-                "2: iload_1",
-                "3: istore 4",
-                "5: iload_2",
-                "6: istore 5",
-                "8: iload_3",
-                "9: ifeq 12",
-                "12: return",
-            ][..],
         ),
         // Of a load merged with a call, the load goes and the call pops its own result; the jump
         // around the `goto` left in front of the call is then negated.
@@ -108,17 +85,6 @@ fn a_discarded_inline_result_is_not_pushed_like_kotlincs() {
                 "11: invokestatic # // Method ext:()I",
                 "14: pop",
                 "15: return",
-            ][..],
-            &[
-                "0: iload_0",
-                "1: istore_2",
-                "2: iload_1",
-                "3: istore_3",
-                "4: iload_2",
-                "5: ifne 12",
-                "8: invokestatic # // Method ext:()I",
-                "11: pop",
-                "12: return",
             ][..],
         ),
         // A `pop2` is never propagated.
@@ -141,31 +107,16 @@ fn a_discarded_inline_result_is_not_pushed_like_kotlincs() {
                 "24: pop2",
                 "25: return",
             ][..],
-            &[
-                "0: iload_0",
-                "1: istore 5",
-                "3: lload_1",
-                "4: lstore 6",
-                "6: lload_3",
-                "7: lstore 8",
-                "9: iload 5",
-                "11: ifeq 19",
-                "14: lload 6",
-                "16: goto 21",
-                "19: lload 8",
-                "21: pop2",
-                "22: return",
-            ][..],
         ),
     ] {
         assert_eq!(
             method_instructions(&built.reference, member),
-            rows(reference),
+            rows(expected),
             "{member} (kotlinc)"
         );
         assert_eq!(
             method_instructions(&built.krusty, member),
-            rows(krusty),
+            rows(expected),
             "{member}"
         );
     }

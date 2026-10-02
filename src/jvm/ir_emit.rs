@@ -5,8 +5,8 @@ use std::collections::{HashMap, HashSet};
 
 use crate::backend::BackendClassifierSource;
 use crate::ir::{
-    Callee, ClassId, IrBinOp, IrClass, IrConst, IrDataClassMemberRole, IrExpr, IrField, IrFile,
-    IrTypeOp,
+    Callee, ClassId, ExprId, IrBinOp, IrClass, IrConst, IrDataClassMemberRole, IrExpr, IrField,
+    IrFile, IrTypeOp,
 };
 use crate::jvm::array_representation::prim_newarray_atype;
 use crate::jvm::classfile::{
@@ -17,16 +17,20 @@ use crate::jvm::constructor_debug::property_line;
 use crate::jvm::inline::MethodBodies;
 use crate::jvm::names::{
     mapped_builtin_virtual_name, method_descriptor, property_getter_name, property_setter_name,
-    reference_array_element, type_descriptor,
+    type_descriptor,
 };
+use crate::jvm::property_references::local_delegated_properties::LocalDelegatedProperties;
+use crate::jvm::value_classes::instance_representation;
 use crate::kt_string::KtStringBuf;
 use crate::types::{stored_value_ty, Ty, TypeName, TypeVariance};
+use companion_field::{add_companion_field, emit_companion_init};
 use field_visibility::{declared_field_access, default_accessor_access, is_jvm_field};
 
 mod access_bridges;
 mod annotation_impl;
-mod array_access;
+mod array_elements;
 mod backend_temporaries;
+mod binary_operation;
 mod block_scope;
 mod bottom_values;
 mod bridge_emission;
@@ -35,6 +39,7 @@ mod bytecode_inline_call;
 mod call_operands;
 mod captured_storage;
 mod checked_facts;
+mod class_literals;
 mod class_pool_seed;
 mod companion_blocks;
 mod comparison_branches;
@@ -44,12 +49,14 @@ mod constructor_accessors;
 mod constructor_defaults;
 mod constructor_initialization;
 use constructor_defaults::{constructor_default_masks, emit_constructor_default_arguments};
+mod companion_field;
 mod copied_code;
 mod coroutine_machine;
 mod debug_lines;
 mod declaration_annotations;
 mod declaration_types;
 mod declared_nullability;
+mod declared_property_access;
 mod delegated_property_array;
 mod field_nullability;
 use field_nullability::{
@@ -60,6 +67,7 @@ mod diverging_value_type;
 mod enclosure;
 mod enum_entry_subclass;
 mod enum_metadata;
+mod explicit_backing_fields;
 mod field_read;
 mod field_visibility;
 mod field_write;
@@ -67,6 +75,9 @@ mod frame_map;
 mod function_annotations;
 mod function_debug;
 mod function_invocation;
+use function_invocation::{
+    is_high_arity_function, jvm_function_interface, jvm_function_invoke_descriptor,
+};
 mod function_reference_class;
 mod function_reference_invoke;
 mod generated_property_operations;
@@ -74,9 +85,11 @@ mod implicit_reference_coercion;
 mod in_place_arguments;
 mod inline_body_emission;
 mod inline_call;
+mod inline_frame_marker;
 mod instance_field_names;
 use instance_field_names::instance_field_jvm_name;
 mod interface_compatibility;
+mod intrinsic_probes;
 mod lambda_class;
 mod lambda_class_names;
 mod local_updates;
@@ -104,6 +117,7 @@ mod property_reference_class;
 mod property_reference_values;
 mod return_emission;
 mod safe_calls;
+mod sam_wrapper_class;
 mod scalar_coercion;
 mod shared_cell_declaration;
 mod signature_formatter;
@@ -115,14 +129,16 @@ use value_class_adapters::{emit_value_class_box_adapter, emit_value_class_unbox_
 mod transformed_suspensions;
 mod try_emission;
 use annotation_impl::emit_annotation_impl_class;
+use array_elements::reference_array_scalar_adapter;
 mod value_class_descriptors;
+mod value_class_override_metadata;
 mod value_class_signatures;
 use crate::jvm::private_static_access::StaticOwner;
 use class_pool_seed::{
     seed_enum_constructor_locals, seed_plain_class_pool, seed_plain_constructor_tail,
     PlainClassPoolSeed,
 };
-use enclosure::class_enclosure;
+pub(super) use enclosure::{class_enclosure, property_accessor_function};
 use primary_constructor_parameters::{
     primary_ctor_parameter_fields, primary_ctor_source_parameters,
 };
@@ -426,6 +442,13 @@ impl EmitRun {
             *current = Some(reason);
         }
     }
+
+    /// Whether this pass has already declined to emit the file. Class finalization must observe
+    /// this before frame computation: a method that reported a missing backend fact can have an
+    /// intentionally incomplete operand stack at the point where it stopped.
+    fn emission_failed(&self) -> bool {
+        self.inline_bail.borrow().is_some() || self.emit_bail.get()
+    }
 }
 
 /// The emit environment threaded (by `&`) through the whole emit callgraph in place of the bare
@@ -441,6 +464,7 @@ pub(super) struct EmitEnv<'a> {
     continuation_metadata: &'a crate::jvm::suspend::ContinuationMetadataMap,
     emit_time_machines: &'a crate::jvm::suspend::EmitTimeMachines,
     suspended_result_returns: &'a crate::jvm::suspend::SuspendedResultReturns,
+    intrinsic_probe_continuations: &'a crate::jvm::suspend::IntrinsicProbeContinuations,
     bridge_adaptations: &'a crate::jvm::bridge_adaptations::BridgeAdaptations,
     /// The bridges that take `FunctionN.invoke`'s packed argument array.
     function_argument_arrays: &'a crate::jvm::function_argument_arrays::FunctionArgumentArrays,
@@ -463,6 +487,8 @@ pub(super) struct EmitEnv<'a> {
     /// class. Common IR deliberately carries none of these representation facts.
     property_reference_realizations:
         &'a crate::jvm::property_references::PropertyReferenceRealizations,
+    /// JVM-only construction plans for Kotlin function-value SAM wrappers.
+    sam_wrapper_realizations: &'a crate::jvm::sam_wrappers::SamWrapperRealizations,
     /// Per-call JVM placeholder/mask/marker plans produced during default-call realization.
     default_call_operands: &'a crate::jvm::default_call_operands::DefaultCallOperands,
     /// File-wide `InnerClasses` candidates prepared once from stable classifier identities.
@@ -1161,46 +1187,6 @@ fn attach_synth_nullability(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassW
     }
 }
 
-fn add_companion_field(cw: &mut ClassWriter, class: &IrClass) {
-    let Some(companion) = class.companion_class else {
-        return;
-    };
-    cw.add_field(
-        0x0019,
-        companion.nested_segment_ref(),
-        &format!("L{};", companion.render()),
-    );
-}
-
-fn emit_companion_init(cw: &mut ClassWriter, code: &mut CodeBuilder, owner: &str, class: &IrClass) {
-    let Some(companion) = class.companion_class else {
-        return;
-    };
-    let companion_name = companion.render();
-    let descriptor = format!("L{companion_name};");
-    // An INTERFACE's companion self-hosts its singleton (`static final $$INSTANCE`, built in the
-    // companion's own `<clinit>`); the interface's `Companion` field merely aliases it.
-    if is_jvm_interface(class) {
-        let instance = cw.fieldref(&companion_name, "$$INSTANCE", &descriptor);
-        code.getstatic(instance, 1);
-        let field = cw.fieldref(owner, companion.nested_segment_ref(), &descriptor);
-        code.putstatic(field, 1);
-        return;
-    }
-    let classifier = cw.class_ref(&companion_name);
-    code.new_obj(classifier);
-    code.dup();
-    code.aconst_null();
-    let constructor = cw.methodref(
-        &companion_name,
-        "<init>",
-        "(Lkotlin/jvm/internal/DefaultConstructorMarker;)V",
-    );
-    code.invokespecial(constructor, 1, 0);
-    let field = cw.fieldref(owner, companion.nested_segment_ref(), &descriptor);
-    code.putstatic(field, 1);
-}
-
 /// Emit the companion/static surface shared by declarations that are JVM interfaces: Kotlin
 /// interfaces and annotation classes. Common IR keeps those source kinds distinct, but both use
 /// interface field constraints and the companion's self-hosted `$$INSTANCE` realization.
@@ -1212,6 +1198,7 @@ fn emit_jvm_interface_companion_surface(
     cw: &mut ClassWriter,
 ) {
     let fq_name = c.fq_name();
+    delegated_property_array::declare_in_interface(env, c.fq_name, cw);
 
     let clinit_statics: Vec<(u32, &crate::ir::IrStatic, crate::ir::ExprId)> = ir
         .statics
@@ -1220,7 +1207,8 @@ fn emit_jvm_interface_companion_surface(
         .filter(|(_, s)| s.owner_matches(&fq_name))
         .filter_map(|(index, s)| Some((index as u32, s, static_fields::clinit_initializer(ir, s)?)))
         .collect();
-    if c.companion_class.is_some() || !clinit_statics.is_empty() {
+    let array = delegated_property_array::exists(env, c.fq_name);
+    if c.companion_class.is_some() || !clinit_statics.is_empty() || array {
         cw.reserve_method_name("<clinit>");
         cw.seed_utf8("()V");
         let mut emitter = Emitter::new(
@@ -1234,6 +1222,7 @@ fn emit_jvm_interface_companion_surface(
             clinit_statics.iter().map(|&(_, _, init)| init),
         );
         let mut clinit = CodeBuilder::new(0);
+        emitter.emit_delegated_property_array(env, c.fq_name, &fq_name, &mut clinit);
         emit_companion_init(emitter.cw, &mut clinit, &fq_name, c);
         let mut clinit_lines = Vec::new();
         for &(static_index, s, init) in &clinit_statics {
@@ -1591,6 +1580,7 @@ pub(crate) fn emit_all_with_checked_classifiers(
         continuation_metadata: facts.metadata.continuations,
         emit_time_machines: facts.metadata.emit_time_machines,
         suspended_result_returns: facts.metadata.suspended_result_returns,
+        intrinsic_probe_continuations: facts.metadata.intrinsic_probe_continuations,
         bridge_adaptations: facts.metadata.bridge_adaptations,
         function_argument_arrays: facts.metadata.function_argument_arrays,
         override_results: facts.metadata.override_results,
@@ -1601,8 +1591,13 @@ pub(crate) fn emit_all_with_checked_classifiers(
         java_parameters: opts.java_parameters,
         property_realizations: facts.property_realizations,
         property_reference_realizations: facts.property_reference_realizations,
+        sam_wrapper_realizations: facts.sam_wrapper_realizations,
         default_call_operands: facts.default_call_operands,
-        inner_classes: crate::jvm::inner_classes::InnerClasses::new(ir),
+        inner_classes: crate::jvm::inner_classes::InnerClasses::new(
+            ir,
+            facts.metadata.override_results,
+            facade,
+        ),
     };
     emit_all_with_class_meta(ir, facade, &env, facts.metadata.facade, opts, &|_| None)
 }
@@ -1767,6 +1762,7 @@ fn emit_pass(
                 .filter_map(|(expression, value)| match value {
                     IrExpr::Checked(_)
                     | IrExpr::PluginPlaceholder { .. }
+                    | IrExpr::LocalDelegateAccess(_)
                     | IrExpr::Call {
                         callee: Callee::Module { .. } | Callee::External { .. },
                         ..
@@ -1969,11 +1965,8 @@ fn emit_pass(
     }
     out.extend(drain_lambda_classes(env, opts));
     out.extend(env.run.machine_classes.borrow_mut().drain(..));
-    if env.run.inline_bail.borrow().is_some() {
-        return None;
-    }
-    if env.run.emit_bail.get() {
-        return None; // a value slot was never allocated (malformed IR) — skip, never miscompile
+    if env.run.emission_failed() {
+        return None; // malformed backend input — discard every class from this pass
     }
     Some(out)
 }
@@ -2369,6 +2362,7 @@ pub(crate) fn jvm_can_emit(ir: &IrFile) -> bool {
         // A plugin placeholder that reached emit means its owning plugin didn't run (or couldn't
         // specialize it) — decline the file rather than miscompile (the node has no JVM lowering).
         IrExpr::PluginPlaceholder { .. } => false,
+        IrExpr::LocalDelegateAccess(_) => false,
         _ => true,
     })
 }
@@ -2379,7 +2373,7 @@ fn checkcast_internal(ty: Ty) -> Option<String> {
     match ty {
         Ty::String => Some("java/lang/String".to_string()),
         _ if ty.is_array() => Some(type_descriptor(ty)),
-        Ty::Obj(n, _) if n != "java/lang/Object" && n != "kotlin/Any" => {
+        Ty::Obj(n, _) if !crate::jvm::jvm_class_map::is_jvm_erased_top(n) => {
             Some(crate::jvm::names::classfile_internal_name_of(n).to_string())
         }
         _ => None,
@@ -2991,6 +2985,9 @@ fn emit_class(
     if let Some(lambda) = &c.lambda {
         return lambda_class::emit_lambda_class(ir, c, lambda, facade, env, opts);
     }
+    if let Some(wrapper) = &c.sam_wrapper {
+        return sam_wrapper_class::emit_sam_wrapper_class(ir, c, wrapper, facade, env, opts);
+    }
     if let Some(lambda) = env.emit_time_machines.suspend_lambda(c.fq_name_id()) {
         return suspend_lambda_class::emit_suspend_lambda_class(ir, c, lambda, facade, env, opts);
     }
@@ -3047,7 +3044,9 @@ fn emit_class(
     // signature (`List<String>` → `Ljava/util/List<Ljava/lang/String;>;`). `None` when no param needs it.
     // Computed once here: the pool seeder interns it and the `<init>` emission attaches it.
     let is_continuation = is_continuation_class(c);
-    let has_continuation_receiver = c.fields.iter().any(|field| field.name == "this$0");
+    let has_continuation_receiver = c.ctor_args.iter().any(|argument| {
+        argument.provenance == crate::ir::IrCtorParameterProvenance::ContinuationDispatchReceiver
+    });
     let ctor_signature = continuation_metadata
         .map(|metadata| {
             if has_continuation_receiver {
@@ -3074,7 +3073,8 @@ fn emit_class(
     let byte_parity = !is_coroutine_state_machine(c)
         && opts.emit_class_metadata
         && (c.is_anonymous_object
-            || build_class_metadata(ir, env.override_results, c, opts).is_some());
+            || build_class_metadata(ir, env.override_results, c, opts, env.local_delegated())
+                .is_some());
     let pool_seed = || PlainClassPoolSeed {
         ir,
         class: c,
@@ -3305,9 +3305,7 @@ fn emit_class(
         let ctor_desc = primary_ctor_descriptor(c);
         let ctor_parameters = if env.java_parameters {
             if is_continuation {
-                super::method_parameters::continuation_constructor(
-                    c.fields.iter().any(|field| field.name == "this$0"),
-                )
+                super::method_parameters::continuation_constructor(c)
             } else {
                 super::method_parameters::primary_constructor(c, &param_tys)
             }
@@ -3532,32 +3530,22 @@ fn emit_class(
         // A continuation's constructor table is attached HERE, not in the trailing debug pass:
         // kotlinc interns a method's `LocalVariableTable` names with that method, before it visits
         // the next one, so batching every table at the end reordered the pool from `<init>` onward.
-        if let Some(metadata) = continuation_metadata {
-            let has_this0 = c.fields.iter().any(|field| field.name == "this$0");
+        if continuation_metadata.is_some() {
             let mut ctor_locals: Vec<(String, String, u16)> =
                 vec![("this".to_string(), format!("L{fq_name};"), 0)];
             let mut slot = 1u16;
-            if has_this0 {
-                ctor_locals.push((
-                    "this$0".to_string(),
-                    format!("L{};", metadata.enclosing_class),
-                    slot,
-                ));
+            let identities = crate::jvm::parameter_names::constructor_identities(&c.ctor_args);
+            assert_eq!(
+                identities.len(),
+                c.ctor_args.len(),
+                "a continuation constructor's local identities must match its parameters"
+            );
+            for (argument, identity) in c.ctor_args.iter().zip(&identities) {
+                let name = crate::jvm::parameter_names::local_variable(identity, "<init>")
+                    .expect("a continuation constructor parameter has a JVM local name");
+                ctor_locals.push((name, ir_type_desc(&argument.ty), slot));
                 slot += 1;
             }
-            ctor_locals.push((
-                "$completion".to_string(),
-                "Lkotlin/coroutines/Continuation;".to_string(),
-                slot,
-            ));
-            let ctor_desc = if has_this0 {
-                format!(
-                    "(L{};Lkotlin/coroutines/Continuation;)V",
-                    metadata.enclosing_class
-                )
-            } else {
-                "(Lkotlin/coroutines/Continuation;)V".to_string()
-            };
             cw.set_method_debug("<init>", &ctor_desc, None, &ctor_locals);
         }
         // Declared PRIMARY-constructor annotations (`class C @Mark constructor(…)`), with the same
@@ -3789,10 +3777,10 @@ fn emit_class(
             &mut cw,
         );
     }
-    cw.set_class_annotations(&c.applied_annotations);
+    cw.set_class_annotations(&super::value_classes::class_file_annotations(c));
     // A cross-module provider's `@Metadata` wins; otherwise compute one from the IR (bounded shapes).
     let computed = (class_meta.is_none() && opts.emit_class_metadata)
-        .then(|| build_class_metadata(ir, env.override_results, c, opts))
+        .then(|| build_class_metadata(ir, env.override_results, c, opts, env.local_delegated()))
         .flatten();
     // Debug tables + nullability annotations (opt-in with metadata) for any class that qualified for a
     // computed `@Metadata` — including data classes (their synthesized methods get a LocalVariableTable
@@ -4062,7 +4050,7 @@ fn emit_annotation_class(
     cw.set_class_annotations(&user_annotations);
     cw.set_runtime_annotations(&mirrors);
     let computed = (class_meta.is_none() && opts.emit_class_metadata)
-        .then(|| build_class_metadata(ir, env.override_results, c, opts))
+        .then(|| build_class_metadata(ir, env.override_results, c, opts, env.local_delegated()))
         .flatten();
     if let Some(m) = class_meta.or(computed.as_ref()) {
         cw.set_kotlin_metadata(m.k, &m.mv, m.xi, &m.d1, &m.d2);
@@ -4079,55 +4067,6 @@ fn arrays_param_desc(array: Ty) -> String {
         "[Ljava/lang/Object;".to_string()
     } else {
         type_descriptor(array)
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum JvmArrayActualRealization {
-    Get,
-    Set,
-    Size,
-}
-
-fn array_actual_element_matches(receiver: Ty, declared: Ty) -> bool {
-    let Some(stored) = receiver.array_elem() else {
-        return false;
-    };
-    if receiver.is_reference_array() {
-        let declared_stored = reference_array_element(ir_ty_to_jvm(&declared));
-        crate::jvm::names::same_type_descriptor(declared_stored, ir_ty_to_jvm(&stored))
-    } else {
-        declared == stored
-    }
-}
-
-/// The JVM realization of an already-selected Kotlin array `actual` declaration. This recognizes the
-/// declaration's complete semantic identity; a same-named function with another owner or signature is
-/// an ordinary call. Metadata supplies these declarations, while only the JVM emitter knows that their
-/// bodies are array bytecodes rather than methods on a loadable `kotlin/*Array` class.
-fn jvm_array_actual_realization(
-    owner: TypeName,
-    name: &str,
-    receiver: Ty,
-    params: &[Ty],
-    ret: Ty,
-) -> Option<JvmArrayActualRealization> {
-    if !receiver.is_array() || receiver.non_null().obj_internal() != Some(owner) {
-        return None;
-    }
-    match (name, params, ret) {
-        ("get", [Ty::Int], declared_ret)
-            if array_actual_element_matches(receiver, declared_ret) =>
-        {
-            Some(JvmArrayActualRealization::Get)
-        }
-        ("set", [Ty::Int, declared_element], Ty::Unit)
-            if array_actual_element_matches(receiver, *declared_element) =>
-        {
-            Some(JvmArrayActualRealization::Set)
-        }
-        ("size", [], Ty::Int) => Some(JvmArrayActualRealization::Size),
-        _ => None,
     }
 }
 
@@ -4464,7 +4403,7 @@ fn emit_interface_class(
     // An interface is a VIEW of the same `IrClass` every other kind is — compute its `@Metadata` (and
     // therefore its debug tables/annotations) through the shared path, exactly like `emit_class`.
     let computed = (class_meta.is_none() && opts.emit_class_metadata)
-        .then(|| build_class_metadata(ir, env.override_results, c, opts))
+        .then(|| build_class_metadata(ir, env.override_results, c, opts, env.local_delegated()))
         .flatten();
     if computed.is_some() {
         attach_synth_debug_tables(ir, c, &mut cw, opts.param_assertions, None, &[], &[]);
@@ -5211,7 +5150,7 @@ fn emit_enum_class(
     // annotations) through the shared path, exactly like `emit_class` and `emit_interface_class`.
     let class_metadata = opts
         .emit_class_metadata
-        .then(|| build_class_metadata(ir, env.override_results, c, opts))
+        .then(|| build_class_metadata(ir, env.override_results, c, opts, env.local_delegated()))
         .flatten();
     if class_metadata.is_some() {
         attach_synth_debug_tables(
@@ -6123,7 +6062,7 @@ fn emit_method_inner_with_holder(
     let declared_nullability::DeclaredNullability {
         result: ret_ann,
         parameters: param_anns,
-    } = declared_nullability::declared_nullability(ir, fid);
+    } = override_result_emission::declared_nullability(ir, e.override_results, fid);
     let emitted_param_anns = holder_receiver.map_or_else(
         || param_anns.clone(),
         |_| {
@@ -6410,8 +6349,8 @@ fn emit_method_inner_with_holder(
     }
     // Method locals precede `this` and parameters in kotlinc's table order.
     if e.record_locals {
-        for (_, slot, start, name, desc) in std::mem::take(&mut e.open_locals) {
-            code.add_local_entry(start, None, slot, &name, &desc);
+        for local in std::mem::take(&mut e.open_locals) {
+            local.record(None, &mut code);
         }
     }
     // Suspend rewriting invalidates source-local expression ids, but its physical parameters remain
@@ -6944,7 +6883,9 @@ struct Emitter<'a> {
     jvm_default: JvmDefaultMode,
     property_realizations: &'a crate::jvm::property_realizations::PropertyRealizations,
     default_call_operands: &'a crate::jvm::default_call_operands::DefaultCallOperands,
+    sam_wrapper_realizations: &'a crate::jvm::sam_wrappers::SamWrapperRealizations,
     suspended_result_returns: &'a crate::jvm::suspend::SuspendedResultReturns,
+    intrinsic_probe_continuations: &'a crate::jvm::suspend::IntrinsicProbeContinuations,
     /// The exact source class whose code this emitter is writing. A generated holder has no
     /// source-static ownership; it must route every private static access through the owner.
     static_owner: Option<StaticOwner>,
@@ -7024,16 +6965,17 @@ struct Emitter<'a> {
     /// `result*31 + <branchy nullable-field hash>`). Prepended to every recorded stack-map frame's stack
     /// so the pending operand is typed through the branch (matching kotlinc), avoiding the spill-to-temp
     /// krusty would otherwise need. Pushed/popped around the branchy RHS in `emit_binop`.
-    /// Open source locals: `(block_depth, slot, start_pc, name, descriptor)`.
-    open_locals: Vec<(usize, u16, u16, String, String)>,
+    /// Open source locals, in declaration order.
+    open_locals: Vec<block_scope::OpenLocal>,
     /// Current block nesting depth; the function body is depth 1.
     block_depth: usize,
     /// The source line of the statement currently being emitted, when it has one. An operand that
     /// carries its own line leaves that line in effect; the instruction that CONSUMES the operand
     /// belongs to the statement, and kotlinc marks it back to this line.
     statement_line: Option<u32>,
-    /// The source line of the comparison being emitted, which its jump carries.
-    comparison_line: Option<u32>,
+    /// The comparison being emitted and its source line. The jump carries that line, mapped when
+    /// the comparison is a copied inline expression.
+    comparison_line: Option<(ExprId, u32)>,
     /// Whether this method records source-local debug entries.
     record_locals: bool,
     /// The source class whose primary-constructor property initializers and `init` blocks are
@@ -7083,8 +7025,10 @@ impl<'a> Emitter<'a> {
             jvm_default: env.jvm_default,
             property_realizations: env.property_realizations,
             default_call_operands: env.default_call_operands,
+            sam_wrapper_realizations: env.sam_wrapper_realizations,
             suspended_result_returns: env.suspended_result_returns,
             self_companion: singleton_instance_load::self_companion(ir, static_owner),
+            intrinsic_probe_continuations: env.intrinsic_probe_continuations,
             static_owner,
             classifiers: env.signature_symbols,
             owner: owner.to_string(),
@@ -7372,18 +7316,18 @@ impl<'a> Emitter<'a> {
                     scratch.push_int(0, self.cw);
                     store(Ty::Int, depth_marker, &mut scratch);
                     if self.record_locals {
-                        if let Some(origin) = self.ir.lambda_origins.get(&impl_fn) {
-                            lam_locals_declared.push((
+                        match crate::jvm::debug_local_names::spliced_lambda_marker_name(
+                            self.ir, callee, impl_fn,
+                        ) {
+                            Some(marker) => lam_locals_declared.push((
                                 u16::try_from(scratch.bytes.len()).unwrap_or(u16::MAX),
                                 depth_marker,
-                                crate::jvm::debug_local_names::spliced_lambda_marker_name(
-                                    callee,
-                                    &self.owner,
-                                    &origin.implementation_name,
-                                    origin.implementation_ordinal,
-                                ),
+                                marker,
                                 "I".to_string(),
-                            ));
+                            )),
+                            None => self.run.set_emit_error(
+                                "a spliced lambda frame has no realized class provenance".into(),
+                            ),
                         }
                     }
                     let body_ret =
@@ -8085,6 +8029,7 @@ impl<'a> Emitter<'a> {
             IrExpr::Variable {
                 index, ty, init, ..
             } => self.emit_local_variable(e, index, ty, init, code),
+            IrExpr::InlineFrameMarker => self.emit_inline_frame_marker(e, code),
             IrExpr::SetValue { var, value } => {
                 let Some(&(slot, jt)) = self.slots.get(&var) else {
                     self.run.set_emit_error(
@@ -8130,7 +8075,7 @@ impl<'a> Emitter<'a> {
 
     fn emit_value_expression(&mut self, e: u32, code: &mut CodeBuilder) {
         debug_lines::begin_expression(self.ir, e, code);
-        debug_lines::mark_expression_start(self.ir, e, code);
+        self.mark_expression_start(e, code);
         // A suspension whose machine emission owns: mark where it landed. The splice decides that
         // position, so an offset recorded before it would be worthless, whereas an instruction
         // travels with the code. Every marker is erased once its answers are read.
@@ -8139,44 +8084,9 @@ impl<'a> Emitter<'a> {
         let node = self.ir.expr(e).clone();
         self.emit_value_node(e, &node, code);
         self.mark_after_inlined_call(e, code);
+        self.probe_intrinsic_suspension(e, code);
         self.machine_after(suspension, code);
         self.close_declared_suspension(e, code);
-    }
-
-    /// Open a suspension this emission's machine owns, if `e` is one.
-    ///
-    /// Both the value and the discarding path go through this: a suspension whose result is thrown
-    /// away — `api.stop(id)` as a statement — is a state of the machine like any other, and one
-    /// that never spilled would resume into a frame the dispatch cannot produce.
-    fn machine_before(&mut self, e: u32, code: &mut CodeBuilder) -> Option<usize> {
-        if !self.machine_suspensions.contains(&e) {
-            return None;
-        }
-        let ordinal = self.machine_next_ordinal;
-        self.machine_next_ordinal += 1;
-        match self.machine.is_some() {
-            // Building the machine: spill first, then the call, then the check.
-            true => self.emit_machine_spills(ordinal, code),
-            // Discovering the frame: mark where the splice put this suspension. The discovery pass
-            // reads everything else — the locals held here and what is on the stack under the
-            // call — off the finished bytecode.
-            false => {
-                if let Ok(marker) = u16::try_from(ordinal) {
-                    code.coroutine_marker(
-                        crate::jvm::classfile::CoroutineMarker::Suspension,
-                        marker,
-                    );
-                }
-            }
-        }
-        Some(ordinal)
-    }
-
-    /// Close a suspension opened by [`Self::machine_before`].
-    fn machine_after(&mut self, suspension: Option<usize>, code: &mut CodeBuilder) {
-        if let (Some(ordinal), true) = (suspension, self.machine.is_some()) {
-            self.emit_machine_check(ordinal, code);
-        }
     }
 
     /// Realize `IrExpr::PropertyRead` — the one place that decides what reading a Kotlin property
@@ -8220,7 +8130,8 @@ impl<'a> Emitter<'a> {
                         operation.interface,
                     ),
             };
-            if let Some(access) = access {
+            if let Some(mut access) = access {
+                self.retarget_explicit_backing_read(&operation, &mut access);
                 return self.emit_realized_property_read(
                     operation.expression,
                     operation.receiver,
@@ -8230,32 +8141,13 @@ impl<'a> Emitter<'a> {
                 );
             }
         }
-        let array_realization = receiver_ty.and_then(|receiver_ty| {
-            jvm_array_actual_realization(
-                operation.owner,
-                operation.name,
-                receiver_ty,
-                &[],
-                declaration_ty,
-            )
-        });
         crate::trace_compiler!(
             "emit",
-            "property read owner={} name={} receiver={receiver_ty:?} declaration={:?} array_realization={array_realization:?}",
+            "property read owner={} name={} receiver={receiver_ty:?} declaration={:?}",
             operation.owner,
             operation.name,
             declaration_ty,
         );
-        if array_realization == Some(JvmArrayActualRealization::Size) {
-            self.emit_value(
-                operation
-                    .receiver
-                    .expect("array property reads have a dispatch receiver"),
-                code,
-            );
-            code.arraylength();
-            return;
-        }
         if let Some(access) = self
             .ir
             .property_external_accessors
@@ -8272,12 +8164,13 @@ impl<'a> Emitter<'a> {
         }
         // A source declaration from this compilation supplies the invocation shape; a checker-selected
         // spelling refines only its otherwise-conventional accessor name.
-        if let Some(access) = self.declared_property_read_access(
+        if let Some(mut access) = self.declared_property_read_access(
             operation.owner,
             operation.name,
             selected.map(|(name, _)| name.as_str()),
             operation.interface,
         ) {
+            self.retarget_explicit_backing_read(&operation, &mut access);
             return self.emit_realized_property_read(
                 operation.expression,
                 operation.receiver,
@@ -8430,19 +8323,7 @@ impl<'a> Emitter<'a> {
             return;
         }
         // The assigned value is bridged to what the realization stores, the mirror of the read's bridge.
-        let target = match &access {
-            PropertyAccess::Field { descriptor, .. } => ty_from_field_descriptor(descriptor),
-            PropertyAccess::Accessor { descriptor, .. } => {
-                crate::jvm::names::parse_method_descriptor(descriptor)
-                    .and_then(|(params, _)| params.first().map(|p| ty_from_field_descriptor(p)))
-                    .unwrap_or_else(|| ir_ty_to_jvm(operation.ty))
-            }
-            PropertyAccess::AccessBridge { descriptor, .. } => {
-                crate::jvm::names::parse_method_descriptor(descriptor)
-                    .and_then(|(params, _)| params.last().map(|p| ty_from_field_descriptor(p)))
-                    .unwrap_or_else(|| ir_ty_to_jvm(operation.ty))
-            }
-        };
+        let target = property_access::property_store_slot(&access, *operation.ty);
         if let Some(temps) = &spilled {
             let (slot, value_ty, _) = temps[1];
             load(value_ty, slot, code);
@@ -8478,12 +8359,12 @@ impl<'a> Emitter<'a> {
                 is_static,
             } => {
                 let owner = owner.render();
-                let jt = ty_from_field_descriptor(&descriptor);
+                let words = crate::jvm::physical_type::field_slot(&descriptor).words();
                 let fref = self.cw.fieldref(&owner, &name, &descriptor);
                 if is_static {
-                    code.putstatic(fref, slot_words(jt) as i32);
+                    code.putstatic(fref, words);
                 } else {
-                    code.putfield(fref, slot_words(jt) as i32);
+                    code.putfield(fref, words);
                 }
             }
             PropertyAccess::Accessor {
@@ -8735,134 +8616,6 @@ impl<'a> Emitter<'a> {
         })
     }
 
-    /// How to read property `name` of a class THIS compilation declares — there is no class file to ask,
-    /// the IR is the declaration. Inside the declaring class the private backing field is loaded directly,
-    /// which is what kotlinc emits there; from outside, the read goes through the accessor. `None` when
-    /// `owner` is not a class of this file, or declares no such property.
-    fn declared_property_read_access(
-        &self,
-        owner: TypeName,
-        name: &str,
-        selected_accessor: Option<&str>,
-        selected_interface: bool,
-    ) -> Option<crate::jvm::inline::PropertyAccess> {
-        use crate::jvm::inline::PropertyAccess;
-        let class = self.ir.classes.iter().find(|c| c.fq_name == owner)?;
-        let interface = is_jvm_interface(class) || selected_interface;
-        // A property that DECLARES an accessor (computed, delegated, or `field`-using) is always read
-        // through it — the accessor is user code, and a direct field load would skip it. Only a plain
-        // backing-field property may be read directly, and only from inside the declaring class.
-        let declared = class.properties.iter().find(|p| p.name == name);
-        let direct_field = self.direct_field_access(class, declared, false);
-        if let Some(getter) = declared.and_then(|p| p.getter) {
-            let f = &self.ir.functions[getter as usize];
-            // Another class reads a private getter through its bridge, kotlinc's `access$<getter>`.
-            if self.reaches_through_bridge(class.fq_name, getter) {
-                return Some(access_bridges::private_member_read_access(
-                    self.ir, getter, owner,
-                ));
-            }
-            return Some(PropertyAccess::Accessor {
-                owner,
-                name: if class.is_annotation {
-                    name.to_string()
-                } else {
-                    f.name.clone()
-                },
-                descriptor: ir_method_desc(&f.params, &f.ret),
-                is_static: f.is_static,
-                is_interface: interface,
-            });
-        }
-        let field = property_access::declared_property_field(class, declared, name);
-        // A declaration-specified JVM name wins; otherwise the checker's selected accessor identity
-        // refines the naming convention. Backend value-class mangling lives in a different table and
-        // therefore cannot overwrite an inherited generic declaration here.
-        let accessor_name = if class.is_annotation {
-            name.to_string()
-        } else {
-            declared
-                .and_then(|p| p.getter_jvm_name.clone())
-                .or_else(|| selected_accessor.map(str::to_string))
-                .unwrap_or_else(|| crate::names::property_getter_name(name))
-        };
-        // The accessor's descriptor comes from the accessor ITSELF, not from the field: an accessor may
-        // return something the field's declared type does not spell (an erased generic, a value class's
-        // underlying), and a descriptor built from the wrong one is a `NoSuchMethodError` at run time.
-        // A value-class-typed property's accessor is `@JvmName`-mangled (`getId-<hash>`), so match the
-        // mangled spelling too — the alternative is falling through to a private backing field, which is
-        // an `IllegalAccessError` from anywhere but the declaring class.
-        let accessor = class.methods.iter().find_map(|&fid| {
-            let f = &self.ir.functions[fid as usize];
-            let named = f.name == accessor_name
-                || f.name
-                    .strip_prefix(&accessor_name)
-                    .is_some_and(|rest| rest.starts_with('-'));
-            let getter_shape = f.params.is_empty()
-                || (f.is_static && f.name.ends_with("-impl") && f.params.len() == 1);
-            (named && getter_shape).then_some(f)
-        });
-        if let Some(accessor) = accessor.filter(|_| !direct_field || field.is_none()) {
-            return Some(PropertyAccess::Accessor {
-                owner,
-                name: accessor.name.clone(),
-                descriptor: ir_method_desc(&accessor.params, &accessor.ret),
-                is_static: accessor.is_static,
-                is_interface: interface,
-            });
-        }
-        // A private property reached from outside its class goes through the synthetic bridge; there is no
-        // accessor and the field itself is unreachable.
-        if let Some(declared) = declared.filter(|p| {
-            p.needs_access_bridge && self.static_owner != Some(StaticOwner::Class(class.fq_name))
-        }) {
-            let ty = declared
-                .backing_field
-                .and_then(|i| class.fields.get(i as usize))
-                .map_or(declared.ty, |f| f.ty);
-            let d = type_descriptor(jvm_declared_ty(&ty));
-            return Some(static_accessors::member_property_access_bridge(
-                self.ir, class, owner, declared, &d, true,
-            ));
-        }
-        // A class of THIS compilation is answered from its declaration, always — never by falling through
-        // to the naming-convention guess, which has no class file to ask and would mistake an interface
-        // for a class (`invokevirtual` on an interface is an `IncompatibleClassChangeError`).
-        let Some(field) = field else {
-            let ty = declared.map(|p| p.ty)?;
-            return Some(PropertyAccess::Accessor {
-                owner,
-                name: accessor_name,
-                descriptor: ir_method_desc(&[], &stored_value_ty(ty)),
-                is_static: false,
-                is_interface: interface,
-            });
-        };
-        // Outside the declaring class the backing field is private, so the read goes through the
-        // accessor — the one synthesized for this declaration, which carries no IR method of its own.
-        if !direct_field {
-            return Some(PropertyAccess::Accessor {
-                owner,
-                name: accessor_name,
-                descriptor: method_descriptor(
-                    &[],
-                    declared
-                        .map(|property| declared_property_accessor_jvm(self.ir, property, field))
-                        .unwrap_or_else(|| jvm_declared_ty(&field.ty)),
-                ),
-                is_static: false,
-                is_interface: interface,
-            });
-        }
-        Some(PropertyAccess::Field {
-            owner,
-            name: instance_field_jvm_name(self.ir, class, field),
-            descriptor: type_descriptor(jvm_declared_ty(&field.ty)),
-            // A static-storage object's backing fields are JVM statics (kotlinc's shape).
-            is_static: static_storage(self.ir, class),
-        })
-    }
-
     /// Whether a property of `owner` may be reached as its raw backing FIELD from the class currently
     /// being emitted. Only inside the declaring class (the field is private everywhere else) — and only
     /// for a FINAL property. An `open`/`override` property is redeclared by subclasses, which replace its
@@ -8890,6 +8643,14 @@ impl<'a> Emitter<'a> {
     ) -> bool {
         if declared.is_some_and(|p| is_jvm_field(class, &p.name)) {
             return true;
+        }
+        // An explicit backing field is a different type from the property. The checker already
+        // chose a field read, and lowered it as one, when the receiver's static type is exactly
+        // this class. A property read that remains is the getter: a subclass value, a nested
+        // class, and every other receiver. Loading the private field here would skip that choice
+        // and hand back the carrier (`Integer.valueOf`) instead of the getter's public value.
+        if !writable && declared.is_some_and(|property| property.storage_ty.is_some()) {
+            return false;
         }
         class.fq_name_matches(&self.owner)
             && !declared.is_some_and(|p| p.is_open && !p.is_private && (!writable || p.is_var))
@@ -8923,40 +8684,11 @@ impl<'a> Emitter<'a> {
                     .map_or_else(|| self.facade.clone(), |name| name.render());
                 code.ldc_class(&name, self.cw);
             }
-            IrExpr::KClassLiteral { classifier, value } => {
-                match (classifier, value) {
-                    (Some(classifier), None) => {
-                        let descriptor = boxed_descriptor(*classifier);
-                        let internal = descriptor
-                            .strip_prefix('L')
-                            .and_then(|descriptor| descriptor.strip_suffix(';'))
-                            .unwrap_or(&descriptor);
-                        code.ldc_class(internal, self.cw);
-                    }
-                    (None, Some(value)) => {
-                        self.emit_value(*value, code);
-                        self.box_scalar_operand(self.value_ty(*value), code);
-                        let get_class = self.cw.methodref(
-                            "java/lang/Object",
-                            "getClass",
-                            "()Ljava/lang/Class;",
-                        );
-                        code.invokevirtual(get_class, 0, 1);
-                    }
-                    _ => {
-                        self.run.set_emit_error(
-                            "checked class literal has an invalid operand shape".to_string(),
-                        );
-                        return;
-                    }
-                }
-                let reflection = self.cw.methodref(
-                    "kotlin/jvm/internal/Reflection",
-                    "getOrCreateKotlinClass",
-                    "(Ljava/lang/Class;)Lkotlin/reflect/KClass;",
-                );
-                code.invokestatic(reflection, 1, 1);
-            }
+            IrExpr::KClassLiteral {
+                classifier,
+                value,
+                type_argument,
+            } => self.emit_kclass_literal(*classifier, *value, *type_argument, code),
             IrExpr::GetValue(i) => {
                 // A slot that was never allocated means the lowering produced malformed IR (e.g. an
                 // unsupported suspend shape). Don't panic — flag the file unemittable and skip it.
@@ -9037,12 +8769,11 @@ impl<'a> Emitter<'a> {
                 outer,
             } => {
                 self.emit_value(*receiver, code);
-                let fref = self.cw.fieldref(
-                    &inner.render(),
-                    "this$0",
-                    &type_descriptor(Ty::obj_name(*outer)),
-                );
-                code.getfield(fref, 1);
+                let outer = instance_representation(self.ir, *outer);
+                let fref = self
+                    .cw
+                    .fieldref(&inner.render(), "this$0", &type_descriptor(outer));
+                code.getfield(fref, slot_words(outer) as i32);
             }
             IrExpr::GetField {
                 receiver,
@@ -9077,8 +8808,11 @@ impl<'a> Emitter<'a> {
                 defaults: default_parameters,
                 default_prefix_count,
             } => {
-                let owner = internal.render();
                 let args = args.clone();
+                if self.emit_nullable_sam_wrapper_new(e, *internal, &args, code) {
+                    return;
+                }
+                let owner = internal.render();
                 // The constructor descriptor + its argument-word count come from ONE source, identified by
                 // the owner NAME (no same-file/other-file/classpath control-flow split):
                 //  - a verbatim descriptor (`ctor_desc`) for a classpath ctor whose signature isn't modeled
@@ -9136,8 +8870,7 @@ impl<'a> Emitter<'a> {
                             source_parameter_count,
                         )
                     };
-                let physical_params =
-                    parse_descriptor_params(&desc).expect("constructor descriptor must be valid");
+                let physical_params = self.constructor_physical_params(e, &desc);
                 let aw = physical_params.iter().map(|t| slot_words(*t) as i32).sum();
                 if args.iter().any(|&a| self.spills_operand_prefix(a)) {
                     // An argument that enters a handler, suspends, or leaves for a loop target can't
@@ -9951,104 +9684,7 @@ impl<'a> Emitter<'a> {
                     target: _,
                 } => {
                     let recv = dispatch_receiver.expect("virtual call needs a receiver");
-                    let semantic_receiver = self.value_ty(recv);
                     let interface = *interface || declared_jvm_interface(self.ir, *owner);
-                    if semantic_receiver.is_array() {
-                        if let Some((declared_params, declared_ret)) = params {
-                            let realization = jvm_array_actual_realization(
-                                *owner,
-                                name,
-                                semantic_receiver,
-                                declared_params,
-                                *declared_ret,
-                            );
-                            crate::trace_compiler!(
-                                "emit",
-                                "array actual candidate owner={} name={} receiver={:?} params={:?} ret={:?} realization={:?}",
-                                owner,
-                                name,
-                                semantic_receiver,
-                                declared_params,
-                                declared_ret,
-                                realization,
-                            );
-                            if let Some(realization) = realization {
-                                match realization {
-                                    JvmArrayActualRealization::Get => {
-                                        self.emit_array_get(recv, args[0], code)
-                                    }
-                                    JvmArrayActualRealization::Set => {
-                                        self.emit_array_set(recv, args[0], args[1], code)
-                                    }
-                                    JvmArrayActualRealization::Size => {
-                                        self.emit_value(recv, code);
-                                        code.arraylength();
-                                    }
-                                }
-                                return;
-                            }
-                        }
-                        let erased_descriptor = |ty: Ty| {
-                            if ty.is_array() {
-                                arrays_param_desc(ty)
-                            } else {
-                                type_descriptor(ty)
-                            }
-                        };
-                        let mut expected = String::from("(");
-                        expected.push_str(&erased_descriptor(semantic_receiver));
-                        for &argument in args {
-                            expected.push_str(&erased_descriptor(self.value_ty(argument)));
-                        }
-                        expected.push(')');
-                        let semantic_ret = self.value_ty(e);
-                        expected.push_str(&erased_descriptor(semantic_ret));
-                        if let Some(realization) =
-                            self.bodies.static_array_member_realization(name, &expected)
-                        {
-                            let physical_params = parse_descriptor_params(&realization.descriptor)
-                                .expect("selected array-member realization descriptor");
-                            let mut operands = Vec::with_capacity(args.len() + 1);
-                            operands.push(recv);
-                            operands.extend(args.iter().copied());
-                            let physical_ret = ty_from_descriptor_ret(&realization.descriptor);
-                            if let Err(mismatch) = self.emit_call_descriptor_operands(
-                                e,
-                                1,
-                                &operands,
-                                &physical_params,
-                                code,
-                            ) {
-                                self.bail_descriptor_arity(&mismatch, physical_ret, code);
-                                return;
-                            }
-                            let argument_words: i32 = physical_params
-                                .iter()
-                                .map(|ty| slot_words(*ty) as i32)
-                                .sum();
-                            let method = self.cw.methodref(
-                                &realization.owner,
-                                &realization.name,
-                                &realization.descriptor,
-                            );
-                            crate::trace_compiler!(
-                                "emit",
-                                "array member {}.{} -> {}.{}{}",
-                                owner,
-                                name,
-                                realization.owner,
-                                realization.name,
-                                realization.descriptor,
-                            );
-                            self.mark_call_start(e, code);
-                            code.invokestatic(
-                                method,
-                                argument_words,
-                                slot_words(physical_ret) as i32,
-                            );
-                            return;
-                        }
-                    }
                     // A sibling-file user method carries its signature as `Ty`s (`params`): build the
                     // descriptor and emit a plain virtual/interface call. The classpath-operator
                     // special-casing below only applies to the `descriptor` form (a classpath receiver).
@@ -10493,40 +10129,7 @@ impl<'a> Emitter<'a> {
                     self.emit_when(e, branches, false, code);
                 }
             }
-            // Block in value position: statements for effect, the trailing value left on the stack,
-            // block-locals scoped (the slot map restored) unless it is a callable's own scope.
-            IrExpr::Block { stmts, value } => {
-                self.link_safe_call_chain(e, code);
-                let enclosing_statement_line = self.statement_line;
-                let saved = self.open_slot_scope();
-                self.block_depth += 1;
-                let mut dead = false;
-                for s in stmts {
-                    self.mark_statement_line(*s, code);
-                    // A statement nets zero on the operand stack. Reset the tracked height to that
-                    // baseline afterward: raw spliced control flow is opaque to the builder's linear
-                    // counter and can leave `cur_stack` drifted above the real, verified height.
-                    let base = code.stack_height();
-                    self.emit(*s, code);
-                    if self.discarding_diverges(*s) {
-                        dead = true;
-                        break;
-                    }
-                    code.set_stack(base.max(0) as u16);
-                }
-                if !dead {
-                    if let Some(v) = value {
-                        self.mark_statement_line(*v, code);
-                        self.emit_value(*v, code);
-                    }
-                }
-                if !self.ir.callable_scopes.contains(&e) {
-                    self.close_scope_locals(code, false);
-                }
-                self.block_depth -= 1;
-                self.restore_slot_scope(saved);
-                self.statement_line = enclosing_statement_line;
-            }
+            IrExpr::Block { stmts, value } => self.emit_value_block(e, stmts, *value, code),
             IrExpr::Lambda {
                 impl_fn,
                 arity,
@@ -11002,7 +10605,10 @@ impl<'a> Emitter<'a> {
                 self.emits_control_flow(*func)
                     || args.iter().any(|&arg| self.emits_control_flow(arg))
             }
-            IrExpr::New { args, .. } => args.iter().any(|&a| self.emits_control_flow(a)),
+            IrExpr::New { args, .. } => {
+                self.nullable_sam_wrapper_emits_control_flow(e)
+                    || args.iter().any(|&a| self.emits_control_flow(a))
+            }
             // A `lateinit` FIELD read carries its own uninitialized guard (`dup; ifnonnull L; ldc name;
             // invokestatic throwUninitializedPropertyAccessException; L:`), whose join requires the
             // surrounding operand baseline to agree — so an earlier operand is spilled first.
@@ -11126,145 +10732,6 @@ impl<'a> Emitter<'a> {
         emit_num_conv(arithmetic_ty, source_prim, code);
         emit_num_conv(source_prim, ret, code);
         true
-    }
-
-    fn emit_binop(
-        &mut self,
-        expression: u32,
-        op: IrBinOp,
-        lhs: u32,
-        rhs: u32,
-        code: &mut CodeBuilder,
-    ) {
-        use IrBinOp::*;
-        let lt = self.value_ty(lhs);
-        match op {
-            Add | Sub | Mul | Div | Rem => {
-                // A branchy RHS (`result*31 + <nullable-field hashCode ternary>`): keep the numeric LHS on
-                // the operand stack across the RHS's branch — matching kotlinc. Final-bytecode analysis
-                // carries that prefix through every edge, so emitter-side frame annotation is unnecessary. A
-                // non-branchy RHS (or a branchy LHS) keeps the ordinary `emit_operands` path (spill only if
-                // needed) — bytecode unchanged for the common case. NOT applicable when the RHS can enter
-                // an exception handler, suspend, or transfer to an enclosing loop (`must_spill_across`):
-                // those boundaries cannot carry the held LHS to this operation.
-                if self.emits_control_flow(rhs)
-                    && !self.emits_control_flow(lhs)
-                    && !self.must_spill_across(rhs)
-                {
-                    self.emit_value(lhs, code);
-                    self.emit_value(rhs, code);
-                } else {
-                    self.emit_operands(&[lhs, rhs], code);
-                }
-                match lt {
-                    Ty::Long => match op {
-                        Add => code.ladd(),
-                        Sub => code.lsub(),
-                        Mul => code.lmul(),
-                        Div => code.ldiv(),
-                        Rem => code.lrem(),
-                        _ => unreachable!(),
-                    },
-                    Ty::Double => match op {
-                        Add => code.dadd(),
-                        Sub => code.dsub(),
-                        Mul => code.dmul(),
-                        Div => code.ddiv(),
-                        Rem => code.drem(),
-                        _ => unreachable!(),
-                    },
-                    Ty::Float => match op {
-                        Add => code.fadd(),
-                        Sub => code.fsub(),
-                        Mul => code.fmul(),
-                        Div => code.fdiv(),
-                        Rem => code.frem(),
-                        _ => unreachable!(),
-                    },
-                    _ => match op {
-                        Add => code.iadd(),
-                        Sub => code.isub(),
-                        Mul => code.imul(),
-                        Div => code.idiv(),
-                        Rem => code.irem(),
-                        _ => unreachable!(),
-                    },
-                }
-                // JVM int-category arithmetic always leaves a full `int`, even when both inputs
-                // use the Char/Byte/Short carrier. Checked FIR's result type remains authoritative:
-                // normalize only after the operation (`Char + Int` wraps modulo 2^16), while an
-                // ordinary `Char - Char : Int` remains untouched.
-                let arithmetic_result = match lt {
-                    Ty::Byte | Ty::Short | Ty::Char => Ty::Int,
-                    other => other,
-                };
-                let semantic_result = self
-                    .ir
-                    .logical_types
-                    .get(&expression)
-                    .copied()
-                    .unwrap_or(arithmetic_result);
-                emit_num_conv(
-                    arithmetic_result,
-                    ir_ty_to_jvm(&semantic_result.non_null()),
-                    code,
-                );
-            }
-            And | Or => {
-                // Evaluate lhs, hold it in a temp while a branchy rhs is emitted, then combine. The
-                // temp is dead afterwards, so release it so it doesn't leak into later merge frames.
-                // Without this, a `false`/`else` path that never assigned the temp reaches a merge
-                // whose frame claims it's defined → VerifyError.
-                self.emit_value(lhs, code);
-                let temp = self.frame.enter_temp(TempRole::BooleanOperand, Ty::Boolean);
-                let tmp = temp.slot();
-                let lease = self.lease_frame_temporary(temp, Ty::Boolean);
-                code.istore(tmp);
-                self.emit_value(rhs, code);
-                code.iload(tmp);
-                if op == And {
-                    code.iand()
-                } else {
-                    code.ior()
-                }
-                self.release_temporary(lease);
-            }
-            BitAnd | BitOr | BitXor => {
-                self.emit_binary_operands_with_live_prefix(lhs, rhs, code);
-                match lt {
-                    Ty::Long => match op {
-                        BitAnd => code.land(),
-                        BitOr => code.lor(),
-                        BitXor => code.lxor(),
-                        _ => unreachable!(),
-                    },
-                    _ => match op {
-                        BitAnd => code.iand(),
-                        BitOr => code.ior(),
-                        BitXor => code.ixor(),
-                        _ => unreachable!(),
-                    },
-                }
-            }
-            Shl | Shr | Ushr => {
-                self.emit_operands(&[lhs, rhs], code); // shift amount is an `Int`
-                match lt {
-                    Ty::Long => match op {
-                        Shl => code.lshl(),
-                        Shr => code.lshr(),
-                        Ushr => code.lushr(),
-                        _ => unreachable!(),
-                    },
-                    _ => match op {
-                        Shl => code.ishl(),
-                        Shr => code.ishr(),
-                        Ushr => code.iushr(),
-                        _ => unreachable!(),
-                    },
-                }
-            }
-            Lt | Le | Gt | Ge | Eq | Ne | RefEq | RefNe => self.emit_comparison(expression, code),
-        }
     }
 
     /// Realize the already-selected Kotlin assertion operation. The runtime guard is emitted before
@@ -11502,7 +10969,7 @@ impl<'a> Emitter<'a> {
                 .map(|(_, t)| *t)
                 .or_else(|| self.var_types.get(i).copied())
                 .unwrap_or(Ty::Error),
-            IrExpr::EnclosingInstance { outer, .. } => Ty::obj_name(*outer),
+            IrExpr::EnclosingInstance { outer, .. } => instance_representation(self.ir, *outer),
             IrExpr::GetField { class, index, .. } => {
                 ir_ty_to_jvm(&self.ir.classes[*class as usize].fields[*index as usize].ty)
             }
@@ -11650,33 +11117,6 @@ const LMF_METAFACTORY_DESC: &str = "(Ljava/lang/invoke/MethodHandles$Lookup;Ljav
 Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodHandle;\
 Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/CallSite;";
 
-/// A JVM method descriptor `(p1p2…)R` from parameter/return `Ty`s.
-/// The erased SAM descriptor `(Ljava/lang/Object;…)Ljava/lang/Object;` for `FunctionN.invoke`.
-fn sam_descriptor(arity: u8) -> String {
-    let mut s = String::from("(");
-    for _ in 0..arity {
-        s.push_str("Ljava/lang/Object;");
-    }
-    s.push_str(")Ljava/lang/Object;");
-    s
-}
-
-fn is_high_arity_function(arity: u8) -> bool {
-    crate::jvm::names::uses_function_n(usize::from(arity))
-}
-
-fn jvm_function_interface(arity: u8) -> String {
-    crate::jvm::names::function_interface_internal_name(usize::from(arity))
-}
-
-fn jvm_function_invoke_descriptor(arity: u8) -> String {
-    if is_high_arity_function(arity) {
-        "([Ljava/lang/Object;)Ljava/lang/Object;".to_string()
-    } else {
-        sam_descriptor(arity)
-    }
-}
-
 /// The boxed (wrapper) descriptor for a `Ty` — primitives map to their wrapper, references unchanged.
 fn boxed_descriptor(t: Ty) -> String {
     if t.non_null().is_unsigned() {
@@ -11724,27 +11164,12 @@ fn descriptor_ret_words(desc: &str) -> i32 {
 
 /// Parse a single JVM field/type descriptor into a `Ty`.
 ///
-/// Suspend operand materialization also consumes exact field descriptors already present in IR. Keep
-/// that pass on this canonical parser instead of growing a second primitive/object/array branch table.
+/// The physical-type boundary owns descriptor parsing. Consumers that still need a `Ty` project it
+/// from that slot instead of maintaining another primitive/object/array table here. In particular,
+/// this preserves the reference element category of `[Lkotlin/UInt;` rather than rebuilding it as
+/// the specialized primitive `UIntArray` (`[I`).
 pub(crate) fn ty_from_field_descriptor(d: &str) -> Ty {
-    match d.as_bytes().first() {
-        Some(b'I') => Ty::Int,
-        Some(b'J') => Ty::Long,
-        Some(b'Z') => Ty::Boolean,
-        Some(b'B') => Ty::Byte,
-        Some(b'C') => Ty::Char,
-        Some(b'S') => Ty::Short,
-        Some(b'F') => Ty::Float,
-        Some(b'D') => Ty::Double,
-        Some(b'V') => Ty::Unit,
-        Some(b'L') => Ty::obj(
-            d.strip_prefix('L')
-                .and_then(|s| s.strip_suffix(';'))
-                .unwrap_or(d),
-        ),
-        Some(b'[') => Ty::array(ty_from_field_descriptor(&d[1..])),
-        _ => Ty::Error,
-    }
+    super::physical_type::field_slot(d).ty
 }
 
 /// `(opcode, value-words)` for an array element load (`Xaload`).
@@ -11753,16 +11178,6 @@ pub(crate) fn ty_from_field_descriptor(d: &str) -> Ty {
 /// element boundary (`a[i]` yields an unboxed `Int`; `a[i] = v` boxes the `Int`).
 fn boxed_prim_of(t: Ty) -> Option<Ty> {
     t.unboxed_primitive()
-}
-
-/// Semantic scalar adapter for a JVM reference-array element. Unsigned values share a primitive
-/// carrier with signed values but their array stores must call the Kotlin value-class box adapter.
-fn reference_array_scalar_adapter(element: Ty) -> Option<Ty> {
-    element
-        .non_null()
-        .is_unsigned()
-        .then_some(element.non_null())
-        .or_else(|| boxed_prim_of(element))
 }
 
 /// `(opcode, value-words)` for an array element store (`Xastore`).
@@ -12036,6 +11451,21 @@ mod invariant_tests {
     use crate::jvm::inline::MethodBodies;
     use crate::types::Ty;
 
+    #[test]
+    fn descriptor_ty_consumers_preserve_reference_array_elements() {
+        for descriptor in ["[Lfixture/Token;", "[Lkotlin/UInt;", "[[I"] {
+            let ty = ty_from_field_descriptor(descriptor);
+            assert_eq!(type_descriptor(ty), descriptor, "{descriptor}");
+        }
+
+        let (params, result) =
+            parse_physical_method_desc("([Lfixture/Token;[Lkotlin/UInt;)[Lkotlin/UInt;")
+                .expect("valid physical method descriptor");
+        assert_eq!(type_descriptor(params[0]), "[Lfixture/Token;");
+        assert_eq!(type_descriptor(params[1]), "[Lkotlin/UInt;");
+        assert_eq!(type_descriptor(result), "[Lkotlin/UInt;");
+    }
+
     pub(super) struct NoBodies;
     impl MethodBodies for NoBodies {
         fn body(&self, _o: &str, _n: &str, _d: &str) -> Option<MethodCode> {
@@ -12059,11 +11489,12 @@ mod invariant_tests {
         facade: &str,
         run: &EmitRun,
     ) -> Option<Vec<(String, Vec<u8>)>> {
-        emit_for_test_with_machines(
+        emit_for_test_with_facts(
             ir,
             facade,
             run,
             &crate::jvm::suspend::EmitTimeMachines::default(),
+            &crate::jvm::suspend::IntrinsicProbeContinuations::default(),
         )
     }
 
@@ -12074,6 +11505,37 @@ mod invariant_tests {
         run: &EmitRun,
         emit_time_machines: &crate::jvm::suspend::EmitTimeMachines,
     ) -> Option<Vec<(String, Vec<u8>)>> {
+        emit_for_test_with_facts(
+            ir,
+            facade,
+            run,
+            emit_time_machines,
+            &crate::jvm::suspend::IntrinsicProbeContinuations::default(),
+        )
+    }
+
+    pub(super) fn emit_for_test_with_probe_continuations(
+        ir: &IrFile,
+        facade: &str,
+        run: &EmitRun,
+        intrinsic_probe_continuations: &crate::jvm::suspend::IntrinsicProbeContinuations,
+    ) -> Option<Vec<(String, Vec<u8>)>> {
+        emit_for_test_with_facts(
+            ir,
+            facade,
+            run,
+            &crate::jvm::suspend::EmitTimeMachines::default(),
+            intrinsic_probe_continuations,
+        )
+    }
+
+    fn emit_for_test_with_facts(
+        ir: &IrFile,
+        facade: &str,
+        run: &EmitRun,
+        emit_time_machines: &crate::jvm::suspend::EmitTimeMachines,
+        intrinsic_probe_continuations: &crate::jvm::suspend::IntrinsicProbeContinuations,
+    ) -> Option<Vec<(String, Vec<u8>)>> {
         let continuations = crate::jvm::suspend::ContinuationMetadataMap::default();
         let property_realizations =
             crate::jvm::property_realizations::PropertyRealizations::default();
@@ -12081,6 +11543,7 @@ mod invariant_tests {
             crate::jvm::property_references::PropertyReferenceRealizations::default();
         let default_call_operands =
             crate::jvm::default_call_operands::DefaultCallOperands::default();
+        let sam_wrapper_realizations = crate::jvm::sam_wrappers::SamWrapperRealizations::default();
         let bridge_adaptations = crate::jvm::bridge_adaptations::BridgeAdaptations::default();
         let function_argument_arrays =
             crate::jvm::function_argument_arrays::FunctionArgumentArrays::default();
@@ -12102,11 +11565,13 @@ mod invariant_tests {
                     collection_method_entry_barriers: &collection_method_entry_barriers,
                     emit_time_machines,
                     suspended_result_returns: &suspended_result_returns,
+                    intrinsic_probe_continuations,
                 },
                 signature_symbols: &NoClassifiers,
                 property_realizations: &property_realizations,
                 property_reference_realizations: &property_reference_realizations,
                 default_call_operands: &default_call_operands,
+                sam_wrapper_realizations: &sam_wrapper_realizations,
             },
             &EmitOptions::default(),
             run,
@@ -12198,6 +11663,7 @@ mod invariant_tests {
             &crate::jvm::override_results::OverrideResults::default(),
             &ir.classes[outer_id as usize],
             &EmitOptions::default(),
+            &LocalDelegatedProperties::default(),
         )
         .expect("plain source class metadata");
         assert!(metadata.d2.iter().any(|entry| entry == "Node2"));
@@ -12216,58 +11682,6 @@ mod invariant_tests {
         assert_eq!(
             call_ret_ty(&Ty::nullable(Ty::Nothing)),
             Ty::obj("kotlin/Any")
-        );
-    }
-
-    #[test]
-    fn array_actual_realization_requires_the_selected_full_declaration() {
-        let array = Ty::array(Ty::Byte);
-        let owner = crate::types::type_name("kotlin/ByteArray");
-        assert_eq!(
-            jvm_array_actual_realization(owner, "get", array, &[Ty::Int], Ty::Byte),
-            Some(JvmArrayActualRealization::Get)
-        );
-        assert_eq!(
-            jvm_array_actual_realization(owner, "set", array, &[Ty::Int, Ty::Byte], Ty::Unit,),
-            Some(JvmArrayActualRealization::Set)
-        );
-        assert_eq!(
-            jvm_array_actual_realization(owner, "size", array, &[], Ty::Int),
-            Some(JvmArrayActualRealization::Size)
-        );
-        let boxed_int_array = Ty::obj_args("kotlin/Array", &[Ty::obj("java/lang/Integer")]);
-        assert_eq!(
-            jvm_array_actual_realization(
-                crate::types::type_name("kotlin/Array"),
-                "get",
-                boxed_int_array,
-                &[Ty::Int],
-                Ty::Int,
-            ),
-            Some(JvmArrayActualRealization::Get)
-        );
-
-        assert_eq!(
-            jvm_array_actual_realization(owner, "get", array, &[Ty::Long], Ty::Byte),
-            None
-        );
-        assert_eq!(
-            jvm_array_actual_realization(owner, "set", array, &[Ty::Int, Ty::Int], Ty::Unit),
-            None
-        );
-        assert_eq!(
-            jvm_array_actual_realization(owner, "size", array, &[], Ty::Long),
-            None
-        );
-        assert_eq!(
-            jvm_array_actual_realization(
-                crate::types::type_name("sample/FakeArray"),
-                "get",
-                array,
-                &[Ty::Int],
-                Ty::Byte,
-            ),
-            None
         );
     }
 

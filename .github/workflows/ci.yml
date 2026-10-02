@@ -1,8 +1,8 @@
 name: ci
 
-# Build the conformance test binary once. Run its box suite against every supported Kotlin
-# version, and run every other test in that binary on the latest version. Publish only after
-# both sets pass and every version matches its exact box fail/not-applicable manifests.
+# Build the conformance test binary once. Every supported Kotlin-version lane runs both its box
+# corpus and every other active test in that binary. Publish only after the combined matrix passes
+# and every version matches its exact box fail/not-applicable manifests.
 # `merge_group` runs the same checks on a merge queue's combined commit: two pull requests can each
 # match the lists on their own base and still disagree with them once both are on master.
 on:
@@ -14,15 +14,15 @@ on:
 permissions:
   contents: read
 
-# One run per ref. A newer push cancels the previous run, including on master, so an older
-# commit does not keep runners after it is no longer the tip.
+# One run per pull-request or merge-group ref, so an update supersedes its older run. Every master
+# push uses a unique group and remains authoritative evidence even when a newer commit is queued.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.ref == 'refs/heads/master' && github.run_id || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
 jobs:
-  # Lint + coverage (`just ci`). Conformance is `build-conformance-bin`, the version
-  # matrix, and `conformance-regressions`. This job does not compile krusty again for it.
+  # Lint + coverage (`just ci`). Conformance is `build-conformance-bin` plus the version matrix.
+  # This job does not compile krusty again for it.
   ci:
     runs-on: ubuntu-latest
     env:
@@ -205,65 +205,28 @@ jobs:
         with:
           distribution: zulu
           java-version: '25'
-      - name: cache kotlin toolchain + box corpus (${{ matrix.version }})
+      - name: cache kotlin toolchain and conformance corpora (${{ matrix.version }})
         uses: actions/cache@v6
         with:
           path: |
             target/cache/kotlinc/${{ matrix.version }}
             target/cache/box-corpus/${{ matrix.version }}
-          key: kotlin-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}
-      - name: download conformance test binary
-        uses: actions/download-artifact@v8
-        with:
-          name: conformance-bin
-      - name: run conformance ${{ matrix.version }}
-        run: |
-          set -euo pipefail
-          chmod +x conformance-bin
-          just conformance-run "$PWD/conformance-bin" "${{ matrix.version }}" > pct.txt
-          read -r pct passed applicable < pct.txt
-          echo "pct=$pct passed=$passed applicable=$applicable"
-      - name: upload pct
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: pct-${{ matrix.version }}
-          path: pct.txt
-          if-no-files-found: error
-
-  # Every conformance test except the box corpus, on the latest Kotlin version. Uses the
-  # artifact from `build-conformance-bin`; it does not compile krusty again.
-  conformance-regressions:
-    needs: [build-conformance-bin, versions]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: just
-      - uses: actions/setup-java@v6.0.1
-        with:
-          distribution: zulu
-          java-version: '25'
-      - name: cache kotlin toolchain, box corpus, and serialization corpus
-        uses: actions/cache@v6
-        with:
-          path: |
-            target/cache/kotlinc/${{ needs.versions.outputs.max }}
-            target/cache/box-corpus/${{ needs.versions.outputs.max }}
-            target/cache/ser-corpus/${{ needs.versions.outputs.max }}
-          key: kotlin-${{ needs.versions.outputs.max }}-${{ hashFiles('kotlin-versions') }}
-      # This job's archive, separate from the one `ci` publishes. A restored entry is
-      # replayed. A test absent from the archive compiles with kotlinc. Master saves
-      # the archive, including that new recording.
-      - name: restore recorded kotlinc bytes
+            target/cache/ser-corpus/${{ matrix.version }}
+            target/cache/ksp-toolchain
+            target/cache/krusty-deps
+          # Do not reuse the former box-only immutable cache: it can never acquire the newly
+          # required serialization/KSP inputs.
+          key: kotlin-conformance-all-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}
+      # One archive per Kotlin version. A restored entry is replayed; a missing test compiles with
+      # that lane's kotlinc. Master saves newly observed recordings under the exact version/commit.
+      - name: restore recorded kotlinc bytes (${{ matrix.version }})
         id: recorded-bytes
         uses: actions/cache/restore@v6
         with:
           path: target/cache/class-dumps
-          key: recorded-kotlinc-bytes-conformance-${{ needs.versions.outputs.max }}-${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.sha }}
+          key: recorded-kotlinc-bytes-conformance-${{ matrix.version }}-${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.sha }}
           restore-keys: |
-            recorded-kotlinc-bytes-conformance-${{ needs.versions.outputs.max }}-
+            recorded-kotlinc-bytes-conformance-${{ matrix.version }}-
       - name: select recorded-byte cache mode
         id: recorded-mode
         env:
@@ -282,22 +245,124 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           name: conformance-bin
-      - name: run conformance regressions
+      - name: run box conformance ${{ matrix.version }}
+        run: |
+          set -euo pipefail
+          chmod +x conformance-bin krusty
+          just conformance-run "$PWD/conformance-bin" "${{ matrix.version }}" > pct.txt
+          read -r pct passed applicable < pct.txt
+          echo "pct=$pct passed=$passed applicable=$applicable"
+      - name: run non-box conformance ${{ matrix.version }}
         env:
           KRUSTY_CLASS_DUMP_DIR: ${{ github.workspace }}/target/cache/class-dumps
           KRUSTY_RECORD_CLASS_DUMPS: "0"
           KRUSTY_CLASS_DUMP_WRITE: ${{ steps.recorded-mode.outputs.write }}
           KRUSTY_CLASS_DUMP_COMPILE_MISSING: ${{ steps.recorded-mode.outputs.compile_missing }}
-        run: |
-          set -euo pipefail
-          chmod +x conformance-bin krusty
-          just conformance-regressions "$PWD/conformance-bin" "${{ needs.versions.outputs.max }}"
-      - name: save recorded kotlinc bytes
+          KRUSTY_DEPS_CACHE: ${{ github.workspace }}/target/cache/krusty-deps
+          KRUSTY_KSP_E2E: "1"
+          KRUSTY_REQUIRE_KSP_E2E: "1"
+          KRUSTY_REQUIRE_SERIALIZATION_CONFORMANCE: "1"
+        run: just conformance-regressions "$PWD/conformance-bin" "${{ matrix.version }}"
+      - name: save recorded kotlinc bytes (${{ matrix.version }})
         if: steps.recorded-mode.outputs.write == '1'
         uses: actions/cache/save@v6
         with:
           path: target/cache/class-dumps
-          key: recorded-kotlinc-bytes-conformance-${{ needs.versions.outputs.max }}-${{ github.sha }}
+          key: recorded-kotlinc-bytes-conformance-${{ matrix.version }}-${{ github.sha }}
+      - name: upload pct
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pct-${{ matrix.version }}
+          path: pct.txt
+          if-no-files-found: error
+
+  # Build the release bytes once. The compatibility matrix below consumes this Maven repository;
+  # it never rebuilds the plugin from the checkout.
+  build-gradle-plugin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - uses: actions/setup-java@v6.0.1
+        with:
+          distribution: zulu
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-provider: basic
+      - name: build portable local-Maven distribution
+        run: |
+          set -euo pipefail
+          version=$(just version)
+          scripts/package-gradle-plugin.sh "$version" "$PWD/dist-gradle"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: krusty-gradle-plugin
+          path: |
+            dist-gradle/*.jar
+            dist-gradle/*.zip
+            dist-gradle/*-SHA256SUMS
+          if-no-files-found: error
+
+  # Execute the exact release bytes against every supported Kotlin Gradle plugin.
+  gradle:
+    needs: [build-conformance-bin, build-gradle-plugin]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { kotlin: 2.4.0,  gradle: 7.6.3 }
+          - { kotlin: 2.4.0,  gradle: 9.5.0 }
+          - { kotlin: 2.4.10, gradle: 8.14.3 }
+          - { kotlin: 2.4.20, gradle: 7.6.3 }
+          - { kotlin: 2.4.20, gradle: 9.7.0 }
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - uses: actions/setup-java@v6.0.1
+        with:
+          distribution: zulu
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: ${{ matrix.gradle }}
+          cache-provider: basic
+      - uses: actions/download-artifact@v8
+        with:
+          name: conformance-bin
+      - uses: actions/download-artifact@v8
+        with:
+          name: krusty-gradle-plugin
+          path: dist-gradle
+      - name: verify and unpack the tested Gradle plugin distribution
+        run: |
+          set -euo pipefail
+          version=$(just version)
+          (cd dist-gradle && sha256sum -c "krusty-gradle-plugin-$version-SHA256SUMS")
+          unzip -q "dist-gradle/krusty-gradle-plugin-$version.zip" -d dist-gradle/unpacked
+          echo "KRUSTY_GRADLE_PLUGIN_VERSION=$version" >> "$GITHUB_ENV"
+          echo "KRUSTY_GRADLE_PLUGIN_PROJECT=$PWD/dist-gradle/unpacked/krusty-gradle-plugin-$version" >> "$GITHUB_ENV"
+      - name: run Gradle ${{ matrix.gradle }} integration with Kotlin ${{ matrix.kotlin }}
+        env:
+          KRUSTY_GRADLE_TEST_BIN: ${{ github.workspace }}/krusty
+          KRUSTY_GRADLE_KGP_VERSION: ${{ matrix.kotlin }}
+          KRUSTY_GRADLE_VERSION: ${{ matrix.gradle }}
+        run: |
+          chmod +x krusty
+          KRUSTY_GRADLE_BIN=$(command -v gradle) \
+            cargo test --profile gate -p krusty-build kotlin_compiler_slice_compiles_through_krusty -- --ignored
 
   # Build the release binaries per OS/arch (master only). Independent of conformance so it can run in
   # parallel; publishing is what waits on the gate.
@@ -366,7 +431,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: [ci, klib-semantics, conformance, conformance-regressions, versions, build-release]
+    needs: [ci, klib-semantics, conformance, build-gradle-plugin, gradle, versions, build-release]
     if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     # Shorter than the release lock's TTL, so a lock that outlives it belongs to a dead job.
@@ -399,6 +464,12 @@ jobs:
           pattern: krusty-*
           path: dist
           merge-multiple: true
+      - name: verify Gradle plugin release assets
+        if: steps.tip.outputs.publish == 'true'
+        run: |
+          set -euo pipefail
+          version=$(just version)
+          (cd dist && sha256sum -c "krusty-gradle-plugin-$version-SHA256SUMS")
       - name: compute version + tag
         if: steps.tip.outputs.publish == 'true'
         id: v

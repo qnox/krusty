@@ -1,7 +1,9 @@
 use super::delegate_calls::FirPropertyDelegatePlan;
 use super::local_callables::BodyLocalCallableDeclarationId;
 use super::local_class_names::FirGeneratedClassProvenance;
-use super::local_delegated_properties::{LocalDelegateBinding, LocalDelegatedPropertyId};
+use super::local_delegated_properties::{
+    FirLocalDelegatePlan, LocalDelegateBinding, LocalDelegatedPropertyId,
+};
 use std::collections::{HashMap, HashSet};
 
 mod context_parameters;
@@ -94,11 +96,21 @@ pub struct FirSamConversion {
     pub context_count: u32,
     pub has_receiver: bool,
     pub suspend: bool,
+    /// The converted value's own callable view is `suspend`. Distinct from [`Self::suspend`], which
+    /// is the selected interface method: a non-suspend value adapted to a suspend method keeps its
+    /// own `FunctionN`.
+    pub source_suspend: bool,
     /// The method's primitive result replaces a non-primitive result it overrides.
     pub overrides_non_primitive_result: bool,
+    /// Specialized semantic result contracts whose target bridges reach that primitive method.
+    pub overridden_non_primitive_results: Box<[ResolvedTy]>,
     /// A nullable function value converts conditionally: `null` remains `null`; only a non-null
     /// function object is wrapped as the selected SAM classifier.
     pub nullable: bool,
+    /// The interface is a Kotlin declaration, not a Java one.
+    pub kotlin_interface: bool,
+    /// Provider-normalized semantic identities parallel to `declared_parameters`.
+    pub parameter_identities: Box<[super::ResolvedParameterIdentity]>,
 }
 
 /// The abstract method a SAM conversion implements.
@@ -228,7 +240,11 @@ pub enum FirIntrinsic {
     /// The selected stdlib coroutine primitive. Its function block is checked as an ordinary
     /// argument, but common lowering must inline that exact checked block against the current
     /// continuation rather than emit a call to the stdlib declaration's intrinsic-only stub.
-    SuspendCoroutineUninterceptedOrReturn,
+    /// `callee` is the selected declaration's source name: the spliced block opens an inline frame
+    /// named after it.
+    SuspendCoroutineUninterceptedOrReturn {
+        callee: Box<str>,
+    },
     /// The selected safe coroutine primitive. This is distinct from the unintercepted primitive:
     /// target realization must invoke the block with a one-shot safe, intercepted continuation and
     /// use that continuation's completed value or suspension sentinel as the call result.
@@ -1161,7 +1177,8 @@ pub enum FirExprKind {
         extension_receiver: Option<FirReceiver>,
         adaptation: Option<Box<FirReferenceAdaptation>>,
     },
-    /// Reflection value supplied to a checked local delegated-property convention call.
+    /// Reflection value supplied to a checked local delegated-property convention call: the
+    /// property, and its `ordinal` among its lexical class's local delegated properties.
     LocalPropertyReference {
         name: Box<str>,
         property_type: ResolvedTy,
@@ -1169,6 +1186,17 @@ pub enum FirExprKind {
         /// declaration names it, wherever the read or write is; two declarations never share it,
         /// whatever their names or origins.
         declaration: LocalDelegatedPropertyId,
+        mutable: bool,
+        ordinal: u32,
+    },
+    /// One checked read/write of a local delegated property. The selected convention lives in the
+    /// body's [`FirLocalDelegatePlan`]; operands remain explicit so targets can choose their own
+    /// realization without repeating lookup or argument mapping.
+    LocalDelegateAccess {
+        plan: LocalDelegatedPropertyId,
+        delegate: FirExprId,
+        dispatch_receiver: Option<FirReceiver>,
+        value: Option<FirExprId>,
     },
     PropertyReference {
         target: FirPropertyReferenceTarget,
@@ -1372,6 +1400,7 @@ impl FirExprKind {
             }
             FirExprKind::ClassLiteral { .. } => 0,
             FirExprKind::LocalPropertyReference { name, .. } => name.len(),
+            FirExprKind::LocalDelegateAccess { .. } => 0,
             FirExprKind::IndexedRead { indices, .. }
             | FirExprKind::IndexedWrite { indices, .. } => {
                 indices.len() * std::mem::size_of::<FirConvertedValue>()
@@ -1706,9 +1735,11 @@ pub struct FirBody {
     generated_class_provenance: HashMap<FirExprId, FirGeneratedClassProvenance>,
     /// This callable's own lifting site, for a lambda or local function body.
     lifting_site: Option<FirLiftingSite>,
-    /// Lifted callables declared in this body that have no body of their own: the accessors of a
-    /// local delegated property.
+    /// Target-realized callables declared in this body that have no common FIR body: the accessors
+    /// of a local delegated property.
     bodiless_lifting_sites: Vec<FirLiftingSite>,
+    /// Target-neutral selected convention plans for local delegated properties declared here.
+    local_delegate_plans: Vec<FirLocalDelegatePlan>,
     context_receiver_types: Vec<ResolvedTy>,
     context_parameter_kinds: Vec<crate::types::ContextParameterKind>,
     /// Declaration-owned inline semantics, in physical parameter order. The checker publishes
@@ -1765,6 +1796,7 @@ impl FirBody {
             generated_class_provenance: HashMap::new(),
             lifting_site: None,
             bodiless_lifting_sites: Vec::new(),
+            local_delegate_plans: Vec::new(),
             context_receiver_types: Vec::new(),
             context_parameter_kinds: Vec::new(),
             inline_parameter_modifiers: Vec::new(),
@@ -1938,6 +1970,14 @@ impl FirBody {
 
     pub fn add_bodiless_lifting_site(&mut self, site: FirLiftingSite) {
         self.bodiless_lifting_sites.push(site);
+    }
+
+    pub(crate) fn add_local_delegate_plan(&mut self, plan: FirLocalDelegatePlan) {
+        self.local_delegate_plans.push(plan);
+    }
+
+    pub(crate) fn local_delegate_plans(&self) -> &[FirLocalDelegatePlan] {
+        &self.local_delegate_plans
     }
 
     /// Every lifting site this body and the callables nested in it declare, its own included.
@@ -2551,6 +2591,17 @@ impl FirBody {
         &self,
         callables: &mut std::collections::HashSet<CallableId>,
     ) {
+        // A local delegated-property convention is a selected semantic call even though its use
+        // is represented by `LocalDelegateAccess`, not by an expression-level `FirCall`. Retained
+        // inline bodies must publish these dependencies before their accessor plans are lowered in
+        // another source; otherwise a selected inline convention has no common-IR template there.
+        for plan in &self.local_delegate_plans {
+            for call in std::iter::once(&plan.get_value).chain(plan.set_value.iter()) {
+                if let Some(callable) = call.target.module() {
+                    callables.insert(callable);
+                }
+            }
+        }
         for expression in &self.expressions {
             match &expression.kind {
                 FirExprKind::Call(call)
@@ -2655,6 +2706,15 @@ impl FirBody {
                 .property_delegate
                 .as_ref()
                 .map_or(0, |_| std::mem::size_of::<FirPropertyDelegatePlan>())
+            + self.local_delegate_plans.len() * std::mem::size_of::<FirLocalDelegatePlan>()
+            + self
+                .local_delegate_plans
+                .iter()
+                .map(|plan| {
+                    plan.storage_name.len()
+                        + plan.accessor_sites.len() * std::mem::size_of::<FirLiftingSite>()
+                })
+                .sum::<usize>()
             + self
                 .property_storage_type
                 .map_or(0, |_| std::mem::size_of::<ResolvedTy>())

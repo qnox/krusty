@@ -104,6 +104,9 @@ impl Parser<'_> {
             let mut member_modifiers = self.parse_member_decl_prefix();
             // The member's own `private`, not one the block itself carries.
             let private_modifier = declaration_modifiers::span(self, &member_modifiers, "private");
+            // Likewise the member's own `actual`: it is hoisted to a file declaration, and only
+            // what it wrote itself claims an `expect`.
+            let own_modifiers = member_modifiers.clone();
             member_modifiers.extend(modifiers.iter().cloned());
             member_modifiers.push("companion".to_string());
             let receiver = || TypeRef {
@@ -122,6 +125,11 @@ impl Parser<'_> {
                     function.flags = function.flags.with_is_companion_block_member(true);
                     let declaration = self.file.add_decl(Decl::Fun(function));
                     self.file.decls.push(declaration);
+                    declaration_modifiers::record_nested_actual(
+                        &mut self.file,
+                        &own_modifiers,
+                        declaration,
+                    );
                     members.push(CompanionBlockMember {
                         declaration,
                         private_modifier,
@@ -134,6 +142,11 @@ impl Parser<'_> {
                     property.is_companion_block_member = true;
                     let declaration = self.file.add_decl(Decl::Property(property));
                     self.file.decls.push(declaration);
+                    declaration_modifiers::record_nested_actual(
+                        &mut self.file,
+                        &own_modifiers,
+                        declaration,
+                    );
                     members.push(CompanionBlockMember {
                         declaration,
                         private_modifier,

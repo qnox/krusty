@@ -435,6 +435,19 @@ impl ProductionSignatureSemantics<'_> {
             .collect::<Vec<_>>();
         for candidate in &mut functions.overloads {
             let Some(mut signature) = candidate.generic_sig.clone() else {
+                // A non-generic extension's receiver still constrains the active variables that
+                // the actual receiver mentions (`Buildee<UserKlass>.f()` on `Buildee<FT>`).
+                if let Some(declared_receiver) = candidate.receiver {
+                    let mut bindings = crate::symbol_resolver::GSigBinds::new();
+                    let constraints =
+                        crate::symbol_resolver::collect_assignability_constraints_from_symbols(
+                            &source,
+                            declared_receiver,
+                            receiver,
+                        );
+                    merge_active_constraints(&mut bindings, constraints, &active);
+                    recorded.push((candidate.clone(), bindings));
+                }
                 continue;
             };
             let mut bindings = known.clone();
@@ -511,6 +524,139 @@ impl ProductionSignatureSemantics<'_> {
             arguments,
             bindings: recorded,
         }
+    }
+
+    pub(super) fn postponed_expectations(
+        arguments: &[crate::fir::SigCallArgumentProbe<'_>],
+        slots: &[Option<usize>],
+        parameters: &[Ty],
+    ) -> Box<[Option<crate::fir::ResolvedTy>]> {
+        let mut expectations = vec![None; arguments.len()];
+        for (slot, source) in slots.iter().enumerate() {
+            let Some(source) = *source else {
+                continue;
+            };
+            let contextual_call = matches!(
+                arguments.get(source),
+                Some(crate::fir::SigCallArgumentProbe::Typed(argument))
+                    if argument.contextual_call
+            );
+            let postponed_callable = matches!(
+                arguments.get(source),
+                Some(
+                    crate::fir::SigCallArgumentProbe::PostponedLambda { .. }
+                        | crate::fir::SigCallArgumentProbe::PostponedCallableReference { .. },
+                )
+            );
+            if contextual_call || postponed_callable {
+                expectations[source] = parameters.get(slot).copied().and_then(|parameter| {
+                    (contextual_call || matches!(parameter.non_null(), Ty::Fun(_)))
+                        .then(|| crate::fir::ResolvedTy::new(parameter).ok())
+                        .flatten()
+                });
+            }
+        }
+        expectations.into_boxed_slice()
+    }
+
+    /// Normalize selected declaration parameters into the callable shapes used to materialize
+    /// postponed lambdas and references. Package, top-level, classifier, and receiver expectation
+    /// paths all consume this operation; none may independently reinterpret SAMs or lambda receiver
+    /// metadata.
+    pub(super) fn functional_parameter_shapes(
+        resolver: &crate::symbol_resolver::SymbolResolver<'_>,
+        selected: &crate::libraries::FunctionInfo,
+        parameters: impl IntoIterator<Item = Ty>,
+    ) -> Vec<Ty> {
+        parameters
+            .into_iter()
+            .enumerate()
+            .map(|(parameter_index, parameter)| {
+                let expectation = resolver
+                    .functional_expectation(parameter)
+                    .unwrap_or(parameter);
+                let Ty::Fun(signature) = expectation.non_null() else {
+                    return expectation;
+                };
+                let has_receiver = selected
+                    .call_sig
+                    .lambda_receiver_params
+                    .get(parameter_index)
+                    .copied()
+                    .unwrap_or(false);
+                let context_count = selected
+                    .call_sig
+                    .lambda_context_counts
+                    .get(parameter_index)
+                    .copied()
+                    .unwrap_or(signature.context_count);
+                Ty::fun_with_shape(
+                    signature.params.clone(),
+                    signature.ret,
+                    context_count,
+                    has_receiver || signature.has_receiver,
+                    signature.suspend,
+                )
+            })
+            .collect()
+    }
+
+    /// Project the selected callable's parameter types back onto postponed source arguments. The
+    /// shared argument mapper owns named/default/trailing-lambda placement; this inversion only
+    /// preserves the many-source-arguments-to-one-vararg relationship which a parameter-slot vector
+    /// cannot represent. Positional vararg arguments expect the element type, while named/spread
+    /// arguments expect the declared array type.
+
+    /// Commit the constraint a selected extension property's declared receiver puts on the active
+    /// variables the actual receiver mentions (`Buildee<UserKlass>.p` read on `Buildee<FT>`).
+    pub(super) fn commit_postponed_property_receiver(
+        &self,
+        scope: crate::fir::SignatureScope,
+        property: &crate::libraries::PropertyInfo,
+        receiver: Ty,
+    ) {
+        let Some(declared) = property.receiver else {
+            return;
+        };
+        let variables = self.active_postponed_type_variables(scope);
+        if !crate::types::ty_mentions_param(receiver, &variables) {
+            return;
+        }
+        let active = variables.iter().map(String::as_str).collect();
+        let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
+        let source = crate::symbol_source::CompositeSource::new(vec![
+            &module as &dyn crate::symbol_source::SymbolSource,
+            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
+        ]);
+        let constraints = crate::symbol_resolver::collect_assignability_constraints_from_symbols(
+            &source, declared, receiver,
+        );
+        let mut bindings = crate::symbol_resolver::GSigBinds::new();
+        merge_active_constraints(&mut bindings, constraints, &active);
+        self.commit_postponed_bindings(scope, bindings);
+    }
+
+    /// The type variables of the postponed call whose lambda `scope` is analyzed inside.
+    pub(super) fn active_postponed_type_variables(
+        &self,
+        scope: crate::fir::SignatureScope,
+    ) -> Vec<String> {
+        let mut active = std::collections::HashSet::new();
+        if let Some(inputs) =
+            self.active_scoped_constraint_frame(scope.owner)
+                .and_then(|(owner, index)| {
+                    self.scoped_constraint_inputs
+                        .borrow()
+                        .get(&owner)
+                        .and_then(|stack| stack.get(index))
+                        .cloned()
+                })
+        {
+            for input in inputs {
+                collect_type_parameters(input, &mut active);
+            }
+        }
+        active.into_iter().map(str::to_owned).collect()
     }
 
     pub(super) fn commit_postponed_bindings(

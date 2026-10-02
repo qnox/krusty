@@ -176,7 +176,7 @@ fn synthesized_data_equals_recovers_its_implicit_equality_bound() {
         .find(|function| function.jvm_name == "equals")
         .expect("synthesized equals metadata");
 
-    assert_eq!(equals.equality_bound, Some(owner));
+    assert_eq!(equals.equality_bound(), Some(owner));
 }
 
 #[test]
@@ -447,7 +447,7 @@ fn package_value_param_defaults_round_trip() {
         param_annotations: Vec::new(),
         no_infer_params: Vec::new(),
     }];
-    let (d1, d2) = build_package(&funcs, &[], &[], None, true);
+    let (d1, d2) = build_package(&funcs, &[], &[], (None, &[]), true);
     let ci = class_info("com/example/HostKt", d1, d2);
 
     let fns = package_functions(&ci);
@@ -499,7 +499,7 @@ fn package_function_type_parameter_bound_round_trips() {
         param_annotations: Vec::new(),
         no_infer_params: Vec::new(),
     }];
-    let (d1, d2) = build_package(&funcs, &[], &[], None, true);
+    let (d1, d2) = build_package(&funcs, &[], &[], (None, &[]), true);
     let ci = class_info("com/example/HostKt", d1, d2);
     let function = package_functions(&ci)
         .iter()
@@ -553,7 +553,7 @@ fn package_extension_receiver_round_trips() {
         param_annotations: Vec::new(),
         no_infer_params: Vec::new(),
     }];
-    let (d1, d2) = build_package(&funcs, &[], &[], None, true);
+    let (d1, d2) = build_package(&funcs, &[], &[], (None, &[]), true);
     let ci = class_info("com/example/NavGraphBuilderKt", d1, d2);
 
     let f = package_functions(&ci)
@@ -625,7 +625,7 @@ fn package_receiver_function_type_param_round_trips() {
         param_annotations: Vec::new(),
         no_infer_params: Vec::new(),
     }];
-    let (d1, d2) = build_package(&funcs, &[], &[], None, true);
+    let (d1, d2) = build_package(&funcs, &[], &[], (None, &[]), true);
     let ci = class_info("com/example/NavHostKt", d1, d2);
 
     let f = package_functions(&ci)

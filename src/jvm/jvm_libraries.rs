@@ -10,6 +10,9 @@ mod generic_signatures;
 mod inline_body_plan;
 mod inline_capability;
 mod mapped_builtin_member_status;
+mod parameter_plans;
+#[cfg(test)]
+mod provider_normalization_tests;
 mod static_properties;
 mod unsigned_intrinsics;
 use static_properties::StaticAccessor;
@@ -29,7 +32,7 @@ use super::classpath::{
     kotlin_name_to_ty, kotlin_type_name_to_ty, metadata_return_info, Classpath,
 };
 use super::classreader::{ConstVal, FieldSig, JavaNullability};
-use super::jvm_class_map::to_kotlin_internal;
+use super::jvm_class_map::{erased_top_member_owner, to_kotlin_internal};
 use super::metadata;
 use crate::jvm::names::same_mapped_virtual_name_of;
 use crate::jvm::names::{property_getter_name, type_descriptor};
@@ -660,6 +663,8 @@ impl JvmLibraries {
     /// `FnKind` as needed.
     fn top_level_overloads(&self, name: &str, pkg: TypeName) -> Vec<FunctionInfo> {
         let mut overloads = Vec::new();
+        let cm = &self.common_expectations;
+        let namespace = SymbolNamespace::Package(pkg);
         for c in self.cp.functions_in_scope(name, &[pkg]) {
             // Accessors and functions share the bytecode static-method index.
             if self
@@ -714,7 +719,7 @@ impl JvmLibraries {
             // return to `Object`; present the LOGICAL signature (drop the continuation) so a normal
             // call resolves. The coroutine pass re-derives the CPS form for the emitted call.
             let descriptor = if suspend {
-                strip_continuation_param(&c.descriptor)
+                parameter_plans::logical_suspend_descriptor(&c.descriptor)
             } else {
                 c.descriptor.clone()
             };
@@ -831,16 +836,12 @@ impl JvmLibraries {
                 )
             };
             callable.physical_params = physical_params;
+            parameter_plans::source_only(&mut callable);
             if !is_default && call_sig.param_defaults.iter().any(|default| *default) {
                 callable.default_realization =
                     self.top_level_default_realization(&callable).map(Box::new);
             }
             callable.inline_body_plan = self.inline_body_plan(&callable).map(Box::new);
-            // The static-method index (`find_top_level`) also surfaces an EXTENSION's compiled form
-            // (`T.run` → `run(receiver, block)`); classify by the metadata signature's receiver so it is
-            // an `Extension`, not a receiver-less `TopLevel`. Extension resolution reaches it through the
-            // by-receiver query; keeping the kind honest is what lets the top-level queries ignore it
-            // without per-call-site receiver checks.
             let generic_sig = generic_sig_for_callable;
             let kind = if generic_sig.as_ref().is_some_and(|g| g.receiver.is_some()) {
                 FnKind::Extension
@@ -870,6 +871,7 @@ impl JvmLibraries {
                 annotations: meta.annotations.clone(),
                 ..FunctionInfo::plain(kind, None, callable)
             });
+            cm.attach_tail(c.paired_common, namespace, name, &mut overloads);
         }
         for builtin in self.cp.builtin_package_functions(pkg, name) {
             if overloads.iter().any(|candidate| {
@@ -1752,7 +1754,7 @@ impl JvmLibraries {
                             .map(|parameter| parameter.name.as_str())
                             .collect::<Vec<_>>(),
                         declaration
-                            .context_params
+                            .context_params()
                             .iter()
                             .map(|parameter| parameter.name.as_str())
                             .collect::<Vec<_>>(),
@@ -1800,7 +1802,7 @@ impl JvmLibraries {
                     member.reified = declaration.has_reified_type_params();
                     member.annotations = declaration.annotations.clone();
                     member.contract = declaration.contract.clone();
-                    member.equality_bound = declaration.equality_bound;
+                    member.equality_bound = declaration.equality_bound();
                     member.return_value_status = Some(declaration.return_value_status);
                     member.set_is_member_extension(declaration.is_extension());
                     member.set_is_operator(declaration.is_operator());
@@ -1879,11 +1881,18 @@ impl JvmLibraries {
                     has_kotlin_metadata,
                     &member.annotations,
                 ));
+                let dispatch_parameter = m.is_static()
+                    && ci.meta.class_kind != Some(crate::libraries::TypeKind::Object)
+                    && declaration
+                        .is_some_and(|declaration| !declaration.is_companion_block_member());
+                let continuation_parameter =
+                    declaration.is_some_and(|declaration| declaration.is_suspend());
                 if m.is_static() {
                     member.realization = crate::libraries::MemberRealization::Direct {
-                        pass_receiver: physical_params.len() == member.params.len() + 1,
+                        pass_receiver: dispatch_parameter,
                     };
                 }
+                parameter_plans::member(&mut member, dispatch_parameter, continuation_parameter);
                 if let Some(declaration) = declaration {
                     let facts = crate::libraries::builtin_declaration::BuiltinMemberDeclaration {
                         owner: internal_name,
@@ -1964,9 +1973,11 @@ impl JvmLibraries {
                     // The EMIT descriptor is the LOGICAL (continuation-stripped) form — the coroutine pass
                     // re-threads the CPS `Continuation` at the call. `physical_params` retains the classfile
                     // shape while `params` is the normalized source-semantic shape used by resolution.
-                    member.descriptor = strip_continuation_param(&member.descriptor);
+                    member.descriptor =
+                        parameter_plans::logical_suspend_descriptor(&member.descriptor);
                     if let Some(holder) = member.nonvirtual_realization.as_deref_mut() {
-                        holder.descriptor = strip_continuation_param(&holder.descriptor);
+                        holder.descriptor =
+                            parameter_plans::logical_suspend_descriptor(&holder.descriptor);
                     }
                 }
                 if is_map && member.name == "put" {
@@ -2181,7 +2192,9 @@ impl JvmLibraries {
                     supertypes.push_name(s);
                 }
                 if let Some(s) = ci.super_class {
-                    supertypes.push_name(s);
+                    // ClassInfo retains the physical hierarchy for backend work; the common class
+                    // model receives the mapping table's canonical source declaration identity.
+                    supertypes.push_name(super::jvm_class_map::to_kotlin_type_name(s));
                 }
             }
             if !kotlin_supertypes_are_authoritative {
@@ -3351,23 +3364,6 @@ fn function_interface_signature(
     Some(Ty::fun(params.to_vec(), ret))
 }
 
-const CONTINUATION_PARAM_DESCRIPTOR: &str = "Lkotlin/coroutines/Continuation;";
-
-/// Parse a method descriptor `(p…)ret` into parameter `Ty`s and the return `Ty`.
-/// The LOGICAL descriptor of a `suspend fun`'s physical CPS method: drop the trailing
-/// `kotlin/coroutines/Continuation` parameter kotlinc appends (`(ILkotlin/coroutines/Continuation;)…`
-/// → `(I)…`). The return stays erased (`Object`); the *logical* Kotlin return lives in `@Metadata`. A
-/// suspend callee is resolved by this logical signature; the coroutine pass re-derives the CPS form for
-/// the emitted call. A no-op if the descriptor has no trailing continuation (not a CPS method).
-fn strip_continuation_param(desc: &str) -> String {
-    if let Some(close) = desc.rfind(')') {
-        if let Some(stripped) = desc[1..close].strip_suffix(CONTINUATION_PARAM_DESCRIPTOR) {
-            return format!("({}){}", stripped, &desc[close + 1..]);
-        }
-    }
-    desc.to_string()
-}
-
 /// Exact nonvirtual realization of a legacy concrete interface declaration, if the classpath
 /// publishes one. Semantic selection stays on the metadata declaration; this only couples it to the
 /// matching receiver-first static method at the provider boundary.
@@ -3736,6 +3732,7 @@ impl JvmLibraries {
                             pass_receiver: true,
                         };
                     }
+                    parameter_plans::callable(&mut getter, value_dispatch, false);
                     let setter = mp.setter.clone().and_then(|setter| {
                         let (physical_params, physical_ret) = parse_method_desc(&setter.desc)?;
                         if physical_params.len() != extension_index + 2 || physical_ret != Ty::Unit
@@ -3765,6 +3762,7 @@ impl JvmLibraries {
                                     pass_receiver: true,
                                 };
                         }
+                        parameter_plans::callable(&mut callable, value_dispatch, false);
                         Some(callable)
                     });
                     overloads.push(PropertyInfo {
@@ -4222,7 +4220,7 @@ impl JvmLibraries {
         // A classpath `typealias` (`kotlin/collections/ArrayList` → `java/util/ArrayList`) has no class of
         // its own; resolve the underlying type and tag it with `alias_target` so name resolution records
         // the real internal.
-        let built = if let Some(target) = self.cp.type_alias_target_name(internal_name) {
+        let built = if let Some(target) = self.semantic_type_alias_target(internal_name) {
             self.classifier_record(target).map(|rc| {
                 let mut t = (*rc).clone();
                 t.alias_target = Some(target);
@@ -4297,6 +4295,22 @@ impl JvmLibraries {
         built
     }
 
+    /// Normalize a metadata typealias target into the common source classifier model. JVM metadata
+    /// encodes a suspend function type with its continuation-bearing physical `FunctionN`, while
+    /// source dependencies publish the semantic source arity. Providers must agree before the
+    /// resolver selects the declaration; core must not accept two physical spellings afterward.
+    fn semantic_type_alias_target(&self, identity: TypeName) -> Option<TypeName> {
+        let (target, _, expansion, _) = self.cp.type_alias_expansion(identity)?;
+        Self::normalized_type_alias_target(target, expansion)
+    }
+
+    fn normalized_type_alias_target(target: TypeName, expansion: Ty) -> Option<TypeName> {
+        match expansion.non_null() {
+            Ty::Fun(_) => crate::libraries::type_alias_target_classifier(expansion),
+            _ => Some(target),
+        }
+    }
+
     fn symbols(
         &self,
         namespace: SymbolNamespace,
@@ -4347,6 +4361,13 @@ impl JvmLibraries {
         let from_builtins = classifier.is_some()
             && classifier_name
                 .is_some_and(|identity| self.cp.builtin_classifier_name(identity).is_some());
+        let classifier_declaration = classifier.as_ref().and_then(|_| match alias_identity {
+            Some(identity) => {
+                <Self as crate::libraries::SemanticPlatform>::type_alias_expansion(self, identity)
+                    .map(crate::libraries::ClassifierDeclaration::TypeAlias)
+            }
+            None => classifier_name.map(crate::libraries::ClassifierDeclaration::Ordinary),
+        });
         let classifier_name = classifier.as_ref().map(|classifier| {
             classifier
                 .alias_target
@@ -4511,7 +4532,7 @@ impl JvmLibraries {
                 // normal call resolves — the same rule the top-level and member paths apply. The
                 // coroutine pass re-threads the CPS `Continuation` at the emitted call.
                 let descriptor = if mf.is_suspend() {
-                    strip_continuation_param(&descriptor)
+                    parameter_plans::logical_suspend_descriptor(&descriptor)
                 } else {
                     descriptor
                 };
@@ -4578,10 +4599,8 @@ impl JvmLibraries {
                     declared_params: generic_sig
                         .as_ref()
                         .map(|signature| signature.parameters_with_receiver(mf.context_count())),
-                    // Carry the resolved bytecode method's generic `Signature` — a `<reified T>` extension's
-                    // splice reads its formal-type-parameter NAMES from here to bind the call's explicit
-                    // type arguments. Without it the reified body cannot be specialized and the call falls
-                    // back to a (throwing) direct invoke of the inline-only method.
+                    // Carry the bytecode generic `Signature` so a reified extension can bind explicit
+                    // type arguments instead of invoking its throwing inline-only method.
                     signature: cand.as_ref().and_then(|c| c.signature.clone()),
                     // The name this extension is DECLARED under, beside the JVM method it is
                     // realized as: `@JvmName` renames the method, and a value-class signature
@@ -4597,6 +4616,7 @@ impl JvmLibraries {
                         self.top_level_default_realization(&callable).map(Box::new);
                 }
                 callable.inline_body_plan = self.inline_body_plan(&callable).map(Box::new);
+                let paired = cand.as_ref().is_some_and(|c| c.paired_common);
                 overloads.push(FunctionInfo {
                     ret: ReturnInfo::new(mf.ret_nullable(), ret_class),
                     visibility: mf.visibility,
@@ -4617,6 +4637,8 @@ impl JvmLibraries {
                     call_sig,
                     ..FunctionInfo::plain(FnKind::Extension, Some(receiver), callable)
                 });
+                self.common_expectations
+                    .attach_tail(paired, namespace, name, &mut overloads);
             }
             // PROPERTIES declared by the facade — receiver-less TOP-LEVEL ones (`val plugin: Plugin`)
             // and EXTENSION ones (`arr.lastIndex`, `list.indices`). Both are the callable namespace's
@@ -4702,11 +4724,22 @@ impl JvmLibraries {
         // stdlib. Federate that classifier source with the platform record here; platform metadata wins
         // when present, while callables remain exclusively metadata/platform declarations.
         let core = EmptySymbolSource.symbols(namespace, name);
-        let (classifier_name, classifier, builtin_classifier) = if classifier.is_some() {
-            (classifier_name, classifier, from_builtins)
-        } else {
-            (core.classifier_name, core.classifier.clone(), false)
-        };
+        let (classifier_name, classifier_declaration, classifier, builtin_classifier) =
+            if classifier.is_some() {
+                (
+                    classifier_name,
+                    classifier_declaration,
+                    classifier,
+                    from_builtins,
+                )
+            } else {
+                (
+                    core.classifier_name,
+                    core.classifier_declaration.clone(),
+                    core.classifier.clone(),
+                    false,
+                )
+            };
         let classifier = classifier.map(|classifier| {
             classifier_name.map_or(classifier.clone(), |owner| {
                 self.register_external_classifier(owner, classifier)
@@ -4724,6 +4757,7 @@ impl JvmLibraries {
             name,
             ResolvedSymbols {
                 classifier_name,
+                classifier_declaration,
                 classifier,
                 builtin_classifier,
                 callables,
@@ -5019,11 +5053,10 @@ impl JvmLibraries {
                         // form for emission.
                         let suspend = m.suspend();
                         let params = m.params.clone();
-                        let descriptor = if suspend {
-                            strip_continuation_param(&m.descriptor)
-                        } else {
-                            m.descriptor.clone()
-                        };
+                        // `build_library_type` normalized this selected member's physical CPS
+                        // descriptor exactly once. Reapplying that operation here would remove the
+                        // final real source parameter from the already-logical descriptor.
+                        let descriptor = m.descriptor.clone();
                         let meta_name = m.physical_name.as_deref().unwrap_or(&m.name);
                         let metadata_ret = m.declared_ret.or_else(|| {
                             self.cp
@@ -5152,7 +5185,7 @@ impl JvmLibraries {
                         } else {
                             None
                         };
-                        let physical_owner = m.owner.as_ref().copied().unwrap_or(cn);
+                        let physical_owner = erased_top_member_owner(cn, m.owner.as_ref().copied());
                         let collection_barrier =
                             collection_barrier_role(builtin_cn, scope_name, &params, ret);
                         let callable = LibraryCallable {
@@ -5199,6 +5232,7 @@ impl JvmLibraries {
                         // rebuilt as a physically boxed `Result<T>` merely because both facts were
                         // normalized through this member-overload view.
                         callable.physical_params = m.physical_params.clone();
+                        callable.physical_parameter_plan = m.physical_parameter_plan.clone();
                         callable.inline_body_plan = self.inline_body_plan(&callable).map(Box::new);
                         let inline_body_plan = callable.inline_body_plan.clone();
                         overloads.push(FunctionInfo {
@@ -5496,16 +5530,19 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
     }
 
     fn type_alias_expansion(&self, internal: TypeName) -> Option<crate::libraries::AliasExpansion> {
-        self.cp.type_alias_expansion(internal).map(
-            |(target, formals, expansion, expansion_spelling)| crate::libraries::AliasExpansion {
-                identity: internal,
-                target: self.canonical_source_type_name(target),
-                formals,
-                expansion_spelling,
-                // Metadata may name a mapped JVM collection as the expanded classifier. Normalize
-                // the complete template at the provider boundary so core resolution only sees
-                // source identities, including inside projections, function types, and nullability.
-                expansion: canonicalize_jvm_collections(expansion),
+        self.cp.type_alias_expansion(internal).and_then(
+            |(target, formals, expansion, expansion_spelling)| {
+                let target = Self::normalized_type_alias_target(target, expansion)?;
+                Some(crate::libraries::AliasExpansion {
+                    identity: internal,
+                    target: self.canonical_source_type_name(target),
+                    formals,
+                    expansion_spelling,
+                    // Metadata may name a mapped JVM collection as the expanded classifier. Normalize
+                    // the complete template at the provider boundary so core resolution only sees
+                    // source identities, including inside projections, function types, and nullability.
+                    expansion: canonicalize_jvm_collections(expansion),
+                })
             },
         )
     }
@@ -6100,29 +6137,6 @@ mod tests {
             actual,
             Ty::obj_args("kotlin/collections/List", &[Ty::String]),
         ));
-    }
-
-    #[test]
-    fn concrete_java_collection_keeps_its_kotlin_interface_faces() {
-        let (Some(stdlib), Some(jdk)) = (
-            crate::toolchain::stdlib_jar(),
-            crate::toolchain::jdk_modules(),
-        ) else {
-            return;
-        };
-        let libraries = initialized_libraries(std::rc::Rc::new(
-            crate::jvm::classpath::Classpath::new(vec![stdlib, jdk]),
-        ));
-        let classifier = libraries
-            .classifier_record(type_name("java/util/ArrayList"))
-            .expect("ArrayList classifier");
-        assert!(
-            classifier
-                .supertypes
-                .contains("kotlin/collections/MutableList"),
-            "ArrayList supertypes: {:?}",
-            classifier.supertypes
-        );
     }
 
     #[test]

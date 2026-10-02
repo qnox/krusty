@@ -124,6 +124,17 @@ fn publish_callable(
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
             parameters: parameters.into_boxed_slice(),
+            type_parameters: super::generics::declaration_type_parameters(
+                index,
+                callable.declaration,
+            )
+            .into_iter()
+            .map(|parameter| crate::ir::IrCallableTypeParameter {
+                semantic_name: parameter.semantic_name,
+                bounds: parameter.bounds.into_boxed_slice(),
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice(),
             result: signature.result.get(),
             annotations: index
                 .declaration_annotations(callable.declaration)

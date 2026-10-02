@@ -36,6 +36,16 @@ pub(super) fn realize(ir: &mut IrFile, callable_under: &Under, renamed_functions
             .reflection_target_param_tys
             .clone()
             .unwrap_or_else(|| fr.target_param_tys[first_call_arg..].to_vec());
+        // A value class's constructor is realized as its static `constructor-impl`, which returns
+        // the constructed value's carrier; kotlinc reflects it so and boxes what `invoke` returns.
+        let value_class_constructor =
+            matches!(fr.reflected, crate::ir::ReflectedCallable::Constructor)
+                .then_some(fr.owner_class)
+                .flatten()
+                .filter(|owner| callable_under.contains_key(owner));
+        if let Some(owner) = value_class_constructor {
+            fr.reflection_target_ret_ty = Some(Ty::obj_name(owner));
+        }
         let target_decl_ret = fr.reflection_target_ret_ty.unwrap_or(fr.target_ret_ty);
         // A bound extension reference on a value-class receiver (`Z(42)::test`) targets a facade
         // static whose leading parameter is that receiver; the emitter unboxes it at `invoke`.
@@ -70,10 +80,15 @@ pub(super) fn realize(ir: &mut IrFile, callable_under: &Under, renamed_functions
                     &target_decl_params,
                     &target_decl_ret,
                     callable_under,
-                    fr.owner_class.is_none(),
+                    // A top-level declaration lives on its file facade, which the reference's
+                    // top-level flag records.
+                    fr.flags & 1 != 0,
                     fr.declaration_suspend,
                 ),
             },
+            crate::ir::ReflectedCallable::Constructor if value_class_constructor.is_some() => {
+                "constructor-impl".to_string()
+            }
             // A local function is reflected by its lifted name, final only at emission.
             crate::ir::ReflectedCallable::Constructor
             | crate::ir::ReflectedCallable::Physical

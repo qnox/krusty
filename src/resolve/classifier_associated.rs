@@ -104,6 +104,14 @@ impl Checker<'_> {
                     .then(|| receiver.ty.kotlin_class_internal())
                     .flatten()
             },
+            |receiver| receiver.ty.kotlin_class_internal(),
+            |classifier| {
+                self.fed_source()
+                    .classifier(classifier)?
+                    .companion_object
+                    .as_ref()
+                    .map(|(_, companion)| *companion)
+            },
         )
     }
 

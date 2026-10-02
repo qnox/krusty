@@ -23,6 +23,14 @@ pub(super) fn local_variable(
     {
         return Some(format!("${name}"));
     }
+    // A local delegated property's storage parameter keeps its source spelling (`x$delegate`) and
+    // kotlinc's local-variable `$` prefix. That role is checked before the plain source-name
+    // return: the storage identity publishes a name, and the prefix is still part of the JVM name.
+    if let IrParameterRole::Generated(IrGeneratedParameterRole::LocalDelegateStorage) =
+        identity.role
+    {
+        return identity.source_name.as_ref().map(|name| format!("${name}"));
+    }
     if let Some(name) = &identity.source_name {
         return Some(name.clone());
     }
@@ -41,7 +49,10 @@ pub(super) fn local_variable(
         IrParameterRole::Generated(role) => match role {
             IrGeneratedParameterRole::Positional { .. } => None,
             IrGeneratedParameterRole::Continuation => Some("$completion".to_string()),
+            IrGeneratedParameterRole::ContinuationDispatchReceiver => Some("this$0".to_string()),
             IrGeneratedParameterRole::HolderReceiver => Some("$this".to_string()),
+            // kotlinc names the parameter like the field it initializes.
+            IrGeneratedParameterRole::OuterInstance => Some("this$0".to_string()),
             IrGeneratedParameterRole::ValueClassCarrier => Some("arg0".to_string()),
             IrGeneratedParameterRole::ValueClassEqualsOperand { ordinal } => {
                 Some(value_class_equals_operand(ordinal).to_string())
@@ -53,6 +64,10 @@ pub(super) fn local_variable(
             IrGeneratedParameterRole::InterfaceDelegationValue { ordinal } => {
                 Some(format!("p{ordinal}"))
             }
+            IrGeneratedParameterRole::LocalDelegateStorage => {
+                identity.source_name.as_ref().map(|name| format!("${name}"))
+            }
+            IrGeneratedParameterRole::LocalDelegateDispatch => Some("this$0".to_string()),
         },
     }
 }
@@ -290,7 +305,11 @@ fn function_semantic_parameter_types(
         .collect()
 }
 
-fn constructor_identities(arguments: &[crate::ir::IrCtorArg]) -> Vec<IrParameterIdentity> {
+/// The identities of a constructor's physical parameters: the one projection its
+/// `LocalVariableTable` and `MethodParameters` names and flags are derived from.
+pub(super) fn constructor_identities(
+    arguments: &[crate::ir::IrCtorArg],
+) -> Vec<IrParameterIdentity> {
     let mut context_ordinal = 0u32;
     arguments
         .iter()
@@ -308,6 +327,35 @@ fn constructor_identities(arguments: &[crate::ir::IrCtorArg]) -> Vec<IrParameter
                 }
                 crate::types::ContextParameterKind::LegacyReceiver => {
                     IrParameterIdentity::context_receiver(context_ordinal)
+                }
+                crate::types::ContextParameterKind::None
+                    if argument.provenance
+                        == crate::ir::IrCtorParameterProvenance::ContinuationDispatchReceiver =>
+                {
+                    IrParameterIdentity::generated(
+                        IrGeneratedParameterRole::ContinuationDispatchReceiver,
+                        None,
+                    )
+                }
+                crate::types::ContextParameterKind::None
+                    if argument.provenance
+                        == crate::ir::IrCtorParameterProvenance::Continuation =>
+                {
+                    IrParameterIdentity::generated(IrGeneratedParameterRole::Continuation, None)
+                }
+                crate::types::ContextParameterKind::None
+                    if argument.provenance
+                        == crate::ir::IrCtorParameterProvenance::EnclosingInstance =>
+                {
+                    assert!(
+                        argument.name.is_none() && argument.capture.is_none(),
+                        "a generated constructor parameter has no source or capture identity"
+                    );
+                    assert_eq!(
+                        physical_ordinal, 0,
+                        "an outer instance is its constructor's first parameter"
+                    );
+                    IrParameterIdentity::generated(IrGeneratedParameterRole::OuterInstance, None)
                 }
                 crate::types::ContextParameterKind::None => match argument.name.as_deref() {
                     Some(name) => IrParameterIdentity::source(name),
@@ -616,6 +664,29 @@ mod tests {
     }
 
     #[test]
+    fn a_local_delegate_storage_parameter_keeps_kotlincs_dollar_prefix() {
+        let storage = IrParameterIdentity::generated(
+            IrGeneratedParameterRole::LocalDelegateStorage,
+            Some("delegated$delegate".to_string()),
+        );
+        assert_eq!(
+            local_variable(&storage, "one$lambda$0$0"),
+            Some("$delegated$delegate".to_string())
+        );
+        assert_eq!(
+            method_parameter(&storage, "one$lambda$0$0"),
+            Some("$delegated$delegate".to_string())
+        );
+        assert_eq!(metadata(&storage), Some("delegated$delegate"));
+        let dispatch =
+            IrParameterIdentity::generated(IrGeneratedParameterRole::LocalDelegateDispatch, None);
+        assert_eq!(
+            local_variable(&dispatch, "read$lambda$0"),
+            Some("this$0".to_string())
+        );
+    }
+
+    #[test]
     fn an_unnamed_generated_parameter_never_acquires_a_positional_name() {
         let generated = IrParameterIdentity::generated(
             IrGeneratedParameterRole::Positional { ordinal: 3 },
@@ -673,6 +744,7 @@ mod tests {
             receiver_parameter: Some(0),
             label: label.map(str::to_owned),
             form: crate::ir::IrLambdaForm::Literal,
+            class_provenance: None,
         };
 
         ir.lambda_origins.insert(function, origin(None));

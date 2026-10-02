@@ -10,13 +10,14 @@
 use super::*;
 
 /// Add each value class's interface entries as bridges targeting the static member, and return the
-/// static members that have one: another bridge to such a member calls its entry instead.
+/// static members that have one, with the entry's name: another bridge to such a member calls its
+/// entry instead.
 pub(super) fn materialize(
     ir: &mut IrFile,
     lowered_value_members: &HashSet<u32>,
     override_results: &crate::jvm::override_results::OverrideResults,
     entry_name: impl Fn(&IrFile, u32) -> String,
-) -> HashSet<u32> {
+) -> HashMap<u32, String> {
     let mut entries = Vec::new();
     for (&owner, edges) in &ir.function_overrides {
         let Some(class) = ir.classes.iter().position(|class| class.fq_name == owner) else {
@@ -60,7 +61,7 @@ pub(super) fn materialize(
             }
         }
     }
-    let mut targets = HashSet::new();
+    let mut targets = HashMap::new();
     for (class, implementation, bridge_parameters) in entries {
         // The static member's physical signature, less the carrier it receives first.
         let target = &ir.functions[implementation as usize];
@@ -88,7 +89,7 @@ pub(super) fn materialize(
                 overridden_owner: None,
                 collection_barrier: None,
                 parameters: bridge_parameters,
-                name,
+                name: name.clone(),
                 erased_params: parameters.clone(),
                 erased_ret: result,
                 concrete_params: parameters,
@@ -100,7 +101,7 @@ pub(super) fn materialize(
                 property_implementation: None,
             });
         }
-        targets.insert(implementation);
+        targets.insert(implementation, name);
     }
     targets
 }

@@ -1,5 +1,9 @@
 //! Declared and inherited member lookup over applied classifier hierarchies.
 
+mod bound_inner_constructors;
+
+pub(crate) use bound_inner_constructors::bound_inner_constructor_candidates;
+
 use super::{
     classifier_bindings, direct_supertypes_from_classifier, resolution_subtype,
     specialize_call_sig, specialize_callable, specialize_member_type, ty_subst_keep_unbound,

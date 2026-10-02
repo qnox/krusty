@@ -71,7 +71,7 @@ impl Emitter<'_> {
         // marks its own line at the jump, after a wide operand's three-way `*cmp`
         // (`mark_comparison_decision`); one without a line of its own belongs to the statement
         // around it, so the instruction that compares returns to the statement's line.
-        let own_line = self.comparison_line.is_some_and(|line| line != 0);
+        let own_line = self.comparison_line.is_some_and(|(_, line)| line != 0);
         if !int_cat {
             if !own_line {
                 self.return_to_statement_line(&[lhs, rhs], code);

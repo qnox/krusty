@@ -94,12 +94,18 @@ impl<'a> StreamedModuleSymbols<'a> {
             })
     }
 
-    pub(crate) fn type_alias_expansion(&self, identity: TypeName) -> Option<(Vec<String>, Ty)> {
+    pub(crate) fn type_alias_binding(
+        &self,
+        identity: TypeName,
+    ) -> Option<crate::libraries::AliasExpansion> {
         let header = self.index.type_alias_by_identity(identity)?;
-        Some((
-            self.index.type_alias_formals(header.declaration),
-            header.expansion.get(),
-        ))
+        Some(crate::libraries::AliasExpansion {
+            identity: header.identity,
+            target: header.target,
+            formals: self.index.type_alias_formals(header.declaration),
+            expansion: header.expansion.get(),
+            expansion_spelling: header.expansion_spelling.clone(),
+        })
     }
 
     pub(crate) fn type_parameter_extra_bounds(&self, identity: &str) -> Vec<Ty> {
@@ -562,6 +568,9 @@ impl<'a> StreamedModuleSymbols<'a> {
             plugin_expression: None,
             descriptor: String::new(),
             physical_params: parameters.clone(),
+            physical_parameter_plan: Some(
+                crate::libraries::physical_parameter_plan::source_parameter_plan(parameters.len()),
+            ),
             params: parameters,
             ret: result,
             physical_ret: result,
@@ -1670,6 +1679,8 @@ impl SymbolSource for StreamedModuleSymbols<'_> {
         std::rc::Rc::new(ResolvedSymbols {
             builtin_classifier: false,
             classifier_name: stable_classifier_name,
+            classifier_declaration: stable_classifier_name
+                .map(crate::libraries::ClassifierDeclaration::Ordinary),
             classifier,
             callables,
             importable_declaration: stable_classifier_name.is_some(),

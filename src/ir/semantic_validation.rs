@@ -7,6 +7,9 @@
 
 use crate::types::Ty;
 
+mod completeness;
+pub use completeness::IncompleteIrFact;
+
 use super::{
     Callee, CtorDelegateTarget, FuncRef, IrCheckedArgument, IrCheckedConstructorTarget,
     IrCheckedOperation, IrCheckedSubstitution, IrClass, IrExpr, IrFile, IrGenericSig, IrIntrinsic,
@@ -288,6 +291,7 @@ fn validate_expr(expression: &IrExpr) -> Result<(), UndeterminedIrType> {
         IrExpr::LocalPropertyReference(reference) => {
             reject("local property reference", reference.property_type)
         }
+        IrExpr::LocalDelegateAccess(_) => Ok(()),
         IrExpr::Call { callee, .. } => validate_callee(callee),
         IrExpr::PluginPlaceholder { types, .. } => {
             reject_all("plugin operation type", types.iter().copied())
@@ -349,6 +353,7 @@ fn validate_expr(expression: &IrExpr) -> Result<(), UndeterminedIrType> {
         | IrExpr::ReifiedTypeOp { .. }
         | IrExpr::UnitInstance
         | IrExpr::CurrentContinuation
+        | IrExpr::InlineFrameMarker
         | IrExpr::NotNullAssert { .. }
         | IrExpr::LateinitCheck { .. }
         | IrExpr::ExternalStaticInstance { .. }
@@ -640,6 +645,10 @@ impl IrFile {
             "deferred local declaration",
             self.deferred_local_types.values().copied(),
         )?;
+        reject_all(
+            "inline operand declaration",
+            self.inline_operand_declared_types(),
+        )?;
         reject_all("exhaustive when", self.whens.exhaustive.values().copied())?;
         reject_all("physical expression", self.physical_types.values().copied())?;
         for properties in self.member_ext_props.values() {
@@ -808,10 +817,14 @@ mod tests {
             context_count: 0,
             has_receiver: false,
             suspend: false,
+            source_suspend: false,
             overrides_non_primitive_result: false,
+            overridden_non_primitive_results: Vec::new(),
             function_adapter: false,
             wraps_function_value: true,
             nullable: true,
+            kotlin_interface: false,
+            parameter_identities: Vec::new(),
         }
     }
 

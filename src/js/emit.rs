@@ -201,6 +201,9 @@ fn emit_stmt(ir: &IrFile, e: u32, depth: usize, inst: bool, out: &mut String) {
                 None => out.push_str("return;\n"),
             }
         }
+        // A frame boundary is not a value. A backend that emits debug locals materializes it;
+        // JavaScript has no such table.
+        IrExpr::InlineFrameMarker => {}
         IrExpr::Variable { index, init, .. } => {
             indent(depth, out);
             match init {
@@ -1098,6 +1101,7 @@ mod tests {
             prop_ref: None,
             func_ref: None,
             lambda: None,
+            sam_wrapper: None,
             bridges: Vec::new(),
             interfaces: Default::default(),
             is_object: false,
@@ -1175,5 +1179,15 @@ mod tests {
         assert!(js.contains("Outer.access$super(null)"), "{js}");
         assert!(js.contains("Base.prototype.value.call(v0)"), "{js}");
         assert!(!js.contains("function access$super"), "{js}");
+    }
+
+    #[test]
+    fn an_inline_frame_marker_is_not_a_javascript_value() {
+        let mut ir = IrFile::default();
+        let marker = ir.add_expr(IrExpr::InlineFrameMarker);
+        ir.value_names.insert(marker, "twice".into());
+        let mut out = String::new();
+        emit_stmt(&ir, marker, 0, false, &mut out);
+        assert_eq!(out, "");
     }
 }

@@ -166,16 +166,18 @@ impl Emitter<'_> {
             source_jvm.non_null().obj_internal() == Some(*classifier)
                 && self.is_value_class_ty(&semantic)
         });
-        let value_class_carrier = boxed_value_class.and_then(|classifier| {
+        let underlying = boxed_value_class.and_then(|classifier| {
             crate::jvm::value_classes::boxed_value_class_underlying(self.ir, classifier)
-                .map(|underlying| jvm_declared_ty(&underlying))
         });
-        if let (Some(classifier), Some(carrier)) = (boxed_value_class, value_class_carrier) {
+        if let (Some(classifier), Some(underlying)) = (boxed_value_class, underlying) {
+            let carrier = jvm_declared_ty(&underlying);
             // A reference supertype/generic descriptor consumes the BOX itself. Unbox only when the
             // selected descriptor consumes this value class's actual carrier.
+            // A nullable destination over a carrier that has a null of its own is the box too.
             let destination_is_concrete_value_class =
                 destination_semantic.is_none_or(|destination| {
                     destination.non_null().obj_internal() == Some(classifier)
+                        && !(destination.is_nullable() && underlying.is_nullable())
                 });
             // The box and the carrier of a primitive-array value class share a descriptor.
             // A physical stamp that still names the value class is the box; unboxing it deletes
@@ -359,5 +361,19 @@ impl Emitter<'_> {
             .and_then(|parameters| parameters.get(parameter_index))
             .copied();
         self.adapt_physical_operand(source, semantic, destination_semantic, physical, code);
+    }
+
+    pub(super) fn constructor_physical_params(
+        &self,
+        construction: crate::ir::ExprId,
+        descriptor: &str,
+    ) -> Vec<Ty> {
+        let checked = self
+            .ir
+            .construction_declared_params
+            .get(&construction)
+            .map(|params| params.as_ref());
+        crate::jvm::physical_type::constructor_operand_tys(descriptor, checked)
+            .expect("constructor descriptor must be valid")
     }
 }

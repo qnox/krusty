@@ -5,6 +5,7 @@
 //! rendered spellings as lookup keys or reparses them to recover semantic owners.
 
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use crate::ir::{IrClass, IrFile};
 use crate::jvm::classfile::{ClassWriter, DeclarationPaths, InnerClassSpec};
@@ -15,10 +16,16 @@ use crate::types::{type_name, TypeName};
 pub(super) struct InnerClasses {
     specs: Vec<InnerClassSpec>,
     paths: DeclarationPaths,
+    /// The class each class declared in executable code is declared in, by internal name.
+    declaring: Rc<HashMap<String, String>>,
 }
 
 impl InnerClasses {
-    pub(super) fn new(ir: &IrFile) -> Self {
+    pub(super) fn new(
+        ir: &IrFile,
+        override_results: &crate::jvm::override_results::OverrideResults,
+        facade: &str,
+    ) -> Self {
         let declared: HashMap<TypeName, &IrClass> = ir
             .classes
             .iter()
@@ -99,6 +106,16 @@ impl InnerClasses {
                 });
                 continue;
             }
+            // A SAM wrapper is anonymous, and scoped to the file that declares it.
+            if class.sam_wrapper.is_some() {
+                specs.push(InnerClassSpec {
+                    inner: identity.render(),
+                    outer: None,
+                    name: None,
+                    access: 0x0010 | 0x0008,
+                });
+                continue;
+            }
             // A callable reference class is anonymous too, and synthetic; it is public only where
             // spliced inline code constructs it from elsewhere.
             if class.func_ref.is_some() || class.prop_ref.is_some() {
@@ -174,9 +191,26 @@ impl InnerClasses {
             .iter()
             .map(|(class, path)| (class.render(), path.clone()))
             .collect::<HashMap<_, _>>();
+        // kotlinc's `ClassCodegen` generates a class declared in executable code from the class
+        // whose code declares it, and lists it there: the class its `EnclosingMethod` names.
+        let declaring = ir
+            .classes
+            .iter()
+            .filter(|class| {
+                class
+                    .enclosure
+                    .is_some_and(|scope| !foreign_scope(ir, scope))
+            })
+            .filter_map(|class| {
+                let (owner, _) =
+                    crate::jvm::ir_emit::class_enclosure(ir, override_results, class, facade)?;
+                Some((class.fq_name(), owner))
+            })
+            .collect();
         Self {
             specs,
-            paths: std::rc::Rc::new(paths),
+            paths: Rc::new(paths),
+            declaring: Rc::new(declaring),
         }
     }
 
@@ -185,6 +219,33 @@ impl InnerClasses {
             writer.add_inner_class(spec.clone());
         }
         writer.set_declaration_paths(self.paths.clone());
+        writer.set_declaring_classes(self.declaring.clone());
+    }
+}
+
+/// Whether `scope` is code another source file declares: an inline function retained here only as
+/// a call-site template. kotlinc generates a class declared there from that file's own classes, so
+/// no class of this file declares it.
+fn foreign_scope(ir: &IrFile, scope: crate::ir::IrEnclosure) -> bool {
+    use crate::ir::IrEnclosure;
+    match scope {
+        IrEnclosure::Function(function) => ir.foreign_inline_templates.contains(&function),
+        IrEnclosure::Lambda(function) => ir
+            .lambda_enclosures
+            .get(&function)
+            .is_some_and(|&outer| foreign_scope(ir, outer)),
+        IrEnclosure::ClassInitializer(class)
+        | IrEnclosure::Classifier(class)
+        | IrEnclosure::Constructor { class, .. } => ir.classes[class as usize]
+            .enclosure
+            .is_some_and(|outer| foreign_scope(ir, outer)),
+        IrEnclosure::PropertyAccessor { property, setter } => {
+            ir.foreign_inline_templates
+                .contains(&crate::jvm::ir_emit::property_accessor_function(
+                    ir, property, setter,
+                ))
+        }
+        IrEnclosure::File => false,
     }
 }
 
@@ -283,7 +344,11 @@ mod tests {
         ir.add_class(companion_class);
         ir.add_class(IrClass::synthetic(nested_with_dollars));
 
-        let prepared = InnerClasses::new(&ir);
+        let prepared = InnerClasses::new(
+            &ir,
+            &crate::jvm::override_results::OverrideResults::default(),
+            "sample/FacadeKt",
+        );
         assert_eq!(
             prepared.specs,
             vec![
@@ -343,7 +408,12 @@ mod tests {
         ir.add_class(member_class);
 
         assert_eq!(
-            InnerClasses::new(&ir).specs,
+            InnerClasses::new(
+                &ir,
+                &crate::jvm::override_results::OverrideResults::default(),
+                "sample/FacadeKt",
+            )
+            .specs,
             [
                 InnerClassSpec {
                     inner: "sample/Owner$make$Local".to_string(),
@@ -370,6 +440,10 @@ mod tests {
         local.enclosure = Some(IrEnclosure::File);
         ir.add_class(local);
 
-        InnerClasses::new(&ir);
+        InnerClasses::new(
+            &ir,
+            &crate::jvm::override_results::OverrideResults::default(),
+            "sample/FacadeKt",
+        );
     }
 }

@@ -9,6 +9,40 @@ use crate::types::Ty;
 use super::{slot_words, type_descriptor, Emitter, TempRole};
 
 impl<'a> Emitter<'a> {
+    /// Emit the JVM-owned nullable-wrapper construction plan for this exact `New`, if any.
+    pub(super) fn emit_nullable_sam_wrapper_new(
+        &mut self,
+        expression: u32,
+        internal: crate::types::TypeName,
+        args: &[u32],
+        code: &mut CodeBuilder,
+    ) -> bool {
+        if !self
+            .sam_wrapper_realizations
+            .is_nullable_construction(expression)
+        {
+            return false;
+        }
+        let [function] = args else {
+            unreachable!("a nullable SAM wrapper is constructed from its function");
+        };
+        let parameters = self
+            .ir
+            .class_id_by_name(internal)
+            .map(|class| super::class_ctor_jvm_tys(&self.ir.classes[class as usize]))
+            .expect("a nullable SAM wrapper names its generated class");
+        let &[capture_ty] = parameters.as_slice() else {
+            unreachable!("a nullable SAM wrapper constructor takes its function");
+        };
+        self.emit_nullable_sam_wrapper(code, &internal.render(), *function, capture_ty);
+        true
+    }
+
+    pub(super) fn nullable_sam_wrapper_emits_control_flow(&self, expression: u32) -> bool {
+        self.sam_wrapper_realizations
+            .is_nullable_construction(expression)
+    }
+
     /// `new` / captures / `<init>`. A validated nullable adapter's single reference capture stays
     /// null instead of being passed to the constructor.
     pub(super) fn emit_capturing_lambda_class(
@@ -67,6 +101,37 @@ impl<'a> Emitter<'a> {
             self.emit_value(capture, code);
         }
         code.invokedynamic(indy, cap_words, 1);
+    }
+
+    /// `new Wrapper(function)` only when `function` is non-null. The wrapper constructor rejects
+    /// null, so the conversion itself is the test: evaluate once, store, and leave `null` otherwise.
+    pub(super) fn emit_nullable_sam_wrapper(
+        &mut self,
+        code: &mut CodeBuilder,
+        internal: &str,
+        function: u32,
+        capture_ty: Ty,
+    ) {
+        debug_assert_eq!(slot_words(capture_ty), 1);
+        self.emit_value(function, code);
+        let temp = self.frame.enter_temp(TempRole::LambdaCapture, capture_ty);
+        let slot = temp.slot();
+        super::store(capture_ty, slot, code);
+        let null_case = code.new_label();
+        let done = code.new_label();
+        super::load(capture_ty, slot, code);
+        code.ifnull(null_case);
+        self.emit_initialized_lambda_class(code, internal, &[capture_ty], |_, code| {
+            super::load(capture_ty, slot, code);
+        });
+        // `<init>` leaves the instance. The null arm is empty until `aconst_null`, so the linear
+        // stack height after the constructor does not describe that arm.
+        code.goto(done);
+        code.bind(null_case);
+        code.set_stack(0);
+        code.aconst_null();
+        code.bind(done);
+        self.frame.leave_temp(temp);
     }
 
     fn emit_null_preserving_lambda_class(

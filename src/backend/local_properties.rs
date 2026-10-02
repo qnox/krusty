@@ -118,6 +118,20 @@ pub(crate) fn realize(ir: &mut IrFile) -> Result<Vec<RealizedLocalPropertyAccess
             ir.call_declared_params
                 .insert(operation, parameters.clone().into_boxed_slice());
         }
+        let first_operand = match &replacement {
+            IrExpr::Call {
+                dispatch_receiver,
+                args,
+                ..
+            } => dispatch_receiver.or_else(|| args.first().copied()),
+            IrExpr::PropertyRead { receiver, .. } | IrExpr::PropertyWrite { receiver, .. } => {
+                *receiver
+            }
+            _ => None,
+        };
+        if first_operand.is_some_and(|operand| ir.is_positionless(operand)) {
+            ir.mark_generated_operand_start(operation);
+        }
         ir.exprs[raw] = replacement;
         realized.push(RealizedLocalPropertyAccess {
             operation,

@@ -201,18 +201,19 @@ fun box(): String = try {\n\
 }
 
 #[test]
-fn nested_projected_nothing_result_can_be_discarded() {
+fn nested_projected_nothing_result_throws_when_observed() {
     const SRC: &str = "class Context<T>\n\
 fun <T> something(): T = Any() as T\n\
 fun <T> Any.decodeIn(context: Context<in T>): T = something()\n\
 fun <T> Any?.decodeOut(context: Context<out T>): T =\n\
     this?.decodeIn(context) ?: throw AssertionError()\n\
 fun box(): String {\n\
-    \"value\".decodeOut(Context<Any>())\n\
-    return \"OK\"\n\
+    return try {\n\
+        \"value\".decodeOut(Context<Any>())\n\
+        \"returned\"\n\
+    } catch (e: Exception) {\n\
+        if (e.javaClass.simpleName == \"KotlinNothingValueException\") \"OK\" else e.javaClass.simpleName\n\
+    }\n\
 }\n";
-    assert_eq!(
-        run(SRC).expect("nested Nothing result can be discarded"),
-        "OK"
-    );
+    common::expect_box_same_as_kotlinc(SRC, "NestedNothingValue");
 }
