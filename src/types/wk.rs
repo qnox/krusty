@@ -31,6 +31,7 @@ names! {
     unit => "kotlin/Unit",
     ubyte => "kotlin/UByte",
     ushort => "kotlin/UShort",
+    nothing => "kotlin/Nothing",
     java_object => "java/lang/Object",
     java_void => "java/lang/Void",
     java_enum => "java/lang/Enum",

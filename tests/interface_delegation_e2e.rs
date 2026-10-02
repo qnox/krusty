@@ -696,8 +696,8 @@ fn a_context_parameter_member_is_delegated() {
     )
     .expect("reference kotlinc and javap are provisioned");
     let marker = "save(Log, java.lang.String)";
-    // The instructions only: a forwarder krusty writes has no local-variable table yet, so the
-    // scan would run on into its parameter annotations, whose rows carry no opcode.
+    // The instructions only: the scan would otherwise run on into the forwarder's debug tables and
+    // parameter annotations, whose rows carry no opcode.
     let instructions = |disassembly: &str| {
         common::method_instructions(disassembly, marker)
             .into_iter()
@@ -708,4 +708,52 @@ fn a_context_parameter_member_is_delegated() {
     assert!(!forwarder.is_empty(), "kotlinc declares {marker}");
     assert_eq!(instructions(&comparison.krusty), forwarder);
     common::expect_box_same_as_kotlinc(CONTEXT_MEMBER_SRC, "ContextDelegationRun");
+}
+
+const DELEGATION_MEMBERS_SRC: &str = "class Result\n\
+class Left\n\
+class Right\n\
+interface I {\n\
+\x20   fun m(): Result\n\
+\x20   fun b(x: Left): Result\n\
+\x20   fun b()\n\
+\x20   fun b(y: Right)\n\
+\x20   fun b(result: Result, left: Left)\n\
+\x20   val zp: Result\n\
+\x20   var ap: Left\n\
+}\n\
+interface K { fun c() }\n\
+class Final(i: I, k: K) : K by k, I by i {\n\
+\x20   val own = 1\n\
+\x20   fun z() = 2\n\
+\x20   fun a() = 3\n\
+}\n\
+abstract class Open(i: I) : I by i\n";
+
+/// kotlinc stores a delegate in a synthetic field, gives each forwarder its receiver and
+/// parameters as locals, and records the forwarders in `@Metadata` as open DELEGATION members after
+/// the class's own declarations: functions, then properties, each sorted by name, then return type,
+/// then value parameters.
+#[test]
+fn delegation_members_are_published_like_kotlinc() {
+    for class in ["Final", "Open"] {
+        common::assert_class_matches_kotlinc("DelegationMembers", DELEGATION_MEMBERS_SRC, class);
+    }
+}
+
+/// A class of another module implements an interface through its superclass's delegation: the
+/// forwarder the dependency's `@Metadata` records is the implementation.
+#[test]
+fn a_dependency_superclass_delegation_implements_the_interface() {
+    const LIB: &str = "object Mark\n\
+    interface A {\n\
+    \x20   fun foo(): Mark\n\
+    }\n\
+    abstract class B(a: A) : A by a\n";
+    const MAIN: &str = "class AImpl : A {\n\
+    \x20   override fun foo(): Mark = Mark\n\
+    }\n\
+    class C : B(AImpl())\n\
+    fun box(): String = if (C().foo() === Mark) \"OK\" else \"fail\"\n";
+    common::expect_box_ok_against("dependency_superclass_delegation", LIB, MAIN);
 }

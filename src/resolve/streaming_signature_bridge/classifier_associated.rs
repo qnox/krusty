@@ -129,6 +129,8 @@ impl ProductionSignatureSemantics<'_> {
             receivers,
             self.static_scope_classifiers(scope),
             |receiver| receiver.non_null().obj_internal(),
+            |receiver| receiver.non_null().obj_internal(),
+            |classifier| self.classifier_companion(classifier),
         )
     }
 

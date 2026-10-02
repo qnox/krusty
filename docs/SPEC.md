@@ -9036,6 +9036,94 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   property's named context parameters to its signature parameters; an anonymous `_` binds nothing.
   (`tests/context_parameters_e2e.rs`, `an_inferred_property_getter_reads_its_context_parameters`.)
 
+- **Interface-delegation members are published as kotlinc publishes them.** For
+  `class C(d: I) : I by d`, the `$$delegate_N` field is compiler-generated storage (`ACC_SYNTHETIC`,
+  no nullability annotation); each forwarder carries its receiver and parameters as locals but no
+  line; and `@Metadata` records every forwarder as an open `DELEGATION` member after the class's own
+  declarations: the functions, then the properties, each ordered as kotlinc's
+  `FirCallableDeclarationComparator` orders them (name, extension receiver, return type, then value
+  parameters by count and type). The function's identity is the override edge's implementation
+  function, including a classpath member that arrives without source parameter names; publication
+  does not depend on those names. A dependent module therefore sees the delegated member as the
+  implementation of the interface's abstract one (`delegation/delegationDifferentModule.kt`).
+  (`tests/interface_delegation_e2e.rs`, `delegation_members_are_published_like_kotlinc`,
+  `a_dependency_superclass_delegation_implements_the_interface`.)
+
+- **A nullable function type is a function-typed context for a callable reference.** A reference
+  whose expected type is `(suspend () -> Unit)?` is selected and adapted exactly as for
+  `suspend () -> Unit`: `processDirect(sam::run)` with a regular `Sam.run` is suspend-converted into
+  a suspend function value, not typed as its standalone `KSuspendFunction0<Unit>` reflection type.
+  (`tests/suspend_conversion_e2e.rs`,
+  `bound_reference_converts_to_a_nullable_suspend_parameter`; corpus
+  `suspendConversion/suspendConversionNullableCCE.kt`.) kotlinc suspend-converts
+  `if (r == null) null else r::run` as a whole, wrapping the nullable reflective value; krusty
+  converts the reference branch, so that one class differs from kotlinc's.
+
+- **A classifier declared in an `init` block belongs to that initializer.** As a local class in a
+  function body is owned by the function, one written in `init { … }` is owned by the initializer
+  declaration, so its supertype and every use resolve in the block's lexical scope: a sibling local
+  class is a visible supertype and constructor (`class C : B()`, `object : B()`, `C()`). The local
+  and anonymous classes match kotlinc's class files. (`tests/local_class_scope_e2e.rs`,
+  `an_init_block_local_class_resolves_in_the_initializer_scope`; corpus
+  `localClasses/localClassInInitializer.kt`.)
+
+- **The type on a destructured lambda parameter is the parameter's type.** In
+  `{ (a, b): P -> … }` and `{ [a, b]: P -> … }` the annotation declares the one destructured
+  parameter's type, exactly as `{ p: P -> … }` does, so the lambda destructures (positionally, or by
+  name under `NameBasedDestructuring`) without an expected function type, including when it is
+  invoked directly. (`tests/name_based_destructuring_e2e.rs`,
+  `a_typed_destructured_lambda_parameter_needs_no_expected_type`; corpus
+  `regressions/directInvokeNameBasedDestructuring.kt`.) A destructured lambda's body still differs
+  from kotlinc's in the `<destruct>` parameter null check and its line entries, as it did with an
+  expected type.
+
+- **An `expect` annotation constructor with no parameters pairs with an all-default actual.**
+  Actualization compares a constructor pair's complete parameter lists, and the counts must agree,
+  with kotlinc's one exception (`valueParametersCountCompatible`): when both constructors belong to
+  annotation classes, a parameterless `expect` constructor is actualized by one whose every
+  parameter has a default, as in `expect annotation class A()` /
+  `actual annotation class A(val value: Mark = Mark.Ok)`. A plain class, or an annotation
+  parameter without a default, is still reported as leaving the `expect` constructor unactualized.
+  (`tests/no_expect_for_actual_e2e.rs`,
+  `a_parameterless_expect_annotation_constructor_pairs_with_an_all_default_one`,
+  `an_expect_constructor_pairs_only_with_its_own_parameter_count_otherwise`; corpus
+  `multiplatform/k2/defaultArguments/kt67488.kt`.)
+
+- **Actualization binds a member's header types through the complete classifier scope.** The
+  classifier a type in an `expect` or `actual` member names is selected from complete type-path
+  candidates at each classifier-scope rung. A nested root whose whole suffix exists wins at its
+  nearer rung; an incomplete root is not selected and the next import/package rung is considered.
+  In `expect class C(e: E = E.O) { enum class E { O, K } }`, `E` is `C.E` (even beside a top-level
+  `E`), so the constructor pairs with `actual constructor(e: E)` and an argument-less `C()` takes the
+  `expect` default. Once a complete candidate is selected, its stable identity is final: later
+  phases do not retry another spelling, root, or namespace. Thus an incomplete nested `E` does not
+  hide an imported or same-package `E.Missing`, while a complete nested `E.Missing` wins. A primary
+  constructor's parameter types are bound in the constructor's scope; a classifier's supertypes and
+  bounds are bound outside its body. Classifiers inherited from supertypes are not yet on this rung.
+  (`tests/mpp_expect_actual_e2e.rs`, `an_expect_constructor_parameter_names_a_nested_classifier`;
+  `tests/no_expect_for_actual_e2e.rs`,
+  `an_explicit_import_wins_an_enclosing_nested_header_classifier`,
+  `a_same_package_classifier_wins_an_enclosing_nested_header_classifier`,
+  `a_complete_nested_header_path_outranks_the_imported_type`; corpus
+  `multiplatform/k2/defaultArguments/nestedEnumEntryValue.kt`.)
+
+- **A companion-block member's own `actual` claims its `expect`.** A `companion { … }` block member
+  is hoisted to a file declaration; the `actual` it writes itself travels with it, so
+  `actual val a = …` in an `actual class`'s block actualizes the `expect` block member and is not
+  reported as an unmarked implementation. (`tests/mpp_expect_actual_e2e.rs`,
+  `a_companion_block_member_actualizes_its_expect`.)
+
+- **A companion block's static scope precedes its classifier's companion object.** On the implicit
+  tower a classifier's static scope (its `companion { … }` block members) directly follows the
+  classifier's own `this`. Inside a block member there is no `this`, and the static scope keeps
+  the same place: ahead of the classifier's companion object receiver. An unqualified `a` or
+  `foo(…)` in a block member therefore names the block's member, not the companion object's; a
+  static scope with neither receiver still follows every receiver.
+  (`tests/companion_block_members_e2e.rs`,
+  `a_block_member_names_its_block_before_the_companion_object`; corpus
+  `multiplatform/k2/expectStatic.kt`.) Classes compiled with this experimental feature match
+  kotlinc's except the `@Metadata` pre-release flag kotlinc sets (`xi` 50 against 48).
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.

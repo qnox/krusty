@@ -303,6 +303,10 @@ fn property_flags(prop: &PropMeta) -> u64 {
             0
         }
         | modality_bits(prop.modifiers.modality)
+        | match prop.modifiers.member_kind {
+            crate::ir::IrMemberKind::Declaration => 0,
+            crate::ir::IrMemberKind::Delegation => property_flags::MEMBER_KIND_DELEGATION,
+        }
         | if prop.modifiers.lateinit {
             property_flags::IS_LATEINIT
         } else {

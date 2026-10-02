@@ -198,10 +198,8 @@ impl ProductionSignatureSemantics<'_> {
         }
         let lexical_classifier =
             self.lexically_nested_classifier_at(scope, &reference.name, include_scope_owner_body);
-        // An alias is a declaration in the classifier namespace, but lexical nested classifiers
-        // occupy a nearer scope-tower rung than imports. Only consult alias expansion when that
-        // lexical rung did not answer; otherwise `Outer.Box` can accidentally inherit an imported
-        // `typealias Box = ...` target in the finalized Pass-1 signature.
+        // An alias is a declaration in the classifier namespace, but a body-local classifier is a
+        // nearer rung. Do not use an imported alias as a template for that unrelated declaration.
         if lexical_classifier.is_none() {
             if let Some(ty) =
                 self.signature_source_alias(scope, lexical, reference, include_scope_owner_body)
@@ -216,7 +214,7 @@ impl ProductionSignatureSemantics<'_> {
         // Classifier before leaf, matching `Checker::type_ref_ty`: a declared classifier outranks a
         // builtin spelling of the same name.
         if let Some(internal) = lexical_classifier
-            .or_else(|| self.qualified_classifier(scope, &reference.name))
+            .or_else(|| self.qualified_type_classifier(scope, &reference.name))
             .or_else(|| {
                 self.classifier_header_scope_owner(scope.owner)
                     .and_then(|owner| {
@@ -429,7 +427,7 @@ impl ProductionSignatureSemantics<'_> {
     ) -> Option<Ty> {
         let (identity, formals, expansion) =
             self.signature_source_alias_expansion(scope, &reference.name)?;
-        let selected_classifier = self.qualified_classifier(scope, &reference.name);
+        let selected_classifier = self.qualified_type_classifier(scope, &reference.name);
         // Compare with the declaration-owned alias target, not with the storage variant of its
         // expansion. A structural function expansion is `Ty::Fun`, while dependency metadata
         // correctly records its classifier target; deriving the head from `Ty::Obj` would reject
@@ -571,6 +569,14 @@ impl ProductionSignatureSemantics<'_> {
         self.qualified_classifier_binding(scope, spelling).0
     }
 
+    pub(super) fn qualified_type_classifier(
+        &self,
+        scope: crate::fir::SignatureScope,
+        spelling: &str,
+    ) -> Option<crate::types::TypeName> {
+        self.qualified_type_classifier_binding(scope, spelling).0
+    }
+
     /// Resolve a classifier spelling and retain the segment where the committed namespace walk
     /// failed. Success and diagnostics deliberately share this operation so a failed compact
     /// signature cannot be rendered through the legacy module-wide `ClassNames` projection.
@@ -610,23 +616,22 @@ impl ProductionSignatureSemantics<'_> {
         // body has no nominal classifier type, so its nested declarations are found here and
         // precede file/import candidates. A class or constructor header has not entered that body:
         // `class MyClass : Base` must not see `interface Base` declared inside MyClass.
-        let declaration_nested = (!header_scope && segments.len() == 1)
+        let declaration_nested = (!header_scope)
             .then(|| self.lexically_nested_classifier_at(scope, first, true))
             .flatten();
         self.with_resolver(scope, |resolver| {
             let mut current = declaration_nested;
-            let mut scope_failure = None;
-            // A declaration nested directly in the lexical owner is the nearest classifier rung.
-            // In an ordinary class body, inherited nested classifiers are the next rung. A class
-            // or primary-constructor header has not entered that inherited body scope yet, so its
-            // file/import rung precedes inherited fallback.
-            for &owner in &lexical_owners {
-                let candidate = owner
-                    .existing_nested_child(first)
-                    .unwrap_or_else(|| crate::types::type_name_nested_child(owner, first));
-                if resolver.classifier(candidate).is_some() {
-                    current = Some(candidate);
-                    break;
+            // Expression qualification selects its nearest root before walking the suffix. A later
+            // miss is final and must not reinterpret the source spelling through another rung.
+            if current.is_none() {
+                for &owner in &lexical_owners {
+                    let candidate = owner
+                        .existing_nested_child(first)
+                        .unwrap_or_else(|| crate::types::type_name_nested_child(owner, first));
+                    if resolver.classifier(candidate).is_some() {
+                        current = Some(candidate);
+                        break;
+                    }
                 }
             }
             let inherited = || {
@@ -667,7 +672,7 @@ impl ProductionSignatureSemantics<'_> {
                         return Some((None, failed_segment));
                     }
                     crate::symbol_resolver::CandidateSelection::None => {
-                        scope_failure = failed_segment;
+                        return Some((None, failed_segment));
                     }
                 }
             }
@@ -684,9 +689,7 @@ impl ProductionSignatureSemantics<'_> {
             }
             let mut current = match current {
                 Some(classifier) => classifier,
-                None => {
-                    return Some((None, scope_failure.or_else(|| Some(first.to_string()))));
-                }
+                None => return Some((None, Some(first.to_string()))),
             };
             for segment in &segments[1..] {
                 let candidate = current
@@ -698,6 +701,136 @@ impl ProductionSignatureSemantics<'_> {
                 current = candidate;
             }
             Some((Some(current), None))
+        })
+        .ok()
+        .unwrap_or_else(|| (None, Some(first.to_string())))
+    }
+
+    /// Resolve a type path by considering only complete candidates at each scope-tower rung. This
+    /// is candidate applicability before selection, not a retry after a root was selected: type
+    /// syntax can therefore choose an explicit import when a nearer same-named classifier does not
+    /// contain the written suffix.
+    pub(super) fn qualified_type_classifier_binding(
+        &self,
+        scope: crate::fir::SignatureScope,
+        spelling: &str,
+    ) -> (Option<crate::types::TypeName>, Option<String>) {
+        let segments = spelling.split('.').collect::<Vec<_>>();
+        let Some(&first) = segments.first() else {
+            return (None, Some(spelling.to_string()));
+        };
+        let mut lexical_owners = Vec::new();
+        let mut owner = self
+            .headers
+            .declarations
+            .anchor(scope.owner)
+            .and_then(|anchor| anchor.owner);
+        while let Some(declaration) = owner {
+            let Some(anchor) = self.headers.declarations.anchor(declaration) else {
+                return (None, Some(first.to_string()));
+            };
+            if anchor.kind == crate::fir::DeclarationKind::Classifier {
+                if let Some(classifier) = self.classifier_types.get(&declaration).copied() {
+                    lexical_owners.push(classifier);
+                }
+            }
+            owner = anchor.owner;
+        }
+        let header_scope = self.classifier_header_scope_owner(scope.owner).is_some()
+            || self
+                .headers
+                .declarations
+                .anchor(scope.owner)
+                .is_some_and(|anchor| anchor.kind == crate::fir::DeclarationKind::Classifier);
+        let declaration_nested = (!header_scope)
+            .then(|| self.lexically_nested_classifier_at(scope, first, true))
+            .flatten();
+        self.with_resolver(scope, |resolver| {
+            let mut failure = None;
+            let mut advance = |candidate| {
+                let (selected, failed_segment) =
+                    resolver.classifier_path_from_selected_root(candidate, &segments[1..]);
+                // A nearer rung that binds the root owns the diagnostic when no complete path is
+                // applicable. Lower rungs may still supply a complete candidate, but their misses
+                // must not replace this candidate's exact failed suffix.
+                if selected.is_none() && failure.is_none() {
+                    failure = failed_segment;
+                }
+                selected
+            };
+            if let Some(candidate) = declaration_nested {
+                if let Some(selected) = advance(candidate) {
+                    return Some((Some(selected), None));
+                }
+            }
+            for &owner in &lexical_owners {
+                let candidate = owner
+                    .existing_nested_child(first)
+                    .unwrap_or_else(|| crate::types::type_name_nested_child(owner, first));
+                if resolver.classifier(candidate).is_some() {
+                    if let Some(selected) = advance(candidate) {
+                        return Some((Some(selected), None));
+                    }
+                }
+            }
+            let inherited = || {
+                for &owner in &lexical_owners {
+                    match resolver.nested_classifier(Ty::obj_name(owner), first) {
+                        crate::symbol_resolver::CandidateSelection::Selected(classifier) => {
+                            let (selected, _) = resolver
+                                .classifier_path_from_selected_root(classifier, &segments[1..]);
+                            if let Some(classifier) = selected {
+                                return crate::symbol_resolver::CandidateSelection::Selected(
+                                    classifier,
+                                );
+                            }
+                        }
+                        crate::symbol_resolver::CandidateSelection::Ambiguous => {
+                            return crate::symbol_resolver::CandidateSelection::Ambiguous;
+                        }
+                        crate::symbol_resolver::CandidateSelection::None => {}
+                    }
+                }
+                crate::symbol_resolver::CandidateSelection::None
+            };
+            if !header_scope {
+                match inherited() {
+                    crate::symbol_resolver::CandidateSelection::Selected(classifier) => {
+                        return Some((Some(classifier), None));
+                    }
+                    crate::symbol_resolver::CandidateSelection::Ambiguous => {
+                        return Some((None, Some(first.to_string())));
+                    }
+                    crate::symbol_resolver::CandidateSelection::None => {}
+                }
+            }
+            let (selection, failed_segment) =
+                resolver.qualified_type_classifier_binding_in_scope(spelling);
+            match selection {
+                crate::symbol_resolver::CandidateSelection::Selected(classifier) => {
+                    return Some((Some(classifier), None));
+                }
+                crate::symbol_resolver::CandidateSelection::Ambiguous => {
+                    return Some((None, failed_segment));
+                }
+                crate::symbol_resolver::CandidateSelection::None => {
+                    if failure.is_none() && failed_segment.is_some() {
+                        failure = failed_segment;
+                    }
+                }
+            }
+            if header_scope {
+                match inherited() {
+                    crate::symbol_resolver::CandidateSelection::Selected(classifier) => {
+                        return Some((Some(classifier), None));
+                    }
+                    crate::symbol_resolver::CandidateSelection::Ambiguous => {
+                        return Some((None, Some(first.to_string())));
+                    }
+                    crate::symbol_resolver::CandidateSelection::None => {}
+                }
+            }
+            Some((None, failure.or_else(|| Some(first.to_string()))))
         })
         .ok()
         .unwrap_or_else(|| (None, Some(first.to_string())))
@@ -830,8 +963,17 @@ impl ProductionSignatureSemantics<'_> {
         if self.classifier_is_singleton(classifier) {
             return Some(Ty::obj_name(classifier));
         }
-        let companion = self
-            .table
+        self.classifier_companion(classifier)
+            .or_else(|| self.classifier_is_enum(classifier).then_some(classifier))
+            .map(Ty::obj_name)
+    }
+
+    /// The companion object `classifier` declares, from its source or library declaration.
+    pub(super) fn classifier_companion(
+        &self,
+        classifier: crate::types::TypeName,
+    ) -> Option<crate::types::TypeName> {
+        self.table
             .classes
             .get(&classifier)
             .and_then(|declaration| declaration.companion_internal)
@@ -845,10 +987,7 @@ impl ProductionSignatureSemantics<'_> {
                             .as_ref()
                             .map(|(_, companion)| *companion)
                     })
-            });
-        companion
-            .or_else(|| self.classifier_is_enum(classifier).then_some(classifier))
-            .map(Ty::obj_name)
+            })
     }
 }
 

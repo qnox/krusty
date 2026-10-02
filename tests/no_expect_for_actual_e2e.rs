@@ -1581,3 +1581,202 @@ fn a_default_imported_classifier_matches_its_qualified_spelling() {
          something else rather than in an empty one"
     );
 }
+
+/// kotlinc's `valueParametersCountCompatible`: an `expect` constructor pairs with an actual one of
+/// a different parameter count only when both belong to annotation classes, the `expect` one
+/// declares no parameter and every actual parameter has a default
+/// (multiplatform/k2/defaultArguments/kt67488.kt).
+#[test]
+fn a_parameterless_expect_annotation_constructor_pairs_with_an_all_default_one() {
+    let (reference, krusty) = both_split(
+        "AnnotationDefaults",
+        &[(
+            "AnnotationDefaultsCommon.kt",
+            "package plib\n\
+             \n\
+             expect annotation class A()\n",
+        )],
+        &[(
+            "AnnotationDefaultsPlatform.kt",
+            "package plib\n\
+             \n\
+             enum class Mark { Ok }\n\
+             actual annotation class A(val value: Mark = Mark.Ok, val other: Mark = Mark.Ok)\n",
+        )],
+    );
+    assert!(
+        reference.is_empty(),
+        "the reference compiler accepts the split source set: {reference:?}"
+    );
+    assert!(krusty.is_empty(), "krusty accepts it too: {krusty:?}");
+}
+
+/// Outside that one shape the counts must agree: a plain class, and an annotation constructor with
+/// a parameter lacking a default, actualize no `expect` constructor of another count.
+#[test]
+fn an_expect_constructor_pairs_only_with_its_own_parameter_count_otherwise() {
+    let (reference, krusty) = both_split(
+        "ConstructorCounts",
+        &[(
+            "ConstructorCountsCommon.kt",
+            "package plib\n\
+             \n\
+             expect class B()\n\
+             expect annotation class C()\n",
+        )],
+        &[(
+            "ConstructorCountsPlatform.kt",
+            "package plib\n\
+             \n\
+             actual class B(val v: B? = null)\n\
+             actual annotation class C(val value: Mark)\n\
+             enum class Mark { Value }\n",
+        )],
+    );
+    assert_eq!(krusty, reference, "the complete ledgers must agree");
+    assert_recorded_reference(
+        reference.iter().map(ToString::to_string).collect(),
+        2,
+        "each actual class is reported once",
+    );
+}
+
+/// An explicit classifier import is a higher-priority root than a classifier nested in the
+/// enclosing class. Both common and platform member headers therefore bind `E.Missing` to the
+/// imported `other.E`, without consulting their respective nested `Holder.E` declarations.
+#[test]
+fn an_explicit_import_wins_an_enclosing_nested_header_classifier() {
+    let (reference, krusty) = both_split(
+        "ExplicitHeaderRoot",
+        &[
+            (
+                "ExplicitHeaderRootOther.kt",
+                "package other\n\
+                 \n\
+                 class E {\n\
+                 \x20   class Missing\n\
+                 }\n",
+            ),
+            (
+                "ExplicitHeaderRootCommon.kt",
+                "package sample\n\
+                 \n\
+                 import other.E\n\
+                 \n\
+                 expect class Holder {\n\
+                 \x20   class E\n\
+                 \x20   fun consume(value: E.Missing)\n\
+                 }\n",
+            ),
+        ],
+        &[(
+            "ExplicitHeaderRootPlatform.kt",
+            "package sample\n\
+             \n\
+             import other.E\n\
+             \n\
+             actual class Holder {\n\
+             \x20   actual class E\n\
+             \x20   actual fun consume(value: E.Missing) = Unit\n\
+             }\n",
+        )],
+    );
+    assert!(
+        reference.is_empty(),
+        "the reference compiler accepts the imported header root: {reference:?}"
+    );
+    assert!(krusty.is_empty(), "krusty accepts it too: {krusty:?}");
+}
+
+/// A member header's same-package classifier root is selected before classifiers nested in the
+/// enclosing class, just like an explicit import. `E.Missing` therefore denotes the complete
+/// top-level path on both sides instead of committing to either nested `Holder.E`.
+#[test]
+fn a_same_package_classifier_wins_an_enclosing_nested_header_classifier() {
+    let (reference, krusty) = both_split(
+        "NestedHeaderRoot",
+        &[
+            (
+                "NestedHeaderRootTopLevel.kt",
+                "package sample\n\
+                 \n\
+                 class E {\n\
+                 \x20   class Missing\n\
+                 }\n",
+            ),
+            (
+                "NestedHeaderRootCommon.kt",
+                "package sample\n\
+                 \n\
+                 expect class Holder {\n\
+                 \x20   class E\n\
+                 \x20   fun consume(value: E.Missing)\n\
+                 }\n",
+            ),
+        ],
+        &[(
+            "NestedHeaderRootPlatform.kt",
+            "package sample\n\
+             \n\
+             actual class Holder {\n\
+             \x20   actual class E\n\
+             \x20   actual fun consume(value: E.Missing) = Unit\n\
+             }\n",
+        )],
+    );
+    assert!(
+        reference.is_empty(),
+        "the reference compiler accepts the same-package header root: {reference:?}"
+    );
+    assert!(krusty.is_empty(), "krusty accepts it too: {krusty:?}");
+}
+
+/// A nested classifier whose complete path exists is the winning candidate. The parameter type is
+/// `Holder.E.Missing`, so returning the explicitly imported `other.E.Missing` is a mismatch.
+#[test]
+fn a_complete_nested_header_path_outranks_the_imported_type() {
+    let (reference, krusty) = both_split(
+        "CompleteNestedHeaderRoot",
+        &[
+            (
+                "CompleteNestedHeaderRootOther.kt",
+                "package other\n\
+                 \n\
+                 class E {\n\
+                 \x20   class Missing\n\
+                 }\n",
+            ),
+            (
+                "CompleteNestedHeaderRootCommon.kt",
+                "package sample\n\
+                 \n\
+                 import other.E\n\
+                 \n\
+                 expect class Holder {\n\
+                 \x20   class E {\n\
+                 \x20       class Missing\n\
+                 \x20   }\n\
+                 \x20   fun consume(value: E.Missing): other.E.Missing\n\
+                 }\n",
+            ),
+        ],
+        &[(
+            "CompleteNestedHeaderRootPlatform.kt",
+            "package sample\n\
+             \n\
+             import other.E\n\
+             \n\
+             actual class Holder {\n\
+             \x20   actual class E {\n\
+             \x20       actual class Missing\n\
+             \x20   }\n\
+             \x20   actual fun consume(value: E.Missing): other.E.Missing = value\n\
+             }\n",
+        )],
+    );
+    assert!(
+        !reference.is_empty(),
+        "the reference compiler rejects the nested type as the imported one: {reference:?}"
+    );
+    assert_eq!(krusty, reference, "file, line, column, and message agree");
+}

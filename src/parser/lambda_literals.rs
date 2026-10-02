@@ -181,13 +181,10 @@ impl Parser<'_> {
                         }
                     }
                     self.expect(TokenKind::RParen, "')'");
-                    // A type annotation on the whole destructured parameter (`(a, b): T ->`) is ignored.
-                    if self.eat(TokenKind::Colon) {
-                        let _ = self.parse_type();
-                    }
+                    // `(a, b): T ->` declares the destructured parameter's own type.
                     let synth = format!("$dstr{}", destructures.len());
                     ps.push(synth.clone());
-                    param_types.push(None);
+                    param_types.push(self.eat(TokenKind::Colon).then(|| self.parse_type()));
                     roles.push(LambdaParameterRole::Destructured);
                     destructures.push((synth, entries, source_props, entry_types, sp));
                 } else if self.at(TokenKind::LBracket) {
@@ -224,12 +221,9 @@ impl Parser<'_> {
                         }
                     }
                     self.expect(TokenKind::RBracket, "']'");
-                    if self.eat(TokenKind::Colon) {
-                        let _ = self.parse_type();
-                    }
                     let synth = format!("$dstr{}", destructures.len());
                     ps.push(synth.clone());
-                    param_types.push(None);
+                    param_types.push(self.eat(TokenKind::Colon).then(|| self.parse_type()));
                     roles.push(LambdaParameterRole::Destructured);
                     // The `[a, b]` bracket form is positional (`componentN`), never by-name.
                     let source_props = vec![None; entries.len()];

@@ -14,6 +14,65 @@ enum ClassifierPathPrefix {
 }
 
 impl SymbolResolver<'_> {
+    fn advance_classifier_path(
+        &self,
+        mut prefix: ClassifierPathPrefix,
+        segments: &[&str],
+    ) -> Result<TypeName, (usize, String)> {
+        for (index, segment) in segments.iter().enumerate() {
+            prefix = match prefix {
+                ClassifierPathPrefix::Package(package) => {
+                    let symbols = self.src.symbols(SymbolNamespace::Package(package), segment);
+                    if let Some(classifier) = symbols.classifier_name {
+                        ClassifierPathPrefix::Classifier(classifier)
+                    } else if self.src.package_exists(package, segment) {
+                        ClassifierPathPrefix::Package(crate::types::type_name_child(
+                            package, segment,
+                        ))
+                    } else {
+                        return Err((index + 1, (*segment).to_string()));
+                    }
+                }
+                ClassifierPathPrefix::Classifier(owner) => {
+                    let Some(classifier) = self
+                        .src
+                        .symbols(SymbolNamespace::Classifier(owner), segment)
+                        .classifier_name
+                    else {
+                        return Err((index + 1, (*segment).to_string()));
+                    };
+                    ClassifierPathPrefix::Classifier(classifier)
+                }
+            };
+        }
+        match prefix {
+            ClassifierPathPrefix::Classifier(classifier) => Ok(classifier),
+            ClassifierPathPrefix::Package(_) => Err((
+                segments.len(),
+                segments.last().copied().unwrap_or_default().to_string(),
+            )),
+        }
+    }
+
+    /// Advance a qualified classifier path from an already selected first-segment identity.
+    /// Failure is final: the caller must not retry another root or reconstruct the path spelling.
+    pub(crate) fn classifier_path_from_selected_root(
+        &self,
+        mut classifier: TypeName,
+        segments: &[&str],
+    ) -> (Option<TypeName>, Option<String>) {
+        for segment in segments {
+            let symbols = self
+                .src
+                .symbols(SymbolNamespace::Classifier(classifier), segment);
+            let Some(nested) = symbols.classifier_name else {
+                return (None, Some((*segment).to_string()));
+            };
+            classifier = nested;
+        }
+        (Some(classifier), None)
+    }
+
     /// Bind a qualified classifier and retain the first segment that could not advance from the
     /// selected namespace facet. Signature diagnostics consume the failed segment directly; they
     /// must not reconstruct it later from a module-wide spelling map, because import and
@@ -29,52 +88,16 @@ impl SymbolResolver<'_> {
         let Some(&first) = segments.first() else {
             return (CandidateSelection::None, Some(spelling.to_string()));
         };
-        let advance = |mut prefix| {
-            for (index, segment) in segments[1..].iter().enumerate() {
-                prefix = match prefix {
-                    ClassifierPathPrefix::Package(package) => {
-                        let symbols = self.src.symbols(SymbolNamespace::Package(package), segment);
-                        if let Some(classifier) = symbols.classifier_name {
-                            ClassifierPathPrefix::Classifier(classifier)
-                        } else if self.src.package_exists(package, segment) {
-                            ClassifierPathPrefix::Package(crate::types::type_name_child(
-                                package, segment,
-                            ))
-                        } else {
-                            return Err((index + 1, (*segment).to_string()));
-                        }
-                    }
-                    ClassifierPathPrefix::Classifier(owner) => {
-                        let Some(classifier) = self
-                            .src
-                            .symbols(SymbolNamespace::Classifier(owner), segment)
-                            .classifier_name
-                        else {
-                            return Err((index + 1, (*segment).to_string()));
-                        };
-                        ClassifierPathPrefix::Classifier(classifier)
-                    }
-                };
-            }
-            match prefix {
-                ClassifierPathPrefix::Classifier(classifier) => Ok(classifier),
-                ClassifierPathPrefix::Package(_) => Err((
-                    segments.len().saturating_sub(1),
-                    segments.last().copied().unwrap_or(first).to_string(),
-                )),
-            }
-        };
-
-        // A complete classifier-rooted path outranks a package-rooted path: a visible classifier
-        // named `pkg1` therefore makes `pkg1.Cls` mean its nested `Cls` when that child exists. An
-        // incomplete classifier path does not hide a complete package path, however; this is what
-        // lets package `Package.Outer` coexist with default-imported `java.lang.Package`.
-        let mut failure = None;
+        // Expression qualification commits the first segment once. A missing later segment never
+        // reinterprets that root as a lower-priority classifier or package.
         match self.classifier_in_scope(first) {
             CandidateSelection::Selected(classifier) => {
-                match advance(ClassifierPathPrefix::Classifier(classifier)) {
+                match self.advance_classifier_path(
+                    ClassifierPathPrefix::Classifier(classifier),
+                    &segments[1..],
+                ) {
                     Ok(classifier) => return (CandidateSelection::Selected(classifier), None),
-                    Err(classifier_failure) => failure = Some(classifier_failure),
+                    Err((_, segment)) => return (CandidateSelection::None, Some(segment)),
                 }
             }
             CandidateSelection::Ambiguous => {
@@ -83,11 +106,110 @@ impl SymbolResolver<'_> {
             CandidateSelection::None => {}
         }
         if self.src.package_exists(TypeName::ROOT, first) {
-            match advance(ClassifierPathPrefix::Package(
-                crate::types::type_name_child(TypeName::ROOT, first),
-            )) {
+            match self.advance_classifier_path(
+                ClassifierPathPrefix::Package(crate::types::type_name_child(TypeName::ROOT, first)),
+                &segments[1..],
+            ) {
                 Ok(classifier) => return (CandidateSelection::Selected(classifier), None),
-                Err(package_failure) => {
+                Err((_, segment)) => {
+                    let segment = (!segment.is_empty())
+                        .then_some(segment)
+                        .unwrap_or_else(|| first.to_string());
+                    return (CandidateSelection::None, Some(segment));
+                }
+            }
+        }
+        (CandidateSelection::None, Some(first.to_string()))
+    }
+
+    /// Bind a type path by testing complete candidates at each classifier-scope rung. Selection
+    /// happens only after the whole candidate path is applicable, so an incomplete same-named root
+    /// does not hide a complete explicit-import or package path.
+    pub(crate) fn qualified_type_classifier_binding_in_scope(
+        &self,
+        spelling: &str,
+    ) -> (CandidateSelection<TypeName>, Option<String>) {
+        let segments = spelling
+            .split(['.', '/'])
+            .filter(|segment| !segment.is_empty())
+            .collect::<Vec<_>>();
+        let Some(&first) = segments.first() else {
+            return (CandidateSelection::None, Some(spelling.to_string()));
+        };
+        let mut failure = None;
+        let mut consider = |candidates: &[TypeName]| {
+            let mut completed = Vec::new();
+            for &candidate in candidates {
+                match self.advance_classifier_path(
+                    ClassifierPathPrefix::Classifier(candidate),
+                    &segments[1..],
+                ) {
+                    Ok(classifier) => {
+                        if !completed.contains(&classifier) {
+                            completed.push(classifier);
+                        }
+                    }
+                    Err(miss) => {
+                        if failure.as_ref().is_none_or(|(depth, _)| miss.0 > *depth) {
+                            failure = Some(miss);
+                        }
+                    }
+                }
+            }
+            match completed.as_slice() {
+                [] => None,
+                [classifier] => Some(CandidateSelection::Selected(*classifier)),
+                _ => Some(CandidateSelection::Ambiguous),
+            }
+        };
+        let selected = |selection: CandidateSelection<TypeName>| match selection {
+            CandidateSelection::Selected(_) => (selection, None),
+            CandidateSelection::Ambiguous => {
+                (CandidateSelection::Ambiguous, Some(first.to_string()))
+            }
+            CandidateSelection::None => (CandidateSelection::None, Some(first.to_string())),
+        };
+        match self.fn_scope {
+            Some(FunctionScopeRef::Imports(imports)) => {
+                if imports.explicit_is_ambiguous(first) {
+                    return (CandidateSelection::Ambiguous, Some(first.to_string()));
+                }
+                if let Some((owner, declared_name)) = imports.explicit_target(first) {
+                    if let Some(candidate) = self.src.symbols(owner, &declared_name).classifier_name
+                    {
+                        if let Some(selection) = consider(&[candidate]) {
+                            return selected(selection);
+                        }
+                    }
+                }
+                for level in imports.classifier_levels() {
+                    let candidates = super::classifier_scope::classifier_candidates_at_import_level(
+                        &self.src, first, level,
+                    );
+                    if let Some(selection) = consider(&candidates) {
+                        return selected(selection);
+                    }
+                }
+            }
+            Some(FunctionScopeRef::Flat(packages)) => {
+                let candidates =
+                    super::classifier_candidates_at_scope_level(&self.src, first, packages);
+                if let Some(selection) = consider(&candidates) {
+                    return selected(selection);
+                }
+            }
+            None => {}
+        }
+        if self.src.package_exists(TypeName::ROOT, first) {
+            match self.advance_classifier_path(
+                ClassifierPathPrefix::Package(crate::types::type_name_child(TypeName::ROOT, first)),
+                &segments[1..],
+            ) {
+                Ok(classifier) => return (CandidateSelection::Selected(classifier), None),
+                Err(mut package_failure) => {
+                    if package_failure.1.is_empty() {
+                        package_failure.1 = first.to_string();
+                    }
                     if failure
                         .as_ref()
                         .is_none_or(|(depth, _)| package_failure.0 > *depth)

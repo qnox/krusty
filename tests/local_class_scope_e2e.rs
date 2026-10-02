@@ -565,3 +565,42 @@ fn a_local_class_in_a_plain_member_captures_the_enclosing_instance() {
         "OK"
     );
 }
+
+/// A classifier written in an `init` block belongs to that initializer, as one written in a function
+/// body belongs to the function: its supertype and its uses resolve in the block's lexical scope, so a
+/// sibling local class is visible to both (corpus localClasses/localClassInInitializer.kt).
+const INIT_BLOCK_LOCAL_CLASSES_SRC: &str = "interface Mark\n\
+    object InitialMark : Mark\n\
+    object BaseMark : Mark\n\
+    object DerivedMark : Mark\n\
+    class Result(val base: Mark, val derived: Mark)\n\
+    class A {\n\
+    \x20   var a = Result(InitialMark, InitialMark)\n\
+    \x20   init {\n\
+    \x20       open class B() {\n\
+    \x20           open fun s(): Mark = BaseMark\n\
+    \x20       }\n\
+    \x20       class C : B() {\n\
+    \x20           override fun s(): Mark = DerivedMark\n\
+    \x20       }\n\
+    \x20       val o = object : B() {\n\
+    \x20           override fun s(): Mark = C().s()\n\
+    \x20       }\n\
+    \x20       a = Result(B().s(), o.s())\n\
+    \x20   }\n\
+    }\n\
+    fun box(): String {\n\
+    \x20   val result = A().a\n\
+    \x20   return if (result.base === BaseMark && result.derived === DerivedMark) \"OK\" else \"fail\"\n\
+    }\n";
+
+#[test]
+fn an_init_block_local_class_resolves_in_the_initializer_scope() {
+    assert_eq!(
+        run(INIT_BLOCK_LOCAL_CLASSES_SRC).expect("init-block local classes resolve"),
+        "OK"
+    );
+    for class in ["A$B", "A$C", "A$o$1"] {
+        common::assert_class_matches_kotlinc("InitLocal", INIT_BLOCK_LOCAL_CLASSES_SRC, class);
+    }
+}

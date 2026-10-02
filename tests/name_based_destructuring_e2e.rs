@@ -250,3 +250,39 @@ fun box(): String {
 "#;
     common::assert_errors_match_kotlinc(&[("Lib.kt", LIB), ("Use.kt", USE)], &[]);
 }
+
+/// The type written on a whole destructured lambda parameter (`(a, b): P ->`, `[a, b]: P ->`) is
+/// that parameter's type, so a lambda with no expected function type still destructures, by position
+/// and by name (corpus regressions/directInvokeNameBasedDestructuring.kt).
+const TYPED_DESTRUCTURED_LAMBDA_PARAMETER: &str = r#"
+// LANGUAGE: +NameBasedDestructuring, +EnableNameBasedDestructuringShortForm
+object First
+object Second
+class Joined(val first: First, val second: Second)
+class P(val first: First, val second: Second) {
+    operator fun component1() = first
+    operator fun component2() = second
+}
+fun positional() = { [a, b]: P -> Joined(a, b) }(P(First, Second))
+fun byName() = { (first, second): P -> Joined(first, second) }(P(First, Second))
+fun renamed() = { (a = first, b = second): P -> Joined(a, b) }(P(First, Second))
+fun underscore() = { (_ = first, second): P -> second }(P(First, Second))
+fun box(): String {
+    val stored = { (second, first): P -> Joined(first, second) }
+    val positional = positional()
+    val named = byName()
+    val renamed = renamed()
+    val retained = stored(P(First, Second))
+    val complete = positional.first === First && positional.second === Second &&
+        named.first === First && named.second === Second &&
+        renamed.first === First && renamed.second === Second &&
+        underscore() === Second && retained.first === First && retained.second === Second
+    return if (complete) "OK" else "fail"
+}
+"#;
+
+#[test]
+fn a_typed_destructured_lambda_parameter_needs_no_expected_type() {
+    common::assert_accepted_like_kotlinc(TYPED_DESTRUCTURED_LAMBDA_PARAMETER);
+    assert_eq!(run(TYPED_DESTRUCTURED_LAMBDA_PARAMETER), "OK");
+}

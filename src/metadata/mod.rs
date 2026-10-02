@@ -49,6 +49,8 @@ pub(crate) mod property_flags {
     /// Low bit of the 2-bit `ReturnValueStatus` field (bits 17-18).
     pub const RETURN_VALUE_STATUS_SHIFT: u32 = 17;
     pub const MODALITY_ABSTRACT: u64 = 1 << 5;
+    /// `MEMBER_KIND` (bits 6-7) DELEGATION: a forwarder to an interface delegate.
+    pub const MEMBER_KIND_DELEGATION: u64 = 2 << 6;
     pub const IS_LATEINIT: u64 = 1 << 12;
     pub const IS_DELEGATED: u64 = 1 << 15;
     /// Accessor flag word bit 6: the accessor is not the compiler default.

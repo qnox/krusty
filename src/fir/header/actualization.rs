@@ -842,7 +842,16 @@ pub fn actualization(
         };
         let expect_parameters = headers.syntax.parameters(expect_parameters);
         let candidate_parameters = headers.syntax.parameters(candidate_parameters);
-        expect_parameters.len() == candidate_parameters.len()
+        // kotlinc's `valueParametersCountCompatible`: counts differ only between two annotation
+        // constructors, when the `expect` one declares nothing and the actual defaults everything.
+        let counts_compatible = expect_parameters.len() == candidate_parameters.len()
+            || (expect_parameters.is_empty()
+                && annotation_constructor(headers, expect)
+                && annotation_constructor(headers, candidate)
+                && candidate_parameters
+                    .iter()
+                    .all(|parameter| parameter.flags.has_default()));
+        counts_compatible
             && expect_parameters
                 .iter()
                 .zip(candidate_parameters)
@@ -857,6 +866,16 @@ pub fn actualization(
                             scope,
                         )
                 })
+    }
+
+    /// Whether `constructor` belongs to an annotation class.
+    fn annotation_constructor(headers: &StreamedHeaderModule, constructor: DeclarationId) -> bool {
+        headers
+            .declarations
+            .anchor(constructor)
+            .and_then(|anchor| anchor.owner)
+            .and_then(|owner| headers.stub(owner))
+            .is_some_and(|owner| owner.flags.has(DeclarationFlags::ANNOTATION_CLASS))
     }
 
     /// The one candidate that answers for `expect`, or none.
@@ -1147,10 +1166,9 @@ pub fn actualization(
                 receiver_identity(receiver)?,
                 headers.syntax.parameters(parameters).len(),
             ),
-            Some(HeaderDeclarationKind::Constructor { parameters, .. }) => (
-                ReceiverKey::Absent,
-                headers.syntax.parameters(parameters).len(),
-            ),
+            // Constructors share one bucket: an annotation constructor's parameter count need not
+            // equal its `expect` one's, and `select_actual` compares the complete parameter list.
+            Some(HeaderDeclarationKind::Constructor { .. }) => (ReceiverKey::Absent, 0),
             Some(HeaderDeclarationKind::Property { receiver, .. }) => {
                 (receiver_identity(receiver)?, 0)
             }
