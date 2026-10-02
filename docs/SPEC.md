@@ -4030,7 +4030,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   The nested class calls the owner's `access$get<X>$p` / `access$set<X>$p`, and that accessor reads
   or writes the field directly. Those methods are distinct from `access$get<X>` /
   `access$set<X>`, which another class uses to call source-declared accessors — a property
-  reference, or a companion writing a private property whose setter is user code. Both pairs can
+  reference, or a companion writing a private property whose setter is user code. That
+  `access$set<X>` is the private-member bridge (`invokespecial` of the setter) and is emitted
+  once; the static-accessor plan does not add a second copy of the same method. Both pairs can
   coexist for one property. A top-level property's accessor is a static method of the file facade;
   a member property's takes the instance. Tests: `tests/backing_field_accessor_e2e.rs`
   (`an_inner_accessor_reads_its_own_backing_field`,

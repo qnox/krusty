@@ -197,6 +197,7 @@ pub(super) fn plan(
     class_member_fids: &HashSet<u32>,
 ) -> StaticAccessorPlan {
     let protected_calls = env.run.protected_member_access_bridges.borrow();
+    let private_member_bridges = env.run.private_member_access_bridges.borrow();
     let walk = Walk {
         ir,
         class_member_fids,
@@ -271,11 +272,43 @@ pub(super) fn plan(
         owner, accessor, ..
     } in uses
     {
+        // A source-declared getter or setter already has one `access$get<X>` / `access$set<X>`
+        // from private-member bridge emission (`invokespecial` of that accessor). Planning the
+        // same method here emits a second copy and the JVM rejects the class.
+        if declared_member_accessor_is_bridged(ir, &private_member_bridges, accessor) {
+            continue;
+        }
         if seen.insert((owner, accessor)) {
             plan.by_owner.entry(owner).or_default().push(accessor);
         }
     }
     plan
+}
+
+/// Whether `accessor` would emit the private-member bridge that already calls this getter or setter.
+fn declared_member_accessor_is_bridged(
+    ir: &IrFile,
+    bridged: &HashSet<u32>,
+    accessor: StaticAccessor,
+) -> bool {
+    let (class, property, setter) = match accessor {
+        StaticAccessor::MemberGetter { class, property } => (class, property, false),
+        StaticAccessor::MemberSetter { class, property } => (class, property, true),
+        _ => return false,
+    };
+    let Some(declared) = ir
+        .classes
+        .get(class as usize)
+        .and_then(|class| class.properties.get(property as usize))
+    else {
+        return false;
+    };
+    let function = if setter {
+        declared.setter
+    } else {
+        declared.getter
+    };
+    function.is_some_and(|function| bridged.contains(&function))
 }
 
 /// One use of another class's private static declaration: the accessor it needs and its line.
