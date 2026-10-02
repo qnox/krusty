@@ -131,9 +131,9 @@ fun nestedBox(): String {\n\
     assert!(reference
         .iter()
         .any(|class| class == "NestedReifiedClassKt$defineNested$1"));
-    assert!(!reference
+    assert!(reference
         .iter()
-        .any(|class| class == "NestedReifiedClassKt$defineNested$1$1"));
+        .any(|class| class == "NestedReifiedClassKt$defineNested$1$nested$1"));
     assert!(reference
         .iter()
         .any(|class| class == "NestedReifiedClassKt$nestedBox$$inlined$defineNested$1$1"));

@@ -32,6 +32,20 @@ fun box(): String {\n\
     common::expect_box_same_as_kotlinc(SRC, "inlineReifiedPropertySetter");
 }
 
+/// A function-valued property reference still invokes the checker-selected inline getter. The
+/// generated adapter is lowering machinery, not a second resolution site, so it must carry the
+/// exact reified substitution published for the reference.
+#[test]
+fn an_inline_reified_property_reference_uses_the_checked_type_argument() {
+    const SRC: &str = "\
+class Token(val text: String)\n\
+inline val <reified T> T.identity: T\n\
+    get() = (this as Any) as T\n\
+fun apply(read: (Token) -> Token): String = read(Token(\"OK\")).text\n\
+fun box(): String = apply(Token::identity)\n";
+    common::expect_box_same_as_kotlinc(SRC, "inlineReifiedPropertyReference");
+}
+
 /// The extension receiver and the stored value each run once. The setter sees that value.
 #[test]
 fn an_inline_setter_evaluates_its_receiver_and_value_once() {

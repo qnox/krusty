@@ -31,12 +31,16 @@ pub(super) struct Site {
 /// its own: a plain Kotlin function value the source's naming walk named, not one an inline call's
 /// splice consumes.
 pub(super) fn site(ir: &IrFile, fid: FunId) -> Option<Site> {
-    let mut sites = reachable_lambdas(ir, fid).into_iter();
+    site_in_roots(ir, fid, true)
+}
+
+fn site_in_roots(ir: &IrFile, fid: FunId, every_emitted_root: bool) -> Option<Site> {
+    let mut sites = reachable_lambdas(ir, fid, every_emitted_root).into_iter();
     let (Some(node), None) = (sites.next(), sites.next()) else {
         crate::trace_compiler!(
             "suspend",
             "lambda fid={fid}: reachable lambda nodes {:?}",
-            reachable_lambdas(ir, fid)
+            reachable_lambdas(ir, fid, every_emitted_root)
         );
         return None;
     };
@@ -65,7 +69,7 @@ pub(super) fn site(ir: &IrFile, fid: FunId) -> Option<Site> {
 /// rebuild roots into fresh nodes and leave the old ones behind in the arena, so an unreachable
 /// node builds no value. Property/static initializers matter here too: a suspend lambda stored by
 /// one is a class just like a lambda stored from a function body.
-fn reachable_lambdas(ir: &IrFile, fid: FunId) -> Vec<ExprId> {
+fn reachable_lambdas(ir: &IrFile, fid: FunId, every_emitted_root: bool) -> Vec<ExprId> {
     let mut roots = Vec::new();
     for (function, declaration) in ir.functions.iter().enumerate() {
         roots.extend(declaration.body);
@@ -77,28 +81,30 @@ fn reachable_lambdas(ir: &IrFile, fid: FunId) -> Vec<ExprId> {
             roots.extend(defaults.iter().flatten().copied());
         }
     }
-    for class in &ir.classes {
-        roots.extend(class.init_body);
-        roots.extend(class.super_arg_prelude.iter().copied());
-        roots.extend(class.super_args.iter().copied());
-        roots.extend(
-            class
-                .properties
-                .iter()
-                .filter_map(|property| property.initializer),
-        );
-        for constructor in &class.secondary_ctors {
-            roots.extend(constructor.body.iter().copied());
-            roots.extend(constructor.defaults.iter().flatten().copied());
-            roots.extend(constructor.delegate_prelude.iter().copied());
-            roots.extend(constructor.delegate_args.iter().copied());
+    if every_emitted_root {
+        for class in &ir.classes {
+            roots.extend(class.init_body);
+            roots.extend(class.super_arg_prelude.iter().copied());
+            roots.extend(class.super_args.iter().copied());
+            roots.extend(
+                class
+                    .properties
+                    .iter()
+                    .filter_map(|property| property.initializer),
+            );
+            for constructor in &class.secondary_ctors {
+                roots.extend(constructor.body.iter().copied());
+                roots.extend(constructor.defaults.iter().flatten().copied());
+                roots.extend(constructor.delegate_prelude.iter().copied());
+                roots.extend(constructor.delegate_args.iter().copied());
+            }
+            for entry in &class.enum_entries {
+                roots.extend(entry.argument_prelude.iter().copied());
+                roots.extend(entry.args.iter().copied());
+            }
         }
-        for entry in &class.enum_entries {
-            roots.extend(entry.argument_prelude.iter().copied());
-            roots.extend(entry.args.iter().copied());
-        }
+        roots.extend(ir.statics.iter().filter_map(|property| property.init));
     }
-    roots.extend(ir.statics.iter().filter_map(|property| property.init));
 
     let mut nodes = roots
         .into_iter()
@@ -176,7 +182,12 @@ pub(super) fn realize(ir: &mut IrFile, classifiers: &dyn crate::types::Classifie
         })
         .collect::<Vec<_>>();
     for fid in lambdas {
-        let values = reachable_lambdas(ir, fid);
+        let runtime_reified = ir.runtime_reified_lambda_implementations.contains(&fid);
+        // Ordinary value-class lambdas retain the pre-existing function-body boundary. The wider
+        // emitted-root search exists specifically for a source closure whose checked reified
+        // operation requires a concrete runtime class; treating a generated constructor-reference
+        // adapter in a static initializer as that source-lambda case changes its physical ABI.
+        let values = reachable_lambdas(ir, fid, runtime_reified);
         let Some(function_type) = values
             .first()
             .and_then(|node| ir.logical_types.get(node).copied())
@@ -186,10 +197,8 @@ pub(super) fn realize(ir: &mut IrFile, classifiers: &dyn crate::types::Classifie
         let Ty::Fun(signature) = function_type.non_null() else {
             continue;
         };
-        let runtime_reified_source = ir.runtime_reified_lambda_implementations.contains(&fid)
-            && !ir.specialized_functions.contains_key(&fid);
         if signature.suspend
-            || (!runtime_reified_source
+            || (!runtime_reified
                 && !signature
                     .params
                     .iter()
@@ -198,7 +207,7 @@ pub(super) fn realize(ir: &mut IrFile, classifiers: &dyn crate::types::Classifie
         {
             continue;
         }
-        match class_shape(ir, fid, runtime_reified_source) {
+        match class_shape(ir, fid, runtime_reified) {
             Ok((site, body, captures)) => realize_class(ir, fid, body, &site, signature, &captures),
             Err(shape) => {
                 crate::trace_compiler!(
@@ -218,7 +227,8 @@ fn class_shape(
     fid: FunId,
     allow_nested_lambdas: bool,
 ) -> Result<(Site, ExprId, Vec<Capture>), &'static str> {
-    let site = site(ir, fid).ok_or("no single named value outside an inline call")?;
+    let site = site_in_roots(ir, fid, allow_nested_lambdas)
+        .ok_or("no single named value outside an inline call")?;
     let body = ir.functions[fid as usize].body.ok_or("no body")?;
     if nests_lifted_functions_with(ir, body, allow_nested_lambdas) {
         return Err("its body declares a lambda or local function");

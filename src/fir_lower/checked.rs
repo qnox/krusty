@@ -556,6 +556,7 @@ impl BodyLowering<'_> {
                 binding,
                 dispatch_receiver,
                 extension_receiver,
+                substitutions,
                 adaptation,
                 reference_ty,
             )? {
@@ -1058,7 +1059,7 @@ impl BodyLowering<'_> {
         }
     }
 
-    fn record_inline_property_splice(
+    pub(super) fn record_inline_property_splice(
         &mut self,
         expression: ExprId,
         splice: &Option<Box<crate::fir::FirInlineAccessorSplice>>,

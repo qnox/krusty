@@ -1544,12 +1544,18 @@ fn specialize_property_reference_target(
         FirPropertyReferenceTarget::SpecializedModule {
             receiver,
             property_type,
+            getter_inline_splice,
             ..
         } => {
             if let Some(receiver) = receiver {
                 specialize_resolved_ty(receiver, bindings);
             }
             specialize_resolved_ty(property_type, bindings);
+            if let Some(splice) = getter_inline_splice {
+                for substitution in &mut splice.substitutions {
+                    specialize_resolved_ty(&mut substitution.value, bindings);
+                }
+            }
         }
         FirPropertyReferenceTarget::Classifier { property_type, .. } => {
             specialize_resolved_ty(property_type, bindings)

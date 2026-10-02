@@ -84,6 +84,7 @@ impl BodyLowering<'_> {
             self.ir
                 .local_delegate_plans
                 .push(crate::ir::IrLocalDelegatePlan {
+                    declaration_enclosure: self.expansion_enclosure,
                     reference,
                     storage_name: plan.storage_name,
                     getter,

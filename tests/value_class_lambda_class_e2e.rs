@@ -83,6 +83,19 @@ fn lambda_classes_run() {
     common::expect_box_same_as_kotlinc(SRC, "ValueClassLambdaClass");
 }
 
+/// A constructor-reference adapter in a static delegated-property initializer is already shaped
+/// for the callable-reference ABI. Discovering reified source closures in every emitted root must
+/// not reclassify that adapter as an ordinary source lambda.
+#[test]
+fn a_value_class_constructor_reference_in_a_static_initializer_keeps_its_adapter_abi() {
+    const SRC: &str = "interface Source {\n\
+        companion object { val default: Token by lazy(::Token) }\n\
+    }\n\
+    @JvmInline value class Token(val text: String = \"OK\") : Source\n\
+    fun box(): String = Source.default.text\n";
+    common::expect_box_same_as_kotlinc(SRC, "StaticValueClassConstructorReference");
+}
+
 /// A lambda passed to a same-file inline function's `noinline` parameter is a value that function
 /// receives, not a body it splices. The expansion materializes the value before lambda classes are
 /// realized, so it is the class kotlinc writes.

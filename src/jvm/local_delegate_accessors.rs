@@ -64,11 +64,6 @@ pub(crate) fn realize(ir: &mut IrFile, current_source: IrModuleSource) -> Result
         })
         .collect::<Vec<_>>();
     accesses.sort_unstable_by_key(|&(expression, _, _)| expression);
-    let live_uses = accesses
-        .iter()
-        .map(|&(_, plan, owner)| PlanUse { plan, owner })
-        .collect::<HashSet<_>>();
-
     // Lift helpers in checked declaration-plan order so unrelated expression allocation does not
     // perturb kotlinc-compatible local/lambda numbering. Within a plan, retain the first emitted
     // owner order (important when an inline template has copies in more than one classifier).
@@ -76,15 +71,15 @@ pub(crate) fn realize(ir: &mut IrFile, current_source: IrModuleSource) -> Result
         .iter()
         .enumerate()
         .filter(|(plan, declaration)| {
-            let Ok(plan) = u32::try_from(*plan) else {
-                return false;
-            };
             declaration.reference.source == current_source
-                && !ir.inline_local_delegate_plan_copies.contains(&plan)
-                && live_uses.contains(&PlanUse {
-                    plan,
-                    owner: declaration.reference.class,
+                && u32::try_from(*plan).map_or(true, |plan| {
+                    !ir.inline_local_delegate_plan_copies.contains(&plan)
                 })
+                && !matches!(
+                    declaration.declaration_enclosure,
+                    Some(crate::ir::IrEnclosure::Function(function))
+                        if ir.inline_only_fns.contains(&function)
+                )
         })
         .map(|(plan, declaration)| {
             Ok((

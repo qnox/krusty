@@ -1309,7 +1309,7 @@ impl BodyFirChecker<'_> {
 
     /// Record an inline accessor and the names of its already-checked type arguments.
     /// Expansion reads this record and does not ask the index whether the accessor is inline.
-    fn inline_accessor_splice(
+    pub(super) fn inline_accessor_splice(
         &self,
         span: Option<Span>,
         declaration: DeclarationId,

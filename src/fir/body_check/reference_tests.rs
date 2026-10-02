@@ -775,6 +775,7 @@ fn specialized_generic_extension_property_reference_publishes_final_accessor_sha
         setter_name,
         declared_receiver,
         declared_property_type,
+        getter_inline_splice,
     } = target
     else {
         panic!("source property reference must carry its selected specialized callable view")
@@ -789,6 +790,37 @@ fn specialized_generic_extension_property_reference_publishes_final_accessor_sha
     // The accessor is compiled against the declaration's own `T`, which the reference crosses.
     assert_eq!(*declared_receiver, Some(*declared_property_type));
     assert_ne!(*declared_property_type, int);
+    assert_eq!(getter_inline_splice, &None);
+}
+
+#[test]
+fn inline_generic_property_reference_publishes_the_selected_getter_splice() {
+    let (body, _) = checked_function_body_with_platform(
+        "class Token\n\
+         inline val <reified T> T.identity: T get() = this\n\
+         fun reference(): (Token) -> Token = Token::identity\n",
+        "reference",
+        jvm_semantics(),
+    );
+    let expression = body
+        .expr(root_expression(&body))
+        .expect("inline generic property reference");
+    let FirExprKind::PropertyReference { target, .. } = &expression.kind else {
+        panic!("inline generic property must remain a checked property reference")
+    };
+    let FirPropertyReferenceTarget::SpecializedModule {
+        property_type,
+        getter_inline_splice: Some(splice),
+        ..
+    } = target
+    else {
+        panic!("inline generic property reference must carry its selected getter splice")
+    };
+    let [substitution] = splice.substitutions.as_ref() else {
+        panic!("one exact reified getter substitution must be published")
+    };
+    assert!(substitution.reified);
+    assert_eq!(substitution.value, *property_type);
 }
 
 #[test]

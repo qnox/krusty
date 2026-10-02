@@ -160,13 +160,10 @@ fn specialized_lambda_function(
         .map(|ty| ty_subst_keep_unbound(ty, bindings))
         .collect();
     shape.ret = ty_subst_keep_unbound(shape.ret, bindings);
-    // The top-level source implementation must retain a real class because its erased reified
-    // operation can still be reached before an inline call is expanded. A nested source
-    // implementation is reached only through that outer class and keeps kotlinc's ordinary indy
-    // realization; each specialized copy below still gets its own runtime-reified class.
-    if parent.is_none() {
-        ir.runtime_reified_lambda_implementations.insert(function);
-    }
+    // Every source implementation that executes a reified operation must retain a real class:
+    // the erased outer closure can reach a nested implementation before an inline call expands.
+    // Each specialized copy below gets its own runtime-reified class as well.
+    ir.runtime_reified_lambda_implementations.insert(function);
     let specialized = crate::ir::clone_function_implementation(
         ir,
         function,

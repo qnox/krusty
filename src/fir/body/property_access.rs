@@ -74,6 +74,10 @@ pub enum FirPropertyReferenceTarget {
         /// and result cross into and out of them.
         declared_receiver: Option<ResolvedTy>,
         declared_property_type: ResolvedTy,
+        /// Exact checked getter splice for this reference use. A function-valued property
+        /// reference materializes a read later, but lowering must not rediscover whether the
+        /// accessor is inline or reconstruct its type arguments.
+        getter_inline_splice: Option<Box<FirInlineAccessorSplice>>,
     },
     Classifier {
         owner: TypeName,
@@ -118,7 +122,13 @@ impl FirPropertyReferenceTarget {
 
     pub(super) fn storage_payload_bytes(&self) -> usize {
         match self {
-            Self::Module(_) | Self::SpecializedModule { .. } | Self::Classifier { .. } => 0,
+            Self::Module(_) | Self::Classifier { .. } => 0,
+            Self::SpecializedModule {
+                getter_inline_splice,
+                ..
+            } => getter_inline_splice.as_ref().map_or(0, |splice| {
+                splice.substitutions.len() * std::mem::size_of::<FirInlineTypeSubstitution>()
+            }),
             Self::External { getter, setter, .. } => {
                 getter.storage_payload_bytes()
                     + setter

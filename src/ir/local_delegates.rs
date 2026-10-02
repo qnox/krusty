@@ -25,6 +25,10 @@ pub(crate) struct IrLocalDelegateAccessorPlan {
 
 #[derive(Clone, Debug)]
 pub(crate) struct IrLocalDelegatePlan {
+    /// Exact executable scope containing the source declaration. A target can therefore omit the
+    /// lexical helper of an inline-only template while still emitting an unread local's helper in
+    /// an ordinary body; neither decision is inferred from a name or from whether an access exists.
+    pub(crate) declaration_enclosure: Option<super::IrEnclosure>,
     /// Lexical declaration identity and source order of the property. A copied inline accessor may
     /// be realized at another physical owner, but an ordinary nested-class use remains owned here.
     pub(crate) reference: super::IrLocalPropertyReference,

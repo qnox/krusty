@@ -1119,6 +1119,9 @@ impl BodyFirChecker<'_> {
             .signature(declaration)
             .ok_or_else(|| self.failure(span, BodyCheckFailureKind::MissingStablePropertyTarget))?
             .result;
+        let substitutions = self.call_substitutions(expression, declaration)?;
+        let getter_inline_splice =
+            self.inline_accessor_splice(span, declaration, false, &substitutions)?;
         Ok(FirExprKind::PropertyReference {
             target: FirPropertyReferenceTarget::SpecializedModule {
                 property: target,
@@ -1129,6 +1132,7 @@ impl BodyFirChecker<'_> {
                 property_type: resolved(property_type)?,
                 declared_receiver,
                 declared_property_type,
+                getter_inline_splice,
             },
             function_type: self.reference_function_type(expression)?,
             reflective: self.reference_is_reflective(expression),
@@ -1136,7 +1140,7 @@ impl BodyFirChecker<'_> {
             dispatch_receiver,
             extension_receiver,
             mutable,
-            substitutions: self.call_substitutions(expression, declaration)?,
+            substitutions,
             adaptation: adaptation.map(Box::new),
         })
     }

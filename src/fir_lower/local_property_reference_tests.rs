@@ -226,13 +226,9 @@ fn two_inline_copies_keep_the_checked_declaration_identity() {
             .map(|(_, plans)| plans.as_slice())
             .unwrap_or_else(|| panic!("{name} must carry an inlined local delegate access"))
     };
-    assert_eq!(
-        ir.inline_local_delegate_plan_copies,
-        std::collections::HashSet::from([1, 2])
-    );
-    assert_eq!(plans("first"), &[1]);
-    assert_eq!(plans("second"), &[2]);
-    assert_eq!(plan_reference(&ir, 1), (name.clone(), *declaration));
-    assert_eq!(plan_reference(&ir, 2), (name.clone(), *declaration));
+    assert_eq!(ir.inline_local_delegate_plan_copies, Default::default());
+    assert_eq!(plans("first"), &[0]);
+    assert_eq!(plans("second"), &[0]);
+    assert_eq!(plan_reference(&ir, 0), (name.clone(), *declaration));
     assert_eq!(declaration.ordinal(), 0);
 }

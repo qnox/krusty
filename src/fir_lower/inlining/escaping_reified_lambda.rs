@@ -260,8 +260,8 @@ fn a_nested_escaping_lambda_is_specialized_too() {
                 .runtime_reified_lambda_implementations
                 .contains(*function))
             .count(),
-        1,
-        "only the outer source closure needs a runtime-reified class"
+        2,
+        "the outer and nested source closures both need runtime-reified classes"
     );
     assert!(
         call.iter()
