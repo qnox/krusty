@@ -316,8 +316,9 @@ pub(super) struct SharedWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
 
 #[cfg(test)]
 impl SharedWriter {
-    pub(super) fn from_arc(bytes: std::sync::Arc<std::sync::Mutex<Vec<u8>>>) -> Self {
-        Self(bytes)
+    pub(super) fn recording() -> (Self, Arc<Mutex<Vec<u8>>>) {
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        (Self(Arc::clone(&bytes)), bytes)
     }
 }
 

@@ -4486,8 +4486,6 @@ pub(super) fn run_async_loop<W>(
 where
     W: Write + Send + 'static,
 {
-    // Stdout is written on its own thread. A client that stops reading must not block this loop:
-    // the analysis engine publishes on `incoming`, and a blocked write would stall that queue.
     let mut writer = super::output_queue::OutputQueue::spawn(writer)?;
     let writer = &mut writer;
     let mut pending = VecDeque::new();
@@ -5325,13 +5323,8 @@ mod tests {
             .unwrap();
         sender.send(Incoming::Eof).unwrap();
 
-        let out = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
-        let code = run_async_loop(
-            service,
-            crate::server::output_queue::SharedWriter::from_arc(std::sync::Arc::clone(&out)),
-            incoming,
-        )
-        .unwrap();
+        let (writer, out) = crate::server::output_queue::SharedWriter::recording();
+        let code = run_async_loop(service, writer, incoming).unwrap();
         assert_eq!(code, 0);
 
         let out = out.lock().expect("shutdown output");
