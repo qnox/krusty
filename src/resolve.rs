@@ -16275,10 +16275,17 @@ impl<'a> Checker<'a> {
                     "top-level SAM inference call={} parameter={parameter_index} declared={parameter:?} nominal={actual:?} function={function:?}",
                     call.0,
                 );
-                let inference_actual = if self.semantic_sam_signature(*parameter).is_some() {
-                    function.unwrap_or(*actual)
-                } else {
-                    *actual
+                let inference_actual = match self.semantic_sam_signature(*parameter) {
+                    Some(sam)
+                        if !self.sam_argument_already_implements(
+                            argument,
+                            *actual,
+                            sam.internal,
+                        ) =>
+                    {
+                        function.unwrap_or(*actual)
+                    }
+                    _ => *actual,
                 };
                 let inferred = crate::symbol_resolver::infer_generic_call_bindings_from_symbols(
                     &source,
