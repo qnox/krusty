@@ -4358,7 +4358,7 @@ where
     Ok(())
 }
 
-fn step_async<W, B>(
+pub(super) fn step_async<W, B>(
     service: &mut LspService<B>,
     writer: &mut W,
     incoming: &Receiver<Incoming>,

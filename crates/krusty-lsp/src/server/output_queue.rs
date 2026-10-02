@@ -62,12 +62,11 @@ impl OutputQueue {
     where
         W: Write + Send + 'static,
     {
-        Self::spawn_limited_held(
+        Self::spawn_limited(
             inner,
             OUTPUT_CHANNEL_FRAMES,
             OUTPUT_STAGED_BYTES,
             OUTPUT_DRAIN_GRACE,
-            None,
         )
     }
 

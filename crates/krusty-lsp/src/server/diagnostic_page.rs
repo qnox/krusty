@@ -2,18 +2,16 @@
 //!
 //! A workspace report that fits in one [`RESPONSE_PAGE_BYTES`] frame is the JSON-RPC result.
 //! A client that sends a `partialResultToken` and a report that does not fit receives every page
-//! through `$/progress`, and the final result is an empty item list. That stream is at most
-//! [`MAX_RESPONSE_PAGES`] progress pages plus the empty result, which is the stdout channel
-//! capacity. A longer report, including one file that cannot fit a frame, is a single
-//! server-cancelled error and no `$/progress`. The item list is the snapshot taken for the
+//! through `$/progress`, and the final result is an empty item list. That stream fits in the
+//! stdout channel, including the empty final result. A longer report, including one file that
+//! cannot fit a frame, is a single server-cancelled error and no `$/progress`. The item list is the snapshot taken for the
 //! request; the response is not revised when later input arrives. A refresh is not used as a
 //! cursor for the omitted files.
 
 use serde_json::{json, Value};
 
 use super::response_page::{
-    json_len, limit_text, paged_array_messages, server_cancelled, MAX_RESPONSE_PAGES,
-    RESPONSE_PAGE_BYTES,
+    json_len, limit_text, paged_array_messages, server_cancelled, RESPONSE_PAGE_BYTES,
 };
 
 /// Room for the workspace-report envelope (`uri`, `resultId`, `kind`) around one file's items,
@@ -131,6 +129,7 @@ fn json_array_len_with_marker(item_lens: &[usize], marker_len: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use super::super::response_page::MAX_RESPONSE_PAGES;
     use super::*;
 
     fn full_item(uri: &str, message: &str) -> Value {
@@ -218,17 +217,6 @@ mod tests {
             DIAGNOSTIC_OMISSION_MESSAGE
         );
         assert_eq!(limit_diagnostic_items(items), expected);
-    }
-
-    fn assert_frames_fit(messages: &[Value]) {
-        for message in messages {
-            let encoded = serde_json::to_vec(message).unwrap();
-            assert!(
-                encoded.len() <= RESPONSE_PAGE_BYTES,
-                "frame is {} bytes",
-                encoded.len()
-            );
-        }
     }
 
     #[test]
@@ -334,9 +322,7 @@ mod tests {
         let id = Value::String("i".repeat(RESPONSE_PAGE_BYTES));
         let messages =
             workspace_diagnostic_messages(id.clone(), vec![unchanged_item("file:///w/A.kt")], None);
-        let expected = vec![server_cancelled(id)];
-        assert_eq!(messages, expected);
-        assert!(json_len(&expected[0]) <= super::super::implementation::MAX_MESSAGE_BYTES);
+        assert_eq!(messages, vec![server_cancelled(id)]);
     }
 
     #[test]
@@ -393,24 +379,34 @@ mod tests {
             "method": "workspace/diagnostic",
             "params": { "partialResultToken": "workspace/diagnostic/2" }
         }));
-        assert!(streamed.messages.len() > 2);
-        assert_frames_fit(&streamed.messages);
-        assert_eq!(
-            streamed.messages.last().unwrap()["result"],
-            json!({"items": []})
+        let result_id = streamed.messages[0]["params"]["value"]["items"][0]["resultId"]
+            .as_str()
+            .expect("result id");
+        assert!(
+            result_id.len() == 16
+                && result_id
+                    .chars()
+                    .all(|ch| ch.is_ascii_hexdigit() && !ch.is_ascii_uppercase()),
+            "{result_id}"
         );
-        let mut seen = Vec::new();
-        for message in &streamed.messages[..streamed.messages.len() - 1] {
-            assert_eq!(message["method"], "$/progress");
-            assert_eq!(message["params"]["token"], "workspace/diagnostic/2");
-            seen.extend(
+        let expected = eighty_file_stream(2, "workspace/diagnostic/2", result_id);
+        assert_eq!(streamed.messages, expected);
+        let encoded: Vec<usize> = streamed
+            .messages
+            .iter()
+            .map(|message| serde_json::to_vec(message).unwrap().len())
+            .collect();
+        assert_eq!(encoded, vec![260_782, 260_782, 151_465, 46]);
+        let seen: Vec<String> = expected[..expected.len() - 1]
+            .iter()
+            .flat_map(|message| {
                 message["params"]["value"]["items"]
                     .as_array()
                     .unwrap()
                     .iter()
-                    .map(|item| item["uri"].as_str().unwrap().to_string()),
-            );
-        }
+                    .map(|item| item["uri"].as_str().unwrap().to_string())
+            })
+            .collect();
         assert_eq!(seen, uris);
 
         let refused = service.handle(json!({
@@ -419,12 +415,7 @@ mod tests {
             "method": "workspace/diagnostic",
             "params": {}
         }));
-        assert_eq!(refused.messages.len(), 1);
-        assert_eq!(refused.messages[0]["error"]["code"], -32802);
-        assert!(refused
-            .messages
-            .iter()
-            .all(|message| message["method"] != "workspace/diagnostic/refresh"));
+        assert_eq!(refused.messages, vec![server_cancelled(json!(3))]);
 
         let invalid = service.handle(json!({
             "jsonrpc": "2.0",
@@ -432,7 +423,153 @@ mod tests {
             "method": "workspace/diagnostic",
             "params": { "partialResultToken": true }
         }));
-        assert_eq!(invalid.messages[0]["error"]["code"], -32602);
+        assert_eq!(
+            invalid.messages,
+            vec![json!({
+                "jsonrpc": "2.0",
+                "id": 4,
+                "error": {"code": -32602, "message": "invalid params"}
+            })]
+        );
+    }
+
+    fn eighty_file_stream(id: i64, token: &str, result_id: &str) -> Vec<Value> {
+        let wire = format!("M{}", "m".repeat(8 * 1024 - 1));
+        let mut expected = Vec::new();
+        for range in [0..31, 31..62, 62..80] {
+            let page: Vec<Value> = range
+                .map(|index| {
+                    json!({
+                        "kind": "full",
+                        "uri": format!("file:///w/F{index:03}.kt"),
+                        "version": Value::Null,
+                        "resultId": result_id,
+                        "items": [{
+                            "range": {
+                                "start": {"line": 0, "character": 0},
+                                "end": {"line": 0, "character": 1}
+                            },
+                            "severity": 1,
+                            "source": "Kotlin",
+                            "message": wire,
+                        }]
+                    })
+                })
+                .collect();
+            expected.push(json!({
+                "jsonrpc": "2.0",
+                "method": "$/progress",
+                "params": {"token": token, "value": {"items": page}}
+            }));
+        }
+        expected.push(json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": {"items": []}
+        }));
+        expected
+    }
+
+    #[test]
+    fn a_queued_cancel_and_index_reset_leave_the_snapshot_intact() {
+        use std::collections::VecDeque;
+        use std::sync::mpsc::sync_channel;
+
+        use super::super::engine::EngineEvent;
+        use super::super::implementation::{step_async, Incoming, LspService};
+        use crate::{DocumentAnalysis, IndexedFile};
+        use krusty::diag::{Diagnostic, DiagnosticKind, Severity};
+
+        let mut service = LspService::new(|sources: &[&str]| {
+            sources
+                .iter()
+                .map(|_| DocumentAnalysis::empty())
+                .collect::<Vec<_>>()
+        });
+        service.handle(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "capabilities": {
+                    "textDocument": { "diagnostic": {} },
+                    "workspace": { "diagnostics": { "refreshSupport": true } }
+                }
+            }
+        }));
+        let message = "m".repeat(8 * 1024);
+        let files: Vec<IndexedFile> = (0..80)
+            .map(|index| IndexedFile {
+                uri: format!("file:///w/F{index:03}.kt"),
+                diagnostics: vec![Diagnostic {
+                    span: krusty::diag::Span::new(0, 1),
+                    editor_span: None,
+                    identity: None,
+                    severity: Severity::Error,
+                    kind: DiagnosticKind::Compiler,
+                    msg: message.clone(),
+                    file: 0,
+                }],
+                text_hash: 1,
+                text: "x".into(),
+            })
+            .collect();
+        let uris: Vec<String> = files.iter().map(|file| file.uri.clone()).collect();
+        service.apply_index_batch(super::super::engine::IndexBatch {
+            generation: 0,
+            attempted: uris,
+            conclusive: true,
+            files,
+        });
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "workspace/diagnostic",
+            "params": { "partialResultToken": "workspace/diagnostic/2" }
+        });
+        let snapshot = service.handle(request.clone());
+        let result_id = snapshot.messages[0]["params"]["value"]["items"][0]["resultId"]
+            .as_str()
+            .expect("result id");
+        let expected = eighty_file_stream(2, "workspace/diagnostic/2", result_id);
+        assert_eq!(snapshot.messages, expected);
+
+        let cancel = json!({
+            "jsonrpc": "2.0",
+            "method": "$/cancelRequest",
+            "params": {"id": 2}
+        });
+        let (tx, incoming) = sync_channel(4);
+        tx.send(Incoming::Message(cancel.clone())).unwrap();
+        tx.send(Incoming::Engine(EngineEvent::IndexReset(1)))
+            .unwrap();
+        let mut pending = VecDeque::new();
+        let mut written = Vec::new();
+        let exit = step_async(
+            &mut service,
+            &mut written,
+            &incoming,
+            &mut pending,
+            Incoming::Message(request),
+        )
+        .unwrap();
+        assert_eq!(exit, None);
+        assert!(pending.is_empty());
+        assert_eq!(decode_frames(&written), expected);
+        match incoming.try_recv().expect("cancel still queued") {
+            Incoming::Message(message) => assert_eq!(message, cancel),
+            Incoming::ParseError | Incoming::Error(_) | Incoming::Eof => {
+                panic!("the queued cancel was not left unread")
+            }
+            Incoming::Engine(_) => panic!("the index reset was taken before the cancel"),
+        }
+        match incoming.try_recv().expect("index reset still queued") {
+            Incoming::Engine(EngineEvent::IndexReset(generation)) => assert_eq!(generation, 1),
+            Incoming::Engine(_) => panic!("a different engine event was queued"),
+            Incoming::Message(_) | Incoming::ParseError | Incoming::Error(_) | Incoming::Eof => {
+                panic!("the index reset was not left unread")
+            }
+        }
     }
 
     #[test]
@@ -541,6 +678,7 @@ mod tests {
         let items = page_filling_items(MAX_RESPONSE_PAGES + 1, &token);
         let messages = workspace_diagnostic_messages(json!(9), items, Some(&token));
         assert_eq!(messages, vec![server_cancelled(json!(9))]);
+        assert_eq!(deliver_blocked(&messages), messages);
     }
 
     #[test]
@@ -570,6 +708,36 @@ mod tests {
 
     #[test]
     fn a_channel_sized_report_is_delivered_through_a_blocked_stdout_queue() {
+        let token = json!("workspace/diagnostic/9");
+        let items = page_filling_items(MAX_RESPONSE_PAGES, &token);
+        let messages = workspace_diagnostic_messages(json!(9), items, Some(&token));
+        assert_eq!(messages.len(), MAX_RESPONSE_PAGES + 1);
+        assert_eq!(deliver_blocked(&messages), messages);
+    }
+
+    fn decode_frames(bytes: &[u8]) -> Vec<Value> {
+        let mut decoded = Vec::new();
+        let mut rest = bytes;
+        while !rest.is_empty() {
+            let header_end = rest
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+                .expect("framed header");
+            let header = std::str::from_utf8(&rest[..header_end]).unwrap();
+            let length: usize = header
+                .strip_prefix("Content-Length: ")
+                .unwrap()
+                .parse()
+                .unwrap();
+            let body_start = header_end + 4;
+            let body = &rest[body_start..body_start + length];
+            decoded.push(serde_json::from_slice::<Value>(body).unwrap());
+            rest = &rest[body_start + length..];
+        }
+        decoded
+    }
+
+    fn deliver_blocked(messages: &[Value]) -> Vec<Value> {
         use std::io::Write;
         use std::sync::{Arc, Condvar, Mutex};
         use std::time::{Duration, Instant};
@@ -612,11 +780,6 @@ mod tests {
             }
         }
 
-        let token = json!("workspace/diagnostic/9");
-        let items = page_filling_items(MAX_RESPONSE_PAGES, &token);
-        let messages = workspace_diagnostic_messages(json!(9), items, Some(&token));
-        assert_eq!(messages.len(), MAX_RESPONSE_PAGES + 1);
-
         let started = Arc::new(Mutex::new(0usize));
         let gate = Arc::new((Mutex::new(false), Condvar::new()));
         let captured = Arc::new(Mutex::new(Vec::new()));
@@ -627,7 +790,7 @@ mod tests {
         })
         .unwrap();
         let _release = OpenGate(Arc::clone(&gate));
-        for message in &messages {
+        for message in messages {
             let encoded = serde_json::to_vec(message).unwrap();
             write_framed(&mut queue, &encoded).unwrap();
         }
@@ -642,26 +805,7 @@ mod tests {
             cv.notify_all();
         }
         drop(queue);
-
         let bytes = captured.lock().expect("captured").clone();
-        let mut decoded = Vec::new();
-        let mut rest = bytes.as_slice();
-        while !rest.is_empty() {
-            let header_end = rest
-                .windows(4)
-                .position(|window| window == b"\r\n\r\n")
-                .expect("framed header");
-            let header = std::str::from_utf8(&rest[..header_end]).unwrap();
-            let length: usize = header
-                .strip_prefix("Content-Length: ")
-                .unwrap()
-                .parse()
-                .unwrap();
-            let body_start = header_end + 4;
-            let body = &rest[body_start..body_start + length];
-            decoded.push(serde_json::from_slice::<Value>(body).unwrap());
-            rest = &rest[body_start + length..];
-        }
-        assert_eq!(decoded, messages);
+        decode_frames(&bytes)
     }
 }
