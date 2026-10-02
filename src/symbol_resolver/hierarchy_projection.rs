@@ -10,7 +10,7 @@ use crate::types::{Ty, TypeName};
 thread_local! {
     /// Owned projection lists. These are hierarchy results, not `Ty::Obj` argument slices, so they
     /// stay in this map and are freed when the compilation drops it.
-    static PROJECTION_CACHE: RefCell<Option<FxHashMap<Ty, Box<[Ty]>>>> = RefCell::new(None);
+    static PROJECTION_CACHE: RefCell<Option<FxHashMap<Ty, Box<[Ty]>>>> = const { RefCell::new(None) };
     static PROJECTION_CACHE_DEPTH: Cell<u32> = const { Cell::new(0) };
 }
 
@@ -534,9 +534,10 @@ mod tests {
             if name != "CacheProbe" {
                 return Rc::new(ResolvedSymbols::default());
             }
-            let mut record = ResolvedSymbols::default();
-            record.classifier = Some(Arc::clone(&self.classifier));
-            Rc::new(record)
+            Rc::new(ResolvedSymbols {
+                classifier: Some(Arc::clone(&self.classifier)),
+                ..ResolvedSymbols::default()
+            })
         }
     }
 
@@ -613,8 +614,7 @@ mod tests {
         fn symbols(&self, namespace: SymbolNamespace, name: &str) -> std::rc::Rc<ResolvedSymbols> {
             let identity = namespace.existing_classifier(name);
             let classifier = identity.and_then(|identity| {
-                function_classifiers::classifier(identity)
-                    .map(|function| function_classifiers::synthetic(function))
+                function_classifiers::classifier(identity).map(function_classifiers::synthetic)
             });
             std::rc::Rc::new(ResolvedSymbols {
                 builtin_classifier: false,

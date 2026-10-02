@@ -347,7 +347,7 @@ fn emit_annotation_hashcode(ir: &IrFile, cw: &mut ClassWriter, fq: &str, members
                     // illegal, so kotlinc falls back to `Object.hashCode` there, and so does this.
                     let owner = other
                         .obj_internal()
-                        .map(|internal| crate::jvm::names::classfile_internal_name_of(internal))
+                        .map(crate::jvm::names::classfile_internal_name_of)
                         .filter(|internal| {
                             !ir.classes.iter().any(|class| {
                                 class.fq_name() == *internal
@@ -356,7 +356,7 @@ fn emit_annotation_hashcode(ir: &IrFile, cw: &mut ClassWriter, fq: &str, members
                             })
                         })
                         .unwrap_or("java/lang/Object");
-                    let hc = cw.methodref(&owner, "hashCode", "()I");
+                    let hc = cw.methodref(owner, "hashCode", "()I");
                     cb.invokevirtual(hc, 0, 1);
                 }
             },

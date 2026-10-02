@@ -1240,9 +1240,7 @@ fn replay_class_dump_with_policy(
     force: bool,
     compile_missing: bool,
 ) -> Option<ReplayedClasses> {
-    let Some(compiler) = compiler else {
-        return None;
-    };
+    let compiler = compiler?;
     if force {
         return None;
     }

@@ -106,9 +106,7 @@ pub fn existing_type_name_child(parent: TypeName, segment: &str) -> Option<TypeN
     if let Some(exact) = type_names().existing_child_of(parent.name_id(), segment) {
         return Some(TypeName(exact));
     }
-    let Some((base, nested)) = split_nested_name(segment) else {
-        return None;
-    };
+    let (base, nested) = split_nested_name(segment)?;
     let mut name = TypeName(type_names().existing_child_of(parent.name_id(), base)?);
     for segment in nested_segments(nested) {
         name = TypeName(type_names().existing_nested_child_of(name.name_id(), segment)?);

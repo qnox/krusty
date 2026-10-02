@@ -729,7 +729,7 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                     semantics, base, expected, graph, demand, memo, computing,
                 )
                 .map(|result| result.and_then(|result| semantics.make_nullable(result))),
-                SigExpr::Sequence { effects, result } => Some((|| {
+                SigExpr::Sequence { effects, result } => {
                     // Statements are effects. A signature-time failure there is not fatal:
                     // `it.resume(Unit)` inside `suspendCoroutineUninterceptedOrReturn` is not
                     // applicable until the continuation's type variable is solved, and the body
@@ -738,13 +738,15 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                         let _ =
                             evaluate_expression(semantics, effect, graph, demand, memo, computing);
                     }
-                    evaluate_expression_with_expected(
-                        semantics, result, expected, graph, demand, memo, computing,
+                    Some(
+                        evaluate_expression_with_expected(
+                            semantics, result, expected, graph, demand, memo, computing,
+                        )
+                        .unwrap_or_else(|| {
+                            evaluate_expression(semantics, result, graph, demand, memo, computing)
+                        }),
                     )
-                    .unwrap_or_else(|| {
-                        evaluate_expression(semantics, result, graph, demand, memo, computing)
-                    })
-                })()),
+                }
                 SigExpr::ScopedReceiver {
                     receiver,
                     result,

@@ -526,6 +526,11 @@ impl ProductionSignatureSemantics<'_> {
         }
     }
 
+    /// Project the selected callable's parameter types back onto postponed source arguments. The
+    /// shared argument mapper owns named/default/trailing-lambda placement; this inversion only
+    /// preserves the many-source-arguments-to-one-vararg relationship which a parameter-slot vector
+    /// cannot represent. Positional vararg arguments expect the element type, while named/spread
+    /// arguments expect the declared array type.
     pub(super) fn postponed_expectations(
         arguments: &[crate::fir::SigCallArgumentProbe<'_>],
         slots: &[Option<usize>],
@@ -600,12 +605,6 @@ impl ProductionSignatureSemantics<'_> {
             })
             .collect()
     }
-
-    /// Project the selected callable's parameter types back onto postponed source arguments. The
-    /// shared argument mapper owns named/default/trailing-lambda placement; this inversion only
-    /// preserves the many-source-arguments-to-one-vararg relationship which a parameter-slot vector
-    /// cannot represent. Positional vararg arguments expect the element type, while named/spread
-    /// arguments expect the declared array type.
 
     /// Commit the constraint a selected extension property's declared receiver puts on the active
     /// variables the actual receiver mentions (`Buildee<UserKlass>.p` read on `Buildee<FT>`).

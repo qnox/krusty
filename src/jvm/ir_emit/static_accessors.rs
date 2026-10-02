@@ -777,7 +777,7 @@ pub(super) fn member_property_access_bridge(
         property_setter_name(&property.name)
     };
     let inline_uninitialized_guard = (read && !declared_accessor)
-        .then(|| property.backing_field)
+        .then_some(property.backing_field)
         .flatten()
         .and_then(|field| class.fields.get(field as usize))
         .filter(|field| field.is_lateinit())

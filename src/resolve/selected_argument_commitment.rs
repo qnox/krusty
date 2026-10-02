@@ -309,11 +309,11 @@ impl Checker<'_> {
 /// context prefix is removed. A non-empty table contributes exactly the suffix after
 /// `context_count`, and that suffix must be one flag per value parameter. A slice that does not
 /// exist is a miss: callers do not substitute an all-false table or the unsliced flags.
-fn value_parameter_defaults<'a>(
-    param_defaults: &'a [bool],
+fn value_parameter_defaults(
+    param_defaults: &[bool],
     context_count: usize,
     value_parameter_count: usize,
-) -> Option<&'a [bool]> {
+) -> Option<&[bool]> {
     if param_defaults.is_empty() {
         return Some(param_defaults);
     }

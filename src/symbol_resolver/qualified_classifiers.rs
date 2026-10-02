@@ -112,9 +112,11 @@ impl SymbolResolver<'_> {
             ) {
                 Ok(classifier) => return (CandidateSelection::Selected(classifier), None),
                 Err((_, segment)) => {
-                    let segment = (!segment.is_empty())
-                        .then_some(segment)
-                        .unwrap_or_else(|| first.to_string());
+                    let segment = if !segment.is_empty() {
+                        segment
+                    } else {
+                        first.to_string()
+                    };
                     return (CandidateSelection::None, Some(segment));
                 }
             }

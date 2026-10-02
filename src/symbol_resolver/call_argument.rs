@@ -260,11 +260,11 @@ impl CallArgKind {
         let Self::IntegerLiteral { ty, constant } = self else {
             return false;
         };
-        let family = match (*ty, parameter) {
-            (Ty::Int, Ty::Byte | Ty::Short | Ty::Long) => true,
-            (Ty::UInt, Ty::UByte | Ty::UShort | Ty::ULong) => true,
-            _ => false,
-        };
+        let family = matches!(
+            (*ty, parameter),
+            (Ty::Int, Ty::Byte | Ty::Short | Ty::Long)
+                | (Ty::UInt, Ty::UByte | Ty::UShort | Ty::ULong)
+        );
         family && constant.fits(parameter)
     }
 

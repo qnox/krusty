@@ -421,9 +421,7 @@ impl BodyLowering<'_> {
                 });
                 continue;
             };
-            if parameter_names.get(index).is_none() {
-                return None;
-            }
+            parameter_names.get(index)?;
             let plan = match supplied_operand_plan(
                 modes.get(index).copied(),
                 matches!(self.ir.expr(*operand), IrExpr::GetValue(_)),

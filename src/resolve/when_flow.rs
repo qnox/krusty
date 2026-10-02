@@ -5,6 +5,10 @@ use super::{Checker, CheckerScope};
 use crate::ast::{Expr, ExprId, WhenCondition};
 use crate::types::Ty;
 
+/// A condition's narrowings: the casts to apply, and the ones a closure mutation declines, keyed
+/// by the declined path's spelling.
+type WhenNarrowings = (Vec<(NarrowPath, Ty)>, Vec<(String, Ty)>);
+
 /// Exact numeric adaptations selected for one subject-form equality condition after earlier
 /// conditions have narrowed the subject. Later phases materialize this plan without re-selecting
 /// numeric applicability or promotion.
@@ -86,13 +90,15 @@ impl Checker<'_> {
     /// A subject-equality condition stores only the candidate expression, so null equality must be
     /// related to the separately stored subject here instead of being mistaken for a standalone
     /// Boolean condition.
+    ///
+    /// Returns the narrowings to apply and the ones declined.
     pub(super) fn when_condition_narrowings(
         &self,
         scope: &CheckerScope<'_>,
         subject: Option<ExprId>,
         condition: WhenCondition,
         truth: bool,
-    ) -> (Vec<(NarrowPath, Ty)>, Vec<(String, Ty)>) {
+    ) -> WhenNarrowings {
         if let (Some(subject), WhenCondition::SubjectEquals(candidate)) = (subject, condition) {
             if matches!(self.file.expr(candidate), Expr::NullLit) {
                 let mut casts = Vec::new();

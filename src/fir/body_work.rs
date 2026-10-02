@@ -431,8 +431,6 @@ impl StreamedHeaderModule {
             stubs,
             inventory,
             local_classifier_lexical_roots,
-            inventoried: _,
-            excluded: _,
             ..
         } = self;
         let mut units = stubs

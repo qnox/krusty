@@ -55,11 +55,11 @@ impl Classpath {
         let name = format!("{internal}.class");
         let bytes = match self.entries.get(entry_index)? {
             Entry::Dir(directory) => std::fs::read(directory.join(&name)).ok().filter(|bytes| {
-                parse_class(bytes).is_ok_and(|class| class.this_class_matches(&internal))
+                parse_class(bytes).is_ok_and(|class| class.this_class_matches(internal))
             }),
             Entry::Jar(jar) => self.jar_entry(jar, &name),
-            Entry::Jimage(_) => self.jimage_bytes(&internal),
-            Entry::CtSym { path, release } => self.ct_sym_bytes(path, *release, &internal),
+            Entry::Jimage(_) => self.jimage_bytes(internal),
+            Entry::CtSym { path, release } => self.ct_sym_bytes(path, *release, internal),
         }?;
         let Some(class) = ClassBodies::parse(std::sync::Arc::new(bytes)) else {
             return Some(None);

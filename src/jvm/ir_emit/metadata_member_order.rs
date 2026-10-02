@@ -122,7 +122,7 @@ pub(super) fn sort_delegation_properties(
         .map(Some)
         .collect::<Vec<_>>();
     let mut delegation = sorted.into_iter();
-    for index in 0..taken.len() {
+    for (index, order_slot) in source_orders.iter_mut().enumerate().take(taken.len()) {
         let source = if positions.contains(&index) {
             delegation
                 .next()
@@ -132,7 +132,7 @@ pub(super) fn sort_delegation_properties(
         };
         let (property, order) = taken[source].take().expect("each property moves once");
         properties.push(property);
-        source_orders[index] = order;
+        *order_slot = order;
     }
     positions
 }

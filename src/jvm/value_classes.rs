@@ -1409,7 +1409,7 @@ pub(crate) fn lower_value_classes(
         if !c.is_value
             && !c.is_object
             && !c.is_interface
-            && hidden_constructors::primary_has_value_class(c, &is_vc_ty)
+            && hidden_constructors::primary_has_value_class(c, is_vc_ty)
         {
             // Capture the DECLARED ctor param types before the erase below rewrites them — the
             // class metadata constructor record must name the value classes.
@@ -1644,7 +1644,7 @@ pub(crate) fn lower_value_classes(
                     i as ExprId,
                     *internal,
                     ps,
-                    &is_vc_ty,
+                    is_vc_ty,
                 );
                 if !is_value_class_internal(*internal, &under) && hides {
                     value_class_parameter_constructions.push(i as ExprId);

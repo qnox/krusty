@@ -447,7 +447,7 @@ impl BodyLowering<'_> {
             dispatch_receiver: receiver,
             args,
         });
-        argument_boundaries::record(&mut self.ir, call, &boundary_parameters, &boundary_defaults);
+        argument_boundaries::record(self.ir, call, &boundary_parameters, &boundary_defaults);
         if let Some(receiver) = source_receiver {
             self.ir
                 .ext_call_source_receiver
@@ -919,7 +919,7 @@ impl BodyLowering<'_> {
             dispatch_receiver: receiver,
             args,
         });
-        argument_boundaries::record(&mut self.ir, call, &parameter_types, &defaults);
+        argument_boundaries::record(self.ir, call, &parameter_types, &defaults);
         Some(self.wrap_call_statements(statements, call))
     }
 
@@ -1736,7 +1736,7 @@ impl BodyLowering<'_> {
             None => return None,
         };
         argument_boundaries::record(
-            &mut self.ir,
+            self.ir,
             call,
             &selected_declaration_parameter_types,
             &default_argument_positions,
@@ -1844,17 +1844,15 @@ impl BodyLowering<'_> {
                                 ..
                             } => {
                                 let declared = *declared_parameters.get(parameter)?;
-                                let value =
-                                    if !parameter_ty.is_reference() && declared.is_reference() {
-                                        self.ir.add_expr(IrExpr::TypeOp {
-                                            op: IrTypeOp::ImplicitCoercion,
-                                            arg: value,
-                                            type_operand: declared,
-                                        })
-                                    } else {
-                                        value
-                                    };
-                                value
+                                if !parameter_ty.is_reference() && declared.is_reference() {
+                                    self.ir.add_expr(IrExpr::TypeOp {
+                                        op: IrTypeOp::ImplicitCoercion,
+                                        arg: value,
+                                        type_operand: declared,
+                                    })
+                                } else {
+                                    value
+                                }
                             }
                             CheckedArgumentPolicy::Selected { .. } => value,
                         })

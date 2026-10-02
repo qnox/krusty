@@ -784,9 +784,7 @@ impl BodyFirChecker<'_> {
         cause: OriginId,
         target: ResolvedTy,
     ) -> Option<FirConversion> {
-        let Some(message) = self.platform_narrowing_message(source) else {
-            return None;
-        };
+        let message = self.platform_narrowing_message(source)?;
         let narrowing = self
             .body
             .add_platform_narrowing(FirPlatformNarrowing { message });
