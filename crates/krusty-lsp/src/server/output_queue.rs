@@ -217,6 +217,19 @@ impl OutputQueue {
         }
     }
 
+    /// Whether the preceding frame has reached the underlying writer.
+    ///
+    /// A paged response waits for this boundary before constructing and accepting its next frame,
+    /// keeping the transport queue bounded and giving the input loop a cancellation point.
+    pub(super) fn is_idle(&mut self) -> io::Result<bool> {
+        self.poll_writer_failure()?;
+        self.pump()?;
+        self.poll_writer_failure()?;
+        Ok(self.current.is_empty()
+            && self.pending.is_empty()
+            && self.held.load(Ordering::SeqCst) == 0)
+    }
+
     pub(super) fn finish(&mut self, outcome: io::Result<i32>) -> io::Result<i32> {
         let delivery = self.shutdown();
         match outcome {

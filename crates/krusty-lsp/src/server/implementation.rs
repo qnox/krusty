@@ -25,10 +25,13 @@ use super::super::{
     MAX_WORKSPACE_SYMBOL_WIRE_BYTES, SEMANTIC_TOKEN_MODIFIERS, SEMANTIC_TOKEN_TYPES,
 };
 use super::diagnostic_page::{
-    limit_diagnostic_items, wire_diagnostic_message, workspace_diagnostic_messages,
+    limit_diagnostic_items, wire_diagnostic_message, workspace_diagnostic_response,
+    WorkspaceDiagnosticResponse,
 };
 pub use super::line_index::{byte_offset_to_position, position_to_byte_offset, Position};
 use super::line_index::{position_to_byte_offset_with_budget, LineIndex};
+pub use super::response_delivery::Dispatch;
+use super::response_delivery::{dispatch_sync as dispatch_messages, AsyncResponseDelivery};
 use super::response_page::{
     array_messages, fit_completion_items, limit_signature_help, limit_text, location_messages,
     partial_result_token, too_large, HOVER_TEXT_BYTES,
@@ -619,12 +622,6 @@ impl<A: Analysis> AnalysisBackend for InlineBackend<A> {
     }
 }
 
-pub struct Dispatch {
-    pub messages: Vec<Value>,
-    pub exit: bool,
-    pub exit_code: i32,
-}
-
 macro_rules! partial_token {
     ($id:expr, $params:expr) => {
         match partial_result_token(&$params) {
@@ -632,20 +629,6 @@ macro_rules! partial_token {
             Err(()) => return invalid_params(Some($id)),
         }
     };
-}
-
-impl Dispatch {
-    pub(crate) fn messages(messages: Vec<Value>) -> Self {
-        Self {
-            messages,
-            exit: false,
-            exit_code: 0,
-        }
-    }
-
-    pub(crate) fn none() -> Self {
-        Self::messages(Vec::new())
-    }
 }
 
 /// `(start line, start UTF-16 column, end line, end UTF-16 column,
@@ -1724,11 +1707,7 @@ where
         let params = object.remove("params").unwrap_or(Value::Null);
 
         if method == "exit" {
-            return Dispatch {
-                messages: Vec::new(),
-                exit: true,
-                exit_code: if self.shutdown_requested { 0 } else { 1 },
-            };
+            return Dispatch::exit(if self.shutdown_requested { 0 } else { 1 });
         }
         if self.shutdown_requested {
             return match id {
@@ -3123,7 +3102,10 @@ where
             };
             items.push(item);
         }
-        Dispatch::messages(workspace_diagnostic_messages(id, items, token.as_ref()))
+        match workspace_diagnostic_response(id, items, token.as_ref()) {
+            WorkspaceDiagnosticResponse::Immediate(message) => Dispatch::messages(vec![message]),
+            WorkspaceDiagnosticResponse::Stream(stream) => Dispatch::diagnostic_stream(stream),
+        }
     }
 
     fn semantic_tokens(&self, id: Option<Value>, params: Value, range: bool) -> Dispatch {
@@ -3965,13 +3947,8 @@ where
         // compiler analysis constructs its AST and type tables.
         drop(body);
 
-        let dispatch = service.handle(message);
-        for response in dispatch.messages {
-            let encoded = serde_json::to_vec(&response).map_err(json_io)?;
-            write_framed(writer, &encoded)?;
-        }
-        if dispatch.exit {
-            return Ok(dispatch.exit_code);
+        if let Some(code) = dispatch_messages(writer, service.handle(message))? {
+            return Ok(code);
         }
     }
 }
@@ -4133,18 +4110,6 @@ pub(crate) fn coalesce_document_notifications(
         }
     }
     changes
-}
-
-fn dispatch_messages<W: Write>(writer: &mut W, dispatch: Dispatch) -> io::Result<Option<i32>> {
-    for response in dispatch.messages {
-        let encoded = serde_json::to_vec(&response).map_err(json_io)?;
-        write_framed(writer, &encoded)?;
-    }
-    if dispatch.exit {
-        Ok(Some(dispatch.exit_code))
-    } else {
-        Ok(None)
-    }
 }
 
 pub(super) fn dispatch_document_batch<W, B>(
@@ -4358,11 +4323,12 @@ where
     Ok(())
 }
 
-pub(super) fn step_async<W, B>(
+fn step_async_with_delivery<W, B>(
     service: &mut LspService<B>,
     writer: &mut W,
     incoming: &Receiver<Incoming>,
     pending: &mut VecDeque<Incoming>,
+    mut delivery: Option<&mut AsyncResponseDelivery>,
     event: Incoming,
 ) -> io::Result<Option<i32>>
 where
@@ -4372,7 +4338,12 @@ where
     match event {
         Incoming::Message(message) => {
             for change in coalesce_document_notifications(message, incoming, pending) {
-                if let Some(code) = dispatch_messages(writer, service.handle_deferred(change))? {
+                let dispatch = service.handle_deferred(change);
+                let result = match delivery.as_deref_mut() {
+                    Some(delivery) => delivery.accept(writer, dispatch),
+                    None => dispatch_messages(writer, dispatch),
+                }?;
+                if let Some(code) = result {
                     return Ok(Some(code));
                 }
             }
@@ -4391,6 +4362,21 @@ where
         write_framed(writer, &encoded)?;
     }
     Ok(None)
+}
+
+#[cfg(test)]
+fn step_async<W, B>(
+    service: &mut LspService<B>,
+    writer: &mut W,
+    incoming: &Receiver<Incoming>,
+    pending: &mut VecDeque<Incoming>,
+    event: Incoming,
+) -> io::Result<Option<i32>>
+where
+    W: Write,
+    B: AnalysisBackend,
+{
+    step_async_with_delivery(service, writer, incoming, pending, None, event)
 }
 
 /// `dev` turns on the developer surfaces; it must be the same flag the analysis host was built
@@ -4437,8 +4423,13 @@ where
     let mut writer = super::output_queue::OutputQueue::spawn(writer)?;
     let writer = &mut writer;
     let mut pending = VecDeque::new();
+    let mut delivery = AsyncResponseDelivery::default();
     let mut input_dispatches_since_maintenance = 0usize;
     let outcome = loop {
+        if delivery.is_active() {
+            delivery.advance(writer, &incoming, &mut pending)?;
+            continue;
+        }
         if maintenance_preempts_input(
             input_dispatches_since_maintenance,
             service.project_refresh_due_in(),
@@ -4476,7 +4467,14 @@ where
                 None => incoming.recv().unwrap_or(Incoming::Eof),
             },
         };
-        match step_async(&mut service, writer, &incoming, &mut pending, event) {
+        match step_async_with_delivery(
+            &mut service,
+            writer,
+            &incoming,
+            &mut pending,
+            Some(&mut delivery),
+            event,
+        ) {
             Ok(Some(code)) => break Ok(code),
             Ok(None) => {
                 input_dispatches_since_maintenance =
@@ -4538,7 +4536,7 @@ fn maintenance_preempts_input(input_dispatches: usize, due: Option<Duration>) ->
         && due.is_some_and(|due| due.is_zero())
 }
 
-fn json_io(error: serde_json::Error) -> io::Error {
+pub(super) fn json_io(error: serde_json::Error) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, error)
 }
 

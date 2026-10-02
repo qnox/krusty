@@ -8,24 +8,17 @@
 //! location, and edit strings are never rewritten to make a value fit.
 
 use std::borrow::Cow;
+use std::collections::VecDeque;
 
 use serde_json::{json, Map, Value};
 
 use super::implementation::MAX_MESSAGE_BYTES;
-use super::output_queue::OUTPUT_CHANNEL_FRAMES;
 
 /// One editor-facing frame, including the JSON-RPC envelope, id, and progress token.
 pub(super) const RESPONSE_PAGE_BYTES: usize = 256 * 1024;
 
-const _: () = assert!(OUTPUT_CHANNEL_FRAMES >= 2);
-
-/// Progress pages one partial-result stream may emit.
-///
-/// The async stdout channel holds [`OUTPUT_CHANNEL_FRAMES`] frames. The empty final result
-/// takes one of those slots. One more progress page would leave that result in the queue's
-/// pending slot, which a blocked client never sees. A longer report is server-cancelled
-/// before any `$/progress`.
-pub(super) const MAX_RESPONSE_PAGES: usize = OUTPUT_CHANNEL_FRAMES - 1;
+/// How many progress pages one request may emit.
+pub(super) const MAX_RESPONSE_PAGES: usize = 32;
 
 /// Hover markdown kept on the wire. The stored hover text may be longer.
 pub(super) const HOVER_TEXT_BYTES: usize = 8 * 1024;
@@ -145,6 +138,41 @@ pub(super) fn location_messages(
     }
 }
 
+pub(super) enum ArrayPagePlan {
+    One(Vec<Value>),
+    Pages(VecDeque<Vec<Value>>),
+    TooLarge,
+}
+
+pub(super) fn paged_array_plan<ResultFrame, ProgressFrame>(
+    id: &Value,
+    items: Vec<Value>,
+    token: Option<&Value>,
+    result_frame: &ResultFrame,
+    progress_frame: &ProgressFrame,
+) -> ArrayPagePlan
+where
+    ResultFrame: Fn(&Value, Vec<Value>) -> Value,
+    ProgressFrame: Fn(&Value, Vec<Value>) -> Value,
+{
+    let Some(result_budget) = array_budget(&result_frame(id, Vec::new())) else {
+        return ArrayPagePlan::TooLarge;
+    };
+    if fits_one(&items, result_budget) {
+        return ArrayPagePlan::One(items);
+    }
+    let Some(token) = token else {
+        return ArrayPagePlan::TooLarge;
+    };
+    let Some(progress_budget) = array_budget(&progress_frame(token, Vec::new())) else {
+        return ArrayPagePlan::TooLarge;
+    };
+    match pack_values(items, progress_budget, MAX_RESPONSE_PAGES) {
+        Ok(pages) => ArrayPagePlan::Pages(pages.into()),
+        Err(()) => ArrayPagePlan::TooLarge,
+    }
+}
+
 /// Build one bounded array result or an all-or-nothing partial-result stream. The caller owns only
 /// the protocol-specific shape around the array; token validation, envelope budgets, page packing,
 /// the page cap, and failure shape stay common to every editor response.
@@ -161,25 +189,17 @@ where
     ProgressFrame: Fn(&Value, Vec<Value>) -> Value,
     TooLarge: Fn(&Value) -> Value,
 {
-    let Some(result_budget) = array_budget(&result_frame(&id, Vec::new())) else {
-        return vec![too_large(&id)];
-    };
-    if fits_one(&items, result_budget) {
-        return vec![result_frame(&id, items)];
+    match paged_array_plan(&id, items, token, &result_frame, &progress_frame) {
+        ArrayPagePlan::One(items) => vec![result_frame(&id, items)],
+        ArrayPagePlan::Pages(pages) => {
+            let token = token.expect("a page plan requires a partial-result token");
+            let mut messages = Vec::with_capacity(pages.len().saturating_add(1));
+            messages.extend(pages.into_iter().map(|page| progress_frame(token, page)));
+            messages.push(result_frame(&id, Vec::new()));
+            messages
+        }
+        ArrayPagePlan::TooLarge => vec![too_large(&id)],
     }
-    let Some(token) = token else {
-        return vec![too_large(&id)];
-    };
-    let Some(progress_budget) = array_budget(&progress_frame(token, Vec::new())) else {
-        return vec![too_large(&id)];
-    };
-    let Ok(pages) = pack_values(items, progress_budget, MAX_RESPONSE_PAGES) else {
-        return vec![too_large(&id)];
-    };
-    let mut messages = Vec::with_capacity(pages.len().saturating_add(1));
-    messages.extend(pages.into_iter().map(|page| progress_frame(token, page)));
-    messages.push(result_frame(&id, Vec::new()));
-    messages
 }
 
 fn clamp_active_signature(object: &mut Map<String, Value>, len: usize) {
