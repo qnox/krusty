@@ -1412,9 +1412,8 @@ pub fn reparent_lambda_impls(ir: &mut IrFile) {
         out
     };
     for cid in 0..ir.classes.len() {
-        // Class-context roots whose code emits inside this class: member/method bodies (covers a
-        // suspend machine's `invokeSuspend`), the instance initializer, super/delegate arguments,
-        // and enum-entry constructor arguments (emitted in `<clinit>`).
+        // Class-context roots whose code emits inside this class: member bodies, the instance
+        // initializer, a companion `<clinit>` body, super arguments, and enum-entry arguments.
         let c = &ir.classes[cid];
         let mut roots: Vec<crate::ir::ExprId> = Vec::new();
         for &fid in &c.methods {
@@ -1423,6 +1422,7 @@ pub fn reparent_lambda_impls(ir: &mut IrFile) {
             }
         }
         roots.extend(c.init_body);
+        roots.extend(ir.companion_clinit_body(c.fq_name));
         roots.extend(c.super_arg_prelude.iter().copied());
         roots.extend(c.super_args.iter().copied());
         for sc in &c.secondary_ctors {

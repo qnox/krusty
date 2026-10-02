@@ -830,6 +830,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   moves with the compaction. A `var` that only customizes its setter therefore still gets its
   default getter, reading the same field the setter writes. Test:
   `tests/companion_custom_accessor_field_e2e.rs`.
+- **A class companion's `init` block runs in the outer `<clinit>`.** kotlinc stores the companion
+  instance, then runs that companion's property initializers and `init` blocks in source order,
+  all inside the enclosing class's `<clinit>`. The companion's own `<init>` is only `super()`.
+  An `init` that touched a hoisted property used to run inside `Companion.<init>`, before
+  `C.Companion` was stored and before the property's static field existed, so `C.visited.add`
+  threw `ExceptionInInitializerError`. The initializer body now runs after the instance store.
+  When it contains anything besides hoisted property stores, those stores stay in the body so a
+  later property still sees the preceding `init` block. A private companion property stays an
+  instance field, so an initializer that still reads one remains on the companion constructor,
+  which can load that field. Interface companions keep their own `<clinit>`. Test:
+  `tests/companion_init_block_e2e.rs`.
 - **`companion { … }` blocks and companion extensions (`CompanionBlocksAndExtensions`).** A block
   member is a static member of the classifier that declares the block, not of the file facade,
   measured against kotlinc 2.4.20: a function is a `public static final` method of `C`; a property

@@ -246,6 +246,7 @@ pub fn lower_companion_properties(ir: &mut IrFile) {
         }
     }
     if candidates.is_empty() {
+        schedule_class_companion_initializers(ir);
         return;
     }
 
@@ -305,6 +306,9 @@ pub fn lower_companion_properties(ir: &mut IrFile) {
 
     // Remove only declaration-initializer stores. A later assignment in an `init` block has a
     // different expression identity and remains in source order (rewritten to the selected static).
+    // When the body also has an `init` block (or any other statement), the stores stay: the outer
+    // `<clinit>` runs that whole body in source order, and each hoisted static's own initializer
+    // is cleared so the value is not stored twice.
     let removed_stores: HashSet<_> = candidates
         .iter()
         .map(|candidate| candidate.initializer_store)
@@ -313,6 +317,7 @@ pub fn lower_companion_properties(ir: &mut IrFile) {
         .iter()
         .map(|candidate| candidate.companion)
         .collect();
+    let mut retain_initializer_stores = HashSet::new();
     for companion in affected_companions.iter().copied() {
         let Some(body) = ir.classes[companion as usize].init_body else {
             continue;
@@ -320,6 +325,32 @@ pub fn lower_companion_properties(ir: &mut IrFile) {
         let IrExpr::Block { stmts, value } = ir.expr(body).clone() else {
             continue;
         };
+        let has_other_statement = value.is_some()
+            || stmts
+                .iter()
+                .any(|statement| !removed_stores.contains(statement));
+        // Hoisted stores are about to become outer-class static stores. What remains must be
+        // movable with them: a leftover companion instance field (a private property) cannot be
+        // read from the outer `<clinit>`, so its initializer stays on the companion constructor
+        // and the hoisted stores keep their own `<clinit>` initializers.
+        let hoisted_properties = candidates
+            .iter()
+            .filter(|candidate| candidate.companion == companion)
+            .map(|candidate| candidate.name.clone())
+            .collect::<HashSet<_>>();
+        if has_other_statement
+            && class_companion_clinit_owner(ir, companion).is_some()
+            && !initializer_needs_companion_instance(
+                ir,
+                companion,
+                body,
+                &removed_stores,
+                &hoisted_properties,
+            )
+        {
+            retain_initializer_stores.insert(companion);
+            continue;
+        }
         let retained: Vec<_> = stmts
             .into_iter()
             .filter(|statement| !removed_stores.contains(statement))
@@ -472,26 +503,32 @@ pub fn lower_companion_properties(ir: &mut IrFile) {
         });
 
         let mut initializer = candidate.initializer;
-        if crate::ir::read_values(ir, initializer).contains(&0) {
-            let outer = ir.classes[candidate.outer as usize].fq_name;
-            let companion = ir.classes[candidate.companion as usize].fq_name;
-            let singleton = ir.add_expr(IrExpr::ExternalStaticInstance {
-                owner: outer,
-                ty: companion,
-                field: companion.nested_segment_ref().to_string(),
-            });
-            let binding = ir.add_expr(IrExpr::Variable {
-                index: 0,
-                ty: Ty::obj_name(companion),
-                init: Some(singleton),
-                named: false,
-            });
-            initializer = ir.add_expr(IrExpr::Block {
-                stmts: vec![binding],
-                value: Some(initializer),
-            });
+        if retain_initializer_stores.contains(&candidate.companion) {
+            // The store stays in the companion body, which `<clinit>` runs with the instance
+            // already in value 0. A separate static initializer would store the value again.
+            ir.statics[static_index as usize].init = None;
+        } else {
+            if crate::ir::read_values(ir, initializer).contains(&0) {
+                let outer = ir.classes[candidate.outer as usize].fq_name;
+                let companion = ir.classes[candidate.companion as usize].fq_name;
+                let singleton = ir.add_expr(IrExpr::ExternalStaticInstance {
+                    owner: outer,
+                    ty: companion,
+                    field: companion.nested_segment_ref().to_string(),
+                });
+                let binding = ir.add_expr(IrExpr::Variable {
+                    index: 0,
+                    ty: Ty::obj_name(companion),
+                    init: Some(singleton),
+                    named: false,
+                });
+                initializer = ir.add_expr(IrExpr::Block {
+                    stmts: vec![binding],
+                    value: Some(initializer),
+                });
+            }
+            ir.statics[static_index as usize].init = Some(initializer);
         }
-        ir.statics[static_index as usize].init = Some(initializer);
 
         let class = &mut ir.classes[candidate.companion as usize];
         let property_accessors = accessors.map(|(getter, setter)| {
@@ -509,6 +546,123 @@ pub fn lower_companion_properties(ir: &mut IrFile) {
             property.setter = setter;
         }
     }
+    schedule_class_companion_initializers(ir);
+}
+
+/// A class companion's initializer runs in the enclosing class `<clinit>`, after that class has
+/// stored the companion instance. Property initializers and `init` blocks stay in source order
+/// inside the body. The companion constructor is left as `super()` only.
+///
+/// Interface companions keep object storage and run their initializer in their own `<clinit>`.
+/// Enum companions stay on the enum's existing `<clinit>` order. A named object's companion stays
+/// with that object's initializer.
+fn schedule_class_companion_initializers(ir: &mut IrFile) {
+    let mut scheduled = Vec::new();
+    for index in 0..ir.classes.len() {
+        if !outer_runs_companion_initializer(&ir.classes[index]) {
+            continue;
+        }
+        let Some(companion_name) = ir.classes[index].companion_class else {
+            continue;
+        };
+        let Some(companion) = ir.class_id_by_name(companion_name) else {
+            continue;
+        };
+        if !ir.classes[companion as usize].is_companion {
+            continue;
+        }
+        let Some(body) = ir.classes[companion as usize].init_body else {
+            continue;
+        };
+        // A private property stays an instance field of the companion. Reading it from the outer
+        // `<clinit>` becomes a getter call, and a private property has no getter. Leave that
+        // initializer on the companion constructor, which can use the field directly.
+        if initializer_needs_companion_instance(
+            ir,
+            companion,
+            body,
+            &HashSet::new(),
+            &HashSet::new(),
+        ) {
+            continue;
+        }
+        scheduled.push((ir.classes[index].fq_name, companion, body));
+    }
+    for (owner, companion, body) in scheduled {
+        ir.set_companion_clinit_body(owner, body);
+        ir.classes[companion as usize].init_body = None;
+    }
+}
+
+fn initializer_needs_companion_instance(
+    ir: &IrFile,
+    companion: ClassId,
+    body: ExprId,
+    skip: &HashSet<ExprId>,
+    // Properties whose stores are moving to the outer class. Their reads are static after that
+    // move, even while the declaration still names its old field.
+    hoisted_properties: &HashSet<String>,
+) -> bool {
+    let companion_name = ir.classes[companion as usize].fq_name;
+    let mut pending = vec![body];
+    let mut seen = HashSet::new();
+    while let Some(expression) = pending.pop() {
+        if !seen.insert(expression) || skip.contains(&expression) {
+            continue;
+        }
+        match ir.expr(expression) {
+            IrExpr::GetField { class, .. }
+            | IrExpr::SetField { class, .. }
+            | IrExpr::LateinitInitialized { class, .. }
+                if *class == companion =>
+            {
+                return true;
+            }
+            IrExpr::PropertyRead { owner, name, .. }
+            | IrExpr::PropertyWrite { owner, name, .. }
+                if *owner == companion_name
+                    && !hoisted_properties.contains(name)
+                    && ir.classes[companion as usize]
+                        .properties
+                        .iter()
+                        .any(|property| {
+                            property.name == *name && property.backing_field.is_some()
+                        }) =>
+            {
+                return true;
+            }
+            _ => {}
+        }
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+    }
+    false
+}
+
+fn outer_runs_companion_initializer(outer: &crate::ir::IrClass) -> bool {
+    !outer.is_interface
+        && !outer.is_annotation
+        && !outer.is_enum
+        && !outer.is_value
+        && !outer.is_object
+        && outer.companion_class.is_some()
+}
+
+/// Outer class that will run `companion`'s initializer, when `companion` is that kind of companion.
+fn class_companion_clinit_owner(ir: &IrFile, companion: ClassId) -> Option<ClassId> {
+    let companion_name = ir.classes.get(companion as usize)?.fq_name;
+    if !ir
+        .classes
+        .get(companion as usize)
+        .is_some_and(|class| class.is_companion)
+    {
+        return None;
+    }
+    ir.classes
+        .iter()
+        .position(|class| {
+            class.companion_class == Some(companion_name) && outer_runs_companion_initializer(class)
+        })
+        .map(|index| index as ClassId)
 }
 
 /// A property that stays on the companion still names its field after plainer siblings are removed.

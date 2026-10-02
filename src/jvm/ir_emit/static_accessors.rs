@@ -124,6 +124,7 @@ pub(super) fn emission_contexts(
             }
         }
         roots.extend(class.init_body);
+        roots.extend(ir.companion_clinit_body(class.fq_name));
         roots.extend(class.super_arg_prelude.iter().copied());
         roots.extend(class.super_args.iter().copied());
         roots.extend(

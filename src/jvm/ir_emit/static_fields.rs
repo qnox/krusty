@@ -544,6 +544,7 @@ pub(super) fn emit_class_static_initializer(
         // construction and hoisted-initializer constants.
         cw.reserve_method_name("<clinit>");
         cw.seed_utf8("()V");
+        let companion_initializer = ir.companion_clinit_body(c.fq_name);
         let mut e = Emitter::new(
             ir,
             cw,
@@ -552,7 +553,10 @@ pub(super) fn emit_class_static_initializer(
             fq_name,
             facade,
             Ty::Unit,
-            clinit_statics.iter().map(|&(_, _, init)| init),
+            clinit_statics
+                .iter()
+                .map(|&(_, _, init)| init)
+                .chain(companion_initializer),
         );
         let mut clinit = CodeBuilder::new(0);
         e.emit_delegated_property_array(env, c.fq_name, fq_name, &mut clinit);
@@ -578,6 +582,37 @@ pub(super) fn emit_class_static_initializer(
                 clinit_lines.push((pc, line));
             }
             e.emit_static_initializer_store(fq_name, static_index, init, &mut clinit);
+        }
+        if let Some(body) = companion_initializer {
+            // The companion constructor no longer runs this body. Value 0 is the companion
+            // instance, which `<clinit>` has already stored.
+            let companion = c
+                .companion_class
+                .expect("a companion initializer belongs to a class that declares one");
+            let companion_name = companion.render();
+            let descriptor = format!("L{companion_name};");
+            let field =
+                e.cw.fieldref(fq_name, companion.nested_segment_ref(), &descriptor);
+            clinit.getstatic(field, 1);
+            let receiver_ty = Ty::obj_name(companion);
+            let existing = e.slots.get(&0).map(|(slot, _)| *slot);
+            let receiver = match existing {
+                Some(slot) => slot,
+                None => e
+                    .frame
+                    .enter(super::frame_map::FrameKey::Receiver, receiver_ty),
+            };
+            store(receiver_ty, receiver, &mut clinit);
+            e.slots.insert(0, (receiver, receiver_ty));
+            let first = clinit.line_marks().len();
+            e.render_initializer_boundaries = true;
+            e.emit(body, &mut clinit);
+            e.render_initializer_boundaries = false;
+            let marks = clinit.line_marks()[first..]
+                .iter()
+                .map(|&(pc, line)| (pc, u32::from(line)));
+            clinit_lines.extend(marks);
+            clinit_lines.dedup_by_key(|(_, line)| *line);
         }
         clinit.ret_void();
         clinit.ensure_locals(e.frame.max());

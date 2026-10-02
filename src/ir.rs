@@ -1732,6 +1732,11 @@ pub struct IrFile {
     /// Static indices whose storage was moved from a companion declaration to its outer class by the
     /// JVM companion-storage pass. Common lowering never populates this physical realization table.
     jvm_companion_hoisted_statics: std::collections::HashSet<u32>,
+    /// A class companion's initializer body (property stores that stayed in source order, then
+    /// `init` blocks), run by the outer class `<clinit>` after the companion instance is stored.
+    /// The companion constructor does not run it. Interface and enum companions are absent: their
+    /// initializers stay on the companion's own storage path.
+    companion_clinit_bodies: std::collections::HashMap<TypeName, ExprId>,
     /// JVM field name of a static whose source name its owner already uses for another static
     /// field (a hoisted companion property beside a same-named `companion { … }` property).
     jvm_static_field_names: std::collections::HashMap<u32, String>,
