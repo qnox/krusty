@@ -1350,6 +1350,7 @@ pub(super) fn lower_substitutions(values: &[FirTypeSubstitution]) -> Vec<IrCheck
         .iter()
         .map(|substitution| IrCheckedSubstitution {
             parameter: substitution.parameter,
+            reified: substitution.reified,
             value: substitution.value.get(),
             additional_bounds: substitution
                 .additional_bounds

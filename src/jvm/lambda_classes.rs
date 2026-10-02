@@ -85,7 +85,10 @@ pub(super) fn nests_lifted_functions(ir: &IrFile, body: ExprId) -> bool {
     crate::ir::value_namespace_expressions(ir, body)
         .iter()
         .any(|&expression| match &ir.exprs[expression as usize] {
-            IrExpr::Lambda { .. } => true,
+            // A specialized escaping implementation remains an independently emitted class whose
+            // JVM plan delegates to its already-owned implementation method. It does not have to
+            // move into the surrounding lambda class with ordinary lifted declarations.
+            IrExpr::Lambda { impl_fn, .. } => !ir.specialized_functions.contains_key(impl_fn),
             IrExpr::Call {
                 callee:
                     crate::ir::Callee::Local(function)
@@ -448,6 +451,7 @@ fn become_invoke(ir: &mut IrFile, fid: FunId, class: ClassId, captured: usize, r
     for owner in &mut ir.classes {
         owner.methods.retain(|&method| method != fid);
     }
+    ir.class_method_owners.remove(&fid);
     if let Some((sequence, site)) = ir.lifted_functions.remove(&fid) {
         let entry = site.path.last().and_then(|step| {
             ir.lifting_sequences
@@ -458,6 +462,7 @@ fn become_invoke(ir: &mut IrFile, fid: FunId, class: ClassId, captured: usize, r
             entry.lifted = false;
         }
     }
+    ir.lifted_names.remove(&fid);
     let function = &mut ir.functions[fid as usize];
     function.params.drain(..captured);
     function.param_checks = function
@@ -483,4 +488,5 @@ fn become_invoke(ir: &mut IrFile, fid: FunId, class: ClassId, captured: usize, r
     // kotlinc writes no nullability annotations on a lambda class's members.
     ir.jvm_nullability_unannotated_methods.insert(fid);
     ir.classes[class as usize].methods.push(fid);
+    ir.note_class_method(class, fid);
 }

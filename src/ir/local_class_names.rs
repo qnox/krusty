@@ -943,6 +943,13 @@ impl super::IrFile {
                 .iter_mut()
                 .for_each(|value| name(value, names));
         }
+        self.callable_reference_names
+            .values_mut()
+            .for_each(|value| name(value, names));
+        self.lambda_class_names
+            .values_mut()
+            .for_each(|value| name(value, names));
+        remap_keyed(&mut self.declaration_paths, names);
 
         remap_keyed(&mut self.referenced_module_classifiers, names);
         remap_keyed(&mut self.classifier_hierarchies, names);

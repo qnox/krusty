@@ -181,10 +181,15 @@ pub(crate) fn lower_body_with_context(
         vec![HashMap::new()],
         local_callables.realizations.clone(),
     );
-    lowering.enclosure = root_enclosure(&body, index, lowering.ir, declaration);
+    let root_is_default = body.is_default_fragment();
+    lowering.expansion_enclosure = root_enclosure(index, lowering.ir, declaration);
+    if !root_is_default {
+        lowering.enclosure = lowering.expansion_enclosure;
+    }
     lowering.prepare_local_delegate_plans()?;
     lowering.prepare_local_functions()?;
     lowering.realize_local_functions()?;
+    lowering.in_default_argument = true;
     let defaults = body
         .default_values()
         .iter()
@@ -216,6 +221,7 @@ pub(crate) fn lower_body_with_context(
             Ok((default.parameter, value))
         })
         .collect::<Result<Vec<_>, FirLoweringFailure>>()?;
+    lowering.in_default_argument = root_is_default;
     let mut roots = Vec::new();
     for root in body.roots().iter().copied() {
         let lowered = lowering.statement(root)?;
@@ -306,6 +312,11 @@ struct BodyLowering<'a> {
     expression_depth: u32,
     /// The executable scope the classes this body declares or generates belong to.
     enclosure: Option<crate::ir::IrEnclosure>,
+    /// The declaration whose body or default fragment contains an inline expansion. Unlike
+    /// `enclosure`, this retains a default fragment's lexical callable/constructor identity.
+    expansion_enclosure: Option<crate::ir::IrEnclosure>,
+    /// Whether the expression currently being lowered belongs to a default-argument fragment.
+    in_default_argument: bool,
     /// The checked block this body's root evaluates, when it is one, and the block it lowered to.
     /// A callable body publishes the lowered block as its own scope (see
     /// [`crate::ir::IrFile::callable_scopes`]).
@@ -347,18 +358,13 @@ fn root_scope_block(body: &FirBody) -> Option<FirExprId> {
     }
 }
 
-/// The enclosure of a root body: its exact callable, or the file or classifier whose initialization
-/// it is part of. Default-argument fragments carry no declarations of their own.
+/// The declaration whose executable scope owns a root body or default-argument fragment.
 fn root_enclosure(
-    body: &FirBody,
     index: &ResolvedModuleIndex,
     ir: &IrFile,
     declaration: crate::fir::DeclarationId,
 ) -> Option<crate::ir::IrEnclosure> {
     use crate::fir::DeclarationKind;
-    if body.is_default_fragment() {
-        return None;
-    }
     let classifier = || initialized_class(index, ir, declaration);
     let anchor = index.declaration_anchor(declaration)?;
     match anchor.kind {
@@ -527,6 +533,8 @@ impl<'a> BodyLowering<'a> {
             published_local_callables,
             control_path: Vec::new(),
             enclosure: None,
+            expansion_enclosure: None,
+            in_default_argument: body.is_default_fragment(),
             expression_depth: 0,
             root_block: root_scope_block(body),
             lowered_root_block: None,
@@ -611,6 +619,7 @@ impl<'a> BodyLowering<'a> {
         };
         if !self.ir.classes[class as usize].methods.contains(&function) {
             self.ir.classes[class as usize].methods.push(function);
+            self.ir.note_class_method(class, function);
         }
         let owner = self.ir.classes[class as usize].fq_name_id();
         self.ir.class_static_local_functions.insert(function, owner);

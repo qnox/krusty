@@ -160,7 +160,7 @@ fn host_path(ir: &IrFile, host: Option<TypeName>, facade: &str) -> String {
 
 /// The dotted qualified name of a classifier declared outside executable code, as kotlinc's
 /// `FqName` spells it.
-fn qualified_name(name: TypeName) -> String {
+pub(super) fn qualified_name(name: TypeName) -> String {
     if let Some(owner) = name.nested_owner() {
         if let Some(nested) = name.nested_segment_within(owner) {
             return format!("{}.{nested}", qualified_name(owner));
@@ -200,7 +200,6 @@ pub(crate) fn realize(ir: &mut IrFile, facade: impl Fn(IrModuleSource) -> TypeNa
         })
         .collect();
     ir.callable_reference_names = references;
-    ir.declaration_paths = paths;
     // A lambda spliced at an inline call writes no class, but its inline-depth marker is spelled
     // after the one it would have been.
     let lambdas = ir
@@ -215,6 +214,7 @@ pub(crate) fn realize(ir: &mut IrFile, facade: impl Fn(IrModuleSource) -> TypeNa
         })
         .collect::<Vec<_>>();
     ir.lambda_class_names = lambdas.into_iter().collect();
+    ir.declaration_paths = paths;
     let identities = physical
         .into_iter()
         .map(|(class, physical)| (ir.classes[class as usize].fq_name, physical))

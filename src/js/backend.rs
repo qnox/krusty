@@ -90,6 +90,28 @@ mod tests {
     }
 
     #[test]
+    fn an_escaping_reified_lambda_declares_the_copy_it_calls() {
+        let source = "\
+interface Item\n\
+class Token(val label: String) : Item\n\
+var check: (Item) -> Boolean = { false }\n\
+inline fun <reified T : Item> defineFunc() {\n\
+    check = { it is T }\n\
+}\n\
+fun box(): String {\n\
+    defineFunc<Token>()\n\
+    return if (check(Token(\"t\"))) \"OK\" else \"Fail\"\n\
+}\n";
+        let (outputs, diags) = compile_js_sources(&[("Probe", source)]);
+        assert_eq!(diagnostic_messages(&diags), Vec::<&str>::new());
+        let js = String::from_utf8(outputs[0].1.clone()).expect("utf8 javascript");
+        assert_eq!(
+            js,
+            "class Token {\n  constructor(v1) {\n    this.label = v1;\n  }\n}\nclass Item {\n  constructor() {\n  }\n}\nlet check = check$fir_4_0_3;\nfunction defineFunc() {\n  check = defineFunc$fir_5_0_2;\n}\nfunction box() {\n  $fir_inline$5_0:\n  while (true) {\n    check = defineFunc$fir_5_0_2$box$1;\n    break $fir_inline$5_0;\n  }\n  undefined;\n  return ((check)(new Token(\"t\")) ? \"OK\" : \"Fail\");\n}\nfunction defineFunc$fir_5_0_2(v0) {\n  return (() => {\n  return (v0 instanceof Item);\n})();\n}\nfunction check$fir_4_0_3(v0) {\n  return (() => {\n  return false;\n})();\n}\nfunction defineFunc$fir_5_0_2$box$1(v0) {\n  return (() => {\n  return (v0 instanceof Token);\n})();\n}\n"
+        );
+    }
+
+    #[test]
     fn js_backend_runs_through_common_compiler_driver() {
         let (outputs, diags) = compile_js_sources(&[("Main", "fun box(): Int = 1 + 2")]);
 

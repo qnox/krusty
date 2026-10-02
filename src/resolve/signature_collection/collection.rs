@@ -2670,21 +2670,17 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             extension_receiver,
                         });
                         if let Some(receiver_ty) = extension_receiver {
+                            let reified_type_parameter_ordinals =
+                                reified_type_parameter_ordinals(&method_header);
                             member_ext_funs
                                 .entry(method_header.name.clone())
                                 .or_default()
-                                .push(MemberExtFunSig {
-                                    receiver_ty,
-                                    physical_receiver: receiver_ty,
-                                    physical_params: signature.params.clone(),
+                                .push(source_member_extension(
                                     signature,
-                                    physical_name: method_header.name.clone(),
-                                    external_identity: None,
-                                    external_default_provider: None,
-                                    declared_ret: None,
-                                    overridden_results: Box::new([]),
-                                    inline_body_plan: None,
-                                });
+                                    receiver_ty,
+                                    &method_header.name,
+                                    reified_type_parameter_ordinals,
+                                ));
                         } else {
                             methods
                                 .entry(method_header.name.clone())

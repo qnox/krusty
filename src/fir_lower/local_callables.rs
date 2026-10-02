@@ -107,8 +107,9 @@ impl BodyLowering<'_> {
             let tailrec = *tailrec;
             // A local function is the scope of what it declares.
             let enclosure = Some(crate::ir::IrEnclosure::Function(function));
-            let lowered =
-                self.lower_nested_function(body, function, enclosure, false, false, tailrec)?;
+            let lowered = self.lower_nested_function(
+                body, function, enclosure, enclosure, false, false, tailrec,
+            )?;
             self.ir.functions[function as usize].body = Some(lowered.callable);
         }
         Ok(())
@@ -401,10 +402,11 @@ impl BodyLowering<'_> {
             .expect("a body always has a local callable scope")
             .insert(callable, realization.clone());
         assert!(previous.is_none(), "a FIR lambda callable is declared once");
-        // A lambda carries no `tailrec`: the modifier is a function declaration's.
-        // A plain lambda is not a scope: what it declares belongs to the enclosing one. A suspend
-        // lambda may be one; the backend that realizes it decides.
-        let enclosure = if suspend {
+        // A lambda carries no `tailrec`: the modifier is a function declaration's. Every lambda is
+        // nevertheless the semantic caller of an inline expansion in its body. A plain lambda is
+        // not a declaration scope, so declarations it contains still belong to the enclosing scope;
+        // a suspend lambda may be one, and the backend that realizes it decides.
+        let declaration_enclosure = if suspend {
             if let Some(outer) = self.enclosure {
                 self.ir.lambda_enclosures.insert(function, outer);
             }
@@ -412,8 +414,15 @@ impl BodyLowering<'_> {
         } else {
             self.enclosure
         };
-        let lowered =
-            self.lower_nested_function(body, function, enclosure, unit_as_value, true, false)?;
+        let lowered = self.lower_nested_function(
+            body,
+            function,
+            declaration_enclosure,
+            Some(crate::ir::IrEnclosure::Lambda(function)),
+            unit_as_value,
+            true,
+            false,
+        )?;
         if super::inline_returns::reachable_checked_returns(self.ir, lowered.callable)
             .iter()
             .any(|(_, depth)| *depth > 0)
@@ -897,6 +906,7 @@ impl BodyLowering<'_> {
                 .copied();
             if let Some(class) = class {
                 self.ir.classes[class as usize].methods.push(function);
+                self.ir.note_class_method(class, function);
                 let owner = self.ir.classes[class as usize].fq_name_id();
                 self.ir.class_static_local_functions.insert(function, owner);
                 Some(owner)
@@ -1027,7 +1037,8 @@ impl BodyLowering<'_> {
         &mut self,
         body: &FirBody,
         function: crate::ir::FunId,
-        enclosure: Option<crate::ir::IrEnclosure>,
+        declaration_enclosure: Option<crate::ir::IrEnclosure>,
+        expansion_enclosure: Option<crate::ir::IrEnclosure>,
         unit_as_value: bool,
         retain_inline_template: bool,
         tailrec: bool,
@@ -1081,7 +1092,8 @@ impl BodyLowering<'_> {
             scopes,
             self.published_local_callables.clone(),
         );
-        nested.enclosure = enclosure;
+        nested.enclosure = declaration_enclosure;
+        nested.expansion_enclosure = expansion_enclosure;
         nested.control_path = self.control_path.clone();
         nested.control_path.push(
             body.local_callable()
@@ -1091,6 +1103,7 @@ impl BodyLowering<'_> {
         nested.prepare_local_functions()?;
         nested.realize_local_functions()?;
         let mut defaults = vec![None; local_function_parameters(body).len()];
+        nested.in_default_argument = true;
         for default in body.default_values() {
             let mut position = body.captures().len()
                 + body.implicit_receiver_captures().len()
@@ -1108,6 +1121,7 @@ impl BodyLowering<'_> {
             };
             *slot = Some(nested.expression(default.value)?);
         }
+        nested.in_default_argument = false;
         if defaults.iter().any(Option::is_some) {
             let parameters = nested
                 .ir

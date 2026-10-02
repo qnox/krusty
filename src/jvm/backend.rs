@@ -48,6 +48,8 @@ pub(crate) struct BackendPassFacts {
     /// Physical returns that preserve `COROUTINE_SUSPENDED` and otherwise answer `Unit`.
     suspended_result_returns: crate::jvm::suspend::SuspendedResultReturns,
     intrinsic_probe_continuations: crate::jvm::suspend::IntrinsicProbeContinuations,
+    /// Suspend-lambda classes whose physical names depend on final caller placement.
+    specialized_suspend_lambda_classes: crate::jvm::suspend::SpecializedLambdaClasses,
     default_call_operands: crate::jvm::default_call_operands::DefaultCallOperands,
     bridge_adaptations: crate::jvm::bridge_adaptations::BridgeAdaptations,
     /// The bridges that take `FunctionN.invoke`'s packed argument array.
@@ -131,6 +133,7 @@ pub(crate) fn run_backend_passes(
     callables: &mut crate::backend::CheckedBackendCallables,
     classpath: &crate::jvm::classpath::Classpath,
     stems: &[String],
+    lambda_modes: crate::jvm::ir_emit::LambdaModes,
     facts: &mut BackendPassFacts,
 ) -> Result<(), SkipReason> {
     crate::plugins::run_enabled(
@@ -153,6 +156,7 @@ pub(crate) fn run_backend_passes(
         callables,
         classpath,
         Some(stems),
+        lambda_modes,
         facts,
     )
 }
@@ -164,6 +168,7 @@ fn run_backend_passes_after_plugins(
     callables: &crate::backend::CheckedBackendCallables,
     classpath: &crate::jvm::classpath::Classpath,
     stems: Option<&[String]>,
+    lambda_modes: crate::jvm::ir_emit::LambdaModes,
     facts: &mut BackendPassFacts,
 ) -> Result<(), SkipReason> {
     let module_value_classes = classifiers.module().source_value_classes();
@@ -279,6 +284,7 @@ fn run_backend_passes_after_plugins(
         &mut facts.emit_time_machines,
         &mut facts.suspended_result_returns,
         &mut facts.intrinsic_probe_continuations,
+        &mut facts.specialized_suspend_lambda_classes,
         null_out_dead_spills,
     ) {
         return Err(SkipReason::Suspend);
@@ -286,11 +292,26 @@ fn run_backend_passes_after_plugins(
     crate::jvm::suspend::finalize_suspend_bridges(ir, &mut facts.bridge_adaptations);
     // After the suspend transform: the body moved onto the static is the finished state machine.
     crate::jvm::suspend_impls::lower_suspend_impls(ir);
-    crate::jvm::ir_emit::realize_lambda_impl_names(ir);
     crate::jvm::ir_emit::mark_must_inline_lambdas(ir);
     crate::jvm::ir_emit::reparent_lambda_impls(ir);
     // After reparenting: a lifted name is distinct only within the class the method lands in.
     crate::jvm::lifted_names::realize(ir, &facts.override_results);
+    // A specialized suspend lambda is already a real class when suspend lowering completes, but
+    // its JVM name depends on the caller's final placement and lifted spelling. Realize that name
+    // only now and keep the coroutine-emission facts keyed by the same physical identity.
+    facts.specialized_suspend_lambda_classes.realize(
+        ir,
+        facade,
+        lambda_modes,
+        &mut facts.emit_time_machines,
+    );
+    // With placement and lifted caller names final, realize JVM-only implementation spellings.
+    crate::jvm::debug_local_names::realize_lambda_implementation_names(
+        ir,
+        facade,
+        lambda_modes,
+        &facts.specialized_suspend_lambda_classes,
+    );
     // Every type the emitter will test or cast against is final now: carry each referenced
     // classifier's checked role into the IR, where type operations read it.
     ir.publish_classifier_roles(classifiers);
@@ -731,6 +752,7 @@ impl JvmBackend {
             &mut callables,
             &self.cp,
             stems,
+            self.lambda_modes,
             &mut pass_facts,
         ) {
             report_backend_pass_failure(reason, diags);

@@ -191,6 +191,7 @@ pub struct KotlinTypeParameter {
     pub bounds: Vec<KotlinType>,
     pub variance: crate::types::TypeVariance,
     pub only_input: bool,
+    pub reified: bool,
 }
 
 pub struct KotlinClass {

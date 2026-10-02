@@ -4418,6 +4418,30 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the body is read from (`MapsKt__MapsKt`), and that is the method the in-place read follows.
   Tests: `tests/reified_class_regeneration_e2e.rs`, `tests/classpath_reified_inline_toplevel_e2e.rs`.
 
+- **An escaping lambda inside `inline fun <reified T>` specializes `T` at the call that creates it.**
+  `func = { it as? T }` stores a closure, so the body is not spliced into the caller. The
+  declaration's implementation keeps the reified marker. Each call copies that implementation,
+  including an implementation nested inside it, and substitutes the call's reified type arguments.
+  The trigger is a runtime use of a reified parameter: a type operation, `typeOf<T>()`, a
+  forwarded reified call, or a checked substitution whose declaration-owned type-parameter ordinal
+  is reified. Substitution presence alone is not a runtime capability: an ordinary type parameter
+  stays erased even when the same lambda also uses a reified sibling. Providers normalize the exact
+  sparse ordinal set from source, Kotlin metadata, or KLIB into the selected callable; FIR and
+  common IR carry that flag on each substitution. Static signatures may still take the full
+  substitution map, while runtime operations take only entries marked reified.
+  The copy keeps the source lambda's origin and records exact semantic provenance: its executable
+  caller enclosure, checked inline-callee identity, source-rendering names, and nested specialized
+  parent. Common IR records no JVM owner, implementation spelling, or physical ordinal. Each target
+  groups and names artifacts from those identities. On the JVM, an indy caller stays on its method
+  owner and uses the realized lifted-lambda method segment; a class-realized caller nests the copy
+  under its generated class and physical `invoke` or selected SAM method. Accessors, constructors,
+  initializers, defaults, suspend machines, and companion-block functions likewise derive their
+  physical owner and segment only after JVM placement is final. The declaration's own lambda body
+  remains unchanged.
+  Tests: `fir_lower::inlining::escaping_reified_lambda`, `tests/escaping_reified_lambda_e2e.rs`,
+  boxes `nullCheckOptimization/kt22410.kt`, `reified/lambda.kt`, `reified/extensionLambda.kt`,
+  `reified/lambdaNameClash.kt`, `basics/k42000_1.kt`, `basics/k42000_crossmodule.kt`.
+
 - **A named argument binds by LABEL, including when it skips a defaulted parameter.** A classpath call
   that names a parameter and omits an earlier one (`mockk(relaxed = true)`, `runTest(timeout = …)`) was
   reported as `unresolved function`. The label→slot mapping was computed and then discarded: the

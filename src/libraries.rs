@@ -5,6 +5,7 @@ pub(crate) mod builtin_declaration;
 pub(crate) mod builtin_member_realization;
 pub(crate) mod builtin_top_level_realization;
 mod call_realization;
+mod call_sig;
 mod classifier_callables;
 mod classifier_declaration;
 mod classifier_kind;
@@ -1027,6 +1028,9 @@ pub struct LibraryCallable {
     /// external callable keeps target realization from inferring either modifier from an
     /// argument's type or from bytecode shape.
     pub inline_modifiers: Box<[InlineParameterModifier]>,
+    /// Exact declaration type-parameter ordinals carrying Kotlin's `reified` modifier. This
+    /// provider-normalized capability survives selection with the callable's stable identity.
+    pub reified_type_parameter_ordinals: Box<[u32]>,
     /// The callee's DECLARED (un-erased, pre-substitution) return type, straight from `@Metadata` —
     /// the return analogue of [`Self::source_receiver`], carried for the same reason and read by the
     /// same pass. [`Self::ret`] is the SUBSTITUTED type, so `List<TokenBox>.get` and `A.create():
@@ -1098,6 +1102,10 @@ pub struct CallSig {
     /// argument, or expected result). Keeping the declaration-owned names here lets every provider
     /// expose the same rule without teaching resolution about stdlib function names.
     pub only_input_type_formals: Vec<String>,
+    /// Declaration type-parameter ordinals carrying Kotlin's `reified` modifier. This is provider-
+    /// normalized callable capability; call lowering uses it to distinguish a runtime reified
+    /// argument from an ordinary substitution without inspecting source names.
+    pub reified_type_parameter_ordinals: Vec<u32>,
     /// Parameter names, parallel to the logical params — maps named arguments (`f(x = 1)`) to positions.
     pub param_names: Vec<String>,
     /// Provider-published semantic identities parallel to the logical parameter list. Context
@@ -1413,69 +1421,6 @@ impl CallSig {
     /// path uses this predicate so `@Exact` cannot drift between candidate families.
     pub fn parameter_admits(&self, index: usize, expected: Ty, actual: Ty) -> bool {
         !self.exact_params.get(index).copied().unwrap_or(false) || expected == actual
-    }
-
-    /// The call shape after parameters supplied outside the source argument list have been removed.
-    pub fn suffix(&self, start: usize) -> Self {
-        let start = start.min(self.param_names.len());
-        CallSig {
-            only_input_type_formals: self.only_input_type_formals.clone(),
-            param_names: self.param_names[start..].to_vec(),
-            parameter_identities: self
-                .parameter_identities
-                .get(start..)
-                .unwrap_or_default()
-                .to_vec(),
-            param_defaults: self
-                .param_defaults
-                .get(start..)
-                .unwrap_or_default()
-                .to_vec(),
-            exact_params: self.exact_params.get(start..).unwrap_or_default().to_vec(),
-            no_infer_params: self
-                .no_infer_params
-                .get(start..)
-                .unwrap_or_default()
-                .to_vec(),
-            implicit_integer_coercion: self
-                .implicit_integer_coercion
-                .get(start..)
-                .unwrap_or_default()
-                .to_vec(),
-            lambda_param_types: self
-                .lambda_param_types
-                .get(start..)
-                .unwrap_or_default()
-                .to_vec(),
-            lambda_receivers: self
-                .lambda_receivers
-                .get(start..)
-                .unwrap_or_default()
-                .to_vec(),
-            lambda_receiver_params: self
-                .lambda_receiver_params
-                .get(start..)
-                .unwrap_or_default()
-                .to_vec(),
-            lambda_context_counts: self
-                .lambda_context_counts
-                .get(start..)
-                .unwrap_or_default()
-                .to_vec(),
-            inline_modifiers: self
-                .inline_modifiers
-                .get(start..)
-                .unwrap_or_default()
-                .to_vec(),
-            platform_nullable_params: self
-                .platform_nullable_params
-                .get(start..)
-                .unwrap_or_default()
-                .to_vec(),
-            required: self.required.saturating_sub(start),
-            vararg: self.vararg,
-            vararg_index: self.vararg_index.and_then(|index| index.checked_sub(start)),
-        }
     }
 
     pub fn has_param_names(&self) -> bool {

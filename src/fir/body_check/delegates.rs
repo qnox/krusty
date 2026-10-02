@@ -1104,8 +1104,12 @@ fn delegate_substitutions(
             let parameter = index
                 .type_parameter_by_semantic_name(&name)
                 .ok_or_else(|| failure(BodyCheckFailureKind::MissingStableCallTarget))?;
+            let header = index
+                .type_parameter_header(parameter)
+                .ok_or_else(|| failure(BodyCheckFailureKind::MissingStableCallTarget))?;
             Ok(FirTypeSubstitution {
                 parameter: parameter.into(),
+                reified: header.flags.is_reified(),
                 value: ResolvedTy::new(value)
                     .map_err(|error| failure(BodyCheckFailureKind::UnpublishableType(error)))?,
                 additional_bounds: Box::new([]),

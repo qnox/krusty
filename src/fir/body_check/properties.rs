@@ -1285,8 +1285,15 @@ impl BodyFirChecker<'_> {
                                 BodyCheckFailureKind::MissingStablePropertyTarget,
                             )
                         })?;
+                let header = self.index.type_parameter_header(parameter).ok_or_else(|| {
+                    self.failure(
+                        self.file.expr_span(expression),
+                        BodyCheckFailureKind::MissingStablePropertyTarget,
+                    )
+                })?;
                 Ok(FirTypeSubstitution {
                     parameter: parameter.into(),
+                    reified: header.flags.is_reified(),
                     value: self.resolved_type(
                         self.file.expr_span(expression).ok_or_else(|| {
                             self.failure(None, BodyCheckFailureKind::MissingSourceSpan)
@@ -1334,13 +1341,12 @@ impl BodyFirChecker<'_> {
                 .ok_or_else(|| {
                     self.failure(span, BodyCheckFailureKind::MissingStablePropertyTarget)
                 })?;
-            let reified = self
-                .index
-                .type_parameter_header(parameter)
-                .is_some_and(|header| header.flags.is_reified());
+            let header = self.index.type_parameter_header(parameter).ok_or_else(|| {
+                self.failure(span, BodyCheckFailureKind::MissingStablePropertyTarget)
+            })?;
             recorded.push(crate::fir::FirInlineTypeSubstitution {
                 name: Box::from(name),
-                reified,
+                reified: header.flags.is_reified(),
                 value: substitution.value,
             });
         }

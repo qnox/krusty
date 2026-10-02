@@ -201,7 +201,45 @@ pub(super) fn realize(ir: &mut IrFile) {
             continue;
         };
         realize_expression_dag(ir, root, &parameters);
+        // A lambda's implementation is a separate function. Its `as? T` / `is T` still names this
+        // declaration's reified parameter, and the call-site copy is specialized before it gets here.
+        for implementation in lambda_implementations(ir, root) {
+            let Some(body) = ir
+                .functions
+                .get(implementation as usize)
+                .and_then(|function| function.body)
+            else {
+                continue;
+            };
+            realize_expression_dag(ir, body, &parameters);
+        }
     }
+}
+
+fn lambda_implementations(ir: &IrFile, root: ExprId) -> Vec<u32> {
+    let mut pending = vec![root];
+    let mut seen_exprs = HashSet::new();
+    let mut seen_functions = HashSet::new();
+    let mut implementations = Vec::new();
+    while let Some(expression) = pending.pop() {
+        if !seen_exprs.insert(expression) {
+            continue;
+        }
+        if let IrExpr::Lambda { impl_fn, .. } = ir.expr(expression) {
+            if seen_functions.insert(*impl_fn) {
+                implementations.push(*impl_fn);
+                if let Some(body) = ir
+                    .functions
+                    .get(*impl_fn as usize)
+                    .and_then(|function| function.body)
+                {
+                    pending.push(body);
+                }
+            }
+        }
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+    }
+    implementations
 }
 
 #[cfg(test)]

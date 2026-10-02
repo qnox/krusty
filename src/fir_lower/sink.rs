@@ -1263,6 +1263,7 @@ impl<'a> CommonIrBodySink<'a> {
             });
             if let Some(owner) = companion_block_owner {
                 self.ir.classes[owner as usize].methods.push(function);
+                self.ir.note_class_method(owner, function);
                 self.ir.companion_blocks.place_function(function, owner);
             }
             self.ir.fn_source_names.insert(function, source_name);
@@ -1321,6 +1322,7 @@ impl<'a> CommonIrBodySink<'a> {
             }
             if let Some(class) = class {
                 self.ir.classes[class as usize].methods.push(function);
+                self.ir.note_class_method(class, function);
             }
             if let Some(header) = index.declaration_header(declaration) {
                 if header.flags.has(crate::fir::DeclarationFlags::OPEN)

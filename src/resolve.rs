@@ -1536,6 +1536,9 @@ pub struct MemberExtFunSig {
     receiver_ty: Ty,
     physical_receiver: Ty,
     signature: Signature,
+    /// Exact declaration type-parameter capabilities retained from the normalized provider/header
+    /// record. Reconstructing `CallSig` from `Signature` cannot recover this sparse semantic fact.
+    reified_type_parameter_ordinals: Vec<u32>,
     /// Physical method parameters after the extension receiver, opaque to semantic resolution.
     physical_params: Vec<Ty>,
     /// Provider-owned physical method spelling, travelling with the selected target only so a
@@ -5471,38 +5474,6 @@ fn named_whole_array_varargs(
                     .is_some_and(Option::is_some)
         })
         .collect()
-}
-
-fn call_sig_for_parameters(sig: &CallSig, parameters: &[usize]) -> CallSig {
-    fn selected<T: Clone>(values: &[T], parameters: &[usize]) -> Vec<T> {
-        parameters
-            .iter()
-            .filter_map(|&parameter| values.get(parameter).cloned())
-            .collect()
-    }
-
-    let param_defaults = selected(&sig.param_defaults, parameters);
-    let vararg_index = sig
-        .vararg_index
-        .and_then(|vararg| parameters.iter().position(|&parameter| parameter == vararg));
-    CallSig {
-        only_input_type_formals: sig.only_input_type_formals.clone(),
-        param_names: selected(&sig.param_names, parameters),
-        parameter_identities: selected(&sig.parameter_identities, parameters),
-        exact_params: selected(&sig.exact_params, parameters),
-        no_infer_params: selected(&sig.no_infer_params, parameters),
-        implicit_integer_coercion: selected(&sig.implicit_integer_coercion, parameters),
-        lambda_param_types: selected(&sig.lambda_param_types, parameters),
-        lambda_receivers: selected(&sig.lambda_receivers, parameters),
-        lambda_receiver_params: selected(&sig.lambda_receiver_params, parameters),
-        lambda_context_counts: selected(&sig.lambda_context_counts, parameters),
-        inline_modifiers: selected(&sig.inline_modifiers, parameters),
-        platform_nullable_params: selected(&sig.platform_nullable_params, parameters),
-        required: crate::libraries::required_arity(parameters.len(), &param_defaults),
-        param_defaults,
-        vararg: vararg_index.is_some(),
-        vararg_index,
-    }
 }
 
 fn map_param_list_args(
@@ -10206,6 +10177,9 @@ pub enum ResolvedCall {
         /// exact call suspends or splices without a lookup or an origin branch.
         inline: InlineKind,
         inline_body_plan: Option<Box<crate::libraries::InlineBodyPlan>>,
+        /// Exact declaration type-parameter ordinals carrying `reified`, retained independently of
+        /// provider origin so checked FIR can classify runtime substitutions.
+        reified_type_parameter_ordinals: Box<[u32]>,
         suspend: bool,
         declared_ret: Option<Ty>,
         overridden_results: Box<[Ty]>,
@@ -13215,7 +13189,7 @@ fn contextual_call_shape_with(
             .iter()
             .map(|&parameter| semantic_params[parameter])
             .collect(),
-        call_sig: call_sig_for_parameters(call_sig, &parameter_indices),
+        call_sig: call_sig.select_parameters(&parameter_indices),
         parameter_indices,
         context_sources,
         context_actual_types,
@@ -13266,7 +13240,9 @@ fn instantiate_member_extension_with(
     if !explicit_type_args.is_empty() && explicit_type_args.len() != method_type_params.len() {
         return None;
     }
-    let full_call_sig = function.signature.call_sig();
+    let mut full_call_sig = function.signature.call_sig();
+    full_call_sig.reified_type_parameter_ordinals =
+        function.reified_type_parameter_ordinals.clone();
     let mut bindings = shape.class_bindings.clone();
     for (_, parameter) in &method_type_params {
         bindings.remove(*parameter);
@@ -42016,7 +41992,7 @@ impl<'a> Checker<'a> {
                         .iter()
                         .map(|&parameter| params[parameter])
                         .collect(),
-                    call_sig: call_sig_for_parameters(call_sig, &parameter_indices),
+                    call_sig: call_sig.select_parameters(&parameter_indices),
                     parameter_indices,
                     context_sources: vec![None; context_count],
                     context_actual_types: vec![None; context_count],
@@ -59495,7 +59471,7 @@ impl<'a> Checker<'a> {
     ) -> Option<Vec<Ty>> {
         let context_count = signature.context_count.min(signature.params.len());
         let parameter_indices = (context_count..signature.params.len()).collect::<Vec<_>>();
-        let call_sig = call_sig_for_parameters(&signature.call_sig(), &parameter_indices);
+        let call_sig = signature.call_sig().select_parameters(&parameter_indices);
         let argument_map = call_argument_parameter_indices(
             args.len(),
             parameter_indices.len(),
@@ -70244,7 +70220,7 @@ impl<'a> Checker<'a> {
         let visible_parameters = (context_count..signature.params.len())
             .chain((0..context_count).filter(|&parameter| explicitly_named(parameter)))
             .collect::<Vec<_>>();
-        let visible_call_sig = call_sig_for_parameters(&member.call_sig, &visible_parameters);
+        let visible_call_sig = member.call_sig.select_parameters(&visible_parameters);
         let parameter_indices = call_argument_parameter_indices_result(
             call.values.len(),
             visible_parameters.len(),
@@ -72361,6 +72337,7 @@ impl<'a> Checker<'a> {
             receiver_ty,
             physical_receiver,
             signature,
+            reified_type_parameter_ordinals: call_sig.reified_type_parameter_ordinals,
             physical_params,
             physical_name: member
                 .physical_name

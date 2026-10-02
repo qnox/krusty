@@ -6,6 +6,28 @@
 
 use super::*;
 
+pub(in crate::resolve) fn source_member_extension(
+    signature: Signature,
+    receiver_ty: Ty,
+    physical_name: &str,
+    reified_type_parameter_ordinals: Vec<u32>,
+) -> MemberExtFunSig {
+    let physical_params = signature.params.clone();
+    MemberExtFunSig {
+        receiver_ty,
+        physical_receiver: receiver_ty,
+        signature,
+        reified_type_parameter_ordinals,
+        physical_params,
+        physical_name: physical_name.to_owned(),
+        external_identity: None,
+        external_default_provider: None,
+        declared_ret: None,
+        overridden_results: Box::new([]),
+        inline_body_plan: None,
+    }
+}
+
 /// Build the lexical signature of a method declared on an enum-entry subclass. The parser has no
 /// standalone class declaration for that subclass, so these methods do not pass through ordinary
 /// class-member collection. They nevertheless own the same generic callable shape and stable type-
@@ -438,21 +460,16 @@ pub(in crate::resolve) fn declared_member_callable_headers(
             .as_ref()
             .map(|receiver| ty_of_ref(receiver, classes, &method_tparams, diags))
         {
+            let reified_type_parameter_ordinals = reified_type_parameter_ordinals(&header);
             extensions
                 .entry(header.name.clone())
                 .or_default()
-                .push(MemberExtFunSig {
-                    receiver_ty,
-                    physical_receiver: receiver_ty,
-                    physical_params: signature.params.clone(),
+                .push(source_member_extension(
                     signature,
-                    physical_name: header.name.clone(),
-                    external_identity: None,
-                    external_default_provider: None,
-                    declared_ret: None,
-                    overridden_results: Box::new([]),
-                    inline_body_plan: None,
-                });
+                    receiver_ty,
+                    &header.name,
+                    reified_type_parameter_ordinals,
+                ));
         } else {
             methods
                 .entry(header.name.clone())

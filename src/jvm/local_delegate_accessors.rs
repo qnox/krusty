@@ -50,12 +50,14 @@ pub(crate) fn realize(ir: &mut IrFile, current_source: IrModuleSource) -> Result
                 // materialized lambda inside that template may replace the copied expression's
                 // immediate inline mark while keeping the foreign declaration plan, so source
                 // provenance is the stable proof that its helper belongs to the emitted owner.
-                let owner =
-                    if ir.is_inline_copy(expression) || plan.reference.source != current_source {
-                        physical_owner
-                    } else {
-                        plan.reference.class
-                    };
+                let owner = if ir.is_inline_copy(expression)
+                    || ir.inline_local_delegate_plan_copies.contains(&access.plan)
+                    || plan.reference.source != current_source
+                {
+                    physical_owner
+                } else {
+                    plan.reference.class
+                };
                 Some((expression, access.plan, owner))
             }
             _ => None,
@@ -69,7 +71,12 @@ pub(crate) fn realize(ir: &mut IrFile, current_source: IrModuleSource) -> Result
     let mut uses = plans
         .iter()
         .enumerate()
-        .filter(|(_, plan)| plan.reference.source == current_source)
+        .filter(|(plan, declaration)| {
+            declaration.reference.source == current_source
+                && u32::try_from(*plan).map_or(true, |plan| {
+                    !ir.inline_local_delegate_plan_copies.contains(&plan)
+                })
+        })
         .map(|(plan, declaration)| {
             Ok((
                 PlanUse {

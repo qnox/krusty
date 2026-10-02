@@ -101,10 +101,7 @@ reflection/typeOf/reifiedAsNestedArgument.kt
 reflection/typeOf/typeAliasedType.kt
 reified/capture.kt
 reified/catchParameter/tryCatchReifiedType.kt
-reified/extensionLambda.kt
 reified/innerObject.kt
-reified/lambda.kt
-reified/lambdaNameClash.kt
 sam/constructors/sameWrapperClass.kt
 secondaryConstructors/localClasses.kt
 typeErasure/funWithReifiedTypeParameterContextParameterAndExtensionReceiverInsideClass.kt

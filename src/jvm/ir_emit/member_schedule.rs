@@ -317,7 +317,15 @@ fn is_lifted_lambda(ir: &IrFile, function: u32) -> bool {
 /// of each lifted local function's body, each nested lambda before the lambda enclosing it.
 pub(super) fn order_lifted_functions(ir: &IrFile, members: &mut [u32]) {
     let slots: Vec<usize> = (0..members.len())
-        .filter(|&slot| ir.lifted_functions.contains_key(&members[slot]))
+        .filter(|&slot| {
+            let function = members[slot];
+            ir.lifted_functions.contains_key(&function)
+                // A specialized implementation is generated at an inline call site. It retains
+                // the source lambda's lifting site for class realization, but its placement is
+                // already the call-site creation order recorded by `specialized_functions`; do
+                // not move it back beside the callee declaration's source lambda.
+                && !ir.specialized_functions.contains_key(&function)
+        })
         .collect();
     if slots.len() < 2 {
         return;

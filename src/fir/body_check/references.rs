@@ -958,6 +958,7 @@ impl BodyFirChecker<'_> {
             parameters,
             result,
             suspend,
+            reified_type_parameter_ordinals,
         } = target;
         let span = self.file.expr_span(expression);
         let declaration = declaration
@@ -1020,6 +1021,7 @@ impl BodyFirChecker<'_> {
                         callable: declaration,
                         ordinal,
                     },
+                    reified: reified_type_parameter_ordinals.contains(&ordinal),
                     value: resolved(value)?,
                     additional_bounds: Box::new([]),
                 })
@@ -1154,6 +1156,7 @@ impl BodyFirChecker<'_> {
         adaptation: Option<FirReferenceAdaptation>,
     ) -> Result<FirExprKind, BodyCheckFailure> {
         let span = self.file.expr_span(expression);
+        let reified_type_parameter_ordinals = getter.reified_type_parameter_ordinals.as_ref();
         let declaration = getter
             .external_identity
             .ok_or_else(|| self.failure(span, BodyCheckFailureKind::MissingStablePropertyTarget))?;
@@ -1194,7 +1197,11 @@ impl BodyFirChecker<'_> {
             dispatch_receiver,
             extension_receiver,
             mutable,
-            substitutions: self.external_reference_substitutions(expression, declaration)?,
+            substitutions: self.external_reference_substitutions(
+                expression,
+                declaration,
+                reified_type_parameter_ordinals,
+            )?,
             adaptation: adaptation.map(Box::new),
         })
     }
@@ -1270,6 +1277,7 @@ impl BodyFirChecker<'_> {
         &self,
         expression: ExprId,
         declaration: ExternalCallableId,
+        reified_type_parameter_ordinals: &[u32],
     ) -> Result<Box<[FirTypeSubstitution]>, BodyCheckFailure> {
         let span = self.file.expr_span(expression);
         let resolved = |ty| {
@@ -1293,6 +1301,7 @@ impl BodyFirChecker<'_> {
                         callable: declaration,
                         ordinal,
                     },
+                    reified: reified_type_parameter_ordinals.contains(&ordinal),
                     value: resolved(value)?,
                     additional_bounds: Box::new([]),
                 })
@@ -1391,10 +1400,11 @@ struct ExternalReferenceDeclaration<'a> {
     /// The declaration itself is `suspend`, as opposed to a reference suspend-converted to a
     /// `suspend` function type.
     suspend: bool,
+    reified_type_parameter_ordinals: &'a [u32],
 }
 
 impl<'a> ExternalReferenceDeclaration<'a> {
-    fn callable(callable: &crate::libraries::LibraryCallable, parameters: &'a [Ty]) -> Self {
+    fn callable(callable: &'a crate::libraries::LibraryCallable, parameters: &'a [Ty]) -> Self {
         Self {
             declaration: callable.external_identity,
             default_provider: callable.external_default_provider,
@@ -1406,6 +1416,7 @@ impl<'a> ExternalReferenceDeclaration<'a> {
             parameters,
             result: callable.ret,
             suspend: callable.suspend,
+            reified_type_parameter_ordinals: &callable.reified_type_parameter_ordinals,
         }
     }
 
@@ -1421,6 +1432,7 @@ impl<'a> ExternalReferenceDeclaration<'a> {
             parameters: &member.params,
             result: member.ret,
             suspend: member.suspend(),
+            reified_type_parameter_ordinals: &member.call_sig.reified_type_parameter_ordinals,
         }
     }
 }

@@ -72,6 +72,32 @@ fn reified_enum_delegate_anonymous_object_uses_the_enclosing_formal_identity() {
 }
 
 #[test]
+fn inline_delegate_convention_records_its_exact_reified_parameter() {
+    let (body, _index) = checked_function_body(
+        "class Delegate<T, R>(val value: T)\n\
+         inline operator fun <T, reified R> Delegate<T, R>.getValue(\n\
+             owner: Any?, property: Any?\n\
+         ): T = value\n\
+         inline fun <T, reified R> read(value: T): T {\n\
+             val local by Delegate<T, R>(value)\n\
+             return local\n\
+         }\n",
+        "read",
+    );
+
+    let [plan] = body.local_delegate_plans() else {
+        panic!("the local delegated property records one semantic plan")
+    };
+    assert!(matches!(
+        plan.get_value.substitutions.as_ref(),
+        [
+            FirTypeSubstitution { reified: false, .. },
+            FirTypeSubstitution { reified: true, .. }
+        ]
+    ));
+}
+
+#[test]
 fn covariant_extension_receiver_widens_from_a_nullable_lambda_result() {
     assert_production_frontend_accepts(
         "class Holder {\n\

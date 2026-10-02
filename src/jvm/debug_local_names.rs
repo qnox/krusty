@@ -2,6 +2,79 @@
 
 use crate::ir::{ExprId, FunId, IrDebugLocalProvenance, IrFile, IrInlineLocalRole, IrLambdaOrigin};
 
+/// Physical JVM names for lambda implementations and specialized copies.
+///
+/// A lambda origin keeps kotlinc's `$lambda$N` spelling. Common IR retains only semantic expansion
+/// provenance; the JVM computes the suffix that makes each copied implementation unique.
+pub(super) fn lambda_implementation_names(
+    ir: &IrFile,
+    facade: &str,
+    modes: crate::jvm::ir_emit::LambdaModes,
+    specialized_suspend_classes: &crate::jvm::suspend::SpecializedLambdaClasses,
+) -> Vec<(u32, String)> {
+    ir.functions
+        .iter()
+        .enumerate()
+        .filter_map(|(index, function)| {
+            let id = index as u32;
+            if realized_lambda_class_method(ir, id, specialized_suspend_classes) {
+                return None;
+            }
+            let origin = ir.lambda_origins.get(&id);
+            let specialization = ir.specialized_functions.get(&id);
+            if origin.is_none() && specialization.is_none() {
+                return None;
+            }
+            let mut name = origin.map_or_else(|| function.name.clone(), lambda_implementation_name);
+            if let Some(specialization) = specialization {
+                let ordinal = crate::jvm::ir_emit::lambda_class_names::specialization_ordinal(
+                    ir, id, facade, modes,
+                )
+                .expect("a specialized implementation retains its sibling position");
+                let (_, caller) = crate::jvm::ir_emit::lambda_class_names::specialization_location(
+                    ir,
+                    specialization,
+                    facade,
+                    modes,
+                )
+                .expect("a specialized implementation retains its JVM caller location");
+                name = format!("{name}${caller}${ordinal}");
+            }
+            Some((id, name))
+        })
+        .collect()
+}
+
+/// A lambda already moved onto a concrete class owns an exact target method name (`invoke` or
+/// `invokeSuspend`). Only emitter-planned lambdas still need a generated implementation spelling.
+fn realized_lambda_class_method(
+    ir: &IrFile,
+    function: FunId,
+    specialized_suspend_classes: &crate::jvm::suspend::SpecializedLambdaClasses,
+) -> bool {
+    specialized_suspend_classes.owns_method(function)
+        || ir.classes.iter().any(|class| {
+            class
+                .lambda
+                .as_ref()
+                .is_some_and(|lambda| lambda.invoke == function)
+        })
+}
+
+/// Apply the JVM-owned implementation spellings after lambda/suspend realization and lifted naming
+/// have fixed each implementation's physical caller and its final method name.
+pub(crate) fn realize_lambda_implementation_names(
+    ir: &mut IrFile,
+    facade: &str,
+    modes: crate::jvm::ir_emit::LambdaModes,
+    specialized_suspend_classes: &crate::jvm::suspend::SpecializedLambdaClasses,
+) {
+    let names = lambda_implementation_names(ir, facade, modes, specialized_suspend_classes);
+    for (function, name) in names {
+        ir.functions[function as usize].name = name;
+    }
+}
+
 pub(super) fn lambda_implementation_name(origin: &IrLambdaOrigin) -> String {
     let enclosing = if origin.implementation_name.is_empty() {
         "_init_"
@@ -340,5 +413,42 @@ mod tests {
             name(&ir, declaration).as_deref(),
             Some("$this$nested_u24lambda_u240")
         );
+    }
+
+    #[test]
+    fn a_realized_suspend_lambda_keeps_its_exact_override_name() {
+        let mut ir = IrFile::default();
+        let implementation = lambda(&mut ir, None);
+        ir.lambda_origins.remove(&implementation);
+        ir.specialized_functions.insert(
+            implementation,
+            crate::ir::IrSpecializedFunction {
+                source: implementation,
+                caller_declaration: crate::fir::DeclarationId::from_raw(0),
+                caller: Some(crate::ir::IrEnclosure::File),
+                caller_is_default: false,
+                caller_source_name: "box".to_string(),
+                inline_callee: crate::fir::CallableId::from_raw(0),
+                inline_callee_source_name: "define".to_string(),
+                parent: None,
+            },
+        );
+        ir.functions[implementation as usize].name = "invokeSuspend".to_string();
+        ir.suspend_funs.push(implementation);
+        let mut class = crate::ir::IrClass::synthetic(crate::types::type_name("LpKt$use$1"));
+        class.methods.push(implementation);
+        let class = ir.add_class(class);
+        let mut specialized_suspend_classes =
+            crate::jvm::suspend::SpecializedLambdaClasses::default();
+        specialized_suspend_classes.record(implementation, class);
+
+        realize_lambda_implementation_names(
+            &mut ir,
+            "LpKt",
+            crate::jvm::ir_emit::LambdaModes::default(),
+            &specialized_suspend_classes,
+        );
+
+        assert_eq!(ir.functions[implementation as usize].name, "invokeSuspend");
     }
 }

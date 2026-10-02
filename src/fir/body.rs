@@ -171,6 +171,8 @@ impl From<TypeParameterId> for FirTypeParameterRef {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FirTypeSubstitution {
     pub parameter: FirTypeParameterRef,
+    /// Whether this exact declaration parameter carries Kotlin's `reified` capability.
+    pub reified: bool,
     pub value: ResolvedTy,
     /// Additional constituents of an inferred flow-intersection type argument. `value` is the
     /// primary/JVM-erasure constituent; these bounds retain the rest of the checked Kotlin type for

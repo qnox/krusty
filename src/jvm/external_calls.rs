@@ -1292,6 +1292,7 @@ fn publish_reified_substitutions(
     };
     let bindings = substitutions
         .iter()
+        .filter(|substitution| substitution.reified)
         .filter_map(|substitution| {
             let crate::fir::FirTypeParameterRef::External {
                 callable: declaration,

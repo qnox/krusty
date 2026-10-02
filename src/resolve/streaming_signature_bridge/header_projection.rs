@@ -27,6 +27,22 @@ pub(in crate::resolve) struct StreamedCallableHeader {
     pub(in crate::resolve) annotations: Vec<TypeRef>,
 }
 
+pub(in crate::resolve) fn reified_type_parameter_ordinals(
+    header: &StreamedCallableHeader,
+) -> Vec<u32> {
+    header
+        .type_parameter_flags
+        .iter()
+        .enumerate()
+        .filter_map(|(ordinal, flags)| {
+            flags
+                .is_reified()
+                .then(|| u32::try_from(ordinal).ok())
+                .flatten()
+        })
+        .collect()
+}
+
 #[derive(Clone)]
 pub(in crate::resolve) struct StreamedCallableParameter {
     pub(in crate::resolve) name: String,

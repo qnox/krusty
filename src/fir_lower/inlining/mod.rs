@@ -20,7 +20,12 @@ use crate::types::{stored_value_ty, ty_subst_keep_unbound, Ty};
 
 use super::BodyLowering;
 
+mod escaping_lambda;
+mod local_delegate_plans;
 mod property_accessors;
+
+#[cfg(test)]
+mod escaping_reified_lambda;
 
 pub(super) fn splice_inline_property_accessors(
     ir: &mut crate::ir::IrFile,
@@ -105,6 +110,35 @@ fn supplied_operand_plan(
     })
 }
 
+/// Build the inline expansion's semantic bindings from the checker's recorded substitutions.
+///
+/// Declaration headers are intentionally not accepted here. Whether a substitution may drive a
+/// reified operation was decided while checking the call and travels on that exact substitution;
+/// common lowering only resolves the stable module parameter identity to its template name.
+fn checked_substitution_bindings<'a>(
+    substitutions: &[FirTypeSubstitution],
+    mut module_parameter_name: impl FnMut(crate::fir::TypeParameterId) -> Option<&'a str>,
+) -> (HashMap<String, Ty>, HashMap<String, Ty>) {
+    let bindings = substitutions
+        .iter()
+        .filter_map(|substitution| match substitution.parameter {
+            FirTypeParameterRef::Module(parameter) => module_parameter_name(parameter)
+                .map(|name| (name.to_owned(), substitution.value.get())),
+            FirTypeParameterRef::External { .. } => None,
+        })
+        .collect::<HashMap<_, _>>();
+    let reified_bindings = substitutions
+        .iter()
+        .filter(|substitution| substitution.reified)
+        .filter_map(|substitution| match substitution.parameter {
+            FirTypeParameterRef::Module(parameter) => module_parameter_name(parameter)
+                .map(|name| (name.to_owned(), substitution.value.get())),
+            FirTypeParameterRef::External { .. } => None,
+        })
+        .collect::<HashMap<_, _>>();
+    (bindings, reified_bindings)
+}
+
 impl BodyLowering<'_> {
     /// Declare an omitted parameter's local, initialized by a copy of the declaration's checked
     /// default. The copy reads the expansion's parameter locals and moves its own locals above the
@@ -116,20 +150,24 @@ impl BodyLowering<'_> {
         slot: u32,
         ty: Ty,
         (bindings, reified_bindings): (&HashMap<String, Ty>, &HashMap<String, Ty>),
-    ) -> Option<ExprId> {
+    ) -> Option<(ExprId, HashMap<ExprId, ExprId>)> {
         const SPLICED: u32 = u32::MAX;
         let formal_slots = operand_slots
             .iter()
             .map(|slot| slot.unwrap_or(SPLICED))
             .collect::<Vec<_>>();
         let (copy, cloned) = crate::ir::clone_expression_dag(self.ir, default);
-        for &copied in cloned.values() {
-            specialize_expression_facts(self.ir, copied, bindings);
-            specialize_types(self.ir.exprs.get_mut(copied as usize)?, bindings);
-            specialize_dependency_substitutions(
-                self.ir.exprs.get_mut(copied as usize)?,
+        let mut local_delegate_plans = HashMap::new();
+        let mut copied_expressions = cloned.values().copied().collect::<Vec<_>>();
+        copied_expressions.sort_unstable();
+        for copied in copied_expressions {
+            local_delegate_plans::specialize_inline_copy(
+                self.ir,
+                copied,
+                bindings,
                 reified_bindings,
-            );
+                &mut local_delegate_plans,
+            )?;
         }
         let locals = super::source_calls::rehome_inline_body_values(
             self.ir,
@@ -151,7 +189,7 @@ impl BodyLowering<'_> {
             named: true,
         });
         self.ir.call_operand_bindings.insert(declaration);
-        Some(declaration)
+        Some((declaration, cloned))
     }
 
     /// Copy an omitted parameter's default lambda for splicing. Its captures read the expansion's
@@ -168,13 +206,17 @@ impl BodyLowering<'_> {
             .map(|slot| slot.unwrap_or(SPLICED))
             .collect::<Vec<_>>();
         let (copy, cloned) = crate::ir::clone_expression_dag(self.ir, default);
-        for &copied in cloned.values() {
-            specialize_expression_facts(self.ir, copied, bindings);
-            specialize_types(self.ir.exprs.get_mut(copied as usize)?, bindings);
-            specialize_dependency_substitutions(
-                self.ir.exprs.get_mut(copied as usize)?,
+        let mut local_delegate_plans = HashMap::new();
+        let mut copied_expressions = cloned.values().copied().collect::<Vec<_>>();
+        copied_expressions.sort_unstable();
+        for copied in copied_expressions {
+            local_delegate_plans::specialize_inline_copy(
+                self.ir,
+                copied,
+                bindings,
                 reified_bindings,
-            );
+                &mut local_delegate_plans,
+            )?;
         }
         let IrExpr::Lambda { captures, .. } = self.ir.expr(copy).clone() else {
             return None;
@@ -209,6 +251,27 @@ impl BodyLowering<'_> {
             .callable(target)
             .and_then(|callable| self.index.enclosing_classifier(callable.declaration))
             .map(|classifier| classifier.classifier);
+        let caller_source_name = match self.body.debug_name() {
+            Some(name) => name.to_owned(),
+            None => match self.expansion_enclosure {
+                // These semantic scopes deliberately have no source callable spelling. A backend
+                // decides how an empty caller segment participates in its physical artifact name.
+                None
+                | Some(
+                    crate::ir::IrEnclosure::Constructor { .. }
+                    | crate::ir::IrEnclosure::File
+                    | crate::ir::IrEnclosure::ClassInitializer(_)
+                    | crate::ir::IrEnclosure::Classifier(_)
+                    | crate::ir::IrEnclosure::PropertyAccessor { .. },
+                ) => String::new(),
+                // Function and lambda bodies always publish their source spelling. Decline the
+                // expansion if that checked provenance is absent instead of inventing one.
+                Some(crate::ir::IrEnclosure::Function(_) | crate::ir::IrEnclosure::Lambda(_)) => {
+                    return None
+                }
+            },
+        };
+        let caller_declaration = crate::fir::DeclarationId::from_raw(self.body.owner().raw());
         let function_shape = self.ir.functions.get(function as usize)?;
         let parameter_count = u32::try_from(
             function_shape.params.len() + usize::from(function_shape.dispatch_receiver.is_some()),
@@ -217,33 +280,15 @@ impl BodyLowering<'_> {
         if operands.len() != parameter_count as usize || inline_lambdas.len() != operands.len() {
             return None;
         }
-        let bindings = substitutions
-            .iter()
-            .filter_map(|substitution| match substitution.parameter {
-                FirTypeParameterRef::Module(parameter) => self
-                    .index
-                    .type_parameter_semantic_name(parameter)
-                    .map(|name| (name.to_owned(), substitution.value.get())),
-                FirTypeParameterRef::External { .. } => None,
-            })
-            .collect::<HashMap<_, _>>();
+        let (bindings, reified_bindings) =
+            checked_substitution_bindings(substitutions, |parameter| {
+                self.index.type_parameter_semantic_name(parameter)
+            });
         // Only a reified parameter's argument is known inside the expanded body at run time. A
         // dependency's reified operation that mentions an ordinary parameter of this declaration
         // keeps that parameter, exactly as the declaration's own emitted body would: `typeOf`
         // describes it as a type parameter rather than as whatever this call site happened to
         // infer for it.
-        let reified_bindings = substitutions
-            .iter()
-            .filter_map(|substitution| match substitution.parameter {
-                FirTypeParameterRef::Module(parameter) => self
-                    .index
-                    .type_parameter_header(parameter)
-                    .filter(|header| header.flags.is_reified())
-                    .and_then(|_| self.index.type_parameter_semantic_name(parameter))
-                    .map(|name| (name.to_owned(), substitution.value.get())),
-                FirTypeParameterRef::External { .. } => None,
-            })
-            .collect::<HashMap<_, _>>();
         // The declared parameter type, before this call's substitutions. A type parameter
         // specialized to a function type is still not an inline lambda parameter.
         let declared_operand_types = function_shape
@@ -492,6 +537,7 @@ impl BodyLowering<'_> {
             }
         }
         let mut default_lambda_implementations = Vec::new();
+        let mut default_copies = Vec::new();
         for &index in &default_lambdas {
             let lambda = self.inline_default_lambda(
                 defaults[index]?,
@@ -506,13 +552,14 @@ impl BodyLowering<'_> {
         }
         for (index, slot) in defaulted {
             let default = defaults[index]?;
-            let declaration = self.inline_default_declaration(
+            let (declaration, cloned) = self.inline_default_declaration(
                 default,
                 &operand_slots,
                 slot,
                 operand_types[index],
                 (&bindings, &reified_bindings),
             )?;
+            default_copies.extend(cloned);
             if let Some(parameter) = parameter_names.get(index) {
                 if let Some(source_name) = parameter.source_name.clone() {
                     self.ir.value_names.insert(declaration, source_name);
@@ -553,6 +600,19 @@ impl BodyLowering<'_> {
             }
             crate::ir::for_each_child(&self.ir.exprs, expression, &mut |child| pending.push(child));
         }
+        // A materialized/noinline default lambda is not part of the declaration body template,
+        // but its implementation crosses the same inline boundary. Keep its inline-body template
+        // protected while making the lambda expression itself available for implementation
+        // specialization below.
+        for &(source, _) in &default_copies {
+            if let IrExpr::Lambda {
+                inline_body: Some(body),
+                ..
+            } = self.ir.expr(source)
+            {
+                mark_subtree(self.ir, *body, &mut protected);
+            }
+        }
 
         let (cloned_root, cloned) = crate::ir::clone_expression_dag(self.ir, template);
         let highest_local = cloned
@@ -581,6 +641,7 @@ impl BodyLowering<'_> {
             .map(|(&source, &copy)| (source, copy))
             .collect::<Vec<_>>();
         copies.sort_by_key(|&(_, copy)| copy);
+        let mut local_delegate_plans = HashMap::new();
         for &(source, copy) in &copies {
             self.ir.record_inline_copy_owner(copy, source_owner);
             // A compiler temporary's synthetic zero is refreshed after its type specializes.
@@ -591,12 +652,13 @@ impl BodyLowering<'_> {
             // templates even though those templates own an independent value-numbering domain.
             // Value rebasing and return rewriting remain protected below, but the checked type
             // decision must cross the enclosing inline-call boundary with the lambda.
-            specialize_expression_facts(self.ir, copy, &bindings);
-            specialize_types(self.ir.exprs.get_mut(copy as usize)?, &bindings);
-            specialize_dependency_substitutions(
-                self.ir.exprs.get_mut(copy as usize)?,
+            local_delegate_plans::specialize_inline_copy(
+                self.ir,
+                copy,
+                &bindings,
                 &reified_bindings,
-            );
+                &mut local_delegate_plans,
+            )?;
             if let Some(previous_zero) = generated_zero {
                 let replacement = match self.ir.expr(copy) {
                     IrExpr::Variable { ty, .. } => IrConst::zero_for_value_type(*ty),
@@ -667,6 +729,24 @@ impl BodyLowering<'_> {
                 self.ir.checked_return_depths.remove(&copy);
             }
         }
+        // An escaping lambda keeps its own implementation method. Specializing only the inline
+        // template would leave `as? T` erased on that method, so the call site still runs the
+        // declaration's check. Clone the implementation when this expansion fixes a type it uses.
+        let mut escaping_copies = copies.clone();
+        escaping_copies.extend(default_copies);
+        escaping_lambda::specialize(
+            self.ir,
+            &escaping_copies,
+            &protected,
+            &bindings,
+            &reified_bindings,
+            caller_declaration,
+            self.expansion_enclosure,
+            self.in_default_argument,
+            &caller_source_name,
+            target,
+            &callee,
+        );
 
         let inline_invocations = copies
             .iter()
@@ -1089,7 +1169,14 @@ fn synthetic_temporary_default(ir: &crate::ir::IrFile, source: ExprId) -> Option
     Some(value.clone())
 }
 
-fn specialize_types(expression: &mut IrExpr, bindings: &HashMap<String, Ty>) {
+/// `bindings` substitutes static signatures. `runtime` substitutes operations that execute at run
+/// time (`is`, `as`, `as?`, `typeOf`, `T::class`). An ordinary type parameter is in `bindings` and
+/// not in `runtime`, so a lambda copied for a reified sibling does not reify the erased parameter.
+pub(super) fn specialize_typed_expression(
+    expression: &mut IrExpr,
+    bindings: &HashMap<String, Ty>,
+    runtime: &HashMap<String, Ty>,
+) {
     match expression {
         IrExpr::Checked(operation) => specialize_checked_operation(operation, bindings),
         IrExpr::CallableReference(reference) => {
@@ -1105,24 +1192,24 @@ fn specialize_types(expression: &mut IrExpr, bindings: &HashMap<String, Ty>) {
             specialize_ty(&mut reference.declaration_result, bindings);
             specialize_reference_adaptation(&mut reference.adaptation, bindings);
         }
-        IrExpr::KClassLiteral { classifier, .. } => specialize_optional_ty(classifier, bindings),
+        IrExpr::KClassLiteral { classifier, .. } => specialize_optional_ty(classifier, runtime),
         IrExpr::LocalPropertyReference(reference) => {
             specialize_ty(&mut reference.property_type, bindings)
         }
         IrExpr::LocalDelegateAccess(_) => {}
-        IrExpr::Call { callee, .. } => specialize_callee(callee, bindings),
+        IrExpr::Call { callee, .. } => specialize_callee(callee, bindings, runtime),
         IrExpr::TypeOp {
             op, type_operand, ..
         } => {
             let declaration_generic_target = matches!(type_operand.non_null(), Ty::TyParam(..));
-            specialize_ty(type_operand, bindings);
+            specialize_ty(type_operand, runtime);
             // `as T` is checked against T's declaration bound, so an unconstrained T initially
-            // admits null. Once an inline call fixes T to a concrete non-null type, the checked
-            // operation has non-null cast semantics at that use site (and a primitive target must
-            // subsequently unbox). This is specialization of the selected type operation, not a
-            // new lookup or inference decision in lowering.
+            // admits null. Once an inline call fixes a reified T to a concrete non-null type, the
+            // checked operation has non-null cast semantics at that use site. An ordinary type
+            // parameter stays a type parameter: the cast remains erased.
             if declaration_generic_target
                 && *op == crate::ir::IrTypeOp::Cast
+                && !matches!(type_operand.non_null(), Ty::TyParam(..))
                 && !type_operand.is_nullable()
             {
                 *op = crate::ir::IrTypeOp::CastNonNull;
@@ -1216,10 +1303,11 @@ fn specialize_types(expression: &mut IrExpr, bindings: &HashMap<String, Ty>) {
     }
 }
 
-fn specialize_expression_facts(
+pub(super) fn specialize_recorded_facts(
     ir: &mut crate::ir::IrFile,
     expression: ExprId,
     bindings: &HashMap<String, Ty>,
+    runtime: &HashMap<String, Ty>,
 ) {
     for ty in [
         ir.logical_types.get_mut(&expression),
@@ -1255,7 +1343,7 @@ fn specialize_expression_facts(
     }
     if let Some(substitutions) = ir.reified_call_subst.get_mut(&expression) {
         for (_, ty) in substitutions {
-            specialize_ty(ty, bindings);
+            specialize_ty(ty, runtime);
         }
     }
     if let Some(construction) = ir.annotation_constructions.get_mut(&expression) {
@@ -1342,10 +1430,14 @@ fn specialize_intrinsic(operation: &mut IrIntrinsic, bindings: &HashMap<String, 
     }
 }
 
-fn specialize_callee(callee: &mut Callee, bindings: &HashMap<String, Ty>) {
+fn specialize_callee(
+    callee: &mut Callee,
+    bindings: &HashMap<String, Ty>,
+    runtime: &HashMap<String, Ty>,
+) {
     match callee {
         Callee::Intrinsic { operation, ret } => {
-            specialize_intrinsic(operation, bindings);
+            specialize_intrinsic(operation, runtime);
             specialize_ty(ret, bindings);
         }
         Callee::CrossFile { params, ret, .. }
@@ -1394,7 +1486,7 @@ fn specialize_callee(callee: &mut Callee, bindings: &HashMap<String, Ty>) {
 /// Specialize the type arguments a dependency call selected. Only these reach a dependency's
 /// reified operations, which see the reified arguments of the expanded declaration and nothing
 /// else.
-fn specialize_dependency_substitutions(
+pub(super) fn specialize_dependency_substitutions(
     expression: &mut IrExpr,
     reified_bindings: &HashMap<String, Ty>,
 ) {
@@ -1651,8 +1743,46 @@ fn tail_statement_block_chain(
 
 #[cfg(test)]
 mod expansion_mode_tests {
-    use super::supplied_operand_plan;
-    use crate::types::InlineExpansionMode;
+    use super::{checked_substitution_bindings, supplied_operand_plan};
+    use crate::fir::{FirTypeParameterRef, FirTypeSubstitution, ResolvedTy, TypeParameterId};
+    use crate::types::{InlineExpansionMode, Ty};
+
+    #[test]
+    fn checked_substitution_flag_alone_selects_reified_bindings() {
+        let ordinary = TypeParameterId::from_raw(3);
+        let reified = TypeParameterId::from_raw(7);
+        let substitutions = [
+            FirTypeSubstitution {
+                parameter: FirTypeParameterRef::Module(ordinary),
+                reified: false,
+                value: ResolvedTy::new(Ty::String).unwrap(),
+                additional_bounds: Box::new([]),
+            },
+            FirTypeSubstitution {
+                parameter: FirTypeParameterRef::Module(reified),
+                reified: true,
+                value: ResolvedTy::new(Ty::Int).unwrap(),
+                additional_bounds: Box::new([]),
+            },
+        ];
+
+        let (bindings, reified_bindings) =
+            checked_substitution_bindings(&substitutions, |parameter| {
+                if parameter == ordinary {
+                    Some("T")
+                } else if parameter == reified {
+                    Some("R")
+                } else {
+                    None
+                }
+            });
+
+        assert_eq!(
+            bindings,
+            [("T".into(), Ty::String), ("R".into(), Ty::Int)].into()
+        );
+        assert_eq!(reified_bindings, [("R".into(), Ty::Int)].into());
+    }
 
     #[test]
     fn a_missing_mode_declines_a_lambda_instead_of_copying_it() {

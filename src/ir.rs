@@ -163,6 +163,9 @@ pub struct IrDeclarationArgumentBoundary {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IrCheckedSubstitution {
     pub parameter: crate::fir::FirTypeParameterRef,
+    /// Exact declaration capability published by checked FIR; ordinary generic substitutions are
+    /// not runtime reification operations.
+    pub reified: bool,
     pub value: Ty,
     pub additional_bounds: Vec<Ty>,
 }
@@ -1484,6 +1487,35 @@ pub struct IrValueClassTypeOperation {
     pub role: IrValueClassTypeRole,
 }
 
+/// A call-site copy of a lambda implementation.
+///
+/// The record keeps the checked declaration identities and lexical containment that caused the
+/// copy. Source spellings are retained only as rendering provenance. A backend decides whether the
+/// copy needs a separate artifact and owns every physical name and ordinal used for that artifact.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IrSpecializedFunction {
+    pub source: FunId,
+    /// Stable declaration whose body contains the expansion.
+    pub caller_declaration: crate::fir::DeclarationId,
+    /// Exact executable scope containing the expansion. `None` means no declaration identity was
+    /// available for the fragment.
+    pub caller: Option<IrEnclosure>,
+    /// The expansion is evaluated in a callable's default-argument fragment. The caller still
+    /// records that callable or constructor identity; a target owns the physical `$default` or
+    /// constructor-special rendering.
+    pub caller_is_default: bool,
+    /// Source spelling of that declaration, or the deliberately empty spelling of a constructor or
+    /// unnamed initializer. This is rendering provenance, never the expansion identity.
+    pub caller_source_name: String,
+    /// Stable checked identity of the same-module inline callable that was expanded.
+    pub inline_callee: crate::fir::CallableId,
+    /// Source spelling retained for target-specific debug/artifact rendering.
+    pub inline_callee_source_name: String,
+    /// Specialized implementation lexically containing this one. Nested copies retain containment
+    /// rather than being flattened into another top-level expansion ordinal.
+    pub parent: Option<FunId>,
+}
+
 /// One lowered source file (`IrFile`) — its arenas. Index-based, bulk-freeable.
 #[derive(Default)]
 pub struct IrFile {
@@ -1502,6 +1534,9 @@ pub struct IrFile {
     /// declaring property's plan without copying it or manufacturing another helper.
     pub(crate) local_delegate_plan_ids:
         std::collections::HashMap<crate::fir::LocalDelegatedPropertyId, u32>,
+    /// Plans copied with an inline expansion. They are realized only for emitted copied accesses;
+    /// unlike source declaration plans, they do not independently require a lexical helper.
+    pub(crate) inline_local_delegate_plan_copies: std::collections::HashSet<u32>,
     /// JVM `$suspendImpl` body carriers (an interface member's, or an overridable class member's),
     /// keyed by carrier function id, with the exact owner and source-declaration function id. The JVM signature/default-stub boundaries consume
     /// these identities; they must not recover either one from the generated `$suspendImpl`
@@ -1767,6 +1802,14 @@ pub struct IrFile {
     inline_expansions: inline_copies::InlineExpansions,
     /// Lifted lambda implementation id → stable source origin and lexical binding context.
     pub lambda_origins: std::collections::HashMap<u32, IrLambdaOrigin>,
+    /// Specialized function → the implementation it was copied from and the expansion that copied it.
+    pub specialized_functions: std::collections::HashMap<FunId, IrSpecializedFunction>,
+    /// Lambda implementations whose bodies execute a runtime reified operation. The declaration
+    /// and each specialized call-site copy are recorded semantically; a backend independently
+    /// chooses the physical closure representation needed to realize that operation.
+    pub(crate) runtime_reified_lambda_implementations: std::collections::HashSet<FunId>,
+    /// Class index of a function already published as that class's method.
+    pub(crate) class_method_owners: std::collections::HashMap<FunId, Vec<u32>>,
     /// `ExprId` → the expression's LOGICAL (source) type as the checker inferred it, recorded verbatim by
     /// the lowerer — NOT erased. The value-class pass consults it to recover the representation of a value
     /// whose IR node alone is ambiguous: a library call returns a physical `Object` descriptor, but its
@@ -2628,6 +2671,15 @@ impl IrFile {
         self.classes.push(c);
         id
     }
+
+    /// Record that `function` is a method of `class`. Specialization copies this edge instead of
+    /// scanning every class method list to rediscover it.
+    pub(crate) fn note_class_method(&mut self, class: u32, function: FunId) {
+        self.class_method_owners
+            .entry(function)
+            .or_default()
+            .push(class);
+    }
 }
 
 mod data_class_members;
@@ -2646,7 +2698,10 @@ pub use function_parameters::*;
 mod traversal;
 pub use traversal::*;
 mod clone;
-pub use clone::*;
+pub use clone::clone_expression_dag;
+#[cfg(test)]
+pub(crate) use clone::make_expression_children_unique;
+pub(crate) use clone::{clone_function_implementation, make_expression_children_unique_tracked};
 mod semantic_validation;
 pub use semantic_validation::{
     IncompleteIrFact, InvalidIrContract, NullableSamContractViolation, UndeterminedIrType,

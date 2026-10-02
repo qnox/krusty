@@ -94,7 +94,7 @@ mod interface_compatibility;
 mod interface_hierarchy;
 mod intrinsic_probes;
 mod lambda_class;
-mod lambda_class_names;
+pub(super) mod lambda_class_names;
 mod local_updates;
 mod local_variable_representation;
 mod loop_emission;
@@ -322,8 +322,9 @@ pub(crate) struct EmitRun {
     /// paired with its JVM owner. A source lambda lowered into multiple constructors still
     /// contributes one class. The discovery pass is discarded when dead implementations require a
     /// second emit, so this set is cleared with the pending plans at each pass boundary.
-    lambda_classes_written:
-        std::cell::RefCell<std::collections::HashSet<(String, LambdaClassIdentity)>>,
+    lambda_classes_written: std::cell::RefCell<
+        std::collections::HashSet<(String, lambda_class_names::LambdaClassIdentity)>,
+    >,
     /// Private instance members reached from another emitted JVM class. Kotlin permits this across
     /// lexical nesting, while Java 8 bytecode does not; the declaring class owns one synthetic
     /// static access bridge and every cross-owner call targets it.
@@ -363,31 +364,6 @@ impl EmitRun {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum LambdaClassIdentity {
-    Source(u32),
-    Synthetic(u32),
-}
-
-/// Realize backend-private implementation names from the semantic lambda origins produced by
-/// common lowering. The common IR deliberately keeps its opaque temporary function name; only the
-/// JVM boundary owns kotlinc's `$lambda$N` spelling.
-pub(crate) fn realize_lambda_impl_names(ir: &mut IrFile) {
-    let names = ir
-        .lambda_origins
-        .iter()
-        .map(|(&function, origin)| {
-            (
-                function,
-                super::debug_local_names::lambda_implementation_name(origin),
-            )
-        })
-        .collect::<Vec<_>>();
-    for (function, name) in names {
-        ir.functions[function as usize].name = name;
-    }
-}
-
 /// One synthetic lambda class to write under [`LambdaMode::Class`].
 ///
 /// The lambda body stays where the indy strategy put it — a private static on the enclosing class —
@@ -419,7 +395,7 @@ struct LambdaClassPlan {
     /// Whether the body lives on an INTERFACE: a static call to one needs an `InterfaceMethodref`
     /// constant, not a `Methodref` (`IncompatibleClassChangeError` otherwise).
     owner_is_interface: bool,
-    identity: LambdaClassIdentity,
+    identity: lambda_class_names::LambdaClassIdentity,
 }
 
 impl EmitRun {
@@ -1473,6 +1449,7 @@ pub fn reparent_lambda_impls(ir: &mut IrFile) {
                 {
                     owned.insert(fid);
                     ir.classes[cid].methods.push(fid);
+                    ir.note_class_method(cid as u32, fid);
                     // The impl's own body now emits in this class too — walk it for nested lambdas.
                     if let Some(b) = ir.functions.get(fid as usize).and_then(|f| f.body) {
                         stack.push(b);
@@ -9836,7 +9813,17 @@ impl<'a> Emitter<'a> {
                 self.run.used_lambdas.borrow_mut().insert(*impl_fn);
                 let function_adapter = sam.as_ref().is_some_and(|target| target.function_adapter);
                 let boxed_sam_result = sam.as_ref().is_some_and(boxes_sam_result);
-                let lambda_mode = self.lambda_modes.for_lambda(sam.as_ref(), *arity);
+                let mut lambda_mode = self.lambda_modes.for_lambda(sam.as_ref(), *arity);
+                // This implementation executes a runtime reified operation. The common IR records
+                // that semantic requirement; the JVM realizes it as a class independently of the
+                // file's ordinary lambda strategy.
+                if self
+                    .ir
+                    .runtime_reified_lambda_implementations
+                    .contains(impl_fn)
+                {
+                    lambda_mode = LambdaMode::Class;
+                }
                 if lambda_mode == LambdaMode::Indy {
                     if self.ir.jvm_unrealized_lambda_classes.contains(impl_fn) {
                         // The class is discarded; a placeholder keeps its frames computable.
@@ -9989,8 +9976,14 @@ impl<'a> Emitter<'a> {
                     .map(|c| c.fq_name())
                     .unwrap_or_else(|| self.facade.clone());
                 if lambda_mode == LambdaMode::Class {
-                    let (internal, identity) =
-                        lambda_class_names::class_name(self.ir, *impl_fn, &impl_name, &impl_owner);
+                    let (internal, identity) = lambda_class_names::class_name(
+                        self.ir,
+                        *impl_fn,
+                        &impl_name,
+                        &impl_owner,
+                        &self.facade,
+                        self.lambda_modes,
+                    );
                     self.run.lambda_classes.borrow_mut().push(LambdaClassPlan {
                         internal: internal.clone(),
                         iface: iface.clone(),

@@ -57,7 +57,13 @@ fn compile_pairs(
     let target = jvm_target
         .map(|target| target.to_string())
         .unwrap_or_else(|| "default".to_string());
-    let inputs = super::common_core::byte_dump::class_dump_inputs(source, &target, &[], classpath);
+    let language_args = super::common_core::language_directives::kotlinc_args(source);
+    let inputs = super::common_core::byte_dump::class_dump_inputs(
+        source,
+        &target,
+        &language_args,
+        classpath,
+    );
     let expected = super::common_core::byte_dump::kotlinc_class_dumps(
         stem,
         &target,
@@ -84,6 +90,7 @@ fn compile_pairs(
                 args.push("-jvm-target".to_string());
                 args.push(target.to_string());
             }
+            args.extend(language_args.iter().cloned());
             args.push(source_path.to_string_lossy().into_owned());
             let (code, stderr) = super::common_core::kotlinc_compile(&args)
                 .expect("reference kotlinc is provisioned");
