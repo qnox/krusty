@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use crate::klib::{KlibArchive, KlibError};
 use crate::libraries::{
     CallSig, ClassifierInheritance, CompilerIntrinsic, FnKind, FunctionInfo, GenericSig,
-    LibraryMember, LibraryType, ParamList, TypeKind,
+    InlineKind, LibraryMember, LibraryType, ParamList, TypeKind,
 };
 use crate::metadata::id_signature::KlibPublicIdSignature;
 use crate::metadata::{decode, semantic};
@@ -121,6 +121,7 @@ enum CommonPackageFunctionIdentity {
     FloatRangeTo,
     DoubleRangeUntil,
     FloatRangeUntil,
+    EnumEntries,
 }
 
 impl CommonPackageFunctionIdentity {
@@ -130,6 +131,31 @@ impl CommonPackageFunctionIdentity {
             | Self::FloatRangeTo
             | Self::DoubleRangeUntil
             | Self::FloatRangeUntil => CompilerIntrinsic::FloatingRangeMembership,
+            Self::EnumEntries => CompilerIntrinsic::EnumEntries,
+        }
+    }
+
+    /// Shape of the paired JVM declaration. The public identity selects the role; these facts only
+    /// refuse a declaration that cannot be that realization.
+    fn accepts(self, candidate: &FunctionInfo) -> bool {
+        let plain = !candidate.flags.suspend
+            && !candidate.flags.infix
+            && candidate.context_count == 0
+            && !candidate.call_sig.vararg;
+        match self {
+            Self::DoubleRangeTo
+            | Self::FloatRangeTo
+            | Self::DoubleRangeUntil
+            | Self::FloatRangeUntil => {
+                plain && candidate.kind == FnKind::Extension && candidate.flags.operator
+            }
+            Self::EnumEntries => {
+                plain
+                    && candidate.kind == FnKind::TopLevel
+                    && !candidate.flags.operator
+                    && candidate.flags.reified
+                    && candidate.flags.inline == InlineKind::MustInline
+            }
         }
     }
 }
@@ -186,12 +212,7 @@ impl CommonExpectationIndex {
             declaration.package == package
                 && declaration.name == name
                 && declaration.generic_sig == *signature
-                && candidate.kind == FnKind::Extension
-                && candidate.flags.operator
-                && !candidate.flags.suspend
-                && !candidate.flags.infix
-                && candidate.context_count == 0
-                && !candidate.call_sig.vararg
+                && declaration.identity.accepts(candidate)
         });
         let declaration = matches.next()?;
         matches
@@ -297,8 +318,9 @@ impl CommonExpectationIndex {
 
 /// Language role carried by exact public identities from the trusted common stdlib KLIB. These
 /// member ids are Kotlin's stable public identities for the floating-point `rangeTo` and
-/// `rangeUntil` declarations. A same-named or same-shaped declaration has a different complete
-/// identity and therefore never enters this inventory.
+/// `rangeUntil` declarations and for the zero-argument `enumEntries` declaration. A same-named or
+/// same-shaped declaration has a different complete identity and therefore never enters this
+/// inventory.
 fn common_package_function_role(
     identity: KlibPublicIdSignature,
 ) -> Option<CommonPackageFunctionRole> {
@@ -306,6 +328,17 @@ fn common_package_function_role(
     const FLOAT_RANGE_TO: u64 = 14_812_996_858_166_169_491;
     const DOUBLE_RANGE_UNTIL: u64 = 742_649_461_109_916_381;
     const FLOAT_RANGE_UNTIL: u64 = 1_543_348_898_644_284_516;
+    // The zero-argument `kotlin.enums.enumEntries`. The one-argument overloads publish different
+    // member ids and stay ordinary functions.
+    const ENUM_ENTRIES: u64 = 1_918_022_784_687_648_499;
+    if identity.matches_exact(&["kotlin", "enums"], &["enumEntries"], ENUM_ENTRIES, 0) {
+        return Some(CommonPackageFunctionRole {
+            identity: CommonPackageFunctionIdentity::EnumEntries,
+            package: type_name("kotlin/enums"),
+            name: "enumEntries",
+            generic_sig: enum_entries_signature(),
+        });
+    }
     let (identity, scalar, name, range) =
         if identity.matches_exact(&["kotlin", "ranges"], &["rangeTo"], DOUBLE_RANGE_TO, 0) {
             (
@@ -361,6 +394,25 @@ fn common_package_function_role(
             return_policy: Default::default(),
         },
     })
+}
+
+/// Source signature of the zero-argument `enumEntries` declaration: one formal bounded by
+/// `Enum<T>`, no value parameters, and `EnumEntries<T>`. The type argument inside the bound is the
+/// formal with Kotlin's implicit nullable `Any` bound, which is how metadata decodes that bound
+/// before the formal's own erasure is known. Reified and inline are declaration flags, checked
+/// when this signature is joined to the paired JVM method.
+fn enum_entries_signature() -> GenericSig {
+    let parameter_in_bound = Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")));
+    let bound = Ty::obj_args("kotlin/Enum", &[parameter_in_bound]);
+    let parameter = Ty::ty_param("T", bound);
+    GenericSig {
+        formals: vec!["T".to_string()],
+        formal_bounds: vec![vec![bound]],
+        receiver: None,
+        params: Vec::new(),
+        ret: Ty::obj_args("kotlin/enums/EnumEntries", &[parameter]),
+        return_policy: Default::default(),
+    }
 }
 
 fn annotation_type(declaration: semantic::KotlinClass) -> LibraryType {
@@ -679,6 +731,168 @@ mod tests {
                 "generic Comparable.{name} and unrelated overloads remain ordinary declarations",
             );
         }
+    }
+
+    fn enum_entries_identity(
+        member_id: u64,
+    ) -> crate::metadata::id_signature::KlibPublicIdSignature {
+        let mut package = Vec::new();
+        push_varint(0, &mut package);
+        push_varint(1, &mut package);
+        let mut common = bytes_field(1, &package);
+        common.extend(bytes_field(2, &[2]));
+        push_varint((6 << 3) | 1, &mut common);
+        common.extend(member_id.to_le_bytes());
+        let encoded = bytes_field(1, &common);
+        decode_public_id_signature(
+            &encoded,
+            &["kotlin", "enums", "enumEntries"].map(str::to_string),
+        )
+        .expect("valid public identity")
+        .expect("public identity")
+    }
+
+    fn enum_entries_candidate(role: &super::CommonPackageFunctionRole) -> FunctionInfo {
+        let mut candidate = FunctionInfo::plain(
+            FnKind::TopLevel,
+            None,
+            crate::libraries::LibraryCallable::library(
+                type_name("kotlin/enums/EnumEntriesKt"),
+                role.name,
+                Vec::new(),
+                role.generic_sig.ret,
+                role.generic_sig.ret,
+                "()Lkotlin/enums/EnumEntries;",
+            ),
+        );
+        candidate.generic_sig = Some(role.generic_sig.clone());
+        candidate.flags.reified = true;
+        candidate.flags.inline = crate::libraries::InlineKind::MustInline;
+        candidate
+    }
+
+    #[test]
+    fn enum_entries_role_requires_the_exact_common_declaration_identity() {
+        const ENUM_ENTRIES: u64 = 1_918_022_784_687_648_499;
+        const ENUM_ENTRIES_FROM_PROVIDER: u64 = 16_990_762_899_543_326_496;
+        const ENUM_ENTRIES_FROM_ARRAY: u64 = 1_252_104_220_106_890_916;
+        let exact = common_package_function_role(enum_entries_identity(ENUM_ENTRIES))
+            .expect("the zero-argument common identity owns the role");
+        assert_eq!(exact.name, "enumEntries");
+        assert!(exact.generic_sig.params.is_empty());
+        assert!(
+            common_package_function_role(enum_entries_identity(ENUM_ENTRIES_FROM_PROVIDER))
+                .is_none()
+        );
+        assert!(
+            common_package_function_role(enum_entries_identity(ENUM_ENTRIES_FROM_ARRAY)).is_none()
+        );
+        assert!(common_package_function_role(enum_entries_identity(ENUM_ENTRIES + 1)).is_none());
+
+        let candidate = enum_entries_candidate(&exact);
+        let missing_identity = CommonExpectationIndex::default();
+        assert_eq!(
+            missing_identity.package_function_role(
+                true,
+                type_name("kotlin/enums"),
+                "enumEntries",
+                &candidate,
+            ),
+            None,
+            "the same owner and signature have no role without the exact common identity",
+        );
+    }
+
+    #[test]
+    fn enum_entries_role_requires_the_paired_jvm_dependency() {
+        const ENUM_ENTRIES: u64 = 1_918_022_784_687_648_499;
+        let exact = common_package_function_role(enum_entries_identity(ENUM_ENTRIES))
+            .expect("the zero-argument common identity owns the role");
+        let candidate = enum_entries_candidate(&exact);
+        let index = CommonExpectationIndex {
+            package_function_roles: vec![exact],
+            ..CommonExpectationIndex::default()
+        };
+        assert_eq!(
+            index.package_function_role(false, type_name("kotlin/enums"), "enumEntries", &candidate),
+            None,
+            "an identical owner and signature from another JVM dependency cannot actualize the common identity",
+        );
+        assert_eq!(
+            index.package_function_role(true, type_name("kotlin/enums"), "enumEntries", &candidate),
+            Some(CompilerIntrinsic::EnumEntries),
+        );
+        let mut ordinary = candidate.clone();
+        ordinary.flags.reified = false;
+        ordinary.flags.inline = crate::libraries::InlineKind::None;
+        assert_eq!(
+            index.package_function_role(true, type_name("kotlin/enums"), "enumEntries", &ordinary),
+            None,
+            "a non-reified same signature is not the inline declaration",
+        );
+    }
+
+    #[test]
+    fn paired_stdlib_provider_publishes_only_the_zero_argument_enum_entries_identity() {
+        let Some(stdlib) = crate::toolchain::stdlib_jar() else {
+            return;
+        };
+        let libraries = JvmLibraries::new(std::rc::Rc::new(Classpath::new(vec![stdlib])))
+            .expect("stdlib provider");
+        let symbols = libraries.symbols(
+            SymbolNamespace::Package(type_name("kotlin/enums")),
+            "enumEntries",
+        );
+        let functions = match &symbols.callables {
+            crate::libraries::Callables::Functions(functions)
+            | crate::libraries::Callables::Both { functions, .. } => functions,
+            _ => panic!("enumEntries is missing from the paired stdlib provider"),
+        };
+        let realized = functions
+            .overloads
+            .iter()
+            .filter(|function| {
+                function.callable.compiler_intrinsic == Some(CompilerIntrinsic::EnumEntries)
+            })
+            .collect::<Vec<_>>();
+        let described = functions
+            .overloads
+            .iter()
+            .map(|function| {
+                (
+                    function.generic_sig.clone(),
+                    function.flags.reified,
+                    function.flags.inline,
+                    function.callable.compiler_intrinsic,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            realized.len(),
+            1,
+            "only the zero-argument declaration is the intrinsic; signatures: {described:?}"
+        );
+        let signature = realized[0]
+            .generic_sig
+            .as_ref()
+            .expect("the realized declaration has a generic signature");
+        assert!(signature.params.is_empty());
+        assert_eq!(signature.formals, ["T"]);
+        let ordinary_one_argument = functions
+            .overloads
+            .iter()
+            .filter(|function| {
+                function.callable.compiler_intrinsic.is_none()
+                    && function
+                        .generic_sig
+                        .as_ref()
+                        .is_some_and(|signature| signature.params.len() == 1)
+            })
+            .count();
+        assert_eq!(
+            ordinary_one_argument, 2,
+            "the array and provider overloads stay ordinary; signatures: {described:?}"
+        );
     }
 
     fn write_empty_zip(path: &Path) {

@@ -196,29 +196,6 @@ fn kotlin_function(facts: &BuiltinFunctionDeclaration<'_>) -> Option<CompilerInt
     }
 }
 
-/// `kotlin.enums.enumEntries<T>()` has no callable body. The one-argument overloads are ordinary.
-fn enum_entries(facts: &BuiltinFunctionDeclaration<'_>) -> Option<CompilerIntrinsic> {
-    if !facts.package.matches("kotlin/enums")
-        || facts.name != "enumEntries"
-        || !plain(facts, FnKind::TopLevel)
-        || facts.receiver.is_some()
-        || facts.type_parameter_count != 1
-        || facts.vararg.is_some()
-        || facts.is_operator
-        || !facts.params.is_empty()
-    {
-        return None;
-    }
-    let returned = facts.ret.non_null();
-    let [Ty::TyParam(_, _)] = returned.type_args() else {
-        return None;
-    };
-    returned
-        .obj_internal()
-        .is_some_and(|name| name.matches("kotlin/enums/EnumEntries"))
-        .then_some(CompilerIntrinsic::EnumEntries)
-}
-
 fn console(facts: &BuiltinFunctionDeclaration<'_>) -> Option<CompilerIntrinsic> {
     if !facts.package.matches("kotlin/io")
         || !plain(facts, FnKind::TopLevel)
@@ -495,8 +472,6 @@ pub(crate) fn function_realization(
         kotlin_test(&facts)
     } else if facts.package.matches("kotlin/reflect") {
         reflection(&facts)
-    } else if facts.package.matches("kotlin/enums") {
-        enum_entries(&facts)
     } else if facts.package == crate::types::wk::kotlin_ranges_package() {
         progression_builder(&facts)
     } else {
@@ -674,18 +649,45 @@ mod tests {
     }
 
     #[test]
-    fn enum_entries_realization_is_only_the_zero_argument_declaration() {
+    fn enum_entries_shape_has_no_realization_without_its_public_identity() {
         let parameter = Ty::ty_param("T", Ty::obj("kotlin/Enum"));
         let result = Ty::obj_args("kotlin/enums/EnumEntries", &[parameter]);
         assert_eq!(
             function_realization(enum_entries(&[], result)),
-            Some(CompilerIntrinsic::EnumEntries)
+            None,
+            "the zero-argument shape is not the stdlib declaration"
         );
         let array = [Ty::array(parameter)];
         assert_eq!(
             function_realization(enum_entries(&array, result)),
             None,
             "the array overload is an ordinary function"
+        );
+        let mut same_shape = FunctionInfo::plain(
+            FnKind::TopLevel,
+            None,
+            crate::libraries::LibraryCallable::library(
+                type_name("kotlin/enums/EnumEntriesKt"),
+                "enumEntries",
+                Vec::new(),
+                result,
+                result,
+                "",
+            ),
+        );
+        same_shape.generic_sig = Some(crate::libraries::GenericSig {
+            formals: vec!["T".to_string()],
+            formal_bounds: vec![vec![Ty::obj("kotlin/Enum")]],
+            receiver: None,
+            params: Vec::new(),
+            ret: result,
+            return_policy: Default::default(),
+        });
+        same_shape.flags.reified = true;
+        assert_eq!(
+            normalized_function_realization(type_name("kotlin/enums"), "enumEntries", &same_shape),
+            None,
+            "normalized package overloads do not acquire the intrinsic from shape"
         );
     }
 
