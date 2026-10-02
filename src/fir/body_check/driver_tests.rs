@@ -625,9 +625,12 @@ fn local_class_init_reads_a_property_parameter_through_the_captured_outer_instan
         &mut index,
     )
     .expect("checked local signatures must publish before FIR body checking");
-    let local_class = index
-        .classifier_declaration(crate::types::type_name("A").nested_child("B"))
-        .expect("stable local-class identity");
+    let &[local_class] = index.local_class_declarations() else {
+        panic!(
+            "expected exactly one stable local-class declaration, got {:?}",
+            index.local_class_declarations()
+        );
+    };
     let mut session = BodyCheckSession::default();
     let mut sink = RecordingSink::default();
     for work in ordinary {
