@@ -9205,6 +9205,79 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   progressions and strings answer what kotlinc answers on the JVM for `list_api_answers.kt`, which
   the harness runs and compares with the driver.
   Tests: `tests/native_runtime_e2e.rs` (`list_api_answers`).
+- **Native maps and sets (`src/native/runtime/krusty_maps.c`) are Kotlin/Native's.** Under the
+  maintainer's rule (behave as Kotlin/Native, speak as the JVM where that is cheap, declare every
+  difference), the storage is Kotlin/Native's `HashMap`, ported statement for statement from
+  `HashMap.kt` (JetBrains/kotlin v2.4.10), with no JDK chains or tree bins. `HashMap` and `HashSet`
+  are the two classes, named `kotlin.collections.HashMap`/`HashSet`; `LinkedHashMap` and
+  `LinkedHashSet` are type aliases for them, so every spelling and builder answers one of the two
+  (`mapOf`/`hashMapOf`/`mutableMapOf` a `HashMap` of capacity `mapCapacity(n) = n`), except that
+  `mapOf` and `setOf` with nothing to hold -- `mapOf()`, `setOf()`, `emptyMap()`, `emptySet()`, and
+  `mapOf(*pairs)`/`setOf(*elements)` of an empty array -- answer the common stdlib's shared
+  read-only `kotlin.collections.EmptyMap` and `EmptySet` objects (`Maps.kt`, `Sets.kt`), one object
+  each for the program's life. Neither is a `MutableMap`/`MutableSet` (`is` false, `as?` null, `as`
+  `ClassCastException` in Kotlin/Native's wording); `equals` is `other is Map`/`Set` and
+  `other.isEmpty()`, `hashCode` 0, `toString` `{}`/`[]`; a lookup asks the key nothing; `keys` and
+  `entries` are `EmptySet`; their iterator is the one `EmptyIterator`, whose `next` raises
+  `NoSuchElementException`. `EmptyMap.values` is the stdlib's `EmptyList`, which the runtime does
+  not model; it answers its own empty list, as for `emptyList()`. `hashMapOf`/`hashSetOf` of an
+  empty spread stay a new `HashMap`/`HashSet`. The keys, and
+  a map's values, sit in arrays in insertion order, found through an open-addressed hash array of
+  index-plus-one slots, a key's slot being `(hashCode * 0x9E3779B9) ushr shift`, probed downward
+  for at most the longest probe any key needed; growth (half again, `AbstractList.newCapacity`)
+  compacts removed keys away and rehashes every key, asking each its `hashCode` again. Every map
+  and set iterates in insertion order, a removed and re-added key going to the end. A lookup hashes
+  the key -- even on a fresh map, whose hash array exists from construction -- and asks each probed
+  STORED key's `equals` of it, `stored == key`, with no identity check; `containsValue` asks each
+  stored value's `equals` from the last entry back; `values.remove(v)` removes the last entry
+  holding `v`. A negative initial capacity is `IllegalArgumentException` with the JVM's message,
+  `Illegal initial capacity: -1`. `keys`, `values` and `entries` are live views, the same object
+  every time, named `kotlin.collections.HashMapKeys`, `HashMapValues` and `HashMapEntrySet`;
+  `values` is no `List` and equals only itself; removing through a view removes from the map, and
+  adding through one is `UnsupportedOperationException`. An entry is a
+  `kotlin.collections.HashMap.EntryRef` that reads the map by index, so it shows a later `put` of
+  its key, and whose `key`/`value` raise `ConcurrentModificationException("The backing map has
+  been modified after this entry was obtained.")` once the map changed structurally. An iterator is
+  `kotlin.collections.HashMap.KeysItr`, `ValuesItr` or `EntriesItr` under `HashMap.Itr`: `hasNext`
+  is whether its index is below the map's length (false after a `clear()`), and `next` fails with
+  `ConcurrentModificationException` once the map changed structurally, before an exhausted one
+  fails with `NoSuchElementException`; a value written over an existing key is no such change, and
+  `clear` always is. A key's or value's `equals` that changes the map carries on as Kotlin/Native's
+  does, reading the arrays afresh at every probe: a lookup whose comparison removed its match
+  answers the cleared value, null; one whose comparison cleared the map finds the next slot empty;
+  a `put` after such a clear claims the next slot, where a later lookup does not reach it.
+  `toString` and `hashCode` read the entries by index with no check for a change, so a key its
+  `toString` added is rendered. `value in s` for a set walked as an `Iterable` is the set's own
+  `contains`. A collection that holds itself renders `(this Map)` / `(this Collection)` in its
+  place. An element member that throws stops the operation there and propagates: `put`/`add`
+  insert nothing, `mapOf`/`setOf`, `toString` and `hashCode` ask no later element, and a key whose
+  `hashCode` throws is compared with nothing. The pending slot, not the member's answer, says it
+  threw: an `equals` that raises and answers true is no match. Equality is `HashMap.contentEquals`
+  and `AbstractSet.setEquals`: a map or set is equal to itself without asking anything; a map equals
+  any `Map` of the same size each of whose entries it contains, walking the OTHER map's entries and
+  asking its own stored key's and then stored value's `equals`, a `ClassCastException` inside
+  answering false; a set equals any `Set` of the same size all of whose elements it contains,
+  walking the other set; an entry equals any `Map.Entry` whose key and value, asked first, equal its
+  own. A class of the program implementing `Map`, `Set` or `Map.Entry` compared with one fails
+  loudly, naming the class, since answering would need its members. `Any.toString` asks the
+  object's own `hashCode`, and one that throws propagates rather than being rendered.
+  `assert(false) { … }`, `error(x)` and `TODO(x)` whose message throws propagate that exception,
+  not their own. Every answer is compared with kotlinc's on the JVM for the Kotlin program beside
+  each driver, and every line on which the JVM's `java.util` classes answer otherwise -- their class
+  names, their table order, their chains, their incoming-key `equals` and identity checks, their
+  `NullPointerException` catch -- is a declared divergence citing `HashMap.kt`.
+  Tests: `tests/native_runtime_e2e.rs` (`map_lookup_protocol`, `map_iteration_order`,
+  `map_kinds_and_views`, `map_callback_mutation`, `map_chain_callback`, `map_iterator_identity`,
+  `map_equality_across_kinds`,
+  `map_equality_program_map`, `collection_to_string_self_reference`,
+  `map_stops_at_a_raise`, `map_views_do_not_compare_keys`, `stdlib_thrower_keeps_first_exception`,
+  `default_to_string_stops_at_a_raise`, `empty_map_and_set`).
+- **Native companions of the built-in types.** `Byte`, `Short`, `Int`, `Long`, `Char`, `Boolean`,
+  `Float`, `Double`, `String`, `UByte`, `UShort`, `UInt` and `ULong` each have one companion
+  object, the same one every time and distinct from every other, whose class is named
+  `kotlin.<Type>.Companion` with the simple name `Companion`, as kotlinc answers on the JVM for
+  `companion_objects.kt`, which the harness runs and compares with the driver.
+  Tests: `tests/native_runtime_e2e.rs` (`companion_objects`).
 
 - **A file's program entry point is Kotlin's `main`, selected once by the frontend's rule.** A
   top-level function is a `main` entry point when it is named `main`, has no extension receiver, type

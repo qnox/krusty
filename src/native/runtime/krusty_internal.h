@@ -49,6 +49,25 @@ struct KObject {
     } as;
 };
 
+/* A `ByteArray`, the storage of a string's text, and its body. */
+typedef KArray KByteArray;
+
+static inline char *kt_bytes_of(KByteArray *array) { return (char *)(array + 1); }
+
+KByteArray *kt_bytes_new(kt_int length);
+
+/* A string naming `byte_length` bytes at `bytes`, kept alive by `storage` (NULL for static text). */
+KRef kt_string_of(KRef storage, const char *bytes, kt_int byte_length);
+
+/* The read-only list's layout, which every list shape begins with, and a reference array's
+   elements. */
+typedef struct KList {
+    KObjectHeader header;
+    KRef elements;
+} KList;
+
+static inline KRef *kt_elements_of(KRef array) { return (KRef *)((KArray *)array + 1); }
+
 /* An array's element count, from the header every array begins with. */
 static inline kt_int kt_length_of(KRef array) { return ((const KArray *)array)->length; }
 
@@ -98,5 +117,20 @@ kt_long kt_walk_next_long(KRef iterator);
 /* `function(first, second, third)` through the slot every function value declares. Defined in
    `krusty_collections.c`. */
 KRef kt_invoke_three(KRef function, KRef first, KRef second, KRef third);
+
+/* The value facilities `krusty_classes.c` defines for the rest of the runtime: a built-in value's
+   `equals` and `hashCode`, an object's own `toString` through its vtable, the bits `equals` and
+   `hashCode` read from a floating-point value (every NaN collapsed to one), and the raise a
+   `notNull` delegate read before it was written makes. */
+kt_boolean kt_builtin_equals(KRef self, KRef other);
+kt_int kt_builtin_hash_code(KRef self);
+KRef kt_object_to_string(KRef value);
+uint64_t kt_double_bits(kt_double value);
+uint32_t kt_float_bits(kt_float value);
+void kt_raise_uninitialized_property(KRef name);
+
+/* The size of a map, a set or one of a map's views, or -1 for anything else: what a walk sizing
+   its result asks. Defined in `krusty_maps.c`. */
+kt_int kt_map_collection_size(KRef value);
 
 #endif /* KRUSTY_INTERNAL_H */

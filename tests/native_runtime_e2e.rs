@@ -5,7 +5,9 @@
 //! harness RUNS it. Each driver under `tests/native_runtime/` is a small freestanding program that
 //! supplies `kt_program_entry`, calls into the runtime, and prints `OK` when what it checked held.
 //! The harness links the driver with every runtime source on the branch — with the host's clang,
-//! `-nostdlib -static`, so nothing but the runtime itself answers its symbols — and runs it.
+//! `-nostdlib -static`, so nothing but the runtime itself answers its symbols — and runs it. The
+//! runtime's sources are compiled once per test run, with the drivers' own flags, and every driver
+//! links all of their objects.
 //!
 //! A driver reports failure by exiting non-zero with a message on stderr (`KT_SYS_FAIL`), or by
 //! crashing; either fails the test with what it printed. A driver that checks the runtime ENDS the
@@ -16,16 +18,18 @@
 //! them with values copied into C, and the harness compares that transcript with the one the Kotlin
 //! program beside it (`<driver>.kt`) answers under the reference kotlinc
 //! (`run_driver_against_kotlin`). Where the native runtime answers differently from the JVM on
-//! purpose, the test declares the line (`run_driver_against_kotlin_with`, `Divergence`).
+//! purpose, the test declares the line (`run_driver_against_kotlin_with`, `Divergence`). kotlinc
+//! compiles every such program once per test run, in one invocation (`kotlin_programs`).
 //!
 //! The drivers need a C compiler for the host. CI has one and must run them; a local build without
 //! clang is told why they did not run rather than failing on a missing tool.
 
 use super::common;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::sync::OnceLock;
 
 /// Whether every function the runtime sources on this branch call is defined by them. The runtime
@@ -53,75 +57,134 @@ fn driver_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/native_runtime")
 }
 
-/// Whether the host is a target the runtime supports and a clang is there to build for it.
+/// Whether the host is a target the runtime supports and a clang is there to build for it. Asked
+/// once per test run.
 fn host_can_run() -> bool {
-    let supported = cfg!(target_os = "linux")
-        && cfg!(any(
-            target_arch = "x86_64",
-            target_arch = "aarch64",
-            target_arch = "riscv64"
-        ));
-    let clang = Command::new("clang")
-        .arg("--version")
-        .output()
-        .is_ok_and(|output| output.status.success());
-    if supported && clang {
-        return true;
-    }
-    assert!(
-        std::env::var_os("CI").is_none(),
-        "CI must run the native runtime drivers, but this host cannot (supported target: \
-         {supported}, clang: {clang})"
-    );
-    eprintln!("native runtime drivers skipped: this host has no clang or is not a runtime target");
-    false
+    static CAN_RUN: OnceLock<bool> = OnceLock::new();
+    *CAN_RUN.get_or_init(|| {
+        let supported = cfg!(target_os = "linux")
+            && cfg!(any(
+                target_arch = "x86_64",
+                target_arch = "aarch64",
+                target_arch = "riscv64"
+            ));
+        let clang = Command::new("clang")
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success());
+        if supported && clang {
+            return true;
+        }
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "CI must run the native runtime drivers, but this host cannot (supported target: \
+             {supported}, clang: {clang})"
+        );
+        eprintln!(
+            "native runtime drivers skipped: this host has no clang or is not a runtime target"
+        );
+        false
+    })
 }
 
-/// Link `driver` with every runtime source and run it. `None` when the host cannot run drivers at
+/// The flags the runtime and every driver compile with, the same for both. Linking adds only
+/// `-Wl,--unresolved-symbols=ignore-all` while the runtime is incomplete.
+fn compile_flags() -> Vec<&'static str> {
+    let mut flags = vec![
+        "-std=c11",
+        "-ffreestanding",
+        "-nostdlib",
+        "-static",
+        "-fno-pic",
+        "-fno-stack-protector",
+        "-fno-asynchronous-unwind-tables",
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        // Runtime descriptors name the fields they define and intentionally leave the rest
+        // zero-initialized. Keep every other warning an error.
+        "-Wno-missing-field-initializers",
+        // Signed overflow is undefined in C, and Kotlin's `Int` and `Long` wrap or raise; a
+        // driver that drives a runtime counter past its maximum must see an overflow the
+        // runtime left signed, so every one traps (SIGILL) instead of wrapping quietly.
+        "-fsanitize=signed-integer-overflow",
+        "-fsanitize-trap=signed-integer-overflow",
+    ];
+    if !RUNTIME_COMPLETE {
+        flags.extend_from_slice(INCOMPLETE_RUNTIME_WARNINGS);
+    }
+    flags
+}
+
+/// Every runtime source compiled to an object, once per test run and in the sources' sorted order,
+/// or what clang said when one did not compile. The sources compile in parallel; each driver then
+/// links all of the objects, as it would link the sources themselves.
+fn runtime_objects() -> &'static Result<Vec<PathBuf>, String> {
+    static OBJECTS: OnceLock<Result<Vec<PathBuf>, String>> = OnceLock::new();
+    OBJECTS.get_or_init(|| {
+        let mut sources: Vec<PathBuf> = fs::read_dir(runtime_dir())
+            .expect("read the runtime directory")
+            .map(|entry| entry.expect("runtime directory entry").path())
+            .filter(|path| path.extension().is_some_and(|extension| extension == "c"))
+            .collect();
+        sources.sort();
+        let scratch = common::scratch_dir().expect("scratch directory");
+        let compiles: Vec<(PathBuf, std::process::Child)> = sources
+            .iter()
+            .map(|source| {
+                let object = scratch
+                    .join(source.file_name().expect("runtime source name"))
+                    .with_extension("o");
+                let child = Command::new("clang")
+                    .args(compile_flags())
+                    .arg("-I")
+                    .arg(runtime_dir())
+                    .arg("-c")
+                    .arg(source)
+                    .arg("-o")
+                    .arg(&object)
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .expect("run clang");
+                (object, child)
+            })
+            .collect();
+        let mut objects = Vec::new();
+        let mut errors = String::new();
+        for (object, child) in compiles {
+            let output = child.wait_with_output().expect("run clang");
+            if !output.status.success() {
+                errors.push_str(&String::from_utf8_lossy(&output.stderr));
+            }
+            objects.push(object);
+        }
+        if errors.is_empty() {
+            Ok(objects)
+        } else {
+            Err(errors)
+        }
+    })
+}
+
+/// Link `driver` with every runtime object and run it. `None` when the host cannot run drivers at
 /// all.
 fn build_and_run(driver: &str) -> Option<Output> {
     if !host_can_run() {
         return None;
     }
-    let mut sources: Vec<PathBuf> = std::fs::read_dir(runtime_dir())
-        .expect("read the runtime directory")
-        .map(|entry| entry.expect("runtime directory entry").path())
-        .filter(|path| path.extension().is_some_and(|extension| extension == "c"))
-        .collect();
-    sources.sort();
+    let objects = runtime_objects().as_ref().unwrap_or_else(|errors| {
+        panic!("{driver}: the driver and runtime did not build:\n{errors}")
+    });
     let scratch = common::scratch_dir().expect("scratch directory");
     let executable = scratch.join(driver);
     let build = Command::new("clang")
-        .args([
-            "-std=c11",
-            "-ffreestanding",
-            "-nostdlib",
-            "-static",
-            "-fno-pic",
-            "-fno-stack-protector",
-            "-fno-asynchronous-unwind-tables",
-            "-O2",
-            "-Wall",
-            "-Wextra",
-            "-Werror",
-            // Runtime descriptors name the fields they define and intentionally leave the rest
-            // zero-initialized. Keep every other warning an error.
-            "-Wno-missing-field-initializers",
-            // Signed overflow is undefined in C, and Kotlin's `Int` and `Long` wrap or raise; a
-            // driver that drives a runtime counter past its maximum must see an overflow the
-            // runtime left signed, so every one traps (SIGILL) instead of wrapping quietly.
-            "-fsanitize=signed-integer-overflow",
-            "-fsanitize-trap=signed-integer-overflow",
-        ])
+        .args(compile_flags())
         .args((!RUNTIME_COMPLETE).then_some("-Wl,--unresolved-symbols=ignore-all"))
-        .args(if RUNTIME_COMPLETE {
-            &[][..]
-        } else {
-            INCOMPLETE_RUNTIME_WARNINGS
-        })
         .arg("-I")
         .arg(runtime_dir())
-        .args(&sources)
+        .args(objects)
         .arg(driver_dir().join(format!("{driver}.c")))
         .arg("-o")
         .arg(&executable)
@@ -174,12 +237,109 @@ fn run_payload_driver(driver: &str) -> Option<Vec<u8>> {
 /// `box()`, the transcript of what the driver observes (one observation per line, each ending in a
 /// newline), and the driver prints its own transcript before its `OK` (`transcript.h`). The program
 /// is compiled by the reference kotlinc and run on the shared JVM through the persistent harness
-/// (`common::kotlinc_box_result`); it must compile and answer whole lines, and the driver must
+/// (`kotlin_programs`, `common::run_box`); it must compile and answer whole lines, and the driver must
 /// succeed exactly as `run_payload_driver` requires. The two transcripts must then be identical, so
 /// every answer the driver prints is Kotlin's by execution, not a value copied into C. The driver's
 /// own checks of what Kotlin has no counterpart for still end it on failure.
 fn run_driver_against_kotlin(driver: &str) {
     run_driver_against_kotlin_with(driver, &[]);
+}
+
+/// Every Kotlin program beside a driver, compiled by the reference kotlinc once per test run: the
+/// programs that take the same kotlinc arguments compile together, in ONE invocation, since a
+/// compile's fixed cost outweighs a small program's. Each program compiles in a package named after
+/// its driver (`package <driver>;` opens the line after its file annotations, so every line keeps
+/// its number), which keeps one program's declarations from colliding with another's; its `box()`
+/// is then `<driver>.MainKt`, and only a qualified name it prints could tell. Maps each driver to
+/// the class directory holding its program alone. A program in no batch that compiled — kotlinc
+/// rejected one of the batch, say — is missing, and its test compiles it by itself
+/// (`common::kotlinc_box_result`), so kotlinc's diagnostics fail that test as they always have.
+fn kotlin_programs() -> &'static HashMap<String, PathBuf> {
+    static PROGRAMS: OnceLock<HashMap<String, PathBuf>> = OnceLock::new();
+    PROGRAMS.get_or_init(|| {
+        let work = common::scratch_dir().expect("scratch directory");
+        let mut batches: BTreeMap<Vec<String>, Vec<(String, PathBuf)>> = BTreeMap::new();
+        for entry in fs::read_dir(driver_dir()).expect("read the driver directory") {
+            let program = entry.expect("driver directory entry").path();
+            if program
+                .extension()
+                .is_none_or(|extension| extension != "kt")
+            {
+                continue;
+            }
+            let driver = program
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .expect("a UTF-8 program name")
+                .to_string();
+            let Ok(source) = fs::read_to_string(&program) else {
+                continue;
+            };
+            let Some(packaged) = in_package(&driver, &source) else {
+                continue;
+            };
+            let file = work.join("src").join(&driver).join("Main.kt");
+            fs::create_dir_all(file.parent().expect("program directory"))
+                .expect("create the program directory");
+            fs::write(&file, packaged).expect("write the packaged program");
+            batches
+                .entry(common::language_directives::kotlinc_args(&source))
+                .or_default()
+                .push((driver, file));
+        }
+        let mut programs = HashMap::new();
+        for (index, (arguments, members)) in batches.into_iter().enumerate() {
+            let output = work.join(format!("out-{index}"));
+            let mut kotlinc: Vec<String> = members
+                .iter()
+                .map(|(_, file)| file.to_string_lossy().into_owned())
+                .collect();
+            kotlinc.extend(["-d".to_string(), output.to_string_lossy().into_owned()]);
+            kotlinc.extend(arguments);
+            if !matches!(common::kotlinc_compile(&kotlinc), Some((0, _))) {
+                continue;
+            }
+            for (driver, _) in members {
+                let classes = work.join("classes").join(&driver);
+                fs::create_dir_all(&classes).expect("create the program's class directory");
+                fs::rename(output.join(&driver), classes.join(&driver))
+                    .expect("move the program's classes");
+                programs.insert(driver, classes);
+            }
+        }
+        programs
+    })
+}
+
+/// `source` in package `package`, the declaration opening the line after the file annotations so no
+/// line moves; `None` for a program that names its own package.
+fn in_package(package: &str, source: &str) -> Option<String> {
+    let lines: Vec<&str> = source.split_inclusive('\n').collect();
+    if lines.iter().any(|line| line.starts_with("package ")) {
+        return None;
+    }
+    let at = lines
+        .iter()
+        .rposition(|line| line.starts_with("@file:"))
+        .map_or(0, |last| last + 1);
+    Some(format!(
+        "{}package {package}; {}",
+        lines[..at].concat(),
+        lines[at..].concat()
+    ))
+}
+
+#[test]
+fn a_program_is_packaged_after_its_file_annotations_on_the_same_line() {
+    assert_eq!(
+        in_package("p", "// a\nfun box() = \"\"\n").as_deref(),
+        Some("package p; // a\nfun box() = \"\"\n")
+    );
+    assert_eq!(
+        in_package("p", "// a\n@file:OptIn(X::class)\nimport a.b\n").as_deref(),
+        Some("// a\n@file:OptIn(X::class)\npackage p; import a.b\n")
+    );
+    assert_eq!(in_package("p", "package q\nfun box() = \"\"\n"), None);
 }
 
 /// Which of the native runtime's rules a line the JVM answers differently follows. The runtime
@@ -256,7 +416,15 @@ fn run_driver_against_kotlin_with(driver: &str, divergences: &[Divergence]) {
     let program = driver_dir().join(format!("{driver}.kt"));
     let source = fs::read_to_string(&program)
         .unwrap_or_else(|error| panic!("{driver}: read {}: {error}", program.display()));
-    let kotlin = common::kotlinc_box_result(&source);
+    let kotlin = match kotlin_programs().get(driver) {
+        Some(classes) => common::run_box(
+            &[],
+            &format!("{driver}.MainKt"),
+            &[classes.clone(), common::stdlib_jar(), common::jdk_modules()],
+        )
+        .expect("run kotlinc-built box fixture"),
+        None => common::kotlinc_box_result(&source),
+    };
     assert!(
         !kotlin.starts_with("ERROR:") && kotlin.ends_with('\n'),
         "{driver}: the Kotlin program must run and answer whole lines, got {kotlin:?}"
@@ -1087,6 +1255,490 @@ fn an_iterator_is_an_iterator_and_an_arrays_is_its_kinds_iterator() {
     );
 }
 
+#[test]
+fn a_map_or_set_that_holds_itself_renders_the_marker() {
+    run_driver("collection_to_string_self_reference");
+}
+
+#[test]
+fn a_stdlib_thrower_whose_message_throws_propagates_that_exception() {
+    run_driver("stdlib_thrower_keeps_first_exception");
+}
+
+#[test]
+fn map_keys_and_entries_show_the_keys_without_comparing_them() {
+    run_driver("map_views_do_not_compare_keys");
+}
+
+#[test]
+fn a_map_or_set_stops_where_an_element_member_threw() {
+    run_driver("map_stops_at_a_raise");
+}
+
+#[test]
+fn a_default_to_string_whose_hash_code_throws_propagates_it() {
+    run_driver("default_to_string_stops_at_a_raise");
+}
+
+#[test]
+fn a_map_lookup_hashes_the_key_and_asks_the_stored_keys_equals() {
+    // Kotlin/Native's HashMap
+    // (kotlin-native/runtime/src/main/kotlin/kotlin/collections/HashMap.kt, JetBrains/kotlin
+    // v2.4.10): findKey and addKey probe the open-addressed hash array and ask the STORED key's
+    // equals, keysArray[index - 1] == key, with no identity check, so an asymmetric key is asked
+    // the other way round and a key finds itself by equals; findValue walks the values from the
+    // last index down with the stored value's equals; the hash array exists from construction, so
+    // a fresh map hashes the key it is asked for.
+    run_driver_against_kotlin_with(
+        "map_lookup_protocol",
+        &[
+            Divergence::native_behaviour(
+                "put b = null | hash(b) eq(b,a1) ",
+                "put b = null | hash(b) eq(a1,b) ",
+            ),
+            Divergence::native_behaviour(
+                "get a1 = 1 | hash(a1) ",
+                "get a1 = 1 | hash(a1) eq(a1,a1) ",
+            ),
+            Divergence::native_behaviour(
+                "get q = 1 | hash(q) eq(q,a1) ",
+                "get q = 1 | hash(q) eq(a1,q) ",
+            ),
+            Divergence::native_behaviour(
+                "get r = null | hash(r) eq(r,a1) eq(r,b) ",
+                "get r = null | hash(r) eq(a1,r) eq(b,r) ",
+            ),
+            Divergence::native_behaviour(
+                "containsKey c = true | hash(c) ",
+                "containsKey c = true | hash(c) eq(c,c) ",
+            ),
+            Divergence::native_behaviour(
+                "get x = 1 | hashA(x) eqA(x) ",
+                "get x = null | hashA(x) eq(a1,null) eq(b,null) ",
+            ),
+            Divergence::native_behaviour(
+                "remove b = 2 | hash(b) eq(b,a1) ",
+                "remove b = 2 | hash(b) eq(a1,b) eq(b,b) ",
+            ),
+            Divergence::native_behaviour("get c = 3 | hash(c) ", "get c = 3 | hash(c) eq(c,c) "),
+            Divergence::native_behaviour(
+                "contains z = true | hashA(z) eqA(z) ",
+                "contains z = false | hashA(z) eq(a1,null) ",
+            ),
+            Divergence::native_behaviour(
+                "add d = false | hash(d) eq(d,a1) ",
+                "add d = false | hash(d) eq(a1,d) ",
+            ),
+            Divergence::native_behaviour(
+                "remove e = true | hash(e) eq(e,c) ",
+                "remove e = true | hash(e) eq(c,e) ",
+            ),
+            Divergence::native_behaviour(
+                "containsValue f = true | eq(f,a1) eq(f,c) ",
+                "containsValue f = true | eq(c,f) ",
+            ),
+            Divergence::native_behaviour(
+                "containsValue a1 = true | ",
+                "containsValue a1 = true | eq(c,a1) eq(a1,a1) ",
+            ),
+            Divergence::native_behaviour(
+                "containsValue g = true | eqA(g) eqA(g) ",
+                "containsValue g = false | eq(c,null) eq(a1,null) ",
+            ),
+            Divergence::native_behaviour("fresh get a = null | ", "fresh get a = null | hash(a) "),
+            Divergence::native_behaviour(
+                "fresh containsKey b = false | ",
+                "fresh containsKey b = false | hash(b) ",
+            ),
+            Divergence::native_behaviour(
+                "fresh getOrDefault o = 5 | ",
+                "fresh getOrDefault o = 5 | hash(o) ",
+            ),
+            Divergence::native_behaviour(
+                "fresh set contains f = false | ",
+                "fresh set contains f = false | hash(f) ",
+            ),
+        ],
+    );
+}
+
+#[test]
+fn every_map_and_set_iterates_in_insertion_order() {
+    // Kotlin/Native's HashMap and HashSet
+    // (kotlin-native/runtime/src/main/kotlin/kotlin/collections/HashMap.kt and
+    // libraries/stdlib/native-wasm/src/kotlin/collections/HashSet.kt, JetBrains/kotlin v2.4.10)
+    // keep keys in insertion order in keysArray and iterate by index, so every map and set
+    // iterates in insertion order, a removed and re-added key going to the end; LinkedHashMap and
+    // LinkedHashSet are type aliases for them.
+    run_driver_against_kotlin_with(
+        "map_iteration_order",
+        &[
+            Divergence::native_behaviour("[16, 0, 33, 1, 17, 49, 2]", "[33, 1, 17, 16, 0, 49, 2]"),
+            Divergence::native_behaviour(
+                "[banana, date, apple, cherry]",
+                "[banana, apple, cherry, date]",
+            ),
+            Divergence::native_behaviour("[64, 17, 3, 100, 5]", "[100, 3, 17, 64, 5]"),
+            Divergence::native_behaviour(
+                "[0, 32, 64, 96, 128, 160, 192, 16, 48, 80, 112, 144, 176]",
+                "[0, 16, 32, 48, 64, 80, 96, 112, 128, 144, 160, 176, 192]",
+            ),
+            Divergence::native_behaviour("[1, 15, 31, 47, 63]", "[15, 31, 47, 63, 1]"),
+            Divergence::native_behaviour(
+                "[0, 2, 4, 6, 8, 1, 3, 5, 7, 9]",
+                "[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]",
+            ),
+            Divergence::native_behaviour(
+                "[-1, 65537, 65536, 1, -16]",
+                "[-1, -16, 65536, 65537, 1]",
+            ),
+            Divergence::native_behaviour("[1, 17, 2, 3]", "[2, 3, 1, 17]"),
+            Divergence::native_behaviour("[4, 9, 2]", "[9, 2, 4]"),
+        ],
+    );
+}
+
+#[test]
+fn maps_sets_entries_and_views_are_kotlin_natives_classes_and_live() {
+    // Kotlin/Native's classes
+    // (kotlin-native/runtime/src/main/kotlin/kotlin/collections/HashMap.kt, JetBrains/kotlin
+    // v2.4.10): LinkedHashMap and LinkedHashSet are type aliases for HashMap and HashSet, an entry
+    // is a HashMap.EntryRef reading the map by index, and the views are HashMapKeys, HashMapValues
+    // and HashMapEntrySet. Itr.hasNext is index < map.length, which a clear() sets to zero;
+    // HashSet.contains asks the stored element's equals.
+    run_driver_against_kotlin_with(
+        "map_kinds_and_views",
+        &[
+            Divergence::native_behaviour(
+                "java.util.LinkedHashMap.Entry Entry java.util.LinkedHashMap.LinkedKeySet \
+                 LinkedKeySet java.util.LinkedHashMap.LinkedValues LinkedValues \
+                 java.util.LinkedHashMap.LinkedEntrySet LinkedEntrySet",
+                "kotlin.collections.HashMap.EntryRef EntryRef kotlin.collections.HashMapKeys \
+                 HashMapKeys kotlin.collections.HashMapValues HashMapValues \
+                 kotlin.collections.HashMapEntrySet HashMapEntrySet",
+            ),
+            Divergence::native_behaviour(
+                "java.util.HashMap.Node Node java.util.HashMap.KeySet KeySet \
+                 java.util.HashMap.Values Values java.util.HashMap.EntrySet EntrySet",
+                "kotlin.collections.HashMap.EntryRef EntryRef kotlin.collections.HashMapKeys \
+                 HashMapKeys kotlin.collections.HashMapValues HashMapValues \
+                 kotlin.collections.HashMapEntrySet HashMapEntrySet",
+            ),
+            Divergence::native_behaviour(
+                "true false true false true true",
+                "true true true true true true",
+            ),
+            Divergence::native_behaviour(
+                "java.util.LinkedHashMap LinkedHashMap java.util.HashMap HashMap \
+                 java.util.HashSet HashSet java.util.LinkedHashSet LinkedHashSet",
+                "kotlin.collections.HashMap HashMap kotlin.collections.HashMap HashMap \
+                 kotlin.collections.HashSet HashSet kotlin.collections.HashSet HashSet",
+            ),
+            Divergence::native_behaviour(
+                "hasNext after a clear: true",
+                "hasNext after a clear: false",
+            ),
+            Divergence::native_behaviour(
+                "in: true | hash(q) eq(q,b) ",
+                "in: true | hash(q) eq(b,q) ",
+            ),
+        ],
+    );
+}
+
+#[test]
+fn map_of_and_set_of_nothing_are_the_shared_read_only_empty_map_and_set() {
+    // Kotlin's common stdlib (libraries/stdlib/src/kotlin/collections/Maps.kt and Sets.kt,
+    // JetBrains/kotlin v2.4.10), which Kotlin/Native compiles as written: mapOf(vararg) is
+    // emptyMap() with no pairs and setOf(vararg) is elements.toSet(), emptySet() for none, the
+    // one EmptyMap and EmptySet objects; neither is a MutableMap or MutableSet, and their
+    // iterator is EmptyIterator. hashMapOf and hashSetOf are always a new HashMap or HashSet. A
+    // failed cast keeps Kotlin/Native's wording (krusty_classes.c, kt_fail_cast).
+    run_driver_against_kotlin_with(
+        "empty_map_and_set",
+        &[
+            Divergence::native_message(
+                "put: threw ClassCastException: kotlin.collections.EmptyMap cannot be cast to \
+                 kotlin.collections.MutableMap",
+                "put: threw ClassCastException: class kotlin.collections.EmptyMap cannot be cast \
+                 to class kotlin.collections.MutableMap",
+            ),
+            Divergence::native_message(
+                "add: threw ClassCastException: kotlin.collections.EmptySet cannot be cast to \
+                 kotlin.collections.MutableSet",
+                "add: threw ClassCastException: class kotlin.collections.EmptySet cannot be cast \
+                 to class kotlin.collections.MutableSet",
+            ),
+            Divergence::native_behaviour(
+                "hashMapOf: java.util.HashMap HashMap false true true",
+                "hashMapOf: kotlin.collections.HashMap HashMap false true true",
+            ),
+            Divergence::native_behaviour(
+                "hashSetOf: java.util.HashSet HashSet false true true",
+                "hashSetOf: kotlin.collections.HashSet HashSet false true true",
+            ),
+        ],
+    );
+}
+
+#[test]
+fn a_map_changed_by_a_keys_callback_goes_on_as_kotlin_natives_does() {
+    // Kotlin/Native's HashMap
+    // (kotlin-native/runtime/src/main/kotlin/kotlin/collections/HashMap.kt, JetBrains/kotlin
+    // v2.4.10): get reads valuesArray at the index findKey found after the stored key's equals
+    // ran, so a match the callback removed answers null, and a probe that the removal emptied ends
+    // the search; toString walks EntriesItr.nextAppendString, which checks for no change, so a key
+    // the callback added is rendered; findValue walks from the last index down, so it compares the
+    // entry the callback leaves in place.
+    run_driver_against_kotlin_with(
+        "map_callback_mutation",
+        &[
+            Divergence::native_behaviour(
+                "LinkedHashMap get removing its match: A",
+                "LinkedHashMap get removing its match: null",
+            ),
+            Divergence::native_behaviour(
+                "HashMap get removing another key: B",
+                "HashMap get removing another key: null",
+            ),
+            Divergence::native_behaviour(
+                "toString adding a key: threw ConcurrentModificationException: null",
+                "toString adding a key: {a=A, x=X, y=Y}",
+            ),
+            Divergence::native_behaviour(
+                "LinkedHashMap containsValue removing its entry: false",
+                "LinkedHashMap containsValue removing its entry: true",
+            ),
+        ],
+    );
+}
+
+#[test]
+fn maps_and_sets_compare_across_classes_as_kotlin_natives_do() {
+    // Kotlin/Native's HashMap.equals is contentEquals
+    // (kotlin-native/runtime/src/main/kotlin/kotlin/collections/HashMap.kt, JetBrains/kotlin
+    // v2.4.10): the sizes, then containsAllEntries walks the OTHER map's entries and looks each up
+    // here, asking the stored key's and then the stored value's equals, and catches only
+    // ClassCastException; a set's equals is AbstractSet.setEquals, this.containsAll(other), which
+    // walks the other set and looks each element up here with no catch
+    // (libraries/stdlib/src/kotlin/collections/AbstractSet.kt); EntryRef.equals asks other.key ==
+    // key and other.value == value. So no call is identity-checked away, a NullPointerException
+    // propagates, and a change to the receiver inside a comparison leaves the walk of the other
+    // map untouched.
+    run_driver_against_kotlin_with(
+        "map_equality_across_kinds",
+        &[
+            Divergence::native_behaviour(
+                "m1 == m2 = true | hash(a) eq(a,b2) eq(a,a2) eq(va,va2) hash(b) eq(b,b2) \
+                 eq(vb,vb2) ",
+                "m1 == m2 = true | hash(b2) eq(a,b2) eq(b,b2) eq(vb,vb2) hash(a2) eq(a,a2) \
+                 eq(va,va2) ",
+            ),
+            Divergence::native_behaviour(
+                "m2 == m1 = true | hash(b2) eq(b2,a) eq(b2,b) eq(vb2,vb) hash(a2) eq(a2,a) \
+                 eq(va2,va) ",
+                "m2 == m1 = true | hash(a) eq(b2,a) eq(a2,a) eq(va2,va) hash(b) eq(b2,b) \
+                 eq(vb2,vb) ",
+            ),
+            Divergence::native_behaviour(
+                "n1 == n2 = true | hash(a) eq(a,a2) hash(a) eq(a,a2) ",
+                "n1 == n2 = true | hash(a2) eq(a,a2) ",
+            ),
+            Divergence::native_behaviour(
+                "n1 == n3 = false | hash(a) eq(a,b2) hash(a) eq(a,b2) ",
+                "n1 == n3 = false | hash(b2) eq(a,b2) ",
+            ),
+            Divergence::native_behaviour(
+                "s1 == s2 = true | hash(b2) eq(b2,a) eq(b2,b) hash(a2) eq(a2,a) ",
+                "s1 == s2 = true | hash(b2) eq(a,b2) eq(b,b2) hash(a2) eq(a,a2) ",
+            ),
+            Divergence::native_behaviour(
+                "s2 == s1 = true | hash(a) eq(a,b2) eq(a,a2) hash(b) eq(b,b2) ",
+                "s2 == s1 = true | hash(a) eq(b2,a) eq(a2,a) hash(b) eq(b2,b) ",
+            ),
+            Divergence::native_behaviour(
+                "s1 == m1.keys = true | hash(a) hash(b) eq(b,a) ",
+                "s1 == m1.keys = true | hash(a) eq(a,a) hash(b) eq(a,b) eq(b,b) ",
+            ),
+            Divergence::native_behaviour(
+                "m1.keys == s1 = true | hash(a) hash(b) eq(b,a) ",
+                "m1.keys == s1 = true | hash(a) eq(a,a) hash(b) eq(a,b) eq(b,b) ",
+            ),
+            Divergence::native_behaviour(
+                "m1.entries == m2.entries = true | hash(b2) eq(b2,a) eq(b2,b) eq(b,b2) \
+                 eq(vb,vb2) hash(a2) eq(a2,a) eq(a,a2) eq(va,va2) ",
+                "m1.entries == m2.entries = true | hash(b2) eq(a,b2) eq(b,b2) eq(vb,vb2) \
+                 hash(a2) eq(a,a2) eq(va,va2) ",
+            ),
+            Divergence::native_behaviour(
+                "e1 == e2 = true | eq(a,a2) eq(va,va2) ",
+                "e1 == e2 = true | eq(a2,a) eq(va2,va) ",
+            ),
+            Divergence::native_behaviour(
+                "pm == pm2 = false | hash(x) throw(x) ",
+                "pm == pm2 = threw NullPointerException: null | hash(y) throw(x) ",
+            ),
+            Divergence::native_behaviour(
+                "ps == ps2 = false | hash(t) throw(t) ",
+                "ps == ps2 = threw NullPointerException: null | hash(t) throw(s) ",
+            ),
+            Divergence::native_behaviour(
+                "c1 == c2 = threw ConcurrentModificationException: null | ",
+                "c1 == c2 = true | ",
+            ),
+        ],
+    );
+}
+
+#[test]
+fn every_built_in_companion_is_one_object_of_its_own() {
+    run_driver_against_kotlin("companion_objects");
+}
+
+#[test]
+fn a_map_compared_with_the_programs_map_fails_naming_it() {
+    run_driver_expecting_failure(
+        "map_equality_program_map",
+        "krusty: comparing with the program's Map ProgramMap, whose members this runtime cannot \
+         call\n",
+    );
+}
+
+#[test]
+fn a_map_lookup_reads_the_arrays_a_callback_cleared() {
+    // Kotlin/Native's HashMap
+    // (kotlin-native/runtime/src/main/kotlin/kotlin/collections/HashMap.kt, JetBrains/kotlin
+    // v2.4.10) has no chains: findKey and addKey read the hash array and keysArray afresh at every
+    // probe, and clear() empties both, so a lookup whose first comparison cleared the map finds an
+    // empty slot next and answers null, one that refilled it finds the refilled key, a removal
+    // finds nothing to remove, and a put claims the slot after the cleared one, where a later
+    // lookup, starting at the key's own slot, does not reach it.
+    run_driver_against_kotlin_with(
+        "map_chain_callback",
+        &[
+            Divergence::native_behaviour(
+                "HashMap get clearing: B {} size=0",
+                "HashMap get clearing: null {} size=0",
+            ),
+            Divergence::native_behaviour(
+                "HashMap get clearing and refilling: B {c=C, d=D} size=2",
+                "HashMap get clearing and refilling: D {c=C, d=D} size=2",
+            ),
+            Divergence::native_behaviour(
+                "HashMap containsKey clearing: true {} size=0",
+                "HashMap containsKey clearing: false {} size=0",
+            ),
+            Divergence::native_behaviour(
+                "HashMap remove clearing: B {} size=-1",
+                "HashMap remove clearing: null {} size=0",
+            ),
+            Divergence::native_behaviour(
+                "HashMap put clearing: null {} size=1",
+                "HashMap put clearing: null {c=C} size=1",
+            ),
+            Divergence::native_behaviour(
+                "HashMap get after put clearing: null {} size=1",
+                "HashMap get after put clearing: null {c=C} size=1",
+            ),
+            Divergence::native_behaviour(
+                "LinkedHashMap get clearing: B {} size=0",
+                "LinkedHashMap get clearing: null {} size=0",
+            ),
+            Divergence::native_behaviour(
+                "LinkedHashMap get clearing and refilling: B {c=C, d=D} size=2",
+                "LinkedHashMap get clearing and refilling: D {c=C, d=D} size=2",
+            ),
+            Divergence::native_behaviour(
+                "LinkedHashMap containsKey clearing: true {} size=0",
+                "LinkedHashMap containsKey clearing: false {} size=0",
+            ),
+            Divergence::native_behaviour(
+                "LinkedHashMap remove clearing: B {} size=-1",
+                "LinkedHashMap remove clearing: null {} size=0",
+            ),
+        ],
+    );
+}
+
+#[test]
+fn a_map_iterator_is_kotlin_natives_class_for_what_it_hands_out() {
+    // Kotlin/Native's iterators are HashMap.KeysItr, ValuesItr and EntriesItr under the open class
+    // HashMap.Itr, for either spelling of a map or a set, since LinkedHashMap and LinkedHashSet
+    // are type aliases (kotlin-native/runtime/src/main/kotlin/kotlin/collections/HashMap.kt,
+    // JetBrains/kotlin v2.4.10).
+    run_driver_against_kotlin_with(
+        "map_iterator_identity",
+        &[
+            Divergence::native_behaviour(
+                "HashMap: java.util.HashMap.EntryIterator EntryIterator \
+                 super=java.util.HashMap.HashIterator true",
+                "HashMap: kotlin.collections.HashMap.EntriesItr EntriesItr \
+                 super=kotlin.collections.HashMap.Itr true",
+            ),
+            Divergence::native_behaviour(
+                "HashMap.keys: java.util.HashMap.KeyIterator KeyIterator \
+                 super=java.util.HashMap.HashIterator true",
+                "HashMap.keys: kotlin.collections.HashMap.KeysItr KeysItr \
+                 super=kotlin.collections.HashMap.Itr true",
+            ),
+            Divergence::native_behaviour(
+                "HashMap.values: java.util.HashMap.ValueIterator ValueIterator \
+                 super=java.util.HashMap.HashIterator true",
+                "HashMap.values: kotlin.collections.HashMap.ValuesItr ValuesItr \
+                 super=kotlin.collections.HashMap.Itr true",
+            ),
+            Divergence::native_behaviour(
+                "HashMap.entries: java.util.HashMap.EntryIterator EntryIterator \
+                 super=java.util.HashMap.HashIterator true",
+                "HashMap.entries: kotlin.collections.HashMap.EntriesItr EntriesItr \
+                 super=kotlin.collections.HashMap.Itr true",
+            ),
+            Divergence::native_behaviour(
+                "LinkedHashMap: java.util.LinkedHashMap.LinkedEntryIterator \
+                 LinkedEntryIterator super=java.util.LinkedHashMap.LinkedHashIterator true",
+                "LinkedHashMap: kotlin.collections.HashMap.EntriesItr EntriesItr \
+                 super=kotlin.collections.HashMap.Itr true",
+            ),
+            Divergence::native_behaviour(
+                "LinkedHashMap.keys: java.util.LinkedHashMap.LinkedKeyIterator \
+                 LinkedKeyIterator super=java.util.LinkedHashMap.LinkedHashIterator true",
+                "LinkedHashMap.keys: kotlin.collections.HashMap.KeysItr KeysItr \
+                 super=kotlin.collections.HashMap.Itr true",
+            ),
+            Divergence::native_behaviour(
+                "LinkedHashMap.values: java.util.LinkedHashMap.LinkedValueIterator \
+                 LinkedValueIterator super=java.util.LinkedHashMap.LinkedHashIterator true",
+                "LinkedHashMap.values: kotlin.collections.HashMap.ValuesItr ValuesItr \
+                 super=kotlin.collections.HashMap.Itr true",
+            ),
+            Divergence::native_behaviour(
+                "LinkedHashMap.entries: java.util.LinkedHashMap.LinkedEntryIterator \
+                 LinkedEntryIterator super=java.util.LinkedHashMap.LinkedHashIterator true",
+                "LinkedHashMap.entries: kotlin.collections.HashMap.EntriesItr EntriesItr \
+                 super=kotlin.collections.HashMap.Itr true",
+            ),
+            Divergence::native_behaviour(
+                "HashSet: java.util.HashMap.KeyIterator KeyIterator \
+                 super=java.util.HashMap.HashIterator true",
+                "HashSet: kotlin.collections.HashMap.KeysItr KeysItr \
+                 super=kotlin.collections.HashMap.Itr true",
+            ),
+            Divergence::native_behaviour(
+                "LinkedHashSet: java.util.LinkedHashMap.LinkedKeyIterator LinkedKeyIterator \
+                 super=java.util.LinkedHashMap.LinkedHashIterator true",
+                "LinkedHashSet: kotlin.collections.HashMap.KeysItr KeysItr \
+                 super=kotlin.collections.HashMap.Itr true",
+            ),
+            Divergence::native_behaviour(
+                "empty HashMap.keys: java.util.HashMap.KeyIterator KeyIterator \
+                 super=java.util.HashMap.HashIterator true",
+                "empty HashMap.keys: kotlin.collections.HashMap.KeysItr KeysItr \
+                 super=kotlin.collections.HashMap.Itr true",
+            ),
+        ],
+    );
+}
+
 fn compiled_build_script() -> PathBuf {
     static BUILD_SCRIPT: OnceLock<PathBuf> = OnceLock::new();
     BUILD_SCRIPT
@@ -1134,6 +1786,8 @@ fn a_missing_runtime_compiler_leaves_the_native_target_unavailable() {
         format!(
             "cargo:rerun-if-changed=src/native/runtime/krusty_rt.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_collections.c\n\
+             cargo:rerun-if-changed=src/native/runtime/krusty_maps.c\n\
+             cargo:rerun-if-changed=src/native/runtime/krusty_classes.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_fp.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_gc.c\n\
              cargo:rerun-if-changed=src/native/runtime/krusty_start.c\n\
@@ -1185,6 +1839,8 @@ fn a_failing_runtime_compiler_fails_the_build() {
         String::from_utf8(output.stdout).expect("build-script stdout is UTF-8"),
         "cargo:rerun-if-changed=src/native/runtime/krusty_rt.c\n\
          cargo:rerun-if-changed=src/native/runtime/krusty_collections.c\n\
+         cargo:rerun-if-changed=src/native/runtime/krusty_maps.c\n\
+         cargo:rerun-if-changed=src/native/runtime/krusty_classes.c\n\
          cargo:rerun-if-changed=src/native/runtime/krusty_fp.c\n\
          cargo:rerun-if-changed=src/native/runtime/krusty_gc.c\n\
          cargo:rerun-if-changed=src/native/runtime/krusty_start.c\n\

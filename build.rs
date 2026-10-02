@@ -53,6 +53,8 @@ const COMMON_FLAGS: &[&str] = &[
 const SOURCES: &[&str] = &[
     "krusty_rt.c",
     "krusty_collections.c",
+    "krusty_maps.c",
+    "krusty_classes.c",
     "krusty_fp.c",
     "krusty_gc.c",
     "krusty_start.c",
