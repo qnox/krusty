@@ -4439,7 +4439,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   physical owner and segment only after JVM placement is final. The declaration's own lambda body
   remains unchanged. A nested declaration closure that uses the reified parameter is a class too
   (`defineNested$1$nested$1`), not an invokedynamic; the call site still receives its own
-  specialized class.
+  specialized class. Each of those classes is a `FunctionN` whose `invoke` holds the lambda body.
+  The file facade does not keep an implementation method for it. The copy is named from the
+  caller's final placement (`caller$$inlined$callee$N`) only after lifted names exist; until then
+  it has a private identity so it cannot collide with the declaration class.
   A local delegated property keeps the checker-selected declaration accessor plan across those
   copies. Kotlin emits that convention helper with the declaration's erased signature and reuses
   it across call-site type substitutions; common lowering therefore specializes the copied access

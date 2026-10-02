@@ -566,33 +566,41 @@ fun box(): String {\n\
         .find(|(_, class)| class.ends_with("$$inlined$defineFunc$1"))
         .expect("the inlined class pair")
         .0;
-    let krusty_inlined = &inlined.1;
-    assert!(
-        krusty_inlined
-            .windows(6)
-            .any(|window| window == b"invoke".as_slice()),
-        "the call-site class implements invoke"
-    );
     let implementation = b"defineFunc$lambda$0$box$1";
-    assert!(
-        krusty_inlined
-            .windows(implementation.len())
-            .any(|window| window == implementation),
-        "the call-site class calls the specialized implementation"
-    );
+    for (label, bytes) in [("kotlinc", &inlined.0), ("krusty", &inlined.1)] {
+        assert!(
+            bytes.windows(6).any(|window| window == b"invoke"),
+            "{label}: the call-site class implements invoke"
+        );
+        assert!(
+            bytes.windows(5).any(|window| window == b"Token"),
+            "{label}: the call-site class checks Token"
+        );
+        assert!(
+            !bytes
+                .windows(implementation.len())
+                .any(|window| window == implementation),
+            "{label}: the call-site class holds the body, not a facade implementation"
+        );
+    }
     let facade = pairs
         .iter()
         .zip(classes)
         .find(|(_, class)| *class == "EscapingReifiedClassKt")
         .expect("the file facade")
         .0;
-    assert!(
-        facade
-            .1
-            .windows(5)
-            .any(|window| window == b"Token".as_slice()),
-        "the specialized implementation checks Token"
-    );
+    for (label, bytes) in [("kotlinc", &facade.0), ("krusty", &facade.1)] {
+        assert!(
+            bytes.windows(5).any(|window| window == b"Token"),
+            "{label}: the facade names Token"
+        );
+        assert!(
+            !bytes
+                .windows(implementation.len())
+                .any(|window| window == implementation),
+            "{label}: the facade does not keep the lambda implementation"
+        );
+    }
 }
 
 const SPECIALIZED_SUSPEND_LAMBDA: &str = "\

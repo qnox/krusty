@@ -308,6 +308,9 @@ fn run_backend_passes_after_plugins(
         lambda_modes,
         &mut facts.emit_time_machines,
     );
+    // A specialized reified lambda is already a function class. Its `$$inlined$` name depends on
+    // the caller's lifted spelling, which exists only now.
+    crate::jvm::lambda_classes::rename_specialized_reified_classes(ir, facade, lambda_modes);
     // With placement and lifted caller names final, realize JVM-only implementation spellings.
     crate::jvm::debug_local_names::realize_lambda_implementation_names(
         ir,
@@ -983,7 +986,7 @@ impl Backend for JvmBackend {
         // A lambda the metafactory cannot adapt is a class of its own; decided before any lambda
         // is numbered, as kotlinc numbers only the lambdas it lifts.
         if self.lambda_modes.lambdas == crate::jvm::ir_emit::LambdaMode::Indy {
-            crate::jvm::lambda_classes::realize(&mut file.ir, &file.classifiers);
+            crate::jvm::lambda_classes::realize(&mut file.ir, &file.classifiers, &facade);
         }
         if crate::jvm::local_delegate_accessors::realize(
             &mut file.ir,

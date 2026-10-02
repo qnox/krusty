@@ -31,10 +31,15 @@ pub(super) struct Site {
 /// its own: a plain Kotlin function value the source's naming walk named, not one an inline call's
 /// splice consumes.
 pub(super) fn site(ir: &IrFile, fid: FunId) -> Option<Site> {
-    site_in_roots(ir, fid, true)
+    site_in_roots(ir, fid, true, None)
 }
 
-fn site_in_roots(ir: &IrFile, fid: FunId, every_emitted_root: bool) -> Option<Site> {
+fn site_in_roots(
+    ir: &IrFile,
+    fid: FunId,
+    every_emitted_root: bool,
+    class_name: Option<TypeName>,
+) -> Option<Site> {
     let mut sites = reachable_lambdas(ir, fid, every_emitted_root).into_iter();
     let (Some(node), None) = (sites.next(), sites.next()) else {
         crate::trace_compiler!(
@@ -54,7 +59,13 @@ fn site_in_roots(ir: &IrFile, fid: FunId, every_emitted_root: bool) -> Option<Si
     else {
         return None;
     };
-    let class = crate::jvm::local_class_names::callable_reference_name(ir, node)?;
+    // A specialized copy shares the source lambda's naming provenance. Using that name here would
+    // declare the call-site class as the declaration class. The copy takes a private identity until
+    // lifted caller names exist; `rename_specialized_reified_classes` applies the `$$inlined$` name.
+    let class = match class_name {
+        Some(class) => class,
+        None => crate::jvm::local_class_names::callable_reference_name(ir, node)?,
+    };
     let function_type = ir.logical_types.get(&node).copied()?;
     let fits = usize::from(*arity) <= crate::jvm::names::MAX_NUMBERED_FUNCTION_ARITY;
     (fits && !inline_call_argument(ir, node)).then(|| Site {
@@ -170,7 +181,11 @@ struct Capture {
 /// A lambda of a shape this step does not realize is recorded instead, so emitting it as an
 /// `invokedynamic`, which cannot link, is an error rather than a silent fallback. A lambda an inline
 /// call's splice consumes is recorded too: the splice emits no value for it.
-pub(super) fn realize(ir: &mut IrFile, classifiers: &dyn crate::types::ClassifierFactSource) {
+pub(super) fn realize(
+    ir: &mut IrFile,
+    classifiers: &dyn crate::types::ClassifierFactSource,
+    facade: &str,
+) {
     let lambdas = ir
         .exprs
         .iter()
@@ -209,7 +224,15 @@ pub(super) fn realize(ir: &mut IrFile, classifiers: &dyn crate::types::Classifie
         {
             continue;
         }
-        match class_shape(ir, fid, every_emitted_root, runtime_reified) {
+        let class_name = (runtime_reified && ir.specialized_functions.contains_key(&fid))
+            .then(|| specialized_reified_placeholder(facade, fid));
+        match class_shape(
+            ir,
+            fid,
+            every_emitted_root,
+            runtime_reified,
+            class_name,
+        ) {
             Ok((site, body, captures)) => realize_class(ir, fid, body, &site, signature, &captures),
             Err(shape) => {
                 crate::trace_compiler!(
@@ -229,8 +252,9 @@ fn class_shape(
     fid: FunId,
     every_emitted_root: bool,
     allow_nested_lambdas: bool,
+    class_name: Option<TypeName>,
 ) -> Result<(Site, ExprId, Vec<Capture>), &'static str> {
-    let site = site_in_roots(ir, fid, every_emitted_root)
+    let site = site_in_roots(ir, fid, every_emitted_root, class_name)
         .ok_or("no single named value outside an inline call")?;
     let body = ir.functions[fid as usize].body.ok_or("no body")?;
     if nests_lifted_functions_with(ir, body, allow_nested_lambdas) {
@@ -498,6 +522,40 @@ fn declare_class(
         bridge: crate::ir::IrInvokeBridge::logical(signature.params.clone(), signature.ret),
     });
     ir.add_class(class)
+}
+
+/// A temporary identity for a specialized reified lambda. `;` cannot occur in a JVM internal name,
+/// so the placeholder cannot collide with a source class or be emitted.
+fn specialized_reified_placeholder(facade: &str, function: FunId) -> TypeName {
+    crate::types::type_name(&format!("{facade};specialized-reified#{function}"))
+}
+
+/// Name each specialized reified lambda class from the caller's final placement.
+///
+/// Realization runs before lifted names exist, so the class is born under
+/// [`specialized_reified_placeholder`]. Suspend copies are named by their own pass.
+pub(super) fn rename_specialized_reified_classes(
+    ir: &mut IrFile,
+    facade: &str,
+    modes: crate::jvm::ir_emit::LambdaModes,
+) {
+    let pending = ir
+        .classes
+        .iter()
+        .filter_map(|class| {
+            let invoke = class.lambda.as_ref()?.invoke;
+            let from = class.fq_name_id();
+            (from == specialized_reified_placeholder(facade, invoke)).then_some((invoke, from))
+        })
+        .collect::<Vec<_>>();
+    for (function, from) in pending {
+        let name = crate::jvm::ir_emit::lambda_class_names::specialized_name(
+            ir, function, facade, modes,
+        )
+        .expect("a specialized reified lambda retains complete caller provenance");
+        let names = std::collections::HashMap::from([(from, crate::types::type_name(&name))]);
+        ir.remap_classifier_identities(&names);
+    }
 }
 
 /// Make the lifted lambda function the class's `invoke` over the lambda's own parameters, taking
