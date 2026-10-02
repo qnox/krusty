@@ -16,9 +16,10 @@ impl Emitter<'_> {
         use IrBinOp::*;
         match self.ir.expr(expression) {
             IrExpr::Equality { op, mode, lhs, rhs } => {
-                (*mode != crate::ir::EqualityMode::Structural
-                    && matches!(op, Eq | Ne)
-                    && self.value_ty(*lhs).is_jvm_scalar())
+                self.unsigned_mixed_equality_branches(*op, *lhs, *rhs)
+                    || (*mode != crate::ir::EqualityMode::Structural
+                        && matches!(op, Eq | Ne)
+                        && self.value_ty(*lhs).is_jvm_scalar())
                     || (matches!(op, Eq | Ne)
                         && (matches!(self.ir.expr(*lhs), IrExpr::Const(IrConst::Null))
                             || matches!(self.ir.expr(*rhs), IrExpr::Const(IrConst::Null))))
@@ -147,6 +148,11 @@ impl Emitter<'_> {
             }
             return;
         }
+        if matches!(op, IrBinOp::Eq | IrBinOp::Ne)
+            && self.emit_unsigned_mixed_equality_value(op, lhs, rhs, code)
+        {
+            return;
+        }
         let f = code.new_label();
         // Every comparison that needs a conditional branch goes through the same classifier and
         // operand emitter used by `if`/`while`/`when`. Value position merely supplies a false target
@@ -178,7 +184,7 @@ impl Emitter<'_> {
 
     /// Negate the Boolean on the operand stack as kotlinc's `Not` materializes it:
     /// `ifne F; iconst_1; goto E; F: iconst_0; E:`.
-    fn negate_material_bool(&mut self, code: &mut CodeBuilder) {
+    pub(super) fn negate_material_bool(&mut self, code: &mut CodeBuilder) {
         let f = code.new_label();
         code.ifne(f);
         self.materialize_cmp_bool(f, code);
@@ -239,6 +245,11 @@ impl Emitter<'_> {
         jt: bool,
         code: &mut CodeBuilder,
     ) {
+        if matches!(op, IrBinOp::Eq | IrBinOp::Ne)
+            && self.emit_unsigned_mixed_equality_branch(op, lhs, rhs, target, jt, code)
+        {
+            return;
+        }
         if self.emit_non_structural_compare_branch(op, lhs, rhs, mode, target, jt, code) {
             return;
         }

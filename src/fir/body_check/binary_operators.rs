@@ -80,6 +80,14 @@ impl BodyFirChecker<'_> {
         let Some((nullable, primitive, primitive_ty, nullable_first)) = operands else {
             return self.builtin_binary_expression(expression, source_operation, lhs, rhs);
         };
+        // Unsigned values do not have one JVM slot. A parameter or property of `UInt` is the
+        // primitive carrier, while `UInt?` and a `FunctionN` argument are the `kotlin/UInt` box.
+        // Unboxing here would compare those as carriers and swap the source operands. The
+        // comparison stays in source order; the JVM backend picks `areEqual`, `equals-impl`, or a
+        // null-safe unbox from the slots it emits.
+        if primitive_ty.is_unsigned() {
+            return self.builtin_binary_expression(expression, source_operation, lhs, rhs);
+        }
         Ok(FirExprKind::NullablePrimitiveComparison {
             operation,
             nullable: self.expression(nullable)?,
