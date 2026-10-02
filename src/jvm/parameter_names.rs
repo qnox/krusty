@@ -6,7 +6,7 @@
 
 use crate::ir::{
     IrCapturedDeclaration, IrCapturedReceiver, IrCapturingCallable, IrFile,
-    IrGeneratedParameterRole, IrParameterIdentity, IrParameterRole,
+    IrGeneratedParameterRole, IrLambdaForm, IrParameterIdentity, IrParameterRole,
 };
 use crate::jvm::anonymous_context_labels;
 use crate::jvm::capture_names::capture_parameter_local;
@@ -105,7 +105,7 @@ pub(super) fn function_locals(
     types: &[crate::types::Ty],
 ) -> Option<Vec<Option<String>>> {
     let identities = ir.function_parameter_identities(function)?;
-    let anonymous = if anonymous_context_parameters_are_locals() {
+    let anonymous = if anonymous_context_locals(ir, function) {
         let semantic_types = function_semantic_parameter_types(ir, function, identities, types);
         disambiguated_anonymous_context_labels(identities, &semantic_types)
     } else {
@@ -124,7 +124,17 @@ pub(super) fn function_locals(
 
 /// Kotlin 2.4.20 names an anonymous context parameter by its generated label in the IR itself, so
 /// the label is also its local-variable name; earlier releases left it unnamed there, publishing the
-/// label only to reflection and null assertions.
+/// label only to reflection and null assertions. A lambda literal's own context-function parameter
+/// stays unnamed in the method's `LocalVariableTable` at every version: the label is only the
+/// null-check message.
+fn anonymous_context_locals(ir: &IrFile, function: u32) -> bool {
+    anonymous_context_parameters_are_locals()
+        && ir
+            .lambda_origins
+            .get(&function)
+            .is_none_or(|origin| origin.form != IrLambdaForm::Literal)
+}
+
 fn anonymous_context_parameters_are_locals() -> bool {
     crate::kotlin_version::at_least(crate::kotlin_version::KotlinVersion::V2_4_20)
 }
@@ -684,6 +694,73 @@ mod tests {
             assert_eq!(metadata(&parameter), Some(name));
             assert_eq!(assertion(&parameter), Some(name.to_string()));
         }
+    }
+
+    #[test]
+    fn a_lambda_literal_quotes_its_context_parameter_without_a_local_row() {
+        let receiver = crate::types::Ty::obj("Receiver");
+        let mut ir = IrFile::default();
+        let function = ir.add_fun(IrFunction {
+            name: "functionType$lambda$0".to_string(),
+            params: vec![receiver],
+            ret: crate::types::Ty::Unit,
+            body: None,
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: vec![None],
+        });
+        ir.fn_params.insert(
+            function,
+            FnParamInfo::identities(vec![IrParameterIdentity::anonymous_context_parameter(0)]),
+        );
+        ir.lambda_origins.insert(
+            function,
+            crate::ir::IrLambdaOrigin {
+                identity: 0,
+                lexical_owner: None,
+                enclosing_name: "functionType".into(),
+                binding_name: None,
+                ordinal: 0,
+                implementation_name: "functionType".into(),
+                implementation_ordinal: 0,
+                receiver_parameter: None,
+                label: None,
+                form: IrLambdaForm::Literal,
+                class_provenance: None,
+            },
+        );
+        assert_eq!(
+            function_locals(&ir, function, &[receiver]),
+            Some(vec![None])
+        );
+        assert_eq!(
+            function_assertions(&ir, function, &[receiver]),
+            Some(vec![Some("$context-Receiver".to_string())])
+        );
+
+        let mut declared = IrFile::default();
+        let declared_function = declared.add_fun(IrFunction {
+            name: "anonymous".to_string(),
+            params: vec![receiver],
+            ret: crate::types::Ty::Unit,
+            body: None,
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: vec![None],
+        });
+        declared.fn_params.insert(
+            declared_function,
+            FnParamInfo::identities(vec![IrParameterIdentity::anonymous_context_parameter(0)]),
+        );
+        let declared_local = if anonymous_context_parameters_are_locals() {
+            Some("$context-Receiver".to_string())
+        } else {
+            None
+        };
+        assert_eq!(
+            function_locals(&declared, declared_function, &[receiver]),
+            Some(vec![declared_local])
+        );
     }
 
     #[test]

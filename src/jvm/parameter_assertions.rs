@@ -60,7 +60,8 @@ fn realize_function(ir: &mut IrFile, function: FunId) {
 }
 
 /// kotlinc's `generateNonNullAssertions` skips a private function unless it is the local function
-/// of a lambda literal (`LOCAL_FUNCTION_FOR_LAMBDA`): that one guards its own receiver and value
+/// of a lambda literal (`LOCAL_FUNCTION_FOR_LAMBDA`): that one guards its own receiver, the
+/// anonymous context parameters of the function type it is checked against, and its value
 /// parameters, a bare `_` or destructuring pattern included, but not the values it captures. An
 /// anonymous function (`fun(…) {}`) lowers to an ordinary private local function and guards
 /// nothing, and a suspend lambda becomes a class whose resumption arguments are null.
@@ -75,6 +76,7 @@ fn realize_lambda(ir: &mut IrFile, function: FunId) {
         .iter()
         .map(|identity| match identity.role {
             IrParameterRole::ExtensionReceiver
+            | IrParameterRole::AnonymousContextParameter { .. }
             | IrParameterRole::UnusedValue
             | IrParameterRole::DestructuredValue => true,
             // The role decides the guard; the source name is only the message it quotes.

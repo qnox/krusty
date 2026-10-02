@@ -648,6 +648,9 @@ fn encode_type_with_parameter(
             if signature.has_receiver {
                 add_extension_function_annotation(&mut message, strings);
             }
+            if signature.context_count > 0 {
+                add_context_function_annotation(&mut message, strings, signature.context_count);
+            }
             if signature.suspend {
                 message.field_varint(1, 1); // Type.flags: SUSPEND_TYPE
             }
@@ -824,6 +827,34 @@ pub(crate) fn add_extension_function_annotation(message: &mut Pb, strings: &mut 
     let mut annotation = Pb::new();
     annotation.field_varint(1, annotation_id as u64);
     message.field_message(100, &annotation);
+}
+
+/// `@ContextFunctionTypeParams(count = N)` on a context function type. The count is the number of
+/// leading context parameters; they stay ordinary type arguments of `FunctionN`.
+pub(crate) fn add_context_function_annotation(
+    message: &mut Pb,
+    strings: &mut StringTable,
+    count: usize,
+) {
+    let annotation_id =
+        strings.class_id(crate::types::type_name("kotlin/ContextFunctionTypeParams"));
+    let mut value = Pb::new();
+    value.field_varint(1, 3); // Annotation.Argument.Value.Type.INT
+    value.field_varint(
+        2,
+        zigzag_i64(i64::try_from(count).expect("context count fits")),
+    );
+    let mut argument = Pb::new();
+    argument.field_varint(1, strings.local("count") as u64);
+    argument.field_message(2, &value);
+    let mut annotation = Pb::new();
+    annotation.field_varint(1, annotation_id as u64);
+    annotation.field_message(2, &argument);
+    message.field_message(100, &annotation);
+}
+
+fn zigzag_i64(value: i64) -> u64 {
+    ((value as u64) << 1) ^ ((value >> 63) as u64)
 }
 
 pub(crate) fn encode_metadata_type_parameter(

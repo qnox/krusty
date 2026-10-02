@@ -10472,9 +10472,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **A lambda's implementation guards its own parameters** (kotlinc's `generateNonNullAssertions`,
   which skips a private function unless it is `LOCAL_FUNCTION_FOR_LAMBDA`). The private static
   method of a lambda literal checks each non-null parameter whose JVM type is not primitive with
-  `Intrinsics.checkNotNullParameter`: its extension receiver and its value parameters, but not the
-  values it captures. An anonymous function (`fun(…) {}`), a private `LOCAL_FUNCTION` for kotlinc,
-  guards nothing, and a suspend lambda (a class) is left alone. `Unit` is a reference type here, for
+  `Intrinsics.checkNotNullParameter`: its extension receiver, the anonymous context parameters of
+  the function type it is checked against, and its value parameters, but not the values it captures.
+  That context parameter's guard quotes the same label a declaration uses (`$context-Receiver`, and
+  `$context-Token$1` when the label repeats). The lambda method still writes no `LocalVariableTable`
+  row for it; a declaration gains that row at 2.4.20. An anonymous function (`fun(…) {}`), a
+  private `LOCAL_FUNCTION` for kotlinc, guards nothing, and a suspend lambda (a class) is left
+  alone. `Unit` is a reference type here, for
   every function (`fun f(u: Unit)` is guarded too). The message is the parameter's name: a bare `_`
   is `<unused var>`, a destructuring pattern `<destruct>`, and the receiver its local name
   (`$this$<label>`, or `<this>`). An anonymous function's bare `_` parameter is unused too, so it has
@@ -10489,7 +10493,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   callable's own scope block (`IrFile::callable_scopes`) starts no line of its own and, in value
   position too, keeps its locals open to the method's end, so a lambda that returns a value
   covers its return with them as kotlinc does. Test: `tests/lambda_parameter_checks_e2e.rs`
-  (separate cases for a `Unit` parameter and destructured parameters).
+  (separate cases for a `Unit` parameter and destructured parameters) and
+  `tests/captured_receiver_names_e2e.rs`.
 
 - **A `break`/`continue` marks its own line on a `nop` before it jumps** (kotlinc's
   `visitBreakContinue`), whether or not it leaves a `try`; the same `nop` is the instruction that
