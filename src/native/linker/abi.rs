@@ -70,6 +70,7 @@ const RISCV_STACK_ALIGN: u64 = 16;
 
 const TAG_RISCV_STACK_ALIGN: u64 = 4;
 const TAG_RISCV_ARCH: u64 = 5;
+const TAG_RISCV_UNALIGNED_ACCESS: u64 = 6;
 const TAG_RISCV_PRIV_SPEC: u64 = 8;
 const TAG_RISCV_PRIV_SPEC_MINOR: u64 = 10;
 const TAG_RISCV_PRIV_SPEC_REVISION: u64 = 12;
@@ -263,6 +264,15 @@ fn riscv_attributes(input: &str, file: &Elf) -> Result<RiscvAttributes, ProgramL
                         TAG_RISCV_ARCH => {
                             let isa = reader.read_string().map_err(malformed)?;
                             found.arch = Some(String::from_utf8_lossy(isa).into_owned());
+                        }
+                        TAG_RISCV_UNALIGNED_ACCESS => {
+                            let value = reader.read_integer().map_err(malformed)?;
+                            if !matches!(value, 0 | 1) {
+                                return Err(ProgramLinkError::IncompatibleAbi {
+                                    input: input.to_string(),
+                                    mismatch: AbiMismatch::RiscvUnknownUnalignedAccess(value),
+                                });
+                            }
                         }
                         TAG_RISCV_PRIV_SPEC => {
                             found.priv_spec_major = Some(reader.read_integer().map_err(malformed)?);
@@ -518,6 +528,22 @@ mod tests {
             incompatible(0, AbiMismatch::RiscvArch("rv32i2p1_m2p0".to_string())).to_string(),
             "input 0 is built for `rv32i2p1_m2p0` (Tag_RISCV_arch), which is not an RV64I \
              instruction set"
+        );
+    }
+
+    #[test]
+    fn a_riscv64_object_with_an_undefined_unaligned_access_policy_is_refused() {
+        let object = with_attributes(&[(TAG_RISCV_UNALIGNED_ACCESS, Attribute::Integer(2))]);
+        let error = link(Arch::Riscv64, &[&object])
+            .expect_err("an undefined unaligned-access policy must not be discarded");
+        assert_eq!(
+            error,
+            incompatible(0, AbiMismatch::RiscvUnknownUnalignedAccess(2))
+        );
+        assert_eq!(
+            error.to_string(),
+            "input 0 sets Tag_RISCV_unaligned_access to undefined value 2; the psABI defines only \
+             0 (no unaligned accesses) and 1 (may use unaligned accesses)"
         );
     }
 

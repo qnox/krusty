@@ -77,6 +77,8 @@ pub enum AbiMismatch {
     RiscvStackAlign { found: u64, expected: u64 },
     /// `Tag_RISCV_arch` names an instruction set that is not RV64I.
     RiscvArch(String),
+    /// `Tag_RISCV_unaligned_access` carries a value the psABI does not define.
+    RiscvUnknownUnalignedAccess(u64),
     /// Deprecated `Tag_RISCV_priv_spec*` attributes name different versions.
     RiscvPrivSpec {
         found: RiscvPrivSpec,
@@ -195,6 +197,11 @@ impl std::fmt::Display for AbiMismatch {
             Self::RiscvArch(isa) => write!(
                 formatter,
                 "is built for `{isa}` (Tag_RISCV_arch), which is not an RV64I instruction set"
+            ),
+            Self::RiscvUnknownUnalignedAccess(value) => write!(
+                formatter,
+                "sets Tag_RISCV_unaligned_access to undefined value {value}; the psABI defines \
+                 only 0 (no unaligned accesses) and 1 (may use unaligned accesses)"
             ),
             Self::RiscvPrivSpec {
                 found,

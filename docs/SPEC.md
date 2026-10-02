@@ -9484,8 +9484,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   0x4 linked against the runtime's 0x5 objects gives 0x5. `.riscv.attributes` is read as well:
   `Tag_RISCV_stack_align` must be 16 and `Tag_RISCV_arch` must start `rv64i` (its extensions are
   not compared: a linker merges them, and whether the machine has them is the deployment's
-  concern), and `Tag_RISCV_atomic_abi` A6C and A7, whose sequentially consistent loads and stores
-  use different fences, may not meet in one link. Undefined atomic-ABI values are errors.
+  concern). `Tag_RISCV_unaligned_access` accepts only its defined 0/1 policies and is then dropped
+  because the final executable has no attributes section. `Tag_RISCV_atomic_abi` A6C and A7, whose
+  sequentially consistent loads and stores use different fences, may not meet in one link.
+  Undefined unaligned-access and atomic-ABI values are errors.
   Explicitly different deprecated `Tag_RISCV_priv_spec*` version triples are incompatible.
   `Tag_RISCV_x3_reg_usage` is merged with missing/UNKNOWN value 0 allowed to adopt only the global
   pointer (1) or shadow-stack (2) use; every other pair of different uses is incompatible. An
@@ -9500,6 +9502,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `a_riscv64_object_with_unknown_flags_is_refused`, `riscv64_attributes_for_the_target_link`,
   `a_riscv64_object_assuming_another_stack_alignment_is_refused`,
   `a_riscv64_object_for_another_base_isa_is_refused`,
+  `a_riscv64_object_with_an_undefined_unaligned_access_policy_is_refused`,
   `riscv64_objects_for_different_privileged_specifications_are_refused`,
   `riscv64_objects_with_conflicting_atomic_abis_are_refused`,
   `a_riscv64_object_with_an_undefined_atomic_abi_is_refused`,
