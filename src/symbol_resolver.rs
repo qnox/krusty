@@ -6371,8 +6371,7 @@ fn best_by_args_at_priority_with_ties<'a>(
 
     // Contextual nested calls use this same comparison. Keeping them in a fixed-only pre-pass
     // would discard an applicable vararg element shape before specificity can compare it.
-    match overload_selection::select_fixed_or_more_specific_vararg(cands, args, &fits, &specificity)
-    {
+    match overload_selection::select_fixed_or_more_specific_vararg(cands, args, fits, specificity) {
         CandidateSelectionWithTies::Selected(candidate) => {
             return CandidateSelectionWithTies::Selected(candidate);
         }
