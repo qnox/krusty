@@ -55,17 +55,26 @@ impl Checker<'_> {
         inferred_return: Ty,
         inherits_override: bool,
     ) {
-        if function.ret.is_none()
-            && !inherits_override
-            && matches!(function.body, FunBody::Expr(expression)
-                if !matches!(self.file.expr(expression), Expr::Throw { .. }))
-            && inferred_return == Ty::Nothing
-        {
-            self.diags.error(
-                function.name_span,
-                "return type 'Nothing' needs to be specified explicitly.".to_string(),
-            );
+        if function.ret.is_some() || inherits_override || inferred_return != Ty::Nothing {
+            return;
         }
+        // Ordinary bodies are released after signature inference. The result is already
+        // `Nothing`; only a body that is still in the arena can show that it is a `throw`.
+        let FunBody::Expr(expression) = function.body else {
+            return;
+        };
+        if self
+            .file
+            .expr_arena
+            .get(expression.0 as usize)
+            .is_some_and(|body| matches!(body, Expr::Throw { .. }))
+        {
+            return;
+        }
+        self.diags.error(
+            function.name_span,
+            "return type 'Nothing' needs to be specified explicitly.".to_string(),
+        );
     }
 
     /// True if evaluating `e` always transfers control away (a `return`, or a block/if whose every
