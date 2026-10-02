@@ -18,14 +18,11 @@ fn index_workspace_files_returns_exact_diagnostics_and_clears_the_latch() {
     let options = krusty_lsp::LspOptions::parse(std::iter::empty::<String>()).unwrap();
     let classpath = options.effective_classpath();
     // The unit-test executable is the Cargo harness, which rejects `--analysis-worker`. The
-    // supervisor binary is the one `index_workspace_files` execs in production.
-    let mut executable = std::env::current_exe().unwrap();
-    assert!(
-        executable.pop() && executable.pop(),
-        "test executable layout"
-    );
-    executable.push("krusty-lsp");
-    let worker = krusty_lsp::AnalysisWorker::spawn(executable, classpath).expect("analysis worker");
+    // supervisor binary is the one `index_workspace_files` execs in production. `cargo test --bin`
+    // does not uplift that binary; the coverage harness builds it and publishes the path.
+    let executable = supervisor_executable();
+    let worker = krusty_lsp::AnalysisWorker::spawn(executable.clone(), classpath)
+        .unwrap_or_else(|error| panic!("analysis worker {}: {error}", executable.display()));
     let mut host = WorkerHost::new(worker, options);
     assert!(!host.index_diagnostics_only);
 
@@ -55,4 +52,31 @@ fn index_workspace_files_returns_exact_diagnostics_and_clears_the_latch() {
         "interactive analysis after indexing must keep navigation indexes"
     );
     std::fs::remove_dir_all(directory).unwrap();
+}
+
+fn supervisor_executable() -> std::path::PathBuf {
+    if let Some(published) = std::env::var_os("KRUSTY_LSP_BIN") {
+        let published = std::path::PathBuf::from(published);
+        assert!(
+            published.is_file(),
+            "KRUSTY_LSP_BIN does not name the supervisor: {}",
+            published.display()
+        );
+        return published;
+    }
+    let current = std::env::current_exe().expect("current test executable");
+    let mut dir = current.clone();
+    for _ in 0..6 {
+        if !dir.pop() {
+            break;
+        }
+        let candidate = dir.join("krusty-lsp");
+        if candidate.is_file() {
+            return candidate;
+        }
+    }
+    panic!(
+        "krusty-lsp supervisor not found above {}; set KRUSTY_LSP_BIN to the built binary",
+        current.display()
+    );
 }
