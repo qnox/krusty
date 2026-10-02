@@ -413,6 +413,14 @@ pub(crate) fn members_in_hierarchy(
     }
 
     normalize_inherited_member_functions_with_family(source, &mut functions, intersection_family);
+    if intersection_family {
+        // Component order is not a hierarchy distance. A member inherited by the earliest
+        // component and a member declared on a later component are one slot; flattening the
+        // walk depth lets that selection see both instead of keeping only the shallower rung.
+        for function in &mut functions.overloads {
+            function.receiver_rank = 0;
+        }
+    }
     Callables::from_parts(functions, properties)
 }
 

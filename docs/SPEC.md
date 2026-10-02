@@ -2796,6 +2796,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   call members and properties and form callable references from either interface.
   When several components declare one member slot, the call uses the
   canonical-earliest component's declaration, including its default arguments.
+  A member that component inherits still occupies the slot ahead of a later
+  component's direct declaration.
   That union does not discard a supertype member an override still needs: an override
   that omits `operator` inherits it from `Comparable.compareTo` or `Iterable.iterator`.
   A public declaration approximates the intersection: unrelated classifiers become
