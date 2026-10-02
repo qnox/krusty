@@ -10,7 +10,7 @@
 //! Declarations are joined to metadata exclusively through their public [`KlibPublicIdSignature`].
 //! Source spellings, owner strings, and parameter names are never used as a substitute identity.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::klib::{KlibArchive, KlibError};
 
@@ -154,6 +154,7 @@ impl KlibIrInlineBodies {
 pub struct KlibIrBodies {
     defaults: KlibIrDefaults,
     inline: KlibIrInlineBodies,
+    public_declarations: HashSet<KlibPublicIdSignature>,
 }
 
 impl KlibIrBodies {
@@ -230,15 +231,31 @@ pub fn read_constant_defaults(archive: &KlibArchive) -> Result<KlibIrDefaults, K
     Ok(read_bodies(archive, DecodeMode::DefaultsOnly)?.defaults)
 }
 
+/// Decode every public declaration identity published by a KLIB's serialized IR.
+///
+/// The focused inventory does not interpret declaration bodies. It is used when a provider needs
+/// to authorize a semantic role from an exact dependency identity before joining that declaration
+/// to a target-specific realization.
+pub fn read_public_declaration_signatures(
+    archive: &KlibArchive,
+) -> Result<HashSet<KlibPublicIdSignature>, KlibIrDecodeError> {
+    Ok(read_bodies(archive, DecodeMode::PublicSignaturesOnly)?.public_declarations)
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum DecodeMode {
     DefaultsOnly,
     AllBodies,
+    PublicSignaturesOnly,
 }
 
 impl DecodeMode {
     fn reads_inline(self) -> bool {
         self == Self::AllBodies
+    }
+
+    fn reads_defaults(self) -> bool {
+        self != Self::PublicSignaturesOnly
     }
 }
 
@@ -402,6 +419,7 @@ fn decode_declaration(
                 decode_function(
                     file,
                     base,
+                    mode,
                     mode.reads_inline() && field.number == 6,
                     decoded,
                 )?;
@@ -419,7 +437,7 @@ fn decode_declaration(
                             1,
                             "accessor function base",
                         )?;
-                        decode_function(file, base, false, decoded)?;
+                        decode_function(file, base, mode, false, decoded)?;
                     }
                 }
             }
@@ -432,6 +450,7 @@ fn decode_declaration(
 fn decode_function(
     file: &IrFile<'_>,
     base: &[u8],
+    mode: DecodeMode,
     decode_inline: bool,
     decoded: &mut KlibIrBodies,
 ) -> Result<(), KlibIrDecodeError> {
@@ -462,6 +481,14 @@ fn decode_function(
             "function declaration base has no symbol",
         )
     })?;
+
+    let public_signature = file.public_signature(symbol)?;
+    if let Some(signature) = public_signature.as_ref() {
+        decoded.public_declarations.insert(signature.clone());
+    }
+    if !mode.reads_defaults() {
+        return Ok(());
+    }
 
     let mut values = Vec::new();
     let mut parameter_symbols = Vec::new();
@@ -523,7 +550,7 @@ fn decode_function(
         values.push(value);
     }
     if has_default {
-        let Some(signature) = file.public_signature(symbol)? else {
+        let Some(signature) = public_signature.clone() else {
             return Ok(());
         };
         decoded.defaults.record(signature, values)?;
@@ -551,7 +578,7 @@ fn decode_function(
     let Some(body) = decode_inline_body(file, &base_fields, symbol, &parameter_symbols)? else {
         return Ok(());
     };
-    let Some(signature) = file.public_signature(symbol)? else {
+    let Some(signature) = public_signature else {
         return Ok(());
     };
     decoded.inline.record(signature, body)
@@ -1467,6 +1494,33 @@ mod tests {
             decoded.defaults().get(&signature),
             Some([Some(KlibIrConstant::Int(7))].as_slice())
         );
+    }
+
+    #[test]
+    fn public_inventory_keeps_the_exact_declaration_identity_without_reading_a_body() {
+        let strings = vec!["fixture".to_string(), "rangeTo".to_string()];
+        let signature = public_signature(0, &[1], 41);
+        let signatures = [signature.as_slice()];
+        let file = IrFile {
+            strings: &strings,
+            signatures: &signatures,
+            bodies: &[],
+        };
+        let mut decoded = KlibIrBodies::default();
+        decode_declaration(
+            &file,
+            &function_with_inline_body(0, None, &[], 99),
+            DecodeMode::PublicSignaturesOnly,
+            &mut decoded,
+        )
+        .unwrap();
+
+        let exact = decode_public_id_signature(signatures[0], &strings)
+            .unwrap()
+            .unwrap();
+        assert_eq!(decoded.public_declarations, HashSet::from([exact.clone()]));
+        assert!(exact.matches_exact(&["fixture"], &["rangeTo"], 41, 0));
+        assert!(!exact.matches_exact(&["fixture"], &["rangeTo"], 42, 0));
     }
 
     #[test]

@@ -309,8 +309,6 @@ fn reflection(facts: &BuiltinFunctionDeclaration<'_>) -> Option<CompilerIntrinsi
     .then_some(CompilerIntrinsic::TypeOf)
 }
 
-/// The `kotlin.ranges` progression builders: `downTo` and `until` over integral values, and `step`
-/// and `reversed` over a progression.
 fn progression_builder(facts: &BuiltinFunctionDeclaration<'_>) -> Option<CompilerIntrinsic> {
     if facts.kind != FnKind::Extension
         || facts.context_count != 0
@@ -490,7 +488,7 @@ pub(crate) fn normalized_function_realization(
 ) -> Option<CompilerIntrinsic> {
     let params = function.semantic_params();
     let generic = function.generic_sig.as_ref();
-    function_realization(BuiltinFunctionDeclaration {
+    let facts = BuiltinFunctionDeclaration {
         package,
         name,
         kind: function.kind,
@@ -503,7 +501,8 @@ pub(crate) fn normalized_function_realization(
         is_suspend: function.flags.suspend,
         is_operator: function.flags.operator,
         is_infix: function.flags.infix,
-    })
+    };
+    function_realization(facts)
 }
 
 pub(crate) fn property_realization(
@@ -665,6 +664,26 @@ mod tests {
         );
         assert_eq!(
             function_realization(declaration(type_name("kotlin/reflect"), Ty::String)),
+            None
+        );
+    }
+
+    #[test]
+    fn a_shape_equivalent_floating_range_has_no_realization() {
+        let package = crate::types::wk::kotlin_ranges_package();
+        let result = Ty::obj_args("kotlin/ranges/ClosedFloatingPointRange", &[Ty::Double]);
+        let callable = crate::libraries::LibraryCallable::library(
+            package,
+            "rangeTo",
+            vec![Ty::Double, Ty::Double],
+            result,
+            result,
+            "",
+        );
+        let mut same_shape = FunctionInfo::plain(FnKind::Extension, Some(Ty::Double), callable);
+        same_shape.flags.operator = true;
+        assert_eq!(
+            normalized_function_realization(package, "rangeTo", &same_shape),
             None
         );
     }
