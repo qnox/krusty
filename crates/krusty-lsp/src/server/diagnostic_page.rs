@@ -229,7 +229,6 @@ fn json_array_len_with_marker(item_lens: &[usize], marker_len: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::super::response_page::MAX_RESPONSE_PAGES;
     use super::*;
 
     fn full_item(uri: &str, message: &str) -> Value {
@@ -257,6 +256,17 @@ mod tests {
             "version": Value::Null,
             "resultId": "0123456789abcdef"
         })
+    }
+
+    fn assert_frames_fit(messages: &[Value]) {
+        for message in messages {
+            let encoded = serde_json::to_vec(message).unwrap();
+            assert!(
+                encoded.len() <= RESPONSE_PAGE_BYTES,
+                "frame is {} bytes",
+                encoded.len()
+            );
+        }
     }
 
     #[test]
