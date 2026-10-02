@@ -209,6 +209,10 @@ extern const KType kt_type_boolean_companion;
 extern const KType kt_type_float_companion;
 extern const KType kt_type_double_companion;
 extern const KType kt_type_string_companion;
+extern const KType kt_type_ubyte_companion;
+extern const KType kt_type_ushort_companion;
+extern const KType kt_type_uint_companion;
+extern const KType kt_type_ulong_companion;
 
 KRef kt_byte_companion(void);
 KRef kt_short_companion(void);
@@ -219,6 +223,10 @@ KRef kt_boolean_companion(void);
 KRef kt_float_companion(void);
 KRef kt_double_companion(void);
 KRef kt_string_companion(void);
+KRef kt_ubyte_companion(void);
+KRef kt_ushort_companion(void);
+KRef kt_uint_companion(void);
+KRef kt_ulong_companion(void);
 
 /* `kotlin.Number` and `kotlin.Comparable` exist only as descriptors to point at: no value has one
    as its own type, and an `is` against either is answered by the interface list of the box. */
@@ -340,6 +348,10 @@ extern const KType kt_type_mutable_collection_interface;
 extern const KType kt_type_list_interface;
 extern const KType kt_type_mutable_list_interface;
 extern const KType kt_type_random_access_interface;
+extern const KType kt_type_set_interface;
+extern const KType kt_type_mutable_set_interface;
+extern const KType kt_type_map_interface;
+extern const KType kt_type_mutable_map_interface;
 
 /* `listOf(...)` as a value: an immutable list over the `Array<T>` a vararg call already built,
    which is what Kotlin's own `listOf(vararg)` wraps too. Being immutable is what makes sharing
@@ -843,56 +855,82 @@ kt_boolean kt_is_string_builder(KRef value);
 
 /* ---- maps and sets ---------------------------------------------------------------------------
 
-   A map is two growable lists side by side: its keys in insertion order and the values beside them
-   at the same positions. A SET is the same object with no values, which is what a `LinkedHashSet`
-   is — a map whose values nothing reads.
-
-   Lookup is LINEAR, by `equals`. Kotlin's is by hash, and the difference is speed and nothing
-   else. What a hash map would not give is the ORDER, which is observable: `mapOf` answers a
-   `LinkedHashMap`, whose iteration, `toString` and `keys` are in insertion order. The unordered
-   spellings answer this object too, their order being unspecified.
-
-   `keys`, `values` and `entries` are SNAPSHOTS where Kotlin's are views — the same trade
-   `toList()` on an array makes, visible only to a program that keeps one across a write. */
-extern const KType kt_type_map;
-extern const KType kt_type_set;
+   Kotlin/Native's `HashMap` and `HashSet`, which `LinkedHashMap` and `LinkedHashSet` are type
+   aliases for: keys and values in insertion order, found through an open-addressed hash array. A
+   lookup asks the key's `hashCode` and then each probed STORED key's `equals` of it; every map
+   iterates in insertion order. `keys`, `values` and `entries` are live views, and an entry is an
+   `EntryRef` onto the map. `krusty_maps.c` says which calls into the program each member makes.
+   With nothing to hold, `mapOf` and `setOf` answer the stdlib's shared read-only `EmptyMap` and
+   `EmptySet` instead, which every read-only member here answers for too. */
+/* `HashMap`, what `mapOf` of at least one pair, `mutableMapOf`, `hashMapOf` and `linkedMapOf`
+   answer. */
+extern const KType kt_type_hash_map;
+/* `HashSet`, what `setOf` of at least one element, `mutableSetOf`, `hashSetOf` and `linkedSetOf`
+   answer. */
+extern const KType kt_type_hash_set;
+/* `Map.Entry` and `MutableMap.MutableEntry`, the interfaces an entry implements. */
 extern const KType kt_type_map_entry;
+extern const KType kt_type_mutable_map_entry;
 
+/* A `HashMap` or `EmptyMap`. */
 kt_boolean kt_is_map(KRef value);
+/* A set, `EmptySet`, or a map's `keys` or `entries`. */
 kt_boolean kt_is_set(KRef value);
-/* The list of a map's keys, which for a set ARE its elements — so one walk serves both. */
+/* What a map, a set or a view holds, in iteration order, as a fresh list: a map's keys, and what a
+   set or a view yields. */
 KRef kt_map_keys_list(KRef self);
 
+/* `LinkedHashMap()`, `LinkedHashSet()`, `HashMap()`, `HashSet()` -- one class each pair -- and the
+   latter two with an initial capacity, which Kotlin rejects when negative. */
 KRef kt_map_new(void);
 KRef kt_set_new(void);
-/* `mapOf(a to b, …)` / `setOf(a, …)`, from the array a vararg call already packed. The contents
-   are copied in: the array belongs to the caller, and a map can be written through. */
+KRef kt_hash_map_new(void);
+KRef kt_hash_set_new(void);
+KRef kt_hash_map_with_capacity(kt_int capacity);
+KRef kt_hash_set_with_capacity(kt_int capacity);
+/* `emptyMap()` and `emptySet()`, and so `mapOf()` and `setOf()`: the one read-only `EmptyMap` and
+   `EmptySet`, the same object on every call. Neither is a `MutableMap` or `MutableSet`, so no
+   member that writes is ever handed one. */
+KRef kt_map_empty(void);
+KRef kt_set_empty(void);
+/* `mapOf(a to b, …)` / `setOf(a, …)` / `hashMapOf(…)` / `hashSetOf(…)`, from the array a vararg
+   call already packed. The contents are copied in: the array belongs to the caller, and a map can
+   be written through. `mapOf` and `setOf` of an empty array answer `EmptyMap` and `EmptySet`, as
+   Kotlin's do; `hashMapOf` and `hashSetOf` always answer a new map or set. */
 KRef kt_map_of(KRef pairs);
 KRef kt_set_of(KRef elements);
+KRef kt_hash_map_of(KRef pairs);
+KRef kt_hash_set_of(KRef elements);
 /* `mapOf(a to b)`: the one-pair form Kotlin declares beside the vararg one. */
 KRef kt_map_of_pair(KRef pair);
 
+/* The size of a map, a set or a view. */
 kt_int kt_map_size(KRef self);
 kt_boolean kt_map_is_empty(KRef self);
 /* `m[k]`, NULL for an absent key — which is why Kotlin declares `Map.get` nullable. */
 KRef kt_map_get(KRef self, KRef key);
 KRef kt_map_get_or_default(KRef self, KRef key, KRef fallback);
 /* `put` answers the value that was there; `set` is `m[k] = v` and answers `Unit`. An existing key
-   keeps its POSITION, which is what a `LinkedHashMap` promises. */
+   keeps its index, and so its position. */
 KRef kt_map_put(KRef self, KRef key, KRef value);
 void kt_map_set(KRef self, KRef key, KRef value);
 KRef kt_map_remove(KRef self, KRef key);
 void kt_map_clear(KRef self);
 kt_boolean kt_map_contains_key(KRef self, KRef key);
 kt_boolean kt_map_contains_value(KRef self, KRef value);
+/* The views, the same object on every call. */
 KRef kt_map_keys(KRef self);
 KRef kt_map_values(KRef self);
 KRef kt_map_entries(KRef self);
 
+/* A set's members, which a map's views answer too: `keys` by key, `entries` by entry and `values`
+   by value. A view has no `add`. */
 kt_boolean kt_set_contains(KRef self, KRef value);
 kt_boolean kt_set_add(KRef self, KRef value);
 kt_boolean kt_set_remove(KRef self, KRef value);
 
+/* An entry's halves, read from its map: `ConcurrentModificationException` once the map has changed
+   structurally since the entry was handed out. */
 KRef kt_map_entry_key(KRef entry);
 KRef kt_map_entry_value(KRef entry);
 

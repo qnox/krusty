@@ -410,17 +410,33 @@ binary. Per-test JVM startup is one of the easiest ways to degrade the suite.
 succeeds with exactly `OK\n` on stdout and nothing on stderr (`run_driver`), or ends the way the
 runtime ends a program with exactly the runtime's message (`run_driver_expecting_failure`).
 
+The runtime's sources compile once per test-binary run, in parallel, to one object each
+(`runtime_objects`); each driver then compiles its own `.c` with the same flags and links every
+one of those objects, in the sources' sorted order. That is the program a single clang invocation
+over all the sources would build, without recompiling about ten thousand lines of `-O2` C per
+driver, which was nearly all of the drivers' time. The objects are not an archive, so a driver
+still links the whole runtime and a duplicate definition still fails the link.
+
 A driver whose expected answers are Kotlin's does not copy them into C. It prints a transcript — one
 observation per line, runtime objects rendered through the runtime's own `toString` where that is the
 claim — before its `OK`, and `run_driver_against_kotlin` compares it with the Kotlin program beside
 it, `tests/native_runtime/<driver>.kt`. That program's `fun box(): String` builds the same lines;
 the harness compiles it with the persistent reference kotlinc and runs it on the shared JVM
-(`common::kotlinc_box_result`), requires it to succeed with whole lines, and fails on the first line
-where the two transcripts differ, printing both. `tests/native_runtime/transcript.h` holds the C side
+(`common::run_box`), requires it to succeed with whole lines, and fails on the first line where the
+two transcripts differ, printing both. `tests/native_runtime/transcript.h` holds the C side
 (`say`, `say_value`, `say_thrown`, …). Checks with no Kotlin counterpart — the pending exception's
 identity, the exact calls into a program stand-in, failure messages — stay `CHECK`s in the driver, and
 an answer the JVM cannot give within the box runner's 10-second limit stays pinned in the driver, with
 kotlinc's answer recorded in the program beside the question.
+
+kotlinc compiles every program beside a driver once per test-binary run, in one invocation for all
+the programs that take the same kotlinc arguments (`kotlin_programs`), since a compile's fixed cost
+outweighs a small program's. Each program is compiled in a package named after its driver, declared
+at the start of the line after its file annotations so no line number moves, and its `box()` runs as
+`<driver>.MainKt` from a class directory holding that program alone. Only a qualified name a program
+prints could tell the package; name a class by `simpleName` instead. If kotlinc rejects a batch,
+each of its programs compiles alone in its own test (`common::kotlinc_box_result`), which then fails
+with kotlinc's diagnostics for that program exactly as before.
 
 The native runtime's rule for where it answers differently from the JVM: it BEHAVES as Kotlin/Native
 does — which exception type is thrown, a class's identity and names, what an `is` answers, iteration
