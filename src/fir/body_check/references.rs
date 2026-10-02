@@ -729,6 +729,13 @@ impl BodyFirChecker<'_> {
                     } else {
                         Some(property.reflection_owner)
                     };
+                    let substitutions = self.selected_getter_substitutions(
+                        expression,
+                        declaration,
+                        &property.getter,
+                        receiver_type,
+                        property.prop_ty,
+                    )?;
                     self.property_reference_to_declaration(
                         expression,
                         declaration,
@@ -748,6 +755,7 @@ impl BodyFirChecker<'_> {
                                 .as_ref()
                                 .map(|setter| setter.name.as_str()),
                         },
+                        substitutions,
                         adaptation,
                     )
                 } else {
@@ -767,6 +775,13 @@ impl BodyFirChecker<'_> {
             }
             CallableReferenceTarget::TopLevelProperty(property) => {
                 if let Some(declaration) = property.stable_declaration {
+                    let substitutions = self.selected_getter_substitutions(
+                        expression,
+                        declaration,
+                        &property.getter,
+                        property.receiver,
+                        property.ty,
+                    )?;
                     self.property_reference_to_declaration(
                         expression,
                         declaration,
@@ -786,6 +801,7 @@ impl BodyFirChecker<'_> {
                                 .as_ref()
                                 .map(|setter| setter.name.as_str()),
                         },
+                        substitutions,
                         adaptation,
                     )
                 } else {
@@ -1059,6 +1075,7 @@ impl BodyFirChecker<'_> {
         declaration: DeclarationId,
         receivers: ReferenceReceivers,
         view: SelectedPropertyView<'_>,
+        substitutions: Box<[FirTypeSubstitution]>,
         adaptation: Option<FirReferenceAdaptation>,
     ) -> Result<FirExprKind, BodyCheckFailure> {
         let ReferenceReceivers {
@@ -1119,7 +1136,6 @@ impl BodyFirChecker<'_> {
             .signature(declaration)
             .ok_or_else(|| self.failure(span, BodyCheckFailureKind::MissingStablePropertyTarget))?
             .result;
-        let substitutions = self.call_substitutions(expression, declaration)?;
         let getter_inline_splice =
             self.inline_accessor_splice(span, declaration, false, &substitutions)?;
         Ok(FirExprKind::PropertyReference {

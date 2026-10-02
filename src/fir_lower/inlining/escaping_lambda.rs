@@ -106,10 +106,36 @@ fn retarget_lambdas(ir: &mut crate::ir::IrFile, root: ExprId, replacements: &Has
                 if let IrExpr::Lambda { impl_fn, .. } = &mut ir.exprs[expression as usize] {
                     *impl_fn = done;
                 }
+                retarget_specialized_parent(ir, expression, done);
             }
         }
         enqueue_local_delegate_plan_bodies(ir, expression, &mut pending, &mut plans);
         crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+    }
+}
+
+/// A nested lambda copied with its implementation still names the source parent. The specialized
+/// copy's parent is the specialized outer lambda, so the enclosure has to name that parent too.
+fn retarget_specialized_parent(ir: &mut crate::ir::IrFile, expression: ExprId, specialized: u32) {
+    let Some(parent) = ir
+        .specialized_functions
+        .get(&specialized)
+        .and_then(|specialization| specialization.parent)
+    else {
+        return;
+    };
+    let Some(source_parent) = ir
+        .specialized_functions
+        .get(&parent)
+        .map(|specialization| specialization.source)
+    else {
+        return;
+    };
+    let Some(enclosure) = ir.callable_reference_enclosures.get_mut(&expression) else {
+        return;
+    };
+    if *enclosure == crate::ir::IrEnclosure::Lambda(source_parent) {
+        *enclosure = crate::ir::IrEnclosure::Lambda(parent);
     }
 }
 
