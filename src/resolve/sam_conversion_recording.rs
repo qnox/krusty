@@ -194,6 +194,45 @@ impl Checker<'_> {
             .map(|source| source.suspend)
     }
 
+    /// Whether `actual` already implements the fun interface `target`.
+    ///
+    /// A class or object that is that interface stays that value. A function supertype on the
+    /// same value is not a reason to build a fresh adapter. Lambdas and callable references are
+    /// still conversions: their checked type may already be the interface.
+    pub(super) fn sam_argument_already_implements(
+        &self,
+        argument: ExprId,
+        actual: Ty,
+        target: TypeName,
+    ) -> bool {
+        if matches!(
+            self.file.expr(argument),
+            Expr::Lambda { .. } | Expr::CallableRef { .. }
+        ) {
+            return false;
+        }
+        let actual = actual.non_null();
+        if matches!(actual, Ty::Error | Ty::Pending | Ty::Fun(_)) || actual.mentions_pending() {
+            return false;
+        }
+        let mut pending = vec![actual];
+        let mut seen = Vec::new();
+        while let Some(ty) = pending.pop() {
+            let ty = ty.non_null();
+            if seen.contains(&ty) {
+                continue;
+            }
+            seen.push(ty);
+            if let Ty::Obj(name, _) = ty {
+                if name == target {
+                    return true;
+                }
+            }
+            pending.extend(crate::assignable::TypeOracle::direct_supertypes(self, ty));
+        }
+        false
+    }
+
     pub(super) fn sam_conversion_record(
         &mut self,
         scope: &CheckerScope<'_>,
@@ -257,6 +296,9 @@ impl Checker<'_> {
         for (&argument, signature) in args.iter().zip(signatures) {
             if let Some(signature) = signature {
                 let nominal = self.expr_types[argument.0 as usize];
+                if self.sam_argument_already_implements(argument, nominal, signature.internal) {
+                    continue;
+                }
                 if let Some(conversion) =
                     self.sam_conversion_record(scope, argument, nominal, signature.clone())
                 {

@@ -1230,3 +1230,78 @@ fn a_provider_member_without_an_identity_fails_as_missing_stable_call_target() {
         )
     );
 }
+
+#[test]
+fn an_object_that_is_the_fun_interface_is_not_sam_converted() {
+    let (body, _) = checked_function_body(
+        "fun interface Foo : () -> Int\n\
+         fun id(foo: Foo): Foo = foo\n\
+         fun use(): Foo {\n\
+             val value = object : Foo { override fun invoke() = 1 }\n\
+             return id(value)\n\
+         }\n",
+        "use",
+    );
+    assert!(
+        sam_conversions(&body).is_empty(),
+        "an object that is already Foo must not be wrapped: {:?}",
+        sam_conversions(&body)
+    );
+}
+
+#[test]
+fn a_class_that_implements_a_fun_interface_and_a_function_type_is_not_sam_converted() {
+    let (body, _) = checked_function_body(
+        "interface Mark\n\
+         fun interface Worker { fun onStart(scope: Mark) }\n\
+         class Impl(val name: String) : Worker, (String) -> Unit {\n\
+             override fun onStart(scope: Mark) {}\n\
+             override fun invoke(value: String) {}\n\
+         }\n\
+         fun foo(worker: Worker) {}\n\
+         fun use() { foo(Impl(\"1\")) }\n",
+        "use",
+    );
+    assert!(
+        sam_conversions(&body).is_empty(),
+        "Impl already is Worker: {:?}",
+        sam_conversions(&body)
+    );
+}
+
+#[test]
+fn a_generic_fun_interface_subtype_is_not_sam_converted() {
+    let (body, _) = checked_function_body(
+        "interface Mark\n\
+         fun interface Worker<E> { fun onStart(scope: E) }\n\
+         class Impl<F>(val name: String) : Worker<F>, (String) -> Unit {\n\
+             override fun onStart(scope: F) {}\n\
+             override fun invoke(value: String) {}\n\
+         }\n\
+         fun <T> foo(worker: Worker<T>) {}\n\
+         fun use() { foo(Impl<Mark>(\"1\")) }\n",
+        "use",
+    );
+    assert!(
+        sam_conversions(&body).is_empty(),
+        "Impl<Mark> already is Worker<Mark>: {:?}",
+        sam_conversions(&body)
+    );
+}
+
+#[test]
+fn a_function_value_passed_to_a_fun_interface_still_converts() {
+    let (body, _) = checked_function_body(
+        "fun interface Foo : () -> Int\n\
+         fun id(foo: Foo): Foo = foo\n\
+         fun use(f: () -> Int): Foo = id(f)\n",
+        "use",
+    );
+    let [conversion] = &sam_conversions(&body)[..] else {
+        panic!(
+            "a function value still converts to Foo, got {:?}",
+            sam_conversions(&body)
+        )
+    };
+    assert_eq!(conversion.classifier, crate::types::type_name("Foo"));
+}

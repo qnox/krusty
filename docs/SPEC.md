@@ -8481,6 +8481,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `inlineClasses/funInterface/mangledSamWrappers`, `mangledSamWrappersGeneric`,
   `callableReference/adaptedReferences/suspendConversion/propertyReferenceToSuspendFunction`,
   and `coroutines/suspendConversion/suspendConversionBetweenFunInterfaces`.
+- **A value that already implements the expected fun interface is not wrapped.** An argument
+  whose classifier is that interface — an object expression, a class that implements it, or the
+  same value when the interface is generic — is passed through, even when the value also has a
+  function supertype (`fun interface Foo : () -> Int`, or `class Impl : Worker, (String) -> Unit`).
+  Wrapping it would replace its identity and `toString`. A function value that is not the
+  interface, and a lambda or callable reference, still convert. Tests:
+  `an_object_that_is_the_fun_interface_is_not_sam_converted`,
+  `a_class_that_implements_a_fun_interface_and_a_function_type_is_not_sam_converted`,
+  `a_generic_fun_interface_subtype_is_not_sam_converted`,
+  `a_function_value_passed_to_a_fun_interface_still_converts`, and
+  `tests/sam_conversion_e2e.rs`. Corpus: `funInterface/kt46908_functionSupertype.kt`,
+  `funInterface/noConversionForSubtype.kt`, `funInterface/noConversionForSubtypeGeneric.kt`.
 - **`Nothing` type arguments in generic signatures follow kotlinc's type mapper.** A class type
   is written raw when one of its own arguments is `Nothing?`, or `Nothing` for a type parameter
   not declared `in`; the rule is not recursive, so `Inv<List<Nothing?>>` is

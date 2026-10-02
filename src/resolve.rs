@@ -58202,7 +58202,9 @@ impl<'a> Checker<'a> {
                     }
                     return;
                 }
-            } else if conversion_matches {
+            } else if conversion_matches
+                && !self.sam_argument_already_implements(argument, actual, sam.internal)
+            {
                 if let Some(conversion) = self.sam_conversion_record(scope, argument, actual, sam) {
                     self.resolved_sam_conversions.insert(argument, conversion);
                 }
