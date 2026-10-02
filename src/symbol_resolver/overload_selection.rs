@@ -86,7 +86,9 @@ pub(super) fn select_fixed_or_more_specific_vararg<'a>(
 /// Most-specific parameter shapes, then the non-vararg tie-break.
 ///
 /// The tie-break applies only when every maximal shape can forward to every
-/// other. Incomparable parameter types stay ambiguous.
+/// other. Incomparable parameter types stay ambiguous. A library pair stays in
+/// the set when only one candidate is a vararg, so equal shapes such as
+/// `listOf(element)` and `listOf(vararg)` still reach that tie-break.
 pub(super) fn select_equally_specific<'a>(
     shapes: Vec<(Vec<Ty>, &'a FunctionInfo)>,
     at_least_as_specific: impl Fn(usize, Ty, Ty) -> bool,
@@ -96,7 +98,10 @@ pub(super) fn select_equally_specific<'a>(
             .iter()
             .map(|(shape, candidate)| (shape.clone(), *candidate)),
         &at_least_as_specific,
-        |left, right| super::distinct_source_declarations(left, right),
+        |left, right| {
+            super::distinct_source_declarations(left, right)
+                || left.call_sig.vararg_index.is_some() != right.call_sig.vararg_index.is_some()
+        },
     );
     if mutually_as_specific(&shapes, &selection, &at_least_as_specific) {
         prefer_non_vararg(selection)
