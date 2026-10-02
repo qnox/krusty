@@ -25,7 +25,7 @@ while read -r manifest; do
   git cat-file -e "$base:$manifest" 2>/dev/null || continue
   added=$(comm -13 <(entries "$base:$manifest") <(entries "$head:$manifest"))
   [ -n "$added" ] || continue
-  count=$(wc -l <<<"$added")
+  count=$(wc -l <<<"$added" | tr -d '[:space:]')
   added_total=$((added_total + count))
   echo "box-lists: $manifest gains $count entr$([ "$count" -eq 1 ] && echo y || echo ies):" >&2
   sed 's/^/    /' <<<"$added" >&2
