@@ -744,6 +744,10 @@ impl JvmBackend {
             stems,
         } = file;
         let stem = &stems[source.raw() as usize];
+        let _intersection_variance = super::intersection_variance::Guard::install(
+            classifiers.module(),
+            std::rc::Rc::clone(&self.cp),
+        );
         let package = ir.package.clone().unwrap_or_default();
         let facade_name = file_class_name(stem, ir.package.as_deref());
         let facade_class = crate::types::type_name(&facade_name);

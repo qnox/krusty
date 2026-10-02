@@ -1,6 +1,10 @@
 //! Type model: Kotlin scalar, object, array, function, nullable, platform-flexible, and type-parameter
 //! shapes. Backend-specific names and descriptors are kept out of this module.
 
+mod intersection;
+pub(crate) use intersection::{
+    declaration_approximation, enter_variance, variance_of, VarianceScope,
+};
 mod interning;
 mod spelling;
 mod substitute;
@@ -983,28 +987,9 @@ impl Ty {
         Ty::StarProjection(intern_ty(upper_bound))
     }
 
-    /// `A & B & …`. A single component is that component. `Nothing` among the components is
-    /// `Nothing`. Components are flattened, deduplicated, and ordered by their diagnostic name so
-    /// `Int & String` and `String & Int` are one type.
+    /// `A & B & …`. See [`intersection::canonical`].
     pub fn intersection(parts: &[Ty]) -> Ty {
-        let mut flat = Vec::new();
-        for part in parts.iter().copied() {
-            if part == Ty::Error {
-                continue;
-            }
-            match part.non_null() {
-                Ty::Nothing => return Ty::Nothing,
-                Ty::Intersection(inner) => flat.extend(inner.iter().copied()),
-                other => flat.push(other),
-            }
-        }
-        flat.sort_by(|left, right| left.name().cmp(&right.name()));
-        flat.dedup();
-        match flat.as_slice() {
-            [] => Ty::Nothing,
-            [one] => *one,
-            many => Ty::Intersection(intern_tys(many)),
-        }
+        intersection::canonical(parts)
     }
 
     pub fn projection_inner(self) -> Option<Ty> {
@@ -1622,14 +1607,11 @@ impl Ty {
                         .source_name_with_type_parameter_in(context, type_parameter)
                 )
             }
-            Ty::Nullable(inner) => {
-                let rendered = inner.source_name_with_type_parameter_in(context, type_parameter);
-                if matches!(*inner, Ty::Fun(_)) {
-                    format!("({rendered})?")
-                } else {
-                    format!("{rendered}?")
-                }
-            }
+            Ty::Nullable(inner) => intersection::spell_nullable(
+                *inner,
+                |ty| ty.source_name_with_type_parameter_in(context, type_parameter),
+                true,
+            ),
             Ty::PlatformNullable(inner) => {
                 format!(
                     "{}!",
@@ -1709,7 +1691,7 @@ impl Ty {
             Ty::Error => "<error>".to_string(),
             Ty::Pending => "<not determined>".to_string(),
             Ty::Fun(_) => "Function".to_string(),
-            Ty::Nullable(inner) => format!("{}?", inner.name()),
+            Ty::Nullable(inner) => intersection::spell_nullable(*inner, Ty::name, false),
             Ty::PlatformNullable(inner) => format!("{}!", inner.name()),
             Ty::InProjection(inner) => format!("in {}", inner.name()),
             Ty::OutProjection(inner) => format!("out {}", inner.name()),

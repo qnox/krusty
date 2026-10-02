@@ -2138,7 +2138,7 @@ impl<'a> SymbolResolver<'a> {
         let member_scope_receiver = member_scope_receiver(receiver);
         let members = if !member_scope_receiver.is_nullable()
             && (member_scope_receiver.kotlin_class_internal().is_some()
-                || matches!(member_scope_receiver, Ty::Fun(_)))
+                || matches!(member_scope_receiver, Ty::Fun(_) | Ty::Intersection(_)))
         {
             members_in_hierarchy(&self.src, member_scope_receiver, name)
         } else {
@@ -2776,7 +2776,10 @@ impl<'a> SymbolResolver<'a> {
         name: &str,
         property_applicable: impl Fn(&crate::libraries::PropertyInfo) -> Option<(bool, usize)>,
     ) -> Option<SelectedMemberProperty> {
-        if recv.is_nullable() || recv.kotlin_class_internal().is_none() {
+        if recv.is_nullable()
+            || (!matches!(recv.non_null(), Ty::Intersection(_))
+                && recv.kotlin_class_internal().is_none())
+        {
             return None;
         }
         // Walk normalized property declarations one classifier rung at a time. Providers have already
@@ -2787,6 +2790,10 @@ impl<'a> SymbolResolver<'a> {
         let mut synthetic_fallback: Option<(SelectedMemberProperty, bool)> = None;
         let mut inaccessible_declaration: Option<SelectedMemberProperty> = None;
         while let Some((current, depth)) = queue.pop_front() {
+            if let Some(parts) = hierarchy_projection::intersection_components(current) {
+                queue.extend(parts.iter().copied().map(|part| (part, depth)));
+                continue;
+            }
             let Some(internal) = current.kotlin_class_internal() else {
                 continue;
             };

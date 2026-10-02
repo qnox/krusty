@@ -39,6 +39,7 @@ pub mod inline;
 pub mod inline_class;
 pub(crate) mod inliner;
 mod inner_classes;
+mod intersection_variance;
 pub mod ir_emit;
 pub mod java_stub;
 pub mod jvm_class_map;

@@ -47,6 +47,15 @@ fn map_type_default(ty: Ty, local_classifiers: &HashSet<TypeName>) -> Option<Str
             signature.params.len(),
             signature.suspend,
         ),
+        // An intersection's descriptor is its shared carrier (`Inv<String> & Inv<Int>` is `Inv`,
+        // unrelated classes are `Object`). That carrier is what a reader rebuilds after the
+        // declaration is approximated, so the physical descriptor stays derivable.
+        Ty::Intersection(parts) => {
+            return map_type_default(
+                super::physical_type::intersection_jvm_carrier(parts),
+                local_classifiers,
+            );
+        }
         _ => return None,
     })
 }

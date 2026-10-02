@@ -644,7 +644,13 @@ impl EntryHeader {
                 "a lowered value-class member signs its carrier"
             );
             generic.params.remove(0);
-            jvm_method_signature(formatter, &generic, function)
+            // The carrier occupied signed slot 0, so a later vararg keeps declaration-site
+            // variance at its shifted index.
+            let vararg_index = ir
+                .fn_varargs
+                .get(&member)
+                .and_then(|vararg| vararg.index.checked_sub(1));
+            jvm_method_signature(formatter, &generic, function, vararg_index)
                 .filter(|signature| signature != descriptor)
         });
         let nullability = super::declared_nullability::declared_nullability(ir, member);

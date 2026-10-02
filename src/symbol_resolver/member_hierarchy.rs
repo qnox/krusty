@@ -303,6 +303,10 @@ pub(crate) fn has_hidden_deprecated_member(
     let mut queue = std::collections::VecDeque::from([receiver.non_null()]);
     let mut seen = std::collections::HashSet::new();
     while let Some(current) = queue.pop_front() {
+        if let Some(parts) = super::hierarchy_projection::intersection_components(current) {
+            queue.extend(parts.iter().copied());
+            continue;
+        }
         let Some(internal) = current.kotlin_class_internal() else {
             continue;
         };
@@ -351,6 +355,10 @@ pub(crate) fn members_in_hierarchy(
     let mut queue = std::collections::VecDeque::from([(receiver, 0)]);
     let mut seen = std::collections::HashSet::new();
     while let Some((current, depth)) = queue.pop_front() {
+        if let Some(parts) = super::hierarchy_projection::intersection_components(current) {
+            queue.extend(parts.iter().copied().map(|part| (part, depth)));
+            continue;
+        }
         let Some(internal) = current.kotlin_class_internal() else {
             continue;
         };
@@ -388,8 +396,25 @@ pub(crate) fn members_in_hierarchy(
         for property in &mut current_properties.overloads {
             property.receiver_rank += depth;
         }
-        functions.overloads.extend(current_functions.overloads);
-        properties.overloads.extend(current_properties.overloads);
+        for function in current_functions.overloads {
+            let duplicate = functions.overloads.iter().any(|existing| {
+                existing.callable.name == function.callable.name
+                    && existing.semantic_params() == function.semantic_params()
+                    && existing.callable.ret == function.callable.ret
+            });
+            if !duplicate {
+                functions.overloads.push(function);
+            }
+        }
+        for property in current_properties.overloads {
+            let duplicate = properties
+                .overloads
+                .iter()
+                .any(|existing| existing.name == property.name && existing.ty == property.ty);
+            if !duplicate {
+                properties.overloads.push(property);
+            }
+        }
         queue.extend(
             direct_supertypes_from_classifier(&classifier, current)
                 .into_iter()

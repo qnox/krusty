@@ -22,7 +22,8 @@ use call_constraints::GenericBoundViolation;
 pub(crate) use call_constraints::{
     collect_assignability_constraints_from_symbols, infer_generic_call_constraints_from_symbols,
     infer_generic_call_constraints_with_argument_ordinals,
-    infer_generic_call_constraints_with_receiver_from_symbols, AssignabilityConstraints,
+    infer_generic_call_constraints_with_receiver_from_symbols, publish_denotable_upper_bindings,
+    seed_denotable_upper_placeholders, AssignabilityConstraints,
 };
 pub(crate) use call_site_variables::CallSiteVariables;
 pub(crate) use conditional_result::generic_return_expectation_from_sibling;

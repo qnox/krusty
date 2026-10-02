@@ -655,14 +655,32 @@ fn encode_type_with_parameter(
                 message.field_varint(1, 1); // Type.flags: SUSPEND_TYPE
             }
         }
+        Ty::Intersection(parts) => {
+            let semantic = if nullable {
+                Ty::nullable(Ty::Intersection(parts))
+            } else {
+                Ty::Intersection(parts)
+            };
+            let approximated =
+                crate::types::declaration_approximation(semantic, &mut |classifier, index| {
+                    crate::types::variance_of(classifier, index)
+                });
+            return encode_type_with_parameter(
+                strings,
+                approximated,
+                spelled,
+                type_parameters,
+                forced_parameter,
+                expansion,
+            );
+        }
         Ty::Null
         | Ty::Error
         | Ty::Nullable(_)
         | Ty::PlatformNullable(_)
         | Ty::InProjection(_)
         | Ty::OutProjection(_)
-        | Ty::StarProjection(_)
-        | Ty::Intersection(_) => return Err(TypeEncodeError::NonMetadataType(ty)),
+        | Ty::StarProjection(_) => return Err(TypeEncodeError::NonMetadataType(ty)),
     }
     Ok(message)
 }

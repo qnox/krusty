@@ -340,6 +340,58 @@ impl InferredCallBindings {
         }
         Ty::intersection(&concrete)
     }
+
+    pub(crate) fn denotable_upper_bindings(&self, source: &dyn SymbolSource) -> Vec<(String, Ty)> {
+        self.upper_only
+            .iter()
+            .map(|formal| (formal.clone(), self.denotable_upper_binding(source, formal)))
+            .collect()
+    }
+}
+
+/// The projected-return hazard records `Nothing` until an expected result replaces it.
+pub(crate) fn seed_denotable_upper_placeholders(
+    bindings: &mut GSigBinds,
+    denotable: &[(String, Ty)],
+) {
+    for (formal, _) in denotable {
+        bindings.entry(formal.clone()).or_insert(Ty::Nothing);
+    }
+}
+
+/// Publish an upper-only solution when the call has not already fixed that formal.
+///
+/// An absent binding takes the denotable upper (`Int & String`, or the one bound that sits
+/// under the others). The hazard placeholder `Nothing` is replaced by that upper when no
+/// expected result chose `Nothing`. An expected result that the denotable upper already
+/// satisfies (`intersect(In<Int>(), In<String>()): Any`) keeps the upper: the expectation
+/// constrains the produced value and does not replace the input bounds. An expected type
+/// that is more specific than the upper (`(): Nothing`) stays that type.
+pub(crate) fn publish_denotable_upper_bindings(
+    bindings: &mut GSigBinds,
+    denotable: Vec<(String, Ty)>,
+    expected_fixed: Option<&GSigBinds>,
+    mut subtype: impl FnMut(Ty, Ty) -> bool,
+) {
+    for (formal, binding) in denotable {
+        let expected_fixed = expected_fixed.and_then(|fixed| fixed.get(&formal).copied());
+        match bindings.get(&formal).copied() {
+            None => {
+                bindings.insert(formal, binding);
+            }
+            Some(Ty::Nothing) if binding != Ty::Nothing && expected_fixed.is_none() => {
+                bindings.insert(formal, binding);
+            }
+            Some(current)
+                if expected_fixed.is_some_and(|expected| expected == current)
+                    && binding != current
+                    && subtype(binding, current) =>
+            {
+                bindings.insert(formal, binding);
+            }
+            _ => {}
+        }
+    }
 }
 
 impl CallInferenceConstraints {

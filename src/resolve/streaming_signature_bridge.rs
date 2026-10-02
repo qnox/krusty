@@ -20,6 +20,7 @@ mod declaration_aliases;
 mod declaration_conflicts;
 mod declaration_spellings;
 mod delegates;
+mod demanded_source_call;
 mod diagnostics;
 mod file_import_scopes;
 mod header_projection;
@@ -2244,103 +2245,19 @@ impl ProductionSignatureSemantics<'_> {
             &module as &dyn crate::symbol_source::SymbolSource,
             &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
         ]);
-        let mut bindings = crate::symbol_resolver::GSigBinds::new();
-        if let Some(generic) = callable.generic_sig.as_ref() {
-            bindings.extend(
-                generic
-                    .formals
-                    .iter()
-                    .cloned()
-                    .zip(explicit_type_arguments.iter().copied()),
-            );
-        }
-        if let (Some(generic), Some(expected)) = (callable.generic_sig.as_ref(), expected) {
-            let oracle = crate::symbol_resolver::SourceOracle(&semantic_source);
-            if let Some(inferred) =
-                crate::symbol_resolver::infer_generic_return_bindings_from_symbols(
-                    &semantic_source,
-                    generic,
-                    expected,
-                    |actual, bound| {
-                        crate::assignable::is_assignable(
-                            &crate::assignable::TyCtx::new(),
-                            &oracle,
-                            actual,
-                            bound,
-                        )
-                    },
-                )
-            {
-                crate::symbol_resolver::merge_generic_upper_bindings(
-                    generic,
-                    explicit_type_arguments,
-                    &mut bindings,
-                    inferred,
-                    |actual, bound| {
-                        crate::assignable::is_assignable(
-                            &crate::assignable::TyCtx::new(),
-                            &oracle,
-                            actual,
-                            bound,
-                        )
-                    },
-                );
-            }
-        }
-        if let (Some(declared), Some(actual)) = (callable.source_receiver, receiver) {
-            crate::symbol_resolver::unify_inferred_ty_with_source(
-                &semantic_source,
-                declared,
-                actual,
-                &mut bindings,
-            );
-        }
-        let context_count = callable.context_count.min(signature.parameters.len());
-        let visible_vararg = callable
-            .vararg_index
-            .and_then(|index| index.checked_sub(context_count));
-        for (argument_index, argument) in arguments.iter().enumerate() {
-            if *argument == Ty::Error {
-                continue;
-            }
-            let visible_parameter = visible_vararg
-                .filter(|vararg| argument_index >= *vararg)
-                .unwrap_or(argument_index);
-            let Some(parameter) = signature.parameters.get(context_count + visible_parameter)
-            else {
-                continue;
-            };
-            let parameter = if visible_vararg == Some(visible_parameter) {
-                parameter.get().array_read_elem().unwrap_or(parameter.get())
-            } else {
-                parameter.get()
-            };
-            let applied_parameter =
-                crate::symbol_resolver::ty_subst_keep_unbound(parameter, &bindings);
-            let argument = argument_kinds
-                .and_then(|arguments| arguments.get(argument_index))
-                .map_or(*argument, |kind| {
-                    // `arguments` is already mapped to the vararg element type. The spread probe
-                    // retains the source array only for applicability; feeding that array back
-                    // into result substitution would bind `T = Array<T>` after selection.
-                    if kind.is_spread() {
-                        *argument
-                    } else {
-                        kind.type_for(applied_parameter)
-                    }
-                });
-            crate::symbol_resolver::unify_inferred_ty_with_source(
-                &semantic_source,
-                parameter,
-                argument,
-                &mut bindings,
-            );
-        }
-        let result =
-            crate::symbol_resolver::ty_subst_keep_unbound(signature.result.get(), &bindings);
+        let result = demanded_source_call::demanded_source_result(
+            &semantic_source,
+            callable,
+            signature,
+            receiver,
+            arguments,
+            argument_kinds,
+            explicit_type_arguments,
+            expected,
+        );
         crate::trace_compiler!(
             "signature",
-            "apply demanded source callable source={source:?} expected={expected:?} arguments={arguments:?} bindings={bindings:?} result={result:?}",
+            "apply demanded source callable source={source:?} expected={expected:?} arguments={arguments:?} result={result:?}",
         );
         crate::fir::ResolvedTy::new(result).map_err(|_| Self::failure())
     }

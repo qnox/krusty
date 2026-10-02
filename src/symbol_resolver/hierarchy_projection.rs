@@ -346,11 +346,24 @@ pub(crate) fn classifier_value_receiver(
     }
 }
 
+/// Components of an intersection receiver. Member and supertype walks union these into the
+/// ordinary candidate list; the intersection itself has no classifier identity.
+pub(crate) fn intersection_components(ty: Ty) -> Option<&'static [Ty]> {
+    match ty.non_null() {
+        Ty::Intersection(parts) => Some(parts),
+        _ => None,
+    }
+}
+
 pub(super) fn receiver_hierarchy(source: &dyn SymbolSource, receiver: Ty) -> Vec<(Ty, u32)> {
     let mut queue = std::collections::VecDeque::from([(receiver, 0)]);
     let mut seen = std::collections::HashSet::new();
     let mut hierarchy = Vec::new();
     while let Some((current, depth)) = queue.pop_front() {
+        if let Some(parts) = intersection_components(current) {
+            queue.extend(parts.iter().copied().map(|part| (part, depth)));
+            continue;
+        }
         let Some(internal) = current.kotlin_class_internal() else {
             continue;
         };

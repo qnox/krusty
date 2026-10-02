@@ -6091,11 +6091,19 @@ fn jvm_method_signature(
     formatter: &JvmSignatureFormatter<'_>,
     g: &crate::ir::IrGenericSig,
     f: &crate::ir::IrFunction,
+    vararg_index: Option<usize>,
 ) -> Option<String> {
     let mut s = jvm_type_params(formatter, g)?;
     s.push('(');
-    for parameter in &g.params {
-        s.push_str(&formatter.method_ty(parameter, Wildcards::Declared)?);
+    for (index, parameter) in g.params.iter().enumerate() {
+        // A vararg element is a value parameter. `Array<In<E>>` suppresses the element's
+        // declaration-site wildcard; `vararg x: In<E>` keeps `In<? super E>`.
+        let rendered = if vararg_index == Some(index) {
+            formatter.vararg_element_ty(parameter, Wildcards::Declared)?
+        } else {
+            formatter.method_ty(parameter, Wildcards::Declared)?
+        };
+        s.push_str(&rendered);
     }
     s.push(')');
     let ret = g.ret.as_ref().unwrap_or(&f.ret);
@@ -6248,7 +6256,8 @@ fn method_signature_shape(
     }
     if let Some(generic) = ir.signatures.get(&fid) {
         let generic = value_class_signatures::physical_generic_signature(ir, fid, f, generic);
-        return jvm_method_signature(formatter, &generic, f);
+        let vararg_index = ir.fn_varargs.get(&fid).map(|vararg| vararg.index);
+        return jvm_method_signature(formatter, &generic, f, vararg_index);
     }
     if let (Some((params, ret)), Some(_)) = (
         ir.member_semantic_sigs.get(&fid),
@@ -6331,7 +6340,7 @@ fn method_parameterized_sig(
             Ty::Nullable(t) | Ty::PlatformNullable(t) => t,
             t => t,
         };
-        matches!(inner, Ty::Fun(_))
+        matches!(inner, Ty::Fun(_) | Ty::Intersection(_))
             || matches!(inner, Ty::Obj(_, arguments) if !arguments.is_empty())
     };
     if !params

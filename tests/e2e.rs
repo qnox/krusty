@@ -643,8 +643,6 @@ mod diverging_value_position_e2e;
 mod do_while_e2e;
 #[path = "dotted_extension_receiver_e2e.rs"]
 mod dotted_extension_receiver_e2e;
-#[path = "empty_intersection_inference_e2e.rs"]
-mod empty_intersection_inference_e2e;
 #[path = "duplicate_ctor_param_check_e2e.rs"]
 mod duplicate_ctor_param_check_e2e;
 #[path = "duplicate_enum_entry_check_e2e.rs"]
@@ -665,6 +663,8 @@ mod elvis_return_smartcast_e2e;
 mod elvis_signature_inference_e2e;
 #[path = "empty_enum_e2e.rs"]
 mod empty_enum_e2e;
+#[path = "empty_intersection_inference_e2e.rs"]
+mod empty_intersection_inference_e2e;
 #[path = "empty_locals_e2e.rs"]
 mod empty_locals_e2e;
 #[path = "empty_loop_body_e2e.rs"]

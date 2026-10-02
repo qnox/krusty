@@ -193,6 +193,24 @@ pub(crate) fn constructor_operand_tys(descriptor: &str, checked: Option<&[Ty]>) 
     )
 }
 
+/// JVM carrier of an intersection, shared by descriptor planning and emission.
+///
+/// Each component is erased on its own. One shared carrier is that carrier (`Box<String> &
+/// Box<Int>` is `Box`; two `Function1`s stay `Function1`). Incompatible carriers, including
+/// unrelated classes and interfaces, are `java/lang/Object`.
+pub(crate) fn intersection_jvm_carrier(parts: &[Ty]) -> Ty {
+    let mut carrier = None;
+    for part in parts {
+        let erased = ir_ty_to_jvm(&part.non_null());
+        match carrier {
+            None => carrier = Some(erased),
+            Some(current) if current == erased => {}
+            Some(_) => return Ty::obj_name(crate::types::wk::java_object()),
+        }
+    }
+    carrier.unwrap_or_else(|| Ty::obj_name(crate::types::wk::java_object()))
+}
+
 pub fn ir_ty_to_jvm(t: &Ty) -> Ty {
     // A nullable PRIMITIVE is a JVM reference — its boxed wrapper (`Int?` → `java/lang/Integer`, a
     // 1-slot reference), NOT the unboxed scalar. Map it before peeling `?`, so descriptors, slots and
@@ -304,9 +322,9 @@ pub fn ir_ty_to_jvm(t: &Ty) -> Ty {
         // `T : Int` is `Integer`, never `int`.
         Ty::TyParam(_, bound) if t.is_nullable() => ir_ty_to_jvm(&Ty::nullable(*bound)),
         Ty::TyParam(_, bound) => ir_ty_to_jvm(bound),
-        // `Int & String` has no single carrier. The value is the erased reference; a bound that
-        // already determines a primitive is published as that bound, not an intersection.
-        Ty::Intersection(_) => Ty::obj_name(crate::types::wk::java_object()),
+        // A bound that already determines one carrier is published as that bound, not an
+        // intersection. What remains shares one erased class, or it is `Object`.
+        Ty::Intersection(parts) => ir_ty_to_jvm(&intersection_jvm_carrier(parts)),
         _ => Ty::Error,
     }
 }
@@ -447,5 +465,26 @@ mod tests {
         assert_eq!(jvm_builtin_scalar(type_name("kotlin/Unit")), None);
         assert_eq!(jvm_builtin_scalar(type_name("kotlin/Nothing")), None);
         assert_eq!(jvm_builtin_scalar(type_name("kotlin/Array")), None);
+    }
+
+    #[test]
+    fn an_intersection_erases_to_its_shared_carrier_or_object() {
+        let shared = Ty::intersection(&[
+            Ty::obj_args("demo/Box", &[Ty::Int]),
+            Ty::obj_args("demo/Box", &[Ty::String]),
+        ]);
+        assert_eq!(
+            crate::jvm::names::type_descriptor(super::ir_ty_to_jvm(&shared)),
+            crate::jvm::names::type_descriptor(Ty::obj("demo/Box"))
+        );
+        let unrelated = Ty::intersection(&[Ty::obj("demo/Left"), Ty::obj("demo/Right")]);
+        assert_eq!(
+            crate::jvm::names::type_descriptor(super::ir_ty_to_jvm(&unrelated)),
+            "Ljava/lang/Object;"
+        );
+        assert_eq!(
+            crate::jvm::names::type_descriptor(unrelated),
+            "Ljava/lang/Object;"
+        );
     }
 }

@@ -19771,7 +19771,10 @@ impl<'a> Checker<'a> {
                 let mut member_mapping_failure = None;
                 let mut extension_rung = None;
                 if rt == Ty::String
-                    || matches!(rt.non_null(), Ty::Obj(..) | Ty::TyParam(..) | Ty::Fun(..))
+                    || matches!(
+                        rt.non_null(),
+                        Ty::Obj(..) | Ty::TyParam(..) | Ty::Fun(..) | Ty::Intersection(_)
+                    )
                 {
                     match self.record_member_call_with_slots(
                         scope,
@@ -25741,6 +25744,12 @@ impl<'a> Checker<'a> {
                 _ => Ty::Unit,
             };
             let semantic = inferred_declaration_ty(semantic);
+            if f.ret.is_none() && semantic == Ty::Nothing {
+                self.diags.error(
+                    f.name_span,
+                    "return type 'Nothing' needs to be specified explicitly.".to_string(),
+                );
+            }
             let physical =
                 crate::symbol_resolver::ty_subst_keep_unbound(semantic, &semantic_erasure);
             (physical, semantic)
@@ -42429,16 +42438,7 @@ impl<'a> Checker<'a> {
             // not replace a binding the expected result already fixed, so
             // `(): Nothing = intersect(...)` stays `Nothing` while an unconstrained
             // `intersect(In<Int>(), In<String>())` becomes `Int & String`.
-            let denotable_upper_bindings = {
-                let formals = inferred.upper_only.iter().cloned().collect::<Vec<_>>();
-                formals
-                    .into_iter()
-                    .map(|formal| {
-                        let binding = inferred.denotable_upper_binding(&source, &formal);
-                        (formal, binding)
-                    })
-                    .collect::<Vec<_>>()
-            };
+            let denotable_upper_bindings = inferred.denotable_upper_bindings(&source);
             crate::symbol_resolver::merge_call_argument_bindings(
                 &source,
                 &signature,
@@ -42648,9 +42648,10 @@ impl<'a> Checker<'a> {
             // after that replacement, and only when the expected result did not fix the variable
             // (`select(Context<Any>())` is `Any`).
             if candidate.projected_return_hazard {
-                for (formal, _) in &denotable_upper_bindings {
-                    bindings.entry(formal.clone()).or_insert(Ty::Nothing);
-                }
+                crate::symbol_resolver::seed_denotable_upper_placeholders(
+                    &mut bindings,
+                    &denotable_upper_bindings,
+                );
             }
             if let (Some(expected), Some(result_bindings)) = (expected, expected_result_bindings) {
                 // The expected result also relates through the declared return's supertypes: a Java
@@ -42752,23 +42753,12 @@ impl<'a> Checker<'a> {
                     );
                 }
             }
-            for (formal, binding) in denotable_upper_bindings {
-                let expected_fixed = expected_return_intersection_bindings
-                    .as_ref()
-                    .and_then(|result| result.get(&formal))
-                    .copied();
-                match bindings.get(&formal).copied() {
-                    None => {
-                        bindings.insert(formal, binding);
-                    }
-                    // The hazard placeholder is `Nothing`. Keep it when the expected result chose
-                    // `Nothing`, and replace it when no expected result fixed the variable.
-                    Some(Ty::Nothing) if binding != Ty::Nothing && expected_fixed.is_none() => {
-                        bindings.insert(formal, binding);
-                    }
-                    _ => {}
-                }
-            }
+            crate::symbol_resolver::publish_denotable_upper_bindings(
+                &mut bindings,
+                denotable_upper_bindings,
+                expected_return_intersection_bindings.as_ref(),
+                |sub, sup| self.receiver_is_assignable(sub, sup),
+            );
             // Join bottom bindings against `where`-clause subtype constraints IN the real
             // bindings — the return type substitutes from them (`ifBlank { null }` must select
             // with `R = String?`, not pass a check-local copy and return `Nothing?`).
@@ -52556,6 +52546,12 @@ impl<'a> Checker<'a> {
         if infer_ret {
             self.check_operator_declaration(f, self.ret_ty);
         }
+        if f.ret.is_none() && matches!(f.body, FunBody::Expr(_)) && self.ret_ty == Ty::Nothing {
+            self.diags.error(
+                f.name_span,
+                "return type 'Nothing' needs to be specified explicitly.".to_string(),
+            );
+        }
         if f.receiver.is_some() && companion_classifier.is_none() {
             self.extension_receiver_labels.pop();
             self.this_labels.pop();
@@ -57008,6 +57004,12 @@ impl<'a> Checker<'a> {
         }
         if infer_ret {
             self.check_operator_declaration(f, self.ret_ty);
+        }
+        if f.ret.is_none() && matches!(f.body, FunBody::Expr(_)) && self.ret_ty == Ty::Nothing {
+            self.diags.error(
+                f.name_span,
+                "return type 'Nothing' needs to be specified explicitly.".to_string(),
+            );
         }
         if f.receiver.is_some() {
             self.extension_receiver_labels.pop();
@@ -63240,7 +63242,10 @@ impl<'a> Checker<'a> {
                                 .or_else(|| self.report_unmapped_labelled_call(e, a))
                                 .unwrap_or(Ty::Error),
                         }
-                    } else if matches!(recv, Ty::Obj(..) | Ty::TyParam(..) | Ty::Nothing) {
+                    } else if matches!(
+                        recv,
+                        Ty::Obj(..) | Ty::TyParam(..) | Ty::Nothing | Ty::Intersection(_)
+                    ) {
                         // `x?.Inner()` selects an inner classifier's constructor exactly as
                         // `x.Inner()` does: the member tower rung owns both families.
                         match self.record_member_call_with_slots(
