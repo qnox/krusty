@@ -41,6 +41,7 @@ pub mod kotlin_version;
 pub mod kt_string;
 pub mod lexer;
 pub mod libraries;
+pub mod lifting_provenance;
 pub mod lru;
 pub mod metadata;
 pub mod module_symbols;

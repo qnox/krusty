@@ -52,7 +52,7 @@ pub use suspension_points::{
 mod intrinsic;
 mod jvm_static_realization;
 mod lambda_classes;
-mod lifting;
+mod lifting_sequences;
 mod local_class_names;
 mod local_delegates;
 pub use local_delegates::IrLocalDelegateAccess;
@@ -105,7 +105,7 @@ pub use fields::IrField;
 pub use function_scope::IrFunctionScope;
 pub use intrinsic::IrIntrinsic;
 pub use lambda_classes::{IrInvokeBridge, IrLambdaClass, IrSamWrapperClass};
-pub(crate) use lifting::{IrLiftingEntry, IrLiftingSequence};
+pub(crate) use lifting_sequences::{IrLiftingEntry, IrLiftingSequence};
 pub(crate) use local_class_names::{IrLocalClassNameProvenance, IrLocalClassOwner};
 pub use local_property_references::IrLocalPropertyReference;
 pub use module_records::{

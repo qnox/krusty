@@ -1487,10 +1487,11 @@ pub struct LocalDelegateProvenance {
     pub ordinal: u32,
 }
 
-/// One enclosing local callable of a [`LiftingSite`]: its source name (`None` for a lambda) and its
+/// One enclosing local callable of a [`LiftingSite`]: its semantic role, optional source name, and
 /// position in the sequence.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LiftingStep {
+    pub kind: crate::lifting_provenance::LiftingCallableKind,
     pub name: Option<String>,
     pub position: u32,
 }

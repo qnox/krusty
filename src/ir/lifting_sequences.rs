@@ -1,4 +1,4 @@
-//! The sequences kotlinc numbers lifted local callables in, as common IR carries them.
+//! The sequences kotlinc numbers the local callables it lifts in.
 
 /// One sequence of lifted local callables: the source file that declares it, the lexical owner,
 /// and the outermost declaration name, as a [`crate::fir::FirLiftingSite`] spells them.
@@ -12,6 +12,10 @@ pub(crate) struct IrLiftingSequence {
 /// One position of an [`IrLiftingSequence`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct IrLiftingEntry {
+    pub kind: crate::lifting_provenance::LiftingCallableKind,
     pub name: Option<Box<str>>,
     pub lifted: bool,
+    /// The position of the innermost lambda this entry is nested in, whose own numbering it takes
+    /// part in; `None` for one numbered by the sequence itself.
+    pub scope: Option<u32>,
 }
