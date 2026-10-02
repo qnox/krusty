@@ -53,6 +53,16 @@ pub(super) fn property_store_line(
             .copied()
             .filter(|&line| line != 0);
     }
+    // An `init` assignment already records the statement line. The property's declaration line is
+    // only the fallback for a store lowering did not attach to a source statement.
+    if let Some(line) = ir
+        .expr_lines
+        .get(&expression)
+        .copied()
+        .filter(|&line| line != 0)
+    {
+        return Some(line);
+    }
     ir.prop_decl_lines
         .get(&(class.fq_name_id(), field.name.clone()))
         .copied()

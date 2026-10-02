@@ -110,14 +110,55 @@ fn class_shape(disassembly: &str) -> Vec<String> {
 /// delegate after the object's own properties, with kotlinc's line table.
 #[test]
 fn an_object_class_is_the_one_kotlinc_generates() {
+    assert_class_shapes(
+        "ObjectSerializer",
+        SOURCE,
+        &["Marker", "Settings", "Signal$Idle", "Holder$$serializer"],
+    );
+}
+
+const INIT_SOURCE: &str = "import kotlinx.serialization.Serializable\n\
+\n\
+fun note(value: Int) {}\n\
+\n\
+@Serializable\n\
+object Counter {\n\
+\x20   val total = 1\n\
+\x20   init {\n\
+\x20       note(2)\n\
+\x20   }\n\
+}\n\
+\n\
+@Serializable\n\
+object Opened {\n\
+\x20   init {\n\
+\x20       if (note(3) == Unit) {\n\
+\x20           note(4)\n\
+\x20       }\n\
+\x20   }\n\
+}\n\
+\n\
+@Serializable\n\
+object Single { init { note(5) } }\n";
+
+/// The cached serializer delegate is initialized after the object's source initializers, at its
+/// owner's line. An `init` block's closing `}` at that same offset keeps its own line entry behind
+/// a `nop`, as in kotlinc's `<clinit>`.
+#[test]
+fn an_object_init_block_keeps_its_closing_line_before_the_cached_serializer() {
+    assert_class_shapes("ObjectInit", INIT_SOURCE, &["Counter", "Opened", "Single"]);
+}
+
+/// Compile `source` with both compilers and the serialization plugin, and require each class's
+/// shape (everything but the constant pool's numbering) to be kotlinc's.
+fn assert_class_shapes(stem: &str, source: &str, classes: &[&str]) {
     let Some((plugin, cp)) = plugin_and_runtime() else {
         eprintln!("skipping: serialization plugin or runtime jar not available locally");
         return;
     };
     let extra = vec![format!("-Xplugin={}", plugin.display())];
-    for class in ["Marker", "Settings", "Signal$Idle", "Holder$$serializer"] {
-        let Some(built) =
-            compare_with_kotlinc_plugin("ObjectSerializer", SOURCE, class, &cp, "25", &extra)
+    for &class in classes {
+        let Some(built) = compare_with_kotlinc_plugin(stem, source, class, &cp, "25", &extra)
         else {
             eprintln!("skipping: reference kotlinc or javap unavailable");
             return;

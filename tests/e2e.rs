@@ -951,6 +951,8 @@ mod infix_newline_operand_e2e;
 mod inheritance_e2e;
 #[path = "inherited_interface_default_e2e.rs"]
 mod inherited_interface_default_e2e;
+#[path = "init_block_lines_e2e.rs"]
+mod init_block_lines_e2e;
 #[path = "inline_crossinline_object_e2e.rs"]
 mod inline_crossinline_object_e2e;
 #[path = "inline_deep_coverage_e2e.rs"]

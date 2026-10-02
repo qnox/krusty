@@ -84,6 +84,7 @@ mod function_reference_invoke;
 mod generated_property_operations;
 mod implicit_reference_coercion;
 mod in_place_arguments;
+mod initializer_lines;
 mod inline_body_emission;
 mod inline_call;
 mod inline_frame_marker;
@@ -3156,6 +3157,7 @@ fn emit_class(
                     .chain(c.init_body),
             );
             e.this_uninitialized = true;
+            e.record_locals = byte_parity;
             let receiver = e.frame.enter(FrameKey::Receiver, Ty::obj_name(c.fq_name));
             e.slots.insert(0, (receiver, Ty::obj_name(c.fq_name)));
             for (vi, t) in param_tys.iter().enumerate() {
@@ -3298,7 +3300,9 @@ fn emit_class(
                 let marks_before = ctor.line_marks().len();
                 e.record_locals = true;
                 e.constructor_initializer_class = Some(class_id);
+                e.render_initializer_boundaries = true;
                 e.emit_initializer_statements(&initializer_rest, &mut ctor);
+                e.render_initializer_boundaries = false;
                 e.constructor_initializer_class = None;
                 e.record_locals = false;
                 ctor_lines.extend(
@@ -3322,6 +3326,8 @@ fn emit_class(
         if !init_diverges {
             // The trailing `return` goes back on the class-declaration line, closing the ctor's table.
             if !ctor_lines.is_empty() {
+                // A closing `init` line still pending owns a `nop` before the return's line.
+                ctor.mark_line(c.decl_line);
                 ctor_lines.push((ctor.bytes.len() as u16, c.decl_line));
             }
             ctor.ret_void();
@@ -4480,7 +4486,9 @@ fn emit_enum_class(
             let s = e.frame.enter(FrameKey::Value(value), *t);
             e.slots.insert(value, (s, *t));
         }
+        e.render_initializer_boundaries = true;
         e.emit_constructor_init_body(c, init_body, &mut ctor, &mut store_lines);
+        e.render_initializer_boundaries = false;
         max_locals = max_locals.max(e.frame.max());
     }
     // The pc the trailing `return` starts at — kotlinc maps it back to the class HEADER line.
@@ -6794,6 +6802,11 @@ struct Emitter<'a> {
     /// currently being emitted. The checked class identity keeps physical field realization from
     /// recovering the class through its rendered JVM owner name.
     constructor_initializer_class: Option<ClassId>,
+    /// This physical body realizes source class initialization and therefore renders the exact
+    /// anonymous-initializer block identities recorded by common IR. Ordinary functions derived
+    /// from the same source body (notably a value class's `constructor-impl`) keep the provenance
+    /// but do not render constructor boundary entries.
+    render_initializer_boundaries: bool,
     /// kotlinc's `isInsideCondition`: a `when` branch condition is being emitted, so an inlined
     /// call in it marks its own line again after the inlined code.
     inside_condition: bool,
@@ -6874,6 +6887,7 @@ impl<'a> Emitter<'a> {
             comparison_line: None,
             record_locals: false,
             constructor_initializer_class: None,
+            render_initializer_boundaries: false,
             inside_condition: false,
             this_uninitialized: false,
             lambda_modes: env.lambda_modes,
@@ -7802,32 +7816,6 @@ impl<'a> Emitter<'a> {
             return self.inline_value_used_lambda_call(&inline_call, code);
         }
         self.try_inline_classpath_body(&inline_call, code).is_some()
-    }
-
-    /// Emit a constructor's lowered initializer block while retaining the start pc and declared
-    /// source line of each property store. Lowering represents both explicit constructor-parameter
-    /// stores and body-property initializers as a pure `SetField` block when it can preserve this
-    /// correspondence; a mixed block is emitted atomically and contributes no reconstructed lines.
-    fn emit_constructor_init_body(
-        &mut self,
-        class: &crate::ir::IrClass,
-        init_body: crate::ir::ExprId,
-        code: &mut CodeBuilder,
-        lines: &mut Vec<(u16, u32)>,
-    ) {
-        let Some(stores) =
-            crate::jvm::constructor_debug::initializer_property_stores(self.ir, class, init_body)
-        else {
-            self.emit(init_body, code);
-            return;
-        };
-        for store in stores {
-            let pc = code.bytes.len() as u16;
-            if let Some(line) = store.line {
-                lines.push((pc, line));
-            }
-            self.emit(store.expression, code);
-        }
     }
 
     fn emit(&mut self, e: u32, code: &mut CodeBuilder) {

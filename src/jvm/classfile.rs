@@ -2142,10 +2142,8 @@ pub struct CodeBuilder {
     /// stand in, which a bytecode rewrite that inserts an instruction between them needs.
     bind_sequence: Vec<u32>,
     next_bind: u32,
-    /// The next line mark is written even if its line is the one already in effect: an inlined
-    /// call's own lines ended, so the caller's line must be stated again (see
-    /// [`CodeBuilder::forget_line`]).
-    line_forgotten: bool,
+    /// Pending line-mark obligations (see [`line_numbers::PendingLines`]).
+    pending_lines: line_numbers::PendingLines,
 }
 
 impl CodeBuilder {
@@ -2168,7 +2166,7 @@ impl CodeBuilder {
             dead_bound: Vec::new(),
             bind_sequence: Vec::new(),
             next_bind: 0,
-            line_forgotten: false,
+            pending_lines: Default::default(),
         }
     }
 

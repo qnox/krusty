@@ -1899,6 +1899,9 @@ pub struct IrFile {
     /// from, and any block lowering wraps between them. A value declared in one is in scope until
     /// the callable ends, as a Kotlin function's own locals are; a nested block's end with it.
     pub callable_scopes: std::collections::HashSet<ExprId>,
+    /// Anonymous initializer (`init { … }`) bodies. kotlinc gives such a block's opening and
+    /// closing lines entries of their own, even where no instruction of the block sits on them.
+    pub initializer_blocks: std::collections::HashSet<ExprId>,
     /// Compiler-generated `Variable` declarations whose semantic role is holding a call operand:
     /// an inline expansion's parameter (argument, receiver, or capture), or an argument preserved
     /// for evaluation order. This is provenance, not a storage decision; a backend decides how

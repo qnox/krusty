@@ -6,6 +6,17 @@
 
 use super::{ClassWriter, CodeBuilder, LvtEntry};
 
+/// What a method's next line mark owes: marks already written live in `CodeBuilder::line_marks`.
+#[derive(Clone, Default)]
+pub(super) struct PendingLines {
+    /// The next line mark is written even if its line is the one already in effect: an inlined
+    /// call's own lines ended, so the caller's line must be stated again (see
+    /// [`CodeBuilder::forget_line`]).
+    forgotten: bool,
+    /// The pc of a line mark that must own an instruction (see [`CodeBuilder::mark_line_occupied`]).
+    occupied_pc: Option<u16>,
+}
+
 impl ClassWriter {
     /// Position of the implicit void return recorded by declared-function emission. `None` for an
     /// abstract, diverging, value-returning, or otherwise non-fallthrough method.
@@ -191,7 +202,25 @@ impl CodeBuilder {
     /// for three reasons — dead code, a pc past the classfile range, and a dedupe against the line
     /// already in effect at an EARLIER pc — and in each the current offset holds no entry of this
     /// mark's.
+    /// Mark `line` as a line that owns code of its own even when it emits none: kotlinc's `init {`
+    /// and a block's closing `}`. When the next mark names another line at this same pc, a `nop`
+    /// goes first so this line keeps an entry; an instruction emitted in between makes it moot.
+    pub fn mark_line_occupied(&mut self, line: u32) {
+        if self.record_line(line).is_some() {
+            self.pending_lines.occupied_pc = Some(self.bytes.len() as u16);
+        }
+    }
+
     fn record_line(&mut self, line: u32) -> Option<usize> {
+        if let Some(occupied) = self.pending_lines.occupied_pc.take() {
+            let displaces = self
+                .line_marks
+                .last()
+                .is_some_and(|&(pc, current)| pc == occupied && u32::from(current) != line);
+            if occupied as usize == self.bytes.len() && displaces && !self.dead {
+                self.nop();
+            }
+        }
         if self.dead {
             return None; // the statement it would mark is dropped dead code (see `dead`)
         }
@@ -200,7 +229,7 @@ impl CodeBuilder {
         }
         let line = line.min(u16::MAX as u32) as u16;
         let pc = self.bytes.len() as u16;
-        let forgotten = std::mem::take(&mut self.line_forgotten);
+        let forgotten = std::mem::take(&mut self.pending_lines.forgotten);
         let retained = self.retained_line_mark.is_some_and(|index| {
             // Retention names an ENTRY, so it applies only while that entry is still the last one
             // and still sits at this offset. It therefore expires on its own as soon as the pc
@@ -283,7 +312,7 @@ impl CodeBuilder {
     /// resets its last line number after an inlined call (`markLineNumberAfterInlineIfNeeded`),
     /// whose code ran under the callee's lines rather than the caller's.
     pub(crate) fn forget_line(&mut self) {
-        self.line_forgotten = true;
+        self.pending_lines.forgotten = true;
     }
 
     /// Record an inlined body's line number at the current offset, as ASM copies a

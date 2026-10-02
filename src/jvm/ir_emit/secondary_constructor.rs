@@ -190,6 +190,9 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                     .chain(sc.body),
             );
             e.this_uninitialized = true;
+            // A secondary constructor can own the class-initialization body when no primary
+            // constructor exists. Only exact initializer block identities render boundaries.
+            e.render_initializer_boundaries = true;
             let receiver = e.frame.enter(FrameKey::Receiver, Ty::obj(fq_name));
             e.slots.insert(0, (receiver, Ty::obj(fq_name)));
             // The enum name/ordinal are backend-owned physical parameters, not common-IR value

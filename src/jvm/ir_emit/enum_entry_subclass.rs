@@ -73,7 +73,9 @@ pub(super) fn emit_enum_entry_subclass(
         for (index, &ty) in ctor_params.iter().enumerate() {
             e.frame.enter(FrameKey::Parameter(index as u16), ty);
         }
+        e.render_initializer_boundaries = true;
         e.emit(init_body, &mut ctor);
+        e.render_initializer_boundaries = false;
         ctor_max = e.frame.max();
     }
     ctor.ret_void();
