@@ -22,10 +22,12 @@ static KRef text(const char *bytes, kt_int length) { return kt_string_utf8(bytes
      && driver_take_pending() == NULL)
 
 /* Whether the call that answered `result` raised `IndexOutOfBoundsException`. */
+/* A `String`'s bounds outside the text raise Kotlin/Native's `ArrayIndexOutOfBoundsException`. */
 static kt_boolean out_of_bounds(KRef result) {
     (void)result;
     KRef thrown = driver_take_pending();
-    return thrown != NULL && driver_type_of(thrown) == &kt_type_index_out_of_bounds_exception;
+    return thrown != NULL &&
+           driver_type_of(thrown) == &kt_type_array_index_out_of_bounds_exception;
 }
 
 void kt_program_entry(void) {

@@ -328,15 +328,24 @@ extern const KType kt_type_kmutable_property0;
 extern const KType kt_type_kmutable_property1;
 extern const KType kt_type_kmutable_property2;
 
-/* `kotlin.collections.List` as an `is` asks about it. The runtime builds two kinds of list — the
-   immutable one `listOf` answers and the growable one `ArrayList()` answers — and a check names
-   neither of those types, so both name this marker instead. It has no instances of its own. */
+/* The collection interfaces as an `is` asks about them. A check names an interface, never the
+   class of the list it holds, so every list class the runtime builds lists these (transitively, as
+   `KType.interfaces` requires) and a class of the program that implements one names it too. None
+   has instances of its own; each lists its own bases. */
+extern const KType kt_type_iterator_interface;
+extern const KType kt_type_iterable_interface;
+extern const KType kt_type_mutable_iterable_interface;
+extern const KType kt_type_collection_interface;
+extern const KType kt_type_mutable_collection_interface;
 extern const KType kt_type_list_interface;
+extern const KType kt_type_mutable_list_interface;
+extern const KType kt_type_random_access_interface;
 
 /* `listOf(...)` as a value: an immutable list over the `Array<T>` a vararg call already built,
    which is what Kotlin's own `listOf(vararg)` wraps too. Being immutable is what makes sharing
-   that array sound — nothing a program can write through reaches it. `MutableList` is a different
-   type and is not one of these. */
+   that array sound — nothing a program can write through reaches it. It is a `List`, a
+   `Collection`, an `Iterable` and `RandomAccess`, and not a `MutableList`: Kotlin/Native's
+   `listOf(vararg)` answers an anonymous read-only `AbstractList`, which this class stands for. */
 extern const KType kt_type_list;
 extern const KType kt_type_list_iterator;
 
@@ -902,6 +911,9 @@ extern const KType kt_type_assertion_error;
 extern const KType kt_type_null_pointer_exception;
 extern const KType kt_type_class_cast_exception;
 extern const KType kt_type_index_out_of_bounds_exception;
+/* Kotlin/Native's `ArrayIndexOutOfBoundsException`, a subclass of the one above: what its runtime
+   throws for an index outside a `String`. */
+extern const KType kt_type_array_index_out_of_bounds_exception;
 extern const KType kt_type_arithmetic_exception;
 extern const KType kt_type_unsupported_operation_exception;
 extern const KType kt_type_number_format_exception;

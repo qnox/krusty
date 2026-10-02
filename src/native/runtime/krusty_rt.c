@@ -1,6 +1,5 @@
 /* krusty native runtime — generated; do not edit. */
-#include "krusty_rt.h"
-#include "krusty_sys.h"
+#include "krusty_internal.h"
 
 /* ---- kernel interface ---------------------------------------------------------------------- */
 
@@ -9,8 +8,6 @@ void kt_exit(kt_int status) { kt_sys_exit(status); }
 static void kt_write(kt_int fd, const char *bytes, size_t length) {
     kt_sys_write(fd, bytes, length);
 }
-
-#define KT_FAIL(literal) KT_SYS_FAIL(literal)
 
 /* ---- freestanding C support --------------------------------------------------------------- */
 
@@ -43,17 +40,8 @@ static kt_int kt_builtin_hash_code(KRef self);
 static const kt_fn kt_builtin_vtable[] = {(kt_fn)kt_builtin_equals, (kt_fn)kt_builtin_hash_code,
                                           (kt_fn)kt_to_string};
 
-static const kt_fn kt_any_vtable[] = {(kt_fn)kt_any_equals, (kt_fn)kt_any_hash_code,
+const kt_fn kt_any_vtable[3] = {(kt_fn)kt_any_equals, (kt_fn)kt_any_hash_code,
                                       (kt_fn)kt_any_to_string};
-
-/* The names of a class of the runtime's own: `simple` in `package` (which ends in its dot), both
-   published as a member class's (`KType.class_names`), and the rendered name their join. Written
-   as two literals so the simple name is its own text rather than the tail of a split. */
-#define KT_NAMED(package, simple)                                                                  \
-    .name = package simple, .name_length = sizeof(package simple) - 1,                             \
-    .qualified_name = package simple, .qualified_name_length = sizeof(package simple) - 1,         \
-    .simple_name = simple, .simple_name_length = sizeof(simple) - 1,                               \
-    .class_names = KT_CLASS_NAMES_MEMBER
 
 /* kotlin.Any itself is never instantiated; the descriptor exists as the root of every `super`
    chain and the owner of the three default slots. */
@@ -211,13 +199,44 @@ KRef kt_array_new(const KType *type, kt_int length) {
     return (KRef)array;
 }
 
-/* An index outside `0 until size`: Kotlin's `IndexOutOfBoundsException`, which a program may
-   catch. The wording is the JVM's, which is what the corpus reads where it reads one at all. */
+/* `<a><first><b><second>`, then `<c><third>` when `c` is not NULL: the JVM's wording of an index
+   exception, the numbers rendered in decimal. */
+static KRef kt_bounds_text(const char *a, kt_int first, const char *b, kt_int second,
+                           const char *c, kt_int third) {
+    const char *parts[] = {a, b, c};
+    kt_int values[] = {first, second, third};
+    KRef text = kt_string_utf8("", 0);
+    for (int at = 0; at < 3 && parts[at] != NULL; at++) {
+        kt_int length = 0;
+        while (parts[at][length] != 0) {
+            length++;
+        }
+        text = kt_string_plus(kt_string_plus(text, kt_string_utf8(parts[at], length)),
+                              kt_box_int(values[at]));
+    }
+    return text;
+}
+
+/* An index outside `0 until size` raised as `type`, which a program may catch, in the JVM's
+   wording, which is what the corpus reads where it reads one at all. */
+static void kt_raise_index(const KType *type, kt_int index, kt_int size) {
+    KRef message = kt_bounds_text("Index ", index, " out of bounds for length ", size, NULL, 0);
+    kt_throw(kt_throwable_new(type, message));
+}
+
 void kt_index_out_of_bounds(kt_int index, kt_int size) {
-    KRef message = kt_string_plus(kt_string_utf8("Index ", 6), kt_to_string(kt_box_int(index)));
-    message = kt_string_plus(message, kt_string_utf8(" out of bounds for length ", 26));
-    message = kt_string_plus(message, kt_to_string(kt_box_int(size)));
-    kt_throw(kt_throwable_new(&kt_type_index_out_of_bounds_exception, message));
+    kt_raise_index(&kt_type_index_out_of_bounds_exception, index, size);
+}
+
+/* An index outside a text. The type is Kotlin/Native's: its runtime reads a `String` in
+   `KString.cpp`, which throws `ArrayIndexOutOfBoundsException`, and its `StringBuilder` checks
+   through `AbstractList.checkElementIndex`, which throws `IndexOutOfBoundsException`. The wording
+   is the JVM's, whose `StringIndexOutOfBoundsException` both answer. */
+static void kt_text_index_out_of_bounds(KRef text, kt_int index, kt_int size) {
+    kt_raise_index(((const KObjectHeader *)text)->type == &kt_type_string
+                       ? &kt_type_array_index_out_of_bounds_exception
+                       : &kt_type_index_out_of_bounds_exception,
+                   index, size);
 }
 
 /* `kotlin.Enum`'s own storage, which every enum class carries ahead of its own fields. The
@@ -248,36 +267,11 @@ void kt_no_such_enum_constant(KRef name) {
 
 typedef KArray KByteArray;
 
-static kt_int kt_length_of(KRef array) { return ((const KArray *)array)->length; }
-
 static char *kt_bytes_of(KByteArray *array) { return (char *)(array + 1); }
 
 static KByteArray *kt_bytes_new(kt_int length) {
     return (KByteArray *)kt_array_new(&kt_type_byte_array, length);
 }
-
-/* Every built-in value is one of these; the header's type says which. */
-struct KObject {
-    KObjectHeader header;
-    union {
-        struct {
-            /* The heap byte array holding the text, or NULL when `bytes` points into static
-               storage (a literal). This is the string type's one reference field: it is what
-               keeps the text alive exactly as long as the string. */
-            KRef storage;
-            const char *bytes;
-            kt_int byte_length;
-        } string;
-        kt_byte byte_value;
-        kt_short short_value;
-        kt_int int_value;
-        kt_long long_value;
-        kt_char char_value;
-        kt_boolean boolean_value;
-        kt_float float_value;
-        kt_double double_value;
-    } as;
-};
 
 static const uint32_t kt_string_references[] = {offsetof(KObject, as.string.storage)};
 
@@ -369,7 +363,7 @@ kt_char kt_string_get(KRef self, kt_int index) {
        does on the first one; only the end of the walk raises, and that covers indices past the
        end. */
     if (index < 0) {
-        kt_index_out_of_bounds(index, kt_string_length(self));
+        kt_text_index_out_of_bounds(self, index, kt_string_length(self));
         return 0;
     }
     kt_int byte_length = 0;
@@ -401,22 +395,11 @@ kt_char kt_string_get(KRef self, kt_int index) {
         unit += units;
         at += width;
     }
-    kt_index_out_of_bounds(index, unit);
+    kt_text_index_out_of_bounds(self, index, unit);
     return 0;
 }
 
-/* A UTF-16 walk over UTF-8 storage, which is what every question Kotlin asks about a string's
-   CONTENT needs: the unit is the unit Kotlin counts, and a character above U+FFFF is two of them.
-   `pending` holds the trailing surrogate of a pair whose leading half has already been handed out;
-   zero is not a valid trailing surrogate, so it doubles as "none". */
-typedef struct KUnits {
-    const char *bytes;
-    kt_int byte_length;
-    kt_int at;
-    uint32_t pending;
-} KUnits;
-
-static KUnits kt_units_of(KRef self) {
+KUnits kt_units_of(KRef self) {
     kt_int byte_length = 0;
     const char *bytes = kt_text_of(self, &byte_length);
     KUnits units = {bytes, byte_length, 0, 0};
@@ -424,7 +407,7 @@ static KUnits kt_units_of(KRef self) {
 }
 
 /* The next unit, or zero when the text is exhausted. */
-static kt_boolean kt_units_next(KUnits *units, kt_char *out) {
+kt_boolean kt_units_next(KUnits *units, kt_char *out) {
     if (units->pending != 0) {
         *out = (kt_char)units->pending;
         units->pending = 0;
@@ -556,7 +539,7 @@ static kt_int kt_string_offset(KRef self, kt_int index, kt_boolean *split) {
     /* Before the walk, which would otherwise take a negative index for one that falls inside the
        first character. */
     if (index < 0) {
-        kt_index_out_of_bounds(index, kt_string_length(self));
+        kt_text_index_out_of_bounds(self, index, kt_string_length(self));
         return -1;
     }
     kt_int byte_length = 0;
@@ -580,20 +563,16 @@ static kt_int kt_string_offset(KRef self, kt_int index, kt_boolean *split) {
     if (unit == index) {
         return at;
     }
-    kt_index_out_of_bounds(index, unit);
+    kt_text_index_out_of_bounds(self, index, unit);
     return -1;
 }
 
 /* The text between two bounds `kt_string_offset` found. Bounds on character boundaries are a plain
-   slice, which shares a string's storage and copies a builder's.
-
-   A bound between the halves of a pair is a question Kotlin answers with half a character: the
-   JVM's `"😀".substring(0, 1)` is the lone high surrogate D83D, and `substring(1, 2)` the lone low
-   one DE00. The runtime already has a form for a lone half — the three bytes its code unit encodes
-   to, which is what a surrogate `Char` renders as — so the answer is built from that: the LOW half
-   of the character a split start falls in, the whole characters after it, and the HIGH half of the
-   character a split end falls in. Concatenating the two halves back together rejoins them into the
-   character, as it does for any high half followed by a low one. */
+   slice, which shares a string's storage and copies a builder's. A bound between the halves of a
+   pair answers half a character, as the JVM's `"😀".substring(0, 1)` is the lone high surrogate
+   D83D: the LOW half of the character a split start falls in (in the three bytes a lone unit
+   encodes to), the whole characters after it, and the HIGH half of the character a split end falls
+   in. Concatenating the two halves back together rejoins them into the character. */
 static KRef kt_string_cut(KRef self, kt_int from, kt_boolean from_split, kt_int to,
                           kt_boolean to_split) {
     if (!from_split && !to_split) {
@@ -641,8 +620,16 @@ static KRef kt_string_cut(KRef self, kt_int from, kt_boolean from_split, kt_int 
    before it reads the answer, and a slice cut from bounds that were refused would be text of
    negative length. */
 KRef kt_string_substring(KRef self, kt_int start, kt_int end) {
-    if (start < 0 || end < start) {
-        kt_index_out_of_bounds(start, end);
+    /* Kotlin/Native's type, as `kt_text_index_out_of_bounds` has it, and the JVM's wording,
+       `Range [-1, 2) out of bounds for length 3`. */
+    kt_int length = kt_string_length(self);
+    if (start < 0 || end > length || start > end) {
+        KRef message = kt_bounds_text("Range [", start, ", ", end, ") out of bounds for length ",
+                                      length);
+        kt_throw(kt_throwable_new(self->header.type == &kt_type_string
+                                      ? &kt_type_array_index_out_of_bounds_exception
+                                      : &kt_type_index_out_of_bounds_exception,
+                                  message));
         return self;
     }
     kt_boolean from_split = 0;
@@ -659,14 +646,7 @@ KRef kt_string_substring(KRef self, kt_int start, kt_int end) {
 }
 
 KRef kt_string_substring_from(KRef self, kt_int start) {
-    kt_boolean from_split = 0;
-    kt_int from = kt_string_offset(self, start, &from_split);
-    if (from < 0) {
-        return self;
-    }
-    kt_int byte_length = 0;
-    (void)kt_text_of(self, &byte_length);
-    return kt_string_cut(self, from, from_split, byte_length, 0);
+    return kt_string_substring(self, start, kt_string_length(self));
 }
 
 /* `s.isEmpty()` and `s.isNotEmpty()`. No walk is needed and none would help: a text has zero
@@ -784,18 +764,11 @@ static kt_boolean kt_units_begin_with(KUnits text, KUnits wanted) {
 }
 
 /* `s.startsWith(prefix)`, `s.endsWith(suffix)` and `s.contains(other)`, which Kotlin answers by
-   UTF-16 unit.
-
-   Bytes settle all three while neither text holds a lone surrogate: UTF-8 is a prefix code, so one
-   text begins, ends or holds another exactly when its bytes do — a match can neither start in the
-   middle of a character nor straddle one. A lone half breaks that. It is one unit of a character
-   the other text may hold WHOLE, as four bytes that share none of the half's three: `"😀"` holds
-   `"\uD83D"` and ends with `"\uDE00"` on the JVM, and no run of its bytes is either. So a text
-   with a lone half in it is compared unit by unit, which is the question Kotlin asks, and the byte
-   comparison stays the answer for every other text.
-
-   Only the case-SENSITIVE forms reach here; the generator declines `ignoreCase = true`, which is a
-   question about Unicode case folding rather than about text. */
+   UTF-16 unit. Bytes settle all three while neither text holds a lone surrogate, UTF-8 being a
+   prefix code. A lone half is one unit of a character the other text may hold WHOLE, in four bytes
+   that share none of the half's three (`"😀"` holds `"\uD83D"` on the JVM), so a text with one is
+   compared unit by unit. Only the case-SENSITIVE forms reach here; the generator declines
+   `ignoreCase = true`, a question about Unicode case folding rather than about text. */
 kt_boolean kt_string_starts_with(KRef self, KRef prefix) {
     kt_int byte_length = 0;
     const char *bytes = kt_text_of(self, &byte_length);
@@ -916,14 +889,10 @@ KRef kt_string_reversed(KRef self) {
     return kt_string_of((KRef)reversed, out, byte_length);
 }
 
-/* `s.first()` and `s.last()` — the UTF-16 unit at either end, which is what a `Char` is. Kotlin
-   raises `NoSuchElementException` on empty text, with its own wording.
-
-   The raise is followed by a RETURN rather than by the answer. `kt_throw` records the exception for
-   the call site to find and COMES BACK, so whatever follows it runs with one already in flight —
-   and `kt_string_get` on empty text raises its own, which would take this one's place and report an
-   index the program never asked about. The value returned here is never read: the call site tests
-   for the exception before it looks at the answer. */
+/* `s.first()` and `s.last()` — the UTF-16 unit at either end. Kotlin raises
+   `NoSuchElementException` on empty text, with its own wording. The raise is followed by a RETURN:
+   `kt_throw` COMES BACK, and `kt_string_get` on empty text would raise its own over this one. The
+   value returned is never read; the call site tests for the exception first. */
 static kt_boolean kt_text_raise_when_empty(KRef self) {
     if (!kt_string_is_empty(self)) {
         return 0;
@@ -1214,15 +1183,16 @@ static const char *kt_text_of(KRef self, kt_int *byte_length) {
 
 /* `StringBuilder(capacity)`. A capacity is a hint to a builder that grows anyway, but a NEGATIVE
    one is not read as zero. Kotlin's common declaration specifies no exception, and the platforms
-   differ, so this runtime answers as Kotlin/Native does, being a native target: its constructor
-   allocates the builder's storage as `CharArray(capacity)`, and a negative array size there throws
-   `IllegalArgumentException` with no message. (Kotlin/JVM throws Java's
-   `NegativeArraySizeException`, a type Kotlin does not declare; Kotlin/JS ignores the capacity.)
-   The exception is raised before the builder is allocated, and the NULL returned is never read:
-   the call site tests for the exception first. */
+   differ, so this runtime throws the type Kotlin/Native does, being a native target: its
+   constructor allocates the builder's storage as `CharArray(capacity)`, and a negative array size
+   there throws `IllegalArgumentException`. The message is the JVM's, the capacity (Kotlin/JVM
+   throws Java's `NegativeArraySizeException("-1")`; Kotlin/Native's has none). The exception is
+   raised before the builder is allocated, and the NULL returned is never read: the call site tests
+   for the exception first. */
 KRef kt_string_builder_with_capacity(kt_int capacity) {
     if (capacity < 0) {
-        kt_throw(kt_throwable_new(&kt_type_illegal_argument_exception, NULL));
+        KRef size = kt_to_string(kt_box_int(capacity));
+        kt_throw(kt_throwable_new(&kt_type_illegal_argument_exception, size));
         return NULL;
     }
     KStringBuilder *builder =
@@ -1310,14 +1280,10 @@ static void kt_string_builder_reserve(KRef self, kt_int additional) {
     builder->storage = replacement;
 }
 
-/* `sb.setLength(n)`, by UTF-16 UNIT as Kotlin counts. Shorter truncates; longer pads with NUL,
-   which is what Java's own does and what a program reading the result back would see.
-
-   Truncating finds the byte through `kt_string_offset`, which reads a builder's own text. A length
-   between the halves of a surrogate pair keeps the HIGH half, as Kotlin's builder does: the text is
-   cut to the character's start and the lone half is written in its three-byte form, the form
-   `substring` answers for the same bound. That is shorter than the four bytes it replaces, so it
-   fits where the character was. A NUL is one byte, so padding costs one per unit. */
+/* `sb.setLength(n)`, by UTF-16 UNIT as Kotlin counts. Shorter truncates; longer pads with NUL, as
+   Java's own does. A length between the halves of a surrogate pair keeps the HIGH half, as
+   Kotlin's builder does: the text is cut to the character's start and the lone half written in its
+   three-byte form, shorter than the four bytes it replaces. A NUL is one byte. */
 void kt_string_builder_set_length(KRef self, kt_int length) {
     if (length < 0) {
         kt_index_out_of_bounds(length, kt_string_length(self));
@@ -1351,15 +1317,11 @@ static kt_boolean kt_is_encoded_surrogate(const char *bytes, unsigned char secon
     return (unsigned char)bytes[0] == 0xEDu && ((unsigned char)bytes[1] & 0xF0u) == second_high_bits;
 }
 
-/* Append UTF-8 bytes, JOINING a surrogate pair that meets at the tail.
-
-   A `Char` is a UTF-16 unit, and a lone surrogate unit can only be written as its own three-byte
-   sequence. So a supplementary character a program assembles unit by unit -- `for (c in s)
-   sb.append(c)` over any text holding an emoji -- arrives as a high half, then a low one. Stored
-   side by side they are six bytes of CESU-8, which no literal of the same character equals and no
-   terminal prints; the rule is that a low half arriving right after a stored high half becomes one
-   four-byte character with it. Nothing else is rewritten: a lone half with no partner stays the
-   lone unit it is. */
+/* Append UTF-8 bytes, JOINING a surrogate pair that meets at the tail. A character a program
+   assembles unit by unit (`for (c in s) sb.append(c)`) arrives as a high half, then a low one, each
+   in its own three bytes; stored side by side they would be CESU-8, which no literal of the
+   character equals. So a low half right after a stored high half becomes one four-byte character
+   with it, and nothing else is rewritten. */
 static void kt_string_builder_append_bytes(KRef self, const char *bytes, kt_int length) {
     kt_string_builder_reserve(self, length);
     KStringBuilder *builder = (KStringBuilder *)self;
@@ -1446,18 +1408,12 @@ kt_boolean kt_is_string_builder(KRef value) {
 
 /* ---- boxing -------------------------------------------------------------------------------- */
 
-/* Boxing a SMALL value hands out the same object every time, and a program can see that:
-   `boxBoolean(true) === boxBoolean(true)` is true in Kotlin. The cached range is the one the JVM
-   specifies and Kotlin/Native also caches — every `Byte`, `Short`/`Int`/`Long` in -128..127,
-   `Char` in 0..127, and both `Boolean`s. Outside it a box is a fresh object and identity is
-   unspecified, which is what Kotlin says as well; nothing here promises more than that.
-
-   The cache is static storage, not the heap, and that is deliberate on two counts: these objects
-   must outlive every collection, and the collector ignores them for free — both the conservative
-   root scan and the precise field tracer resolve a candidate address to its heap chunk and drop
-   one that belongs to no chunk. An entry is filled on first use rather than at startup, with a
-   NULL type as the "not yet" marker (static storage starts zeroed), so the runtime pays for only
-   the values a program actually boxes. */
+/* Boxing a SMALL value hands out the same object every time, which a program can see:
+   `boxBoolean(true) === boxBoolean(true)`. The cached range is the one the JVM specifies and
+   Kotlin/Native also caches — every `Byte`, `Short`/`Int`/`Long` in -128..127, `Char` in 0..127,
+   and both `Boolean`s; outside it a box is fresh. The cache is static storage, which outlives every
+   collection and which the collector ignores for free, since a candidate address in no heap chunk
+   is dropped. An entry is filled on first use, a NULL type marking it empty. */
 #define KT_BOX(suffix, type_descriptor, field, carrier, low, high)                                 \
     static KObject kt_cache_##suffix[(high) - (low) + 1];                                          \
     KRef kt_box_##suffix(carrier value) {                                                          \
@@ -1933,7 +1889,6 @@ static KRef kt_lazy_to_string(KRef self) {
    cannot ask the object for it, since a property reference answers `name` from a table of the
    emitted code's own. */
 static void kt_raise_uninitialized_property(KRef name);
-static KRef kt_invoke_three(KRef function, KRef first, KRef second, KRef third);
 
 typedef struct KNotNullVar {
     KObjectHeader header;
@@ -2268,14 +2223,9 @@ static uint64_t kt_difference_modulo_unsigned(uint64_t a, uint64_t b, uint64_t c
 }
 
 /* The last value a progression actually reaches: the bound written, pulled back to the nearest
-   point on the step.
-
-   The obvious `first + ((last - first) / step) * step` is right for every range a program is
-   likely to write and wrong for the ones the corpus asks about, because `last - first` is a
-   DISTANCE and the widest ones do not fit: `Long.MIN_VALUE..Long.MAX_VALUE` spans more than a
-   `Long` can hold, so the subtraction wraps and the walk stops after one element. Working modulo
-   the step instead never forms that distance — every intermediate here is inside `0 until step` —
-   which is why Kotlin's own `getProgressionLastElement` is written this way too. */
+   point on the step. `first + ((last - first) / step) * step` wraps for the widest ranges, whose
+   DISTANCE a `Long` cannot hold; working modulo the step never forms it, which is why Kotlin's own
+   `getProgressionLastElement` is written this way too. */
 static kt_long kt_range_last_element(kt_boolean unsigned_bounds, kt_long first, kt_long last,
                                      kt_long step) {
     if (step > 0 ? kt_range_below(unsigned_bounds, last, first)
@@ -2313,13 +2263,9 @@ static KRef kt_range_allocate(const KType *type, kt_long first, kt_long last, kt
 }
 
 /* A progression: what `step`, `downTo` and `reversed()` answer, of the element kind of `like` (a
-   range or a progression). It is one even when its step is `1`. */
+   range or a progression, which every caller has checked), even when its step is `1`. */
 static KRef kt_range_new_stepped(const KType *like, kt_long first, kt_long last, kt_long step) {
-    int kind = kt_range_kind(like);
-    if (kind < 0) {
-        KT_FAIL("krusty: a step or reversal of a value that is not a range\n");
-    }
-    return kt_range_allocate(kt_progression_types[kind], first, last, step);
+    return kt_range_allocate(kt_progression_types[kt_range_kind(like)], first, last, step);
 }
 
 /* A range: what `..` and `until` answer. */
@@ -2394,7 +2340,7 @@ KRef kt_ulong_range_until(kt_long first, kt_long last) {
 }
 
 /* Empty is direction-dependent once there is a step: `10 downTo 1` runs, `1 downTo 10` does not. */
-static kt_boolean kt_range_empty(const KRange *range) {
+kt_boolean kt_range_empty(const KRange *range) {
     kt_boolean unsigned_bounds = kt_range_unsigned(range->header.type);
     return range->step > 0 ? kt_range_below(unsigned_bounds, range->last, range->first)
                            : kt_range_below(unsigned_bounds, range->first, range->last);
@@ -2511,23 +2457,32 @@ typedef struct KRangeIterator {
 
 /* The iterators are Kotlin's concrete classes: `IntProgressionIterator` and its Long and Char
    twins subclass the abstract `kotlin.collections.IntIterator` family, which has no instances of
-   its own, and the two unsigned ones subclass nothing but `kotlin.Any`. */
-KT_RANGE_TYPE(kt_type_int_iterator, "kotlin.collections.", "IntIterator", KObjectHeader,
-              kt_any_vtable)
-KT_RANGE_TYPE(kt_type_long_iterator, "kotlin.collections.", "LongIterator", KObjectHeader,
-              kt_any_vtable)
-KT_RANGE_TYPE(kt_type_char_iterator, "kotlin.collections.", "CharIterator", KObjectHeader,
-              kt_any_vtable)
+   its own, and the two unsigned ones subclass nothing but `kotlin.Any`. Every one implements
+   `kotlin.collections.Iterator`, which the classes subclassing `Any` list themselves and the others
+   find on their abstract superclass. */
+static const KType *const kt_range_iterator_interfaces[] = {&kt_type_iterator_interface};
+#define KT_ITERATOR_TYPE(identifier, package, simple, shape)                                       \
+    const KType identifier = {KT_NAMED(package, simple),                                           \
+                              .instance_size = sizeof(shape),                                      \
+                              .super = &kt_type_any,                                               \
+                              .vtable = kt_any_vtable,                                             \
+                              .vtable_length = 3,                                                  \
+                              .interfaces = kt_range_iterator_interfaces,                          \
+                              .interface_count = 1};
+KT_ITERATOR_TYPE(kt_type_int_iterator, "kotlin.collections.", "IntIterator", KObjectHeader)
+KT_ITERATOR_TYPE(kt_type_long_iterator, "kotlin.collections.", "LongIterator", KObjectHeader)
+KT_ITERATOR_TYPE(kt_type_char_iterator, "kotlin.collections.", "CharIterator", KObjectHeader)
 KT_RANGE_SUBTYPE(kt_type_int_progression_iterator, "kotlin.ranges.", "IntProgressionIterator",
                  KRangeIterator, kt_any_vtable, &kt_type_int_iterator)
 KT_RANGE_SUBTYPE(kt_type_long_progression_iterator, "kotlin.ranges.", "LongProgressionIterator",
                  KRangeIterator, kt_any_vtable, &kt_type_long_iterator)
 KT_RANGE_SUBTYPE(kt_type_char_progression_iterator, "kotlin.ranges.", "CharProgressionIterator",
                  KRangeIterator, kt_any_vtable, &kt_type_char_iterator)
-KT_RANGE_TYPE(kt_type_uint_progression_iterator, "kotlin.ranges.", "UIntProgressionIterator",
-              KRangeIterator, kt_any_vtable)
-KT_RANGE_TYPE(kt_type_ulong_progression_iterator, "kotlin.ranges.", "ULongProgressionIterator",
-              KRangeIterator, kt_any_vtable)
+KT_ITERATOR_TYPE(kt_type_uint_progression_iterator, "kotlin.ranges.", "UIntProgressionIterator",
+                 KRangeIterator)
+KT_ITERATOR_TYPE(kt_type_ulong_progression_iterator, "kotlin.ranges.", "ULongProgressionIterator",
+                 KRangeIterator)
+#undef KT_ITERATOR_TYPE
 
 static const KType *const kt_range_iterator_types[KT_RANGE_KINDS] = {
     &kt_type_int_progression_iterator, &kt_type_long_progression_iterator,
@@ -2538,7 +2493,7 @@ static const KType *const kt_range_iterator_types[KT_RANGE_KINDS] = {
    struct is read through, because everything that is not one of this runtime's own shapes and not
    a walkable class of the program ends up at the range reader — and a value read as a struct it is
    not is a wrong answer where a refusal is the honest one. */
-static kt_boolean kt_is_range(KRef value) {
+kt_boolean kt_is_range(KRef value) {
     return value != NULL && kt_range_kind(value->header.type) >= 0;
 }
 
@@ -2566,19 +2521,24 @@ KRef kt_range_iterator(KRef range) {
     return (KRef)iterator;
 }
 
+/* The receiver of `step` or `reversed()`, read through only once its descriptor says it is a range:
+   another class may be smaller than a `KRange`, so even reading its bounds would read past it. */
+static const KRange *kt_stepped_receiver(KRef range) {
+    if (!kt_is_range(range)) {
+        KT_FAIL("krusty: a step or reversal of a value that is not a range\n");
+    }
+    return (const KRange *)range;
+}
+
 /* `range step n`. The magnitude is what is given; the receiver's direction is kept, which is why
    `10 downTo 1 step 3` descends. A step of zero has no walk to describe and is Kotlin's
    `IllegalArgumentException`. */
 KRef kt_range_step(KRef range, kt_long step) {
-    if (!kt_is_range(range)) {
-        KT_FAIL("krusty: a step or reversal of a value that is not a range\n");
-    }
-    const KRange *bounds = (const KRange *)range;
+    const KRange *bounds = kt_stepped_receiver(range);
     if (step <= 0) {
-        /* Kotlin's own message, which names the step that was given. The RETURN matters: the
-           exception is recorded, not raised, so falling through would build a progression whose
-           step is zero and whose last element is computed modulo it — a SIGFPE, and a machine
-           trap where Kotlin has an exception a program is entitled to catch. */
+        /* Kotlin's own message. The RETURN matters: the exception is recorded, not raised, and
+           falling through would compute the last element modulo a zero step — a SIGFPE where
+           Kotlin has an exception a program is entitled to catch. */
         KRef message = kt_string_plus(kt_string_utf8("Step must be positive, was: ", 28),
                                       kt_to_string(kt_box_long(step)));
         message = kt_string_plus(message, kt_string_utf8(".", 1));
@@ -2592,10 +2552,7 @@ KRef kt_range_step(KRef range, kt_long step) {
 /* `reversed()`. The walk runs the other way from the LAST ELEMENT, which is already on the step —
    so `(1..9 step 3).reversed()` is `7 downTo 1 step 3`, not `9 downTo 1 step 3`. */
 KRef kt_range_reversed(KRef range) {
-    if (!kt_is_range(range)) {
-        KT_FAIL("krusty: a step or reversal of a value that is not a range\n");
-    }
-    const KRange *bounds = (const KRange *)range;
+    const KRange *bounds = kt_stepped_receiver(range);
     return kt_range_new_stepped(range->header.type, bounds->last, bounds->first, -bounds->step);
 }
 
@@ -2627,9 +2584,6 @@ KRef kt_ulong_range_down_to(kt_long first, kt_long last) {
    `CharIterator` — the narrow protocol these two functions implement. So the walk has to answer
    here as well as through the general dispatch, and the descriptor is what says which object this
    is. */
-static kt_boolean kt_walk_is(KRef iterator);
-static kt_boolean kt_walk_has_next(KRef iterator);
-static kt_long kt_walk_next_long(KRef iterator);
 
 kt_boolean kt_range_iterator_has_next(KRef iterator) {
     if (kt_walk_is(iterator)) {
@@ -2650,7 +2604,10 @@ kt_long kt_range_iterator_next(KRef iterator) {
     }
     KRangeIterator *self = (KRangeIterator *)iterator;
     if (!self->has_next) {
-        KT_FAIL("krusty: no more elements in this range\n");
+        /* Kotlin's `IntProgressionIterator` and its kin throw `NoSuchElementException()`, which a
+           program may catch; the zero returned beside it is no element. */
+        kt_throw(kt_throwable_new(&kt_type_no_such_element_exception, NULL));
+        return 0;
     }
     kt_long value = self->next;
     /* Stopping at the LAST ELEMENT rather than by comparing against the bound is what keeps this
@@ -2667,7 +2624,6 @@ kt_long kt_range_iterator_next(KRef iterator) {
     }
     return value;
 }
-
 
 /* ---- floating-point ranges ------------------------------------------------------------------ */
 
@@ -2926,7 +2882,6 @@ static KRef kt_comparable_range_to_string(KRef self) {
     }
     return kt_string_plus(text, end);
 }
-
 
 /* Append `count` bytes of `text` at `out`, answering how many were written. */
 static kt_int kt_range_put(char *out, const char *text, kt_int count) {

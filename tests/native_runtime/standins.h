@@ -186,6 +186,17 @@ __attribute__((weak)) const KType kt_type_index_out_of_bounds_exception = {
     .super = &kt_type_any,
 };
 
+/* `kotlin.ArrayIndexOutOfBoundsException`, which reading a `String` past its ends throws, as a
+   subclass of the one above. */
+__attribute__((weak)) const KType kt_type_array_index_out_of_bounds_exception = {
+    .name = "kotlin.ArrayIndexOutOfBoundsException",
+    .name_length = sizeof("kotlin.ArrayIndexOutOfBoundsException") - 1,
+    .instance_size = sizeof(DriverThrowable),
+    .reference_count = sizeof(driver_throwable_offsets) / sizeof(driver_throwable_offsets[0]),
+    .reference_offsets = driver_throwable_offsets,
+    .super = &kt_type_index_out_of_bounds_exception,
+};
+
 /* The collector finds roots from here up; a driver that allocates records it first. */
 #define DRIVER_BEGIN()                                                                             \
     int driver_stack_bottom;                                                                       \

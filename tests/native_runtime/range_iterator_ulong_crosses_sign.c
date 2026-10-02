@@ -3,20 +3,9 @@
    an optimizing build is entitled to turn into anything and a trapping sanitizer build reports.
    The answers checked here are what Kotlin's `ULongProgressionIterator` gives.
 
-   The expected walks are Kotlin's, from this program compiled and run with the reference kotlinc
-   2.4.10 on the JVM:
-
-       fun main() {
-           println((Long.MAX_VALUE.toULong()..(Long.MAX_VALUE.toULong() + 1uL)).toList())
-           println(((Long.MAX_VALUE.toULong() + 1uL) downTo Long.MAX_VALUE.toULong()).toList())
-           println((0uL..ULong.MAX_VALUE step Long.MAX_VALUE).toList())
-       }
-
-   which prints `[9223372036854775807, 9223372036854775808]`,
-   `[9223372036854775808, 9223372036854775807]` and
-   `[0, 9223372036854775807, 18446744073709551614]`. */
-#include "krusty_rt.h"
-#include "krusty_sys.h"
+   The driver prints each walk as a list, and the harness compares the lines with what
+   `range_iterator_ulong_crosses_sign.kt` answers under the reference kotlinc. */
+#include "transcript.h"
 
 /* The range iterator first asks whether it was handed one of the array and string walks, which a
    later tier defines. Until that tier lands the calls resolve here, and answer the way the real
@@ -39,49 +28,28 @@ __attribute__((weak)) kt_long kt_walk_next_long(KRef iterator) {
     return 0;
 }
 
-/* Name the walk that went wrong on stderr; the caller's `KT_SYS_FAIL` then says how. Counted by
-   hand, since a freestanding driver has no `strlen` to link against. */
-static void name_walk(const char *what) {
-    size_t length = 0;
-    while (what[length] != 0) {
-        length++;
-    }
-    kt_sys_write(2, what, length);
-}
-
-/* Walk `range` and require exactly the `count` values at `expected`. */
-static void expect_walk(KRef range, const uint64_t *expected, int count, const char *what) {
+/* Walk `range` and print its elements as `[a, b, ...]`. Every walk here has at most three, so a
+   fourth is a walk that went past its end, and printing on would not end. */
+static void say_walk(KRef range) {
     KRef iterator = kt_range_iterator(range);
-    for (int index = 0; index < count; index++) {
-        if (!kt_range_iterator_has_next(iterator)
-            || (uint64_t)kt_range_iterator_next(iterator) != expected[index]) {
-            name_walk(what);
-            KT_SYS_FAIL(": a wrong element\n");
-        }
+    say("[");
+    for (kt_int count = 0; kt_range_iterator_has_next(iterator); count++) {
+        CHECK(count < 3, "a walk went past its last element\n");
+        say(count == 0 ? "" : ", ");
+        say_ulong((uint64_t)kt_range_iterator_next(iterator));
     }
-    if (kt_range_iterator_has_next(iterator)) {
-        name_walk(what);
-        KT_SYS_FAIL(": an element past the last\n");
-    }
+    say("]\n");
 }
 
 void kt_program_entry(void) {
-    int stack_bottom;
-    kt_runtime_init(&stack_bottom);
+    DRIVER_BEGIN();
 
-    const uint64_t crossing[] = {0x7FFFFFFFFFFFFFFFu, 0x8000000000000000u};
-    expect_walk(kt_ulong_range((kt_long)crossing[0], (kt_long)crossing[1]), crossing, 2,
-                "Long.MAX_VALUE.toULong()..(Long.MAX_VALUE.toULong() + 1uL)");
-
-    const uint64_t descending[] = {0x8000000000000000u, 0x7FFFFFFFFFFFFFFFu};
-    expect_walk(kt_ulong_range_down_to((kt_long)descending[0], (kt_long)descending[1]), descending,
-                2, "(Long.MAX_VALUE.toULong() + 1uL) downTo Long.MAX_VALUE.toULong()");
-
+    say_walk(kt_ulong_range(INT64_MAX, (kt_long)0x8000000000000000u));
+    say_walk(kt_ulong_range_down_to((kt_long)0x8000000000000000u, INT64_MAX));
     /* Two steps of `Long.MAX_VALUE` from zero: the second lands at 2^64 - 2, which as a `Long`
        sum is the overflow itself. */
-    const uint64_t wide[] = {0, 0x7FFFFFFFFFFFFFFFu, 0xFFFFFFFFFFFFFFFEu};
-    expect_walk(kt_range_step(kt_ulong_range(0, (kt_long)UINT64_MAX), INT64_MAX), wide, 3,
-                "0uL..ULong.MAX_VALUE step Long.MAX_VALUE");
+    say_walk(kt_range_step(kt_ulong_range(0, (kt_long)UINT64_MAX), INT64_MAX));
 
+    CHECK(kt_pending_exception() == NULL, "a walk raised\n");
     kt_sys_write(1, "OK\n", 3);
 }
