@@ -121,7 +121,8 @@ pub struct PlanOptions {
     /// Include test source roots (and test-only modules) in the scan.
     pub include_tests: bool,
     pub depth: DependencyDepth,
-    /// Append the platform JDK's `lib/modules` to every module's classpath. Without it the analysis
+    /// Append the platform JDK's bootclasspath root (`lib/modules`, or `jre/lib/rt.jar` on a
+    /// pre-jimage JDK) to every module's classpath. Without it the analysis
     /// silently falls back to the bundled `.kotlin_builtins`, which reports errors on `java.*` and on
     /// mapped collection members that a real JDK resolves — pure noise in a parity scan.
     pub jdk_modules: bool,

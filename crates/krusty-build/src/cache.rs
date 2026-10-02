@@ -94,7 +94,8 @@ pub struct CacheKeyInputs {
     /// Present allowlisted environment entries as `(name, raw OS bytes)`. Absence, an empty value,
     /// and non-UTF-8 values remain distinct. See [`OUTPUT_AFFECTING_ENVIRONMENT`].
     pub environment: Vec<(String, Vec<u8>)>,
-    /// JDK identity: its version string plus a digest of `lib/modules` (or the `ct.sym` release).
+    /// JDK identity: its version string plus a digest of the selected bootclasspath root
+    /// (`lib/modules`, a pre-jimage `jre/lib/rt.jar`, or the `ct.sym` release).
     pub jdk_identity: String,
     /// Sources in compile order.
     pub sources: Vec<FileDigest>,
