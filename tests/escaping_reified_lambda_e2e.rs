@@ -111,6 +111,38 @@ fn a_nested_escaping_reified_check_matches_kotlinc() {
 }
 
 #[test]
+fn a_cross_file_escaping_reified_safe_cast_preserves_its_null_check() {
+    const LIB: &str = "\
+interface Item\n\
+class Token : Item\n\
+class Other : Item\n\
+var inspect: (Item) -> Unit = {}\n\
+var rejected = false\n\
+inline fun <reified T : Item> install() {\n\
+    inspect = { value ->\n\
+        val candidate = value as? T\n\
+        if (candidate == null) rejected = true\n\
+    }\n\
+}\n";
+    const MAIN: &str = "\
+fun box(): String {\n\
+    install<Token>()\n\
+    inspect(Token())\n\
+    if (rejected) return \"retained value was rejected\"\n\
+    inspect(Other())\n\
+    return if (rejected) \"OK\" else \"failed cast lost its null check\"\n\
+}\n";
+    let sources = [("CastDeclaration.kt", LIB), ("CastCaller.kt", MAIN)];
+    let reference = common::kotlinc_box_files_result(&sources, "CastCallerKt");
+    assert_eq!(reference, "OK", "the reference fixture succeeds");
+    assert_eq!(
+        common::compile_and_run_files_with_stdlib(&sources)
+            .expect("compile and run the checked cross-file safe cast"),
+        reference,
+    );
+}
+
+#[test]
 fn nested_specialized_lambda_class_names_keep_source_nesting() {
     let source = "\
 interface Item\n\

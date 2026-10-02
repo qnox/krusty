@@ -120,28 +120,35 @@ fn an_omitted_noinline_default_specializes_after_reading_a_local_delegate() {
 fn generic_inline_copies_reuse_one_erased_plan_per_physical_owner() {
     common::expect_box_same_as_kotlinc(REUSED_GENERIC_PLAN, "ReusedGenericDelegatePlan");
 
-    let classes =
-        common::expect_classes_with_stdlib(REUSED_GENERIC_PLAN, "ReusedGenericDelegatePlan");
-    for owner in ["ReusedGenericDelegatePlanKt", "DelegateHost"] {
-        let bytes = classes
-            .iter()
-            .find_map(|(name, bytes)| (name == owner).then_some(bytes))
-            .unwrap_or_else(|| panic!("missing emitted owner {owner}"));
-        let ours = krusty::jvm::classreader::parse_class(bytes).expect("read krusty-emitted owner");
-        let helper_flags =
-            krusty::jvm::classreader::ACC_PRIVATE | krusty::jvm::classreader::ACC_STATIC;
-        let helpers = ours
+    let owners = ["ReusedGenericDelegatePlanKt", "DelegateHost"];
+    let classes = common::compile_with_kotlinc(
+        "ReusedGenericDelegatePlan",
+        REUSED_GENERIC_PLAN,
+        &[],
+        &owners,
+    );
+    let helper_flags = krusty::jvm::classreader::ACC_PRIVATE | krusty::jvm::classreader::ACC_STATIC;
+    let helper_descriptors = |class: &krusty::jvm::classreader::ClassInfo| {
+        class
             .methods
             .iter()
-            .filter(|method| {
-                method.access & helper_flags == helper_flags
-                    && method.name.ends_with("$jvm_delegate")
-            })
-            .map(|method| method.descriptor.as_str())
-            .collect::<Vec<_>>();
+            .filter(|method| method.access & helper_flags == helper_flags)
+            .map(|method| method.descriptor.clone())
+            .collect::<Vec<_>>()
+    };
+    for (owner, (reference, ours)) in owners.into_iter().zip(classes) {
+        let reference =
+            krusty::jvm::classreader::parse_class(&reference).expect("read kotlinc-emitted owner");
+        let ours = krusty::jvm::classreader::parse_class(&ours).expect("read krusty-emitted owner");
+        let reference_helpers = helper_descriptors(&reference);
         assert_eq!(
-            helpers,
-            vec!["(LCarrier;)LRoot;"],
+            reference_helpers,
+            vec!["(LCarrier;)LRoot;".to_owned()],
+            "the reference plan is one declaration-erased helper in {owner}",
+        );
+        assert_eq!(
+            helper_descriptors(&ours),
+            reference_helpers,
             "the backend must realize one erased helper, without substitution duplicates, in {owner}",
         );
     }
