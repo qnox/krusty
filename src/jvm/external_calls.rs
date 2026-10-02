@@ -50,17 +50,18 @@ pub(super) fn realize(
             if callable.kind != ExternalCallableKind::Constructor {
                 return Err(target.into());
             }
+            let physical_name = callable.physical_name().to_string();
             if matches!(
                 callable.member_realization,
                 crate::libraries::MemberRealization::Direct {
                     pass_receiver: false
                 }
-            ) && callable.name != "<init>"
+            ) && physical_name != "<init>"
             {
                 let (owner, name, descriptor, real_params, suffix) = if defaults.is_empty() {
                     (
                         callable.physical_owner,
-                        callable.name,
+                        physical_name,
                         if callable.descriptor.is_empty() {
                             crate::jvm::names::method_descriptor(
                                 &callable.physical_params,
@@ -335,6 +336,7 @@ pub(super) fn realize(
             );
             target
         })?;
+        let physical_name = callable.physical_name().to_string();
         let kind = callable.kind;
         publish_reified_substitutions(ir, expression, target, &callable, &substitutions);
         let declared_params = callable.declared_params.clone();
@@ -436,7 +438,7 @@ pub(super) fn realize(
             ir.exprs[index] = IrExpr::PropertyRead {
                 receiver: None,
                 owner: callable.physical_owner,
-                name: callable.name,
+                name: physical_name.clone(),
                 ty: semantic_ret,
                 interface: false,
                 operation: Some(expression),
@@ -457,7 +459,7 @@ pub(super) fn realize(
             ir.exprs[index] = IrExpr::PropertyWrite {
                 receiver: None,
                 owner: callable.physical_owner,
-                name: callable.name,
+                name: physical_name.clone(),
                 value,
                 ty: property_ty,
                 interface: false,
@@ -487,7 +489,7 @@ pub(super) fn realize(
                     ir.exprs[index] = IrExpr::PropertyRead {
                         receiver: Some(receiver),
                         owner: callable.physical_owner,
-                        name: callable.name,
+                        name: physical_name.clone(),
                         ty: semantic_ret,
                         interface: false,
                         operation,
@@ -498,7 +500,7 @@ pub(super) fn realize(
                     ir.exprs[index] = IrExpr::PropertyWrite {
                         receiver: Some(receiver),
                         owner: callable.physical_owner,
-                        name: callable.name,
+                        name: physical_name.clone(),
                         value: arguments[0],
                         ty: property_ty,
                         interface: false,
@@ -516,7 +518,7 @@ pub(super) fn realize(
                 "default_semantics",
                 "realize external default target={target:?} provider={default_provider:?} kind={kind:?} owner={} name={} descriptor={} omitted={defaults:?} bridge={:?}",
                 callable.physical_owner,
-                callable.name,
+                physical_name,
                 callable.descriptor,
                 callable.default_realization,
             );
@@ -730,7 +732,7 @@ pub(super) fn realize(
                     detail: format!(
                         "call {expression} ({kind:?} {}.{}) extension receiver does not fit a parameter ordinal",
                         callable.physical_owner.render(),
-                        callable.name
+                        physical_name
                     ),
                 }
             })?;
@@ -741,7 +743,7 @@ pub(super) fn realize(
                 detail: format!(
                     "call {expression} ({kind:?} {}.{}) supplies {supplied} arguments for {} physical parameters",
                     callable.physical_owner.render(),
-                    callable.name,
+                    physical_name,
                     source_arity
                 ),
             });
@@ -861,7 +863,7 @@ pub(super) fn realize(
             ExternalCallableKind::TopLevel => {
                 *callee = Callee::Static {
                     owner: callable.physical_owner,
-                    name: callable.name,
+                    name: physical_name.clone(),
                     descriptor,
                     inline: callable.inline,
                 };
@@ -873,7 +875,7 @@ pub(super) fn realize(
                 extension_receiver_at = Some(position as u32);
                 *callee = Callee::Static {
                     owner: callable.physical_owner,
-                    name: callable.name,
+                    name: physical_name.clone(),
                     descriptor,
                     inline: callable.inline,
                 };
@@ -895,13 +897,13 @@ pub(super) fn realize(
                         *callee = match callable.nonvirtual_realization.as_deref() {
                             Some(holder) => Callee::Static {
                                 owner: holder.owner,
-                                name: callable.name,
+                                name: physical_name.clone(),
                                 descriptor: holder.descriptor.clone(),
                                 inline: crate::libraries::InlineKind::None,
                             },
                             None => Callee::Special {
                                 owner,
-                                name: callable.name,
+                                name: physical_name.clone(),
                                 descriptor,
                                 interface,
                                 source_member: None,
@@ -911,7 +913,7 @@ pub(super) fn realize(
                     } else if callable.inline.must_inline() {
                         *callee = Callee::Static {
                             owner: callable.physical_owner,
-                            name: callable.name,
+                            name: physical_name.clone(),
                             descriptor,
                             inline: callable.inline,
                         };
@@ -924,7 +926,7 @@ pub(super) fn realize(
                         args.insert(0, dispatch_receiver.take().ok_or(target)?);
                         *callee = Callee::Static {
                             owner,
-                            name: callable.name,
+                            name: physical_name.clone(),
                             descriptor,
                             inline: crate::libraries::InlineKind::None,
                         };
@@ -938,7 +940,7 @@ pub(super) fn realize(
                         // selected array dispatch without this helper is invalid backend input.
                         let helper = array_member_helper(
                             classpath,
-                            &callable.name,
+                            &physical_name,
                             &array,
                             &semantic_params,
                             semantic_ret,
@@ -967,7 +969,7 @@ pub(super) fn realize(
                         })?;
                         *callee = Callee::Virtual {
                             owner,
-                            name: callable.name,
+                            name: physical_name.clone(),
                             descriptor,
                             params: None,
                             interface,
@@ -984,7 +986,7 @@ pub(super) fn realize(
                     }
                     *callee = Callee::Static {
                         owner: callable.physical_owner,
-                        name: callable.name,
+                        name: physical_name.clone(),
                         descriptor,
                         inline: callable.inline,
                     };
@@ -1056,7 +1058,7 @@ pub(super) fn realize(
                             })?;
                             Callee::Virtual {
                                 owner,
-                                name: callable.name,
+                                name: physical_name.clone(),
                                 descriptor,
                                 params: None,
                                 interface,
@@ -1075,7 +1077,7 @@ pub(super) fn realize(
                             args.insert(0, dispatch_receiver.take().ok_or(target)?);
                             Callee::Static {
                                 owner,
-                                name: callable.name,
+                                name: physical_name.clone(),
                                 descriptor,
                                 inline: crate::libraries::InlineKind::None,
                             }
@@ -1094,7 +1096,7 @@ pub(super) fn realize(
                             })?;
                             Callee::Virtual {
                                 owner,
-                                name: callable.name,
+                                name: physical_name.clone(),
                                 descriptor,
                                 params: None,
                                 interface,

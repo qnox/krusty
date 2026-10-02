@@ -116,7 +116,7 @@ impl crate::jvm::inline::MethodBodies for Classpath {
         let callable = realization.callable;
         Some(crate::jvm::inline::PropertyAccess::Field {
             owner: callable.owner,
-            name: callable.name,
+            name: callable.physical_name().to_string(),
             descriptor: callable.descriptor,
             is_static,
         })

@@ -671,7 +671,8 @@ fn mapped_interface_override_publishes_external_declaration_identity() {
     let realization = classpath
         .external_callable(target)
         .expect("external override target realization");
-    assert_eq!(realization.callable.name, "remove");
+    assert_eq!(realization.callable.name, "removeAt");
+    assert_eq!(realization.callable.physical_name(), "remove");
     assert_eq!(
         realization.callable.reflection_name.as_deref(),
         Some("removeAt")
@@ -731,7 +732,10 @@ fn a_dependency_property_publishes_its_kotlin_name() {
             continue;
         };
         if matches!(property.name.as_str(), "start" | "endInclusive" | "indices") {
-            published.push((property.name.clone(), getter.callable.name.clone()));
+            published.push((
+                property.name.clone(),
+                getter.callable.physical_name().to_string(),
+            ));
         }
     }
     published.sort();
@@ -806,11 +810,9 @@ fn a_dependency_extension_publishes_its_kotlin_name() {
         else {
             break;
         };
-        let Some(kotlin) = realization.callable.reflection_name.clone() else {
-            continue;
-        };
+        let kotlin = realization.callable.name.clone();
         if matches!(kotlin.as_str(), "downTo" | "until") {
-            published.push((kotlin, realization.callable.name.clone()));
+            published.push((kotlin, realization.callable.physical_name().to_string()));
         }
     }
     published.sort();

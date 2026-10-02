@@ -52,9 +52,9 @@ impl JvmLibraries {
         parameter_slots: &[u16],
         decode_unavailable: &mut bool,
     ) -> Option<InlineBodyPlan> {
-        let body = self
-            .cp
-            .method_code_name(callable.owner, &callable.name, body_descriptor)?;
+        let body =
+            self.cp
+                .method_code_name(callable.owner, callable.physical_name(), body_descriptor)?;
         let instructions = inline::disassemble(&body.code)?;
         let recognized = recognize(
             callable,
@@ -1442,8 +1442,18 @@ mod tests {
     ) -> (Vec<Insn>, Vec<C>, Vec<ExcEntry>) {
         let body = libraries
             .cp
-            .method_code_name(callable.owner, &callable.name, &callable.descriptor)
-            .unwrap_or_else(|| panic!("missing body for {}{}", callable.name, callable.descriptor));
+            .method_code_name(
+                callable.owner,
+                callable.physical_name(),
+                &callable.descriptor,
+            )
+            .unwrap_or_else(|| {
+                panic!(
+                    "missing body for {}{}",
+                    callable.physical_name(),
+                    callable.descriptor
+                )
+            });
         (
             inline::disassemble(&body.code).expect("valid stdlib iteration bytecode"),
             body.source_cp.to_vec(),

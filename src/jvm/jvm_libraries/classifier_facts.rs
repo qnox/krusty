@@ -2,6 +2,94 @@
 
 use super::*;
 
+/// Give every metadata-declared constructor the classifier parameters it can infer, independently
+/// of how the JVM realizes that declaration. Value classes use `constructor-impl` rather than a
+/// directly callable `<init>`, while ordinary and marker-backed constructors do have `<init>`
+/// methods; that representation distinction must not change their source-level generic signature.
+pub(super) fn classifier_constructor_generic_sig(
+    parameters: &crate::types::TypeParameters<Vec<Vec<Ty>>>,
+    owner: TypeName,
+    value_parameters: &[Ty],
+) -> Option<GenericSig> {
+    if parameters.type_params.is_empty() {
+        return None;
+    }
+    let arguments = parameters
+        .type_params
+        .iter()
+        .enumerate()
+        .map(|(index, formal)| {
+            let bound = parameters
+                .type_param_bounds
+                .get(index)
+                .and_then(|bounds| bounds.first())
+                .copied()
+                .unwrap_or_else(|| Ty::obj("kotlin/Any"));
+            Ty::ty_param(formal, bound)
+        })
+        .collect::<Vec<_>>();
+    Some(GenericSig {
+        formals: parameters.type_params.clone(),
+        formal_bounds: parameters.type_param_bounds.clone(),
+        receiver: None,
+        params: value_parameters.to_vec(),
+        ret: Ty::obj_args_name(owner, &arguments),
+        return_policy: GenericReturnPolicy::Exact,
+    })
+}
+
+/// A mapped Kotlin classifier and its JVM realization may use different source names for the same
+/// owner type parameters (`Iterator<T>` in builtins versus `java.util.Iterator<E>` in the class
+/// file). Java members admitted into the mapped Kotlin scope must use the Kotlin classifier's
+/// parameter identities before they leave this provider. Otherwise core can apply `Iterator<String>`
+/// only to declarations written in terms of `T`, while a visible Java default such as
+/// `forEachRemaining(Consumer<? super E>)` leaks the unrelated physical `E` into checked signatures.
+pub(super) fn align_mapped_owner_type_parameters(
+    members: &mut [LibraryMember],
+    physical: &[String],
+    semantic: &[String],
+    semantic_bounds: &[Vec<Ty>],
+) {
+    if physical.len() != semantic.len() || physical == semantic {
+        return;
+    }
+    let owner_bindings = physical
+        .iter()
+        .zip(semantic)
+        .enumerate()
+        .map(|(index, (physical, semantic))| {
+            let bound = semantic_bounds
+                .get(index)
+                .and_then(|bounds| bounds.first())
+                .copied()
+                .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
+            (physical.clone(), Ty::ty_param(semantic, bound))
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    for member in members {
+        let Some(signature) = &mut member.generic_sig else {
+            continue;
+        };
+        let mut bindings = owner_bindings.clone();
+        for formal in &signature.formals {
+            // A method formal shadows an identically named owner formal.
+            bindings.remove(formal);
+        }
+        signature.receiver = signature
+            .receiver
+            .map(|receiver| ty_subst_keep_unbound(receiver, &bindings));
+        for parameter in &mut signature.params {
+            *parameter = ty_subst_keep_unbound(*parameter, &bindings);
+        }
+        signature.ret = ty_subst_keep_unbound(signature.ret, &bindings);
+        for bounds in &mut signature.formal_bounds {
+            for bound in bounds {
+                *bound = ty_subst_keep_unbound(*bound, &bindings);
+            }
+        }
+    }
+}
+
 pub(super) fn generated_serializer_singleton(
     libraries: &JvmLibraries,
     classifier: TypeName,
