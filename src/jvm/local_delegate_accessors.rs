@@ -262,6 +262,7 @@ fn emitted_expressions(ir: &IrFile) -> HashSet<ExprId> {
     }
     for class in &ir.classes {
         roots.extend(class.init_body);
+        roots.extend(ir.companion_clinit_body(class.fq_name_id()));
         roots.extend(
             class
                 .super_arg_prelude

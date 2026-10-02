@@ -255,6 +255,12 @@ fn a_private_property_keeps_its_source_written_setter() {
 }\n\
 fun box(): String = if (!Identifier.init(true).read()) \"OK\" else \"FAIL\"\n";
     common::expect_box_ok_with_stdlib(src, "Identifier2");
+    let pair = common::ModuleClassPair::compile(&[("Main.kt", src)], "Identifier");
+    let (reference, krusty) = pair.method_code("Identifier", "access$setMyNullable");
+    assert_eq!(
+        krusty, reference,
+        "the private setter bridge is emitted once and matches kotlinc"
+    );
 }
 
 #[test]

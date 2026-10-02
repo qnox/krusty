@@ -1412,9 +1412,8 @@ pub fn reparent_lambda_impls(ir: &mut IrFile) {
         out
     };
     for cid in 0..ir.classes.len() {
-        // Class-context roots whose code emits inside this class: member/method bodies (covers a
-        // suspend machine's `invokeSuspend`), the instance initializer, super/delegate arguments,
-        // and enum-entry constructor arguments (emitted in `<clinit>`).
+        // Class-context roots whose code emits inside this class: member bodies, the instance
+        // initializer, a companion `<clinit>` body, super arguments, and enum-entry arguments.
         let c = &ir.classes[cid];
         let mut roots: Vec<crate::ir::ExprId> = Vec::new();
         for &fid in &c.methods {
@@ -1423,6 +1422,7 @@ pub fn reparent_lambda_impls(ir: &mut IrFile) {
             }
         }
         roots.extend(c.init_body);
+        roots.extend(ir.companion_clinit_body(c.fq_name));
         roots.extend(c.super_arg_prelude.iter().copied());
         roots.extend(c.super_args.iter().copied());
         for sc in &c.secondary_ctors {
@@ -8122,18 +8122,11 @@ impl<'a> Emitter<'a> {
         selected_interface: bool,
     ) -> Option<crate::jvm::inline::PropertyAccess> {
         let crate::ir::IrLocalPropertyLayout::Member {
-            class,
-            owner,
-            property,
-            name,
-            ..
+            class, owner, name, ..
         } = self.ir.local_property_layouts.get(&target)?
         else {
             return None;
         };
-        if let Some(access) = self.hoisted_jvm_field_access(*class, *property) {
-            return Some(access);
-        }
         debug_assert_eq!(self.ir.classes[*class as usize].fq_name, *owner);
         self.declared_property_read_access(*owner, name, selected_accessor, selected_interface)
     }
@@ -8143,41 +8136,13 @@ impl<'a> Emitter<'a> {
         target: crate::fir::PropertyId,
     ) -> Option<crate::jvm::inline::PropertyAccess> {
         let crate::ir::IrLocalPropertyLayout::Member {
-            class,
-            owner,
-            property,
-            name,
-            ..
+            class, owner, name, ..
         } = self.ir.local_property_layouts.get(&target)?
         else {
             return None;
         };
-        if let Some(access) = self.hoisted_jvm_field_access(*class, *property) {
-            return Some(access);
-        }
         debug_assert_eq!(self.ir.classes[*class as usize].fq_name, *owner);
         self.declared_property_write_access(*owner, name)
-    }
-
-    fn hoisted_jvm_field_access(
-        &self,
-        class: crate::ir::ClassId,
-        property: u32,
-    ) -> Option<crate::jvm::inline::PropertyAccess> {
-        let class = self.ir.classes.get(class as usize)?;
-        let static_id = self
-            .ir
-            .jvm_companion_property_static(class.fq_name, property)?;
-        if !self.ir.is_jvm_field_static(static_id) {
-            return None;
-        }
-        let field = self.ir.statics.get(static_id as usize)?;
-        Some(crate::jvm::inline::PropertyAccess::Field {
-            owner: field.owner?,
-            name: field.name.clone(),
-            descriptor: type_descriptor(jvm_declared_ty(&field.ty)),
-            is_static: true,
-        })
     }
 
     /// The write analogue of [`Self::declared_property_read_access`].
@@ -8188,6 +8153,17 @@ impl<'a> Emitter<'a> {
     ) -> Option<crate::jvm::inline::PropertyAccess> {
         use crate::jvm::inline::PropertyAccess;
         let class = self.ir.classes.iter().find(|c| c.fq_name == owner)?;
+        if let Some(index) = class
+            .properties
+            .iter()
+            .position(|property| property.name == name)
+        {
+            if let Some(access) =
+                self.hoisted_companion_property_access(class.fq_name, index as u32, true)
+            {
+                return Some(access);
+            }
+        }
         // The write analogue: a declared setter is user code and must not be bypassed.
         let declared = class.properties.iter().find(|p| p.name == name);
         let direct_field = self.direct_field_access(class, declared, true);
@@ -8204,6 +8180,11 @@ impl<'a> Emitter<'a> {
             ));
         }
         if let Some(setter) = declared.and_then(|p| p.setter) {
+            if self.reaches_through_bridge(class.fq_name, setter) {
+                return Some(access_bridges::private_member_accessor_access(
+                    self.ir, setter, owner,
+                ));
+            }
             let f = &self.ir.functions[setter as usize];
             return Some(PropertyAccess::Accessor {
                 owner,

@@ -65,6 +65,9 @@ pub(crate) struct BackendPassFacts {
     sam_wrapper_realizations: crate::jvm::sam_wrappers::SamWrapperRealizations,
     local_delegate_access: crate::jvm::local_delegate_accessors::HelperAccess,
     lambda_methods: crate::jvm::lambda_classes::LambdaMethods,
+    /// Checked property operations realized before representation passes. Companion hoisting
+    /// reads it to attach a private accessor to the operation that moves into `<clinit>`.
+    property_realizations: crate::jvm::property_realizations::PropertyRealizations,
 }
 
 /// THE post-lowering, pre-emit JVM pass pipeline — the single definition every consumer (the real
@@ -192,7 +195,7 @@ fn run_backend_passes_after_plugins(
     crate::jvm::property_storage::realize_top_level_jvm_fields(ir);
     // Companion backing-field hoisting is a JVM storage choice. Common IR retains the ordinary
     // property declaration and semantic initializer; this pass selects the outer-static realization.
-    crate::jvm::companion::lower_companion_properties(ir);
+    crate::jvm::companion::lower_companion_properties(ir, &facts.property_realizations);
     // Delegated properties that share a source name (extension properties for different
     // receivers) each lower a `{name}$delegate` static. The JVM name is unique per owner:
     // the first keeps that spelling and each later one takes the next `$N` suffix.
@@ -722,7 +725,6 @@ struct BackendReadyIr<'a> {
     pass_facts: BackendPassFacts,
     metadata: Option<crate::jvm::ir_emit::KotlinMetadata>,
     has_facade_members: bool,
-    property_realizations: crate::jvm::property_realizations::PropertyRealizations,
 }
 
 impl JvmBackend {
@@ -747,6 +749,7 @@ impl JvmBackend {
         let package = ir.package.clone().unwrap_or_default();
         let facade_name = file_class_name(stem, ir.package.as_deref());
         let facade_class = crate::types::type_name(&facade_name);
+        pass_facts.property_realizations = property_realizations;
         if let Err(reason) = run_backend_passes(
             &mut ir,
             &facade_name,
@@ -802,7 +805,6 @@ impl JvmBackend {
                 pass_facts,
                 metadata,
                 has_facade_members,
-                property_realizations,
             },
             state,
             diags,
@@ -827,7 +829,6 @@ impl JvmBackend {
             pass_facts,
             metadata,
             has_facade_members,
-            property_realizations,
         } = ready;
         let mut outputs = Vec::new();
         if !self.param_assertions {
@@ -862,7 +863,7 @@ impl JvmBackend {
             crate::jvm::ir_emit::CheckedEmitFacts {
                 metadata: emit_metadata,
                 signature_symbols,
-                property_realizations: &property_realizations,
+                property_realizations: &pass_facts.property_realizations,
                 property_reference_realizations: &pass_facts.property_reference_realizations,
                 default_call_operands: &pass_facts.default_call_operands,
                 sam_wrapper_realizations: &pass_facts.sam_wrapper_realizations,
