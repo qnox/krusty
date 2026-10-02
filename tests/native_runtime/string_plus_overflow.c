@@ -7,7 +7,7 @@
    text behind them: the guard has to come before either payload is read, or the driver faults on
    the NULL bytes instead of ending with the runtime's message. The test requires the runtime's
    abort; reaching the end of this driver fails it. */
-#include "standins.h"
+#include "driver_support.h"
 
 void kt_program_entry(void) {
     DRIVER_BEGIN();

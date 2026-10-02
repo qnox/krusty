@@ -2,7 +2,7 @@
    which wraps. It used to be computed in C's signed `int`, where the overflow is undefined rather
    than a wrap; built with `-fsanitize=signed-integer-overflow -fsanitize-trap` that multiplication
    traps, which is how the defect shows on a host whose optimizer happens to wrap. */
-#include "collections_later_tiers.h"
+#include "driver_exceptions.h"
 
 void kt_program_entry(void) {
     int stack_bottom;

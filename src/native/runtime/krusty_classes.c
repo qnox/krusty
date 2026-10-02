@@ -288,7 +288,8 @@ static void kt_fail_cast(KRef object, const KType *type) {
    back, so the raise is followed by a return. */
 kt_int kt_compare_any(KRef a, KRef b) {
     if (a == NULL || b == NULL) {
-        KT_FAIL("krusty: member access on a null receiver\n");
+        kt_null_receiver();
+        return 0;
     }
     const KType *type = a->header.type;
     if (type != b->header.type) {
@@ -481,7 +482,10 @@ void kt_check(kt_boolean value) {
 
 void kt_abstract_method_called(void) { KT_FAIL("krusty: abstract method called\n"); }
 
-void kt_null_receiver(void) { KT_FAIL("krusty: member access on a null receiver\n"); }
+/* A member access on `null`: Kotlin's `NullPointerException`, with no message, which a program may
+   catch. Kotlin/Native raises exactly that; the JVM's message, when it has one, describes the Java
+   call that failed, which a native program has none of. */
+void kt_null_receiver(void) { kt_throw(kt_throwable_new(&kt_type_null_pointer_exception, NULL)); }
 
 /* A callable whose Kotlin type is `Nothing` returned instead of diverging, and the path that reads
    its value has no value to read. The JVM throws `KotlinNothingValueException` here. This one is

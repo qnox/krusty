@@ -16,7 +16,7 @@
    Kotlin/Native's class with the JVM's message, a declared divergence: the JVM's is
    `StringIndexOutOfBoundsException` for both, Kotlin/Native's `ArrayIndexOutOfBoundsException` for
    a `String` and `IndexOutOfBoundsException` for a `StringBuilder`. */
-#include "collections_later_tiers.h"
+#include "driver_exceptions.h"
 #include "transcript.h"
 
 /* The line for one `next()` past the end: what it raised, and its message. */

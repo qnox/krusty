@@ -10,7 +10,7 @@
    `kotlin.jvm.internal.ArrayIntIterator`, Kotlin/Native's `kotlin.IntArrayIterator`; the JVM's
    `listOf(1, 2).iterator()` is `java.util.Arrays.ArrayItr`, Kotlin/Native's the anonymous one
    `Array.asList` makes, with no qualified name. */
-#include "collections_later_tiers.h"
+#include "driver_exceptions.h"
 #include "transcript.h"
 
 /* The abstract primitive iterators, which the runtime defines and a program's `is` names. */

@@ -3,7 +3,7 @@
    to raise and then read anyway, because `kt_throw` records the exception and comes back: `get(-1)`
    answered the backing array's length word as if it were an element, and `last()` of a growable
    list emptied by `removeAt` answered its capacity the same way. */
-#include "collections_later_tiers.h"
+#include "driver_exceptions.h"
 
 void kt_program_entry(void) {
     DRIVER_BEGIN();

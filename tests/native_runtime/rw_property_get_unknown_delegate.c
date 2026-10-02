@@ -1,7 +1,7 @@
 /* A `ReadWriteProperty` read whose receiver is neither of the two delegates the runtime builds
    is a loud failure naming the receiver's descriptor. It used to take every object that was not an
    observable for a `Delegates.notNull()` and read its first field as the value. */
-#include "standins.h"
+#include "driver_support.h"
 
 /* A delegate of the program's own: one reference field where a `NotNullVar` keeps its value. */
 typedef struct Custom {

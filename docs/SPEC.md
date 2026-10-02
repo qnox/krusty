@@ -9293,6 +9293,103 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `kotlin.<Type>.Companion` with the simple name `Companion`, as kotlinc answers on the JVM for
   `companion_objects.kt`, which the harness runs and compares with the driver.
   Tests: `tests/native_runtime_e2e.rs` (`companion_objects`).
+- **Native runtime: exceptions and integer arithmetic.** `src/native/runtime/krusty_lang.c` raises
+  what Kotlin raises and does not stop there: `kt_throw` RECORDS the exception in the one pending
+  slot and returns, and the caller's check of that slot is the propagation. So every runtime entry
+  that raises must return right after (a null `UInt?` unboxed used to fall through and dereference
+  the null). Integer `/` and `%` by zero record `ArithmeticException: / by zero`; `MIN_VALUE / -1`
+  wraps; `mod` takes the divisor's sign; shift counts are masked to 5/6 bits; unsigned `/`, `%` and
+  `toString` read their operands unsigned; a callable reference hashes as `31 * target +
+  receiver.hashCode()` on the wrapping ring. Two DIVERGENCES from the JVM backend, both deliberate:
+  a runtime exception names Kotlin's class (`kotlin.ArithmeticException: / by zero`, and
+  `assertFailsWith` reads `Expected an exception of class kotlin.IllegalStateException …`) where the
+  JVM names `java.lang.…`; and an uncaught exception prints `Exception in thread "main" <toString>`
+  and ends the program with status 134, this target's code for every abnormal end, where the JVM
+  exits with 1. String literals are interned through one runtime-owned list behind ONE global
+  root, however many there are, so the collector's root registry holds the program's declarations
+  rather than its text; a literal's own slot is registered nowhere.
+  An entry that calls a program's own `equals`, `hashCode` or `toString` — the kotlin.test
+  assertions comparing and rendering their operands, `assertFailsWith` rendering what was thrown,
+  `Throwable(cause)` rendering its cause, a bound reference's `equals`/`hashCode` asking its
+  receiver's, `print`/`println` — checks the pending slot right after that call and returns when it
+  raised, so the program's exception is the one in flight: an assertion does not raise its
+  `AssertionError` over it, `Throwable(cause)` constructs nothing, and `print`/`println` write no
+  byte (not the `null` the renderer falls back to, nor `println`'s newline). The uncaught report
+  empties the slot before it runs the exception's `toString`, since generated code entered with the
+  slot full takes it for its own raise after its first call; a `toString` that raises there is
+  reported as the JVM reports it, `Exception in thread "main" ` and then `Exception: <class> thrown
+  from the UncaughtExceptionHandler in thread "main"` naming the class it raised (Kotlin's name, per
+  the divergence above), with status 134.
+  The arithmetic, unsigned and exception answers are an executable comparison:
+  `tests/native_runtime/arithmetic_and_exceptions.kt` is the Kotlin program, run by the reference
+  kotlinc with kotlin-test on its class path, and the C driver prints the same lines from the native
+  runtime (`run_driver_against_kotlin`); the answers named by a class (`Throwable(cause)`'s message,
+  `assertFailsWith`'s report) are Kotlin/Native's `kotlin.*` names, declared divergences.
+  Tests: `tests/native_runtime_e2e.rs` (`integer_arithmetic_and_exceptions_answer_as_kotlin_does`,
+  `unboxing_a_null_unsigned_records_a_null_pointer_exception_and_returns`,
+  `equal_callable_references_hash_on_the_wrapping_ring`,
+  `string_literals_share_one_root_and_stay_interned_and_alive`,
+  `a_program_member_that_raises_inside_a_runtime_call_keeps_its_exception_in_flight`,
+  `a_print_whose_to_string_raises_writes_nothing`,
+  `the_uncaught_report_runs_to_string_with_nothing_in_flight`,
+  `an_uncaught_exception_whose_to_string_raises_is_reported_as_the_jvm_reports_it`). The last two
+  run the uncaught path to its end and check its status and exact report.
+- **A native negative array size raises `IllegalArgumentException`.** Every array kind the native
+  runtime allocates (`kt_array_new`) raises `IllegalArgumentException` for a negative size, with the
+  size as its message, and makes no array, which a program may catch. The type is Kotlin/Native's,
+  as for `StringBuilder(-1)`: its array constructors (`IntArray(n)`, `Array(n) { }`) allocate
+  through `AllocArrayInstance`, which calls `ThrowIllegalArgumentException` for a negative size. The
+  message is the JVM's, the size, which is cheap to give. Kotlin/JVM throws Java's
+  `NegativeArraySizeException`, a type Kotlin does not declare; each line is a declared divergence,
+  compared with kotlinc's answers for `array_new_negative_size.kt` on every run.
+  Tests: `tests/native_runtime_e2e.rs` (`array_new_negative_size`).
+- **A native unmatched exhaustive `when` raises `NoWhenBranchMatchedException`.** The native
+  runtime's `kt_no_when_branch_matched` raises `kotlin.NoWhenBranchMatchedException`, a
+  `RuntimeException` with no message that renders as its name, which a program may catch; both
+  platforms declare and name it so (kotlinc 2.4.10 on the JVM, program recorded in the driver).
+  Tests: `tests/native_runtime_e2e.rs` (`no_when_branch_matched`).
+- **A native member access on `null` raises `NullPointerException`.** `kt_null_receiver`, and every
+  native runtime entry handed a `null` receiver (`compareTo`, an array's `isEmpty` and
+  `reversedArray` and `toList`, `IndexedValue`'s members, `iterator()` and an iterator's `hasNext`
+  and `next`, `map`, a spread, `::class`, a delegate's read and write), raises
+  `NullPointerException` with no message, returns a placeholder nobody reads and does nothing else,
+  so a program may catch it. `kt_dispatch` on a `null` receiver raises and
+  answers NULL, reading no descriptor through the null; a call site dispatches, then checks the
+  pending slot and propagates without calling, and only then calls the member at the slot's own
+  signature, so nothing is called through NULL or through a function type other than the member's
+  own (undefined in C). The message follows Kotlin/Native, which has none; the JVM's describes the
+  Java call that failed (kotlinc 2.4.10, program recorded in the driver).
+  Tests: `tests/native_runtime_e2e.rs` (`null_receiver_raises`, `dispatch_on_null`).
+- **Native callable-reference equality is by declaration and receiver.** Two references are equal
+  when they name the same declaration, whichever site made them, and bound equal receivers or both
+  bound none; a reference to another declaration, a bound one against an unbound one, a bound one on
+  a receiver that is not equal, and a lambda are not. The receiver's `equals` is asked only once the
+  declarations match, and only by a bound receiver (`a::f == R::f` asks `a.equals(null)`, `R::f ==
+  a::f` asks nothing), as kotlinc 2.4.10 does on the JVM for the program recorded in the driver. A
+  bound reference's `hashCode` asks its receiver's, which follows Kotlin/Native
+  (`KFunctionImpl.hashCode`); the JVM's `FunctionReference.hashCode` never asks the receiver.
+  Tests: `tests/native_runtime_e2e.rs` (`reference_identity`, `reference_hash_code`).
+- **Native `kotlin.test` assertions report kotlin-test's wording.** `assertEquals` compares
+  `actual == expected`, asking the ACTUAL operand's `equals` as kotlin-test's `DefaultAsserter`
+  does (an expected operand whose `equals` raises is never asked), and reports
+  `Expected <x>, actual <y>.`, `assertSame` `Expected <x>, actual <y> is not same.`, `assertNotSame`
+  `Expected not same as <x>.`, each prefixed `message. ` when given one; `assertTrue`/`assertFalse`
+  report `Expected value to be true.`/`false.`, or, given a message, that message alone. These are
+  kotlin-test's common `DefaultAsserter` texts, which both platforms share, as kotlinc 2.4.10 prints
+  them on the JVM for the programs recorded in the drivers.
+  Tests: `tests/native_runtime_e2e.rs` (`assertion_wording`, `arithmetic_and_exceptions`,
+  `user_code_raise_keeps_first_exception`).
+- **The rt/09 native runtime drivers are compared with kotlinc.** A driver with a Kotlin
+  counterpart `tests/native_runtime/<driver>.kt` -- a `fun box(): String` returning one line per
+  claim -- prints the same lines computed from the native runtime, and the harness
+  (`run_driver_against_kotlin`) runs the program under the reference kotlinc (with kotlin-test on
+  its class path where it asserts) and compares the two line by line. Where the platforms differ --
+  a message naming a class (`java.lang.*` against `kotlin.*`), a bound reference's `hashCode` asking
+  its receiver -- the line is a declared divergence citing Kotlin/Native's source.
+  Tests: `tests/native_runtime_e2e.rs` (`arithmetic_and_exceptions`, `reference_identity`,
+  `assertion_wording`, `user_code_raise_keeps_first_exception`,
+  `print_of_raising_to_string_writes_nothing`, `unsigned_unbox_null`, `throwable_subclass_size`,
+  `no_when_branch_matched`, `null_receiver_raises`).
 
 - **A file's program entry point is Kotlin's `main`, selected once by the frontend's rule.** A
   top-level function is a `main` entry point when it is named `main`, has no extension receiver, type

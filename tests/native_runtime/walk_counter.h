@@ -12,7 +12,7 @@
 #ifndef KRUSTY_TEST_WALK_COUNTER_H
 #define KRUSTY_TEST_WALK_COUNTER_H
 
-#include "collections_later_tiers.h"
+#include "driver_exceptions.h"
 #include "transcript.h"
 
 extern uint32_t kt_walk_counter_origin;

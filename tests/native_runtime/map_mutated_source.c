@@ -10,7 +10,7 @@
    throws there. The driver prints each answer and the list afterwards, and the harness compares the
    lines with what `map_mutated_source.kt` answers under the reference kotlinc, those two lines
    being declared divergences. */
-#include "collections_later_tiers.h"
+#include "driver_exceptions.h"
 #include "transcript.h"
 
 static KRef source;

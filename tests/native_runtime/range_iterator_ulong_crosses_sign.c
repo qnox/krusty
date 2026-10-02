@@ -7,27 +7,6 @@
    `range_iterator_ulong_crosses_sign.kt` answers under the reference kotlinc. */
 #include "transcript.h"
 
-/* The range iterator first asks whether it was handed one of the array and string walks, which a
-   later tier defines. Until that tier lands the calls resolve here, and answer the way the real
-   ones do for an iterator that is not a walk. They are WEAK, and the runtime defines the real ones
-   with internal linkage, so from that tier on its calls never reach these. */
-__attribute__((weak)) kt_boolean kt_walk_is(KRef iterator) {
-    (void)iterator;
-    return false;
-}
-
-__attribute__((weak)) kt_boolean kt_walk_has_next(KRef iterator) {
-    (void)iterator;
-    KT_SYS_FAIL("range_iterator_ulong_crosses_sign: not a walk\n");
-    return false;
-}
-
-__attribute__((weak)) kt_long kt_walk_next_long(KRef iterator) {
-    (void)iterator;
-    KT_SYS_FAIL("range_iterator_ulong_crosses_sign: not a walk\n");
-    return 0;
-}
-
 /* Walk `range` and print its elements as `[a, b, ...]`. Every walk here has at most three, so a
    fourth is a walk that went past its end, and printing on would not end. */
 static void say_walk(KRef range) {

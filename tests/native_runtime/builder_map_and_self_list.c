@@ -6,7 +6,7 @@
 
    The driver prints each result, rendered by the runtime, and the harness compares the lines with
    what `builder_map_and_self_list.kt` answers under the reference kotlinc. */
-#include "collections_later_tiers.h"
+#include "driver_exceptions.h"
 #include "transcript.h"
 
 static KRef builder;
