@@ -4,6 +4,24 @@
 
 use super::*;
 
+pub(super) fn is_high_arity_function(arity: u8) -> bool {
+    crate::jvm::names::uses_function_n(usize::from(arity))
+}
+
+pub(super) fn jvm_function_interface(arity: u8) -> String {
+    crate::jvm::names::function_interface_internal_name(usize::from(arity))
+}
+
+/// `FunctionN.invoke`'s erased descriptor: one `Object` per parameter, or the array of them.
+pub(super) fn jvm_function_invoke_descriptor(arity: u8) -> String {
+    let parameters = if is_high_arity_function(arity) {
+        "[Ljava/lang/Object;".to_string()
+    } else {
+        "Ljava/lang/Object;".repeat(usize::from(arity))
+    };
+    format!("({parameters})Ljava/lang/Object;")
+}
+
 impl Emitter<'_> {
     /// Push the function value and its boxed arguments, then call `invoke`, leaving its erased
     /// `Object` result.
@@ -17,6 +35,7 @@ impl Emitter<'_> {
     ) {
         let n = args.len();
         let high_arity = is_high_arity_function(n as u8);
+        let argument_array_type = Ty::array(Ty::nullable(Ty::obj("kotlin/Any")));
         if args.iter().any(|&a| self.spills_operand_prefix(a)) {
             // An argument that cannot carry the operand stack can't run with the function value
             // on it. Evaluate the function + args into temps first (in order), then load and box.
@@ -24,14 +43,25 @@ impl Emitter<'_> {
             all.extend(args.iter().copied());
             let temps = self.spill_to_temps(&all, code);
             load(temps[0].1, temps[0].0, code);
-            if high_arity {
+            let argument_array = if high_arity {
                 code.push_int(n as i32, self.cw);
                 let object = self.cw.class_ref("java/lang/Object");
                 code.anewarray(object);
-            }
+                let temporary = self
+                    .frame
+                    .enter_temp(frame_map::TempRole::FunctionArguments, argument_array_type);
+                let slot = temporary.slot();
+                store(argument_array_type, slot, code);
+                Some((
+                    slot,
+                    self.lease_frame_temporary(temporary, argument_array_type),
+                ))
+            } else {
+                None
+            };
             for (i, &(slot, t, _)) in temps[1..].iter().enumerate() {
-                if high_arity {
-                    code.dup();
+                if let Some((array, _)) = argument_array {
+                    load(argument_array_type, array, code);
                     code.push_int(i as i32, self.cw);
                 }
                 load(t, slot, code);
@@ -41,17 +71,32 @@ impl Emitter<'_> {
                     code.array_store(0x53, 1); // aastore
                 }
             }
+            if let Some((slot, lease)) = argument_array {
+                load(argument_array_type, slot, code);
+                self.release_temporary(lease);
+            }
             self.release_operand_spills(&temps);
         } else {
             self.emit_value(func, code);
-            if high_arity {
+            let argument_array = if high_arity {
                 code.push_int(n as i32, self.cw);
                 let object = self.cw.class_ref("java/lang/Object");
                 code.anewarray(object);
-            }
+                let temporary = self
+                    .frame
+                    .enter_temp(frame_map::TempRole::FunctionArguments, argument_array_type);
+                let slot = temporary.slot();
+                store(argument_array_type, slot, code);
+                Some((
+                    slot,
+                    self.lease_frame_temporary(temporary, argument_array_type),
+                ))
+            } else {
+                None
+            };
             for (i, &arg) in args.iter().enumerate() {
-                if high_arity {
-                    code.dup();
+                if let Some((array, _)) = argument_array {
+                    load(argument_array_type, array, code);
                     code.push_int(i as i32, self.cw);
                 }
                 self.emit_value(arg, code);
@@ -64,6 +109,10 @@ impl Emitter<'_> {
                 if high_arity {
                     code.array_store(0x53, 1); // aastore
                 }
+            }
+            if let Some((slot, lease)) = argument_array {
+                load(argument_array_type, slot, code);
+                self.release_temporary(lease);
             }
         }
         let iface = jvm_function_interface(n as u8);

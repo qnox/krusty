@@ -106,6 +106,16 @@ impl InnerClasses {
                 });
                 continue;
             }
+            // A SAM wrapper is anonymous, and scoped to the file that declares it.
+            if class.sam_wrapper.is_some() {
+                specs.push(InnerClassSpec {
+                    inner: identity.render(),
+                    outer: None,
+                    name: None,
+                    access: 0x0010 | 0x0008,
+                });
+                continue;
+            }
             // A callable reference class is anonymous too, and synthetic; it is public only where
             // spliced inline code constructs it from elsewhere.
             if class.func_ref.is_some() || class.prop_ref.is_some() {

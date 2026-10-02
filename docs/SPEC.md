@@ -8284,8 +8284,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`fun interface Child : Base { override fun f(): Int }` over `fun f(): Any`) is converted
   through a class of its own, never `invokedynamic`, as kotlinc does: the SAM selection publishes
   the fact on the conversion (`FirSamConversion::overrides_non_primitive_result`, from the
-  overridden declarations of the selected method's slot), so a dependency's interface takes the
-  same path (`sam/kt59858.kt`). Tests: `tests/local_override_boxed_result_e2e.rs`,
+  overridden declarations of the selected method's slot, before the call specializes them). A
+  type parameter is one of those results: `fun interface Count : Echo<Int>` over
+  `interface Echo<T> { fun echo(x: T): T }` still returns the wrapper, because `T` erases to
+  `Any` even when this call binds it to `Int`. A dependency's interface takes the same path
+  (`sam/kt59858.kt`). Tests: `tests/local_override_boxed_result_e2e.rs`,
   `fir::body_check::lambda_tests::sam_argument_records_a_primitive_result_over_a_non_primitive_one`,
   `tests/module_override_boxed_result_e2e.rs`.
 - **A lambda `LambdaMetafactory` cannot adapt compiles to a class, as kotlinc's does.** kotlinc's
@@ -8384,6 +8387,30 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   argument and calls the entry. krusty named the static function from the bridge
   (`compareTo-impl(I)I`), which does not exist. Tests: `tests/explicit_backing_field_e2e.rs`.
   Corpus: `properties/backingField/genericSupertypeWithValueClassExplicitBackingField`.
+- **A function value converted to a Kotlin fun interface is wrapped in a class.** `B(f)` for a
+  function value `f` (not a lambda literal or a callable reference) builds kotlinc's
+  `<FileFacade>$sam$<B's FQ name, dots as underscores>$0`: one `final synthetic` class per file and
+  interface, shared by every such conversion in the file. It implements `B` and `FunctionAdapter`;
+  its constructor checks and stores `f` in `private final synthetic function: FunctionN`; its method
+  is typed as `B` declares it (mangled for value classes) and calls `function.invoke`; and
+  `getFunctionDelegate`, `equals` and `hashCode` make two wrappers of one function equal. The
+  conversion is `new` of the wrapper cast to `B`. A Java interface keeps the `invokedynamic`
+  conversion.   The same route owns extension receivers, context parameters, `FunctionN` arities,
+  suspend methods (including their continuation and generic function-field ABI), and a primitive
+  result overriding a reference result (boxed implementation plus erased bridge). A regular
+  function suspend-converted into the interface is stored as that function's own `FunctionN`
+  (`() -> Unit` is `Function0`); the method calls it and does not pass the continuation. The same
+  storage follows the value's callable view when that value is not itself a function type: a
+  `KProperty0<R>` is `Function0`, and a fun interface whose method is not suspend (`Fn<T> :
+  (T) -> Unit`) is `Function1` when passed to a suspend collector. A fun
+  interface whose context parameters are published as ordinary named slots is still that
+  interface. A conversion in
+  an inline function uses kotlinc's public `$sam$i$` class and constructor. The statement line
+  starts at the wrapped value rather than at `new`; bridge debug provenance comes from the first
+  exact conversion site. Tests: `tests/sam_wrapper_class_e2e.rs`. Corpus:
+  `inlineClasses/funInterface/mangledSamWrappers`, `mangledSamWrappersGeneric`,
+  `callableReference/adaptedReferences/suspendConversion/propertyReferenceToSuspendFunction`,
+  and `coroutines/suspendConversion/suspendConversionBetweenFunInterfaces`.
 - **`Nothing` type arguments in generic signatures follow kotlinc's type mapper.** A class type
   is written raw when one of its own arguments is `Nothing?`, or `Nothing` for a type parameter
   not declared `in`; the rule is not recursive, so `Inv<List<Nothing?>>` is
@@ -11077,8 +11104,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   capture before a backend sees it; emission never falls back from a malformed nullable shape.
   `invokedynamic` duplicates the function and skips the call site when it is null. The class strategy
   parks the function in a local first: `new` cannot both test that value and pass it to `<init>`
-  without a temporary. A non-null function and a lambda literal still become the interface. Both
-  JVM strategies are compared with kotlinc in `tests/nullable_sam_e2e.rs`. Corpus
+  without a temporary. A Kotlin fun interface does not use either of those carriers for an existing
+  function value: it constructs the file's `$sam$` wrapper, and that construction is the null test.
+  The wrapper constructor still rejects a null `function`, so a null value is stored once and never
+  passed to `<init>`; the result stays `null`. A non-null function and a lambda literal still become
+  the interface. Both JVM strategies are compared with kotlinc in `tests/nullable_sam_e2e.rs`. Corpus
   `funInterface/nullableSam.kt`.
 
 - **A valueless `return@label` makes that lambda's result `Unit`, and the last expression is inferred against `Unit`.** The ordinary checker traversal binds each return once to its resolved lambda identity (`ReturnTarget::Lambda`). After the owning body block's preceding statements have been checked, an open result with only valueless exits checks its trailing expression once in statement position with a `Unit` expectation. Whether the result is open is explicit constraint provenance: a source-declared `Any` result stays fixed even though an unconstrained result variable has the same upper-bound type. A fixed result such as `Unit?` likewise stays: the body is checked against it, and the valueless return widens `Unit` to `Unit?`. `n.let { if (b) return@let; materialize() }` therefore returns `Unit` from `let`, and `materialize`'s type argument is `Unit`: `"str" as K` is a coercion to the `Unit` singleton rather than a value of the unconstrained bottom type `Nothing`. Using that `Nothing` as the lambda's value throws `KotlinNothingValueException`. The statement position is what keeps a trailing `when` without `else` legal. A valued return to the same lambda is a real result and is joined with the tail. A nested literal that reuses the label has its own exit set: a valueless return bound to the inner lambda does not coerce the outer one, and a return bound to the outer lambda from inside the inner literal affects only the outer target. (`tests/unit_cast_e2e.rs`, including `a_unit_lambda_records_the_generic_tail_as_unit`, `a_substituted_result_bound_still_records_the_generic_tail_as_unit`, and `a_fixed_any_lambda_result_rejects_a_valueless_exit`; corpus `inference/coercionToUnitWithLastLambdaExpression.kt`.)

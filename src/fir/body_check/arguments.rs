@@ -483,12 +483,17 @@ impl BodyFirChecker<'_> {
         argument: ExprId,
         cause: OriginId,
     ) -> Result<Option<FirConversion>, BodyCheckFailure> {
-        let Some(sam) = self.info.resolved_sam_conversions.get(&argument).cloned() else {
+        let Some(selected) = self.info.resolved_sam_conversions.get(&argument).cloned() else {
             return Ok(None);
         };
         let span = self.file.expr_span(argument);
         let nullable = self.info.semantic_ty(argument).is_nullable();
-        let conversion = self.published_sam_conversion(span, &sam, nullable)?;
+        let conversion = self.published_sam_conversion(
+            span,
+            &selected.signature,
+            nullable,
+            selected.source_suspend,
+        )?;
         let conversion = self.body.add_sam_conversion(conversion);
         Ok(Some(FirConversion {
             origin: cause,
@@ -1276,8 +1281,11 @@ impl BodyFirChecker<'_> {
         args: &[ExprId],
     ) -> Result<FirExprKind, BodyCheckFailure> {
         let span = self.file.expr_span(expression);
-        let Some(ExprLowering::SamConstructor { sam, .. }) =
-            self.info.expr_lowers.get(&expression).cloned()
+        let Some(ExprLowering::SamConstructor {
+            sam,
+            source_suspend,
+            ..
+        }) = self.info.expr_lowers.get(&expression).cloned()
         else {
             return Err(self.failure(span, BodyCheckFailureKind::UnsupportedCallShape));
         };
@@ -1285,7 +1293,7 @@ impl BodyFirChecker<'_> {
             return Err(self.failure(span, BodyCheckFailureKind::UnsupportedCallShape));
         };
         let cause = self.expression_origin(expression)?;
-        let conversion = self.published_sam_conversion(span, &sam, false)?;
+        let conversion = self.published_sam_conversion(span, &sam, false, source_suspend)?;
         let conversion = self.body.add_sam_conversion(conversion);
         let value = self.expression(*operand)?;
         Ok(FirExprKind::ImplicitConversion {
@@ -1305,6 +1313,7 @@ impl BodyFirChecker<'_> {
         span: Option<Span>,
         sam: &crate::symbol_resolver::SamSignature,
         nullable: bool,
+        source_suspend: bool,
     ) -> Result<FirSamConversion, BodyCheckFailure> {
         let resolved = |ty| {
             ResolvedTy::new(ty)
@@ -1352,8 +1361,12 @@ impl BodyFirChecker<'_> {
                 .map_err(|_| self.failure(span, BodyCheckFailureKind::UnsupportedCallShape))?,
             has_receiver: sam.has_receiver,
             suspend: sam.suspend,
+            source_suspend,
             overrides_non_primitive_result: sam.overrides_non_primitive_result,
+            overridden_non_primitive_results: resolved_all(&sam.overridden_non_primitive_results)?,
             nullable,
+            kotlin_interface: sam.kotlin_interface,
+            parameter_identities: sam.parameter_identities.clone(),
         })
     }
 }
