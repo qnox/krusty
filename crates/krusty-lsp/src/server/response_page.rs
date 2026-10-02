@@ -12,12 +12,20 @@ use std::borrow::Cow;
 use serde_json::{json, Map, Value};
 
 use super::implementation::MAX_MESSAGE_BYTES;
+use super::output_queue::OUTPUT_CHANNEL_FRAMES;
 
 /// One editor-facing frame, including the JSON-RPC envelope, id, and progress token.
 pub(super) const RESPONSE_PAGE_BYTES: usize = 256 * 1024;
 
-/// How many progress pages one request may emit.
-pub(super) const MAX_RESPONSE_PAGES: usize = 32;
+const _: () = assert!(OUTPUT_CHANNEL_FRAMES >= 2);
+
+/// Progress pages one partial-result stream may emit.
+///
+/// The async stdout channel holds [`OUTPUT_CHANNEL_FRAMES`] frames. The empty final result
+/// takes one of those slots. One more progress page would leave that result in the queue's
+/// pending slot, which a blocked client never sees. A longer report is server-cancelled
+/// before any `$/progress`.
+pub(super) const MAX_RESPONSE_PAGES: usize = OUTPUT_CHANNEL_FRAMES - 1;
 
 /// Hover markdown kept on the wire. The stored hover text may be longer.
 pub(super) const HOVER_TEXT_BYTES: usize = 8 * 1024;
