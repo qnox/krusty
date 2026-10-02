@@ -174,6 +174,26 @@ fun box(): String {\n\
 }
 
 #[test]
+fn a_canonical_component_can_inherit_the_selected_default() {
+    // The first canonical component does not declare `choose` itself. Its nearest inherited slot
+    // still precedes the later component's direct declaration, and reversing the inference inputs
+    // must not change the canonical intersection identity or the selected default.
+    const SRC: &str = "\
+interface Shared { fun choose(value: Int = 1): String = \"B$value\" }\n\
+interface Left : Shared\n\
+interface Right { fun choose(value: Int = 2): String = \"R$value\" }\n\
+class In<in K>\n\
+class OnlyLeft : Left\n\
+fun <E> intersect(vararg x: In<E>): E = OnlyLeft() as E\n\
+fun box(): String {\n\
+    val forward = intersect(In<Left>(), In<Right>())\n\
+    val reverse = intersect(In<Right>(), In<Left>())\n\
+    return if (forward.choose() == \"B1\" && reverse.choose() == \"B1\") \"OK\" else \"NO\"\n\
+}\n";
+    common::expect_box_same_as_kotlinc(SRC, "InheritedIntersectionComponentDefault");
+}
+
+#[test]
 fn a_public_intersection_matches_kotlinc_abi_and_metadata() {
     let source = format!(
         "{SHAPES}\n\

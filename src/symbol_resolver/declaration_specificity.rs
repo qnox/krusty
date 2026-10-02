@@ -107,18 +107,20 @@ pub(crate) fn retain_most_specific_declarations<T>(
         index += 1;
         keep
     });
-    retain_earliest_intersection_member(intersection_receiver, candidates, |candidate| {
+    retain_earliest_intersection_member(src, intersection_receiver, candidates, |candidate| {
         let (_, parameters, _, owner) = shape(candidate);
         owner.map(|owner| (owner, parameters.to_vec()))
     });
 }
 
-/// Several intersection components can declare one member slot, including distinct default
-/// arguments. Specificity does not choose among them. The canonical component order is the type's
-/// identity, so the earliest component that declares the slot supplies the call, defaults included.
+/// Several intersection components can contribute one member slot, including inherited
+/// declarations with distinct default arguments. Specificity does not choose among them. The
+/// canonical component order is the type's identity, so the earliest component whose hierarchy
+/// declares the slot supplies the call, defaults included.
 /// A real overload family — different parameter shapes, or two survivors on that earliest
 /// component — stays intact for the ordinary ambiguity diagnostic.
 fn retain_earliest_intersection_member<T>(
+    src: &dyn SymbolSource,
     receiver: Option<Ty>,
     candidates: &mut Vec<T>,
     member: impl Fn(&T) -> Option<(TypeName, Vec<Ty>)>,
@@ -149,8 +151,20 @@ fn retain_earliest_intersection_member<T>(
         .filter_map(|shape| shape.as_ref().map(|(owner, _)| *owner))
         .collect::<Vec<_>>();
     let Some(preferred) = parts.iter().find_map(|part| {
-        let owner = part.kotlin_class_internal()?;
-        owners.contains(&owner).then_some(owner)
+        let reachable = super::hierarchy_projection::receiver_hierarchy(src, *part)
+            .into_iter()
+            .filter_map(|(applied, depth)| {
+                let owner = applied.kotlin_class_internal()?;
+                owners.contains(&owner).then_some((owner, depth))
+            })
+            .collect::<Vec<_>>();
+        let nearest = reachable.iter().map(|(_, depth)| *depth).min()?;
+        Some(
+            reachable
+                .into_iter()
+                .filter_map(|(owner, depth)| (depth == nearest).then_some(owner))
+                .collect::<std::collections::HashSet<_>>(),
+        )
     }) else {
         return;
     };
@@ -158,7 +172,7 @@ fn retain_earliest_intersection_member<T>(
     candidates.retain(|_| {
         let keep = shapes[index]
             .as_ref()
-            .is_some_and(|(owner, _)| *owner == preferred);
+            .is_some_and(|(owner, _)| preferred.contains(owner));
         index += 1;
         keep
     });
