@@ -514,8 +514,9 @@ fn bind_member_return_from_call_args(
         gsig.params.iter().zip(args).enumerate().filter_map(
             |(parameter, (&declared, argument))| {
                 (!no_infer_params.get(parameter).copied().unwrap_or(false)
-                    && !argument.is_expected_type_callable()
-                    && !argument.is_omitted_default())
+                    && !argument.is_omitted_default()
+                    && (!argument.is_expected_type_callable()
+                        || argument.result_is_input_constrained()))
                 .then_some((
                     parameter,
                     argument.inference_type(source, declared),
@@ -1095,7 +1096,7 @@ pub(crate) enum CandidateSelection<T> {
     Ambiguous,
 }
 
-fn fixed_parameter_shape(
+pub(super) fn fixed_parameter_shape(
     params: &[Ty],
     args: &[CallArgKind],
     fits: impl Fn(usize, &Ty, &CallArgKind) -> bool,
@@ -1136,7 +1137,7 @@ fn vararg_parameter_shape(
 /// is not necessarily last (`fun option(vararg names: String, help: String = "")`), so the
 /// final-slot assumption below only serves candidates whose metadata records no vararg at all.
 /// `params` are the VALUE parameters, so the recorded index is shifted past the context ones.
-fn candidate_vararg_shape(
+pub(super) fn candidate_vararg_shape(
     candidate: &FunctionInfo,
     params: &[Ty],
     args: &[CallArgKind],
@@ -1194,7 +1195,7 @@ fn vararg_parameter_shape_at(
     fits: impl Fn(usize, &Ty, &CallArgKind) -> bool,
 ) -> Option<Vec<Ty>> {
     let array = *params.get(vararg_index)?;
-    let element = array.array_elem()?;
+    let element = array.array_read_elem()?;
     if args.len() == vararg_index + 1
         && args.get(vararg_index).map(|argument| argument.ty()) == Some(array)
     {
@@ -1228,7 +1229,7 @@ fn vararg_parameter_shape_at(
     Some(expanded)
 }
 
-fn parameter_at_least_as_specific(
+pub(super) fn parameter_at_least_as_specific(
     src: &dyn SymbolSource,
     left: Ty,
     right: Ty,
@@ -6045,13 +6046,12 @@ fn logical_call_params(
             .zip(arguments)
             .enumerate()
             .filter_map(|(parameter, (&declared, argument))| {
-                // A nested generic call's erased provisional result is not an input constraint.
-                // Once this candidate supplies a parameter, argument checking propagates it into
-                // the nested call.
-                (!argument.is_expected_type_callable()
-                    && !argument.is_lambda_literal()
-                    && !argument.is_omitted_default())
-                .then_some((
+                // A result-only nested call is not an input constraint; argument checking
+                // propagates the selected parameter into it. A nested call whose own inputs
+                // already fixed the result (`listOf(value)`, `xs.map { B(it) }`) is evidence:
+                // `Collection<T>.plus` joins that element type with the receiver instead of
+                // pinning `T` to the receiver alone.
+                argument.supplies_fixed_argument_type().then_some((
                     parameter,
                     argument.inference_type(source, declared),
                     argument.is_spread(),
@@ -6124,10 +6124,7 @@ fn indexed_call_shape(
         .iter()
         .enumerate()
         .filter_map(|(source_index, argument)| {
-            if argument.is_expected_type_callable()
-                || argument.is_lambda_literal()
-                || argument.is_omitted_default()
-            {
+            if !argument.supplies_fixed_argument_type() {
                 return None;
             }
             let parameter = if source_index < logical_vararg {
@@ -6218,7 +6215,7 @@ fn semantic_arg_assignable(src: &dyn SymbolSource, param: &Ty, arg: &Ty) -> bool
     )
 }
 
-fn distinct_source_declarations(left: &FunctionInfo, right: &FunctionInfo) -> bool {
+pub(super) fn distinct_source_declarations(left: &FunctionInfo, right: &FunctionInfo) -> bool {
     match (left.stable_declaration, right.stable_declaration) {
         (Some(left), Some(right)) => left != right,
         _ => {
@@ -6243,17 +6240,26 @@ where
 
 fn declaration_specificity_params(candidate: &FunctionInfo) -> Vec<Ty> {
     let signature = candidate.semantic_signature();
-    signature
+    let mut params = signature
         .params
         .iter()
         .skip(candidate.context_count.min(signature.params.len()))
         .map(|parameter| ty_subst(*parameter, &GSigBinds::new()))
-        .collect()
+        .collect::<Vec<_>>();
+    let vararg = candidate
+        .call_sig
+        .vararg_index
+        .and_then(|index| index.checked_sub(candidate.context_count));
+    if let Some(index) = vararg {
+        if let Some(element) = params.get(index).and_then(|array| array.array_read_elem()) {
+            params[index] = element;
+        }
+    }
+    params
 }
 
 /// Pick the best overload whose logical value parameters accept `args`, in Kotlin applicability order:
-/// exact, then `Any`-widened / function-arity, then a prefix under-application (omitted trailing params
-/// must be optional), then a trailing-lambda call that omits leading DEFAULTED params (`m.withLock { … }`).
+/// exact, then widened or arity fits, then an omitted-default prefix, then a trailing lambda.
 pub(crate) fn best_by_args<'a>(
     lib: &dyn SemanticPlatform,
     src: &dyn SymbolSource,
@@ -6295,9 +6301,6 @@ fn best_by_args_with_ties<'a>(
     }
 }
 
-/// Select within one declaration-priority tier. Applicability and specificity deliberately know
-/// nothing about `@LowPriorityInOverloadResolution`; the outer tiering step invokes this same selector
-/// first for ordinary declarations and only then for low-priority declarations.
 fn best_by_args_at_priority_with_ties<'a>(
     lib: &dyn SemanticPlatform,
     src: &dyn SymbolSource,
@@ -6314,10 +6317,6 @@ fn best_by_args_at_priority_with_ties<'a>(
                 arg_fits_platform(lib, p, &function) || semantic_arg_assignable(src, p, &function)
             })
     };
-    // The DEFAULT-omitting passes accept a reference SUBTYPE / value-class-underlying argument (a
-    // `joinToString(separator: CharSequence = …)` call with a `String`), matching the assignability the
-    // exact-arity subtype pass in `select_overload` applies — the exact/`Any`-widened passes above stay
-    // stricter so an exact call still prefers its precise overload.
     let fits = |_position: usize, p: &Ty, arg: &CallArgKind| {
         if arg.is_omitted_default() {
             return true;
@@ -6334,22 +6333,20 @@ fn best_by_args_at_priority_with_ties<'a>(
             || function_like_fits(p, arg)
             || arg.binds_result_to(src, *p)
     };
-    match source_aware_most_specific_with_ties(
-        cands
-            .iter()
-            .filter(|(_, params)| params.as_slice() == arg_tys)
-            .map(|(candidate, _)| (declaration_specificity_params(candidate), *candidate)),
-        |_, left, right| {
-            parameter_at_least_as_specific(src, left, right, CallArgKind::Typed(Ty::Error))
-        },
-    ) {
+    match overload_selection::select_recorded_exact(cands, args, |_, left, right| {
+        parameter_at_least_as_specific(src, left, right, CallArgKind::Typed(Ty::Error))
+    }) {
         CandidateSelectionWithTies::Selected(candidate) => {
             return CandidateSelectionWithTies::Selected(candidate);
         }
-        CandidateSelectionWithTies::Ambiguous(candidates) => {
-            return CandidateSelectionWithTies::Ambiguous(candidates)
+        CandidateSelectionWithTies::Ambiguous(candidates)
+            if candidates
+                .iter()
+                .all(|candidate| candidate.call_sig.vararg_index.is_none()) =>
+        {
+            return CandidateSelectionWithTies::Ambiguous(candidates);
         }
-        CandidateSelectionWithTies::None => {}
+        CandidateSelectionWithTies::Ambiguous(_) | CandidateSelectionWithTies::None => {}
     }
     match integer_literal_overload_with_ties(
         cands
@@ -6364,7 +6361,7 @@ fn best_by_args_at_priority_with_ties<'a>(
             return CandidateSelectionWithTies::Selected(candidate);
         }
         CandidateSelectionWithTies::Ambiguous(candidates) => {
-            return CandidateSelectionWithTies::Ambiguous(candidates)
+            return overload_selection::non_vararg_among(cands, &candidates, src);
         }
         CandidateSelectionWithTies::None => {}
     }
@@ -6372,47 +6369,15 @@ fn best_by_args_at_priority_with_ties<'a>(
         parameter_at_least_as_specific(src, left, right, CallArgKind::Typed(Ty::Error))
     };
 
-    // Expected-result inference may make several otherwise unrelated overloads applicable. Unlike
-    // ordinary classpath assignability, declaration order cannot choose among them: the inferred
-    // result would then depend on provider iteration order. Run the same unique-most-specific rule
-    // used for source declarations and report incomparable maxima as an ambiguity.
-    if args.iter().any(CallArgKind::is_expected_type_callable) {
-        match unique_most_specific_with_conflicts_and_ties(
-            cands.iter().filter_map(|(candidate, params)| {
-                fixed_parameter_shape(params, args, |position, param, arg| {
-                    fits(position, param, arg)
-                })
-                .map(|shape| (shape, *candidate))
-            }),
-            specificity,
-            |left, right| distinct_source_declarations(left, right),
-        ) {
-            CandidateSelectionWithTies::Selected(candidate) => {
-                return CandidateSelectionWithTies::Selected(candidate);
-            }
-            CandidateSelectionWithTies::Ambiguous(candidates) => {
-                return CandidateSelectionWithTies::Ambiguous(candidates)
-            }
-            CandidateSelectionWithTies::None => {}
-        }
-    }
-
-    // Exact arity is judged by the one semantic assignability relation. Every applicable overload
-    // competes in the same most-specific selection; there is no later descriptor/erasure retry.
-    match source_aware_most_specific_with_ties(
-        cands.iter().filter_map(|(candidate, params)| {
-            fixed_parameter_shape(params, args, |position, param, arg| {
-                fits(position, param, arg)
-            })
-            .map(|shape| (shape, *candidate))
-        }),
-        specificity,
-    ) {
+    // Contextual nested calls use this same comparison. Keeping them in a fixed-only pre-pass
+    // would discard an applicable vararg element shape before specificity can compare it.
+    match overload_selection::select_fixed_or_more_specific_vararg(cands, args, &fits, &specificity)
+    {
         CandidateSelectionWithTies::Selected(candidate) => {
             return CandidateSelectionWithTies::Selected(candidate);
         }
         CandidateSelectionWithTies::Ambiguous(candidates) => {
-            return CandidateSelectionWithTies::Ambiguous(candidates)
+            return CandidateSelectionWithTies::Ambiguous(candidates);
         }
         CandidateSelectionWithTies::None => {}
     }

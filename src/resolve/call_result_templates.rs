@@ -15,6 +15,30 @@
 use super::*;
 
 impl Checker<'_> {
+    /// Whether this nested call has no input-fixed result shape and therefore receives an ordinary
+    /// successful-argument score until the enclosing declarations' parameter shapes are compared.
+    pub(super) fn argument_uses_context_only_result(
+        &self,
+        scope: &CheckerScope<'_>,
+        argument: ExprId,
+    ) -> bool {
+        let argument = self.call_arg_kind(scope, argument);
+        argument.is_expected_type_callable() && !argument.result_is_input_constrained()
+    }
+
+    /// Whether an enclosing parameter may complete this nested result without replacing type
+    /// evidence fixed by the nested call's own inputs.
+    pub(super) fn argument_result_may_bind_expected(
+        &self,
+        scope: &CheckerScope<'_>,
+        argument: ExprId,
+        expected: Ty,
+    ) -> bool {
+        self.call_arg_kind(scope, argument)
+            .may_bind_result_during_overload_selection(expected)
+            && self.call_result_can_bind_expected(argument, expected)
+    }
+
     /// Record the type-parameter identities lexically in scope at `call`.
     pub(super) fn record_call_site_lexical_formals(
         &mut self,
