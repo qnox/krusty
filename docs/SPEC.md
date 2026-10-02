@@ -7465,6 +7465,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`codegen/box/localClasses/capturingInDefaultConstructorParameter.kt`).
   Tests: `tests/local_class_scope_e2e.rs`.
 
+  A local classifier declared inside a signature default is part of that default's checked
+  payload. Its applied hierarchy is published with the checked header before the default fragment
+  is lowered. An anonymous object that extends a local class in the same constructor-parameter
+  default therefore dispatches to the override (`B().s() + o.s()` is `"OK"`). Test:
+  `tests/local_class_e2e.rs::a_constructor_default_anonymous_object_overrides_its_local_class`,
+  box `localClasses/localClassInParameterInitializer.kt`.
+
 - **Fully-qualified name references resolve by SEGMENT ITERATION over a package/classifier
   namespace, not by matching spellings.** Kotlin admits a fully-qualified reference with no import
   wherever a simple name is legal — `pkg.Cls()`, `pkg.Cls.COMPANION_VALUE`, `pkg.Obj.fn()`,
