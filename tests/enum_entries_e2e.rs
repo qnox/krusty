@@ -273,3 +273,24 @@ fun box(): String {\n\
 }\n";
     common::expect_box_same_as_kotlinc(SRC, "enum_entries_unqualified_legacy");
 }
+
+#[test]
+fn prioritized_unqualified_entries_write_does_not_fall_through_to_an_outer_var() {
+    const SRC: &str = "\
+// LANGUAGE: +PrioritizedEnumEntries\n\
+object Holder {\n\
+    var entries: Any = \"outer\"\n\
+    enum class Choice {\n\
+        One;\n\
+        fun overwrite() { entries = \"changed\" }\n\
+    }\n\
+}\n";
+    let result = common::compiler_diagnostics(&[("Write.kt", SRC)], &[common::stdlib_jar()]);
+    assert_eq!(result.reference_code, 1, "{}", result.reference_stderr);
+    assert_eq!(
+        common::compiler_errors(&result.krusty_stderr),
+        common::compiler_errors(&result.reference_stderr),
+        "a read-only property on the nearest tower rung must terminate write lookup"
+    );
+    assert_eq!(result.krusty_code, 1, "{}", result.krusty_stderr);
+}

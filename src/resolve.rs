@@ -24572,7 +24572,8 @@ impl<'a> Checker<'a> {
                 ),
                 PropertyWriteSelection::None
                 | PropertyWriteSelection::Implicit(_)
-                | PropertyWriteSelection::Receiverless(_) => self
+                | PropertyWriteSelection::Receiverless(_)
+                | PropertyWriteSelection::ClassifierProperty(_) => self
                     .diags
                     .error(span, format!("unresolved reference '{name}'.")),
             },
@@ -24825,6 +24826,18 @@ impl<'a> Checker<'a> {
                             );
                             self.stmt_lowers
                                 .insert(s, StmtLowering::TopLevelPropertySet(property));
+                        }
+                        PropertyWriteSelection::ClassifierProperty(property) => {
+                            self.report_val_reassignment(
+                                target_span,
+                                "'val' cannot be reassigned.",
+                            );
+                            self.expect_assignable(
+                                property.ty,
+                                vt,
+                                self.value_diagnostic_span(value, vt),
+                                "assignment",
+                            );
                         }
                         PropertyWriteSelection::Ambiguous => self.diags.error(
                             target_span,
@@ -62511,7 +62524,8 @@ impl<'a> Checker<'a> {
                             ),
                             PropertyWriteSelection::None
                             | PropertyWriteSelection::Implicit(_)
-                            | PropertyWriteSelection::Receiverless(_) => self
+                            | PropertyWriteSelection::Receiverless(_)
+                            | PropertyWriteSelection::ClassifierProperty(_) => self
                                 .diags
                                 .error(self.span(e), format!("unresolved reference '{name}'.")),
                         }

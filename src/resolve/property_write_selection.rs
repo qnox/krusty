@@ -17,6 +17,10 @@ pub(super) enum PropertyWriteSelection {
     None,
     Implicit(Box<ImplicitPropertyWriteResolution>),
     Receiverless(Box<ResolvedPropertyAccess>),
+    /// A language-defined classifier property selected by the same implicit tower as reads. These
+    /// properties are read-only, but still terminate write lookup so a farther mutable property
+    /// cannot become a fallback target.
+    ClassifierProperty(Box<crate::libraries::ClassifierProperty>),
     MissingContext(MissingContextParameter, Vec<String>),
     Ambiguous,
 }
@@ -28,6 +32,7 @@ impl PropertyWriteSelection {
             Self::Receiverless(property) => {
                 Some((property.property.ty, property.property.setter.is_some()))
             }
+            Self::ClassifierProperty(property) => Some((property.ty, false)),
             Self::None | Self::MissingContext(..) | Self::Ambiguous => None,
         }
     }
@@ -43,7 +48,11 @@ impl Checker<'_> {
     ) -> PropertyWriteSelection {
         for rung in self.implicit_rungs(scope) {
             match rung {
-                implicit_rungs::ImplicitRung::PrioritizedClassifierProperties(_) => {}
+                implicit_rungs::ImplicitRung::PrioritizedClassifierProperties(owner) => {
+                    if let Some((_, property)) = self.classifier_property_for_owner(owner, name) {
+                        return PropertyWriteSelection::ClassifierProperty(Box::new(property));
+                    }
+                }
                 implicit_rungs::ImplicitRung::Receiver(receiver) => {
                     if let Some(property) = self.property_write_on_receiver(scope, receiver, name) {
                         return PropertyWriteSelection::Implicit(Box::new(property));
@@ -272,6 +281,7 @@ impl Checker<'_> {
                     .insert(stmt, StmtLowering::TopLevelPropertySet(property.clone()));
             }
             PropertyWriteSelection::None
+            | PropertyWriteSelection::ClassifierProperty(_)
             | PropertyWriteSelection::MissingContext(..)
             | PropertyWriteSelection::Ambiguous => {}
         }
@@ -299,6 +309,7 @@ impl Checker<'_> {
                 );
             }
             PropertyWriteSelection::None
+            | PropertyWriteSelection::ClassifierProperty(_)
             | PropertyWriteSelection::MissingContext(..)
             | PropertyWriteSelection::Ambiguous => {}
         }
