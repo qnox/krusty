@@ -131,6 +131,37 @@ fn an_inner_class_member_reads_an_enclosing_type_parameter_across_modules() {
     );
 }
 
+/// Source spelling is not type-parameter identity. Applying `Inner<Int>` must not substitute its
+/// own `E` into the captured `Outer<String>.E`; the provider qualifies the captured parameter by
+/// its declaring classifier before publishing the member signature.
+#[test]
+fn same_spelled_inner_and_outer_parameters_stay_distinct_across_modules() {
+    const LIB: &str = "package lib\n\
+        \n\
+        class Outer<E : CharSequence>(val outer: E) {\n\
+        \x20   inner class Inner<E : Number>(val inner: E) {\n\
+        \x20       fun outerValue() = this@Outer.outer\n\
+        \x20   }\n\
+        }\n";
+    const MAIN: &str = "import lib.Outer\n\
+        \n\
+        fun box(): String {\n\
+        \x20   val value = Outer<String>(\"OK\").Inner<Int>(7)\n\
+        \x20   val outer: CharSequence = value.outerValue()\n\
+        \x20   val inner: Number = value.inner\n\
+        \x20   return if (outer == \"OK\" && inner == 7) \"OK\" else \"fail\"\n\
+        }\n";
+    assert_eq!(
+        common::expect_box_run_against("shadowed_inner_enclosing_tp", LIB, MAIN)
+            .expect("krusty-built library"),
+        "OK"
+    );
+    assert_eq!(
+        common::expect_box_run_against_kotlinc(LIB, MAIN).expect("kotlinc-built library"),
+        "OK"
+    );
+}
+
 /// A value class's underlying type is a class-level payload, so its own type parameter is named
 /// there — and it surfaces at all only because a non-public underlying property has the type
 /// recorded on the class itself.

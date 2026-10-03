@@ -30,6 +30,26 @@ pub(crate) fn declaration_type_parameter(
     semantic
 }
 
+/// A type parameter decoded from an external classifier declaration.
+///
+/// Kotlin metadata carries the source spelling, while the classpath provider also knows the
+/// declaring classifier and ordinal.  Fold those declaration facts into an opaque identity and
+/// retain the spelling separately, exactly as for source declarations.
+pub(crate) fn external_classifier_type_parameter(
+    owner: super::TypeName,
+    ordinal: usize,
+    source: &str,
+) -> &'static str {
+    let source = intern(source);
+    let semantic = intern(&format!("\0external-class:{}:{ordinal}", owner.name_id().0));
+    TYPE_PARAMETER_SOURCES
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap()
+        .insert(semantic, source);
+    semantic
+}
+
 /// The call-owned inference variable standing for declaration formal `declared` at one call site.
 /// It keeps the declaration's source spelling for diagnostics and never equals a declaration-owned
 /// identity, so the enclosing declaration's own `declared` stays a fixed type while the call's
@@ -83,7 +103,8 @@ pub(crate) fn type_parameter_source_name(name: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{
-        constructor_type_parameter, declaration_type_parameter, type_parameter_source_name,
+        constructor_type_parameter, declaration_type_parameter, external_classifier_type_parameter,
+        type_parameter_source_name,
     };
 
     #[test]
@@ -109,5 +130,17 @@ mod tests {
         assert_eq!(type_parameter_source_name(overload), "T");
         assert_eq!(type_parameter_source_name(other_owner), "T");
         assert_eq!(type_parameter_source_name(next_formal), "T");
+    }
+
+    #[test]
+    fn external_classifier_formals_are_owned_not_spelling_identified() {
+        let outer = crate::types::type_name("demo/Outer");
+        let inner = crate::types::type_name("demo/Outer$Inner");
+        let outer_e = external_classifier_type_parameter(outer, 0, "E");
+        let inner_e = external_classifier_type_parameter(inner, 0, "E");
+
+        assert_ne!(outer_e, inner_e);
+        assert_eq!(type_parameter_source_name(outer_e), "E");
+        assert_eq!(type_parameter_source_name(inner_e), "E");
     }
 }

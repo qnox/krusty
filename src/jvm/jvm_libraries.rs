@@ -349,8 +349,17 @@ impl JvmLibraries {
                         parameters
                             .type_params()
                             .iter()
-                            .cloned()
-                            .zip(parameters.type_param_bounds().iter().cloned())
+                            .zip(parameters.type_param_bounds())
+                            .enumerate()
+                            .map(|(ordinal, (source, bounds))| {
+                                (
+                                    crate::types::external_classifier_type_parameter(
+                                        owner, ordinal, source,
+                                    )
+                                    .to_string(),
+                                    bounds.clone(),
+                                )
+                            })
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default()
