@@ -13,6 +13,7 @@
 //! The binding payload `B` stays generic so this module does not depend on the checker's `Local`.
 //! The flow frame is concrete: narrowings are a property of lexical scopes, so they live here.
 
+use super::receiver_capture_identity::{LambdaReceiverSlot, ReceiverDeclarationRole};
 use crate::diag::Span;
 use crate::types::{Ty, TypeName};
 use std::cell::RefCell;
@@ -62,6 +63,7 @@ pub(crate) enum ContextReceiverKind {
 
 #[derive(Clone, Debug)]
 pub(crate) struct ContextReceiver {
+    declaration: Option<Span>,
     pub(crate) ty: Ty,
     pub(crate) kind: ContextReceiverKind,
     /// The source name, which only a named parameter has.
@@ -79,6 +81,7 @@ impl ContextReceiver {
         );
         let name = None;
         Self {
+            declaration: None,
             ty,
             kind,
             name,
@@ -90,6 +93,7 @@ impl ContextReceiver {
     pub(crate) fn named(ty: Ty, name: impl Into<String>) -> Self {
         let (kind, name, label) = (ContextReceiverKind::Named, Some(name.into()), None);
         Self {
+            declaration: None,
             ty,
             kind,
             name,
@@ -100,6 +104,16 @@ impl ContextReceiver {
     /// The parameter's source name, when it is a named one.
     pub(crate) fn name(&self) -> Option<&str> {
         self.name.as_deref()
+    }
+
+    pub(crate) fn with_declaration(mut self, declaration: Span) -> Self {
+        self.declaration = Some(declaration);
+        self
+    }
+
+    pub(crate) fn declaration_role(&self) -> Option<ReceiverDeclarationRole> {
+        self.declaration
+            .map(ReceiverDeclarationRole::ContextParameter)
     }
 
     /// Whether the entry joins the implicit-receiver tower: every kind but a named parameter.
@@ -267,6 +281,13 @@ struct ScopedReceiver {
     context_shadow_depth: usize,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum FunctionReceiverKind {
+    Capturable,
+    Dispatch,
+    Singleton,
+}
+
 impl ScopedReceiver {
     fn plain(ty: Ty, identity: (usize, usize)) -> Self {
         Self {
@@ -300,6 +321,12 @@ pub(crate) struct Scope<'p, B> {
     current_receiver_name: Option<String>,
     /// A receiver lambda's label (explicit, or the called function's name) when this rung is one.
     lambda_label: Option<String>,
+    lambda_expression: Option<Span>,
+    /// Runtime ownership of a `Function` rung's receiver. Scratch declaration checks still have a
+    /// class dispatch receiver even though they cannot use `ScopeKind::Class` (that would cut the
+    /// method/type-parameter scopes between it and the body). Constructor-header singletons take
+    /// part in lookup but are materialized from singleton storage, never closure captures.
+    function_receiver_kind: FunctionReceiverKind,
     /// The context parameters of the function type a lambda rung is checked against, in order,
     /// when the last of them is this rung's current receiver (no extension receiver took it).
     current_receiver_context: Option<Vec<Ty>>,
@@ -341,6 +368,8 @@ impl<'p, B> Scope<'p, B> {
             context_receivers: RefCell::new(Vec::new()),
             current_receiver_name: None,
             lambda_label: None,
+            lambda_expression: None,
+            function_receiver_kind: FunctionReceiverKind::Capturable,
             current_receiver_context: None,
             extension_receiver_declaration: None,
             extension_receiver_label: None,
@@ -442,6 +471,25 @@ impl<'p, B> Scope<'p, B> {
             .context_receivers
             .get_mut()
             .extend_from_slice(context_receivers);
+        child
+    }
+
+    pub(crate) fn singleton_receiver_child(&'p self, receiver: Option<Ty>) -> Scope<'p, B> {
+        let mut child = Scope::with_parent(Some(self), ScopeKind::Function { receiver });
+        if receiver.is_some() {
+            child.function_receiver_kind = FunctionReceiverKind::Singleton;
+        }
+        child
+    }
+
+    pub(crate) fn dispatch_receiver_child(&'p self, receiver: Ty) -> Scope<'p, B> {
+        let mut child = Scope::with_parent(
+            Some(self),
+            ScopeKind::Function {
+                receiver: Some(receiver),
+            },
+        );
+        child.function_receiver_kind = FunctionReceiverKind::Dispatch;
         child
     }
 
@@ -1066,6 +1114,61 @@ impl<'p, B> Scope<'p, B> {
         self
     }
 
+    pub(crate) fn with_lambda_expression(mut self, expression: Span) -> Self {
+        self.lambda_expression = Some(expression);
+        self
+    }
+
+    /// Declaration provenance of the selected live rung, independent of its scope address, type,
+    /// label and relative tower depth. Context slots use their source declaration order.
+    pub(crate) fn implicit_receiver_role(
+        &self,
+        identity: (usize, usize),
+    ) -> Option<ReceiverDeclarationRole> {
+        let scope = self
+            .ancestors()
+            .find(|scope| (*scope as *const Self as usize) == identity.0)?;
+        if identity.1 == 0 {
+            if let Some(declaration) = scope.extension_receiver_declaration {
+                return Some(ReceiverDeclarationRole::Extension(declaration));
+            }
+            let expression = scope.lambda_expression?;
+            let slot = if scope.current_receiver_context.is_some() {
+                LambdaReceiverSlot::Context(
+                    u32::try_from(scope.context_receivers.borrow().len())
+                        .expect("too many lambda context parameters"),
+                )
+            } else {
+                LambdaReceiverSlot::Extension
+            };
+            return Some(ReceiverDeclarationRole::Lambda { expression, slot });
+        }
+        let receivers = scope.context_receivers.borrow();
+        let (index, receiver) = receivers
+            .iter()
+            .enumerate()
+            .filter(|(_, receiver)| receiver.implicit_receiver())
+            .rev()
+            .nth(identity.1 - 1)?;
+        if let Some(declaration) = receiver.declaration {
+            return Some(ReceiverDeclarationRole::ContextParameter(declaration));
+        }
+        Some(ReceiverDeclarationRole::Lambda {
+            expression: scope.lambda_expression?,
+            slot: LambdaReceiverSlot::Context(
+                u32::try_from(index).expect("too many lambda context parameters"),
+            ),
+        })
+    }
+
+    pub(crate) fn implicit_receiver_is_singleton(&self, identity: (usize, usize)) -> bool {
+        identity.1 == 0
+            && self.ancestors().any(|scope| {
+                (scope as *const Self as usize) == identity.0
+                    && scope.function_receiver_kind == FunctionReceiverKind::Singleton
+            })
+    }
+
     /// This lambda rung's function-type context parameters, when the last is its current receiver.
     pub(crate) fn with_current_receiver_context(mut self, types: Option<Vec<Ty>>) -> Self {
         self.current_receiver_context = types;
@@ -1111,7 +1214,9 @@ impl<'p, B> Scope<'p, B> {
     /// receiver may all have the same applied type while denoting different runtime values.
     pub(crate) fn innermost_class_receiver_identity(&self) -> Option<(usize, usize)> {
         self.ancestors().find_map(|scope| {
-            matches!(scope.kind, ScopeKind::Class { .. })
+            (matches!(scope.kind, ScopeKind::Class { .. })
+                || (matches!(scope.kind, ScopeKind::Function { receiver: Some(_) })
+                    && scope.function_receiver_kind == FunctionReceiverKind::Dispatch))
                 .then_some((scope as *const Self as usize, 0))
         })
     }
@@ -1186,6 +1291,11 @@ impl<'p, B> Scope<'p, B> {
                         scope.current_receiver_name.clone(),
                         scope.extension_receiver_declaration,
                     );
+                    if scope.function_receiver_kind == FunctionReceiverKind::Dispatch {
+                        out.last_mut()
+                            .expect("a function receiver was just added")
+                            .class_receiver = true;
+                    }
                 }
                 ScopeKind::Class { ty, .. } => {
                     out.push(ScopedReceiver::plain(ty, (scope_identity, 0)));
@@ -1407,6 +1517,32 @@ mod tests {
             "the extension receiver is nearer than the enclosing class"
         );
         assert_eq!(ext.this_ty(), Some(obj("kotlin/String")));
+    }
+
+    #[test]
+    fn a_static_singleton_rung_keeps_exact_non_capture_provenance() {
+        let root: Scope<'_, u32> = Scope::root();
+        let singleton = root.singleton_receiver_child(Some(obj("test/Owner$Companion")));
+        let lambda = singleton
+            .function_child(Some(obj("test/Receiver")), None, &[])
+            .with_lambda_expression(Span { lo: 7, hi: 19 });
+        let receivers = lambda.implicit_receivers_with_declarations();
+
+        assert_eq!(receivers.len(), 2);
+        assert!(!lambda.implicit_receiver_is_singleton(receivers[0].2));
+        assert!(lambda.implicit_receiver_is_singleton(receivers[1].2));
+    }
+
+    #[test]
+    fn a_scratch_dispatch_rung_is_still_a_class_receiver() {
+        let root: Scope<'_, u32> = Scope::root();
+        let dispatch = root.dispatch_receiver_child(obj("test/Owner"));
+        let parameter_scope = dispatch.child(ScopeKind::Function { receiver: None });
+        let receivers = parameter_scope.implicit_receivers_with_declarations();
+
+        assert_eq!(receivers.len(), 1);
+        assert!(receivers[0].3);
+        assert!(!parameter_scope.implicit_receiver_is_singleton(receivers[0].2));
     }
 
     #[test]

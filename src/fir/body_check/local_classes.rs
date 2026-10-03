@@ -1423,9 +1423,18 @@ impl BodyFirChecker<'_> {
         // equality here discards that exact identity and incorrectly republishes the receiver as a
         // direct callable slot.  Read the selected capture field and expose its checked, specialized
         // semantic type; lowering then only consumes the explicit storage identity.
-        if let Some(binding) =
-            stable_classifier_binding.or_else(|| self.class_receiver_binding_at(selected_depth))
-        {
+        // A resolved class receiver has a stable classifier identity. If this local class has no
+        // capture field for that classifier, it is reached through the checked `inner` ownership
+        // path below. Falling back to the numeric receiver coordinate can alias an unrelated,
+        // farther captured class receiver (for example selecting local `B` inside `B.C` but reading
+        // `B`'s captured outer `A` field). Non-class receivers have no classifier identity and keep
+        // their exact semantic coordinate path.
+        let captured_binding = if selected.classifier.is_some() {
+            stable_classifier_binding
+        } else {
+            self.class_receiver_binding_at(selected_depth)
+        };
+        if let Some(binding) = captured_binding {
             let kind = self.class_storage_read_kind(binding, origin)?;
             let value = self.body.add_expr(FirExpr {
                 origin,
@@ -1436,6 +1445,12 @@ impl BodyFirChecker<'_> {
                 value,
                 conversion: None,
             }));
+        }
+        if selected.classifier.is_some() {
+            // No exact capture field owns this classifier. The caller must materialize its stable
+            // enclosing-class path; the local capture table below is coordinate-addressed for
+            // non-class receivers and must not reinterpret a class identity by depth.
+            return Ok(None);
         }
         let owner = DeclarationId::from_raw(self.body.owner().raw());
         let Some(classifier) = self.index.enclosing_classifier(owner) else {

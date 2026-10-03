@@ -3829,7 +3829,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                     let source = if companion_extension {
                                         source.with_implicit_classifier(recv_ty.obj_internal())
                                     } else {
-                                        source.with_implicit_value(Some(recv_ty))
+                                        source.with_extension_receiver(recv_ty, recv_ref.span)
                                     };
                                     infer_lit_ty_scoped(
                                         source,

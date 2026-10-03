@@ -30,7 +30,7 @@ impl Checker<'_> {
                         (*candidate == declaration).then(|| {
                             self.this_labels
                                 .get(*index)
-                                .map(|(label, _, _)| label.clone())
+                                .map(|(label, _, _, _)| label.clone())
                         })
                     })
                     .flatten()

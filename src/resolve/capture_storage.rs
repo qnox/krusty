@@ -403,15 +403,18 @@ impl Checker<'_> {
             .implicit_receivers_with_declarations()
             .into_iter()
             .next()
-            .filter(|(_, _, identity, _)| {
-                scope.innermost_class_receiver_identity() != Some(*identity)
+            .filter(|(_, _, identity, class_receiver)| {
+                !*class_receiver && !scope.implicit_receiver_is_singleton(*identity)
             })
             .map(|(ty, extension, identity, class_receiver)| {
-                let receiver_capture = self.implicit_receiver_capture_id(class_receiver, identity);
+                let receiver_role = scope.implicit_receiver_role(identity);
+                let receiver_capture =
+                    self.implicit_receiver_capture_id(class_receiver, receiver_role);
                 (
                     ty,
                     self.captured_receiver(scope, identity, extension, class_receiver),
                     receiver_capture,
+                    receiver_role,
                 )
             });
         let innermost_label = self.this_labels.last();
@@ -717,6 +720,7 @@ impl Checker<'_> {
                     lexical_shadow_depth: 0,
                     capture_dependency: None,
                     receiver_capture: None,
+                    receiver_role: None,
                 }),
                 None => {
                     result.unsupported.get_or_insert("this".to_string());
@@ -725,10 +729,12 @@ impl Checker<'_> {
         }
         // A local classifier is emitted as a separate body unit, so an enclosing receiver-lambda
         // or extension receiver must cross the same constructor/field boundary as a lexical value.
-        // Keep the exact receiver-tower coordinate selected at the declaration site. Capturing it
-        // conservatively is harmless when no member ultimately reads it and prevents a later body
-        // callback from attempting source-scope lookup after the enclosing body has been dropped.
-        if let Some((receiver, receiver_name, receiver_capture)) = implicit_receiver_capture {
+        // The nearest receiver is recorded before the body is checked, at the coordinate selected
+        // here. The local-class statement drops it afterwards when the body never reads it, so an
+        // unused extension receiver does not become a constructor parameter.
+        if let Some((receiver, receiver_name, receiver_capture, receiver_role)) =
+            implicit_receiver_capture
+        {
             result.values.push(AnonymousObjectCapture {
                 name: "this$receiver".to_string(),
                 ty: receiver,
@@ -739,8 +745,8 @@ impl Checker<'_> {
                     depth: 0,
                 },
                 receiver_label: innermost_label
-                    .filter(|(_, _, is_class)| !*is_class)
-                    .map(|(label, _, _)| label.clone().into_boxed_str()),
+                    .filter(|(_, _, is_class, _)| !*is_class)
+                    .map(|(label, _, _, _)| label.clone().into_boxed_str()),
                 receiver: Some(receiver_name),
                 semantic_receiver: Some(AnonymousObjectReceiverSource::ImplicitReceiver {
                     current: true,
@@ -749,6 +755,7 @@ impl Checker<'_> {
                 lexical_shadow_depth: 0,
                 capture_dependency: None,
                 receiver_capture,
+                receiver_role,
             });
         }
         captured.sort();
@@ -793,6 +800,7 @@ impl Checker<'_> {
                 lexical_shadow_depth: 0,
                 capture_dependency: None,
                 receiver_capture: None,
+                receiver_role: None,
             });
         }
         result

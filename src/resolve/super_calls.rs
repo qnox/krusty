@@ -161,7 +161,7 @@ impl Checker<'_> {
             let index = self
                 .this_labels
                 .iter()
-                .rposition(|(candidate, _, is_class)| *is_class && candidate == label)?;
+                .rposition(|(candidate, _, is_class, _)| *is_class && candidate == label)?;
             let top = self.this_labels.len().checked_sub(1)?;
             (self.this_labels[index].1, index == top, top - index)
         } else {
@@ -172,18 +172,19 @@ impl Checker<'_> {
             let index = self
                 .this_labels
                 .iter()
-                .rposition(|(_, _, is_class)| *is_class)
+                .rposition(|(_, _, is_class, _)| *is_class)
                 .or_else(|| {
                     scope.this_ty().and_then(|ty| {
                         self.this_labels
                             .iter()
-                            .rposition(|(_, candidate, _)| *candidate == ty)
+                            .rposition(|(_, candidate, _, _)| *candidate == ty)
                     })
                 })?;
             let top = self.this_labels.len().checked_sub(1)?;
             (self.this_labels[index].1, index == top, top - index)
         };
         Some(self.implicit_receiver_selection(ImplicitReceiver {
+            receiver_role: None,
             ty,
             declared_ty: ty,
             identity: (0, receiver_depth),
@@ -204,7 +205,7 @@ impl Checker<'_> {
         if class.source_file != Some(self.file_index) {
             return None;
         }
-        let (entry, labelled_receiver, is_class) = self.this_labels.last()?;
+        let (entry, labelled_receiver, is_class, _) = self.this_labels.last()?;
         if *is_class || *labelled_receiver != receiver {
             return None;
         }

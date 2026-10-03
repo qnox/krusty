@@ -314,6 +314,7 @@ mod tests {
             .map(
                 |(receiver_depth, (ty, extension_receiver, identity, class_receiver))| {
                     ImplicitReceiver {
+                        receiver_role: scope.implicit_receiver_role(identity),
                         ty,
                         declared_ty: ty,
                         identity,

@@ -449,3 +449,334 @@ fn a_captured_legacy_context_receiver_keeps_its_own_role() {
         .collect::<Vec<_>>();
     assert_eq!(fields, [("$$context_receiver_0", "LBox;")]);
 }
+
+/// `::FLocal` inside an extension must not take the extension receiver: the local class never
+/// reads it, so its constructor and the constructor reference are `(LT, FT)`. `read` does read the
+/// receiver, so that local class's constructor keeps `Rec` and the direct call passes it.
+const CONSTRUCTOR_REFERENCE: &str = r#"
+open class L<LL>(val ll: LL)
+class Rec<T>(val rt: T)
+
+fun <FT> Rec<FT>.fn(): L<FT> {
+    class FLocal<LT>(lt: LT, val pt: FT) : L<LT>(lt)
+    return foo2(rt, rt, ::FLocal)
+}
+
+fun <FT> Rec<FT>.read(extra: FT): String {
+    class Local(val pt: FT) {
+        fun show(): String = this@read.rt.toString()
+    }
+    return Local(extra).show()
+}
+
+fun <T1, T2, R> foo2(t1: T1, t2: T2, bb: (T1, T2) -> R): R = bb(t1, t2)
+
+fun box(): String {
+    val unused = Rec("O").fn().ll
+    val used = Rec("K").read("x")
+    return unused + used
+}
+"#;
+
+#[test]
+fn an_unused_extension_receiver_is_not_a_constructor_reference_parameter() {
+    let shapes = [
+        ("MainKt$fn$FLocal", "MainKt$fn$FLocal"),
+        ("MainKt$fn$1", "invoke"),
+        ("MainKt$read$Local", "MainKt$read$Local"),
+    ];
+    for (class, method) in shapes {
+        let pair = common::ModuleClassPair::compile(&[("Main.kt", CONSTRUCTOR_REFERENCE)], class);
+        let (reference, krusty) = pair.method_code(class, method);
+        assert_eq!(
+            krusty, reference,
+            "{class}.{method}: constructor-reference shape differs from kotlinc"
+        );
+    }
+    common::expect_box_same_as_kotlinc(CONSTRUCTOR_REFERENCE, "LocalCtorRef");
+}
+
+/// `Inner` does not capture `this@bar` itself. `Outer` stores it, and `Inner`'s super call reads
+/// that field, so `Local`'s constructor still receives the extension receiver.
+const INNER_SUPER_RECEIVER: &str = r#"
+class CaptureToken(val text: String)
+
+fun CaptureToken.bar(): CaptureToken {
+    open class Local {
+        fun result() = this@bar
+    }
+    class Outer {
+        inner class Inner : Local() {
+            fun outer() = this@Outer
+        }
+    }
+    return Outer().Inner().result()
+}
+
+fun box() = CaptureToken("OK").bar().text
+"#;
+
+#[test]
+fn inner_subclass_reads_the_extension_receiver_from_its_enclosing_local_class() {
+    let classes = [
+        "MainKt$bar$Local",
+        "MainKt$bar$Outer",
+        "MainKt$bar$Outer$Inner",
+    ];
+    for class in classes {
+        let pair = common::ModuleClassPair::compile(&[("Main.kt", INNER_SUPER_RECEIVER)], class);
+        let capture_abi = |bytes: &[u8]| {
+            let parsed = krusty::jvm::classreader::parse_class(bytes)
+                .unwrap_or_else(|error| panic!("parse {class}: {error:?}"));
+            let fields = parsed
+                .fields
+                .into_iter()
+                .map(|field| {
+                    (
+                        field.name,
+                        field.descriptor,
+                        field.access,
+                        field.signature,
+                        field.nullability,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let constructors = parsed
+                .methods
+                .into_iter()
+                .filter(|method| method.name == "<init>")
+                .map(|method| {
+                    (
+                        method.descriptor,
+                        method.access,
+                        method.signature,
+                        method.parameter_nullability,
+                    )
+                })
+                .collect::<Vec<_>>();
+            (fields, constructors)
+        };
+        assert_eq!(
+            capture_abi(&pair.krusty),
+            capture_abi(&pair.kotlinc),
+            "{class}: capture fields and constructor ABI differ from kotlinc"
+        );
+    }
+    common::expect_box_same_as_kotlinc(INNER_SUPER_RECEIVER, "InnerSuperReceiver");
+}
+
+/// `Outer` is declared in a receiver lambda, so `Scope` is nearer than `this@bar`. `Local` still
+/// captures `this@bar`, and `Inner` reads that field from `Outer` rather than capturing `Scope`.
+const NON_NEAREST_SUPER_RECEIVER: &str = r#"
+class CaptureToken(val text: String)
+class Scope
+
+fun CaptureToken.bar(): CaptureToken {
+    open class Local {
+        fun result() = this@bar
+    }
+    val block: Scope.() -> CaptureToken = {
+        class Outer {
+            inner class Inner : Local() {
+                fun outer() = this@Outer
+            }
+        }
+        Outer().Inner().result()
+    }
+    return Scope().block()
+}
+
+fun box() = CaptureToken("OK").bar().text
+"#;
+
+#[test]
+fn inner_subclass_forwards_a_non_nearest_extension_receiver_like_kotlinc() {
+    let classes = [
+        "MainKt$bar$Local",
+        "MainKt$bar$block$1$Outer",
+        "MainKt$bar$block$1$Outer$Inner",
+    ];
+    for class in classes {
+        let pair =
+            common::ModuleClassPair::compile(&[("Main.kt", NON_NEAREST_SUPER_RECEIVER)], class);
+        let capture_abi = |bytes: &[u8]| {
+            let parsed = krusty::jvm::classreader::parse_class(bytes)
+                .unwrap_or_else(|error| panic!("parse {class}: {error:?}"));
+            let fields = parsed
+                .fields
+                .into_iter()
+                .map(|field| {
+                    (
+                        field.name,
+                        field.descriptor,
+                        field.access,
+                        field.signature,
+                        field.nullability,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let constructors = parsed
+                .methods
+                .into_iter()
+                .filter(|method| method.name == "<init>")
+                .map(|method| {
+                    (
+                        method.descriptor,
+                        method.access,
+                        method.signature,
+                        method.parameter_nullability,
+                    )
+                })
+                .collect::<Vec<_>>();
+            (fields, constructors)
+        };
+        assert_eq!(
+            capture_abi(&pair.krusty),
+            capture_abi(&pair.kotlinc),
+            "{class}: capture fields and constructor ABI differ from kotlinc"
+        );
+    }
+    common::expect_box_same_as_kotlinc(NON_NEAREST_SUPER_RECEIVER, "NonNearestSuperReceiver");
+}
+
+const POSTPONED_MEMBER_CAPTURES: &str = r#"
+class CaptureToken(val text: String)
+class CaptureSink<T> {
+    var count: Int = 0
+    fun remember(value: T): Boolean { count++; return true }
+}
+fun <T> collectCaptured(block: CaptureSink<T>.() -> Unit): CaptureSink<T> {
+    val sink = CaptureSink<T>()
+    sink.block()
+    return sink
+}
+fun anonymousMethod() {
+    collectCaptured { object { fun probe() = remember(CaptureToken("OK")) } }
+}
+fun localMethod() {
+    collectCaptured { class Local { fun probe() = remember(CaptureToken("OK")) } }
+}
+fun anonymousSetter() {
+    collectCaptured {
+        object {
+            var value: CaptureToken
+                get() = CaptureToken("OK")
+                set(value) { remember(value) }
+        }
+    }
+}
+fun localSetter() {
+    collectCaptured {
+        class Local {
+            var value: CaptureToken
+                get() = CaptureToken("OK")
+                set(value) { remember(value) }
+        }
+    }
+}
+class CaptureOuter(val text: String) {
+    fun read(): String {
+        var answer = "missing enclosing instance"
+        val sink = collectCaptured {
+            class Local {
+                fun probe(): String {
+                    remember(CaptureToken("seen"))
+                    return this@CaptureOuter.text
+                }
+            }
+            answer = Local().probe()
+        }
+        return if (sink.count == 1) answer else "missing receiver"
+    }
+}
+fun box(): String {
+    anonymousMethod()
+    localMethod()
+    anonymousSetter()
+    localSetter()
+    val sink = collectCaptured {
+        class Used { fun probe() = remember(CaptureToken("OK")) }
+        class Unused
+        Used().probe()
+        Unused()
+    }
+    return if (sink.count == 1) CaptureOuter("OK").read() else "missing receiver"
+}
+"#;
+
+#[test]
+fn postponed_generic_receivers_survive_local_member_and_accessor_checks() {
+    common::expect_box_same_as_kotlinc(POSTPONED_MEMBER_CAPTURES, "PostponedMemberCapture");
+}
+
+#[test]
+fn local_constructor_init_lambda_keeps_its_revisited_receiver_like_kotlinc() {
+    // KT-61929's secondary-constructor/init/lambda shape, with test-owned callable identities.
+    common::expect_box_same_as_kotlinc(
+        r#"
+inline fun <T, R> T.inCaptureRegion(action: T.() -> R): R = action()
+fun dispatchCapture(action: () -> Unit) { action() }
+class CaptureAnonymousOwner(value: String) {
+    var result: String = "missing anonymous capture"
+    init {
+        inCaptureRegion {
+            object {
+                init { dispatchCapture { completed(value) } }
+            }
+        }
+    }
+    fun completed(value: String) { this.result = value }
+}
+class CaptureOwner(result: String) {
+    var result: String = "OK"
+    init {
+        inCaptureRegion {
+            class CaptureLocal {
+                init { dispatchCapture { completed(result) } }
+                constructor() {}
+                constructor(token: String) {}
+            }
+            if (this.result == "OK") {
+                this.result = "empty constructor lost capture"
+                CaptureLocal()
+            }
+            if (this.result == "OK") {
+                this.result = "parameter constructor lost capture"
+                CaptureLocal("token")
+            }
+        }
+    }
+    fun completed(value: String) { this.result = value }
+}
+fun box(): String {
+    val anonymous = CaptureAnonymousOwner("OK").result
+    if (anonymous != "OK") return anonymous
+    return CaptureOwner("OK").result
+}
+"#,
+        "ConstructorInitReceiverRemap",
+    );
+}
+
+#[test]
+fn an_inner_class_of_a_local_class_uses_each_exact_enclosing_classifier() {
+    common::expect_box_same_as_kotlinc(
+        r#"
+class CaptureTree {
+    val root = 1
+    fun total(): Int {
+        class CaptureBranch {
+            val branch = 2
+            inner class CaptureLeaf {
+                val leaf = 3
+                fun total() = this@CaptureTree.root + this@CaptureBranch.branch + this.leaf
+            }
+        }
+        return CaptureBranch().CaptureLeaf().total()
+    }
+}
+fun box(): String = if (CaptureTree().total() == 6) "OK" else "wrong enclosing receiver"
+"#,
+        "LocalInnerReceiverIdentity",
+    );
+}
