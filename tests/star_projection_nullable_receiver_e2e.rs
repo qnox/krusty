@@ -94,8 +94,9 @@ fn nullable_formals_respect_use_site_projection_direction() {
 }
 
 /// Control: a NON-nullable formal `Iterable<T>` with `T : Any` genuinely does not accept `List<*>`.
-/// kotlinc rejects it, and so must krusty — with exactly this one diagnostic, so the fix cannot make
-/// every star fit a non-null bound.
+/// Kotlinc reports both the enclosing return mismatch and the rejected receiver candidate, and so
+/// must krusty; the exact comparison also prevents the fix from making every star fit a non-null
+/// bound.
 #[test]
 fn a_star_projection_still_fails_a_non_nullable_formal_receiver() {
     let result = common::compiler_diagnostics(
@@ -106,41 +107,13 @@ fn a_star_projection_still_fails_a_non_nullable_formal_receiver() {
         )],
         &[common::stdlib_jar()],
     );
-    let reference_path = result
-        .reference_stderr
-        .split(':')
-        .next()
-        .expect("kotlinc names the rejected file");
-    // kotlinc's whole report, source echoes and carets included, recorded per Kotlin version
-    // (2.4.20 names the one candidate where earlier releases listed candidates).
     assert_eq!(result.reference_code, 1, "{}", result.reference_stderr);
-    let reference: Vec<String> = result
-        .reference_stderr
-        .replace(reference_path, "Strict.kt")
-        .lines()
-        .map(ToString::to_string)
-        .collect();
     assert_eq!(
-        reference,
-        common::recorded(|| reference.clone()),
-        "kotlinc's report"
+        common::compiler_errors(&result.krusty_stderr),
+        common::compiler_errors(&result.reference_stderr),
+        "the selected kotlinc's complete ordered error headers"
     );
-    let path = result
-        .krusty_stderr
-        .split(':')
-        .next()
-        .expect("krusty names the rejected file");
-    assert_eq!(
-        (result.krusty_code, result.krusty_stderr.as_str()),
-        (
-            1,
-            format!(
-                "{path}:2:38: error: none of the following candidates is applicable:\n\nfun \
-                 Iterable<T>.only(): List<T>\nkrusty: 1 error(s)\n"
-            )
-            .as_str()
-        ),
-    );
+    assert_eq!(result.krusty_code, 1, "{}", result.krusty_stderr);
 }
 
 /// The runtime contract: the starred receiver really reaches `filterNotNull`, so the selected

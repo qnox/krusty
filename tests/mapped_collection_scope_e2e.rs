@@ -330,19 +330,18 @@ fn java_only_members_are_not_in_the_kotlin_scope() {
     }
 }
 
-/// krusty's complete ordered diagnostic ledger for `source` is kotlinc's, recorded per version.
+/// krusty's complete ordered diagnostic ledger for `source` is the selected kotlinc's.
 fn assert_member_unresolved_as_kotlinc(member: &str, source: &str) {
     let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();
-    let expected =
-        common::recorded_named(member, || common::reference_error_messages("Main", source));
+    let expected = common::reference_error_messages("Main", source);
     assert!(
         !expected.is_empty(),
-        "kotlinc must reject {source}: {expected:?}"
+        "kotlinc must reject {member} in {source}: {expected:?}"
     );
     let diagnostics =
         common::front_end_diagnostics(source, std::slice::from_ref(&stdlib), Some(&jdk));
-    assert_eq!(diagnostics, expected, "{source}");
+    assert_eq!(diagnostics, expected, "{member}: {source}");
 }
 
 #[test]

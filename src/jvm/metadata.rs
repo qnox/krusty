@@ -10,6 +10,7 @@ mod function;
 mod inline_class;
 mod property_declarations;
 mod property_identity;
+mod since_kotlin;
 mod string_table;
 mod type_aliases;
 mod value_parameter;
@@ -842,29 +843,6 @@ fn annotation_jvm_name(bodies: &[Vec<u8>], records: &[Rec], d2: &[String]) -> Op
         }
     }
     None
-}
-
-fn annotation_names(
-    bodies: &[Vec<u8>],
-    records: &[Rec],
-    d2: &[String],
-) -> Vec<crate::types::TypeName> {
-    bodies
-        .iter()
-        .filter_map(|body| {
-            let mut pb = Pb::new(body);
-            let mut id = None;
-            while !pb.at_end() {
-                let tag = pb.varint()?;
-                match (tag >> 3, tag & 7) {
-                    (1, 0) => id = pb.varint(),
-                    (_, wire) => pb.skip(wire)?,
-                }
-            }
-            id.and_then(|id| resolve_class_name(records, d2, id as usize))
-                .map(|name| type_name(&name))
-        })
-        .collect()
 }
 
 /// The declaration facts carried directly by one Kotlin metadata `Type` message.
@@ -2385,11 +2363,15 @@ fn decode_functions(
                             .type_params
                             .iter()
                             .filter(|parameter| {
-                                annotation_names(&parameter.annotation_bodies, records, d2)
-                                    .iter()
-                                    .any(|annotation| {
-                                        annotation.matches("kotlin/internal/OnlyInputTypes")
-                                    })
+                                since_kotlin::annotation_names(
+                                    &parameter.annotation_bodies,
+                                    records,
+                                    d2,
+                                )
+                                .iter()
+                                .any(|annotation| {
+                                    annotation.matches("kotlin/internal/OnlyInputTypes")
+                                })
                             })
                             .filter_map(|parameter| {
                                 resolve_string(records, d2, parameter.name_id as usize)
@@ -2408,7 +2390,12 @@ fn decode_functions(
                             .collect(),
                         context_params,
                         context_parameter_kinds,
-                        annotations: annotation_names(&pf.annotation_bodies, records, d2),
+                        annotations: since_kotlin::annotation_names(
+                            &pf.annotation_bodies,
+                            records,
+                            d2,
+                        ),
+                        since_kotlin: since_kotlin::version(&pf.annotation_bodies, records, d2),
                     }));
                 }
             }

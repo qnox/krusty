@@ -73,6 +73,14 @@ pub trait SymbolSource {
         false
     }
 
+    /// `name` on `owner` was withheld because its `@SinceKotlin` is newer than this compilation's
+    /// API level. The declaration is already absent from candidates; diagnostics use this only to
+    /// omit the receiver type from `UNRESOLVED_REFERENCE`, which is what kotlinc does when the
+    /// applicable callable was removed before selection.
+    fn api_withheld_callable(&self, _owner: TypeName, _name: &str) -> bool {
+        false
+    }
+
     /// Return the complete declaration record for one `(namespace, name)` key. This is the sole
     /// declaration API. `Package(TypeName::ROOT)` is the default package. Providers may map the key to
     /// an already-interned classifier, but must not intern it merely because it was probed. Parallel
@@ -166,6 +174,12 @@ impl SymbolSource for CompositeSource<'_> {
     /// both, and a qualifier walk must be able to continue through either.
     fn package_exists(&self, parent: TypeName, name: &str) -> bool {
         self.children.iter().any(|c| c.package_exists(parent, name))
+    }
+
+    fn api_withheld_callable(&self, owner: TypeName, name: &str) -> bool {
+        self.children
+            .iter()
+            .any(|child| child.api_withheld_callable(owner, name))
     }
 
     fn generated_serializer_singleton(&self, classifier: TypeName) -> Option<TypeName> {
@@ -299,6 +313,10 @@ impl<'a> CachedCompositeSource<'a> {
 impl SymbolSource for CachedCompositeSource<'_> {
     fn package_exists(&self, parent: TypeName, name: &str) -> bool {
         self.source.package_exists(parent, name)
+    }
+
+    fn api_withheld_callable(&self, owner: TypeName, name: &str) -> bool {
+        self.source.api_withheld_callable(owner, name)
     }
 
     fn symbols(&self, namespace: SymbolNamespace, name: &str) -> std::rc::Rc<ResolvedSymbols> {

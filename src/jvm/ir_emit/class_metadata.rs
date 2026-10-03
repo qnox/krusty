@@ -2,6 +2,40 @@
 
 use super::*;
 
+/// Common class-shape admission shared by the writer and transitive value-class readability. Keeping
+/// these kind/constructor bails in one predicate is correctness-critical: if the writer withholds a
+/// value class but the transitive check independently admits it, a mentioning class publishes a type
+/// a downstream compiler reads as an ordinary box.
+pub(super) fn class_metadata_common_shape_admitted(_ir: &IrFile, c: &crate::ir::IrClass) -> bool {
+    !(c.prop_ref.is_some()
+        || c.func_ref.is_some()
+        // A published secondary constructor is described from its recorded semantic parameter
+        // identities. A malformed publication contract would advertise the wrong parameter list,
+        // so the class declines instead. Unpublished target realizations carry no record.
+        || c.secondary_ctors
+            .iter()
+            .any(|sc| sc.metadata_visibility.is_some() && sc.named_params.len() != sc.params.len())
+        || (!c.has_primary_ctor
+            && c.secondary_ctors.is_empty()
+            && !c.is_interface
+            && !c.is_enum)
+        || (c.fields.len() as u32) < c.ctor_param_count)
+}
+
+/// The single admission predicate for a VALUE class's own metadata record. Both the class writer
+/// and transitive value-class readability call it, so adding a new write-side bail cannot silently
+/// let a different class describe the withheld value class downstream.
+pub(super) fn value_class_metadata_shape_admitted(ir: &IrFile, c: &crate::ir::IrClass) -> bool {
+    c.is_value
+        && class_metadata_common_shape_admitted(ir, c)
+        // A value class's ctors realize as mangled static `constructor-impl` overloads, which the
+        // secondary-ctor record path does not model — keep declining that combination.
+        && c.secondary_ctors.is_empty()
+        && c.fields.len() == 1
+        && c.fields[0].is_final()
+        && !ir.has_value_param_ctor(&c.fq_name())
+}
+
 /// Compute a class's `@kotlin.Metadata` from its IR — WIRING [`crate::metadata::class_builder::build_class`]
 /// into emission. Covers a class with a primary constructor of `val`/`var` properties plus real declared
 /// members (emitted with derived [`function_flags`]), and the data/value-class synthesized sets. Returns
@@ -1378,6 +1412,10 @@ pub(super) fn build_class_metadata_with_facts(
             local_classifiers: &local_classifiers,
             enum_entry_bodies: &super::super::local_classifiers::enum_entry_bodies(ir),
             is_enum: c.is_enum,
+            // kotlinc's `LanguageFeature.AnnotationsInMetadata` (since language level 2.4): an
+            // older source-language level keeps the HAS_ANNOTATIONS flags but writes no records.
+            // The physical metadata stamp is deliberately not consulted here.
+            annotations_in_metadata: opts.annotations_in_metadata,
         },
     );
     // d1 is the protobuf payload as one `char` per byte (the constant pool writes it as modified-UTF-8).

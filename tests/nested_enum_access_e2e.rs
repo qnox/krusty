@@ -76,7 +76,7 @@ class Catalog {
     };
     // The nested `Mode` wins the classifier namespace; it has no value facet, so `READY` is the
     // unresolved segment (kotlinc: `unresolved reference 'READY'` at `READY`).
-    let expected = common::recorded(|| common::reference_error_messages("Main", src));
+    let expected = common::reference_error_messages("Main", src);
     assert_eq!(
         diagnostics, expected,
         "the shadowed enum entry must stay unresolved exactly as kotlinc reports it"

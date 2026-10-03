@@ -111,15 +111,13 @@ fn a_transient_property_without_an_initializer_is_rejected_like_kotlinc() {
             .collect::<Vec<_>>()
     };
     let kotlinc = render(common::compiler_errors(&result.reference_stderr));
-    let expected = common::recorded(|| kotlinc.clone());
     assert_ne!(result.reference_code, 0, "kotlinc accepted the fixture");
-    assert_eq!(kotlinc, expected, "kotlinc: {}", result.reference_stderr);
     assert_ne!(result.krusty_code, 0, "krusty accepted the fixture");
     let mut krusty = common::compiler_errors(&result.krusty_stderr);
     krusty.extend(common::compiler_errors(&result.krusty_stdout));
     let krusty = render(krusty);
     assert_eq!(
-        krusty, expected,
+        krusty, kotlinc,
         "krusty: {}{}",
         result.krusty_stdout, result.krusty_stderr
     );
