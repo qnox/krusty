@@ -4996,10 +4996,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `invoke` builds the SAM wrapper from the function value. Equality and `hashCode` compare that
   interface class, so two references to the same fun interface are equal across files and across
   type arguments (`KSupplier<String>` and `KSupplier<Number>`). The carrier implements `KFunction`
-  because `FunInterfaceConstructorReference` extends `FunctionReference`. An unannotated binding
-  (`val kr = ::Action`) is stored as the erased `kotlin.reflect.KFunction`; calling it
-  `checkcast`s to `FunctionN` before `invokeinterface`, because `KFunction` does not extend
-  `FunctionN`. Tests:
+  because `FunInterfaceConstructorReference` extends `FunctionReference`. An invocation
+  emits `invokeinterface` on the selected `FunctionN`, and `checkcast`s the receiver to that
+  interface when its realized JVM type is a different representation. An unannotated binding
+  (`val kr = ::Action`) is stored as erased `kotlin.reflect.KFunction`, so the call site casts.
+  A receiver realized as `FunctionN` — a lambda, or a reference the use site typed as a
+  function — is invoked directly. Tests:
   `fir_lower::callable_references::tests::fun_interface_constructor_reference_returns_a_checked_sam_delegate`,
   `tests/fun_interface_constructor_reference_e2e.rs`, and the
   `callableReference/funInterfaceConstructor` boxes.

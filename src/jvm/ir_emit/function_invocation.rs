@@ -43,7 +43,7 @@ impl Emitter<'_> {
             all.extend(args.iter().copied());
             let temps = self.spill_to_temps(&all, code);
             load(temps[0].1, temps[0].0, code);
-            self.cast_reflective_function_value(func, n as u8, code);
+            self.cast_receiver_to_invocation_interface(func, n as u8, code);
             let argument_array = if high_arity {
                 code.push_int(n as i32, self.cw);
                 let object = self.cw.class_ref("java/lang/Object");
@@ -79,7 +79,7 @@ impl Emitter<'_> {
             self.release_operand_spills(&temps);
         } else {
             self.emit_value(func, code);
-            self.cast_reflective_function_value(func, n as u8, code);
+            self.cast_receiver_to_invocation_interface(func, n as u8, code);
             let argument_array = if high_arity {
                 code.push_int(n as i32, self.cw);
                 let object = self.cw.class_ref("java/lang/Object");
@@ -128,18 +128,23 @@ impl Emitter<'_> {
         code.invokeinterface(m, if high_arity { 1 } else { n as i32 }, 1);
     }
 
-    /// `KFunctionN` erases to `kotlin.reflect.KFunction`, which does not extend `FunctionN`.
-    /// kotlinc `checkcast`s to the function interface before `invokeinterface`.
-    fn cast_reflective_function_value(&mut self, func: u32, arity: u8, code: &mut CodeBuilder) {
-        let jvm = ir_ty_to_jvm(&self.value_ty(func));
-        let reflective = matches!(
-            jvm.non_null(),
-            Ty::Obj(name, _) if name.matches("kotlin/reflect/KFunction")
+    /// `invokeinterface` dispatches on the selected `FunctionN`. A receiver already realized as
+    /// that interface is invoked directly; every other realized representation is `checkcast`
+    /// to it first.
+    fn cast_receiver_to_invocation_interface(
+        &mut self,
+        func: u32,
+        arity: u8,
+        code: &mut CodeBuilder,
+    ) {
+        let interface = jvm_function_interface(arity);
+        let realized = ir_ty_to_jvm(&self.value_ty(func));
+        let already_interface = matches!(
+            realized.non_null(),
+            Ty::Obj(name, _) if name.matches(&interface)
         );
-        if reflective {
-            let interface = jvm_function_interface(arity);
-            let class = self.cw.class_ref(&interface);
-            code.checkcast(class);
+        if !already_interface {
+            code.checkcast(self.cw.class_ref(&interface));
         }
     }
 
