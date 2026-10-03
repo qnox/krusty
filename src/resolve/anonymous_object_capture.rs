@@ -436,29 +436,32 @@ impl Checker<'_> {
                 ) {
                     return None;
                 }
-                // The coordinate on `source` is relative to the superclass body. Only the closure
-                // identity is shared with this class, and publication assigns it to every implicit
-                // receiver. Matching the coordinate, or inventing the identity when it is absent,
-                // would retain a different rung.
-                let receiver_capture = capture.receiver_capture.expect(
-                    "an implicit receiver published on a local class has a closure identity",
-                );
-                Some((receiver_capture, capture.capture_dependency))
+                // An enclosing class instance has a field identity and is supplied by the
+                // ordinary local-capture dependency path. This rule is only for a receiver rung
+                // whose exact cross-class identity was published by the checker.
+                let Some(receiver) = capture.receiver_capture else {
+                    return None;
+                };
+                Some((receiver, capture.capture_dependency))
             }));
         }
-        for (receiver_capture, dependency) in required {
-            let Some(local) = captures
+        for (receiver, dependency) in required {
+            let local = captures
                 .iter_mut()
-                .find(|local| local.receiver_capture == Some(receiver_capture))
-            else {
-                continue;
-            };
-            if local.capture_dependency.is_none() {
-                // A direct superclass capture has no further edge. The dependency recorded here is
-                // that same identity, which is what keeps an unread receiver on this constructor.
-                local.capture_dependency = dependency.or(Some(
-                    crate::fir::ClassCaptureIdentity::Receiver(receiver_capture),
-                ));
+                .find(|local| local.receiver_capture == Some(receiver))
+                .expect(
+                    "an enclosing local class publishes the receiver identity required by its \
+                     inner subclass",
+                );
+            let dependency =
+                dependency.unwrap_or(crate::fir::ClassCaptureIdentity::Receiver(receiver));
+            if let Some(existing) = local.capture_dependency {
+                assert_eq!(
+                    existing, dependency,
+                    "one receiver identity cannot forward two closure fields"
+                );
+            } else {
+                local.capture_dependency = Some(dependency);
             }
         }
     }

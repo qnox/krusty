@@ -499,7 +499,9 @@ fn an_unused_extension_receiver_is_not_a_constructor_reference_parameter() {
 /// `Inner` does not capture `this@bar` itself. `Outer` stores it, and `Inner`'s super call reads
 /// that field, so `Local`'s constructor still receives the extension receiver.
 const INNER_SUPER_RECEIVER: &str = r#"
-fun String.bar(): String {
+class CaptureToken(val text: String)
+
+fun CaptureToken.bar(): CaptureToken {
     open class Local {
         fun result() = this@bar
     }
@@ -511,84 +513,54 @@ fun String.bar(): String {
     return Outer().Inner().result()
 }
 
-fun box() = "OK".bar()
+fun box() = CaptureToken("OK").bar().text
 "#;
 
 #[test]
 fn inner_subclass_reads_the_extension_receiver_from_its_enclosing_local_class() {
-    assert_capture_abi(
-        "InnerSuperReceiver",
-        INNER_SUPER_RECEIVER,
-        &[
-            "InnerSuperReceiverKt$bar$Local",
-            "InnerSuperReceiverKt$bar$Outer",
-            "InnerSuperReceiverKt$bar$Outer$Inner",
-        ],
-    );
-    common::expect_box_same_as_kotlinc(INNER_SUPER_RECEIVER, "InnerSuperReceiver");
-}
-
-/// Fields and constructors, in classfile order. A redundant receiver capture on `Inner` changes
-/// this shape even when `box()` still returns the same string.
-fn assert_capture_abi(stem: &str, source: &str, classes: &[&str]) {
-    let dir = common::scratch_dir().expect("scratch directory");
-    let reference = dir.join("ref");
-    std::fs::create_dir_all(&reference).expect("reference output directory");
-    let source_path = dir.join(format!("{stem}.kt"));
-    std::fs::write(&source_path, source).expect("fixture source");
-    let args = [
-        "-d".to_string(),
-        reference.to_string_lossy().into_owned(),
-        source_path.to_string_lossy().into_owned(),
+    let classes = [
+        "MainKt$bar$Local",
+        "MainKt$bar$Outer",
+        "MainKt$bar$Outer$Inner",
     ];
-    let (code, stderr) = common::kotlinc_compile(&args).expect("reference kotlinc is provisioned");
-    assert_eq!(code, 0, "kotlinc failed: {stderr}");
-    let emitted = common::compile_in_process_metadata_cp(source, stem, &[common::stdlib_jar()])
-        .expect("krusty compiles the fixture");
     for class in classes {
-        let expected = std::fs::read(reference.join(format!("{class}.class")))
-            .unwrap_or_else(|error| panic!("kotlinc did not emit {class}: {error}"));
-        let (_, actual) = emitted
-            .iter()
-            .find(|(name, _)| name == class)
-            .unwrap_or_else(|| panic!("krusty did not emit {class}"));
+        let pair = common::ModuleClassPair::compile(&[("Main.kt", INNER_SUPER_RECEIVER)], class);
+        let capture_abi = |bytes: &[u8]| {
+            let parsed = krusty::jvm::classreader::parse_class(bytes)
+                .unwrap_or_else(|error| panic!("parse {class}: {error:?}"));
+            let fields = parsed
+                .fields
+                .into_iter()
+                .map(|field| {
+                    (
+                        field.name,
+                        field.descriptor,
+                        field.access,
+                        field.signature,
+                        field.nullability,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let constructors = parsed
+                .methods
+                .into_iter()
+                .filter(|method| method.name == "<init>")
+                .map(|method| {
+                    (
+                        method.descriptor,
+                        method.access,
+                        method.signature,
+                        method.parameter_nullability,
+                    )
+                })
+                .collect::<Vec<_>>();
+            (fields, constructors)
+        };
         assert_eq!(
-            field_and_constructor_shape(class, actual),
-            field_and_constructor_shape(class, &expected),
-            "{class}: capture fields or constructor descriptors differ from kotlinc"
+            capture_abi(&pair.krusty),
+            capture_abi(&pair.kotlinc),
+            "{class}: capture fields and constructor ABI differ from kotlinc"
         );
     }
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-fn field_and_constructor_shape(class: &str, bytes: &[u8]) -> String {
-    let work = common::scratch_dir().expect("scratch directory");
-    let path = work.join(format!("{class}.class"));
-    std::fs::write(&path, bytes).expect("write class for disassembly");
-    let listing = common::javap(&["-p", "-s", &path.to_string_lossy()]).expect("javap");
-    let _ = std::fs::remove_dir_all(work);
-    let lines: Vec<&str> = listing.lines().map(str::trim).collect();
-    let mut shape = String::new();
-    for pair in lines.windows(2) {
-        let Some(descriptor) = pair[1].strip_prefix("descriptor: ") else {
-            continue;
-        };
-        let declaration = pair[0];
-        let keeps = if declaration.contains('(') {
-            let head = declaration.split('(').next().unwrap_or(declaration);
-            let tokens: Vec<&str> = head.split_whitespace().collect();
-            tokens.len() >= 2
-                && matches!(tokens[tokens.len() - 2], "public" | "private" | "protected")
-        } else {
-            true
-        };
-        if keeps {
-            shape.push_str(declaration);
-            shape.push('\n');
-            shape.push_str("descriptor: ");
-            shape.push_str(descriptor);
-            shape.push('\n');
-        }
-    }
-    shape
+    common::expect_box_same_as_kotlinc(INNER_SUPER_RECEIVER, "InnerSuperReceiver");
 }

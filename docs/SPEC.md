@@ -1546,10 +1546,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `fun <FT> Rec<FT>.fn` has constructor `(LT, FT)`, and `::Local` passes those two values.
   A subclass whose own constructor must forward that receiver keeps it, even when the subclass
   body never reads it. An inner class does not take its own copy: `inner class Inner : Local()`
-  inside `class Outer` in `fun String.bar` reads `this@bar` from `Outer`, so `Outer` keeps the
-  receiver even though its own body never mentions it. `Outer` keeps it only when its capture
-  carries the same closure identity `Local` published. A receiver-tower depth that happens to
-  match is not that identity.
+  inside `class Outer` in `fun CaptureToken.bar` reads `this@bar` from `Outer`, so `Outer` keeps the
+  receiver even though its own body never mentions it. The superclass field and enclosing-class
+  field must carry the same recorded receiver identity; their relative receiver-tower coordinates
+  are not interchangeable and are never used as a fallback join.
   Tests: `local_class_does_not_capture_an_unused_extension_receiver`,
   `inner_subclass_keeps_the_extension_receiver_its_superclass_constructor_needs`,
   `tests/local_class_capture_constructors_e2e.rs::an_unused_extension_receiver_is_not_a_constructor_reference_parameter`

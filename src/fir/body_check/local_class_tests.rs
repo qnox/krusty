@@ -1056,7 +1056,8 @@ fn local_class_does_not_capture_an_unused_extension_receiver() {
 
 #[test]
 fn inner_subclass_keeps_the_extension_receiver_its_superclass_constructor_needs() {
-    let source = "fun String.bar(): String {\n\
+    let source = "class CaptureToken(val text: String)\n\
+                  fun CaptureToken.bar(): CaptureToken {\n\
                       open class Local {\n\
                           fun result() = this@bar\n\
                       }\n\
@@ -1088,13 +1089,30 @@ fn inner_subclass_keeps_the_extension_receiver_its_superclass_constructor_needs(
         2,
         "Local and Outer are the function's local classes: {captures:?}"
     );
-    let local_identity = receiver_identity(captures[0]);
-    let outer_identity = receiver_identity(captures[1]);
-    assert_eq!(
-        local_identity, outer_identity,
-        "Outer stores the same receiver rung Local's constructor takes: {captures:?}"
+    let [local, enclosing] = captures.as_slice() else {
+        unreachable!("the exact local-class count was asserted above")
+    };
+    let [local] = *local else {
+        panic!("Local has exactly one capture, the extension receiver: {local:?}")
+    };
+    let [enclosing] = *enclosing else {
+        panic!("Outer has exactly one capture, the same extension receiver: {enclosing:?}")
+    };
+    assert!(
+        capture_token_extension_receiver(local) && capture_token_extension_receiver(enclosing),
+        "both fields carry the extension receiver: {captures:?}"
     );
-
+    assert!(
+        matches!(
+            local.capture_identity,
+            Some(ClassCaptureIdentity::Receiver(_))
+        ),
+        "the directly-read receiver has a stable receiver identity: {local:?}"
+    );
+    assert_eq!(
+        enclosing.capture_identity, local.capture_identity,
+        "Outer forwards Local's exact receiver identity rather than duplicating its coordinate"
+    );
     let inner_calls = (0..outer.expression_count())
         .filter_map(|raw| {
             let expression = outer.expr(FirExprId::from_raw(raw as u32))?;
@@ -1127,18 +1145,8 @@ fn inner_subclass_keeps_the_extension_receiver_its_superclass_constructor_needs(
     );
 }
 
-fn receiver_identity(captures: &[FirLocalClassCapture]) -> ClassCaptureIdentity {
-    let receiver = captures
-        .iter()
-        .find(|capture| string_extension_receiver(capture))
-        .expect("the extension receiver is a capture");
-    receiver
-        .capture_identity
-        .expect("the extension receiver has a closure identity")
-}
-
-fn string_extension_receiver(capture: &FirLocalClassCapture) -> bool {
-    capture.ty.get() == Ty::String
+fn capture_token_extension_receiver(capture: &FirLocalClassCapture) -> bool {
+    capture.ty.get() == Ty::obj("CaptureToken")
         && matches!(
             capture.source,
             FirLocalClassCaptureSource::ImplicitReceiver { .. }
