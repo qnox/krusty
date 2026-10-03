@@ -428,21 +428,29 @@ mod tests {
 
     #[test]
     fn the_code_generator_uses_only_ir_contract_dependencies() {
-        // `jvm` is GONE from both of these. It was here for one reason — the only symbol provider
-        // read a JVM classpath, so a selected dependency declaration resolved through it — and the
-        // generator now holds a `SemanticPlatform` and asks IT what it realized an identity as.
-        // That contract is `libraries`, and it names no target.
-        assert_allowed_crate_modules(
-            "src/native/codegen/mod.rs",
-            &["backend", "diag", "frontend", "libraries"],
-        );
-        // `fir` for the same reason `objects.rs` has it: the checked property and callable ids
-        // the IR itself carries. Here it is the `ExternalPropertyId` a declining diagnostic names
-        // the property by — the generator reads the id's name, never a declaration through it.
+        // The facade receives the closed backend handoff. It neither retains a provider nor reaches
+        // back into frontend state while emitting.
+        assert_allowed_crate_modules("src/native/codegen/mod.rs", &["backend", "diag"]);
+        // `fir` names only the opaque checked property/callable ids already carried by IR. `backend`
+        // supplies their frozen facts; it is not a provider or another lookup surface.
         assert_allowed_crate_modules(
             "src/native/codegen/lower.rs",
-            &["fir", "ir", "libraries", "types"],
+            &["backend", "fir", "ir", "types"],
         );
+        for path in rust_files_under("src/native/codegen") {
+            let text = fs::read_to_string(&path).expect("read native code generator source");
+            for forbidden in [
+                "SemanticPlatform",
+                ".external_callable(",
+                ".external_property(",
+            ] {
+                assert!(
+                    !text.contains(forbidden),
+                    "{} crosses the checked backend handoff through `{forbidden}`",
+                    path.display()
+                );
+            }
+        }
     }
 
     #[test]
