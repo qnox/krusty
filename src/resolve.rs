@@ -63622,6 +63622,11 @@ impl<'a> Checker<'a> {
                     for rung in self.implicit_rungs(scope) {
                         let receiver = match rung {
                             implicit_rungs::ImplicitRung::StaticScope(classifier) => {
+                                if let Some(ty) =
+                                    self.prioritized_unqualified_enum_entries(e, &n, classifier)
+                                {
+                                    return self.set(e, ty);
+                                }
                                 let selection =
                                     self.select_static_scope_property(scope, classifier, &n);
                                 if let Some(ty) =
@@ -63688,6 +63693,11 @@ impl<'a> Checker<'a> {
                                     return self.set(e, answered);
                                 }
                             }
+                            return self.set(e, ty);
+                        }
+                        if let Some(ty) =
+                            self.prioritized_enum_entries_after_class_receiver(e, &n, &receiver)
+                        {
                             return self.set(e, ty);
                         }
                     }
@@ -63803,6 +63813,11 @@ impl<'a> Checker<'a> {
                 for rung in self.implicit_rungs(scope) {
                     let implicit_receiver = match rung {
                         implicit_rungs::ImplicitRung::StaticScope(classifier) => {
+                            if let Some(ty) =
+                                self.prioritized_unqualified_enum_entries(e, &n, classifier)
+                            {
+                                return self.set(e, ty);
+                            }
                             let selection =
                                 self.select_static_scope_property(scope, classifier, &n);
                             if let Some(ty) =
@@ -63837,6 +63852,13 @@ impl<'a> Checker<'a> {
                             implicit_receiver.identity,
                             ty,
                         );
+                        return self.set(e, ty);
+                    }
+                    if let Some(ty) = self.prioritized_enum_entries_after_class_receiver(
+                        e,
+                        &n,
+                        &implicit_receiver,
+                    ) {
                         return self.set(e, ty);
                     }
                 }
