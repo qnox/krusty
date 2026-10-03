@@ -13,7 +13,7 @@ pub(super) struct LocalMethodDependency {
     owner: DeclId,
     method: usize,
     properties: Vec<ScopedProperty>,
-    this_labels: Vec<(String, Ty, bool)>,
+    this_labels: Vec<ReceiverLabel>,
     extension_receiver_labels: Vec<(usize, Span)>,
     lexical_class_context: Vec<TypeName>,
     exact_anonymous_class_roots: std::collections::HashSet<TypeName>,

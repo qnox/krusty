@@ -1541,6 +1541,55 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the order its body first uses them, as kotlinc's local declaration lowering does, not in
   scope-tower order: that order fixes the `$this_…` fields and the constructor's parameters. Test:
   `tests/local_class_capture_constructors_e2e.rs::nested_labeled_receivers_reach_their_own_lambda_like_kotlinc`.
+  An extension receiver the local class never reads is not captured. Mentioning the extension's
+  type parameter in a constructor parameter is not a read, so `class Local<LT>(val pt: FT)` inside
+  `fun <FT> Rec<FT>.fn` has constructor `(LT, FT)`, and `::Local` passes those two values.
+  A subclass whose own constructor must forward that receiver keeps it, even when the subclass
+  body never reads it. An inner class does not take its own copy: `inner class Inner : Local()`
+  inside `class Outer` in `fun CaptureToken.bar` reads `this@bar` from `Outer`, so `Outer` keeps the
+  receiver even though its own body never mentions it. The superclass field and enclosing-class
+  field must carry the same recorded receiver identity; their relative receiver-tower coordinates
+  are not interchangeable and are never used as a fallback join.
+  The enclosing class publishes that identity from its own receiver tower when the superclass
+  captured a rung that is not the nearest receiver at the enclosing declaration. `class Outer`
+  declared inside `Scope.() -> ...`, whose `inner class Inner : Local()` needs `this@bar`, keeps
+  `this@bar` at the shifted coordinate and does not keep the unused `Scope` receiver. The
+  superclass's own coordinate is not copied onto `Outer`.
+  A postponed generic receiver-lambda check is a provisional constraint probe, not a completed
+  closure inventory. All candidate receivers are temporarily visible during the body check, but
+  only proven selections enter the declaration's capture ledger. Local methods are checked once;
+  a later solved or memoized visit retains those selections, refreshes their current semantic
+  types and bindings, and does not treat the absence of new use-counter increments as non-use.
+  A local class whose body never selects the receiver still has no receiver constructor input.
+  When secondary-constructor/default scopes rebuild the receiver tower, a retained capture is
+  refreshed by its recorded receiver declaration role, not its earlier scope address, relative
+  coordinate, label, or type. A lambda role is its source expression span and receiver slot;
+  a declared extension or context receiver uses its source type-reference span. The checker assigns
+  one closure identity to that exact role, including across separately rebuilt scopes, and isolated
+  class bodies carry the role into their reconstructed receiver tower. A non-class capture without
+  declaration provenance fails closed. Enclosing instances remap by their resolved classifier
+  identity and remain outside the closure-id namespace on the class/dependency path.
+  Tests: `receiver_remap_tests::constructor_scope_remap_selects_identity_not_old_coordinate_or_same_type`,
+  `receiver_remap_tests::a_coordinate_without_receiver_provenance_cannot_remap_a_proven_selection`,
+  `receiver_remap_tests::every_class_receiver_rung_is_an_enclosing_instance_not_a_closure`,
+  `receiver_capture_identity::tests::rebuilt_scopes_keep_receiver_declaration_identity_at_a_shifted_depth`,
+  `receiver_capture_identity::tests::a_legacy_receiver_without_declaration_provenance_fails_closed`,
+  `tests/local_class_capture_constructors_e2e.rs::local_constructor_init_lambda_keeps_its_revisited_receiver_like_kotlinc`
+  (the KT-61929 nested-init shape with test-owned callables).
+  Tests: `local_class_does_not_capture_an_unused_extension_receiver`,
+  `inner_subclass_keeps_the_extension_receiver_its_superclass_constructor_needs`,
+  `inner_subclass_keeps_a_non_nearest_receiver_its_superclass_needs`,
+  `tests/local_class_capture_constructors_e2e.rs::inner_subclass_forwards_a_non_nearest_extension_receiver_like_kotlinc`,
+  `tests/local_class_scope_e2e.rs::a_local_class_reads_a_grandparent_receiver_like_kotlinc`,
+  `tests/local_class_capture_constructors_e2e.rs::an_unused_extension_receiver_is_not_a_constructor_reference_parameter`
+  (runtime and the exact constructor/`invoke` shape, plus a local class that does read the
+  receiver),
+  `tests/local_class_capture_constructors_e2e.rs::inner_subclass_reads_the_extension_receiver_from_its_enclosing_local_class`,
+  `postponed_generic_receiver_is_kept_for_local_methods_and_setters`,
+  `tests/local_class_capture_constructors_e2e.rs::postponed_generic_receivers_survive_local_member_and_accessor_checks`,
+  and boxes `callableReference/genericLocalClassConstructorReference.kt`,
+  `callableReference/genericConstructorReference.kt`, and
+  `localClasses/innerOfLocalCaptureExtensionReceiver.kt`.
 - **Nullability is a first-class fact on `Ty`** (`Ty::Nullable(&Ty)`, `types.rs`), not faked as the
   boxed JVM wrapper. `Int?` is `Nullable(Int)` (a Kotlin-level type), and the boxing to a JVM reference
   (`Int?` → `Ljava/lang/Integer;`, `UInt?` → `Lkotlin/UInt;`, a nullable reference → its own descriptor)
