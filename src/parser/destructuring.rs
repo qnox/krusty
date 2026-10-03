@@ -39,20 +39,13 @@ impl Parser<'_> {
             }
             let ignored = self.at(TokenKind::Ident) && self.text() == "_" && !self.escaped_ident();
             let name = self.ident_or_error("variable name");
+            let name_span = self.declaration_name_span;
             let mut entry_type = self.eat(TokenKind::Colon).then(|| self.parse_type());
-            let source_property = if self.eat(TokenKind::Eq) {
-                let source = self.ident_or_error("property name");
-                if self.eat(TokenKind::Colon) {
-                    entry_type = Some(self.parse_type());
-                }
-                Some(source)
-            } else if close == TokenKind::RParen {
-                Some(name.clone())
-            } else {
-                None
-            };
+            let source_property =
+                self.destructure_property(&name, close == TokenKind::RParen, &mut entry_type);
             entries.push(DestructureEntry {
                 name,
+                name_span,
                 mutable: is_var,
                 ignored,
             });
@@ -102,20 +95,13 @@ impl Parser<'_> {
                 let ignored =
                     self.at(TokenKind::Ident) && self.text() == "_" && !self.escaped_ident();
                 let name = self.ident_or_error("variable name");
+                let name_span = self.declaration_name_span;
                 let mut entry_type = self.eat(TokenKind::Colon).then(|| self.parse_type());
-                let source_property = if self.name_based_destructuring && self.eat(TokenKind::Eq) {
-                    let source = self.ident_or_error("property name");
-                    if self.eat(TokenKind::Colon) {
-                        entry_type = Some(self.parse_type());
-                    }
-                    Some(source)
-                } else if self.short_form_destructuring && close == TokenKind::RParen {
-                    Some(name.clone())
-                } else {
-                    None
-                };
+                let implicit = self.short_form_destructuring && close == TokenKind::RParen;
+                let source_property = self.destructure_property(&name, implicit, &mut entry_type);
                 entries.push(DestructureEntry {
                     name,
+                    name_span,
                     mutable: is_var,
                     ignored,
                 });
@@ -210,10 +196,31 @@ impl Parser<'_> {
         }
     }
 
+    /// `= property` is an explicit rename. A parenthesized name-based entry without `=` names the
+    /// property by the entry itself. The two stay distinct even when both strings are `_`.
+    pub(super) fn destructure_property(
+        &mut self,
+        entry_name: &str,
+        implicit: bool,
+        entry_type: &mut Option<TypeRef>,
+    ) -> Option<DestructureProperty> {
+        if self.name_based_destructuring && self.eat(TokenKind::Eq) {
+            let source = self.ident_or_error("property name");
+            if self.eat(TokenKind::Colon) {
+                *entry_type = Some(self.parse_type());
+            }
+            Some(DestructureProperty::Renamed(source))
+        } else if implicit {
+            Some(DestructureProperty::Implicit(entry_name.to_string()))
+        } else {
+            None
+        }
+    }
+
     fn record_destructure_syntax(
         &mut self,
         statement: StmtId,
-        source_properties: Vec<Option<String>>,
+        source_properties: Vec<Option<DestructureProperty>>,
         entry_types: Vec<Option<TypeRef>>,
     ) {
         if source_properties.iter().any(Option::is_some) {
