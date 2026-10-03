@@ -19,7 +19,6 @@ coroutines/inlineClasses/direct/boxUnboxInsideCoroutine_suspendFunType.kt
 coroutines/inlineClasses/kt84305.kt
 coroutines/inlineClasses/resume/boxUnboxInsideCoroutine_suspendFunType.kt
 coroutines/localFunctions/named/defaultArgument.kt
-coroutines/nonLocalReturnFromInlineLambdaDeep.kt
 coroutines/suspendFunctionAsCoroutine/superCallInterface.kt
 coroutines/tailCallOptimizations/crossinline.kt
 extensionFunctions/kt475.kt

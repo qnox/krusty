@@ -973,6 +973,8 @@ mod inherited_interface_default_e2e;
 mod inherited_member_owner_e2e;
 #[path = "init_block_lines_e2e.rs"]
 mod init_block_lines_e2e;
+#[path = "inline_capture_splice_e2e.rs"]
+mod inline_capture_splice_e2e;
 #[path = "inline_crossinline_object_e2e.rs"]
 mod inline_crossinline_object_e2e;
 #[path = "inline_deep_coverage_e2e.rs"]
