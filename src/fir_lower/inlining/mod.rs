@@ -20,6 +20,7 @@ use crate::types::{stored_value_ty, ty_subst_keep_unbound, Ty};
 
 use super::BodyLowering;
 
+mod converted_inline_lambda;
 mod escaping_anonymous;
 mod escaping_lambda;
 mod property_accessors;
@@ -776,6 +777,13 @@ impl BodyLowering<'_> {
             return None;
         }
 
+        // A function-value conversion between an inline parameter and its lambda is a
+        // callable reference stored in a local. The invocation reads that local, so the
+        // splice below never sees the lambda. Retarget the invocation when that local is
+        // only invoked; the carrier is then not evaluated.
+        let converted_unit_results =
+            self.expose_inline_lambdas_behind_function_value_conversions(&copies);
+
         let inline_invocations = copies
             .iter()
             .map(|&(_, copy)| copy)
@@ -812,6 +820,9 @@ impl BodyLowering<'_> {
                     callee: Some(&callee),
                 },
             )?;
+        }
+        for invocation in converted_unit_results {
+            self.discard_converted_lambda_result(invocation);
         }
         for (function, body, inline_only) in default_lambda_methods {
             self.ir.functions.get_mut(function as usize)?.body = body;

@@ -11653,7 +11653,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   rule. Checked FIR carries `FirConversionKind::FunctionValue { from, to, ordinal }`; common lowering
   realizes it as a callable reference bound to the value (`IrCallableReferenceTarget::
   FunctionValueConversion`) whose adapter invokes the value's `FunctionN.invoke`, discarding the
-  result for a unit conversion and otherwise handing it on as the erased suspend result. The JVM
+  result for a unit conversion and otherwise handing it on as the erased suspend result. An inline
+  lambda is not that runtime value. When an inline expansion's only uses of the converted local are
+  invocations, the lambda is spliced at those invocations and the carrier is not evaluated, so a
+  non-local return leaves the enclosing function and an inline-only lambda is not realized as the
+  method the carrier would call (`nonLocalReturns/suspendConversion.kt`). A function value that is
+  not an inline lambda still evaluates the carrier. The JVM
   carrier is kotlinc's: a synthetic `FunctionReferenceImpl` (not `AdaptedFunctionReference`, flags 0)
   implementing the target `FunctionN` (plus `SuspendFunction` for a suspend target), constructed with
   the value as bound receiver and reflecting `Intrinsics.Kotlin`'s `suspendConversion<N>` with the
