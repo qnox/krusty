@@ -1556,6 +1556,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   a later solved or memoized visit retains those selections, refreshes their current semantic
   types and bindings, and does not treat the absence of new use-counter increments as non-use.
   A local class whose body never selects the receiver still has no receiver constructor input.
+  When secondary-constructor/default scopes rebuild the receiver tower, a retained capture is
+  refreshed by its published receiver identity, not its earlier relative coordinate or type.
+  Tests: `receiver_remap_tests::constructor_scope_remap_selects_identity_not_old_coordinate_or_same_type`,
+  `tests/local_class_capture_constructors_e2e.rs::local_constructor_init_lambda_keeps_its_revisited_receiver_like_kotlinc`
+  (the KT-61929 nested-init shape with test-owned callables).
   Tests: `local_class_does_not_capture_an_unused_extension_receiver`,
   `inner_subclass_keeps_the_extension_receiver_its_superclass_constructor_needs`,
   `tests/local_class_capture_constructors_e2e.rs::an_unused_extension_receiver_is_not_a_constructor_reference_parameter`

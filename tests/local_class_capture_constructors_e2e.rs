@@ -619,3 +619,37 @@ fun box(): String {
 fn postponed_generic_receivers_survive_local_member_and_accessor_checks() {
     common::expect_box_same_as_kotlinc(POSTPONED_MEMBER_CAPTURES, "PostponedMemberCapture");
 }
+
+#[test]
+fn local_constructor_init_lambda_keeps_its_revisited_receiver_like_kotlinc() {
+    // KT-61929's secondary-constructor/init/lambda shape, with test-owned callable identities.
+    common::expect_box_same_as_kotlinc(
+        r#"
+inline fun <T, R> T.inCaptureRegion(action: T.() -> R): R = action()
+fun dispatchCapture(action: () -> Unit) { action() }
+class CaptureOwner(result: String) {
+    var result: String = "OK"
+    init {
+        inCaptureRegion {
+            class CaptureLocal {
+                init { dispatchCapture { completed(result) } }
+                constructor() {}
+                constructor(token: String) {}
+            }
+            if (this.result == "OK") {
+                this.result = "empty constructor lost capture"
+                CaptureLocal()
+            }
+            if (this.result == "OK") {
+                this.result = "parameter constructor lost capture"
+                CaptureLocal("token")
+            }
+        }
+    }
+    fun completed(value: String) { this.result = value }
+}
+fun box(): String = CaptureOwner("OK").result
+"#,
+        "ConstructorInitReceiverRemap",
+    );
+}

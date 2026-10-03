@@ -24149,7 +24149,7 @@ impl<'a> Checker<'a> {
                 // type/name matching and without asking lowering to repeat scope lookup.
                 let receiver_candidates = self.local_class_receiver_candidates(scope);
                 let mut captures = self.local_class_captures(scope, d, &cl);
-                let established = self.local_class_capture_inventory(d);
+                let mut established = self.local_class_capture_inventory(d);
                 if captures.forwarded_super_arguments.is_empty() {
                     self.discovered_anonymous_super_forwards.remove(&d);
                 } else {
@@ -24185,7 +24185,7 @@ impl<'a> Checker<'a> {
                 let mut capture_bindings =
                     self.local_capture_binding_identities(scope, &captures.values);
                 self.restore_proven_local_receiver_captures(
-                    &established,
+                    &mut established,
                     &receiver_candidates,
                     &mut captures.values,
                     &mut capture_bindings,

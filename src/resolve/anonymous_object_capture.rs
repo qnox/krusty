@@ -363,30 +363,29 @@ impl Checker<'_> {
     }
 
     /// Refresh a prior proven receiver from this declaration's current lexical inventory. Source
-    /// coordinates correlate visits of this one declaration only; cross-class joins use the
-    /// independently published receiver identity.
+    /// coordinates can change when constructor/default scopes are rebuilt: a published receiver
+    /// identity owns the remap. Only captures without that identity correlate by same-declaration
+    /// coordinate; cross-class joins always use their independently published receiver identity.
     pub(super) fn restore_proven_local_receiver_captures(
         &self,
-        established: &LocalClassCaptureInventory,
+        established: &mut LocalClassCaptureInventory,
         candidates: &[ObservedReceiverCapture],
         captures: &mut Vec<AnonymousObjectCapture>,
         bindings: &mut Vec<Option<u32>>,
     ) {
-        for prior in &established.captures {
+        for prior in &mut established.captures {
             if !matches!(
                 prior.source,
                 AnonymousObjectCaptureSource::ImplicitReceiver { .. }
             ) {
                 continue;
             }
-            let mut current = candidates
-                .iter()
-                .find(|candidate| candidate.capture.source == prior.source)
-                .expect("a proven local-class receiver remains in its declaration's lexical tower")
-                .capture
-                .clone();
-            current.receiver_capture = prior.receiver_capture;
-            current.capture_dependency = prior.capture_dependency;
+            let current = refreshed_local_receiver_capture(prior, candidates);
+            // The proof remains declaration-owned, but its source operand belongs to this visit's
+            // reconstructed tower. Keep established exact types for pending-type reconciliation.
+            prior.source = current.source;
+            prior.semantic_receiver = current.semantic_receiver;
+            prior.name = current.name.clone();
             merge_local_receiver_capture(captures, bindings, current.clone());
             let selected = captures
                 .iter_mut()
@@ -606,6 +605,74 @@ impl Checker<'_> {
                     )
                 })?;
         self.discovered_local_class_captures.get(&declaration)
+    }
+}
+
+fn refreshed_local_receiver_capture(
+    prior: &AnonymousObjectCapture,
+    candidates: &[ObservedReceiverCapture],
+) -> AnonymousObjectCapture {
+    let mut current = candidates
+        .iter()
+        .find(|candidate| match prior.receiver_capture {
+            Some(identity) => candidate.capture.receiver_capture == Some(identity),
+            None => candidate.capture.source == prior.source,
+        })
+        .expect("a proven local-class receiver remains in its declaration's lexical tower")
+        .capture
+        .clone();
+    current.receiver_capture = prior.receiver_capture;
+    current.capture_dependency = prior.capture_dependency;
+    current
+}
+
+#[cfg(test)]
+mod receiver_remap_tests {
+    use super::*;
+
+    fn receiver(identity: u32, depth: u32) -> AnonymousObjectCapture {
+        AnonymousObjectCapture {
+            name: "captured".into(),
+            ty: Ty::obj("CaptureToken"),
+            shared_cell: false,
+            storage_ty: None,
+            source: AnonymousObjectCaptureSource::ImplicitReceiver {
+                current: depth == 0,
+                depth,
+            },
+            receiver_label: None,
+            receiver: Some(FirCapturedReceiver::Lambda(None)),
+            semantic_receiver: Some(AnonymousObjectReceiverSource::ImplicitReceiver {
+                current: depth == 0,
+                depth,
+            }),
+            lexical_shadow_depth: 0,
+            capture_dependency: None,
+            receiver_capture: Some(identity),
+        }
+    }
+
+    #[test]
+    fn constructor_scope_remap_selects_identity_not_old_coordinate_or_same_type() {
+        let mut prior = receiver(7, 1);
+        prior.capture_dependency = Some(crate::fir::ClassCaptureIdentity::Receiver(7));
+        let shifted = receiver(7, 0);
+        let candidates = [
+            ObservedReceiverCapture {
+                capture: receiver(8, 1),
+                uses_before: Vec::new(),
+            },
+            ObservedReceiverCapture {
+                capture: shifted.clone(),
+                uses_before: Vec::new(),
+            },
+        ];
+        let current = refreshed_local_receiver_capture(&prior, &candidates);
+        assert_eq!(current.receiver_capture, Some(7));
+        assert_eq!(current.source, shifted.source);
+        assert_eq!(current.semantic_receiver, shifted.semantic_receiver);
+        assert_eq!(current.capture_dependency, prior.capture_dependency);
+        assert_eq!(current.ty, shifted.ty);
     }
 }
 
