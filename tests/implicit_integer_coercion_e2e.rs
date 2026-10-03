@@ -83,3 +83,73 @@ fun test() { accept(VALUE) }\n";
         "wrong annotation identity enabled coercion: {diagnostics:?}"
     );
 }
+
+#[test]
+fn signed_values_widen_to_the_unsigned_parameter_carrier() {
+    const USE_SITE: &str = "// LANGUAGE: +ImplicitSignedToUnsignedIntegerConversion\n\
+import kotlin.internal.ImplicitIntegerCoercion\n\
+@ImplicitIntegerCoercion const val IMPLICIT_INT = 255\n\
+@ImplicitIntegerCoercion const val EXPLICIT_INT: Int = 255\n\
+@ImplicitIntegerCoercion const val BIGGER_THAN_UBYTE = 256\n\
+fun testInt(@ImplicitIntegerCoercion x: UInt) = x\n\
+fun testLong(@ImplicitIntegerCoercion x: ULong) = x\n\
+fun takeUByte(@ImplicitIntegerCoercion u: UByte) = u\n\
+fun takeUShort(@ImplicitIntegerCoercion u: UShort) = u\n\
+fun takeUInt(@ImplicitIntegerCoercion u: UInt) = u\n\
+fun takeULong(@ImplicitIntegerCoercion u: ULong) = u\n\
+fun takeUBytes(@ImplicitIntegerCoercion vararg u: UByte) = u[0].toInt() + u[1].toInt() + u[2].toInt()\n\
+fun box(): String {\n\
+    if (testInt(5) != 5u) return \"int\"\n\
+    if (testInt(x = 5) != 5u) return \"named int\"\n\
+    if (testLong(5) != 5uL) return \"long\"\n\
+    if (testLong(x = 5) != 5uL) return \"named long\"\n\
+    if (takeUByte(255) != 255.toUByte()) return \"literal ubyte\"\n\
+    if (takeUByte(IMPLICIT_INT) != 255.toUByte()) return \"ubyte\"\n\
+    if (takeUByte(EXPLICIT_INT) != 255.toUByte()) return \"explicit\"\n\
+    if (takeUShort(IMPLICIT_INT) != 255.toUShort()) return \"ushort\"\n\
+    if (takeUShort(BIGGER_THAN_UBYTE) != 256.toUShort()) return \"256\"\n\
+    if (takeUInt(IMPLICIT_INT) != 255u) return \"uint\"\n\
+    if (takeULong(IMPLICIT_INT) != 255uL) return \"ulong\"\n\
+    if (takeUBytes(IMPLICIT_INT, EXPLICIT_INT, 42u) != 255 + 255 + 42) return \"vararg\"\n\
+    return \"OK\"\n\
+}\n";
+    let sources = [("annotation.kt", ANNOTATION), ("Main.kt", USE_SITE)];
+    let krusty = common::compile_and_run_files_with_stdlib(&sources)
+        .expect("signed-to-unsigned coercion did not run box()");
+    let work = common::scratch_dir().expect("cannot allocate coercion fixture");
+    let source_paths = sources
+        .iter()
+        .map(|(name, source)| {
+            let path = work.join(name);
+            std::fs::write(&path, source).expect("write coercion fixture");
+            path
+        })
+        .collect::<Vec<_>>();
+    let output = work.join("out");
+    std::fs::create_dir_all(&output).expect("create kotlinc output");
+    let mut args = source_paths
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>();
+    args.extend([
+        "-d".to_string(),
+        output.display().to_string(),
+        "-Xallow-kotlin-package".to_string(),
+        "-XXLanguage:+ImplicitSignedToUnsignedIntegerConversion".to_string(),
+    ]);
+    let (code, diagnostics) =
+        common::kotlinc_compile(&args).expect("reference compiler unavailable");
+    assert_eq!(
+        code, 0,
+        "kotlinc rejected signed-to-unsigned coercion: {diagnostics}"
+    );
+    let reference = common::run_box(
+        &[],
+        "MainKt",
+        &[output, common::stdlib_jar(), common::jdk_modules()],
+    )
+    .expect("run kotlinc signed-to-unsigned fixture");
+    let _ = std::fs::remove_dir_all(work);
+    assert_eq!(reference, "OK", "kotlinc fixture must succeed");
+    assert_eq!(krusty, reference, "krusty and kotlinc box results differ");
+}

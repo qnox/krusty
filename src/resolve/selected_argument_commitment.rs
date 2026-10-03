@@ -129,7 +129,7 @@ impl Checker<'_> {
                 );
                 continue;
             }
-            if self.implicit_integer_coercion_applies(
+            if self.commit_implicit_integer_coercion(
                 argument,
                 expected,
                 call_sig

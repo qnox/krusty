@@ -3397,6 +3397,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   inline-class factory `kotlin/UInt."box-impl"(I)Lkotlin/UInt;` (and `unbox-impl` on read, `is UInt` →
   `instanceof kotlin/UInt`) — never `Integer`, so identity and large values are preserved.
   `tests/unsigned_e2e.rs`, `tests/feature_coverage_i_e2e.rs`.
+  With `+ImplicitSignedToUnsignedIntegerConversion`, a parameter marked
+  `@kotlin.internal.ImplicitIntegerCoercion` also accepts a signed integer literal or another
+  `@ImplicitIntegerCoercion` constant and converts that value to the unsigned carrier. `Int` to
+  `ULong` is the sign-extending `i2l` of `Int.toULong()`, `Int` to `UByte`/`UShort` is `i2b`/`i2s`,
+  and same-width `Int` to `UInt` emits nothing. That is separate from `UInt.toLong()`, which
+  zero-extends through `Integer.toUnsignedLong`. Test: `tests/implicit_integer_coercion_e2e.rs`.
 
   A **member** property whose type is one of these classes mangles the accessor the backend
   synthesizes, the same way any other value-class member accessor does. The classes stay out of
