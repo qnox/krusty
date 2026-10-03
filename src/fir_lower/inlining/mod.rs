@@ -1663,14 +1663,6 @@ fn specialize_checked_operation(
     }
 }
 
-/// Rewrite `root` to PRODUCE the value of its sole rewritten return, or leave it exactly as it was.
-///
-/// The shape is PROVED before anything changes, and proving it cannot change anything: the chain of
-/// statement blocks from `root` down to `tail` is collected from a shared reference. Only once that
-/// answers does the `Unit` placeholder get allocated and the blocks rewritten. Ordering it the other
-/// way left an orphan `UnitInstance` in the arena whenever the answer turned out to be no — the
-/// block shapes were restored, but the allocation was not, so a refused optimization still shifted
-/// every expression identity after it.
 /// The block that replaces one cloned `return` inside an expansion's exit loop.
 ///
 /// A non-`Unit` result is stored and read after the loop. A `Unit` result has no slot, but
@@ -1693,6 +1685,14 @@ fn inline_return_exit(
     IrExpr::Block { stmts, value: None }
 }
 
+/// Rewrite `root` to PRODUCE the value of its sole rewritten return, or leave it exactly as it was.
+///
+/// The shape is PROVED before anything changes, and proving it cannot change anything: the chain of
+/// statement blocks from `root` down to `tail` is collected from a shared reference. Only once that
+/// answers does the `Unit` placeholder get allocated and the blocks rewritten. Ordering it the other
+/// way left an orphan `UnitInstance` in the arena whenever the answer turned out to be no — the
+/// block shapes were restored, but the allocation was not, so a refused optimization still shifted
+/// every expression identity after it.
 fn produce_sole_tail_return(
     ir: &mut crate::ir::IrFile,
     root: ExprId,

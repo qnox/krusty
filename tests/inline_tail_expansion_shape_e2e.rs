@@ -121,15 +121,7 @@ fn a_non_tail_unit_return_evaluates_its_expression() {
         \x20   f1(false, 2, 1)\n\
         \x20   return if (even == 2 && odd == 1) \"OK\" else \"even=$even odd=$odd\"\n\
         }\n";
-    let jdk = common::jdk_modules();
-    let out = common::compile_and_run_box(
-        src,
-        "UnitNonTailReturn",
-        &[common::stdlib_jar()],
-        Some(jdk.as_path()),
-    )
-    .expect("a JVM runner is required to observe the returned inline call");
-    assert_eq!(out.trim(), "OK");
+    common::expect_box_same_as_kotlinc(src, "UnitNonTailReturn");
 }
 
 /// The other half of the `Unit` case, and the one the shape rule must REFUSE: a `Unit` expansion
