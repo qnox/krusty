@@ -1023,6 +1023,216 @@ fn local_class_captures_an_enclosing_extension_receiver_by_checked_coordinate() 
 }
 
 #[test]
+fn local_class_does_not_capture_an_unused_extension_receiver() {
+    let source = "class Rec<T>(val rt: T)\n\
+                  fun <FT> Rec<FT>.fn(): Any {\n\
+                      class Local<LT>(val pt: FT)\n\
+                      return Local<FT>(rt)\n\
+                  }\n";
+    let (outer, _) = checked_function_body(source, "fn");
+    let FirExprKind::Block { statements, .. } = &outer
+        .expr(root_expression(&outer))
+        .expect("extension body block")
+        .kind
+    else {
+        panic!("extension function must retain its checked block")
+    };
+    let captures = statements
+        .iter()
+        .filter_map(|statement| outer.statement(*statement))
+        .find_map(|statement| match &statement.kind {
+            FirStatementKind::LocalDeclaration { captures, .. } => Some(captures.as_ref()),
+            _ => None,
+        })
+        .expect("local class declaration");
+    assert!(
+        captures.iter().all(|capture| !matches!(
+            capture.source,
+            FirLocalClassCaptureSource::ImplicitReceiver { .. }
+        )),
+        "an unused extension receiver is not a constructor parameter: {captures:?}"
+    );
+}
+
+#[test]
+fn inner_subclass_keeps_the_extension_receiver_its_superclass_constructor_needs() {
+    let source = "class CaptureToken(val text: String)\n\
+                  fun CaptureToken.bar(): CaptureToken {\n\
+                      open class Local {\n\
+                          fun result() = this@bar\n\
+                      }\n\
+                      class Outer {\n\
+                          inner class Inner : Local() {\n\
+                              fun outer() = this@Outer\n\
+                          }\n\
+                      }\n\
+                      return Outer().Inner().result()\n\
+                  }\n";
+    let (outer, index) = checked_function_body(source, "bar");
+    let FirExprKind::Block { statements, .. } = &outer
+        .expr(root_expression(&outer))
+        .expect("extension body block")
+        .kind
+    else {
+        panic!("extension function must retain its checked block")
+    };
+    let captures = statements
+        .iter()
+        .filter_map(|statement| outer.statement(*statement))
+        .filter_map(|statement| match &statement.kind {
+            FirStatementKind::LocalDeclaration { captures, .. } => Some(captures.as_ref()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        captures.len(),
+        2,
+        "Local and Outer are the function's local classes: {captures:?}"
+    );
+    let [local, enclosing] = captures.as_slice() else {
+        unreachable!("the exact local-class count was asserted above")
+    };
+    let [local] = *local else {
+        panic!("Local has exactly one capture, the extension receiver: {local:?}")
+    };
+    let [enclosing] = *enclosing else {
+        panic!("Outer has exactly one capture, the same extension receiver: {enclosing:?}")
+    };
+    assert!(
+        capture_token_extension_receiver(local) && capture_token_extension_receiver(enclosing),
+        "both fields carry the extension receiver: {captures:?}"
+    );
+    assert!(
+        matches!(
+            local.capture_identity,
+            Some(ClassCaptureIdentity::Receiver(_))
+        ),
+        "the directly-read receiver has a stable receiver identity: {local:?}"
+    );
+    assert_eq!(
+        enclosing.capture_identity, local.capture_identity,
+        "Outer forwards Local's exact receiver identity rather than duplicating its coordinate"
+    );
+    let inner_calls = (0..outer.expression_count())
+        .filter_map(|raw| {
+            let expression = outer.expr(FirExprId::from_raw(raw as u32))?;
+            let FirExprKind::ConstructorCall(call) = &expression.kind else {
+                return None;
+            };
+            let owner = expression.ty.get().obj_internal()?;
+            let declaration = index.classifier_declaration(owner)?;
+            index
+                .local_class_name_provenance(declaration)
+                .is_some_and(|provenance| {
+                    provenance
+                        .segments
+                        .last()
+                        .is_some_and(|segment| segment == "Inner")
+                })
+                .then_some(call)
+        })
+        .collect::<Vec<_>>();
+    let [inner_call] = inner_calls.as_slice() else {
+        panic!("the function constructs Inner once: {inner_calls:?}")
+    };
+    assert!(
+        inner_call.outer_receiver.is_some() && inner_call.arguments.is_empty(),
+        "Inner's constructor takes its enclosing instance and no value arguments: {inner_call:?}"
+    );
+    assert!(
+        inner_call.external_capture_arguments.is_none(),
+        "Inner does not take its own copy of the extension receiver: {inner_call:?}"
+    );
+}
+
+#[test]
+fn inner_subclass_keeps_a_non_nearest_receiver_its_superclass_needs() {
+    let source = "class CaptureToken(val text: String)\n\
+                  class Scope\n\
+                  fun CaptureToken.bar(): CaptureToken {\n\
+                      open class Local {\n\
+                          fun result() = this@bar\n\
+                      }\n\
+                      val block: Scope.() -> CaptureToken = {\n\
+                          class Outer {\n\
+                              inner class Inner : Local() {\n\
+                                  fun outer() = this@Outer\n\
+                              }\n\
+                          }\n\
+                          Outer().Inner().result()\n\
+                      }\n\
+                      return Scope().block()\n\
+                  }\n";
+    let (outer, _) = checked_function_body(source, "bar");
+    let FirExprKind::Block { statements, .. } = &outer
+        .expr(root_expression(&outer))
+        .expect("extension body block")
+        .kind
+    else {
+        panic!("extension function must retain its checked block")
+    };
+    let local = statements
+        .iter()
+        .filter_map(|statement| outer.statement(*statement))
+        .find_map(|statement| match &statement.kind {
+            FirStatementKind::LocalDeclaration { captures, .. } => Some(captures.as_ref()),
+            _ => None,
+        })
+        .expect("Local is declared in bar");
+    let [local] = local else {
+        panic!("Local has exactly one capture, the extension receiver: {local:?}")
+    };
+    let lambda = (0..outer.expression_count())
+        .find_map(
+            |raw| match &outer.expr(FirExprId::from_raw(raw as u32))?.kind {
+                FirExprKind::Lambda { body, .. } => Some(body),
+                _ => None,
+            },
+        )
+        .expect("Outer is declared in the receiver lambda");
+    let enclosing = (0..lambda.statement_count())
+        .find_map(
+            |raw| match &lambda.statement(FirStatementId::from_raw(raw as u32))?.kind {
+                FirStatementKind::LocalDeclaration { captures, .. } => Some(captures.as_ref()),
+                _ => None,
+            },
+        )
+        .expect("Outer publishes its captures from the lambda");
+    let [enclosing] = enclosing else {
+        panic!(
+            "Outer keeps only the non-nearest receiver its inner subclass forwards: {enclosing:?}"
+        )
+    };
+    assert!(
+        capture_token_extension_receiver(local) && capture_token_extension_receiver(enclosing),
+        "both fields carry this@bar, not the unused lambda receiver: local={local:?} outer={enclosing:?}"
+    );
+    assert!(
+        matches!(
+            enclosing.source,
+            FirLocalClassCaptureSource::ImplicitReceiver {
+                current: false,
+                depth: 1
+            } | FirLocalClassCaptureSource::CapturedImplicitReceiver { .. }
+        ),
+        "at Outer the lambda receiver is nearer than this@bar: {enclosing:?}"
+    );
+    assert_eq!(
+        enclosing.capture_identity, local.capture_identity,
+        "Outer forwards Local's exact receiver identity"
+    );
+}
+
+fn capture_token_extension_receiver(capture: &FirLocalClassCapture) -> bool {
+    capture.ty.get() == Ty::obj("CaptureToken")
+        && matches!(
+            capture.source,
+            FirLocalClassCaptureSource::ImplicitReceiver { .. }
+                | FirLocalClassCaptureSource::CapturedImplicitReceiver { .. }
+        )
+}
+
+#[test]
 fn local_class_captures_both_extension_and_outer_dispatch_receivers() {
     let source = "class Outer(val suffix: String) {\n\
                       fun Receiver.call(): String {\n\
@@ -1101,6 +1311,73 @@ fn local_class_reads_receiver_lambda_property_through_its_captured_receiver() {
             depth: 0
         }
     ));
+}
+
+#[test]
+fn postponed_generic_receiver_is_kept_for_local_methods_and_setters() {
+    let (body, _) = checked_function_body(
+        r#"
+class CaptureToken
+class CaptureSink<T> { fun remember(value: T): Boolean = true }
+fun <T> collectCaptured(block: CaptureSink<T>.() -> Unit): CaptureSink<T> {
+    val sink = CaptureSink<T>()
+    sink.block()
+    return sink
+}
+fun use() {
+    collectCaptured {
+        class Used { fun probe() = remember(CaptureToken()) }
+        class SetterCapture {
+            var value: CaptureToken
+                get() = CaptureToken()
+                set(value) { remember(value) }
+        }
+        class Unused
+    }
+}
+"#,
+        "use",
+    );
+    let lambdas = (0..body.expression_count())
+        .filter_map(
+            |raw| match &body.expr(FirExprId::from_raw(raw as u32))?.kind {
+                FirExprKind::Lambda { body, .. } => Some(body),
+                _ => None,
+            },
+        )
+        .collect::<Vec<_>>();
+    let [lambda] = lambdas.as_slice() else {
+        panic!("one builder receiver lambda expected: {lambdas:?}")
+    };
+    let captures = (0..lambda.statement_count())
+        .filter_map(
+            |raw| match &lambda.statement(FirStatementId::from_raw(raw as u32))?.kind {
+                FirStatementKind::LocalDeclaration { captures, .. } => Some(captures.as_ref()),
+                _ => None,
+            },
+        )
+        .collect::<Vec<_>>();
+    let [method, setter, unused] = captures.as_slice() else {
+        panic!("used method, setter and unused local declarations expected: {captures:?}")
+    };
+    assert!(
+        unused.is_empty(),
+        "the solved visit prunes Unused's provisional receiver: {unused:?}"
+    );
+    let [method] = *method else {
+        panic!("the inferred method has exactly one receiver capture: {method:?}")
+    };
+    let [setter] = *setter else {
+        panic!("the setter has exactly one receiver capture: {setter:?}")
+    };
+    let expected = Ty::obj_args("CaptureSink", &[Ty::obj("CaptureToken")]);
+    assert_eq!(method.ty.get(), expected);
+    assert_eq!(setter.ty.get(), expected);
+    assert!(matches!(
+        method.capture_identity,
+        Some(ClassCaptureIdentity::Receiver(_))
+    ));
+    assert_eq!(setter.capture_identity, method.capture_identity);
 }
 
 #[test]

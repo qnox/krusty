@@ -16,13 +16,6 @@ fn run(src: &str) -> Option<String> {
     Some(common::expect_box_run_with_stdlib(src, "Main"))
 }
 
-fn assert_rejected(src: &str) {
-    assert!(
-        common::compile_and_run_with_stdlib(src, "Main").is_none(),
-        "source should be rejected, but compiled successfully:\n{src}"
-    );
-}
-
 /// kotlinc: accepted.
 ///
 /// A local class inside a member of a generic class can name that class's type parameter — the
@@ -505,14 +498,13 @@ fn a_local_class_shadows_an_enclosing_type_parameter_of_the_same_name() {
     );
 }
 
-/// kotlinc: accepted — krusty limitation, the file skips.
+/// kotlinc: accepted, prints `OK`.
 ///
-/// A local class reading a receiver FURTHER OUT than the innermost one would need a chain of
-/// captures (`L.this$0` is the `B` instance, and `this@A` is another hop through `B.this$0`), which
-/// is not modelled. Only the innermost receiver contributes capture names, so `this@A` finds no
-/// binding and the class is rejected instead of being handed a `this$0` that holds the wrong object.
+/// A local class reading a receiver further out than the innermost one follows the exact enclosing
+/// class roles: `L.this$0` is the `B` instance and `this@A` is the next hop through `B.this$0`.
+/// Treating either class rung as an anonymous closure receiver would hand `L` the wrong object.
 #[test]
-fn a_local_class_reading_a_grandparent_receiver_is_rejected() {
+fn a_local_class_reads_a_grandparent_receiver_like_kotlinc() {
     const SRC: &str = "class A(val x: String) {\n\
         \x20   inner class B {\n\
         \x20       fun m(): String {\n\
@@ -522,7 +514,7 @@ fn a_local_class_reading_a_grandparent_receiver_is_rejected() {
         \x20   }\n\
         }\n\
         fun box(): String = A(\"OK\").B().m()\n";
-    assert_rejected(SRC);
+    common::expect_box_same_as_kotlinc(SRC, "GrandparentReceiver");
 }
 
 /// kotlinc: accepted, prints `hi3`.
