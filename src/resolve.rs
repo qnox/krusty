@@ -116,6 +116,7 @@ mod lambda_returns;
 mod lexical_bindings;
 mod local_capture_dependencies;
 mod local_class_scope;
+mod local_extension_callable_ref;
 mod local_method_dependencies;
 mod loop_flow;
 mod member_extension_selection;
@@ -2639,71 +2640,6 @@ fn local_function_candidate_score(
         arg_tys,
         argument_fits,
     )
-}
-
-/// Apply a local extension's own generic receiver bindings to its call-site signature. The
-/// declaration remains generic; only the selected call shape is specialized (`A<R>` on `A<Int>`
-/// yields `R := Int`).
-fn specialize_local_extension_signature(
-    source: &dyn SymbolSource,
-    signature: &Signature,
-    receiver: Ty,
-) -> Signature {
-    let Some(generic) = signature
-        .generic_sig
-        .as_ref()
-        .filter(|generic| generic.receiver.is_some())
-    else {
-        return signature.clone();
-    };
-    let mut bindings = crate::symbol_resolver::GSigBinds::new();
-    crate::symbol_resolver::unify_ty(
-        generic.receiver.expect("filtered generic receiver"),
-        receiver,
-        &mut bindings,
-    );
-    let mut selected = signature.clone();
-    selected.params = generic
-        .params
-        .iter()
-        .map(|parameter| {
-            crate::symbol_resolver::instantiate_slot(
-                source,
-                Some(generic),
-                *parameter,
-                &bindings,
-                crate::symbol_resolver::TypePosition::In,
-                crate::symbol_resolver::UnboundSpecialization::Preserve,
-            )
-        })
-        .collect();
-    selected.ret = crate::symbol_resolver::instantiate_slot(
-        source,
-        Some(generic),
-        generic.ret,
-        &bindings,
-        crate::symbol_resolver::TypePosition::Out,
-        crate::symbol_resolver::UnboundSpecialization::Preserve,
-    );
-    selected.source_receiver = generic.receiver.map(|declared| {
-        crate::symbol_resolver::instantiate_slot(
-            source,
-            Some(generic),
-            declared,
-            &bindings,
-            crate::symbol_resolver::TypePosition::Invariant,
-            crate::symbol_resolver::UnboundSpecialization::Preserve,
-        )
-    });
-    selected.lambda_param_types = selected
-        .params
-        .iter()
-        .map(|parameter| match parameter {
-            Ty::Fun(function) => function.params.clone(),
-            _ => Vec::new(),
-        })
-        .collect();
-    selected
 }
 
 /// Simple type name → JVM internal name, split into a SHARED read-only base (the library/classpath
@@ -66192,14 +66128,13 @@ impl<'a> Checker<'a> {
                 let candidates = overloads
                     .into_iter()
                     .filter(|(_, signature)| {
-                        let signature = specialize_local_extension_signature(
+                        local_extension_callable_ref::applicable_local_extension_signature(
                             &self.module,
                             signature,
                             extension_receiver_ty,
-                        );
-                        signature.source_receiver.is_some_and(|declared| {
-                            self.receiver_is_assignable(extension_receiver_ty, declared)
-                        })
+                            |actual, expected| self.receiver_is_assignable(actual, expected),
+                        )
+                        .is_some()
                     })
                     .filter_map(|(statement, signature)| {
                         let (value_parameters, ret) = match expected_function {
@@ -67120,14 +67055,13 @@ impl<'a> Checker<'a> {
                     let candidates = overloads
                         .into_iter()
                         .filter(|(_, signature)| {
-                            let signature = specialize_local_extension_signature(
+                            local_extension_callable_ref::applicable_local_extension_signature(
                                 &self.module,
                                 signature,
                                 extension_receiver,
-                            );
-                            signature.source_receiver.is_some_and(|declared| {
-                                self.receiver_is_assignable(extension_receiver, declared)
-                            })
+                                |actual, expected| self.receiver_is_assignable(actual, expected),
+                            )
+                            .is_some()
                         })
                         .filter_map(|(statement, signature)| {
                             let (params, ret) = match expected_function {
@@ -68104,14 +68038,16 @@ impl<'a> Checker<'a> {
             let Stmt::LocalFun(_) = self.file.stmt(statement) else {
                 continue;
             };
-            let signature =
-                specialize_local_extension_signature(&self.module, &callable.signature, receiver);
-            let Some(expected_receiver) = signature.source_receiver else {
+            let Some(signature) =
+                local_extension_callable_ref::applicable_local_extension_signature(
+                    &self.module,
+                    &callable.signature,
+                    receiver,
+                    |actual, expected| self.receiver_is_assignable(actual, expected),
+                )
+            else {
                 continue;
             };
-            if !self.receiver_is_assignable(receiver, expected_receiver) {
-                continue;
-            }
             let context_count = signature.context_count.min(signature.params.len());
             let Some(context_args) =
                 self.select_context_arguments(scope, &signature.params[..context_count])
