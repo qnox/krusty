@@ -40263,12 +40263,11 @@ impl<'a> Checker<'a> {
                         .map(AdaptedRefArgument::Value)
                         .collect(),
                 };
-                let cost = Self::adapted_ref_plan_cost(&plan);
                 // Overload specificity is a property of the DECLARATIONS. The expected/adapted
                 // function shape is intentionally absent here: every compatible overload adapts to
                 // that same shape, so comparing it would turn `C::pick` for `(C, Int) -> Unit` into
                 // a false tie between `pick(Int)` and `pick(Any)`.
-                Some((function, reference_params, plan, cost, type_arguments))
+                Some((function, reference_params, plan, type_arguments))
             })
             .collect::<Vec<_>>();
         if candidates.is_empty() {
@@ -40286,45 +40285,37 @@ impl<'a> Checker<'a> {
             .map(|(function, ..)| function.receiver_rank)
             .min()
             .expect("nonempty candidates");
-        let mut candidates = candidates
+        let candidates = candidates
             .into_iter()
             .filter(|(function, ..)| function.receiver_rank == nearest)
             .collect::<Vec<_>>();
-        let best_cost = candidates
+        let specificity = candidates
             .iter()
-            .map(|candidate| candidate.3)
-            .min()
-            .expect("nonempty nearest extension candidates");
-        candidates.retain(|candidate| candidate.3 == best_cost);
-        let maximal = candidates
-            .iter()
-            .enumerate()
-            .filter_map(|(index, (current, current_params, ..))| {
-                let dominated = candidates.iter().enumerate().any(
-                    |(other_index, (other, other_params, ..))| {
-                        index != other_index
-                            && self.callable_ref_shape_at_least_as_specific(
-                                other_params,
-                                other.callable.ret,
-                                current_params,
-                                current.callable.ret,
-                            )
-                            && !self.callable_ref_shape_at_least_as_specific(
-                                current_params,
-                                current.callable.ret,
-                                other_params,
-                                other.callable.ret,
-                            )
-                    },
-                );
-                (!dominated).then_some(index)
+            .map(|(function, parameters, plan, _)| {
+                callable_reference_selection::AdaptedReferenceSpecificity {
+                    parameters,
+                    ret: function.callable.ret,
+                    plan,
+                    is_vararg: function.call_sig.vararg_index.is_some(),
+                }
             })
             .collect::<Vec<_>>();
+        let maximal = callable_reference_selection::maximal_adapted_references(
+            &specificity,
+            |left_params, left_ret, right_params, right_ret| {
+                self.callable_ref_shape_at_least_as_specific(
+                    left_params,
+                    left_ret,
+                    right_params,
+                    right_ret,
+                )
+            },
+        );
         match maximal.as_slice() {
             [selected] => ExtensionRefSelection::Selected(Box::new((
                 candidates[*selected].0.clone(),
                 candidates[*selected].2.clone(),
-                candidates[*selected].4.clone(),
+                candidates[*selected].3.clone(),
             ))),
             _ => ExtensionRefSelection::Ambiguous(
                 maximal

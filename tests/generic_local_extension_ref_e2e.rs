@@ -4,8 +4,9 @@
 //! extension property. The classifiers here are repository-owned and invariant.
 
 use super::common::{
-    assert_error_blocks_match_kotlinc, expect_box_run_against_kotlinc, expect_box_run_against_ref,
-    expect_box_same_as_kotlinc,
+    assert_error_blocks_match_kotlinc, expect_box_run_against, expect_box_run_against_kotlinc,
+    expect_box_run_against_ref, expect_box_same_as_kotlinc, kotlinc_box_result_with_classpath,
+    kotlinc_library,
 };
 
 #[test]
@@ -257,11 +258,67 @@ fun box(): String {
     val zero: () -> Int = receiver::choose
     val one: (Int) -> Int = receiver::choose
     val two: (Int, Int) -> Int = receiver::choose
-    val log = "${zero()}-${one(7)}-${two(3, 4)}"
-    return if (log == "11-17-22") "OK" else "fail:$log"
+    val unboundZero: (AmbiguousReceiver) -> Int = AmbiguousReceiver::choose
+    val unboundOne: (AmbiguousReceiver, Int) -> Int = AmbiguousReceiver::choose
+    val unboundTwo: (AmbiguousReceiver, Int, Int) -> Int = AmbiguousReceiver::choose
+    val log = "${zero()}-${one(7)}-${two(3, 4)}/" +
+        "${unboundZero(receiver)}-${unboundOne(receiver, 7)}-${unboundTwo(receiver, 3, 4)}"
+    return if (log == "11-17-22/11-17-22") "OK" else "fail:$log"
 }
 "#,
         "LocalExtensionReferenceSpecificity",
+    );
+}
+
+#[test]
+fn a_defaulted_top_level_extension_beats_an_equally_specific_vararg() {
+    expect_box_same_as_kotlinc(
+        r#"
+class TopLevelReceiver
+
+fun TopLevelReceiver.choose(value: Int = 1): Int = 10 + value
+fun TopLevelReceiver.choose(vararg values: Int): Int = 20 + values.size
+
+fun box(): String {
+    val receiver = TopLevelReceiver()
+    val zero: () -> Int = receiver::choose
+    val one: (Int) -> Int = receiver::choose
+    val two: (Int, Int) -> Int = receiver::choose
+    val unboundZero: (TopLevelReceiver) -> Int = TopLevelReceiver::choose
+    val unboundOne: (TopLevelReceiver, Int) -> Int = TopLevelReceiver::choose
+    val unboundTwo: (TopLevelReceiver, Int, Int) -> Int = TopLevelReceiver::choose
+    val log = "${zero()}-${one(7)}-${two(3, 4)}/" +
+        "${unboundZero(receiver)}-${unboundOne(receiver, 7)}-${unboundTwo(receiver, 3, 4)}"
+    return if (log == "11-17-22/11-17-22") "OK" else "fail:$log"
+}
+"#,
+        "TopLevelExtensionReferenceSpecificity",
+    );
+}
+
+#[test]
+fn a_defaulted_member_beats_an_equally_specific_vararg() {
+    expect_box_same_as_kotlinc(
+        r#"
+class MemberReceiver {
+    fun choose(value: Int = 1): Int = 10 + value
+    fun choose(vararg values: Int): Int = 20 + values.size
+}
+
+fun box(): String {
+    val receiver = MemberReceiver()
+    val zero: () -> Int = receiver::choose
+    val one: (Int) -> Int = receiver::choose
+    val two: (Int, Int) -> Int = receiver::choose
+    val unboundZero: (MemberReceiver) -> Int = MemberReceiver::choose
+    val unboundOne: (MemberReceiver, Int) -> Int = MemberReceiver::choose
+    val unboundTwo: (MemberReceiver, Int, Int) -> Int = MemberReceiver::choose
+    val log = "${zero()}-${one(7)}-${two(3, 4)}/" +
+        "${unboundZero(receiver)}-${unboundOne(receiver, 7)}-${unboundTwo(receiver, 3, 4)}"
+    return if (log == "11-17-22/11-17-22") "OK" else "fail:$log"
+}
+"#,
+        "MemberReferenceSpecificity",
     );
 }
 
@@ -339,6 +396,33 @@ fun box(): String {
 }
 "#;
 
+const PROVIDER_SPECIFICITY_LIB: &str = r#"
+package provider
+
+class ProviderReceiver
+
+fun ProviderReceiver.choose(value: Int = 1): Int = 10 + value
+fun ProviderReceiver.choose(vararg values: Int): Int = 20 + values.size
+"#;
+
+const PROVIDER_SPECIFICITY_MAIN: &str = r#"
+import provider.ProviderReceiver
+import provider.choose
+
+fun box(): String {
+    val receiver = ProviderReceiver()
+    val zero: () -> Int = receiver::choose
+    val one: (Int) -> Int = receiver::choose
+    val two: (Int, Int) -> Int = receiver::choose
+    val unboundZero: (ProviderReceiver) -> Int = ProviderReceiver::choose
+    val unboundOne: (ProviderReceiver, Int) -> Int = ProviderReceiver::choose
+    val unboundTwo: (ProviderReceiver, Int, Int) -> Int = ProviderReceiver::choose
+    val log = "${zero()}-${one(7)}-${two(3, 4)}/" +
+        "${unboundZero(receiver)}-${unboundOne(receiver, 7)}-${unboundTwo(receiver, 3, 4)}"
+    return if (log == "11-17-22/11-17-22") "OK" else "fail:$log"
+}
+"#;
+
 #[test]
 fn a_classpath_derived_receiver_specializes_a_base_local_extension() {
     assert_eq!(
@@ -352,5 +436,29 @@ fn a_kotlinc_derived_receiver_specializes_a_base_local_extension() {
     assert_eq!(
         expect_box_run_against_kotlinc(LIB, MAIN).as_deref(),
         Some("OK")
+    );
+}
+
+#[test]
+fn a_kotlinc_provider_uses_the_shared_adapted_reference_specificity() {
+    let Some(reference_library) = kotlinc_library(PROVIDER_SPECIFICITY_LIB) else {
+        return;
+    };
+    let reference =
+        kotlinc_box_result_with_classpath(PROVIDER_SPECIFICITY_MAIN, &[reference_library]);
+    assert_eq!(reference, "OK", "kotlinc fixture must succeed");
+    assert_eq!(
+        expect_box_run_against(
+            "provider_callable_ref_specificity",
+            PROVIDER_SPECIFICITY_LIB,
+            PROVIDER_SPECIFICITY_MAIN,
+        )
+        .as_deref(),
+        Some(reference.as_str()),
+    );
+    assert_eq!(
+        expect_box_run_against_kotlinc(PROVIDER_SPECIFICITY_LIB, PROVIDER_SPECIFICITY_MAIN)
+            .as_deref(),
+        Some(reference.as_str()),
     );
 }
