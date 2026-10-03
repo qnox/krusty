@@ -1,0 +1,8 @@
+# kotlinc output recorded per Kotlin version by tests/common/recorded.rs. A version with
+# no value is recorded from its kotlinc on the next local run; KRUSTY_RECORD=1 re-records.
+
+[equal_cost_unrelated_local_extension_shapes_are_ambiguous]
+2.4.20:
+  LocalExtensionReferenceAmbiguity.kt:8:44: overload resolution ambiguity between candidates:
+  | fun AmbiguousReceiver.choose(value: FirstInput = ...): String
+  | fun AmbiguousReceiver.choose(value: SecondInput = ...): String

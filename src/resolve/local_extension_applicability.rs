@@ -6,7 +6,7 @@
 //! available. Formal bounds use the shared bound-admission contract; the receiver check stays
 //! ordinary assignability.
 
-use crate::ast::{ExprId, StmtId};
+use crate::ast::{ExprId, Stmt, StmtId};
 use crate::libraries::GenericSig;
 use crate::symbol_resolver::{
     generic_bindings_satisfy_bounds, instantiate_slot, unify_ty_from_symbols, GSigBinds,
@@ -18,6 +18,13 @@ use crate::types::{FnSig, Ty};
 use super::callable_reference_selection::AdaptedRefArgument;
 use super::{Checker, CheckerScope, Signature};
 
+pub(super) fn function_expectation(expected: Option<Ty>) -> Option<&'static FnSig> {
+    match expected {
+        Some(Ty::Fun(function)) => Some(function),
+        _ => None,
+    }
+}
+
 /// One applicable local extension selected for a callable reference, with the shape the reference
 /// exposes. An expectation-free reference carries the receiver specialization; a contextual
 /// reference still applies the expected callable shape on top of the declaration.
@@ -25,26 +32,28 @@ pub(super) struct LocalExtensionReferenceCandidate {
     pub(super) statement: StmtId,
     pub(super) signature: Signature,
     receiver_rank: u32,
+    declared_receiver: Ty,
+    generic_receiver: bool,
     pub(super) parameters: Vec<Ty>,
     pub(super) ret: Ty,
     pub(super) adaptation: Option<(Vec<AdaptedRefArgument>, bool)>,
 }
 
-pub(super) enum LocalExtensionReferenceSelection {
+enum LocalExtensionReferenceSelection {
     None,
     Selected(Box<LocalExtensionReferenceCandidate>),
-    Ambiguous,
+    Ambiguous(Vec<LocalExtensionReferenceCandidate>),
 }
 
 impl LocalExtensionReferenceSelection {
-    pub(super) fn is_ambiguous(&self) -> bool {
-        matches!(self, Self::Ambiguous)
-    }
-
-    pub(super) fn into_selected(self) -> Option<Box<LocalExtensionReferenceCandidate>> {
+    fn into_candidate(
+        self,
+    ) -> Result<Option<Box<LocalExtensionReferenceCandidate>>, Vec<LocalExtensionReferenceCandidate>>
+    {
         match self {
-            Self::Selected(candidate) => Some(candidate),
-            Self::None | Self::Ambiguous => None,
+            Self::Selected(candidate) => Ok(Some(candidate)),
+            Self::None => Ok(None),
+            Self::Ambiguous(candidates) => Err(candidates),
         }
     }
 }
@@ -87,15 +96,52 @@ pub(super) fn applicable_local_extension_signature(
 }
 
 impl Checker<'_> {
-    pub(super) fn report_local_extension_reference_ambiguity(
+    pub(super) fn selected_local_extension_reference(
+        &mut self,
+        expression: ExprId,
+        scope: &CheckerScope<'_>,
+        name: &str,
+        receiver: Ty,
+        expected: Option<&FnSig>,
+        leading_receiver_in_expected: bool,
+    ) -> Result<Option<Box<LocalExtensionReferenceCandidate>>, Ty> {
+        match self
+            .select_local_extension_reference(
+                scope,
+                name,
+                receiver,
+                expected,
+                leading_receiver_in_expected,
+            )
+            .into_candidate()
+        {
+            Ok(candidate) => Ok(candidate),
+            Err(candidates) => {
+                Err(self.report_local_extension_reference_ambiguity(expression, name, &candidates))
+            }
+        }
+    }
+
+    fn report_local_extension_reference_ambiguity(
         &mut self,
         expression: ExprId,
         name: &str,
+        candidates: &[LocalExtensionReferenceCandidate],
     ) -> Ty {
-        self.diags.error(
-            self.member_name_span(expression, name),
-            "overload resolution ambiguity between candidates:".to_string(),
-        );
+        let mut message = "overload resolution ambiguity between candidates:".to_string();
+        for candidate in candidates {
+            let Stmt::LocalFun(function) = self.file.stmt(candidate.statement) else {
+                unreachable!("a local-extension reference candidate must be a local function")
+            };
+            message.push('\n');
+            message.push_str(&super::source_function_display(
+                self.file,
+                function,
+                candidate.signature.ret,
+            ));
+        }
+        self.diags
+            .error(self.member_name_span(expression, name), message);
         Ty::Error
     }
 
@@ -119,7 +165,7 @@ impl Checker<'_> {
         )
     }
 
-    pub(super) fn select_local_extension_reference(
+    fn select_local_extension_reference(
         &self,
         scope: &CheckerScope<'_>,
         name: &str,
@@ -166,7 +212,8 @@ impl Checker<'_> {
         for candidate in candidates {
             if unique.iter().any(|existing| {
                 existing.statement == candidate.statement
-                    && existing.signature.source_receiver == candidate.signature.source_receiver
+                    && existing.declared_receiver == candidate.declared_receiver
+                    && existing.generic_receiver == candidate.generic_receiver
                     && existing.signature.params == candidate.signature.params
                     && existing.ret == candidate.ret
                     && existing.signature.is_suspend() == candidate.signature.is_suspend()
@@ -180,13 +227,28 @@ impl Checker<'_> {
             .enumerate()
             .filter_map(|(index, current)| {
                 let dominated = unique.iter().enumerate().any(|(other_index, other)| {
-                    index != other_index
-                        && self.callable_ref_shape_at_least_as_specific(
-                            &other.parameters,
-                            other.ret,
-                            &current.parameters,
-                            current.ret,
-                        )
+                    if index == other_index {
+                        return false;
+                    }
+                    if current.generic_receiver != other.generic_receiver {
+                        return super::member_extension_selection::concrete_receiver_is_more_specific(
+                            other.generic_receiver,
+                            current.generic_receiver,
+                        );
+                    }
+                    let other_receiver_is_subtype =
+                        self.receiver_is_assignable(other.declared_receiver, current.declared_receiver);
+                    let current_receiver_is_subtype =
+                        self.receiver_is_assignable(current.declared_receiver, other.declared_receiver);
+                    if other_receiver_is_subtype != current_receiver_is_subtype {
+                        return other_receiver_is_subtype;
+                    }
+                    self.callable_ref_shape_at_least_as_specific(
+                        &other.parameters,
+                        other.ret,
+                        &current.parameters,
+                        current.ret,
+                    )
                         && !self.callable_ref_shape_at_least_as_specific(
                             &current.parameters,
                             current.ret,
@@ -201,7 +263,13 @@ impl Checker<'_> {
             [selected] => {
                 LocalExtensionReferenceSelection::Selected(Box::new(unique.swap_remove(*selected)))
             }
-            _ => LocalExtensionReferenceSelection::Ambiguous,
+            _ => LocalExtensionReferenceSelection::Ambiguous(
+                unique
+                    .into_iter()
+                    .enumerate()
+                    .filter_map(|(index, candidate)| maximal.contains(&index).then_some(candidate))
+                    .collect(),
+            ),
         }
     }
 
@@ -224,6 +292,14 @@ impl Checker<'_> {
             let candidates = overloads
                 .into_iter()
                 .filter_map(|(statement, declared)| {
+                    let receiver_domain = declared
+                        .generic_sig
+                        .as_ref()
+                        .and_then(|generic| generic.receiver)
+                        .or(declared.source_receiver)?;
+                    let generic_receiver = declared.generic_sig.as_ref().is_some_and(|generic| {
+                        crate::types::ty_mentions_param(receiver_domain, &generic.formals)
+                    });
                     let signature = applicable_local_extension_signature(
                         &source,
                         &declared,
@@ -231,8 +307,8 @@ impl Checker<'_> {
                         |actual, bound| self.generic_bound_admits(actual, bound),
                         |actual, expected| self.receiver_is_assignable(actual, expected),
                     )?;
-                    let declared_receiver = signature.source_receiver?;
-                    let receiver_rank = receiver_mro.rank(&source, declared_receiver)?;
+                    let specialized_receiver = signature.source_receiver?;
+                    let receiver_rank = receiver_mro.rank(&source, specialized_receiver)?;
                     let (value_parameters, ret) = match expected {
                         Some(expected) => {
                             let expected_values = if leading_receiver_in_expected {
@@ -294,6 +370,8 @@ impl Checker<'_> {
                         statement,
                         signature,
                         receiver_rank,
+                        declared_receiver: receiver_domain,
+                        generic_receiver,
                         parameters,
                         ret,
                         adaptation: adaptation.flatten(),

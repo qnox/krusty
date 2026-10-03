@@ -4,8 +4,8 @@
 //! extension property. The classifiers here are repository-owned and invariant.
 
 use super::common::{
-    compiler_diagnostics, expect_box_run_against_kotlinc, expect_box_run_against_ref,
-    expect_box_same_as_kotlinc, expect_identical_rejection,
+    assert_error_blocks_match_kotlinc, expect_box_run_against_kotlinc, expect_box_run_against_ref,
+    expect_box_same_as_kotlinc,
 };
 
 #[test]
@@ -245,6 +245,26 @@ fun box(): String {
 }
 
 #[test]
+fn concrete_receiver_domain_beats_a_generic_receiver_domain() {
+    expect_box_same_as_kotlinc(
+        r#"
+class Container<T>
+
+fun box(): String {
+    fun <T> Container<T>.pick(): String = "generic"
+    fun Container<String>.pick(): String = "concrete"
+
+    val value = Container<String>()
+    val bound: () -> String = value::pick
+    val unbound: (Container<String>) -> String = Container<String>::pick
+    return if (bound() == "concrete" && unbound(value) == "concrete") "OK" else "fail"
+}
+"#,
+        "LocalExtensionReferenceGenericReceiverSpecificity",
+    );
+}
+
+#[test]
 fn a_bound_reference_selects_the_cheapest_local_extension_adaptation() {
     expect_box_same_as_kotlinc(
         r#"
@@ -277,8 +297,7 @@ fun probe(receiver: AmbiguousReceiver) {
 }
 "#;
 
-    let result = compiler_diagnostics(&[("LocalExtensionReferenceAmbiguity.kt", SOURCE)], &[]);
-    expect_identical_rejection(&result, "equal-cost local-extension reference ambiguity");
+    assert_error_blocks_match_kotlinc(&[("LocalExtensionReferenceAmbiguity.kt", SOURCE)], &[]);
 }
 
 const LIB: &str = r#"

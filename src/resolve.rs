@@ -65916,10 +65916,7 @@ impl<'a> Checker<'a> {
             } else {
                 receiver_ty
             };
-            let expected_function = match expected {
-                Some(Ty::Fun(function)) => Some(function),
-                _ => None,
-            };
+            let expected_function = local_extension_applicability::function_expectation(expected);
             let classifier_reference = if nullable_receiver {
                 None
             } else if let Some(expected) = expected_function {
@@ -66102,21 +66099,18 @@ impl<'a> Checker<'a> {
             // it does in a bound `value::name` reference. Its receiver is the leading function parameter;
             // the local declaration's `Signature` remains the sole callable shape and lowering receives
             // the already-selected local declaration id.
-            let expected_function = match expected {
-                Some(Ty::Fun(function)) => Some(function),
-                _ => None,
-            };
-            let candidate = self.select_local_extension_reference(
+            let candidate = match self.selected_local_extension_reference(
+                expression,
                 scope,
                 name,
                 extension_receiver_ty,
                 expected_function,
                 true,
-            );
-            if candidate.is_ambiguous() {
-                return Some(self.report_local_extension_reference_ambiguity(expression, name));
-            }
-            if let Some(candidate) = candidate.into_selected() {
+            ) {
+                Ok(candidate) => candidate,
+                Err(error) => return Some(error),
+            };
+            if let Some(candidate) = candidate {
                 if let Some((plan, suspend_conversion)) = &candidate.adaptation {
                     if Self::adapted_ref_plan_is_identity(plan) && !suspend_conversion {
                         self.mark_local_function_ref(expression, candidate.statement, false);
@@ -66959,10 +66953,8 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
-                let expected_function = match expected {
-                    Some(Ty::Fun(function)) => Some(function),
-                    _ => None,
-                };
+                let expected_function =
+                    local_extension_applicability::function_expectation(expected);
                 let extension_receiver =
                     self.expression_function_type(scope, r, rty).unwrap_or(rty);
                 let extension_candidates = if extension_receiver == rty {
@@ -66972,18 +66964,18 @@ impl<'a> Checker<'a> {
                 } else {
                     self.callable_ref_candidates(extension_receiver, &name)
                 };
-                let candidate = self.select_local_extension_reference(
+                let candidate = match self.selected_local_extension_reference(
+                    e,
                     scope,
                     &name,
                     extension_receiver,
                     expected_function,
                     false,
-                );
-                if candidate.is_ambiguous() {
-                    let error = self.report_local_extension_reference_ambiguity(e, &name);
-                    return self.set(e, error);
-                }
-                if let Some(candidate) = candidate.into_selected() {
+                ) {
+                    Ok(candidate) => candidate,
+                    Err(error) => return self.set(e, error),
+                };
+                if let Some(candidate) = candidate {
                     if let Some((plan, suspend_conversion)) = &candidate.adaptation {
                         if Self::adapted_ref_plan_is_identity(plan) && !suspend_conversion {
                             self.mark_local_function_ref(e, candidate.statement, true);
