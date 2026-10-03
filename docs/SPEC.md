@@ -5569,6 +5569,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   An inline function from another file of the module declares its objects in that file: a caller
   that only inlines it lists no row for them. Test:
   `a_caller_lists_no_local_class_of_an_inline_function_in_another_file`.
+  The anonymous object's class stays in the function's package, and its primary constructor is
+  public so the copied `new` is callable from a caller in another package. An anonymous object in
+  an ordinary function keeps a package-private constructor. Test:
+  `tests/cross_file_inline_call_e2e.rs::an_inline_anonymous_object_is_constructed_from_another_package`.
 - **What an enum entry's body declares is enclosed by the entry class's constructor.** An enum
   entry with a body compiles to its own class, whose `(String, int, ...)V` constructor runs the
   body's initializers. An object or local class declared in one of them names that constructor in
