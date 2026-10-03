@@ -254,7 +254,8 @@ mod tests {
     fn exact_declaration_identity_needs_no_classifier_fallback() {
         let owner = crate::types::type_name("review/ExactDeclaration");
         let ir = IrFile::default();
-        let classifiers = CheckedDispatchClassifiers::new(&ir, &Facts::default());
+        let facts = Facts::default();
+        let classifiers = CheckedDispatchClassifiers::new(&ir, &facts);
         let expected = realization(owner);
 
         assert_eq!(
