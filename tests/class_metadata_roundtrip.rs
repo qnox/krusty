@@ -278,6 +278,43 @@ fn inner_member_metadata_maps_captured_and_own_type_parameters_to_distinct_ids()
             ..Default::default()
         },
     );
+    // Writer pin for the kotlinc-parity encoding: the captured enclosing parameter is addressed by
+    // its RESERVED id only (`Type.type_parameter_id` f7 = 0), the class's own parameter takes the
+    // next id (f7 = 1). Neither writes `Type.type_parameter_name` (f9) — d2 carries no
+    // "outer-semantic" entry. An isolated decode cannot recover a captured parameter's name (it
+    // lives in the enclosing class's metadata), so the reader keeps the reference as a placeholder
+    // carrying the joint id; the classpath provider rebinds it once the owner chain is in scope
+    // (`metadata::rebind_enclosing_type_parameters`). The equivalent real shape (`class Outer<E> {
+    // inner class Inner(val e: E) }`) is byte-verified against kotlinc in
+    // `metadata_type_reference_e2e::an_inner_class_addresses_an_enclosing_type_parameter_by_id`.
+    // The `38 00` / `38 01` pairs below are f7 = 0 (captured) and f7 = 1 (own) in the `pair`
+    // member's return-type arguments and value-parameter types.
+    assert_eq!(
+        d1,
+        vec![
+            0x00, 0x16, 0x0a, 0x02, 0x18, 0x02, 0x0a, 0x00, 0x0a, 0x02, 0x10, 0x00, 0x0a, 0x02,
+            0x08, 0x03, 0x0a, 0x02, 0x18, 0x02, 0x0a, 0x02, 0x08, 0x02, 0x18, 0x00, 0x2a, 0x08,
+            0x08, 0x01, 0x10, 0x01, 0x2a, 0x02, 0x30, 0x02, 0x32, 0x02, 0x30, 0x02, 0x42, 0x07,
+            0xa2, 0x06, 0x04, 0x08, 0x03, 0x10, 0x04, 0x4a, 0x22, 0x10, 0x05, 0x1a, 0x0e, 0x12,
+            0x04, 0x12, 0x02, 0x38, 0x00, 0x12, 0x04, 0x12, 0x02, 0x38, 0x01, 0x30, 0x06, 0x32,
+            0x06, 0x10, 0x07, 0x1a, 0x02, 0x38, 0x00, 0x32, 0x06, 0x10, 0x08, 0x1a, 0x02, 0x38,
+            0x01,
+        ],
+    );
+    assert_eq!(
+        d2,
+        vec![
+            "Lsample/Outer$Inner;",
+            "U",
+            "",
+            "<init>",
+            "(Lsample/Outer;)V",
+            "pair",
+            "Lkotlin/Pair;",
+            "outer",
+            "inner",
+        ],
+    );
     let ci = class_info_kind("sample/Outer$Inner", d1, d2, Some(1));
     assert_eq!(ci.meta.class_type_parameters.type_params(), &["U"]);
     let pair = class_functions(&ci)
@@ -287,7 +324,7 @@ fn inner_member_metadata_maps_captured_and_own_type_parameters_to_distinct_ids()
     let signature = pair.generic_sig.as_ref().expect("generic member signature");
     assert!(matches!(
         signature.params[0],
-        Ty::TyParam("outer-semantic", _)
+        Ty::TyParam("\0tp:enclosing:0", _)
     ));
     assert!(matches!(signature.params[1], Ty::TyParam("U", _)));
 }
@@ -344,7 +381,41 @@ fn nested_inner_metadata_numbers_captures_from_outermost_to_innermost() {
             ..Default::default()
         },
     );
+    // Writer pin: captures reserve ids OUTERMOST first — outer = f7 0, middle = f7 1, the class's
+    // own parameter V = f7 2. Each is encoded as `Type.type_parameter_id` (f7) only, with no
+    // `type_parameter_name` (f9): the capture names appear in d2 only as this test's value-parameter
+    // NAMES (indices 7–9), never as an f9 reference. An isolated decode keeps each captured
+    // reference as a placeholder carrying the joint id (`\0tp:enclosing:N`); the classpath provider
+    // rebinds it to the enclosing class's parameter name once the owner chain is in scope. The
+    // `38 00` / `38 01` / `38 02` triple in `triple`'s value-parameter types is f7 = 0, 1, 2.
+    assert_eq!(
+        d1,
+        vec![
+            0x00, 0x16, 0x0a, 0x02, 0x18, 0x02, 0x0a, 0x00, 0x0a, 0x02, 0x10, 0x00, 0x0a, 0x02,
+            0x08, 0x03, 0x0a, 0x02, 0x10, 0x02, 0x0a, 0x02, 0x08, 0x03, 0x18, 0x00, 0x2a, 0x08,
+            0x08, 0x02, 0x10, 0x01, 0x2a, 0x02, 0x30, 0x02, 0x32, 0x02, 0x30, 0x02, 0x42, 0x07,
+            0xa2, 0x06, 0x04, 0x08, 0x03, 0x10, 0x04, 0x4a, 0x1e, 0x10, 0x05, 0x1a, 0x02, 0x30,
+            0x06, 0x32, 0x06, 0x10, 0x07, 0x1a, 0x02, 0x38, 0x00, 0x32, 0x06, 0x10, 0x08, 0x1a,
+            0x02, 0x38, 0x01, 0x32, 0x06, 0x10, 0x09, 0x1a, 0x02, 0x38, 0x02,
+        ],
+    );
+    assert_eq!(
+        d2,
+        vec![
+            "Lsample/Outer$Middle$Inner;",
+            "V",
+            "",
+            "<init>",
+            "(Lsample/Outer$Middle;)V",
+            "triple",
+            "",
+            "outer-semantic",
+            "middle-semantic",
+            "inner-semantic",
+        ],
+    );
     let ci = class_info_kind("sample/Outer$Middle$Inner", d1, d2, Some(1));
+    assert_eq!(ci.meta.class_type_parameters.type_params(), &["V"]);
     let signature = class_functions(&ci)
         .iter()
         .find(|function| function.jvm_name == "triple")
@@ -352,11 +423,11 @@ fn nested_inner_metadata_numbers_captures_from_outermost_to_innermost() {
         .expect("triple metadata signature");
     assert!(matches!(
         signature.params[0],
-        Ty::TyParam("outer-semantic", _)
+        Ty::TyParam("\0tp:enclosing:0", _)
     ));
     assert!(matches!(
         signature.params[1],
-        Ty::TyParam("middle-semantic", _)
+        Ty::TyParam("\0tp:enclosing:1", _)
     ));
     assert!(matches!(signature.params[2], Ty::TyParam("V", _)));
 }

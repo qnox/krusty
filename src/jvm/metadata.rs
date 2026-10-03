@@ -1858,6 +1858,110 @@ fn decode_class_signature(ctx: &MetaCtx<'_>) -> MetadataResult<ClassSignature> {
     Ok((parameters.formals, parameters.formal_bounds, supertypes))
 }
 
+/// The placeholder a decoded type carries for a type parameter of an ENCLOSING class
+/// (`class Outer<E> { inner class Inner(val e: E) }`): kotlinc writes the reference as
+/// `Type.type_parameter` (f7) alone, where the id counts every enclosing class's own parameters
+/// outermost-first before the class's own. A per-classfile decode has no enclosing-class metadata
+/// in hand, so the reference stays a placeholder until the classpath provider rebinds it to the
+/// enclosing parameter's name (`rebind_enclosing_type_parameters`).
+const ENCLOSING_TYPE_PARAMETER_PREFIX: &str = "\u{0}tp:enclosing:";
+
+fn enclosing_type_parameter_placeholder(id: u64) -> String {
+    format!("{ENCLOSING_TYPE_PARAMETER_PREFIX}{id}")
+}
+
+/// The joint (outermost-first) id behind an [`enclosing_type_parameter_placeholder`] name.
+pub fn enclosing_type_parameter_id(name: &str) -> Option<usize> {
+    name.strip_prefix(ENCLOSING_TYPE_PARAMETER_PREFIX)?
+        .parse()
+        .ok()
+}
+
+/// Rebind the enclosing-class placeholders in `ty` to the enclosing classes' own parameters
+/// (`enclosing` is outermost-first, so placeholder id `i` is `enclosing[i]`), restoring each
+/// parameter's declared bound (first declared upper bound; the placeholder's decode-time default
+/// otherwise). An id past the list — an enclosing class without Kotlin metadata, for one — keeps
+/// its placeholder.
+pub fn rebind_enclosing_type_parameters(ty: Ty, enclosing: &[(String, Vec<Ty>)]) -> Ty {
+    if enclosing.is_empty() {
+        return ty;
+    }
+    match ty {
+        Ty::TyParam(name, bound) => match enclosing_type_parameter_id(name) {
+            Some(id) if id < enclosing.len() => {
+                let (name, bounds) = &enclosing[id];
+                let bound = bounds.first().copied().unwrap_or(*bound);
+                Ty::ty_param(name, bound)
+            }
+            _ => ty,
+        },
+        Ty::Nullable(inner) => Ty::nullable(rebind_enclosing_type_parameters(*inner, enclosing)),
+        Ty::PlatformNullable(inner) => {
+            Ty::platform_nullable(rebind_enclosing_type_parameters(*inner, enclosing))
+        }
+        Ty::DefinitelyNotNull(inner) => {
+            rebind_enclosing_type_parameters(*inner, enclosing).definitely_non_null()
+        }
+        Ty::InProjection(inner) => {
+            Ty::in_projection(rebind_enclosing_type_parameters(*inner, enclosing))
+        }
+        Ty::OutProjection(inner) => {
+            Ty::out_projection(rebind_enclosing_type_parameters(*inner, enclosing))
+        }
+        Ty::StarProjection(inner) => {
+            Ty::star_projection(rebind_enclosing_type_parameters(*inner, enclosing))
+        }
+        Ty::Obj(internal, arguments) if !arguments.is_empty() => Ty::obj_args_name(
+            internal,
+            &arguments
+                .iter()
+                .map(|argument| rebind_enclosing_type_parameters(*argument, enclosing))
+                .collect::<Vec<_>>(),
+        ),
+        Ty::Fun(signature) => Ty::fun_with_shape(
+            signature
+                .params
+                .iter()
+                .map(|parameter| rebind_enclosing_type_parameters(*parameter, enclosing))
+                .collect(),
+            rebind_enclosing_type_parameters(signature.ret, enclosing),
+            signature.context_count,
+            signature.has_receiver,
+            signature.suspend,
+        ),
+        Ty::Intersection(parts) => Ty::intersection(
+            &parts
+                .iter()
+                .map(|part| rebind_enclosing_type_parameters(*part, enclosing))
+                .collect::<Vec<_>>(),
+        ),
+        _ => ty,
+    }
+}
+
+/// [`rebind_enclosing_type_parameters`] over every type a signature carries.
+pub fn rebind_generic_signature_enclosing(
+    signature: &GenericSig,
+    enclosing: &[(String, Vec<Ty>)],
+) -> GenericSig {
+    if enclosing.is_empty() {
+        return signature.clone();
+    }
+    let rebind = |ty: &Ty| rebind_enclosing_type_parameters(*ty, enclosing);
+    GenericSig {
+        formals: signature.formals.clone(),
+        formal_bounds: signature
+            .formal_bounds
+            .iter()
+            .map(|bounds| bounds.iter().map(rebind).collect())
+            .collect(),
+        receiver: signature.receiver.as_ref().map(rebind),
+        params: signature.params.iter().map(rebind).collect(),
+        ret: rebind(&signature.ret),
+        return_policy: signature.return_policy,
+    }
+}
+
 fn decode_metadata_type(
     body: &[u8],
     type_table: Option<&[u8]>,
@@ -1953,6 +2057,15 @@ fn decode_metadata_type(
             .or_else(|| {
                 node.type_parameter_name_id
                     .and_then(|id| resolve_string(records, d2, id as usize))
+            })
+            .or_else(|| {
+                // kotlinc addresses a type parameter of an ENCLOSING class by id alone (f7), and
+                // the id counts the enclosing classes' own parameters before this class's — but a
+                // per-classfile decode has no enclosing-class metadata in hand. Keep the reference
+                // as a placeholder; the classpath provider rebinds it to the enclosing parameter's
+                // name once the owner chain is in scope (see `enclosing_type_parameter_placeholder`).
+                node.type_parameter_id
+                    .map(enclosing_type_parameter_placeholder)
             })?;
         Ty::ty_param(
             &name,
