@@ -14,6 +14,7 @@ use std::collections::HashMap;
 
 mod arithmetic;
 mod boxed;
+mod compiler_intrinsics;
 mod exceptions;
 use arithmetic::{arithmetic_result, scalar_bound};
 mod strings;
@@ -1945,23 +1946,15 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 let Some(realization) = self.file.callables.callable(*target) else {
                     return Err("an unresolvable dependency call".to_string());
                 };
-                if realization.compiler_intrinsic
-                    == Some(crate::libraries::CompilerIntrinsic::StringPlus)
-                {
-                    let (Some(receiver), [argument]) = (dispatch_receiver, args) else {
-                        return Err("a malformed `String.plus`".to_string());
-                    };
-                    let left = self.reference(receiver)?;
-                    let right = self.reference(*argument)?;
-                    if self.terminated {
-                        return Ok(None);
-                    }
-                    return self.runtime_call(
-                        "kt_string_plus",
-                        &[any(), any()],
-                        *ret,
-                        &[left, right],
-                    );
+                // A callable reference reaches this ordinary dependency-call path, while retaining
+                // the exact compiler intrinsic the source-form operation uses.
+                if let Some(realized) = self.compiler_intrinsic_call(
+                    realization.compiler_intrinsic,
+                    dispatch_receiver,
+                    args,
+                    *ret,
+                ) {
+                    return realized;
                 }
                 let owner = super::super::intrinsics::DeclarationOwner::callable(realization);
                 // The Kotlin name the declaration PUBLISHES, not the spelling it is realized under.
@@ -1986,21 +1979,6 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                             super::super::intrinsics::float_predicate(owner, &name)
                         {
                             return self.float_predicate(predicate, receiver);
-                        }
-                        // The exact declaration a SOURCE FORM names, called through a reference:
-                        // `(IntArray::get)(a, i)` names the declaration `a[i]` names, and
-                        // `Boolean::not` the one `!b` does. The frontend supplies an operation for
-                        // the form it recognizes and an ordinary dependency call for the call, and
-                        // the provider intrinsic proves the declaration is the same either way, so
-                        // the operation is too rather than a member of a type the runtime has no
-                        // methods for.
-                        if let Some(realized) = self.primitive_member(
-                            realization.compiler_intrinsic,
-                            receiver,
-                            args,
-                            *ret,
-                        ) {
-                            return realized;
                         }
                         // The unsigned integers: a value class the erasure made look like the
                         // signed number sharing its bits, so every member where that difference
@@ -2386,23 +2364,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 let (Some(receiver), [index]) = (receiver, args) else {
                     return Err("a malformed string read".to_string());
                 };
-                let value = self.reference(receiver)?;
-                let Some(index) = self.coerce(*index, Ty::Int)? else {
-                    return Err("a `Unit` string index".to_string());
-                };
-                if self.terminated {
-                    return Ok(None);
-                }
-                let produced = self.runtime_call(
-                    "kt_string_get",
-                    &[any(), Ty::Int],
-                    Ty::Char,
-                    &[value, index],
-                )?;
-                let Some(produced) = produced else {
-                    return Ok(None);
-                };
-                self.convert(produced, Some(Ty::Char), ret)
+                self.string_get(receiver, *index, ret)
             }
             // `"$u"`: the frontend names the conversion rather than letting the template reach for
             // `Any.toString()`, because the value it would reach for is the signed number sharing

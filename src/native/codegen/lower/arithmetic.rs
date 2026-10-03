@@ -658,35 +658,12 @@ pub(super) fn arithmetic_result(op: IrBinOp, lhs: Ty, rhs: Option<Ty>) -> Ty {
 }
 
 impl BodyLowering<'_, '_, '_> {
-    /// A provider-identified primitive member realized as the operation the declaration is.
-    ///
-    /// `!b` reaches the generator as a compiler-supplied operation, because the frontend
-    /// recognizes the source FORM and names one. `(Boolean::not)(b)` carries the very same
-    /// provider intrinsic through an ordinary dependency call, which the member path
-    /// would otherwise look for a runtime entry point for and find none — a primitive has no
-    /// methods to reach. The declaration is what says what the call means, not the spelling, so
-    /// the answer here is the operation. No owner or callable spelling is consulted.
-    ///
-    /// Returns `None` when this is somebody else's member, so the caller falls through.
-    pub(super) fn primitive_member(
-        &mut self,
-        intrinsic: Option<crate::libraries::CompilerIntrinsic>,
-        receiver: u32,
-        args: &[u32],
-        ret: Ty,
-    ) -> Option<Result<Option<Value>, Unsupported>> {
-        let ty = self.type_of(receiver)?.non_null();
-        if ty == Ty::Boolean
-            && args.is_empty()
-            && intrinsic == Some(crate::libraries::CompilerIntrinsic::BooleanNot)
-        {
-            return Some(self.boolean_not(receiver, ret));
-        }
-        None
-    }
-
     /// `!b`, with the operand read at its own width rather than through a box.
-    fn boolean_not(&mut self, receiver: u32, ret: Ty) -> Result<Option<Value>, Unsupported> {
+    pub(super) fn boolean_not(
+        &mut self,
+        receiver: u32,
+        ret: Ty,
+    ) -> Result<Option<Value>, Unsupported> {
         let Some(value) = self.coerce(receiver, Ty::Boolean)? else {
             return Err("a `Unit` operand of `Boolean.not`".to_string());
         };

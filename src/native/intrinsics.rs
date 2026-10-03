@@ -615,12 +615,9 @@ pub(super) fn scalar_member(
         || owner.classifier_matches("kotlin/text/StringBuilder");
     if text_owner {
         match (name, params) {
-            // `s[i]`. A mapped builtin whose realization names a different physical member hands
-            // over that physical
-            // name, and `kotlin.CharSequence.get` is realized as `java.lang.CharSequence.charAt`. The
-            // Kotlin spelling still reaches here from a source that did not go through a realization,
-            // so both are the same member rather than one replacing the other.
-            ("get" | "charAt", [Ty::Int]) => {
+            // A `CharSequence`/builder read. `String.get` does not reach this name table: its exact
+            // compiler-intrinsic identity selects the same runtime operation in lowering.
+            ("get" | "charAt", [Ty::Int]) if !owner.classifier_matches("kotlin/String") => {
                 return Some(("kt_string_get", vec![reference, Ty::Int], Ty::Char));
             }
             // `sb.setLength(n)` counts UTF-16 units, so the operand is an `Int` the generator must not
@@ -903,20 +900,18 @@ pub(super) fn unsigned_conversion(owner: DeclarationOwner, name: &str) -> Option
     })
 }
 
-/// Whether an accessor is TEXT's `length` — `String`'s, `CharSequence`'s or a builder's.
+/// Whether an accessor is a non-`String` TEXT `length` — `CharSequence`'s or a builder's.
 ///
 /// One question about the same thing, and the runtime answers all three from one place (see
 /// `kt_text_of`) — including for text the PROGRAM declared, whose own `length` the descriptor
-/// records. `String.length` reaches here only through an ACCESSOR: written in source it is a
-/// compiler-supplied operation, because the frontend recognizes the form, and a synthesized
-/// accessor is a call.
-pub(super) fn is_text_length(owner: crate::types::TypeName, name: &str) -> bool {
+/// records. The selected `String.length` declaration carries `CompilerIntrinsic::StringLength`
+/// and deliberately does not enter this spelling-based migration path.
+pub(super) fn is_non_string_text_length(owner: crate::types::TypeName, name: &str) -> bool {
     // The provider presents it under the Kotlin name of the property, not the JVM accessor's:
     // `length`, where `kotlin.Enum`'s two arrive as `getName`/`getOrdinal`. Both spellings are
     // taken because which one a provider uses is the provider's business, not this table's.
     name == "length"
         && (classifier_matches(owner, "kotlin/CharSequence")
-            || classifier_matches(owner, "kotlin/String")
             || classifier_matches(owner, "kotlin/text/StringBuilder"))
 }
 
@@ -1139,6 +1134,40 @@ mod tests {
             None,
             "String.plus is admitted only by its CompilerIntrinsic identity"
         );
+    }
+
+    #[test]
+    fn string_get_has_no_name_based_runtime_fallback() {
+        for owner in ["kotlin/String", "java/lang/String"] {
+            assert_eq!(
+                scalar_member(member(owner), "get", &[Ty::Int]),
+                None,
+                "String.get from {owner} is admitted only by its CompilerIntrinsic identity"
+            );
+        }
+        assert_eq!(
+            scalar_member(member("kotlin/CharSequence"), "get", &[Ty::Int]),
+            Some((
+                "kt_string_get",
+                vec![Ty::nullable(Ty::obj("kotlin/Any")), Ty::Int],
+                Ty::Char,
+            )),
+            "the distinct CharSequence declaration remains explicit migration debt"
+        );
+    }
+
+    #[test]
+    fn string_length_has_no_name_based_property_fallback() {
+        for owner in ["kotlin/String", "java/lang/String"] {
+            assert!(
+                !is_non_string_text_length(crate::types::type_name(owner), "length"),
+                "String.length from {owner} is admitted only by its CompilerIntrinsic identity"
+            );
+        }
+        assert!(is_non_string_text_length(
+            crate::types::type_name("kotlin/CharSequence"),
+            "length"
+        ));
     }
 
     #[test]

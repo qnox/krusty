@@ -29,6 +29,33 @@ fn a_string_is_indexed_by_utf16_code_unit() {
 }
 
 #[test]
+fn a_string_get_reference_uses_the_selected_intrinsic() {
+    // The call through this reference is an ordinary dependency call in IR. Its selected
+    // declaration still carries `CompilerIntrinsic::StringGet`; the native backend must consume
+    // that identity instead of recognizing the `get` spelling again.
+    expect_native_box(
+        "fun box(): String {\n\
+         \x20   val read: (String, Int) -> Char = String::get\n\
+         \x20   return if (read(\"OK\", 1) == 'K') \"OK\" else \"fail\"\n\
+         }\n",
+        "StringGetReference",
+        "OK",
+    );
+}
+
+#[test]
+fn a_string_length_reference_uses_the_selected_intrinsic() {
+    expect_native_box(
+        "fun box(): String {\n\
+         \x20   val length: (String) -> Int = String::length\n\
+         \x20   return if (length(\"OK\") == 2) \"OK\" else \"fail\"\n\
+         }\n",
+        "StringLengthReference",
+        "OK",
+    );
+}
+
+#[test]
 fn a_substring_is_taken_by_utf16_unit() {
     expect_native_box(
         "fun box(): String {\n\
