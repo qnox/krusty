@@ -1223,6 +1223,8 @@ mod local_override_boxed_result_e2e;
 mod local_shadows_receiver_member_e2e;
 #[path = "local_superclass_capture_e2e.rs"]
 mod local_superclass_capture_e2e;
+#[path = "local_suspend_default_e2e.rs"]
+mod local_suspend_default_e2e;
 #[path = "loop_control_lines_e2e.rs"]
 mod loop_control_lines_e2e;
 #[path = "loop_jump_shape_e2e.rs"]
