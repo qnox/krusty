@@ -609,6 +609,7 @@ impl BodyFirChecker<'_> {
                     result: member.ret,
                     declared_result: member.declared_ret,
                     overridden_results: &member.overridden_results,
+                    semantic_role: member.semantic_role,
                     suspend: member.suspend(),
                     can_inline: member.inline.can_inline(),
                     inline_plan: member.inline_body_plan.as_deref(),
@@ -881,6 +882,7 @@ impl BodyFirChecker<'_> {
                         result: extension.callable.ret,
                         declared_result: extension.callable.declared_ret,
                         overridden_results: &extension.callable.overridden_results,
+                        semantic_role: extension.callable.semantic_role,
                         suspend: extension.callable.suspend,
                         can_inline: extension.callable.inline.can_inline(),
                         inline_plan,
@@ -1082,6 +1084,7 @@ impl BodyFirChecker<'_> {
                             .map(resolved)
                             .collect::<Result<Vec<_>, _>>()?
                             .into_boxed_slice(),
+                        semantic_role: selected.member.semantic_role,
                         suspend: selected.member.suspend(),
                         can_inline: selected.member.inline.can_inline(),
                         inline_plan: publish_inline_body_plan(
@@ -1165,6 +1168,7 @@ impl BodyFirChecker<'_> {
                             .map(resolved)
                             .collect::<Result<Vec<_>, _>>()?
                             .into_boxed_slice(),
+                        semantic_role: selected.callable.semantic_role,
                         suspend: selected.callable.suspend,
                         can_inline: selected.callable.inline.can_inline(),
                         inline_plan: publish_inline_body_plan(
@@ -1258,6 +1262,7 @@ impl BodyFirChecker<'_> {
                             .map(resolved)
                             .collect::<Result<Vec<_>, _>>()?
                             .into_boxed_slice(),
+                        semantic_role: None,
                         suspend: *suspend,
                         can_inline: inline.can_inline(),
                         inline_plan: publish_inline_body_plan(inline_body_plan.as_deref(), None)
@@ -1397,6 +1402,7 @@ impl BodyFirChecker<'_> {
                 result: callable.ret,
                 declared_result: callable.declared_ret,
                 overridden_results: &callable.overridden_results,
+                semantic_role: callable.semantic_role,
                 suspend: callable.suspend,
                 can_inline: callable.inline.can_inline(),
                 inline_plan,
@@ -1523,6 +1529,7 @@ impl BodyFirChecker<'_> {
                 result: *ret,
                 declared_result: *declared_ret,
                 overridden_results,
+                semantic_role: None,
                 suspend: *suspend,
                 can_inline: inline.can_inline(),
                 inline_plan: inline_body_plan.as_deref(),
@@ -1594,6 +1601,7 @@ impl BodyFirChecker<'_> {
             result,
             declared_result,
             overridden_results,
+            semantic_role,
             suspend,
             can_inline,
             inline_plan,
@@ -1669,6 +1677,7 @@ impl BodyFirChecker<'_> {
                     .map(resolved)
                     .collect::<Result<Vec<_>, _>>()?
                     .into_boxed_slice(),
+                semantic_role,
                 suspend,
                 can_inline,
                 inline_plan: publish_inline_body_plan(inline_plan, inline_receiver_parameter)
@@ -2293,6 +2302,7 @@ impl BodyFirChecker<'_> {
                 result: selected.ret,
                 declared_result: selected.member.declared_ret,
                 overridden_results: &selected.member.overridden_results,
+                semantic_role: selected.member.semantic_role,
                 suspend: selected.member.suspend(),
                 can_inline: selected.member.inline.can_inline(),
                 inline_plan: selected.member.inline_body_plan.as_deref(),

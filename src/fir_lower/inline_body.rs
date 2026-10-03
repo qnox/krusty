@@ -575,6 +575,7 @@ impl BodyLowering<'_> {
             result: call.result,
             declared_result: None,
             overridden_results: &[],
+            semantic_role: None,
             suspend: false,
             can_inline: false,
             inline_plan: None,
