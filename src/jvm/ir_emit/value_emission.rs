@@ -11,14 +11,13 @@ use crate::types::Ty;
 use super::{
     access_bridges, array_jvm_element, bottom_values, boxed_descriptor, bytecode_inline_call,
     class_ctor_jvm_tys, constant_emission, constructor_accessors, declared_jvm_interface,
-    default_mask_bit, default_mask_count, descriptor_is_reference, emit_box_impl,
-    emit_constructor_default_arguments, instance_field_jvm_name, ir_ty_to_jvm, jvm_declared_ty,
-    jvm_function_interface, jvm_function_invoke_descriptor, jvm_function_params, jvm_tys,
-    lambda_class, lambda_class_names, load, mapped_builtin_virtual_name, method_defaults,
-    native_unsigned_impl_target, parse_descriptor_params, physical_call_result_words,
-    prim_newarray_atype, push_zero, ref_class, singleton_instance_load, slot_words, try_emission,
-    ty_from_descriptor_ret, vararg, JvmDefaultMode, LambdaClassPlan, LambdaMode, PropertyOperation,
-    LMF_METAFACTORY_DESC,
+    default_mask_bit, default_mask_count, emit_box_impl, emit_constructor_default_arguments,
+    instance_field_jvm_name, ir_ty_to_jvm, jvm_declared_ty, jvm_function_interface,
+    jvm_function_invoke_descriptor, jvm_function_params, jvm_tys, lambda_class, lambda_class_names,
+    load, mapped_builtin_virtual_name, method_defaults, native_unsigned_impl_target,
+    parse_descriptor_params, physical_call_result_words, prim_newarray_atype, push_zero, ref_class,
+    singleton_instance_load, slot_words, try_emission, ty_from_descriptor_ret, vararg,
+    JvmDefaultMode, LambdaClassPlan, LambdaMode, PropertyOperation, LMF_METAFACTORY_DESC,
 };
 
 impl super::Emitter<'_> {
@@ -1521,94 +1520,31 @@ impl super::Emitter<'_> {
                 // lambda's concrete signature (no erasure/boxing).
                 let (iface, sam_method, sam_desc, inst_desc) = match sam {
                     Some(target) => {
-                        // `samMethodType` is the INTERFACE method's (erased) descriptor — NOT the
-                        // lambda's — so a SAM with parameters (or a generic SAM erased to `Object`)
-                        // matches the abstract method the metafactory must implement.
-                        let (sam_parameters, sam_result) = self
-                            .ir
-                            .lambda_sam_jvm_signature
-                            .get(impl_fn)
-                            .map(|(parameters, result)| (parameters.as_slice(), *result))
-                            .unwrap_or((
-                                target.declared_parameters.as_slice(),
-                                target.declared_result,
-                            ));
-                        // A suspend SAM method has the ordinary Kotlin semantic signature carried
-                        // by FIR/common IR, but its JVM interface slot is CPS-shaped just like a
-                        // suspend declaration: one trailing Continuation and Object return.  The
-                        // suspend pass has already applied the same transformation to `impl_fn`, so
-                        // realize the selected target at this platform boundary before comparing
-                        // arities.  Do not put the synthetic parameter into FirSamConversion — it is
-                        // not a Kotlin parameter and other backends need not share this ABI.
-                        let mut sam_parameters = jvm_tys(sam_parameters);
-                        let sam_result = if target.suspend {
-                            sam_parameters.push(Ty::obj("kotlin/coroutines/Continuation"));
-                            Ty::obj("java/lang/Object")
-                        } else if boxed_sam_result {
-                            jvm_declared_ty(&Ty::nullable(sam_result))
-                        } else {
-                            jvm_declared_ty(&sam_result)
-                        };
-                        let sam_desc = method_descriptor(&sam_parameters, sam_result);
-                        // `instantiatedMethodType` describes the specialization of the ERASED SAM
-                        // method, not merely the lifted implementation's primitive signature. A
-                        // generic interface slot can erase to `Object` while checking substitutes a
-                        // scalar (`Comparator<in Int>` is the standard example). Advertising `int`
-                        // for that reference slot asks LambdaMetafactory to specialize a reference
-                        // parameter as a primitive and fails while the bootstrap is linked. Keep the
-                        // lambda body's semantic scalar — the implementation handle may still accept
-                        // it and the metafactory supplies the ordinary wrapper adapter — but spell the
-                        // instantiated boundary with the wrapper wherever the SAM descriptor says the
-                        // physical slot is a reference. This reads only descriptor SHAPE, so source,
-                        // sibling-module, and dependency interfaces all take the same path.
-                        let Some((sam_params, sam_ret)) =
-                            crate::jvm::names::parse_method_descriptor(&sam_desc)
-                        else {
-                            self.run
-                                .set_emit_error("selected SAM descriptor is malformed".to_string());
-                            return;
+                        let descriptors = match lambda_class::sam_bootstrap_descriptors(
+                            self.ir,
+                            *impl_fn,
+                            target,
+                            captures.len(),
+                        ) {
+                            Ok(descriptors) => descriptors,
+                            Err(error) => {
+                                self.run.set_emit_error(error.to_string());
+                                return;
+                            }
                         };
                         crate::trace_compiler!(
                             "emit",
-                            "selected SAM impl={impl_name} own={lam_tys:?} target={}.{}{} physical_params={sam_params:?}",
+                            "selected SAM impl={impl_name} own={lam_tys:?} target={}.{}{} instantiated={}",
                             target.classifier,
                             target.method,
-                            sam_desc,
+                            descriptors.erased_method,
+                            descriptors.instantiated_method,
                         );
-                        if sam_params.len() != lam_tys.len() {
-                            self.run.set_emit_error(
-                                "selected SAM descriptor has the wrong parameter count".to_string(),
-                            );
-                            return;
-                        }
-                        let params: String = lam_tys
-                            .iter()
-                            .zip(sam_params)
-                            .map(|(&logical, physical)| {
-                                if descriptor_is_reference(physical) {
-                                    boxed_descriptor(logical)
-                                } else {
-                                    type_descriptor(logical)
-                                }
-                            })
-                            .collect();
-                        let ret = if sam_ret == "V" {
-                            // Kotlin models a Java `void` SAM result as `Unit`, and a checked lambda
-                            // body can therefore materialize `kotlin.Unit`. The instantiated method
-                            // type still exposes the interface's physical `void` boundary; the
-                            // metafactory discards any implementation value.
-                            "V".to_string()
-                        } else if descriptor_is_reference(sam_ret) {
-                            boxed_descriptor(impl_ret)
-                        } else {
-                            type_descriptor(impl_ret)
-                        };
-                        let inst_desc = format!("({params}){ret}");
                         (
                             target.classifier.render(),
                             target.method.clone(),
-                            sam_desc,
-                            inst_desc,
+                            descriptors.erased_method,
+                            descriptors.instantiated_method,
                         )
                     }
                     None => {
