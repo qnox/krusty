@@ -611,3 +611,66 @@ fun box(): String = Test("OK").test("x")
         "MemberExtPropTParamRet",
     );
 }
+
+/// A PROTECTED member extension property read inside the declaring class: Kotlin's protected rule
+/// constrains the implicit dispatch receiver (`this`), never the extension receiver, so
+/// `compute.observable` reads a protected member of `this` and is legal.
+#[test]
+fn protected_member_extension_property_read_in_declaring_class() {
+    common::expect_box_same_as_kotlinc(
+        r#"
+abstract class Store {
+    protected abstract val <K, V> ((K) -> V).observable: (K) -> V
+
+    fun memoize(compute: (String) -> String): (String) -> String = compute.observable
+}
+
+class Impl : Store() {
+    override val <K, V> ((K) -> V).observable: (K) -> V
+        get() = { k -> this(k) }
+}
+
+fun box(): String = Impl().memoize({ it + "OK" })("")
+"#,
+        "ProtectedMemberExtPropRead",
+    );
+}
+
+/// The same protected read from a SUBCLASS through its implicit dispatch receiver.
+#[test]
+fn protected_member_extension_property_read_in_subclass() {
+    common::expect_box_same_as_kotlinc(
+        r#"
+open class Base {
+    protected val Int.tag: String
+        get() = "OK"
+}
+
+class Child : Base() {
+    fun read(): String = 0.tag
+}
+
+fun box(): String = Child().read()
+"#,
+        "ProtectedMemberExtPropSubclass",
+    );
+}
+
+/// The protected rule still bites from an UNRELATED class: the read is rejected with the selected
+/// member's access diagnostic, not an internal error.
+#[test]
+fn protected_member_extension_property_read_from_unrelated_class_is_rejected() {
+    let diagnostics = common::front_end_diagnostics_with_stdlib(
+        r#"
+open class A {
+    protected val String.x: String
+        get() = this
+}
+
+class C {
+    fun use(a: A) = with(a) { "hi".x }
+}
+"#,
+    );
+    assert_eq!(diagnostics, ["cannot access 'x': it is protected in 'A'"]);
+}
