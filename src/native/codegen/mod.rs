@@ -83,6 +83,11 @@ impl Backend for CraneliftBackend {
     ) -> Vec<Artifact> {
         let stem = file.stems[file.source.raw() as usize].clone();
         crate::backend::counted_loops::realize(&mut file.ir, COUNTED_LOOPS);
+        // A local or anonymous classifier arrives with an opaque identity; this target names it
+        // from its provenance as Kotlin/Native does. There is no facade class here, so a
+        // classifier local to a top-level function starts in the package: `box$MyLocalObject`,
+        // `box$1`. Everything below, the name a failed cast reports included, reads that name.
+        file.ir.realize_local_class_names_in_packages();
         if state.runtime_symbols.is_none() {
             match super::linker::runtime_symbols(self.target) {
                 Ok(symbols) => state.runtime_symbols = Some(symbols),
@@ -102,6 +107,7 @@ impl Backend for CraneliftBackend {
         let lowered = match lower::lower_file(
             lower::FileInput {
                 ir: &file.ir,
+                classifiers: &file.classifiers,
                 callables: &file.callables,
                 runtime_symbols,
             },

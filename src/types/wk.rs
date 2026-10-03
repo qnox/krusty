@@ -26,6 +26,7 @@ names! {
     platform_dependent => "kotlin/internal/PlatformDependent",
     published_api => "kotlin/PublishedApi",
     continuation => "kotlin/coroutines/Continuation",
+    function_root => "kotlin/Function",
     any => "kotlin/Any",
     array => "kotlin/Array",
     string => "kotlin/String",

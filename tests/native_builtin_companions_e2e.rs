@@ -15,6 +15,43 @@
 
 use super::common::{expect_box_ok_with_stdlib, expect_native_box};
 
+/// The identity of a companion, which is all there is to observe.
+#[test]
+fn a_builtin_companion_is_one_object_and_not_another_types() {
+    let source = "fun box(): String {\n\
+         \x20   if (Int.Companion !== Int.Companion) return \"fail same\"\n\
+         \x20   // `Int` written as a value IS `Int.Companion`.\n\
+         \x20   val named: Any = Int\n\
+         \x20   if (named !== Int.Companion) return \"fail classifier\"\n\
+         \x20   val other: Any = Long.Companion\n\
+         \x20   if (named === other) return \"fail two companions\"\n\
+         \x20   if (Byte.Companion === Short.Companion) return \"fail narrow pair\"\n\
+         \x20   if (Float.Companion === Double.Companion) return \"fail floating pair\"\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    expect_box_ok_with_stdlib(source, "BuiltinCompanions");
+    expect_native_box(source, "BuiltinCompanions", "OK");
+}
+
+/// An extension on a companion, which is how a program reaches one as a receiver.
+#[test]
+fn an_extension_on_a_builtin_companion_reads_its_constants() {
+    let source = "fun Int.Companion.smallest() = MIN_VALUE\n\
+         fun Byte.Companion.largest() = MAX_VALUE\n\
+         fun <T> same(a: T, b: T): Boolean = a == b\n\
+         fun box(): String {\n\
+         \x20   if (Int.smallest() != Int.MIN_VALUE) return \"fail int\"\n\
+         \x20   if (Byte.largest() != Byte.MAX_VALUE) return \"fail byte\"\n\
+         \x20   // Through a generic parameter, which BOXES both sides — so the width the constant\n\
+         \x20   // was recorded at is what decides whether they compare equal.\n\
+         \x20   if (!same(Byte.MAX_VALUE, Byte.largest())) return \"fail boxed byte\"\n\
+         \x20   if (!same(Int.MIN_VALUE, Int.smallest())) return \"fail boxed int\"\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    expect_box_ok_with_stdlib(source, "CompanionExtensions");
+    expect_native_box(source, "CompanionExtensions", "OK");
+}
+
 /// A constant keeps its own WIDTH when it is boxed — the defect these cases uncovered.
 #[test]
 fn a_narrow_constant_boxes_as_its_own_type() {
