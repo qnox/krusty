@@ -25,18 +25,57 @@ pub(super) fn is_local(ir: &IrFile, class: &IrClass) -> bool {
             })
 }
 
+/// The type parameters a nested class's `@Metadata` reserves ids for: every enclosing class's own
+/// parameters, outermost first. kotlinc serializes a nested class under its parent's serializer,
+/// whose interner eagerly holds the parent's parameters — so the nested class's own parameters
+/// continue after them whether or not anything references them (`class Outer<E> { class Nested<E> }`
+/// gives the nested `E` id 1).
+pub(super) fn enclosing_type_parameters(ir: &IrFile, class: &IrClass) -> Vec<String> {
+    let mut owners = class.fq_name_id().existing_nested_owners();
+    owners.reverse(); // recorded deepest-first; ids count from the outermost class
+    owners
+        .into_iter()
+        .flat_map(|owner| {
+            // A same-file nested class's owner always has a class signature; a miss here silently
+            // shifts every reserved id after it.
+            let signature = ir.class_signature_name(owner);
+            debug_assert!(
+                signature.is_some(),
+                "nested class owner has no class signature"
+            );
+            signature
+                .map(|signature| {
+                    signature
+                        .type_params
+                        .iter()
+                        .map(|parameter| parameter.semantic_name.clone())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
 /// How `class`'s `@Metadata` numbers the type parameters it captures. kotlinc serializes a class
 /// declared in executable code with no enclosing serializer, so its captured parameters are
 /// numbered on first use; a class nested in another is serialized under the outer one, whose
-/// parameters keep the ids before its own.
-pub(super) fn captured_type_parameters(
-    class: &IrClass,
-) -> crate::metadata::class_builder::CapturedTypeParameters<'_> {
+/// parameters hold the ids before its own (see [`enclosing_type_parameters`]).
+pub(super) fn captured_type_parameters<'a>(
+    ir: &IrFile,
+    class: &'a IrClass,
+    enclosing: &'a [String],
+) -> crate::metadata::class_builder::CapturedTypeParameters<'a> {
     use crate::metadata::class_builder::CapturedTypeParameters;
     if class.is_local_class || class.is_anonymous_object {
         CapturedTypeParameters::NumberedOnUse(&class.captured_type_params)
-    } else {
+    } else if is_local(ir, class) {
+        // Only a class nested in an enum entry's body reaches this branch — one nested in a local
+        // class or anonymous object is itself a local class (`is_local_class`) and takes the first
+        // branch. An enum entry body cannot capture a type parameter, so the reservation is empty
+        // and the numbering choice is moot; the recorded captures are kept as the reservation.
         CapturedTypeParameters::Reserved(&class.captured_type_params)
+    } else {
+        CapturedTypeParameters::Reserved(enclosing)
     }
 }
 

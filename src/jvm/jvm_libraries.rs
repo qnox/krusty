@@ -449,6 +449,38 @@ impl JvmLibraries {
         signature
     }
 
+    /// The own type parameters (names with their declared bounds) of every class enclosing
+    /// `internal`, outermost first — the id space a nested class's `Type.type_parameter` (f7)
+    /// counts into. The per-classfile metadata reader records such a reference as a placeholder;
+    /// rebinding it needs the enclosing classes' metadata, reachable only through the classpath at
+    /// this provider boundary.
+    fn enclosing_type_parameters(&self, internal: TypeName) -> Vec<(String, Vec<Ty>)> {
+        let mut owners = Vec::new();
+        let mut owner = internal.nested_owner();
+        while let Some(name) = owner {
+            owners.push(name);
+            owner = name.nested_owner();
+        }
+        owners.reverse();
+        owners
+            .into_iter()
+            .flat_map(|owner| {
+                self.cp
+                    .find_name(owner)
+                    .map(|class| {
+                        let parameters = &class.meta.class_type_parameters;
+                        parameters
+                            .type_params()
+                            .iter()
+                            .cloned()
+                            .zip(parameters.type_param_bounds().iter().cloned())
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+            })
+            .collect()
+    }
+
     fn member_scope_names(
         &self,
         internal: TypeName,
@@ -1502,6 +1534,11 @@ impl JvmLibraries {
             // its record so a named-argument / omitted-`$default` member call resolves through the ONE
             // `resolve_type` member seam (the `instance_members` query), not a separate `functions()` walk.
             let meta_fns = metadata::class_functions(&ci);
+            // A member may reference an ENCLOSING class's type parameter (`inner class
+            // Inner(val e: E)`): kotlinc writes that by id alone, so the reader left a
+            // placeholder. This is the boundary where the owner chain is reachable — rebind the
+            // placeholders to the enclosing parameters' names and declared bounds.
+            let enclosing_type_parameters = self.enclosing_type_parameters(internal_name);
             // The class's `@Metadata` CONSTRUCTOR records — the only place a constructor parameter's
             // source-level shape survives (a receiver function type erases to `FunctionN` in both the
             // descriptor and the `Signature`).
@@ -1633,6 +1670,10 @@ impl JvmLibraries {
                         );
                         continue;
                     };
+                    let signature = metadata::rebind_generic_signature_enclosing(
+                        &signature,
+                        &enclosing_type_parameters,
+                    );
                     member.name = declaration.kotlin_name.clone();
                     if declaration.jvm_name != declaration.kotlin_name {
                         member.physical_name = Some(declaration.jvm_name.clone());
@@ -1682,7 +1723,17 @@ impl JvmLibraries {
                         );
                         continue;
                     }
-                    member.params.clone_from(&declaration.params.types);
+                    member.params = declaration
+                        .params
+                        .types
+                        .iter()
+                        .map(|ty| {
+                            metadata::rebind_enclosing_type_parameters(
+                                *ty,
+                                &enclosing_type_parameters,
+                            )
+                        })
+                        .collect();
                     member.name = "<init>".to_string();
                     if declaration.jvm_name != "<init>" {
                         member.physical_name = Some(declaration.jvm_name.to_string());
@@ -1984,10 +2035,38 @@ impl JvmLibraries {
                 super::jvm_class_map::maps_to_distinct_jvm_internal(internal_name);
             let builtin_class_signature = self.cp.builtin_class_gsig_name(internal_name);
             let metadata_class_signature = ci.meta.class_visibility.map(|_| {
+                // The class's OWN level references an enclosing class's parameter by the same
+                // id-only encoding as its members (`class Outer<E> { inner class Inner<T : E> :
+                // Comparable<E> }`) — rebind those placeholders before the bounds and supertypes
+                // publish, exactly as the member records above.
                 (
                     ci.meta.class_type_parameters.type_params.clone(),
-                    ci.meta.class_type_parameters.type_param_bounds.clone(),
-                    ci.meta.class_supertypes.clone(),
+                    ci.meta
+                        .class_type_parameters
+                        .type_param_bounds
+                        .iter()
+                        .map(|bounds| {
+                            bounds
+                                .iter()
+                                .map(|bound| {
+                                    metadata::rebind_enclosing_type_parameters(
+                                        *bound,
+                                        &enclosing_type_parameters,
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .collect(),
+                    ci.meta
+                        .class_supertypes
+                        .iter()
+                        .map(|supertype| {
+                            metadata::rebind_enclosing_type_parameters(
+                                *supertype,
+                                &enclosing_type_parameters,
+                            )
+                        })
+                        .collect(),
                 )
             });
             let semantic_class_signature = metadata_class_signature.clone().or_else(|| {
@@ -3506,6 +3585,7 @@ impl JvmLibraries {
         let mapped_property = mapped_members
             .iter()
             .find(|mapping| mapping.is_property() && mapping.source_name == name);
+        let enclosing_type_parameters = self.enclosing_type_parameters(cn);
         if let Some(ci) = self.cp.find_name(cn) {
             for mp in metadata::class_properties(&ci) {
                 // A `companion { … }` block property is a classifier member, not an instance one.
@@ -3519,7 +3599,12 @@ impl JvmLibraries {
                     mp.context_params,
                     mp.getter,
                 );
-                let property_signature = mp.generic_sig.as_ref();
+                let property_signature = mp.generic_sig.as_ref().map(|signature| {
+                    metadata::rebind_generic_signature_enclosing(
+                        signature,
+                        &enclosing_type_parameters,
+                    )
+                });
                 // Need the real accessor to emit anything; skip a property whose metadata omits it.
                 let Some(getter) = mp.getter.clone() else {
                     continue;
@@ -3565,10 +3650,13 @@ impl JvmLibraries {
                         continue;
                     };
                     let receiver = property_signature
+                        .as_ref()
                         .and_then(|signature| signature.receiver)
                         .or_else(|| mp.receiver_class.map(kotlin_type_name_to_ty))
                         .unwrap_or(physical_receiver);
-                    let ty = property_signature.map_or(ty, |signature| signature.ret);
+                    let ty = property_signature
+                        .as_ref()
+                        .map_or(ty, |signature| signature.ret);
                     let getter_source_name = crate::names::property_getter_name(&mp.name);
                     let getter_physical_name = getter.name.clone();
                     let mut getter = LibraryCallable::library(
@@ -3582,6 +3670,7 @@ impl JvmLibraries {
                     getter.physical_name = (getter_physical_name != getter_source_name)
                         .then_some(getter_physical_name);
                     let semantic_context = property_signature
+                        .as_ref()
                         .map(|signature| signature.params.clone())
                         .unwrap_or_else(|| getter_params[..context_count].to_vec());
                     getter.params = semantic_context
@@ -3591,7 +3680,7 @@ impl JvmLibraries {
                         .collect();
                     getter.source_receiver = Some(receiver);
                     getter.context_count = context_count;
-                    getter.generic_sig = property_signature.cloned().map(Box::new);
+                    getter.generic_sig = property_signature.clone().map(Box::new);
                     getter.owner_is_interface = ci.is_interface();
                     getter.is_abstract = mp.is_abstract;
                     getter.inline = property_accessor_inline(getter_public);
@@ -3644,6 +3733,7 @@ impl JvmLibraries {
                         associated_classifier: None,
                         associated_access_owner: None,
                         formals: property_signature
+                            .as_ref()
                             .map(|signature| signature.formals.clone())
                             .unwrap_or_default(),
                         ty,
@@ -3696,6 +3786,7 @@ impl JvmLibraries {
                     continue;
                 }
                 let semantic_context = property_signature
+                    .as_ref()
                     .map(|signature| signature.params.clone())
                     .unwrap_or_else(|| getter_params.clone());
                 let getter_source_name = crate::names::property_getter_name(&mp.name);
@@ -3715,7 +3806,7 @@ impl JvmLibraries {
                 // (`Base<T>.value: T?`). `specialize_property` reads that relation from the getter,
                 // just as it does for member-extension properties; omitting it here turned an
                 // applied `Base<String>.value` into the unbound upper bound `Any?`.
-                getter.generic_sig = property_signature.cloned().map(Box::new);
+                getter.generic_sig = property_signature.clone().map(Box::new);
                 getter.context_count = context_count;
                 getter.owner_is_interface = ci.is_interface();
                 getter.is_abstract = mp.is_abstract;
@@ -3737,6 +3828,7 @@ impl JvmLibraries {
                 // only its erased physical realization (`java/util/List`). Do not rediscover the
                 // property type through a getter overload query.
                 let ty = property_signature
+                    .as_ref()
                     .map(|signature| signature.ret)
                     .or_else(|| getter_signature.as_ref().map(|signature| signature.ret))
                     .unwrap_or(ty);
@@ -3786,6 +3878,7 @@ impl JvmLibraries {
                     associated_classifier: None,
                     associated_access_owner: None,
                     formals: property_signature
+                        .as_ref()
                         .map(|signature| signature.formals.clone())
                         .or_else(|| {
                             getter_signature
