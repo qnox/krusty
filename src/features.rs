@@ -287,6 +287,14 @@ mod tests {
     }
 
     #[test]
+    fn experimental_language_levels_enable_their_standard_feature_baseline() {
+        let features = LangFeatures::for_language_version(LanguageVersion::V2_5);
+        assert!(features.has("ExplicitContextArguments"));
+        assert!(features.has("NameBasedDestructuring"));
+        assert!(features.has("ContextParameters"));
+    }
+
+    #[test]
     fn each_cli_feature_alias_enables_its_feature() {
         assert!(LangFeatures::new().has("ExplicitBackingFields"));
         assert!(!LangFeatures::new().has("DataClassCopyRespectsConstructorVisibility"));

@@ -388,6 +388,7 @@ private val JVM_DEFAULT_LEGACY_MODES = setOf("all", "all-compatibility", "disabl
 // The stamp contract of the CLI's `-Xmetadata-version` (METADATA_STAMP_LEVELS in krusty-cli):
 // an artifact stamp, not a language-semantics switch.
 private val METADATA_STAMP_LEVELS = setOf("2.0", "2.1", "2.2", "2.3", "2.4")
+private val LANGUAGE_API_LEVELS = setOf("2.0", "2.1", "2.2", "2.3", "2.4", "2.5", "2.6")
 
 private fun isFreeJvmDefault(argument: String): Boolean =
     argument == "-jvm-default" || argument == "-Xjvm-default" ||
@@ -469,20 +470,20 @@ private fun reservedFreeArgument(argument: String): String? {
 // The standard language and API versions are semantic compiler inputs and are forwarded unchanged.
 // The compiler owns their relationship and declaration-availability checks.
 private fun supportedLanguageVersion(version: String): String {
-    if (version !in METADATA_STAMP_LEVELS) {
+    if (version !in LANGUAGE_API_LEVELS) {
         throw GradleException(
             "krusty does not support compilerOptions.languageVersion=$version; " +
-                "supported language versions: ${METADATA_STAMP_LEVELS.joinToString()}",
+                "supported language versions: ${LANGUAGE_API_LEVELS.joinToString()}",
         )
     }
     return version
 }
 
 private fun supportedApiVersion(version: String): String {
-    if (version !in METADATA_STAMP_LEVELS) {
+    if (version !in LANGUAGE_API_LEVELS) {
         throw GradleException(
             "krusty does not support compilerOptions.apiVersion=$version; " +
-                "supported API versions: ${METADATA_STAMP_LEVELS.joinToString()}",
+                "supported API versions: ${LANGUAGE_API_LEVELS.joinToString()}",
         )
     }
     return version

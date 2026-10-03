@@ -147,6 +147,9 @@ fn compile_work_unit(unit: krusty_cli::worker::WorkUnit) -> Result<(), String> {
 /// instead of terminating: a worker that exits on a broken source takes the whole build's worker
 /// process down with it.
 pub fn compile(opts: &cli::Options) -> Result<usize, String> {
+    for warning in &opts.version_warnings {
+        eprintln!("warning: {warning}");
+    }
     let version = match opts.kotlin_reference_version {
         Some(version) => version,
         None => krusty::kotlin_version::configured_target()

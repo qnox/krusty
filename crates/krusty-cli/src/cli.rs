@@ -36,6 +36,9 @@ pub struct Options {
     /// part of kotlinc's accepted surface: the driver prints kotlinc's warning and compilation is
     /// unchanged. Currently only `-Xwasm-kclass-fqn` — see the match arm for the measured contract.
     pub unsupported_flag_warnings: Vec<String>,
+    /// Standard language/API compatibility warnings emitted by kotlinc for deprecated or
+    /// experimental public levels.
+    pub version_warnings: Vec<String>,
     /// Invalid or explicitly requested-but-unemittable options. The driver reports these and exits
     /// before compilation rather than silently producing a different artifact.
     pub errors: Vec<String>,
@@ -92,6 +95,7 @@ impl Default for Options {
             language_settings: LanguageSettings::default(),
             ignored: Vec::new(),
             unsupported_flag_warnings: Vec::new(),
+            version_warnings: Vec::new(),
             errors: Vec::new(),
             print_version: false,
             print_help: false,
@@ -167,13 +171,37 @@ fn apply_jvm_default(
 }
 
 fn supported_stamp_levels() -> String {
-    LanguageVersion::supported_text()
+    LanguageVersion::supported_metadata_stamps_text()
 }
 
 /// Parse a `major.minor` level on the shared stamp contract. Anything else — a patch segment,
-/// a sign, or a level outside 2.0 through 2.4 — is unknown.
+/// a sign, or a level outside the internal 2.0 through 2.4 stamp domain — is unknown.
 fn parse_metadata_level(value: &str) -> Option<[i32; 3]> {
-    LanguageVersion::parse_supported(value).map(LanguageVersion::metadata_version)
+    LanguageVersion::parse_supported_metadata_stamp(value).map(LanguageVersion::metadata_version)
+}
+
+fn version_warnings(settings: &LanguageSettings) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if settings.language_version >= LanguageVersion::V2_2
+        && settings.api_version <= LanguageVersion::V2_1
+    {
+        warnings.push(format!(
+            "API version {} is deprecated and its support will be removed in a future version of Kotlin. Update the version to 2.2.",
+            settings.api_version
+        ));
+    }
+    match settings.language_version {
+        LanguageVersion::V2_0 | LanguageVersion::V2_1 => warnings.push(format!(
+            "language version {} is deprecated and its support will be removed in a future version of Kotlin. Update the version to 2.2.",
+            settings.language_version
+        )),
+        LanguageVersion::V2_5 | LanguageVersion::V2_6 => warnings.push(format!(
+            "language version {} is experimental, there are no backwards compatibility guarantees for new language and library features. Use the stable version 2.4 instead.",
+            settings.language_version
+        )),
+        _ => {}
+    }
+    warnings
 }
 
 /// Split a classpath string on the platform separator (`:` on Unix).
@@ -403,7 +431,10 @@ pub fn parse(argv: impl IntoIterator<Item = String>) -> Options {
     opts.plugins.finish();
     opts.errors.append(&mut opts.plugins.errors);
     match LanguageSettings::new(language_version, api_version, &language_feature_arguments) {
-        Ok(settings) => opts.language_settings = settings,
+        Ok(settings) => {
+            opts.version_warnings = version_warnings(&settings);
+            opts.language_settings = settings;
+        }
         Err(error) => opts.errors.push(error),
     }
     opts
@@ -630,7 +661,7 @@ Common options (kotlinc-compatible):
   -module-name <name>   name of the generated <name>.kotlin_module (default: main)
   -include-runtime      accepted (no-op: krusty does not bundle the stdlib)
   -jvm-target <v>        class-file version to emit (1.8→v52, 9→v53, …, 25→v69; default v52)
-  -language-version <v>  source semantics to compile (2.0–2.4; default 2.4)
+  -language-version <v>  source semantics to compile (2.0–2.6; default stable 2.4)
   -api-version <v>       Kotlin API surface available to source (defaults to language version)
   -Xmetadata-version <v> internal artifact stamp for @kotlin.Metadata and the
                          .kotlin_module header (2.0–2.4; does not change semantics)
@@ -1029,9 +1060,17 @@ mod tests {
         assert!(stamp.errors.is_empty(), "{:?}", stamp.errors);
         assert!(stamp.ignored.is_empty(), "{:?}", stamp.ignored);
 
-        let supported = "2.0, 2.1, 2.2, 2.3, 2.4";
+        for experimental in [LanguageVersion::V2_5, LanguageVersion::V2_6] {
+            let parsed = parse_args(&["-language-version", &experimental.to_string(), "f.kt"]);
+            assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+            assert_eq!(parsed.language_settings.language_version, experimental);
+            assert_eq!(parsed.language_settings.api_version, experimental);
+            assert_eq!(parsed.version_warnings.len(), 1);
+        }
+
+        let supported = "2.0 (deprecated), 2.1 (deprecated), 2.2, 2.3, 2.4, 2.5 (experimental), 2.6 (experimental)";
         for bad in [
-            "banana", "2", "2.4.0", "2.x", "-2.2", "+2.2", "0.0", "2.5", "999.1",
+            "banana", "2", "2.4.0", "2.x", "-2.2", "+2.2", "0.0", "2.7", "999.1", "",
         ] {
             let language = parse_args(&["-language-version", bad, "f.kt"]);
             assert_eq!(
@@ -1046,7 +1085,7 @@ mod tests {
             assert_eq!(
                 metadata.errors,
                 [format!(
-                    "unknown metadata version: {bad}\nSupported metadata versions: {supported}"
+                    "unknown metadata version: {bad}\nSupported metadata versions: 2.0, 2.1, 2.2, 2.3, 2.4"
                 )],
                 "{bad:?}"
             );
@@ -1059,6 +1098,34 @@ mod tests {
         assert_eq!(
             parse_args(&["-Xmetadata-version"]).errors,
             ["missing value for -Xmetadata-version".to_string()]
+        );
+
+        let metadata = parse_args(&["-Xmetadata-version", "2.5", "f.kt"]);
+        assert_eq!(
+            metadata.errors,
+            ["unknown metadata version: 2.5\nSupported metadata versions: 2.0, 2.1, 2.2, 2.3, 2.4".to_owned()]
+        );
+    }
+
+    #[test]
+    fn version_status_warnings_match_kotlinc() {
+        assert_eq!(
+            parse_args(&["-language-version", "2.0", "f.kt"]).version_warnings,
+            ["language version 2.0 is deprecated and its support will be removed in a future version of Kotlin. Update the version to 2.2.".to_owned()]
+        );
+        assert_eq!(
+            parse_args(&[
+                "-language-version",
+                "2.5",
+                "-api-version",
+                "2.0",
+                "f.kt",
+            ])
+            .version_warnings,
+            [
+                "API version 2.0 is deprecated and its support will be removed in a future version of Kotlin. Update the version to 2.2.".to_owned(),
+                "language version 2.5 is experimental, there are no backwards compatibility guarantees for new language and library features. Use the stable version 2.4 instead.".to_owned(),
+            ]
         );
     }
 
