@@ -190,6 +190,10 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                     .chain(sc.body),
             );
             e.this_uninitialized = true;
+            e.regeneration_site = Some(super::bytecode_inline_call::RegenerationSite::constructor(
+                &sc_desc,
+                env.signature_symbols,
+            ));
             // A secondary constructor can own the class-initialization body when no primary
             // constructor exists. Only exact initializer block identities render boundaries.
             e.render_initializer_boundaries = true;

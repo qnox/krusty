@@ -478,6 +478,7 @@ mod construction_argument_labels_e2e;
 mod construction_default_arg_e2e;
 #[path = "constructor_initialization_order_e2e.rs"]
 mod constructor_initialization_order_e2e;
+mod constructor_continuation_e2e;
 #[path = "consumer_materialized_result_e2e.rs"]
 mod consumer_materialized_result_e2e;
 #[path = "context_and_loop_wording_e2e.rs"]
