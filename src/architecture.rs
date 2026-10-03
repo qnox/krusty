@@ -646,6 +646,8 @@ mod tests {
                 "jvm",
                 "klib",
                 "kotlin_version",
+                "language_settings",
+                "language_version",
                 "lexer",
                 "libraries",
                 "metadata",
