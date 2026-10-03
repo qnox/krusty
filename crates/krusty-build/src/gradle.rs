@@ -873,14 +873,6 @@ mod tests {
                     "krusty does not support warning policy freeCompilerArg '-Werror'",
                 ),
                 (
-                    "warning-level-bad-severity",
-                    "unsupported freeCompilerArg '-Xwarning-level=REDUNDANT_CLI_ARG:loud'; supported severities: error, warning, disabled",
-                ),
-                (
-                    "warning-level-missing-colon",
-                    "unsupported freeCompilerArg '-Xwarning-level=REDUNDANT_CLI_ARG'; expected -Xwarning-level=<NAME>:<error|warning|disabled>",
-                ),
-                (
                     "empty-opt-in",
                     "compilerOptions.optIn contains an empty marker",
                 ),
@@ -919,6 +911,36 @@ mod tests {
                 assert!(!log.exists(), "{case} must fail before execing krusty");
             }
 
+            // Gradle transports named warning policy without duplicating the compiler's registry.
+            // Malformed policy therefore reaches krusty and is rejected by the same parser as a
+            // direct CLI or Bazel-worker invocation.
+            for (case, argument) in [
+                (
+                    "warning-level-bad-severity",
+                    "-Xwarning-level=REDUNDANT_CLI_ARG:loud",
+                ),
+                (
+                    "warning-level-missing-colon",
+                    "-Xwarning-level=REDUNDANT_CLI_ARG",
+                ),
+            ] {
+                let _ = std::fs::remove_file(&log);
+                let result = build()
+                    .property("krusty.negative", case)
+                    .tasks([":compiler:util:compileKotlin"])
+                    .run();
+                assert!(result.is_err(), "negative case {case} succeeded");
+                let invocation = single_invocation(&log);
+                assert_eq!(
+                    invocation
+                        .iter()
+                        .filter(|actual| actual.as_str() == argument)
+                        .count(),
+                    1,
+                    "{case}: {invocation:?}",
+                );
+            }
+
             // Gradle forwards standard version values without duplicating kotlinc's
             // release-specific version table in the plugin. The shared compiler settings boundary
             // rejects values unavailable in the selected 2.4.10 compiler after seeing the exact
@@ -944,9 +966,8 @@ mod tests {
                 );
             }
 
-            // A well-formed `-Xwarning-level=NAME:SEVERITY` freeCompilerArg is forwarded as an
-            // accepted-but-unwired compatibility arg: warning policy never changes the emitted
-            // bytes, so the compile runs and the recorded invocation carries the argument.
+            // A well-formed named policy is forwarded to and applied by the compiler. Disabling a
+            // warning does not change classfile bytes, so this compile succeeds normally.
             let _ = std::fs::remove_file(&log);
             build()
                 .property("krusty.negative", "warning-level")

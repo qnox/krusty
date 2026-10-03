@@ -218,18 +218,18 @@ pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
                 "--opt_in" => unit
                     .inert
                     .extend(values.into_iter().map(|value| format!("--opt_in {value}"))),
-                // Warning policy changes what the compiler REPORTS, never what it emits, so each
-                // entry is inert — validated against the same shape the CLI accepts (a colon, a
-                // non-empty name, kotlinc's severity set) rather than trusted unseen.
+                // Preserve warning policy as the standard kotlinc spelling. The batch parser owns
+                // the diagnostic-name registry and duplicate checks, so the worker does not grow
+                // a second, drifting copy.
                 "--x_warning_level" => {
                     if values.is_empty() {
-                        unit.inert.push(flag.to_string());
+                        return Err(Refusal::Malformed(
+                            "--x_warning_level requires at least one NAME:SEVERITY value"
+                                .to_string(),
+                        ));
                     }
                     for value in values {
-                        if let Err(error) = crate::cli::validate_warning_level(&value) {
-                            return Err(Refusal::Unsupported(error));
-                        }
-                        unit.inert.push(format!("--x_warning_level {value}"));
+                        unit.kotlinc_args.push(format!("-Xwarning-level={value}"));
                     }
                 }
                 "--x_xlanguage" => {
@@ -376,17 +376,10 @@ pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
                         // fleet.util.codepoints) is safe to build. Inert here for Bazel to print;
                         // deliberately NOT generalized to other `-Xwasm-*` flags.
                         "-Xwasm-kclass-fqn" => unit.inert.push(value),
-                        // Warning policy only: the CLI accepts this spelling as an ignored
-                        // compatibility option, so the worker reports it inert the same way —
-                        // validated like the CLI's own parse, since a malformed value would
-                        // otherwise report a successful compile kotlinc would reject.
-                        _ if value.starts_with("-Xwarning-level=") => {
-                            let level = value.strip_prefix("-Xwarning-level=").unwrap_or_default();
-                            match crate::cli::validate_warning_level(level) {
-                                Ok(()) => unit.inert.push(value),
-                                Err(error) => return Err(Refusal::Unsupported(error)),
-                            }
-                        }
+                        // The common CLI parser validates the typed diagnostic identity and applies
+                        // its severity. Keeping the argument here also lets duplicate spellings from
+                        // the two worker surfaces be rejected in one place.
+                        _ if value.starts_with("-Xwarning-level=") => unit.kotlinc_args.push(value),
                         _ => unit.kotlinc_args.push(value),
                     }
                 }
@@ -1002,12 +995,10 @@ mod tests {
         );
     }
 
-    /// A `-Xwarning-level` forwarded through `kotlinc_opts`, and the worker's own
-    /// `--x_warning_level` list flag, are warning policy only: they change what the compiler
-    /// reports, never what it emits, so both are recorded as inert. A malformed value is refused,
-    /// as the CLI's own parse would reject it.
+    /// Both worker spellings normalize to the standard CLI option. Validation and policy
+    /// application then happen through the same typed diagnostic registry as a batch invocation.
     #[test]
-    fn warning_level_is_accepted_as_inert() {
+    fn warning_level_is_forwarded_to_the_typed_cli_policy() {
         let unit = translate(&args(&[
             "--kotlinc-arg",
             "-Xwarning-level=REDUNDANT_CLI_ARG:disabled",
@@ -1017,20 +1008,16 @@ mod tests {
             "o.jar",
         ]))
         .expect("a valid warning level must translate");
+        assert!(unit.inert.is_empty(), "{:?}", unit.inert);
         assert_eq!(
-            unit.inert,
+            unit.kotlinc_args,
             vec!["-Xwarning-level=REDUNDANT_CLI_ARG:disabled".to_string()]
-        );
-        assert!(
-            unit.kotlinc_args.is_empty(),
-            "the flag changes nothing, so nothing is forwarded: {:?}",
-            unit.kotlinc_args
         );
 
         let unit = translate(&args(&[
             "--x_warning_level",
             "REDUNDANT_CLI_ARG:disabled",
-            "DEPRECATION:error",
+            "DEPRECATED_LANGUAGE_VERSION:error",
             "--srcs",
             "A.kt",
             "--out",
@@ -1038,12 +1025,13 @@ mod tests {
         ]))
         .expect("the worker's own warning-level flag must translate");
         assert_eq!(
-            unit.inert,
+            unit.kotlinc_args,
             vec![
-                "--x_warning_level REDUNDANT_CLI_ARG:disabled".to_string(),
-                "--x_warning_level DEPRECATION:error".to_string(),
+                "-Xwarning-level=REDUNDANT_CLI_ARG:disabled".to_string(),
+                "-Xwarning-level=DEPRECATED_LANGUAGE_VERSION:error".to_string(),
             ]
         );
+        assert!(unit.inert.is_empty(), "{:?}", unit.inert);
 
         for arguments in [
             args(&[
@@ -1069,6 +1057,21 @@ mod tests {
                 "{arguments:?}: {refusal:?}"
             );
         }
+
+        let refusal = translate(&args(&[
+            "--x_warning_level",
+            "--srcs",
+            "A.kt",
+            "--out",
+            "o.jar",
+        ]))
+        .unwrap_err();
+        assert_eq!(
+            refusal,
+            Refusal::Malformed(
+                "--x_warning_level requires at least one NAME:SEVERITY value".to_string()
+            )
+        );
     }
 
     /// A target-provided compiler flag is safe only when the CLI actually models it. Accepting an
