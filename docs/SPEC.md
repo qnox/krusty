@@ -8938,6 +8938,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `inlineClasses/funInterface/mangledSamWrappers`, `mangledSamWrappersGeneric`,
   `callableReference/adaptedReferences/suspendConversion/propertyReferenceToSuspendFunction`,
   and `coroutines/suspendConversion/suspendConversionBetweenFunInterfaces`.
+- **A suspend callable reference adapted to a suspend fun interface keeps its adapter class.**
+  `SuspendRunnable(::bar)` is a class that captures the reference and implements the interface.
+  That class is `{facade}$$fir_sam_delegate$1`. When `bar` actually suspends, the forwarding
+  method is a state machine: it passes the method's continuation into the reference, and the
+  continuation class is the next ordinal (`$2`), not the adapter. Reusing `$1` replaces the
+  adapter with `ContinuationImpl`, so `new …(FunctionN)` fails. A reference that returns
+  immediately still passes that continuation; it just has no machine of its own. Tests:
+  `tests/suspend_fun_interface_e2e.rs`
+  (`a_suspending_callable_reference_keeps_its_adapter_class`). Corpus:
+  `funInterface/suspendFunInterfaceConversionCodegen.kt`.
 - **A value that already implements the expected fun interface is not wrapped.** Assignability
   to the exact applied interface — including its type arguments, variance, and projections — is
   an ordinary argument during overload ranking, even when the value also has a function

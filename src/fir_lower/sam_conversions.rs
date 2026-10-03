@@ -52,6 +52,13 @@ impl BodyLowering<'_> {
                 .collect(),
             ret: conversion.result.get(),
         });
+        // The captured suspend value takes this adapter's continuation as its last argument.
+        // A non-suspend value adapted to a suspend method does not: that call stays `FunctionN`.
+        if conversion.suspend && conversion.source_suspend {
+            self.ir
+                .suspend_calls
+                .insert(invoke, conversion.result.get());
+        }
         let body = self.callable_reference_adapter_body(
             invoke,
             conversion.result.get(),

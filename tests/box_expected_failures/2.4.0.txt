@@ -27,7 +27,6 @@ coroutines/suspendFunctionAsCoroutine/superCallInterface.kt
 coroutines/suspendFunctionMethodReference.kt
 coroutines/tailCallOptimizations/crossinline.kt
 extensionFunctions/kt475.kt
-funInterface/suspendFunInterfaceConversionCodegen.kt
 functions/functionNtoString.kt
 functions/functionNtoStringGeneric.kt
 inference/capturedSelfInsideIntersection.kt

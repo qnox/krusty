@@ -73,3 +73,78 @@ fn direct_lambda_implements_the_suspend_sam_jvm_slot() {
         "OK"
     );
 }
+
+/// `SuspendRunnable(::bar)` where `bar` suspends. The adapter class captures the reference;
+/// the forwarding method's continuation is a different class. Sharing the name makes the
+/// adapter `ContinuationImpl`, and `new …(Function1)` throws `NoSuchMethodError`.
+#[test]
+fn a_suspending_callable_reference_keeps_its_adapter_class() {
+    let source = r#"
+        import kotlin.coroutines.Continuation
+        import kotlin.coroutines.EmptyCoroutineContext
+        import kotlin.coroutines.resume
+        import kotlin.coroutines.startCoroutine
+        import kotlin.coroutines.suspendCoroutine
+
+        fun interface SuspendRunnable {
+            suspend fun invoke()
+        }
+
+        var result = "initial"
+        var resumeCallback: () -> Unit = {}
+
+        suspend fun bar() {
+            suspendCoroutine<Unit> { cont ->
+                resumeCallback = { cont.resume(Unit) }
+            }
+            result = "OK"
+        }
+
+        fun box(): String {
+            val runnable = SuspendRunnable(::bar)
+            (runnable::invoke).startCoroutine(Continuation(EmptyCoroutineContext) {})
+            if (result != "initial") return "fail: $result"
+            resumeCallback()
+            return result
+        }
+    "#;
+
+    assert_eq!(
+        common::expect_box_run_with_stdlib(source, "SuspendSamAdapter"),
+        "OK"
+    );
+
+    let classes = common::expect_classes_with_stdlib(source, "SuspendSamAdapter");
+    let work = common::scratch_dir().expect("scratch");
+    let mut adapter = None;
+    let mut continuation = None;
+    for (name, bytes) in &classes {
+        if !name.contains("fir_sam_delegate") {
+            continue;
+        }
+        let path = work.join(format!("{}.class", name.replace('/', "_")));
+        std::fs::write(&path, bytes).expect("write class");
+        let text = common::javap(&["-p", &path.to_string_lossy()]).expect("javap");
+        let header = text
+            .lines()
+            .find(|line| line.contains("class "))
+            .unwrap_or("");
+        if header.contains("ContinuationImpl") {
+            continuation = Some(name.clone());
+        } else {
+            adapter = Some(name.clone());
+        }
+    }
+    assert!(
+        adapter.is_some(),
+        "the callable-reference adapter class is missing: {:?}",
+        classes.iter().map(|(name, _)| name).collect::<Vec<_>>()
+    );
+    assert!(
+        continuation.is_some(),
+        "the forwarding method's continuation class is missing: {:?}",
+        classes.iter().map(|(name, _)| name).collect::<Vec<_>>()
+    );
+    assert_ne!(adapter, continuation);
+    let _ = std::fs::remove_dir_all(&work);
+}
