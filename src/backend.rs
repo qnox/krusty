@@ -10,7 +10,8 @@ mod module_facts;
 #[cfg(test)]
 pub(crate) use dependency_facts::referenced_dependencies;
 pub use dependency_facts::{
-    BackendCallableFact, BackendPropertyFact, CheckedBackendCallables, DependencyFactError,
+    BackendCallableFact, BackendCompilerIntrinsic, BackendPropertyFact, BackendSemanticCallRole,
+    CheckedBackendCallables, DependencyFactError,
 };
 
 pub use module_facts::{

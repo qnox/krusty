@@ -632,11 +632,48 @@ fn push_text(constant: &EvaluatedConstant, text: &mut KtStringBuf) -> Option<()>
         FirConstant::Boolean(value) => text.push_str(if *value { "true" } else { "false" }),
         FirConstant::Char(value) => text.push_unit(*value),
         FirConstant::Int(value) | FirConstant::Long(value) => text.push_str(&value.to_string()),
-        FirConstant::UInt(value) | FirConstant::ULong(value) => {
+        FirConstant::UInt(value) => text.push_str(
+            &match constant.ty.non_null().canonical_semantic() {
+                Ty::UByte => u64::from(*value as u8),
+                Ty::UShort => u64::from(*value as u16),
+                Ty::UInt => u64::from(*value as u32),
+                _ => return None,
+            }
+            .to_string(),
+        ),
+        FirConstant::ULong(value) if constant.ty.non_null().canonical_semantic() == Ty::ULong => {
             text.push_str(&(*value as u64).to_string())
         }
+        FirConstant::ULong(_) => return None,
         FirConstant::Float(value) => crate::kt_string::push_f32(*value, text)?,
         FirConstant::Double(value) => crate::kt_string::push_f64(*value, text)?,
     }
     Some(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rendered(value: FirConstant, ty: Ty) -> Option<String> {
+        let mut text = KtStringBuf::new();
+        push_text(&EvaluatedConstant { value, ty }, &mut text)?;
+        text.finish().as_str().map(str::to_owned)
+    }
+
+    #[test]
+    fn narrow_unsigned_constants_render_at_their_checked_width() {
+        assert_eq!(
+            rendered(FirConstant::UInt(i64::from(u32::MAX)), Ty::UByte),
+            Some("255".to_string())
+        );
+        assert_eq!(
+            rendered(FirConstant::UInt(i64::from(u32::MAX)), Ty::UShort),
+            Some("65535".to_string())
+        );
+        assert_eq!(
+            rendered(FirConstant::UInt(i64::from(u32::MAX)), Ty::UInt),
+            Some("4294967295".to_string())
+        );
+    }
 }

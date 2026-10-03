@@ -17,9 +17,12 @@ use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 
 use crate::fir::{ExternalCallableId, ExternalPropertyId};
+pub use crate::libraries::{
+    CompilerIntrinsic as BackendCompilerIntrinsic, SemanticCallRole as BackendSemanticCallRole,
+};
 use crate::libraries::{
-    CompilerIntrinsic, DefaultCallRealization, ExternalCallableKind, GenericSig, InlineKind,
-    MemberRealization, NonvirtualCallRealization, SemanticCallRole,
+    DefaultCallRealization, ExternalCallableKind, GenericSig, InlineKind, MemberRealization,
+    NonvirtualCallRealization,
 };
 use crate::symbol_source::SymbolSource;
 use crate::types::{InlineParameterModifier, Ty, TypeName};
@@ -38,8 +41,8 @@ pub struct BackendCallableFact {
     pub physical_owner: TypeName,
     pub kind: ExternalCallableKind,
     pub owner_is_interface: bool,
-    pub compiler_intrinsic: Option<CompilerIntrinsic>,
-    pub semantic_role: Option<SemanticCallRole>,
+    pub compiler_intrinsic: Option<BackendCompilerIntrinsic>,
+    pub semantic_role: Option<BackendSemanticCallRole>,
     pub member_realization: MemberRealization,
     pub params: Vec<Ty>,
     pub physical_params: Vec<Ty>,
@@ -62,6 +65,17 @@ pub struct BackendCallableFact {
 impl BackendCallableFact {
     pub fn physical_name(&self) -> &str {
         self.physical_name.as_deref().unwrap_or(&self.name)
+    }
+
+    /// Whether this selected callable is a top-level declaration or extension.
+    ///
+    /// This is copied from the provider's declaration kind at the handoff. Backends use the
+    /// normalized shape and never need to depend on the provider-owned kind enum itself.
+    pub fn is_top_level(&self) -> bool {
+        matches!(
+            self.kind,
+            ExternalCallableKind::TopLevel | ExternalCallableKind::Extension
+        )
     }
 }
 
