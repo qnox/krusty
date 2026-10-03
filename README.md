@@ -42,6 +42,40 @@ krusty -help                                 # all options
 The reference `kotlinc` version krusty targets defaults to the newest supported release; select
 another with `-Xkotlin-reference-version=<version>`.
 
+### Gradle
+
+Download `krusty-gradle-plugin-<version>.zip` from the
+[latest GitHub release](https://github.com/qnox/krusty/releases/latest) and unpack it under the
+build's `gradle/` directory. It contains a portable local Maven repository; krusty is not published
+to the Gradle Plugin Portal or Maven Central.
+
+```kotlin
+// settings.gradle.kts
+pluginManagement {
+    repositories {
+        maven { url = uri("gradle/krusty-gradle-plugin-<version>/repository") }
+        gradlePluginPortal()
+        mavenCentral()
+    }
+}
+```
+
+```kotlin
+// build.gradle.kts
+plugins {
+    kotlin("jvm") version "2.4.20" // also supported: 2.4.0 and 2.4.10
+    id("krusty") version "<version>"
+}
+```
+
+Kotlin/JVM must be applied before krusty. The validated Gradle versions are 7.6.3, 8.14.3, 9.5.0,
+and 9.7.0. Point the plugin at the compiler binary with either form:
+
+```sh
+./gradlew -Pkrusty.binary=/absolute/path/to/krusty krustyCompile
+KRUSTY_BIN=/absolute/path/to/krusty ./gradlew krustyCompile
+```
+
 ## Features
 
 - **kotlinc-compatible command line** for the supported subset, output to a class directory or a jar.
@@ -57,7 +91,7 @@ another with `-Xkotlin-reference-version=<version>`.
 
 krusty compiles plain Kotlin/JVM code today. Not supported yet:
 
-- Gradle and Maven integration (use the command line or Bazel)
+- Maven integration (use the command line, Gradle plugin or Bazel)
 - Compose, kapt and compiler plugins other than kotlinx.serialization (all-open, no-arg, Spring,
   Parcelize); krusty stops with an error rather than skipping them
 - Kotlin scripts (`.kts`)
@@ -65,7 +99,6 @@ krusty compiles plain Kotlin/JVM code today. Not supported yet:
 ## Roadmap
 
 - 100% JVM conformance with kotlinc
-- Gradle integration
 - Kotlin/Native
 - Kotlin/Wasm
 - Compose
