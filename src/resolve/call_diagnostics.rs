@@ -117,7 +117,9 @@ impl Checker<'_> {
                 continue;
             };
             self.diags.error(self.span(argument), message.clone());
+            self.omit_unshaped_any_receiver_type += 1;
             self.expr_inner_lambda(scope, argument, None, params, body, implicit_lambda_label);
+            self.omit_unshaped_any_receiver_type -= 1;
         }
     }
 

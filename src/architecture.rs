@@ -267,6 +267,9 @@ mod tests {
             // annotation-implementation nullability) is a per-release fact, not a JVM concept.
             "kotlin_version",
             "kt_string",
+            // A dependency provider filters declarations carrying `@SinceKotlin` against the
+            // compilation's selected API version before publishing normalized candidates.
+            "language_version",
             "libraries",
             // The role of a lifted callable (lambda, local function, or local delegated-property
             // accessor) is a source fact. JVM naming reads it; it carries no class-file spelling.

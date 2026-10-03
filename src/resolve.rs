@@ -36191,6 +36191,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         symbolic_signature_inference: false,
         postponed_call_constraints: Vec::new(),
         postponed_argument_depth: 0,
+        omit_unshaped_any_receiver_type: 0,
         expected_declared: false,
         expectation_frames: Vec::new(),
         unreachable_statement_depth: 0,
@@ -38925,6 +38926,10 @@ struct Checker<'a> {
     /// constraints, but it cannot finalize an inference diagnostic; the selected argument check
     /// immediately following overload selection owns that decision.
     postponed_argument_depth: usize,
+    /// Diagnostic-recovery depth for a lambda whose selected generic call could not determine its
+    /// input type. Such an input is checked as `Any` only to expose body errors; kotlinc does not
+    /// print that recovery placeholder as an explicit receiver type.
+    omit_unshaped_any_receiver_type: usize,
     /// Whether [`Self::expected`] comes from a declaration, assignment or return (see
     /// [`Self::expr_declared`]). Consumed with it.
     expected_declared: bool,
