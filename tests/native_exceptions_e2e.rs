@@ -109,3 +109,49 @@ fn a_message_that_is_any_renders_where_a_string_message_passes_through() {
         "kotlin.AssertionError: null",
     );
 }
+
+/// An `object` whose initializer throws is not handed out half-built. The getter publishes the
+/// instance before its constructor runs, so a constructor reaching back finds it; a constructor
+/// that throws withdraws it again. The JVM answers the second access with `NoClassDefFoundError`
+/// and this target by running the initializer again — both throw, which is what the program pins.
+#[test]
+fn a_throwing_object_initializer_leaves_no_instance_behind() {
+    let source = "fun compute(): Int = throw IllegalStateException(\"boom\")\n\
+         object O { val x: Int = compute(); fun get() = x }\n\
+         fun box(): String {\n\
+         \x20   try { O.get(); return \"fail first\" } catch (e: Throwable) {}\n\
+         \x20   return try { \"second: ${O.get()}\" } catch (e: Throwable) { \"OK\" }\n\
+         }\n";
+    super::common::expect_box_ok_with_stdlib(source, "ThrowingObjectInit");
+    expect_native_box(source, "ThrowingObjectInit", "OK");
+}
+
+/// The same for an enum: a constant whose constructor throws leaves every constant unbuilt.
+#[test]
+fn a_throwing_enum_constant_leaves_no_constants_behind() {
+    let source = "fun compute(): Int = throw IllegalStateException(\"boom\")\n\
+         enum class E(val v: Int) { A(compute()), B(1) }\n\
+         fun box(): String {\n\
+         \x20   try { E.B; return \"fail first\" } catch (e: Throwable) {}\n\
+         \x20   return try { \"second: ${E.B}\" } catch (e: Throwable) { \"OK\" }\n\
+         }\n";
+    super::common::expect_box_ok_with_stdlib(source, "ThrowingEnumInit");
+    expect_native_box(source, "ThrowingEnumInit", "OK");
+}
+
+/// A top-level initializer that throws ends the program before the entry's first statement: the
+/// JVM fails the facade's initializer before `main` runs. The entry here throws an exception of its
+/// own first thing, so reaching it would report that one instead of the initializer's.
+#[test]
+fn a_throwing_top_level_initializer_stops_before_the_entry() {
+    expect_native_exit(
+        "fun throwing(): Int = throw IllegalStateException(\"boom\")\n\
+         val boom: Int = throwing()\n\
+         fun box(): String {\n\
+         \x20   throw RuntimeException(\"entered\")\n\
+         }\n",
+        "ThrowingTopLevelInit",
+        134,
+        "kotlin.IllegalStateException: boom",
+    );
+}
