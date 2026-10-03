@@ -5,8 +5,9 @@
 
 use super::common::{
     assert_error_blocks_match_kotlinc, expect_box_run_against, expect_box_run_against_kotlinc,
-    expect_box_run_against_ref, expect_box_same_as_kotlinc, kotlinc_box_result_with_classpath,
-    kotlinc_library,
+    expect_box_run_against_ref, expect_box_run_with_stdlib, expect_box_same_as_kotlinc,
+    kotlinc_box_result_with_classpath, kotlinc_library, kotlinc_source_result_with_args,
+    language_directives,
 };
 
 #[test]
@@ -296,8 +297,11 @@ fun box(): String {
 
 #[test]
 fn an_unbound_local_context_extension_keeps_the_receiver_after_context_parameters() {
-    expect_box_same_as_kotlinc(
-        r#"
+    // kotlinc 2.4.20 does not compile a callable reference to a context-parameter function.
+    // With no context value it reports a missing context argument; with one in scope it reports
+    // the reference as unsupported. Krusty still forms the reference, and the receiver stays
+    // after the context parameters in that function type.
+    let source = r#"
 // LANGUAGE: +ContextParameters
 class Prefix(val text: String)
 class Target(val text: String)
@@ -320,8 +324,19 @@ fun box(): String {
         unboundPair(prefix, target, Piece("A"), Piece("B"))
     return if (values == "PTDPTABPTDPTAB") "OK" else "fail:$values"
 }
-"#,
+"#;
+    let (code, diagnostics) = kotlinc_source_result_with_args(
         "LocalContextExtensionReferenceAlignment",
+        source,
+        &language_directives::kotlinc_args(source),
+    );
+    assert_ne!(
+        code, 0,
+        "kotlinc 2.4.20 started compiling this reference: {diagnostics}"
+    );
+    assert_eq!(
+        expect_box_run_with_stdlib(source, "LocalContextExtensionReferenceAlignment"),
+        "OK"
     );
 }
 
