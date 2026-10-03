@@ -278,29 +278,31 @@ fn a_reified_anonymous_object_copies_its_property_accessors() {
 }
 
 const EXTERNAL_CALL: &str = "\
-interface Face { fun value(): String }\n\
+interface Face { fun value(): String? }\n\
 class Token\n\
-inline fun <reified T> externalInline(): String = T::class.simpleName ?: \"none\"\n\
+fun <reified T> externalInline(): String? = T::class.simpleName\n\
 inline fun <reified T> make(): Face = object : Face {\n\
-    override fun value() = externalInline<T>()\n\
+    override fun value(): String? = externalInline<T>()\n\
 }\n\
-fun box(): String = make<Token>().value()\n";
+fun box(): String? = make<Token>().value()\n";
 
 const DELEGATE_PLAN: &str = "\
 import kotlin.reflect.KProperty\n\
-interface Face { fun value(): String }\n\
+interface Face { fun value(): Any? }\n\
 interface Item\n\
 class Token : Item\n\
 class Delegate<T>(val value: Any?)\n\
-inline operator fun <reified T> Delegate<T>.getValue(owner: Any?, property: KProperty<*>): String =\n\
-    if (value is T) \"yes\" else \"no\"\n\
-inline fun <reified T : Item> make(value: Any?): Face = object : Face {\n\
-    override fun value(): String {\n\
+inline operator fun <reified T> Delegate<T>.getValue(\n\
+    owner: Any?,\n\
+    property: KProperty<*>,\n\
+): T = value as T\n\
+inline fun <reified T> make(value: Any?): Face = object : Face {\n\
+    override fun value(): Any? {\n\
         val local by Delegate<T>(value)\n\
         return local\n\
     }\n\
 }\n\
-fun box(): String = make<Token>(Token()).value()\n";
+fun box(): Any? = make<Token>(Token()).value()\n";
 
 #[test]
 fn an_external_reified_call_copies_the_anonymous_class() {
