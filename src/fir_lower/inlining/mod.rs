@@ -20,6 +20,7 @@ use crate::types::{stored_value_ty, ty_subst_keep_unbound, Ty};
 
 use super::BodyLowering;
 
+mod converted_inline_lambda;
 mod escaping_anonymous;
 mod escaping_lambda;
 mod property_accessors;
@@ -776,6 +777,13 @@ impl BodyLowering<'_> {
             return None;
         }
 
+        // A function-value conversion between an inline parameter and its lambda is a
+        // callable reference stored in a local. The invocation reads that local, so the
+        // splice below never sees the lambda. Retarget the invocation when that local is
+        // only invoked; the carrier is then not evaluated.
+        let converted_unit_results =
+            self.expose_inline_lambdas_behind_function_value_conversions(&copies);
+
         let inline_invocations = copies
             .iter()
             .map(|&(_, copy)| copy)
@@ -812,6 +820,9 @@ impl BodyLowering<'_> {
                     callee: Some(&callee),
                 },
             )?;
+        }
+        for invocation in converted_unit_results {
+            self.discard_converted_lambda_result(invocation);
         }
         for (function, body, inline_only) in default_lambda_methods {
             self.ir.functions.get_mut(function as usize)?.body = body;
@@ -956,9 +967,11 @@ impl BodyLowering<'_> {
         else {
             return None;
         };
+        if !lambda_invocation_is_spliceable(self.ir, invocation, func) {
+            return None;
+        }
         let IrExpr::Lambda {
             impl_fn,
-            arity,
             captures,
             inline_body: Some(inline_body),
             ..
@@ -966,15 +979,7 @@ impl BodyLowering<'_> {
         else {
             return None;
         };
-        // A suspend lambda's arity counts the continuation its invocation passes implicitly.
-        let suspend = self.ir.suspend_funs.contains(&impl_fn);
-        if args.len() + usize::from(suspend) != arity as usize {
-            return None;
-        }
         let parameter_types = self.ir.functions.get(impl_fn as usize)?.params.clone();
-        if parameter_types.len() != captures.len() + args.len() {
-            return None;
-        }
 
         let receiver_parameter = self
             .ir
@@ -1084,6 +1089,36 @@ impl BodyLowering<'_> {
         self.ir.suspend_call_overridden_results.remove(&invocation);
         Some(())
     }
+}
+
+/// Whether `invocation` and its inline `lambda` have the parameter shape the splicer consumes.
+/// A caller that exposes a lambda hidden behind a semantic wrapper uses this same gate before
+/// retargeting the invocation, so the preparatory rewrite and the splice cannot drift apart.
+fn lambda_invocation_is_spliceable(
+    ir: &crate::ir::IrFile,
+    invocation: ExprId,
+    lambda: ExprId,
+) -> bool {
+    let IrExpr::InvokeFunction { args, .. } = ir.expr(invocation) else {
+        return false;
+    };
+    let IrExpr::Lambda {
+        impl_fn,
+        arity,
+        captures,
+        inline_body: Some(_),
+        ..
+    } = ir.expr(lambda)
+    else {
+        return false;
+    };
+    // A suspend lambda's arity counts the continuation its invocation passes implicitly.
+    let suspend = ir.suspend_funs.contains(impl_fn);
+    args.len() + usize::from(suspend) == *arity as usize
+        && ir
+            .functions
+            .get(*impl_fn as usize)
+            .is_some_and(|function| function.params.len() == captures.len() + args.len())
 }
 
 /// How a spliced lambda's parameters meet the arguments of its invocation.
