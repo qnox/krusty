@@ -115,6 +115,7 @@ use lambda_call_shapes::UntypedLambdaCall;
 mod lambda_expectation;
 mod lambda_returns;
 mod lexical_bindings;
+mod local_callable_reference_selection;
 mod local_capture_dependencies;
 mod local_class_scope;
 mod local_extension_applicability;
@@ -41459,10 +41460,6 @@ impl<'a> Checker<'a> {
         )
     }
 
-    fn adapted_ref_plan_cost(plan: &[AdaptedRefArgument]) -> usize {
-        callable_reference_selection::plan_cost(plan)
-    }
-
     fn adapted_ref_plan_is_identity(plan: &[AdaptedRefArgument]) -> bool {
         Self::adapted_ref_plan_is_identity_from(plan, 0)
     }
@@ -41638,23 +41635,20 @@ impl<'a> Checker<'a> {
                 let argument_mapping = (!direct_prefix
                     && vararg_collect.is_none()
                     && !legacy_trailing_omission)
-                    .then_some(plan);
+                    .then(|| plan.clone());
                 let needs_adapter = supplied != declared
                     || vararg_collect.is_some()
                     || argument_mapping.is_some()
                     || function.callable.suspend != expected.suspend
                     || (expected.ret == Ty::Unit && function.callable.ret != Ty::Unit);
-                let adaptation_cost = usize::from(argument_mapping.is_some()) * 100
-                    + usize::from(vararg_collect.is_some()) * 10
-                    + declared.saturating_sub(supplied);
                 Some((
                     function,
                     adapted_expected,
                     needs_adapter,
                     vararg_collect,
                     argument_mapping,
-                    adaptation_cost,
                     type_arguments,
+                    plan,
                 ))
             })
             .collect::<Vec<_>>();
@@ -41711,31 +41705,28 @@ impl<'a> Checker<'a> {
                 return Some(Ty::Error);
             }
         }
-        let best_cost = candidates.iter().map(|candidate| candidate.5).min()?;
-        let maximal = candidates
+        let specificity = candidates
             .iter()
-            .enumerate()
-            .filter(|(_, candidate)| candidate.5 == best_cost)
-            .filter_map(|(index, current)| {
-                let dominated = candidates.iter().enumerate().any(|(other_index, other)| {
-                    index != other_index
-                        && other.5 == best_cost
-                        && self.callable_ref_shape_at_least_as_specific(
-                            &other.0.semantic_params(),
-                            other.0.callable.ret,
-                            &current.0.semantic_params(),
-                            current.0.callable.ret,
-                        )
-                        && !self.callable_ref_shape_at_least_as_specific(
-                            &current.0.semantic_params(),
-                            current.0.callable.ret,
-                            &other.0.semantic_params(),
-                            other.0.callable.ret,
-                        )
-                });
-                (!dominated).then_some(index)
-            })
+            .map(
+                |candidate| callable_reference_selection::AdaptedReferenceSpecificity {
+                    parameters: &candidate.0.callable.params,
+                    ret: candidate.0.callable.ret,
+                    plan: &candidate.6,
+                    is_vararg: candidate.0.call_sig.vararg_index.is_some(),
+                },
+            )
             .collect::<Vec<_>>();
+        let maximal = callable_reference_selection::maximal_adapted_references(
+            &specificity,
+            |left_params, left_ret, right_params, right_ret| {
+                self.callable_ref_shape_at_least_as_specific(
+                    left_params,
+                    left_ret,
+                    right_params,
+                    right_ret,
+                )
+            },
+        );
         let [selected_index] = maximal.as_slice() else {
             if maximal.is_empty() {
                 return None;
@@ -41758,8 +41749,8 @@ impl<'a> Checker<'a> {
             needs_adapter,
             vararg_collect,
             argument_mapping,
-            _,
             type_arguments,
+            _,
         ) = &candidates[*selected_index];
         if !type_arguments.is_empty() {
             self.resolved_call_type_args.insert(
@@ -65552,8 +65543,9 @@ impl<'a> Checker<'a> {
                 )?;
                 Self::adapted_ref_plan_is_identity(&plan).then_some((constructor, None))
             });
-            direct.or_else(|| {
-                let mut candidates = classifier
+            let mut ambiguous = Vec::new();
+            let selected = direct.or_else(|| {
+                let candidates = classifier
                     .constructors
                     .iter()
                     .filter_map(|constructor| {
@@ -65562,17 +65554,56 @@ impl<'a> Checker<'a> {
                             &constructor.call_sig,
                             parameters,
                         )?;
-                        let cost = Self::adapted_ref_plan_cost(&plan);
-                        Some((constructor.clone(), plan, cost))
+                        Some((constructor.clone(), plan))
                     })
                     .collect::<Vec<_>>();
-                let best = candidates.iter().map(|candidate| candidate.2).min()?;
-                candidates.retain(|candidate| candidate.2 == best);
-                match candidates.as_slice() {
-                    [(constructor, plan, _)] => Some((constructor.clone(), Some(plan.clone()))),
-                    _ => None,
+                let specificity = candidates
+                    .iter()
+                    .map(|(constructor, plan)| {
+                        callable_reference_selection::AdaptedReferenceSpecificity {
+                            parameters: &constructor.params,
+                            ret: constructor.ret,
+                            plan,
+                            is_vararg: constructor.call_sig.vararg_index.is_some(),
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let maximal = callable_reference_selection::maximal_adapted_references(
+                    &specificity,
+                    |left_params, left_ret, right_params, right_ret| {
+                        self.callable_ref_shape_at_least_as_specific(
+                            left_params,
+                            left_ret,
+                            right_params,
+                            right_ret,
+                        )
+                    },
+                );
+                let [selected] = maximal.as_slice() else {
+                    ambiguous.extend(maximal.into_iter().map(|index| candidates[index].0.clone()));
+                    return None;
+                };
+                let (constructor, plan) = &candidates[*selected];
+                Some((constructor.clone(), Some(plan.clone())))
+            });
+            if !ambiguous.is_empty() {
+                let name = match self.file.expr(expression) {
+                    Expr::CallableRef { name, .. } => name.as_str(),
+                    _ => "constructor",
+                };
+                let mut message = "overload resolution ambiguity between candidates:".to_string();
+                for candidate in ambiguous {
+                    let mut displayed = candidate.clone();
+                    displayed.ret = target;
+                    let display = Self::library_member_candidate_display("constructor", &displayed);
+                    message.push('\n');
+                    message.push_str(display.strip_prefix("fun ").unwrap_or(&display));
                 }
-            })
+                self.diags
+                    .error(self.member_name_span(expression, name), message);
+                return Some(Ty::Error);
+            }
+            selected
         } else {
             let mut constructors = classifier.constructors.iter();
             let selected = constructors.next().cloned();
@@ -66449,99 +66480,12 @@ impl<'a> Checker<'a> {
             }
             // A top-level reference without an expected type requires a unique overload.
             if receiver.is_none() {
-                // Local function reference `::localFun` (shadows a same-named top-level fn). Map the
-                // ref to the local fun's decl — the SAME map a local-fun CALL uses — so lowering can
-                // find the lifted static method and prepend its captures.
-                if let Some(Ty::Fun(expected)) = expected {
-                    if let Some(overloads) = self.lookup_local_fun_overloads(scope, &name) {
-                        let local_functions = overloads
-                            .into_iter()
-                            .filter(|(_, signature)| signature.source_receiver.is_none())
-                            .collect::<Vec<_>>();
-                        if !local_functions.is_empty() {
-                            let mut candidates = local_functions
-                                .iter()
-                                .filter_map(|(statement, signature)| {
-                                    if signature.is_suspend() && !expected.suspend {
-                                        return None;
-                                    }
-                                    let (params, ret) = self
-                                        .contextual_local_function_reference_shape(
-                                            signature,
-                                            None,
-                                            &expected.params,
-                                            expected.ret,
-                                        )?;
-                                    let call_sig = crate::libraries::CallSig {
-                                        param_defaults: signature.param_defaults.clone(),
-                                        required: signature.required,
-                                        vararg: signature.vararg(),
-                                        vararg_index: signature.vararg_index,
-                                        ..crate::libraries::CallSig::default()
-                                    };
-                                    let plan = self.callable_ref_parameter_plan(
-                                        &params,
-                                        &call_sig,
-                                        &expected.params,
-                                    )?;
-                                    if !self.callable_ref_is_compatible(
-                                        &expected.params,
-                                        ret,
-                                        signature.is_suspend(),
-                                        expected,
-                                        true,
-                                    ) {
-                                        return None;
-                                    }
-                                    let cost = Self::adapted_ref_plan_cost(&plan);
-                                    Some((
-                                        *statement,
-                                        plan,
-                                        cost,
-                                        expected.suspend && !signature.is_suspend(),
-                                    ))
-                                })
-                                .collect::<Vec<_>>();
-                            if let Some(best) = candidates.iter().map(|candidate| candidate.2).min()
-                            {
-                                candidates.retain(|candidate| candidate.2 == best);
-                            }
-                            if let [(statement, plan, _, suspend_conversion)] =
-                                candidates.as_slice()
-                            {
-                                let identity = Self::adapted_ref_plan_is_identity(plan);
-                                if identity && !suspend_conversion {
-                                    self.mark_local_function_ref(e, *statement, false);
-                                } else {
-                                    self.expr_lowers.insert(
-                                        e,
-                                        ExprLowering::AdaptedLocalFunctionRef {
-                                            stmt_id: *statement,
-                                            bound_receiver: false,
-                                            argument_mapping: plan.clone(),
-                                            signature: Ty::Fun(expected),
-                                            suspend_conversion: *suspend_conversion,
-                                        },
-                                    );
-                                }
-                                return self.set(e, Ty::Fun(expected));
-                            }
-                            self.diags.error(
-                                self.member_name_span(e, &name),
-                                if candidates.is_empty() {
-                                    format!("none of the local function candidates for '{name}' is applicable")
-                                } else {
-                                    format!("overload resolution ambiguity for callable reference '{name}'")
-                                },
-                            );
-                            return self.set(e, Ty::Error);
-                        }
-                    }
-                }
-                if let Some((stmt_id, sig)) = self.lookup_local_fun(scope, &name) {
-                    self.mark_local_function_ref(e, stmt_id, false);
-                    let (params, ret) = Self::local_function_reference_shape(&sig, None);
-                    return self.set(e, Ty::fun(params, ret));
+                // A lexical local shadows the same-named top-level family. Selection records the
+                // lifted declaration here; lowering only consumes that stable decision.
+                if let Some(ty) =
+                    self.select_receiverless_local_reference(scope, e, &name, expected)
+                {
+                    return self.set(e, ty);
                 }
                 // The static scopes open here name associated declarations without a receiver.
                 for rung in self.implicit_rungs(scope) {

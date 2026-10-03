@@ -271,6 +271,61 @@ fun box(): String {
 }
 
 #[test]
+fn a_defaulted_receiverless_local_beats_an_equally_specific_vararg() {
+    expect_box_same_as_kotlinc(
+        r#"
+class ReceiverlessLocalPiece(val text: String)
+
+fun box(): String {
+    fun choose(value: ReceiverlessLocalPiece = ReceiverlessLocalPiece("D")): String =
+        "fixed:${value.text}"
+    fun choose(vararg values: ReceiverlessLocalPiece): String =
+        "vararg:${values.size}" +
+            if (values.size == 2) ":${values[0].text}${values[1].text}" else ""
+    val zero: () -> String = ::choose
+    val one: (ReceiverlessLocalPiece) -> String = ::choose
+    val two: (ReceiverlessLocalPiece, ReceiverlessLocalPiece) -> String = ::choose
+    val log = "${zero()}-${one(ReceiverlessLocalPiece("A"))}-" +
+        two(ReceiverlessLocalPiece("A"), ReceiverlessLocalPiece("B"))
+    return if (log == "fixed:D-fixed:A-vararg:2:AB") "OK" else "fail:$log"
+}
+"#,
+        "ReceiverlessLocalReferenceSpecificity",
+    );
+}
+
+#[test]
+fn an_unbound_local_context_extension_keeps_the_receiver_after_context_parameters() {
+    expect_box_same_as_kotlinc(
+        r#"
+// LANGUAGE: +ContextParameters
+class Prefix(val text: String)
+class Target(val text: String)
+class Piece(val text: String)
+
+fun box(): String {
+    context(prefix: Prefix)
+    fun Target.join(first: Piece = Piece("D"), vararg rest: Piece): String =
+        prefix.text + text + first.text + if (rest.size == 0) "" else rest[0].text
+
+    val target = Target("T")
+    val boundDefault: context(Prefix) () -> String = target::join
+    val boundPair: context(Prefix) (Piece, Piece) -> String = target::join
+    val unboundDefault: context(Prefix) (Target) -> String = Target::join
+    val unboundPair: context(Prefix) (Target, Piece, Piece) -> String = Target::join
+    val prefix = Prefix("P")
+    val values =
+        boundDefault(prefix) + boundPair(prefix, Piece("A"), Piece("B")) +
+        unboundDefault(prefix, target) +
+        unboundPair(prefix, target, Piece("A"), Piece("B"))
+    return if (values == "PTDPTABPTDPTAB") "OK" else "fail:$values"
+}
+"#,
+        "LocalContextExtensionReferenceAlignment",
+    );
+}
+
+#[test]
 fn a_defaulted_top_level_extension_beats_an_equally_specific_vararg() {
     expect_box_same_as_kotlinc(
         r#"
@@ -293,6 +348,58 @@ fun box(): String {
 }
 "#,
         "TopLevelExtensionReferenceSpecificity",
+    );
+}
+
+#[test]
+fn a_defaulted_receiverless_top_level_beats_an_equally_specific_vararg() {
+    expect_box_same_as_kotlinc(
+        r#"
+class ReceiverlessTopLevelPiece(val text: String)
+
+fun choose(value: ReceiverlessTopLevelPiece = ReceiverlessTopLevelPiece("D")): String =
+    "fixed:${value.text}"
+fun choose(vararg values: ReceiverlessTopLevelPiece): String =
+    "vararg:${values.size}" +
+        if (values.size == 2) ":${values[0].text}${values[1].text}" else ""
+
+fun box(): String {
+    val zero: () -> String = ::choose
+    val one: (ReceiverlessTopLevelPiece) -> String = ::choose
+    val two: (ReceiverlessTopLevelPiece, ReceiverlessTopLevelPiece) -> String = ::choose
+    val log = "${zero()}-${one(ReceiverlessTopLevelPiece("A"))}-" +
+        two(ReceiverlessTopLevelPiece("A"), ReceiverlessTopLevelPiece("B"))
+    return if (log == "fixed:D-fixed:A-vararg:2:AB") "OK" else "fail:$log"
+}
+"#,
+        "ReceiverlessTopLevelReferenceSpecificity",
+    );
+}
+
+#[test]
+fn a_defaulted_constructor_beats_an_equally_specific_vararg() {
+    expect_box_same_as_kotlinc(
+        r#"
+class ConstructorPiece(val text: String)
+
+class Constructed(val result: String) {
+    constructor(value: ConstructorPiece = ConstructorPiece("D")) : this("fixed:${value.text}")
+    constructor(vararg values: ConstructorPiece) : this(
+        "vararg:${values.size}" +
+            if (values.size == 2) ":${values[0].text}${values[1].text}" else ""
+    )
+}
+
+fun box(): String {
+    val zero: () -> Constructed = ::Constructed
+    val one: (ConstructorPiece) -> Constructed = ::Constructed
+    val two: (ConstructorPiece, ConstructorPiece) -> Constructed = ::Constructed
+    val log = "${zero().result}-${one(ConstructorPiece("A")).result}-" +
+        two(ConstructorPiece("A"), ConstructorPiece("B")).result
+    return if (log == "fixed:D-fixed:A-vararg:2:AB") "OK" else "fail:$log"
+}
+"#,
+        "ConstructorReferenceSpecificity",
     );
 }
 
@@ -378,6 +485,46 @@ fun probe(receiver: AmbiguousReceiver) {
     assert_error_blocks_match_kotlinc(&[("LocalExtensionReferenceAmbiguity.kt", SOURCE)], &[]);
 }
 
+#[test]
+fn receiverless_equal_default_shapes_remain_ambiguous() {
+    const SOURCE: &str = r#"class FirstInput
+class SecondInput
+
+fun choose(value: FirstInput = FirstInput()): String = "first"
+fun choose(value: SecondInput = SecondInput()): String = "second"
+
+fun localProbe() {
+    fun choose(value: FirstInput = FirstInput()): String = "first"
+    fun choose(value: SecondInput = SecondInput()): String = "second"
+    val selected: () -> String = ::choose
+}
+
+fun topLevelProbe() {
+    val selected: () -> String = ::choose
+}
+"#;
+
+    assert_error_blocks_match_kotlinc(&[("ReceiverlessReferenceAmbiguity.kt", SOURCE)], &[]);
+}
+
+#[test]
+fn constructor_equal_default_shapes_remain_ambiguous() {
+    const SOURCE: &str = r#"class ConstructorFirstInput
+class ConstructorSecondInput
+
+class AmbiguousConstructed {
+    constructor(value: ConstructorFirstInput = ConstructorFirstInput()) {}
+    constructor(value: ConstructorSecondInput = ConstructorSecondInput()) {}
+}
+
+fun constructorProbe() {
+    val selected: () -> AmbiguousConstructed = ::AmbiguousConstructed
+}
+"#;
+
+    assert_error_blocks_match_kotlinc(&[("ConstructorReferenceAmbiguity.kt", SOURCE)], &[]);
+}
+
 const LIB: &str = r#"
 package lib
 open class Base<T>
@@ -400,14 +547,22 @@ const PROVIDER_SPECIFICITY_LIB: &str = r#"
 package provider
 
 class ProviderReceiver
+class ProviderPiece(val text: String)
 
 fun ProviderReceiver.choose(value: Int = 1): Int = 10 + value
 fun ProviderReceiver.choose(vararg values: Int): Int = 20 + values.size
+
+fun select(value: ProviderPiece = ProviderPiece("D")): String = "fixed:${value.text}"
+fun select(vararg values: ProviderPiece): String =
+    "vararg:${values.size}" +
+        if (values.size == 2) ":${values[0].text}${values[1].text}" else ""
 "#;
 
 const PROVIDER_SPECIFICITY_MAIN: &str = r#"
 import provider.ProviderReceiver
+import provider.ProviderPiece
 import provider.choose
+import provider.select
 
 fun box(): String {
     val receiver = ProviderReceiver()
@@ -419,7 +574,13 @@ fun box(): String {
     val unboundTwo: (ProviderReceiver, Int, Int) -> Int = ProviderReceiver::choose
     val log = "${zero()}-${one(7)}-${two(3, 4)}/" +
         "${unboundZero(receiver)}-${unboundOne(receiver, 7)}-${unboundTwo(receiver, 3, 4)}"
-    return if (log == "11-17-22/11-17-22") "OK" else "fail:$log"
+    val rootZero: () -> String = ::select
+    val rootOne: (ProviderPiece) -> String = ::select
+    val rootTwo: (ProviderPiece, ProviderPiece) -> String = ::select
+    val root = "${rootZero()}-${rootOne(ProviderPiece("A"))}-" +
+        rootTwo(ProviderPiece("A"), ProviderPiece("B"))
+    return if (log == "11-17-22/11-17-22" && root == "fixed:D-fixed:A-vararg:2:AB") "OK"
+        else "fail:$log/$root"
 }
 "#;
 

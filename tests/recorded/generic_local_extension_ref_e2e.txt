@@ -6,3 +6,18 @@
   LocalExtensionReferenceAmbiguity.kt:8:44: overload resolution ambiguity between candidates:
   | fun AmbiguousReceiver.choose(value: FirstInput = ...): String
   | fun AmbiguousReceiver.choose(value: SecondInput = ...): String
+
+[receiverless_equal_default_shapes_remain_ambiguous]
+2.4.20:
+  ReceiverlessReferenceAmbiguity.kt:10:36: overload resolution ambiguity between candidates:
+  | fun choose(value: FirstInput = ...): String
+  | fun choose(value: SecondInput = ...): String
+  ReceiverlessReferenceAmbiguity.kt:14:36: overload resolution ambiguity between candidates:
+  | fun choose(value: FirstInput = ...): String
+  | fun choose(value: SecondInput = ...): String
+
+[constructor_equal_default_shapes_remain_ambiguous]
+2.4.20:
+  ConstructorReferenceAmbiguity.kt:10:50: overload resolution ambiguity between candidates:
+  | constructor(value: ConstructorFirstInput = ...): AmbiguousConstructed
+  | constructor(value: ConstructorSecondInput = ...): AmbiguousConstructed

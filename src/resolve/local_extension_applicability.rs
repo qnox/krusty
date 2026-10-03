@@ -307,9 +307,9 @@ impl Checker<'_> {
 
     /// Local extensions applicable to `receiver::name` or `Receiver::name`.
     ///
-    /// `leading_receiver_in_expected` is the unbound `Receiver::name` shape: the expected callable's
-    /// first parameter is that receiver, and the exposed function type puts it back in front. A
-    /// bound `value::name` reference compares the expected value parameters directly.
+    /// `leading_receiver_in_expected` is the unbound `Receiver::name` shape: the expected callable
+    /// carries the receiver after its context parameters. A bound `value::name` reference compares
+    /// the expected declaration parameters directly.
     fn local_extension_reference_candidates(
         &self,
         scope: &CheckerScope<'_>,
@@ -341,40 +341,42 @@ impl Checker<'_> {
                     )?;
                     let specialized_receiver = signature.source_receiver?;
                     let receiver_rank = receiver_mro.rank(&source, specialized_receiver)?;
-                    let (value_parameters, ret) = match expected {
-                        Some(expected) => {
-                            let expected_values = if leading_receiver_in_expected {
-                                let (_, values) = expected.params.split_first()?;
-                                values
-                            } else {
-                                expected.params.as_slice()
-                            };
-                            self.contextual_local_function_reference_shape(
-                                &declared,
-                                Some(receiver),
-                                expected_values,
-                                expected.ret,
-                            )?
+                    let context_count = declared.context_count.min(signature.params.len());
+                    let expected_values = expected.map(|expected| {
+                        let mut values = expected.params.to_vec();
+                        if leading_receiver_in_expected {
+                            values.get(context_count)?;
+                            values.remove(context_count);
                         }
+                        Some(values)
+                    });
+                    if matches!(expected_values, Some(None)) {
+                        return None;
+                    }
+                    let expected_values = expected_values.flatten();
+                    let (value_parameters, ret) = match expected {
+                        Some(expected) => self.contextual_local_function_reference_shape(
+                            &declared,
+                            Some(receiver),
+                            expected_values.as_deref()?,
+                            expected.ret,
+                        )?,
                         None => (signature.params.clone(), signature.ret),
                     };
                     let parameters = if leading_receiver_in_expected {
-                        let mut parameters = vec![receiver];
-                        parameters.extend(value_parameters.iter().copied());
+                        let mut parameters = value_parameters.clone();
+                        parameters.insert(context_count.min(parameters.len()), receiver);
                         parameters
                     } else {
                         value_parameters.clone()
                     };
                     let adaptation = expected.map(|expected| {
-                        let expected_values = if leading_receiver_in_expected {
-                            let (expected_receiver, values) = expected.params.split_first()?;
-                            if !self.receiver_is_assignable(*expected_receiver, receiver) {
+                        if leading_receiver_in_expected {
+                            let expected_receiver = *expected.params.get(context_count)?;
+                            if !self.receiver_is_assignable(expected_receiver, receiver) {
                                 return None;
                             }
-                            values
-                        } else {
-                            expected.params.as_slice()
-                        };
+                        }
                         if (declared.is_suspend() && !expected.suspend)
                             || (expected.ret != Ty::Unit
                                 && !self.receiver_is_assignable(ret, expected.ret))
@@ -388,11 +390,18 @@ impl Checker<'_> {
                             vararg_index: declared.vararg_index,
                             ..crate::libraries::CallSig::default()
                         };
-                        let plan = self.callable_ref_parameter_plan(
+                        let mut plan = self.callable_ref_parameter_plan(
                             &value_parameters,
                             &call_sig,
-                            expected_values,
+                            expected_values.as_deref()?,
                         )?;
+                        if leading_receiver_in_expected {
+                            super::callable_reference_selection::shift_plan_values_from(
+                                &mut plan,
+                                context_count,
+                                1,
+                            );
+                        }
                         Some((plan, expected.suspend && !declared.is_suspend()))
                     });
                     if matches!(adaptation, Some(None)) {

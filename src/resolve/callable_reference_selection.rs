@@ -860,19 +860,6 @@ pub(super) fn realize_adapted_instance_shape(
     )
 }
 
-pub(super) fn plan_cost(plan: &[AdaptedRefArgument]) -> usize {
-    plan.iter()
-        .map(|argument| match argument {
-            AdaptedRefArgument::Value(_) => 0,
-            AdaptedRefArgument::Vararg {
-                whole_array: true, ..
-            } => 1,
-            AdaptedRefArgument::Vararg { .. } => 10,
-            AdaptedRefArgument::Default => 100,
-        })
-        .sum()
-}
-
 pub(super) fn plan_is_identity_from(plan: &[AdaptedRefArgument], value_offset: usize) -> bool {
     plan.iter().enumerate().all(|(target, argument)| {
         matches!(argument, AdaptedRefArgument::Value(value) if *value == target + value_offset)

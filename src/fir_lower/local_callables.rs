@@ -560,9 +560,8 @@ impl BodyLowering<'_> {
         if unbound_receiver_count != 0 && reference.params.is_empty() {
             return Ok(None);
         }
-        let own_start =
-            u32::try_from(capture_count + bound_receiver_count + unbound_receiver_count)
-                .map_err(|_| FirLoweringFailure::MissingLocalCallable(target.clone()))?;
+        let own_start = u32::try_from(capture_count + bound_receiver_count)
+            .map_err(|_| FirLoweringFailure::MissingLocalCallable(target.clone()))?;
         let identity_arguments;
         let adapted_arguments = if let Some(adaptation) = adaptation {
             adaptation.arguments.as_ref()
@@ -570,7 +569,14 @@ impl BodyLowering<'_> {
             identity_arguments = (0..declaration_parameter_count)
                 .map(|source| {
                     crate::fir::FirAdaptedReferenceArgument::Value(
-                        u32::try_from(source).expect("too many local reference parameters"),
+                        u32::try_from(
+                            source
+                                + usize::from(
+                                    unbound_receiver_count != 0
+                                        && source >= realization.context_parameter_count as usize,
+                                ),
+                        )
+                        .expect("too many local reference parameters"),
                     )
                 })
                 .collect::<Vec<_>>();
@@ -641,8 +647,14 @@ impl BodyLowering<'_> {
             })
             .collect::<Vec<_>>();
         let wrapper_extension_receiver = if realization.has_extension_receiver {
+            let receiver = capture_count
+                + if bound_extension_receiver.is_some() {
+                    0
+                } else {
+                    realization.context_parameter_count as usize
+                };
             Some(self.ir.add_expr(IrExpr::GetValue(
-                u32::try_from(capture_count).expect("too many local captures"),
+                u32::try_from(receiver).expect("too many local reference parameters"),
             )))
         } else {
             None
