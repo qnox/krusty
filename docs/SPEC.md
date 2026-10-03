@@ -1551,8 +1551,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   field must carry the same recorded receiver identity; their relative receiver-tower coordinates
   are not interchangeable and are never used as a fallback join.
   A postponed generic receiver-lambda check is a provisional constraint probe, not a completed
-  closure inventory. Its unused provisional receiver remains until the solved typed visit; an
-  inferred local member or accessor can still require that receiver in the checked body.
+  closure inventory. All candidate receivers are temporarily visible during the body check, but
+  only proven selections enter the declaration's capture ledger. Local methods are checked once;
+  a later solved or memoized visit retains those selections, refreshes their current semantic
+  types and bindings, and does not treat the absence of new use-counter increments as non-use.
+  A local class whose body never selects the receiver still has no receiver constructor input.
   Tests: `local_class_does_not_capture_an_unused_extension_receiver`,
   `inner_subclass_keeps_the_extension_receiver_its_superclass_constructor_needs`,
   `tests/local_class_capture_constructors_e2e.rs::an_unused_extension_receiver_is_not_a_constructor_reference_parameter`

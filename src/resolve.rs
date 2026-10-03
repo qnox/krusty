@@ -40,8 +40,8 @@ mod annotation_applications;
 mod anonymous_extension_functions;
 mod anonymous_object_capture;
 use anonymous_object_capture::{
-    merge_local_receiver_capture, record_anonymous_construction_captures,
-    AnonymousCaptureCandidate, SelectedLocalCallableCaptures,
+    record_anonymous_construction_captures, AnonymousCaptureCandidate,
+    SelectedLocalCallableCaptures,
 };
 pub use anonymous_object_capture::{
     AnonymousObjectCapture, AnonymousObjectCaptureSource, AnonymousObjectReceiverSource,
@@ -24149,6 +24149,7 @@ impl<'a> Checker<'a> {
                 // type/name matching and without asking lowering to repeat scope lookup.
                 let receiver_candidates = self.local_class_receiver_candidates(scope);
                 let mut captures = self.local_class_captures(scope, d, &cl);
+                let established = self.local_class_capture_inventory(d);
                 if captures.forwarded_super_arguments.is_empty() {
                     self.discovered_anonymous_super_forwards.remove(&d);
                 } else {
@@ -24183,6 +24184,12 @@ impl<'a> Checker<'a> {
                 }
                 let mut capture_bindings =
                     self.local_capture_binding_identities(scope, &captures.values);
+                self.restore_proven_local_receiver_captures(
+                    &established,
+                    &receiver_candidates,
+                    &mut captures.values,
+                    &mut capture_bindings,
+                );
                 if !captures.values.is_empty() {
                     self.discovered_local_class_captures
                         .insert(d, captures.values.clone());
@@ -24200,34 +24207,13 @@ impl<'a> Checker<'a> {
                     &mut captures.values,
                     &mut capture_bindings,
                 );
-                let mut used_receivers = Vec::new();
-                for observed in receiver_candidates {
-                    let Some(first_use) = observed
-                        .uses_before
-                        .iter()
-                        .filter(|(identity, before)| {
-                            self.implicit_receiver_identity_use_count(*identity) > *before
-                        })
-                        .map(|(identity, _)| {
-                            let uses = &self.implicit_receiver_identity_uses;
-                            uses.first_use_since(uses_before_body, *identity, None)
-                        })
-                        .min()
-                    else {
-                        continue;
-                    };
-                    used_receivers.push((first_use, observed.capture.source));
-                    merge_local_receiver_capture(
-                        &mut captures.values,
-                        &mut capture_bindings,
-                        observed.capture,
-                    );
-                }
                 self.finalize_local_class_receiver_captures(
                     d,
                     &mut captures.values,
                     &mut capture_bindings,
-                    used_receivers,
+                    receiver_candidates,
+                    uses_before_body,
+                    established,
                 );
             }
         }
@@ -36323,6 +36309,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         discovered_anonymous_super_forwards: HashMap::new(),
         discovered_local_class_captures: HashMap::new(),
         discovered_local_class_capture_bindings: HashMap::new(),
+        finalized_local_class_captures: std::collections::HashSet::new(),
         local_function_capture_bindings: HashMap::new(),
         receiver_capture_ids: receiver_capture_identity::ReceiverCaptureIds::default(),
         next_lexical_capture_identity: 0,
@@ -39062,6 +39049,7 @@ struct Checker<'a> {
     /// These let a selected closure dependency be remapped into the caller's lexical tower without
     /// publishing parser ids, source ranges, or names as semantic identities.
     discovered_local_class_capture_bindings: HashMap<DeclId, Vec<Option<u32>>>,
+    finalized_local_class_captures: std::collections::HashSet<DeclId>,
     /// Resolver-only binding identities parallel to lifted local-function capture vectors.
     local_function_capture_bindings: HashMap<StmtId, Vec<Option<u32>>>,
     receiver_capture_ids: receiver_capture_identity::ReceiverCaptureIds,

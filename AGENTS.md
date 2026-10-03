@@ -185,6 +185,15 @@ review explanation tied to an active migration plan.
   declarations that do not have Kotlin metadata.
 - Inheritance traversal is core behavior over the common class model. Providers return direct
   declarations and direct supertypes; they must not independently return inherited duplicates.
+- Capture candidates and proven selections have different lifetimes. A full receiver inventory is
+  a temporary body-check overlay; only selected inputs enter the declaration-owned capture ledger.
+  Memoized local methods do not repeat receiver-use accounting on inference revisits. Preserve their
+  proven selections and refresh current types/bindings instead of treating zero new uses as non-use.
+  Receiver coordinates may correlate visits of the same declaration, never join different classes.
+
+```text
+rg -n 'registered_local_method_is_complete|finalized_.*captures|uses_before|drop_unused_implicit_receivers' src/resolve.rs src/resolve
+```
 
 ## Interned-name rule
 

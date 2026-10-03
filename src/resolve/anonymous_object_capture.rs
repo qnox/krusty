@@ -316,13 +316,20 @@ impl Checker<'_> {
 }
 
 pub(super) struct ObservedReceiverCapture {
-    pub(super) capture: AnonymousObjectCapture,
-    pub(super) uses_before: Vec<((usize, usize), usize)>,
+    capture: AnonymousObjectCapture,
+    uses_before: Vec<((usize, usize), usize)>,
+}
+
+/// Proven selections of one declaration, separate from the temporary full receiver inventory
+/// installed while its body is checked. Method memoization survives inference revisits.
+pub(super) struct LocalClassCaptureInventory {
+    captures: Vec<AnonymousObjectCapture>,
+    finalized: bool,
 }
 
 /// Keep one capture per semantic source. A capture already recorded for that source still
 /// receives the closure id when publication of the local-class inventory ran first.
-pub(super) fn merge_local_receiver_capture(
+fn merge_local_receiver_capture(
     captures: &mut Vec<AnonymousObjectCapture>,
     bindings: &mut Vec<Option<u32>>,
     candidate: AnonymousObjectCapture,
@@ -341,6 +348,54 @@ pub(super) fn merge_local_receiver_capture(
 }
 
 impl Checker<'_> {
+    pub(super) fn local_class_capture_inventory(
+        &self,
+        declaration: DeclId,
+    ) -> LocalClassCaptureInventory {
+        LocalClassCaptureInventory {
+            captures: self
+                .discovered_local_class_captures
+                .get(&declaration)
+                .cloned()
+                .unwrap_or_default(),
+            finalized: self.finalized_local_class_captures.contains(&declaration),
+        }
+    }
+
+    /// Refresh a prior proven receiver from this declaration's current lexical inventory. Source
+    /// coordinates correlate visits of this one declaration only; cross-class joins use the
+    /// independently published receiver identity.
+    pub(super) fn restore_proven_local_receiver_captures(
+        &self,
+        established: &LocalClassCaptureInventory,
+        candidates: &[ObservedReceiverCapture],
+        captures: &mut Vec<AnonymousObjectCapture>,
+        bindings: &mut Vec<Option<u32>>,
+    ) {
+        for prior in &established.captures {
+            if !matches!(
+                prior.source,
+                AnonymousObjectCaptureSource::ImplicitReceiver { .. }
+            ) {
+                continue;
+            }
+            let mut current = candidates
+                .iter()
+                .find(|candidate| candidate.capture.source == prior.source)
+                .expect("a proven local-class receiver remains in its declaration's lexical tower")
+                .capture
+                .clone();
+            current.receiver_capture = prior.receiver_capture;
+            current.capture_dependency = prior.capture_dependency;
+            merge_local_receiver_capture(captures, bindings, current.clone());
+            let selected = captures
+                .iter_mut()
+                .find(|capture| capture.source == prior.source)
+                .expect("the refreshed receiver was installed");
+            *selected = current;
+        }
+    }
+
     /// Finish a local class's receiver captures after its body has been checked.
     ///
     /// Receivers the body read are ordered by first use. An implicit receiver the inventory held
@@ -352,21 +407,37 @@ impl Checker<'_> {
         declaration: DeclId,
         captures: &mut Vec<AnonymousObjectCapture>,
         bindings: &mut Vec<Option<u32>>,
-        used_receivers: Vec<(usize, AnonymousObjectCaptureSource)>,
+        receiver_candidates: Vec<ObservedReceiverCapture>,
+        uses_before_body: usize,
+        established: LocalClassCaptureInventory,
     ) {
+        let mut used_receivers = Vec::new();
+        for observed in receiver_candidates {
+            let Some(first_use) = observed
+                .uses_before
+                .iter()
+                .filter(|(identity, before)| {
+                    self.implicit_receiver_identity_use_count(*identity) > *before
+                })
+                .map(|(identity, _)| {
+                    self.implicit_receiver_identity_uses.first_use_since(
+                        uses_before_body,
+                        *identity,
+                        None,
+                    )
+                })
+                .min()
+            else {
+                continue;
+            };
+            used_receivers.push((first_use, observed.capture.source));
+            merge_local_receiver_capture(captures, bindings, observed.capture);
+        }
         // An inner class is not entered as its own local-class statement, so it never publishes
         // captures of its own. Its super call reads a superclass receiver from the enclosing
         // local class. Keep that receiver here even when this class's body never mentions it.
         self.retain_receivers_read_by_nested_inner_superclasses(declaration, captures);
-        capture_field_order::order_receivers_by_first_use(
-            captures,
-            bindings,
-            used_receivers.clone(),
-        );
-        // A postponed receiver-lambda revisit is a constraint probe, not the final closure
-        // inventory. Its member/accessor check can temporarily lack a resolved receiver operand;
-        // absence of a use in that visit does not prove the declaration never reads the receiver.
-        // Keep the provisional inputs until the solved typed visit can authoritatively prune them.
+        // Provisional visits publish only proven selections, but cannot mark their types final.
         let provisional = self.postponed_argument_depth != 0
             || captures.iter().any(|capture| {
                 capture.ty.mentions_pending()
@@ -374,9 +445,49 @@ impl Checker<'_> {
                         .storage_ty
                         .is_some_and(|storage| storage.mentions_pending())
             });
-        if !provisional {
-            drop_unused_implicit_receivers(captures, bindings, &used_receivers);
+        // Established fields are proven reads, not the temporary candidate overlay. A completed
+        // local method never selects its receiver again during a memoized revisit.
+        let mut proven_uses = established
+            .captures
+            .iter()
+            .filter_map(|capture| {
+                matches!(
+                    capture.source,
+                    AnonymousObjectCaptureSource::ImplicitReceiver { .. }
+                )
+                .then_some(capture.source)
+            })
+            .enumerate()
+            .collect::<Vec<_>>();
+        used_receivers.sort_by_key(|(position, _)| *position);
+        for (_, source) in used_receivers {
+            if !proven_uses.iter().any(|(_, proven)| *proven == source) {
+                proven_uses.push((proven_uses.len(), source));
+            }
         }
+        let used_receivers = proven_uses;
+        capture_field_order::order_receivers_by_first_use(
+            captures,
+            bindings,
+            used_receivers.clone(),
+        );
+        // Publish only selected inputs, including on provisional visits. The full overlay was
+        // needed for checking, but conserving it would give Unused a phantom constructor input.
+        drop_unused_implicit_receivers(captures, bindings, &used_receivers);
+        let (selected, _) = capture_field_order::reconcile(
+            Some(&established.captures),
+            std::mem::take(captures),
+            false,
+        );
+        *captures = selected;
+        if !provisional || established.finalized {
+            self.finalized_local_class_captures.insert(declaration);
+        }
+        assert_eq!(
+            captures.len(),
+            bindings.len(),
+            "local capture publication pairs every selected field with its binding identity"
+        );
         if captures.is_empty() {
             self.discovered_local_class_captures.remove(&declaration);
             self.discovered_local_class_capture_bindings
