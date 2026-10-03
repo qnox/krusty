@@ -4513,15 +4513,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 
 - **A reified `catch (e: E)` uses the inline call's type argument as its JVM catch type.** The
   clause is checked as the reified parameter. Common IR stores only that semantic type. While the
-  parameter is still unsubstituted, emission catches the parameter's bound (`Throwable`) and writes
+  parameter is still unsubstituted, the JVM reified-operation pass records the declaration's
+  source spelling on that `try` — the spelling the marker carries, not a name recovered from the
+  semantic identity. Emission catches the parameter's bound (`Throwable`) and writes
   `Intrinsics.reifiedOperationMarker(7, "E")` as the handler's first instructions, ahead of the
-  store of the exception. The bytecode inliner reads that marker: a concrete argument replaces
-  every typed `try_catch_blocks` entry of that handler with the argument's class and erases the
-  marker; a forwarded parameter (`inline fun <reified T> forward()` calling `eval<T>()`) renames
-  the marker and leaves the erasure for the outer caller. A catch-all handler is left alone. After
-  FIR substitution the semantic type is already the concrete class, so emission catches that class
-  and writes no marker. A thrown type outside the specialized class falls through to the next
-  handler. A catch type that does not determine a JVM class is invalid IR. Tests:
+  store of the exception. The bytecode inliner reads that marker and requires exactly one typed
+  exception-table entry for the handler label that precedes it. A concrete argument replaces that
+  entry with the argument's class and erases the marker; a forwarded parameter (`inline fun
+  <reified T> forward()` calling `eval<T>()`) renames the marker and leaves the erasure for the
+  outer caller. A missing or ambiguous handler is left unchanged. A catch-all is not that entry.
+  After FIR substitution the semantic type is already the concrete class, so emission catches that
+  class and writes no marker. A thrown type outside the specialized class falls through to the
+  next handler. A catch type that does not determine a JVM class is invalid IR. Tests:
   `tests/reified_catch_e2e.rs`. Corpus:
   `codegen/box/reified/catchParameter/tryCatchReifiedType.kt`.
 

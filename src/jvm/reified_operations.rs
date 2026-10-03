@@ -134,6 +134,62 @@ pub(super) fn splice_arguments(
     super::reified_arguments::ReifiedArguments { classes, type_of }
 }
 
+fn collect_reified_parameters(ir: &IrFile) -> HashMap<String, ReifiedParameter> {
+    let mut parameters = HashMap::new();
+    for signature in ir.signatures.values() {
+        for (identity, parameter) in reified_parameters(&signature.type_params) {
+            if let Some(previous) = parameters.insert(identity, parameter.clone()) {
+                assert_eq!(
+                    previous, parameter,
+                    "one semantic reified parameter has consistent declaration facts"
+                );
+            }
+        }
+    }
+    parameters
+}
+
+/// Record which catches are still a reified parameter of a declaration in this file.
+///
+/// The plan is the declaration's source spelling, keyed by the `try` expression and parallel to
+/// its catches. Later passes may move a catch onto a fresh `try`, so emission rebuilds the plan
+/// from the same declaration facts. A catch whose type is already a class records nothing.
+fn record_reified_catches(ir: &mut IrFile, parameters: &HashMap<String, ReifiedParameter>) {
+    ir.reified_catch_markers.clear();
+    let bodies = ir
+        .functions
+        .iter()
+        .filter_map(|function| function.body)
+        .collect::<Vec<_>>();
+    let mut visited = HashSet::new();
+    for root in bodies {
+        let mut pending = vec![root];
+        while let Some(expression) = pending.pop() {
+            if !visited.insert(expression) {
+                continue;
+            }
+            crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+            let IrExpr::Try { catches, .. } = ir.expr(expression) else {
+                continue;
+            };
+            let markers = catches
+                .iter()
+                .map(|catch| parameter(catch.ty, parameters).map(|found| found.source_name.clone()))
+                .collect::<Vec<_>>();
+            if markers.iter().any(Option::is_some) {
+                ir.reified_catch_markers.insert(expression, markers);
+            }
+        }
+    }
+}
+
+/// Rebuild the reified-catch plan from declaration parameters. Emission calls this after suspend
+/// lowering, which can move a catch onto a new `try`.
+pub(super) fn record_catch_markers(ir: &mut IrFile) {
+    let parameters = collect_reified_parameters(ir);
+    record_reified_catches(ir, &parameters);
+}
+
 fn realize_expression_dag(
     ir: &mut IrFile,
     root: ExprId,
@@ -190,17 +246,15 @@ pub(super) fn realize(ir: &mut IrFile, lambdas: &super::lambda_classes::LambdaMe
     // rediscovering implementations through expression nodes already consumed by representation.
     // An ordinary object's member can use the same parameter through generic erasure; that is not
     // a declaration or specialized lambda body and must not execute a reification marker.
-    let mut parameters = HashMap::new();
+    let parameters = collect_reified_parameters(ir);
     let mut functions = lambdas.functions().collect::<HashSet<_>>();
     for (&function, signature) in &ir.signatures {
-        for (identity, parameter) in reified_parameters(&signature.type_params) {
+        if signature
+            .type_params
+            .iter()
+            .any(|parameter| parameter.reified)
+        {
             functions.insert(function);
-            if let Some(previous) = parameters.insert(identity, parameter.clone()) {
-                assert_eq!(
-                    previous, parameter,
-                    "one semantic reified parameter has consistent declaration facts"
-                );
-            }
         }
     }
     let bodies = functions
@@ -210,12 +264,13 @@ pub(super) fn realize(ir: &mut IrFile, lambdas: &super::lambda_classes::LambdaMe
     for body in bodies {
         realize_expression_dag(ir, body, &parameters);
     }
+    record_reified_catches(ir, &parameters);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{IrFunction, IrGenericSig};
+    use crate::ir::{IrCatch, IrFunction, IrGenericSig};
 
     fn reified_signature(identity: &str) -> IrGenericSig {
         IrGenericSig {
@@ -417,5 +472,89 @@ mod tests {
             ir.expr(erased_object_member),
             IrExpr::TypeOp { .. }
         ));
+    }
+
+    #[test]
+    fn records_a_reified_catch_from_the_declaration_source_name() {
+        let identity = "E@eval";
+        let mut ir = IrFile::default();
+        let thrown = ir.add_expr(IrExpr::UnitInstance);
+        let reified_handler = ir.add_expr(IrExpr::UnitInstance);
+        let ordinary_handler = ir.add_expr(IrExpr::UnitInstance);
+        let reified = ir.add_expr(IrExpr::Try {
+            body: thrown,
+            catches: vec![
+                IrCatch {
+                    var: 1,
+                    binding: None,
+                    ty: Ty::ty_param(identity, Ty::obj("kotlin/Throwable")),
+                    body: reified_handler,
+                    line: Some(4),
+                },
+                IrCatch {
+                    var: 2,
+                    binding: None,
+                    ty: Ty::obj("kotlin/Throwable"),
+                    body: ordinary_handler,
+                    line: None,
+                },
+            ],
+            finally: None,
+            result: Ty::Unit,
+        });
+        let plain_handler = ir.add_expr(IrExpr::UnitInstance);
+        let plain = ir.add_expr(IrExpr::Try {
+            body: thrown,
+            catches: vec![IrCatch {
+                var: 3,
+                binding: None,
+                ty: Ty::obj("kotlin/Throwable"),
+                body: plain_handler,
+                line: None,
+            }],
+            finally: None,
+            result: Ty::Unit,
+        });
+        ir.functions.push(IrFunction {
+            name: "eval".to_owned(),
+            params: vec![],
+            ret: Ty::Unit,
+            body: Some(reified),
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: vec![],
+        });
+        ir.functions.push(IrFunction {
+            name: "other".to_owned(),
+            params: vec![],
+            ret: Ty::Unit,
+            body: Some(plain),
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: vec![],
+        });
+        ir.signatures.insert(
+            0,
+            IrGenericSig {
+                type_params: vec![IrTypeParameter {
+                    name: "E".to_owned(),
+                    semantic_name: identity.to_owned(),
+                    bounds: vec![(Ty::obj("kotlin/Throwable"), false)],
+                    variance: Default::default(),
+                    reified: true,
+                }],
+                params: vec![],
+                ret: None,
+                supers: vec![],
+            },
+        );
+
+        realize(&mut ir, &Default::default());
+
+        assert_eq!(
+            ir.reified_catch_markers.get(&reified),
+            Some(&vec![Some("E".to_owned()), None])
+        );
+        assert!(!ir.reified_catch_markers.contains_key(&plain));
     }
 }

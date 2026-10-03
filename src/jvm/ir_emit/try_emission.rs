@@ -289,9 +289,16 @@ impl Emitter<'_> {
             if let Some(finalizer) = finally {
                 self.open_finally_segment(finalizer, code);
             }
-            if let Some(name) = c.reified_marker_name() {
-                // kotlinc's reified catch placeholder. The exception stays under the marker's
-                // two arguments; the bytecode inliner rewrites this handler's catch type from it.
+            if let Some(name) = self
+                .ir
+                .reified_catch_markers
+                .get(&expression)
+                .and_then(|markers| markers.get(ordinal)?.as_deref())
+            {
+                // kotlinc's reified catch placeholder, from the plan recorded while the catch
+                // type was still the declaration's parameter. The exception stays under the
+                // marker's two arguments; the bytecode inliner rewrites this handler's catch
+                // type from it.
                 code.push_int(7, self.cw);
                 code.push_string(name, self.cw);
                 let marker = self.cw.methodref(

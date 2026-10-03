@@ -6,8 +6,8 @@ use crate::types::{Ty, TypeName};
 /// One `catch (var: ty) { body }` clause of an [`IrExpr::Try`].
 ///
 /// `ty` is the only catch fact. A reified type parameter stays a type parameter until an inline
-/// call substitutes its argument. The JVM class and any reified-catch marker are derived from `ty`
-/// at the emission boundary.
+/// call substitutes its argument. The JVM class is derived from `ty` at emission. A reified-catch
+/// marker is a separate plan, recorded from the declaration while this type is still that parameter.
 #[derive(Clone, Debug)]
 pub struct IrCatch {
     /// Value index the caught exception is bound to.
@@ -43,14 +43,6 @@ impl IrCatch {
             .non_null()
             .obj_internal()
             .unwrap_or_else(|| unreachable!("a catch type determines a JVM class"))
-    }
-
-    /// Source spelling of a still-reified catch parameter. Present only while [`Self::ty`] is that
-    /// parameter. The marker operand is the spelling kotlinc writes (`"E"`), not the semantic
-    /// identity; emission puts it in `reifiedOperationMarker` mode 7.
-    pub(crate) fn reified_marker_name(&self) -> Option<&'static str> {
-        let identity = self.ty.non_null().ty_param_name()?;
-        Some(crate::types::type_parameter_source_name(identity))
     }
 
     /// The source spelling of the binding, absent for a compiler-generated handler.

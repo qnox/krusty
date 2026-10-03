@@ -5,6 +5,8 @@
 //! handler. The classpath case is the same contract for a body that was compiled ahead of its
 //! caller: the dependency keeps a mode-7 marker, and a later compilation specializes the
 //! exception table, including a forwarded `<T>` that renames the marker to the outer parameter.
+//! The same library built here is also run by kotlinc, which specializes the marker this
+//! compiler wrote.
 
 use super::common;
 
@@ -84,5 +86,15 @@ fn a_kotlinc_reified_catch_specializes_including_a_forwarded_parameter() {
     assert_eq!(
         common::expect_box_run_against_kotlinc(LIB, MAIN).as_deref(),
         Some("OK")
+    );
+}
+
+#[test]
+fn kotlinc_specializes_a_krusty_reified_catch_including_a_forwarded_parameter() {
+    let library = common::compile_libs("reified_catch_for_kotlinc", &[("Lib.kt", LIB)])
+        .expect("krusty builds the reified catch library");
+    assert_eq!(
+        common::kotlinc_box_result_with_classpath(MAIN, std::slice::from_ref(&library)),
+        "OK"
     );
 }

@@ -32,7 +32,7 @@ enum Repoint {
         placeholder: usize,
         argument: String,
     },
-    /// A concrete `catch (e: T)`: rewrite the handler's typed exception-table entries to `class`.
+    /// A concrete `catch (e: T)`: rewrite the handler's one typed exception-table entry to `class`.
     Catch { class: String },
 }
 
@@ -221,11 +221,9 @@ fn catch_repoint(
 ) -> Result<Repoint, InlineError> {
     let handler =
         handler_label_before(node, operation).ok_or(InlineError::MalformedReifiedMarker)?;
-    if !node
-        .try_catch_blocks
-        .iter()
-        .any(|block| block.handler == handler && block.catch_type.is_some())
-    {
+    // The marker belongs to one typed entry. A catch-all on the same label is a different
+    // handler; a second typed entry makes the marker's catch type ambiguous.
+    if typed_handler_entries(node, handler).len() != 1 {
         return Err(InlineError::MalformedReifiedMarker);
     }
     match arguments.classes.get(argument.trim_end_matches('?')) {
@@ -240,21 +238,24 @@ fn catch_repoint(
     }
 }
 
+fn typed_handler_entries(node: &MethodNode, handler: LabelId) -> Vec<usize> {
+    node.try_catch_blocks
+        .iter()
+        .enumerate()
+        .filter(|(_, block)| block.handler == handler && block.catch_type.is_some())
+        .map(|(index, _)| index)
+        .collect()
+}
+
 fn retarget_catch(node: &mut MethodNode, operation: usize, class: &str) -> Result<(), InlineError> {
     let handler =
         handler_label_before(node, operation).ok_or(InlineError::MalformedReifiedMarker)?;
-    let mut updated = false;
-    for block in &mut node.try_catch_blocks {
-        if block.handler == handler && block.catch_type.is_some() {
-            block.catch_type = Some(class.to_owned());
-            updated = true;
-        }
+    let entries = typed_handler_entries(node, handler);
+    if entries.len() != 1 {
+        return Err(InlineError::MalformedReifiedMarker);
     }
-    if updated {
-        Ok(())
-    } else {
-        Err(InlineError::MalformedReifiedMarker)
-    }
+    node.try_catch_blocks[entries[0]].catch_type = Some(class.to_owned());
+    Ok(())
 }
 
 fn handler_label_before(node: &MethodNode, at: usize) -> Option<LabelId> {
@@ -715,6 +716,21 @@ mod tests {
             Some("java/lang/Throwable")
         );
         assert_eq!(node.try_catch_blocks[1].catch_type, None);
+    }
+
+    #[test]
+    fn an_ambiguous_catch_handler_is_rejected_unchanged() {
+        let mut node = catch_handler("E");
+        let mut second = node.try_catch_blocks[0].clone();
+        second.catch_type = Some("java/lang/Exception".to_owned());
+        node.try_catch_blocks.insert(1, second);
+        let original = node.clone();
+
+        assert_eq!(
+            specialize(&mut node, &child_failure()),
+            Err(InlineError::MalformedReifiedMarker),
+        );
+        assert_eq!(node, original);
     }
 
     #[test]

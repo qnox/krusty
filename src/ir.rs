@@ -2238,6 +2238,12 @@ pub struct IrFile {
     /// declaration keeps the callee's `reifiedOperationMarker` for the host's caller to specialize.
     /// This is the classpath analogue of the IR inliner's same-file `reified_subst`.
     pub reified_call_subst: std::collections::HashMap<u32, Vec<(String, Ty)>>,
+    /// Try `ExprId` → source spelling of each catch that is still a reified parameter of a
+    /// declaration in this file, parallel to that try's catches. `None` is an ordinary clause.
+    /// The JVM reified-operation pass records the declaration's source spelling while the semantic
+    /// identity is still on the catch. Try emission reads it for `reifiedOperationMarker` mode 7
+    /// and does not recover the spelling from the identity.
+    pub(crate) reified_catch_markers: std::collections::HashMap<ExprId, Vec<Option<String>>>,
     /// Call `ExprId` → every checked type argument of a classpath inline declaration, under the
     /// dependency metadata's formal name. JVM anonymous-object regeneration specializes generic
     /// class signatures with this full map; runtime reified operations use the narrower map above.
