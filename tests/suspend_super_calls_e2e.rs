@@ -3,8 +3,9 @@
 //! The checker records that the selected declaration suspends, lowering keeps that fact on the
 //! call, and JVM coroutine lowering passes the continuation and names the member's CPS descriptor
 //! on the `invokespecial`. The declaration may be in this file, a sibling file or a dependency,
-//! and reached through a class or an interface qualifier. Each fixture runs, and the override's
-//! instructions match kotlinc's.
+//! and reached through a class or an interface qualifier. Each fixture runs. The override's full
+//! instructions match kotlinc's where instruction scheduling is already identical; otherwise the
+//! test compares the exact call edge that carries the suspension.
 
 use super::common;
 
@@ -43,6 +44,42 @@ fn assert_method_matches_kotlinc(
         Some(Ok(())) => {}
         Some(Err(difference)) => panic!("{difference}"),
     }
+}
+
+/// Compare the call that makes an interface override's helper suspend through its superinterface.
+/// The surrounding string concatenation is intentionally outside this assertion: its builder is
+/// scheduled differently, but it does not own the suspend-call identity or continuation edge.
+fn assert_interface_super_suspend_call_matches_kotlinc(source: &str) {
+    let comparison = common::compare_with_kotlinc_plugin(
+        "SuspendSuperInterfaceCode",
+        source,
+        "A2",
+        &[common::stdlib_jar()],
+        "17",
+        &[],
+    )
+    .expect("reference kotlinc and javap are provisioned");
+    let super_suspend_calls = |disassembly: &str| {
+        common::method_instructions(disassembly, "suspendHere$suspendImpl")
+            .into_iter()
+            .filter_map(|row| row.split_once(": ").map(|(_, instruction)| instruction.to_owned()))
+            .filter(|instruction| {
+                instruction
+                    == "invokespecial # // InterfaceMethod A.suspendHere:(Lkotlin/coroutines/Continuation;)Ljava/lang/Object;"
+            })
+            .collect::<Vec<_>>()
+    };
+    let reference = super_suspend_calls(&comparison.reference);
+    assert_eq!(
+        reference,
+        ["invokespecial # // InterfaceMethod A.suspendHere:(Lkotlin/coroutines/Continuation;)Ljava/lang/Object;"],
+        "kotlinc interface-super suspension edge"
+    );
+    assert_eq!(
+        super_suspend_calls(&comparison.krusty),
+        reference,
+        "krusty interface-super suspension edge"
+    );
 }
 
 const DIRECT: &str = "suspend fun mark() {}\n\
@@ -142,11 +179,12 @@ fun box(): String {\n\
 /// The override lives on the interface, so its machine is `suspendHere$suspendImpl` and the super
 /// call is `invokespecial` of the superinterface default. The base body suspends, and the resume
 /// must return to this override rather than re-dispatch. String concatenation across those
-/// suspensions still schedules its `StringBuilder` differently from kotlinc, so this fixture
-/// checks the result rather than the instruction stream.
+/// suspensions still schedules its `StringBuilder` differently from kotlinc, so the differential
+/// assertion selects the exact suspension edge rather than accepting that unrelated delta.
 #[test]
 fn an_interface_override_of_a_suspending_super_call_runs() {
     assert_runs(INTERFACE_OVERRIDE, "SuspendSuperInterface");
+    assert_interface_super_suspend_call_matches_kotlinc(INTERFACE_OVERRIDE);
 }
 
 /// The TYPED spelling `super<I>.f()`, which reaches an interface's default body.
