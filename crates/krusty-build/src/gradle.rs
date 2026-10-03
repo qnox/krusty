@@ -849,14 +849,6 @@ mod tests {
                     "unsupported freeCompilerArg '-jvm-default=sideways'; use a supported compilerOptions property",
                 ),
                 (
-                    "old-language-version",
-                    "krusty does not support compilerOptions.languageVersion=2.2; only 2.4 is supported",
-                ),
-                (
-                    "old-api-version",
-                    "krusty does not support compilerOptions.apiVersion=2.0; only 2.4 is supported",
-                ),
-                (
                     "progressive-free-argument",
                     "freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead",
                 ),
@@ -879,10 +871,6 @@ mod tests {
                 (
                     "free-werror",
                     "krusty does not support warning policy freeCompilerArg '-Werror'",
-                ),
-                (
-                    "warning-level",
-                    "krusty does not support warning policy freeCompilerArg '-Xwarning-level=REDUNDANT_CLI_ARG:disabled'",
                 ),
                 (
                     "empty-opt-in",
@@ -922,6 +910,118 @@ mod tests {
                 );
                 assert!(!log.exists(), "{case} must fail before execing krusty");
             }
+
+            // Gradle transports named warning policy without duplicating the compiler's registry.
+            // Malformed policy therefore reaches krusty and is rejected by the same parser as a
+            // direct CLI or Bazel-worker invocation.
+            for (case, argument) in [
+                (
+                    "warning-level-bad-severity",
+                    "-Xwarning-level=REDUNDANT_CLI_ARG:loud",
+                ),
+                (
+                    "warning-level-missing-colon",
+                    "-Xwarning-level=REDUNDANT_CLI_ARG",
+                ),
+            ] {
+                let _ = std::fs::remove_file(&log);
+                let result = build()
+                    .property("krusty.negative", case)
+                    .tasks([":compiler:util:compileKotlin"])
+                    .run();
+                assert!(result.is_err(), "negative case {case} succeeded");
+                let invocation = single_invocation(&log);
+                assert_eq!(
+                    invocation
+                        .iter()
+                        .filter(|actual| actual.as_str() == argument)
+                        .count(),
+                    1,
+                    "{case}: {invocation:?}",
+                );
+            }
+
+            // Gradle forwards standard version values without duplicating kotlinc's
+            // release-specific version table in the plugin. The shared compiler settings boundary
+            // rejects values unavailable in the selected 2.4.10 compiler after seeing the exact
+            // standard argument.
+            for (case, option) in [
+                ("old-language-version", "-language-version"),
+                ("old-api-version", "-api-version"),
+            ] {
+                let _ = std::fs::remove_file(&log);
+                let result = build()
+                    .property("krusty.negative", case)
+                    .tasks([":compiler:util:compileKotlin"])
+                    .run();
+                assert!(result.is_err(), "negative case {case} succeeded");
+                let invocation = single_invocation(&log);
+                assert_eq!(
+                    invocation
+                        .windows(2)
+                        .filter(|pair| pair == &[option, "1.9"])
+                        .count(),
+                    1,
+                    "{case}: {invocation:?}",
+                );
+            }
+
+            // A well-formed named policy is forwarded to and applied by the compiler. Disabling a
+            // warning does not change classfile bytes, so this compile succeeds normally.
+            let _ = std::fs::remove_file(&log);
+            build()
+                .property("krusty.negative", "warning-level")
+                .tasks([":compiler:util:compileKotlin"])
+                .run()
+                .unwrap_or_else(|error| panic!("warning-level forwarding: {error}"));
+            let forwarded = single_invocation(&log);
+            assert_eq!(
+                forwarded
+                    .iter()
+                    .filter(|argument| {
+                        argument.as_str() == "-Xwarning-level=REDUNDANT_CLI_ARG:disabled"
+                    })
+                    .count(),
+                1,
+                "{forwarded:?}"
+            );
+
+            // The standard Gradle languageVersion reaches the compiler unchanged. No krusty-only
+            // property and no metadata-only substitution is part of the contract.
+            let _ = std::fs::remove_file(&log);
+            std::fs::write(
+                &runtime_source,
+                "package org.jetbrains.kotlin.util\nfun runtimeMarker() = \"runtime\"\nfun languageLevel22() = 1\n",
+            )
+            .expect("edit runtime for languageVersion 2.2");
+            build()
+                .property("krusty.negative", "language-version-2-2")
+                .tasks([":core:util.runtime:compileKotlin"])
+                .run()
+                .unwrap_or_else(|error| panic!("languageVersion 2.2: {error}"));
+            let language_2_2_run = single_invocation(&log);
+            assert_eq!(
+                language_2_2_run
+                    .windows(2)
+                    .filter(|pair| pair == &["-language-version", "2.2"])
+                    .count(),
+                1,
+                "{language_2_2_run:?}",
+            );
+            assert_eq!(
+                language_2_2_run
+                    .windows(2)
+                    .filter(|pair| pair == &["-api-version", "2.2"])
+                    .count(),
+                1,
+                "{language_2_2_run:?}",
+            );
+            assert!(
+                language_2_2_run
+                    .iter()
+                    .all(|argument| !argument.starts_with("-Xmetadata-version")),
+                "{language_2_2_run:?}",
+            );
         }
 
         let _ = std::fs::remove_dir_all(&root);
@@ -1034,6 +1134,13 @@ mod tests {
     fn has_pair(args: &[String], left: &str, right: &str) -> bool {
         args.windows(2)
             .any(|pair| pair[0] == left && pair[1] == right)
+    }
+
+    fn single_invocation(log: &Path) -> Vec<String> {
+        let text = std::fs::read_to_string(log).expect("bridge invocation log");
+        let runs = invocations(&text);
+        assert_eq!(runs.len(), 1, "{text}");
+        runs.into_iter().next().expect("single invocation")
     }
 
     fn invocations(text: &str) -> Vec<Vec<String>> {
@@ -1216,8 +1323,16 @@ tasks.withType<KotlinJvmCompile>().configureEach {
     compilerOptions {
         jvmTarget.set(JvmTarget.JVM_17)
         moduleName.set("kotlin-util-runtime")
-        languageVersion.set(KotlinVersion.KOTLIN_2_4)
-        apiVersion.set(KotlinVersion.KOTLIN_2_4)
+        when (krustyNegative) {
+            "language-version-2-2" -> {
+                languageVersion.set(KotlinVersion.KOTLIN_2_2)
+                apiVersion.set(KotlinVersion.KOTLIN_2_2)
+            }
+            else -> {
+                languageVersion.set(KotlinVersion.KOTLIN_2_4)
+                apiVersion.set(KotlinVersion.KOTLIN_2_4)
+            }
+        }
         jvmDefault.set(JvmDefaultMode.NO_COMPATIBILITY)
         javaParameters.set(true)
         freeCompilerArgs.add("-Xconsistent-data-class-copy-visibility")
@@ -1342,14 +1457,16 @@ tasks.withType<KotlinJvmCompile>().configureEach {
             "plugin-free-argument" -> freeCompilerArgs.add("-Xplugin=forbidden.jar")
             "jvm-default-conflict" -> freeCompilerArgs.add("-jvm-default=disable")
             "jvm-default-bad-mode" -> freeCompilerArgs.add("-jvm-default=sideways")
-            "old-language-version" -> languageVersion.set(KotlinVersion.KOTLIN_2_2)
-            "old-api-version" -> apiVersion.set(KotlinVersion.KOTLIN_2_0)
+            "old-language-version" -> languageVersion.set(KotlinVersion.fromVersion("1.9"))
+            "old-api-version" -> apiVersion.set(KotlinVersion.fromVersion("1.9"))
             "progressive-free-argument" -> freeCompilerArgs.add("-progressive")
             "jspecify-free-argument" -> freeCompilerArgs.add("-Xjspecify-annotations=strict")
             "jdk-release-free-argument" -> freeCompilerArgs.add("-Xjdk-release=8")
             "duplicate-inert-flag" -> freeCompilerArgs.add("-Xskip-prerelease-check")
             "free-werror" -> freeCompilerArgs.add("-Werror")
             "warning-level" -> freeCompilerArgs.add("-Xwarning-level=REDUNDANT_CLI_ARG:disabled")
+            "warning-level-bad-severity" -> freeCompilerArgs.add("-Xwarning-level=REDUNDANT_CLI_ARG:loud")
+            "warning-level-missing-colon" -> freeCompilerArgs.add("-Xwarning-level=REDUNDANT_CLI_ARG")
             "opt-in-overlap" -> freeCompilerArgs.add("-opt-in=krusty.fixture.ExperimentalFirstApi")
         }
     }

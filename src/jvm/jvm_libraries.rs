@@ -4,6 +4,7 @@
 //! only Kotlin-level `Ty`s and opaque descriptor tokens through the trait.
 
 mod builtin_classifier_shapes;
+mod builtins_customizer;
 mod catalog_presence;
 mod classifier_facts;
 mod generic_signatures;
@@ -20,9 +21,11 @@ mod unsigned_intrinsics;
 use static_properties::StaticAccessor;
 
 use super::mapped_builtin_declarations::MappedBuiltinMember;
+use crate::language_version::LanguageVersion;
 use builtin_classifier_shapes::{
     builtin_library_type, mapped_builtin_property, mapped_builtin_signature, BuiltinGenericShape,
 };
+use builtins_customizer::JvmBuiltInsCustomizer;
 use generic_signatures::{
     concrete_generic_ret, mark_receiver_fun_params, parse_class_gsig, parse_field_gsig,
     suspend_return_from_gsig,
@@ -100,145 +103,17 @@ pub struct JvmLibraries {
     source_headers: std::cell::RefCell<Option<super::classpath::StubOverlayGuard>>,
     common_expectations: std::sync::Arc<super::common_metadata::CommonExpectationIndex>,
     builtins_customizer: JvmBuiltInsCustomizer,
+    /// `-api-version` for this compilation. Classpath caches stay shared; availability is decided
+    /// here, per provider, when a `@SinceKotlin` callable is offered as a candidate.
+    api_version: LanguageVersion,
+    /// Classifiers whose `@SinceKotlin` callable of a given name this compilation withheld.
+    /// Keyed by the declaration's receiver or owner, not by the shared classpath cache.
+    api_withheld:
+        std::cell::RefCell<std::collections::HashMap<TypeName, std::collections::HashSet<String>>>,
     /// Classifier currently having its exact declaration map materialized. This is construction state,
     /// not a lookup fallback: recursive metadata reads observe the same immutable raw signature.
     building_types:
         std::cell::RefCell<std::collections::HashMap<TypeName, std::sync::Arc<LibraryType>>>,
-}
-
-/// JVM-only additions to Kotlin's builtin classifier model.
-///
-/// These declarations are absent from the common `Array` source and are not backend guesses:
-/// kotlinc's `JvmBuiltInsCustomizer` adds `Cloneable`/`Serializable` as array supertypes and publishes
-/// a public, covariant `clone()` declaration on every array classifier. Keeping that transformation
-/// here means every consumer sees one ordinary [`LibraryType`]; resolver and lowerer need no JVM or
-/// array-specific lookup path.
-#[derive(Default)]
-struct JvmBuiltInsCustomizer;
-
-impl JvmBuiltInsCustomizer {
-    fn classifier_name(&self, package: TypeName, name: &str) -> Option<TypeName> {
-        if !package.matches("kotlin") {
-            return None;
-        }
-        let recognized =
-            name == "Cloneable" || name == "Array" || Ty::primitive_array_element(name).is_some();
-        recognized.then(|| crate::types::type_name_child(package, name))
-    }
-
-    fn customize(&self, internal: TypeName, base: Option<LibraryType>) -> Option<LibraryType> {
-        let mut classifier = if internal.matches("kotlin/Cloneable") {
-            base.unwrap_or_else(Self::cloneable_classifier)
-        } else if Ty::obj_name(internal).is_array() {
-            base.unwrap_or_else(LibraryType::declaration_header)
-        } else {
-            base?
-        };
-
-        if internal.matches("kotlin/Cloneable") {
-            Self::install_cloneable_clone(&mut classifier);
-        }
-        if Ty::obj_name(internal).is_array() {
-            Self::install_array_platform_shape(internal, &mut classifier);
-        }
-        Some(classifier)
-    }
-
-    /// JVM realization of an intrinsic builtin companion. The semantic companion identity comes
-    /// from `.kotlin_builtins`; this mapping supplies only the platform class that stores its value.
-    fn intrinsic_companion_realization(
-        &self,
-        owner: TypeName,
-        companion: TypeName,
-    ) -> Option<TypeName> {
-        (owner.parent() == Some(type_name("kotlin")) && companion.nested_owner() == Some(owner))
-            .then(|| {
-                let segment = format!("{}CompanionObject", owner.segment_ref());
-                crate::types::type_name_child(type_name("kotlin/jvm/internal"), &segment)
-            })
-    }
-
-    fn cloneable_classifier() -> LibraryType {
-        let mut supertypes = TypeNameList::new();
-        supertypes.push("kotlin/Any");
-        builtin_library_type(
-            crate::libraries::TypeKind::Interface,
-            crate::libraries::ClassifierAccess::Public,
-            false,
-            supertypes,
-            Vec::new(),
-            Vec::new(),
-            BuiltinGenericShape {
-                type_params: Vec::new(),
-                type_param_variances: Vec::new(),
-                supertype_templates: vec![Ty::obj("kotlin/Any")],
-            },
-        )
-    }
-
-    fn clone_member(ret: Ty, visibility: Visibility) -> LibraryMember {
-        let physical_ret = Ty::obj("kotlin/Any");
-        let mut clone = LibraryMember::new(
-            "clone".to_string(),
-            Vec::new(),
-            ret,
-            "()Ljava/lang/Object;".to_string(),
-        );
-        // `Array.clone()` is a source-level JVM builtin, physically realized by the protected method
-        // on `Object`. The selected callable carries that complete realization into emission.
-        clone.owner = Some(crate::types::wk::java_object());
-        clone.physical_ret = physical_ret;
-        clone.visibility = visibility;
-        clone
-    }
-
-    fn install_cloneable_clone(classifier: &mut LibraryType) {
-        if let Some(clone) = classifier
-            .members
-            .iter_mut()
-            .find(|member| member.name == "clone" && member.params.is_empty())
-        {
-            *clone = Self::clone_member(Ty::obj("kotlin/Any"), Visibility::Protected);
-        } else {
-            classifier.members.push(Self::clone_member(
-                Ty::obj("kotlin/Any"),
-                Visibility::Protected,
-            ));
-        }
-    }
-
-    fn install_array_platform_shape(internal: TypeName, classifier: &mut LibraryType) {
-        for supertype in ["kotlin/Cloneable", "java/io/Serializable"] {
-            let name = type_name(supertype);
-            if !classifier.supertypes.contains_name(name) {
-                classifier.supertypes.push_name(name);
-            }
-            if !classifier
-                .supertype_templates
-                .iter()
-                .any(|ty| ty.obj_internal() == Some(name))
-            {
-                classifier.supertype_templates.push(Ty::obj_name(name));
-            }
-        }
-
-        let arguments = classifier
-            .type_params
-            .iter()
-            .map(|formal| Ty::ty_param(formal, Ty::obj("kotlin/Any")))
-            .collect::<Vec<_>>();
-        let ret = Ty::obj_args_name(internal, &arguments);
-        let replacement = Self::clone_member(ret, Visibility::Public);
-        if let Some(clone) = classifier
-            .members
-            .iter_mut()
-            .find(|member| member.name == "clone" && member.params.is_empty())
-        {
-            *clone = replacement;
-        } else {
-            classifier.members.push(replacement);
-        }
-    }
 }
 
 /// Kotlin's JVM delegation filter, applied at the provider boundary: an implemented Java method
@@ -557,9 +432,7 @@ impl JvmLibraries {
                 false,
                 &|name| self.metadata_value_class_underlying(name),
             );
-            if meta.deprecated_hidden {
-                // `@Deprecated(level = HIDDEN)`: binary-compatibility-only, kotlinc removes it
-                // from the candidate set entirely.
+            if self.hides_callable(meta.deprecated_hidden, meta.since_kotlin) {
                 continue;
             }
             let source_name = meta.source_name.clone().unwrap_or_else(|| name.to_string());
@@ -899,7 +772,9 @@ impl JvmLibraries {
                 .map(|method| method.is_public())
         };
         for function in super::metadata::class_functions(&class) {
-            if function.kotlin_name != name || !function.is_public() || function.deprecated_hidden()
+            if function.kotlin_name != name
+                || !function.is_public()
+                || self.hides_callable(function.deprecated_hidden(), function.since_kotlin())
             {
                 continue;
             }
@@ -1125,8 +1000,39 @@ impl JvmLibraries {
             source_headers: Default::default(),
             common_expectations,
             builtins_customizer: JvmBuiltInsCustomizer,
+            api_version: LanguageVersion::default(),
+            api_withheld: Default::default(),
             building_types: Default::default(),
         })
+    }
+
+    /// Select which `@SinceKotlin` declarations this compilation may call.
+    pub fn with_api_version(mut self, api_version: LanguageVersion) -> Self {
+        self.api_version = api_version;
+        self
+    }
+
+    /// `@Deprecated(HIDDEN)` and a `@SinceKotlin` newer than [`Self::api_version`] are both absent
+    /// from overload resolution. Kotlinc reports the missing callable as an unresolved reference,
+    /// and omits the receiver type when the withheld declaration was the applicable one.
+    fn hides_callable(
+        &self,
+        deprecated_hidden: bool,
+        since_kotlin: Option<LanguageVersion>,
+    ) -> bool {
+        deprecated_hidden || self.since_kotlin_withheld(since_kotlin)
+    }
+
+    fn since_kotlin_withheld(&self, since_kotlin: Option<LanguageVersion>) -> bool {
+        since_kotlin.is_some_and(|since| since > self.api_version)
+    }
+
+    fn note_api_withheld(&self, owner: TypeName, name: &str) {
+        self.api_withheld
+            .borrow_mut()
+            .entry(owner)
+            .or_default()
+            .insert(name.to_string());
     }
 
     fn library_const(value: &ConstVal) -> LibConst {
@@ -1518,7 +1424,15 @@ impl JvmLibraries {
             let declared_methods: Vec<_> = if has_kotlin_metadata {
                 meta_fns
                     .iter()
-                    .filter(|declaration| !declaration.deprecated_hidden())
+                    .filter(|declaration| {
+                        if self.since_kotlin_withheld(declaration.since_kotlin()) {
+                            self.note_api_withheld(internal_name, &declaration.kotlin_name);
+                        }
+                        !self.hides_callable(
+                            declaration.deprecated_hidden(),
+                            declaration.since_kotlin(),
+                        )
+                    })
                     .filter_map(|declaration| {
                         let descriptor = declaration.jvm_desc?;
                         ci.methods
@@ -4340,7 +4254,15 @@ impl JvmLibraries {
         {
             let lambda_return_overload = self.cp.lambda_return_overloads(facade).contains(name);
             for mf in self.cp.meta_functions_name(facade).iter() {
-                if mf.kotlin_name != name || !mf.is_extension() || mf.deprecated_hidden() {
+                if mf.kotlin_name != name || !mf.is_extension() {
+                    continue;
+                }
+                if self.since_kotlin_withheld(mf.since_kotlin()) {
+                    if let Some(receiver) = mf.receiver_class {
+                        self.note_api_withheld(receiver, name);
+                    }
+                }
+                if self.hides_callable(mf.deprecated_hidden(), mf.since_kotlin()) {
                     continue;
                 }
                 let raw_receiver = mf.generic_sig.as_ref().and_then(|g| g.receiver);
@@ -4707,6 +4629,13 @@ impl SymbolSource for JvmLibraries {
         name: &str,
     ) -> std::rc::Rc<crate::libraries::ResolvedSymbols> {
         JvmLibraries::symbols(self, namespace, name)
+    }
+
+    fn api_withheld_callable(&self, owner: TypeName, name: &str) -> bool {
+        self.api_withheld
+            .borrow()
+            .get(&owner)
+            .is_some_and(|names| names.contains(name))
     }
 
     fn platform_flexible_upper_bound(&self, lower: Ty) -> Ty {

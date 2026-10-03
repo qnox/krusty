@@ -235,9 +235,9 @@ diagnostics are listed in source order, and so are one file's body diagnostics: 
 by position, not in the order the checker visits a class's constructors, property initializers,
 accessors and `init` blocks (`conversion_carriers_take_kotlincs_names` before 2.4.20). Tests
 follow the same target:
-differential tests compare against whichever kotlinc the run provisions, and a test that pins what
-kotlinc says reads it from a values file recorded per version from kotlinc itself
-(`tests/recorded/`, `tests/common/recorded.rs`), never from a hand-written branch. Tests:
+differential tests compare against whichever kotlinc the run provisions. Its exact-version binary
+invocation cache records the exit status and diagnostics, so tests never infer another compiler
+version's wording and never need hand-written version branches. Tests:
 `tests/diagnostic_wording_versions_e2e.rs`, `expect_declaration_body_e2e`,
 `safe_call_unresolved_member_e2e`, `inferred_signature_commits_a_classifier_root_over_a_same_named_package`,
 plus `kotlin_version` unit tests and `the_reference_version_flag_accepts_only_supported_releases`.
@@ -10200,19 +10200,48 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `multiplatform/k2/expectStatic.kt`.) Classes compiled with this experimental feature match
   kotlinc's except the `@Metadata` pre-release flag kotlinc sets (`xi` 50 against 48).
 
-- **`-language-version` is the implemented language, and the artifact stamp is separate.**
-  kotlinc's `-language-version` both gates language semantics and selects the version written into
-  `@kotlin.Metadata` and the `.kotlin_module` header. krusty implements 2.4 only, so a public
-  `-language-version` other than 2.4 is rejected; 2.4 leaves the default stamp `[2, 4, 0]`. The
-  internal `-Xmetadata-version X.Y` writes `mv=[X, Y, 0]` and the same version into the module
-  header without claiming those language semantics. The accepted levels are the one contract
-  2.0, 2.1, 2.2, 2.3, and 2.4; a patch segment, a sign, or any other pair (including kotlinc's
-  experimental 2.5) is an unknown version. `-api-version` stays an accepted-and-ignored
-  compatibility flag. (`tests/metadata_language_version_e2e.rs` compares class, facade,
+- **Language and API versions are standard compiler settings, not a Gradle bridge.**
+  `-language-version` selects the source-language feature baseline and the default version written
+  into `@kotlin.Metadata` and the `.kotlin_module` header. `-api-version` defaults to that language
+  version and may not be newer; it selects declaration availability independently of syntax. The
+  settings are per compilation rather than process-global, because workers and language servers may
+  analyze modules at different levels in one process. A classpath function whose metadata carries
+  `@SinceKotlin` newer than `-api-version` is omitted before overload selection, so the call is an
+  unresolved reference with no receiver type (`IntArray.isSorted` and a dependency `fun` marked
+  `@SinceKotlin("2.4")` at API 2.0; both resolve at API 2.4;
+  `tests/api_version_availability_e2e.rs`). Gradle forwards
+  `compilerOptions.languageVersion` and `compilerOptions.apiVersion` unchanged, with no krusty-only
+  property. With no explicit setting, the stable language/API default is the selected kotlinc
+  release's default. The accepted option domain also follows that concrete release: 2.4.0 and
+  2.4.10 accept 2.0 through experimental 2.5, while 2.4.20 additionally accepts experimental 2.6;
+  2.0 and 2.1 are deprecated. The internal `-Xmetadata-version X.Y` remains a separate
+  artifact-stamp override and does not change source semantics. Malformed, signed, patch, and
+  release-unsupported levels are rejected.
+  (`tests/metadata_language_version_e2e.rs` compares class, facade,
   `$DefaultImpls`, suspend-lambda, and regenerated-inline-object stamps with kotlinc's
-  `-language-version 2.2` output; `language_version_rejects_unimplemented_levels_and_the_stamp_is_internal`
+  `-language-version 2.2` output; `language_version_selects_semantics_and_the_stamp_override_stays_internal`
   in `crates/krusty-cli/src/cli.rs`; `language_version_stamps_the_header` in
   `src/metadata/module.rs`.)
+
+- **`-Xwarning-level=<NAME>:<SEVERITY>` configures a typed diagnostic identity.** The accepted
+  severities are kotlinc's exact, case-sensitive `error`, `warning`, and `disabled` spellings.
+  Krusty rejects unknown diagnostic names, malformed severities, and repeated configuration of one
+  name; it never retains an opaque warning name as an ignored option. `-Xsuppress-version-warnings`
+  drops the deprecated and experimental language/API warnings before that policy is applied, and
+  leaves `REDUNDANT_CLI_ARG` in place
+  (`suppress_version_warnings_drops_only_version_status_warnings` in
+  `crates/krusty-cli/src/cli.rs`). The registry contains only
+  diagnostics the compiler can actually emit: deprecated and experimental language-version
+  warnings and `REDUNDANT_CLI_ARG`. Language-feature arguments are replayed from the selected
+  language/API baseline; an argument that makes no semantic change emits `REDUNDANT_CLI_ARG` with
+  kotlinc's wording. The configured severity is applied before compilation: `error` fails the
+  invocation, `warning` reports it, and `disabled` omits it. The Bazel worker normalizes
+  `--x_warning_level` to the standard compiler option, and the Gradle plugin transports the option
+  unchanged; neither owns a duplicate diagnostic-name registry. `-Werror` and
+  `allWarningsAsErrors` remain rejected until the compiler models their global policy.
+  (`warning_level_configures_named_diagnostics` in `crates/krusty-cli/src/cli.rs`;
+  `warning_level_is_forwarded_to_the_typed_cli_policy` in `crates/krusty-cli/src/worker.rs`;
+  `kotlin_compiler_slice_compiles_through_krusty` in `crates/krusty-build/src/gradle.rs`.)
 
 ## 8. Success criteria for the PoC
 
@@ -12737,6 +12766,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   by the ordinary facade stub emitter unchanged. Tests: `tests/metadata_kept_params.rs`,
   `tests/unsigned_classpath_call_e2e.rs` (both krusty-built by default).
 
+- **A same-file call that omits a default of a `suspend` function is still that suspension.**
+  After JVM default realization the edge is `Callee::LocalDefault` or `Callee::ClassStaticDefault`,
+  and it still names the suspend declaration. The caller's continuation is inserted immediately
+  before the mask and marker (`doAction$run$default(String, Function2, Continuation, int, Object)`),
+  the same slot a member `$default` uses. A local `suspend fun` whose omitted argument is a suspend
+  lambda therefore forwards the enclosing continuation and evaluates the default. Corpus:
+  `coroutines/localFunctions/named/defaultArgument.kt`. Test:
+  `tests/local_suspend_default_e2e.rs`.
+
 - **Safe-call `invoke` on a nullable fun-typed value resolves through the invoke convention.** For
   `op?.invoke(a, b)` where `op: ((Int, Int) -> Int)?`, the ordinary member paths know no `invoke`
   member on `Function{N}` and typed the call `Error` (the whole file then bailed at SafeCall
@@ -13066,10 +13104,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `…::secondary_constructor_annotation_reaches_metadata`,
   `…::annotated_suspend_member_interns_its_signature_before_the_annotation`,
   `…::annotated_suspend_top_level_function_interns_its_signature_before_the_annotation`.
-  PROPERTY annotations now take their own route (below). Still DROPPED before the IR, so there is
-  nothing to mirror yet (each needs the class-file side first, not just the metadata record): a
-  PRIMARY constructor's own annotations (`class C @Anno constructor(…)`) and VALUE-PARAMETER
-  annotations (no `RuntimeVisibleParameterAnnotations` is emitted at all).
+  PROPERTY annotations now take their own route (below). The annotation RECORDS themselves are
+  gated by kotlinc's `LanguageFeature.AnnotationsInMetadata`, stable since language version 2.4,
+  while the `HAS_ANNOTATIONS` flag bits — and a property's `syntheticMethod` marker pointer — stay
+  set at older language levels. krusty gates only the record appends on that finalized source
+  feature (`ClassTail::annotations_in_metadata` and the facade builder's matching parameter), never
+  the flags and never an independently overridden metadata stamp. Test:
+  `tests/metadata_language_version_e2e.rs::language_version_2_2_omits_annotation_records_like_kotlinc`
+  (byte-identical `d1`/`d2` to kotlinc `-language-version 2.2` across class, constructor, member,
+  property, enum-entry, and facade records). One class-file gap remains: a VALUE-PARAMETER
+  annotation reaches its metadata record, but no `RuntimeVisibleParameterAnnotations` attribute is
+  emitted for it.
 - **A line break inside a property declaration is a continuation, an explicit `;` is not.** Kotlin's
   property grammar is `… (':' NL* type)? (NL* '=' NL* expression)?`, so a declaration whose type
   fills the line may put the type or the initializer on the next one — which is exactly what a
@@ -13086,9 +13131,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   destructuring `val (a, b)`, and a `when` subject binding.
   Tests: `tests/property_initializer_newline_e2e.rs`.
   PROPERTY annotations now take their own route (below), and the PRIMARY constructor's the one after
-  it. Still DROPPED before the IR, so there is nothing to mirror yet (it needs the class-file side
-  first, not just the metadata record): VALUE-PARAMETER annotations (no
-  `RuntimeVisibleParameterAnnotations` is emitted at all).
+  it. A VALUE-PARAMETER annotation reaches its metadata record; what is still missing is the
+  class-file side (no `RuntimeVisibleParameterAnnotations` attribute is emitted).
 
 - **A primary constructor's own annotations reach both halves.** `class C @Mark constructor(val x: Int)`
   parsed its annotations but dropped them: the emitted `<init>` carried no annotation attribute and the

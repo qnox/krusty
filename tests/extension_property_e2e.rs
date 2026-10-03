@@ -51,7 +51,7 @@ fn inferred_generic_call_keeps_a_common_source_supertype() {
 fn member_extension_property_resolution() {
     let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();
-    // `KOTLINC`: exactly what kotlinc reports, recorded per Kotlin version. `REJECTED`: krusty
+    // `KOTLINC`: exactly what the selected kotlinc reports. `REJECTED`: krusty
     // rejects with a different diagnostic than kotlinc (`candidate ... is inapplicable because of a
     // receiver type mismatch`), so only the single rejection is pinned until that is fixed.
     const KOTLINC: &[&str] = &["<recorded from kotlinc>"];
@@ -626,9 +626,7 @@ fn member_extension_property_resolution() {
         match expected_diagnostic {
             Some(REJECTED) => assert_eq!(diagnostics.len(), 1, "{case}: {diagnostics:?}"),
             Some(KOTLINC) => {
-                let expected = common::recorded_named(case, || {
-                    common::reference_error_messages("Main", source)
-                });
+                let expected = common::reference_error_messages("Main", source);
                 assert_eq!(diagnostics, expected, "{case}: exact diagnostics");
             }
             Some(expected) => assert_eq!(diagnostics, expected, "{case}: exact diagnostics"),
@@ -975,9 +973,8 @@ fn member_extension_receiver_inference_is_cross_file_order_independent() {
         "class Token(val text: String)",
     ];
     let diagnostics = common::front_end_diagnostics_files(&files, &[], None);
-    let expected = common::recorded(|| {
-        common::reference_error_messages_files(&[("A.kt", files[0]), ("B.kt", files[1])])
-    });
+    let expected =
+        common::reference_error_messages_files(&[("A.kt", files[0]), ("B.kt", files[1])]);
     assert_eq!(diagnostics, expected);
 }
 

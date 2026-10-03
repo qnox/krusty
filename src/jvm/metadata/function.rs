@@ -5,6 +5,7 @@
 use std::sync::Arc;
 
 use crate::fir::ResolvedParameterIdentity;
+use crate::language_version::LanguageVersion;
 use crate::libraries::{CallSig, GenericSig};
 use crate::types::{ContextParameterKind, ReturnValueStatus, Ty, TypeName, Visibility};
 
@@ -73,6 +74,8 @@ struct FunctionExtras {
     reified_type_parameter_ordinals: Vec<u32>,
     /// Compiler-known strict-equality parameter refinement decoded from fields 9/10.
     equality_bound: Option<Ty>,
+    /// `@SinceKotlin` version. A callable newer than the compilation's API level is not a candidate.
+    since_kotlin: Option<LanguageVersion>,
 }
 
 /// The decoded function before its rare facts are packed into [`FunctionExtras`].
@@ -94,6 +97,7 @@ pub(super) struct DecodedFunction {
     pub context_params: Vec<MetaValueParam>,
     pub context_parameter_kinds: Vec<ContextParameterKind>,
     pub annotations: Vec<TypeName>,
+    pub since_kotlin: Option<LanguageVersion>,
 }
 
 fn pack_extras(
@@ -102,12 +106,14 @@ fn pack_extras(
     only_input_type_formals: Vec<String>,
     reified_type_parameter_ordinals: Vec<u32>,
     equality_bound: Option<Ty>,
+    since_kotlin: Option<LanguageVersion>,
 ) -> Option<Box<FunctionExtras>> {
     if context_params.is_empty()
         && context_parameter_kinds.is_empty()
         && only_input_type_formals.is_empty()
         && reified_type_parameter_ordinals.is_empty()
         && equality_bound.is_none()
+        && since_kotlin.is_none()
     {
         None
     } else {
@@ -117,6 +123,7 @@ fn pack_extras(
             only_input_type_formals,
             reified_type_parameter_ordinals,
             equality_bound,
+            since_kotlin,
         }))
     }
 }
@@ -142,6 +149,7 @@ impl MetaFn {
                 decoded.only_input_type_formals,
                 decoded.reified_type_parameter_ordinals,
                 decoded.equality_bound,
+                decoded.since_kotlin,
             ),
         }
     }
@@ -198,6 +206,11 @@ impl MetaFn {
     #[inline]
     pub fn deprecated_hidden(&self) -> bool {
         self.flags.has(MfnFlags::DEPRECATED_HIDDEN)
+    }
+
+    /// `@SinceKotlin` on this declaration. Absent means the callable is available at every API level.
+    pub fn since_kotlin(&self) -> Option<LanguageVersion> {
+        self.extras.as_ref().and_then(|extras| extras.since_kotlin)
     }
 
     pub fn context_params(&self) -> &[MetaValueParam] {
@@ -342,6 +355,7 @@ mod tests {
             context_params: Vec::new(),
             context_parameter_kinds: Vec::new(),
             annotations: Vec::new(),
+            since_kotlin: None,
         }
     }
 

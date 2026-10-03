@@ -314,9 +314,6 @@ fun probe() {{\n\
     );
     assert_eq!(
         vec![reference[0].message.clone()],
-        common::recorded_named(
-            "a_receiver_outside_the_formals_bound_is_still_rejected",
-            || { vec![reference[0].message.clone()] }
-        )
+        vec![reference[0].message.clone()]
     );
 }

@@ -147,30 +147,21 @@ every diagnostic alike (see `docs/SPEC.md` §6). `KRUSTY_LANGUAGE_VERSION=<v> ./
 whole suite with krusty reproducing release `<v>` against that release's kotlinc; `just test-all`
 does it for every manifest version at once.
 
-A test that pins what kotlinc reports does not write it down: it states what it observes and reads
-the value from `tests/recorded/<test module>.txt`, keyed by the running test's path and by Kotlin
-version range (`tests/common/recorded.rs`). `common::assert_errors_match_kotlinc` (the whole
-`file:line:column: message` ledger through both CLIs) and `common::assert_messages_match_kotlinc`
-(the frontend's messages) cover the usual shapes; `common::recorded(|| …)`,
-`common::recorded_named(label, || …)` and `common::recorded_line(|| …)` take any value computed from
-kotlinc's run. When the file has no value for the version under test, a local run computes it from
-that kotlinc, writes it and passes; commit the diff. Ranges are closed and merged across adjacent
-versions (`2.4.0..2.4.10:`), while the newest version remains explicit (`2.4.20:`). A newly supported
-release therefore has no value until its own kotlinc records one. Under CI (`CI` set) a missing value
-fails instead of recording.
-`KRUSTY_RECORD=1` re-records every value the run reaches, e.g. after a kotlinc patch update:
-`KRUSTY_RECORD=1 KRUSTY_LANGUAGE_VERSION=<v> ./run-tests.sh --test e2e -- <filter>`. Only kotlinc's
-output is ever recorded, so a recorded value stays an oracle for krusty.
+A diagnostic differential compares against the selected kotlinc observation directly.
+`common::assert_errors_match_kotlinc` (the whole `file:line:column: message` ledger through both
+CLIs) and `common::assert_messages_match_kotlinc` (the frontend's messages) cover the usual shapes.
+Kotlinc exit status and stderr are part of the binary invocation recording described below, so no
+duplicate diagnostic ledger is committed to the repository. Language and API options are ordinary
+invocation inputs and therefore select distinct recordings automatically.
 
 Byte-equality checks (`byte_diff_against_kotlinc`, `compare_with_kotlinc_plugin`,
-`compile_with_kotlinc`, `classes_against_kotlinc_lib`) and the metadata differentials follow the
-same rule with one class-file archive in `KRUSTY_CLASS_DUMP_DIR`, which defaults to
+`compile_with_kotlinc`, `classes_against_kotlinc_lib`), metadata differentials, and diagnostic
+invocations share one binary archive in `KRUSTY_CLASS_DUMP_DIR`, which defaults to
 `target/cache/class-dumps/`. The archive is a single zlib stream: a text index, then each distinct
-output once. A run keeps new dumps in memory and writes that file once, when the process exits. An index entry is an open version range plus a content fingerprint and a blob id:
-`2.4.20..` covers that release and every newer one until a
-later recording disagrees, so adding a Kotlin version does not copy the dumps. RC tags of one
-release share `2.4.20-RC..` and do not share the release range. A dump is used when its fingerprint
-still matches the fixture and the compiler's version falls in the range. The lookup fingerprint
+output once. A run keeps new dumps in memory and writes that file once, when the process exits. An
+index entry contains one exact compiler version, a content fingerprint, and a blob id. Release and
+RC channels use separate exact-version slots. A dump is used only when its fingerprint and exact
+compiler version match. The lookup fingerprint
 covers source bytes, target, flags, and input identities; it is distinct from the blob id that
 hashes the recorded compiler output. Every lookup starts with content-derived identities for the
 selected kotlinc installation's complete `lib/` tree and the selected JDK's exact `modules` image,
@@ -184,19 +175,17 @@ bytes in two locations match, while a patched compiler/runtime or JDK image with
 version is a hard miss.
 Locally, a release (`2.4.20`, `2.4.20-release-482`) or an RC tag
 (`2.4.20-RC`, `2.4.20-RC2`, `2.4.0-RC-137`) with no matching dump fails the test and does not run
-kotlinc. `KRUSTY_RECORD_CLASS_DUMPS=1` recompiles and rewrites the ranges the run reaches. GitHub
+kotlinc. `KRUSTY_RECORD_CLASS_DUMPS=1` recompiles and replaces the exact-version entries the run reaches. GitHub
 restores an immutable cache for the PR's master base.
 PR and merge-group jobs replay every matching entry, compile missing or incomplete entries live,
 and never save the result. Thus a partial prefix cache is an accelerator, not an authority. A
 successful master job refreshes and saves the cache under the supported Kotlin version and master
 commit. A snapshot, dev, or beta build never reads or writes dumps — that version string is not a
-stable artifact, so it still compiles. Class-file kotlinc calls go through the same
-archive. A successful build and a rejected one both keep the exit code and kotlinc's
+stable artifact, so it still compiles. All kotlinc calls go through the same archive. A successful
+build and a rejected one both keep the exit code and kotlinc's
 diagnostics, and an assert replays them. Locally, a dump that has class files but no exit code or
 diagnostics fails that assert instead of compiling; read-only CI compiles that incomplete entry
-live. The text ledger in `tests/recorded/` is still
-the committed oracle for a diagnostic test; filling it reads kotlinc through this archive. The
-archive is read at runtime and is not compiled into the test binary or committed to the repository.
+live. The archive is read at runtime and is not compiled into the test binary or committed to the repository.
 The corpus byte-diff cache under `target/cache/ref-classes/` follows
 the same release/RC rule and stays uncached for any other compiler.
 

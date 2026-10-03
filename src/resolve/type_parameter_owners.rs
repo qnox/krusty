@@ -68,6 +68,14 @@ impl Checker<'_> {
     /// `ty` as a diagnostic names it: a declaration-owned type parameter with its owner
     /// (`T (of fun <T : B> f)`), and classifiers qualified only where `context` makes them clash.
     pub(super) fn diagnostic_type_name(&self, ty: Ty, context: &[Ty]) -> String {
+        if let Ty::Nullable(inner) = ty {
+            if let Ty::TyParam(parameter, _) = *inner {
+                if let Some(owner) = self.type_parameter_owners.get(parameter) {
+                    let source = crate::types::type_parameter_source_name(parameter);
+                    return format!("{source}? (of {owner})");
+                }
+            }
+        }
         ty.source_name_with_type_parameter_in(context, &|parameter| {
             let source = crate::types::type_parameter_source_name(parameter);
             match self.type_parameter_owners.get(parameter) {

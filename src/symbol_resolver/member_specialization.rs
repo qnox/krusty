@@ -61,9 +61,10 @@ fn specialize_member_type_with_unbound(
                 }
             };
             match (position, binding) {
-                (TypePosition::Out, Ty::OutProjection(inner) | Ty::StarProjection(inner)) => {
-                    adjusted(*inner)
-                }
+                // The projection already carries the capture's readable bound. Applying the
+                // declaration bound again would silently narrow the actual capture before a
+                // selected-call or recovery consumer observes its value type.
+                (TypePosition::Out, Ty::OutProjection(inner) | Ty::StarProjection(inner)) => *inner,
                 (TypePosition::In, Ty::OutProjection(_) | Ty::StarProjection(_)) => Ty::Nothing,
                 (TypePosition::Out, Ty::InProjection(_)) => *bound,
                 (TypePosition::In, Ty::InProjection(inner)) => adjusted(*inner),
