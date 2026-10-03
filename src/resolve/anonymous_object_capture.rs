@@ -363,7 +363,20 @@ impl Checker<'_> {
             bindings,
             used_receivers.clone(),
         );
-        drop_unused_implicit_receivers(captures, bindings, &used_receivers);
+        // A postponed receiver-lambda revisit is a constraint probe, not the final closure
+        // inventory. Its member/accessor check can temporarily lack a resolved receiver operand;
+        // absence of a use in that visit does not prove the declaration never reads the receiver.
+        // Keep the provisional inputs until the solved typed visit can authoritatively prune them.
+        let provisional = self.postponed_argument_depth != 0
+            || captures.iter().any(|capture| {
+                capture.ty.mentions_pending()
+                    || capture
+                        .storage_ty
+                        .is_some_and(|storage| storage.mentions_pending())
+            });
+        if !provisional {
+            drop_unused_implicit_receivers(captures, bindings, &used_receivers);
+        }
         if captures.is_empty() {
             self.discovered_local_class_captures.remove(&declaration);
             self.discovered_local_class_capture_bindings

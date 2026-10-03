@@ -1236,6 +1236,73 @@ fn local_class_reads_receiver_lambda_property_through_its_captured_receiver() {
 }
 
 #[test]
+fn postponed_generic_receiver_is_kept_for_local_methods_and_setters() {
+    let (body, _) = checked_function_body(
+        r#"
+class CaptureToken
+class CaptureSink<T> { fun remember(value: T): Boolean = true }
+fun <T> collectCaptured(block: CaptureSink<T>.() -> Unit): CaptureSink<T> {
+    val sink = CaptureSink<T>()
+    sink.block()
+    return sink
+}
+fun use() {
+    collectCaptured {
+        class Used { fun probe() = remember(CaptureToken()) }
+        class SetterCapture {
+            var value: CaptureToken
+                get() = CaptureToken()
+                set(value) { remember(value) }
+        }
+        class Unused
+    }
+}
+"#,
+        "use",
+    );
+    let lambdas = (0..body.expression_count())
+        .filter_map(
+            |raw| match &body.expr(FirExprId::from_raw(raw as u32))?.kind {
+                FirExprKind::Lambda { body, .. } => Some(body),
+                _ => None,
+            },
+        )
+        .collect::<Vec<_>>();
+    let [lambda] = lambdas.as_slice() else {
+        panic!("one builder receiver lambda expected: {lambdas:?}")
+    };
+    let captures = (0..lambda.statement_count())
+        .filter_map(
+            |raw| match &lambda.statement(FirStatementId::from_raw(raw as u32))?.kind {
+                FirStatementKind::LocalDeclaration { captures, .. } => Some(captures.as_ref()),
+                _ => None,
+            },
+        )
+        .collect::<Vec<_>>();
+    let [method, setter, unused] = captures.as_slice() else {
+        panic!("used method, setter and unused local declarations expected: {captures:?}")
+    };
+    assert!(
+        unused.is_empty(),
+        "the solved visit prunes Unused's provisional receiver: {unused:?}"
+    );
+    let [method] = *method else {
+        panic!("the inferred method has exactly one receiver capture: {method:?}")
+    };
+    let [setter] = *setter else {
+        panic!("the setter has exactly one receiver capture: {setter:?}")
+    };
+    let expected = Ty::obj_args("CaptureSink", &[Ty::obj("CaptureToken")]);
+    assert_eq!(method.ty.get(), expected);
+    assert_eq!(setter.ty.get(), expected);
+    assert!(matches!(
+        method.capture_identity,
+        Some(ClassCaptureIdentity::Receiver(_))
+    ));
+    assert_eq!(setter.capture_identity, method.capture_identity);
+}
+
+#[test]
 fn anonymous_object_generic_member_result_is_published_before_later_local_use() {
     let (body, _) = checked_function_body(
         "fun <T> test(): String {\n\

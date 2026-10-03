@@ -564,3 +564,58 @@ fn inner_subclass_reads_the_extension_receiver_from_its_enclosing_local_class() 
     }
     common::expect_box_same_as_kotlinc(INNER_SUPER_RECEIVER, "InnerSuperReceiver");
 }
+
+const POSTPONED_MEMBER_CAPTURES: &str = r#"
+class CaptureToken(val text: String)
+class CaptureSink<T> {
+    var count: Int = 0
+    fun remember(value: T): Boolean { count++; return true }
+}
+fun <T> collectCaptured(block: CaptureSink<T>.() -> Unit): CaptureSink<T> {
+    val sink = CaptureSink<T>()
+    sink.block()
+    return sink
+}
+fun anonymousMethod() {
+    collectCaptured { object { fun probe() = remember(CaptureToken("OK")) } }
+}
+fun localMethod() {
+    collectCaptured { class Local { fun probe() = remember(CaptureToken("OK")) } }
+}
+fun anonymousSetter() {
+    collectCaptured {
+        object {
+            var value: CaptureToken
+                get() = CaptureToken("OK")
+                set(value) { remember(value) }
+        }
+    }
+}
+fun localSetter() {
+    collectCaptured {
+        class Local {
+            var value: CaptureToken
+                get() = CaptureToken("OK")
+                set(value) { remember(value) }
+        }
+    }
+}
+fun box(): String {
+    anonymousMethod()
+    localMethod()
+    anonymousSetter()
+    localSetter()
+    val sink = collectCaptured {
+        class Used { fun probe() = remember(CaptureToken("OK")) }
+        class Unused
+        Used().probe()
+        Unused()
+    }
+    return if (sink.count == 1) "OK" else "missing receiver"
+}
+"#;
+
+#[test]
+fn postponed_generic_receivers_survive_local_member_and_accessor_checks() {
+    common::expect_box_same_as_kotlinc(POSTPONED_MEMBER_CAPTURES, "PostponedMemberCapture");
+}
