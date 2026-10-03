@@ -68,7 +68,6 @@ reified/catchParameter/tryCatchReifiedType.kt
 reified/innerObject.kt
 reified/reifiedTypeArgumentWithIntersectionTypeAsTypeArgument.kt
 sam/constructors/sameWrapperClass.kt
-secondaryConstructors/localClasses.kt
 typeErasure/funWithReifiedTypeParameterContextParameterAndExtensionReceiverInsideClass.kt
 unsignedTypes/implicitIntegerCoercionNamedArg.kt
 unsignedTypes/signedToUnsignedConversions.kt

@@ -90,7 +90,6 @@ reified/capture.kt
 reified/catchParameter/tryCatchReifiedType.kt
 reified/innerObject.kt
 sam/constructors/sameWrapperClass.kt
-secondaryConstructors/localClasses.kt
 typeErasure/funWithReifiedTypeParameterContextParameterAndExtensionReceiverInsideClass.kt
 unsignedTypes/implicitIntegerCoercionNamedArg.kt
 unsignedTypes/signedToUnsignedConversions.kt
