@@ -998,7 +998,6 @@ impl BodyLowering<'_> {
                 suspend,
                 reflective,
             } => {
-                let reflective = *reflective;
                 let lowered = self.checked_function_invoke_reference(
                     *callee,
                     target_parameters,
@@ -1007,16 +1006,11 @@ impl BodyLowering<'_> {
                     reference_parameters,
                     *reference_result,
                     *suspend,
+                    *reflective,
                 )?;
-                if reflective {
-                    let IrExpr::Lambda { impl_fn, .. } = self.ir.exprs[lowered as usize] else {
-                        return Err(FirLoweringFailure::MalformedReflectiveInvokeReference(
-                            expression_id,
-                        ));
-                    };
-                    self.ir.reflective_invoke_references.insert(impl_fn);
-                    // The carrier class takes the source reference's name. The forwarding lambda
-                    // is the node that name is attached to; realization replaces that node.
+                if *reflective {
+                    // The carrier class takes the source reference's name. The forwarding adapter
+                    // belongs to this reference node; realization replaces that node.
                     self.record_generated_class_provenance(expression_id, lowered as usize);
                 }
                 lowered

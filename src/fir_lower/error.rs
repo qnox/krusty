@@ -8,9 +8,6 @@ pub enum FirLoweringFailure {
     MissingExpression(FirExprId),
     MissingStatement(FirStatementId),
     RecursiveExpression(FirExprId),
-    /// A checked reflective `value::invoke` reference did not lower to the forwarding function
-    /// whose identity backends use to realize its reflection-classifier carrier.
-    MalformedReflectiveInvokeReference(FirExprId),
     RecursiveStatement(FirStatementId),
     MissingControlTarget {
         target: ControlTargetId,

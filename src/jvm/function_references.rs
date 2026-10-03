@@ -221,7 +221,8 @@ fn realize_adapter_reference(
         }
         // A conversion is a compiler builtin whose reflected name and signature are fixed.
         crate::ir::IrCallableReferenceTarget::External { .. }
-        | crate::ir::IrCallableReferenceTarget::FunctionValueConversion { .. } => {
+        | crate::ir::IrCallableReferenceTarget::FunctionValueConversion { .. }
+        | crate::ir::IrCallableReferenceTarget::FunctionInvoke => {
             crate::ir::ReflectedCallable::Physical
         }
     };
@@ -307,6 +308,22 @@ fn realize_adapter_reference(
             false,
             None,
         ),
+        crate::ir::IrCallableReferenceTarget::FunctionInvoke => {
+            let arity =
+                reference.declaration_parameters.len() + usize::from(reference.declaration_suspend);
+            let owner = type_name(&crate::jvm::names::function_interface_internal_name(arity));
+            let erased = if crate::jvm::names::uses_function_n(arity) {
+                "[Ljava/lang/Object;".to_string()
+            } else {
+                "Ljava/lang/Object;".repeat(arity)
+            };
+            (
+                Some(owner),
+                "invoke".to_string(),
+                false,
+                Some(format!("invoke({erased})Ljava/lang/Object;")),
+            )
+        }
     };
     let adapted = reference.adaptation.is_some() || suspend_conversion;
     let bound = reference.bound_receiver.is_some();
@@ -753,149 +770,6 @@ pub(super) fn realize(
             reference,
         )?;
     }
-    realize_reflective_invoke_references(ir, facades)?;
-    Ok(())
-}
-
-/// A reflective `value::invoke` is a `KFunction`. Its forwarding lambda implements only `FunctionN`,
-/// so the use site's `checkcast` to `KFunction` fails. Realize that lambda as a bound
-/// `FunctionReferenceImpl` whose `invoke` calls the same private forwarder. The forwarder stays a
-/// static method: suspend lowering still turns it into a state machine, and the reference class
-/// reaches it through the owner's `access$` bridge.
-fn realize_reflective_invoke_references(
-    ir: &mut IrFile,
-    facades: Facades<'_>,
-) -> Result<(), FunctionReferenceRealizationTarget> {
-    let reflective = ir.reflective_invoke_references.clone();
-    let sites = (0..ir.exprs.len())
-        .filter(|&expression| {
-            matches!(
-                &ir.exprs[expression],
-                IrExpr::Lambda { impl_fn, .. } if reflective.contains(impl_fn)
-            )
-        })
-        .collect::<Vec<_>>();
-    for expression in sites {
-        realize_reflective_invoke_reference(ir, facades, expression)?;
-    }
-    Ok(())
-}
-
-fn realize_reflective_invoke_reference(
-    ir: &mut IrFile,
-    facades: Facades<'_>,
-    expression: usize,
-) -> Result<(), FunctionReferenceRealizationTarget> {
-    let IrExpr::Lambda {
-        impl_fn,
-        arity,
-        captures,
-        ..
-    } = ir.exprs[expression].clone()
-    else {
-        return Err(FunctionReferenceRealizationTarget::Invalid);
-    };
-    let &[captured] = captures.as_slice() else {
-        return Err(FunctionReferenceRealizationTarget::Invalid);
-    };
-    let function = ir
-        .functions
-        .get(impl_fn as usize)
-        .ok_or(FunctionReferenceRealizationTarget::Adapter(impl_fn))?
-        .clone();
-    let Some((callee, reference_parameters)) = function.params.split_first() else {
-        return Err(FunctionReferenceRealizationTarget::Invalid);
-    };
-    let callee = *callee;
-    let reference_parameters = reference_parameters.to_vec();
-    let suspend = ir.suspend_funs.contains(&impl_fn);
-    if usize::from(arity) != reference_parameters.len() + usize::from(suspend) {
-        return Err(FunctionReferenceRealizationTarget::Invalid);
-    }
-    let continuation = Ty::obj("kotlin/coroutines/Continuation");
-    let mut invoke_parameters = reference_parameters.clone();
-    let invoke_result = if suspend {
-        invoke_parameters.push(continuation);
-        Ty::obj("kotlin/Any")
-    } else {
-        function.ret
-    };
-    let function_type = if suspend {
-        Ty::fun_suspend(reference_parameters.clone(), function.ret)
-    } else {
-        Ty::fun(reference_parameters.clone(), function.ret)
-    };
-    let owner_class = Ty::obj(&crate::jvm::names::function_interface_internal_name(
-        usize::from(arity),
-    ))
-    .kotlin_class_internal()
-    .ok_or(FunctionReferenceRealizationTarget::Invalid)?;
-    let erased = if crate::jvm::names::uses_function_n(usize::from(arity)) {
-        "[Ljava/lang/Object;".to_string()
-    } else {
-        "Ljava/lang/Object;".repeat(usize::from(arity))
-    };
-    let call_owner = ir.class_static_local_functions.get(&impl_fn).copied();
-    let internal = reference_class_name(ir, facades.current, expression, "function");
-    let mut class = IrClass::synthetic(internal);
-    class.enclosure = reference_enclosure(ir, expression);
-    class.superclass = type_name("kotlin/jvm/internal/FunctionReferenceImpl");
-    class.func_ref = Some(FuncRef {
-        adapted: false,
-        fun_interface_constructor: false,
-        bound: true,
-        field_capture_count: 0,
-        capture_fields: Vec::new(),
-        arity: u8::try_from(reference_parameters.len())
-            .map_err(|_| FunctionReferenceRealizationTarget::Invalid)?,
-        is_suspend: suspend,
-        declaration_suspend: suspend,
-        module_target: None,
-        local_target: Some(impl_fn),
-        owner_class: Some(owner_class),
-        fn_name: "invoke".to_string(),
-        flags: 0,
-        dispatch: FrDispatch::StaticBound,
-        call_owner,
-        call_name: function.name,
-        reflection_name: None,
-        reflection_receiver_parameter: false,
-        reflection_target_ret_ty: Some(Ty::obj("kotlin/Any")),
-        reflection_target_param_tys: None,
-        call_interface: false,
-        param_tys: invoke_parameters.clone(),
-        ret_ty: invoke_result,
-        target_param_tys: {
-            let mut parameters = Vec::with_capacity(invoke_parameters.len() + 1);
-            parameters.push(callee);
-            parameters.extend(invoke_parameters.iter().copied());
-            parameters
-        },
-        target_ret_ty: invoke_result,
-        unbox_params: vec![None; invoke_parameters.len()],
-        unbox_param_nullable: vec![false; invoke_parameters.len()],
-        box_ret: None,
-        staticbound_recv_unbox: None,
-        invoke: None,
-        function_type,
-        reflection_signature: Some(format!("invoke({erased})Ljava/lang/Object;")),
-        reflected: crate::ir::ReflectedCallable::Physical,
-        invoke_renamed: false,
-    });
-    ir.add_class(class);
-    ir.exprs[expression] = IrExpr::New {
-        internal,
-        args: vec![captured],
-        ctor_params: Some(vec![Ty::obj("kotlin/Any")]),
-        ctor_desc: None,
-        external_target: None,
-        defaults: Box::new([]),
-        default_prefix_count: 0,
-    };
-    ir.construction_declared_params.insert(
-        u32::try_from(expression).map_err(|_| FunctionReferenceRealizationTarget::Invalid)?,
-        Box::from([Ty::obj("kotlin/Any")]),
-    );
     Ok(())
 }
 

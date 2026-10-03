@@ -580,7 +580,6 @@ fn copy_function_implementation_facts(
     copy_set!(open_methods);
     copy_set!(must_inline_lambdas);
     copy_set!(synthetic_methods);
-    copy_set!(reflective_invoke_references);
     copy_set!(bridge_methods);
     copy_set!(deprecated_methods);
     copy_set!(inline_only_fns);

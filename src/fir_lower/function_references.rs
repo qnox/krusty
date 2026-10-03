@@ -3,7 +3,8 @@
 //! These adapters bind a receiver or forward `Function.invoke` using decisions already recorded in
 //! FIR. Callable-reference identity and target-specific carrier realization stay separate.
 
-use crate::ir::{IrExpr, IrFunction};
+use crate::ir::{IrCallableReference, IrCallableReferenceTarget, IrExpr, IrFunction};
+use crate::types::Ty;
 
 use super::{BodyLowering, FirLoweringFailure};
 
@@ -121,6 +122,7 @@ impl BodyLowering<'_> {
         reference_parameters: &[crate::fir::ResolvedTy],
         reference_result: crate::fir::ResolvedTy,
         suspend: bool,
+        reflective: bool,
     ) -> Result<crate::ir::ExprId, FirLoweringFailure> {
         if target_parameters.len() != reference_parameters.len() || (target_suspend && !suspend) {
             return Err(FirLoweringFailure::MissingExpression(callee));
@@ -187,12 +189,48 @@ impl BodyLowering<'_> {
             .checked_add(usize::from(suspend))
             .and_then(|arity| u8::try_from(arity).ok())
             .ok_or(FirLoweringFailure::MissingExpression(callee))?;
-        Ok(self.ir.add_expr(IrExpr::Lambda {
-            impl_fn: wrapper,
-            arity,
-            captures: vec![captured],
-            sam: None,
-            inline_body: None,
-        }))
+        if reflective {
+            let function_type = if suspend {
+                Ty::fun_suspend(
+                    reference_parameters
+                        .iter()
+                        .map(|parameter| parameter.get())
+                        .collect(),
+                    reference_result.get(),
+                )
+            } else {
+                Ty::fun(
+                    reference_parameters
+                        .iter()
+                        .map(|parameter| parameter.get())
+                        .collect(),
+                    reference_result.get(),
+                )
+            };
+            Ok(self
+                .ir
+                .add_expr(IrExpr::CallableReference(IrCallableReference {
+                    target: IrCallableReferenceTarget::FunctionInvoke,
+                    adapter: wrapper,
+                    captures: Vec::new(),
+                    bound_receiver: Some(captured),
+                    function_type,
+                    declaration_parameters: target_parameters
+                        .iter()
+                        .map(|parameter| parameter.get())
+                        .collect(),
+                    declaration_result: target_result.get(),
+                    declaration_suspend: target_suspend,
+                    adaptation: None,
+                })))
+        } else {
+            Ok(self.ir.add_expr(IrExpr::Lambda {
+                impl_fn: wrapper,
+                arity,
+                captures: vec![captured],
+                sam: None,
+                inline_body: None,
+            }))
+        }
     }
 }

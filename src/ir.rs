@@ -2041,11 +2041,6 @@ pub struct IrFile {
     pub(crate) module_member_accesses: std::collections::HashMap<ExprId, IrModuleMemberAccess>,
     /// Private methods a synthesized callable-reference class calls; each gets one access bridge.
     pub function_reference_access_bridges: std::collections::HashSet<u32>,
-    /// Forwarding function identities for checked `value::invoke` references whose public
-    /// semantic type is a reflection classifier. A backend must realize a carrier implementing
-    /// that classifier rather than an ordinary function-value closure. Function-typed uses of the
-    /// same callable shape are absent.
-    pub reflective_invoke_references: std::collections::HashSet<u32>,
     /// Lambda impls pre-marked `inline_only` by `mark_must_inline_lambdas` (a must-inline callee's
     /// message lambda, assumed spliced). If emission nonetheless records an `invokedynamic` for one,
     /// the two-pass driver RESCUES it — emits the method after all — so the reference never dangles.
