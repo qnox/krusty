@@ -221,7 +221,8 @@ fn realize_adapter_reference(
         }
         // A conversion is a compiler builtin whose reflected name and signature are fixed.
         crate::ir::IrCallableReferenceTarget::External { .. }
-        | crate::ir::IrCallableReferenceTarget::FunctionValueConversion { .. } => {
+        | crate::ir::IrCallableReferenceTarget::FunctionValueConversion { .. }
+        | crate::ir::IrCallableReferenceTarget::FunctionInvoke => {
             crate::ir::ReflectedCallable::Physical
         }
     };
@@ -307,6 +308,22 @@ fn realize_adapter_reference(
             false,
             None,
         ),
+        crate::ir::IrCallableReferenceTarget::FunctionInvoke => {
+            let arity =
+                reference.declaration_parameters.len() + usize::from(reference.declaration_suspend);
+            let owner = type_name(&crate::jvm::names::function_interface_internal_name(arity));
+            let erased = if crate::jvm::names::uses_function_n(arity) {
+                "[Ljava/lang/Object;".to_string()
+            } else {
+                "Ljava/lang/Object;".repeat(arity)
+            };
+            (
+                Some(owner),
+                "invoke".to_string(),
+                false,
+                Some(format!("invoke({erased})Ljava/lang/Object;")),
+            )
+        }
     };
     let adapted = reference.adaptation.is_some() || suspend_conversion;
     let bound = reference.bound_receiver.is_some();

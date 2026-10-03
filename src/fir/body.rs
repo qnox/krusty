@@ -1154,6 +1154,11 @@ pub enum FirExprKind {
         reference_parameters: Box<[ResolvedTy]>,
         reference_result: ResolvedTy,
         suspend: bool,
+        /// The expression's public type is a reflection classifier (`KFunction` /
+        /// `KSuspendFunction`), not a function type. The JVM must realize the value as a
+        /// `FunctionReference`, which implements that classifier; a function-typed context stays
+        /// a plain function value.
+        reflective: bool,
     },
     ComparisonCall {
         operation: FirBinaryOperation,

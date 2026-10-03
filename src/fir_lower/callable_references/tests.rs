@@ -332,6 +332,48 @@ fn function_invoke_reference_becomes_a_capturing_suspend_forwarder() {
 }
 
 #[test]
+fn reflective_function_invoke_reference_marks_its_forwarder() {
+    let platform: Box<dyn crate::libraries::SemanticPlatform> = Box::new(
+        crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(crate::toolchain::classpath_jars_for(
+                "// WITH_STDLIB",
+            )),
+        ))
+        .expect("JVM provider initialization"),
+    );
+    let ir = lower_single_source_with_platform(
+        "fun reference(block: suspend () -> Unit) {\n    val f = block::invoke\n}\n",
+        "ReflectiveInvokeReference",
+        platform,
+    );
+    let references = ir
+        .exprs
+        .iter()
+        .filter_map(|expression| match expression {
+            IrExpr::CallableReference(reference)
+                if matches!(
+                    reference.target,
+                    crate::ir::IrCallableReferenceTarget::FunctionInvoke
+                ) =>
+            {
+                Some((
+                    reference.adapter,
+                    reference.captures.len(),
+                    reference.bound_receiver.is_some(),
+                ))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [(wrapper, capture_count, bound)] = references.as_slice() else {
+        panic!("one reflective invoke reference, found {references:?}")
+    };
+    assert_eq!(*capture_count, 0);
+    assert!(*bound);
+    assert!(ir.suspend_funs.contains(wrapper));
+}
+
+#[test]
 fn vararg_adapted_local_reference_packs_wrapper_parameters() {
     let ir = lower_single_source(
         r#"

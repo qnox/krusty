@@ -92,6 +92,7 @@ impl ReferencedDependencies {
                 | IrCallableReferenceTarget::Constructor { .. }
                 | IrCallableReferenceTarget::Local { .. }
                 | IrCallableReferenceTarget::FunctionValueConversion { .. }
+                | IrCallableReferenceTarget::FunctionInvoke
                 | IrCallableReferenceTarget::Classifier { .. } => {}
             },
             IrExpr::Checked(operation) => self.checked(operation),
