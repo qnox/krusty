@@ -3268,6 +3268,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                         property.setter.is_some(),
                         property.setter_visibility,
                         property.owner,
+                        None,
                     ),
                     &[result],
                 )
@@ -3692,6 +3693,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                         property.setter.is_some(),
                         property.setter_visibility,
                         property.getter.owner,
+                        Some(receiver.get()),
                     ),
                     &arguments,
                 )

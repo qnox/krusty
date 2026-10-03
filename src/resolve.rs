@@ -43860,7 +43860,11 @@ impl<'a> Checker<'a> {
             property.setter_visibility,
         );
         if property.setter.is_some()
-            && !self.member_accessible(property.setter_visibility, property.getter.owner)
+            && !self.receiver_member_accessible(
+                property.setter_visibility,
+                property.getter.owner,
+                receiver,
+            )
         {
             property.setter = None;
         }
