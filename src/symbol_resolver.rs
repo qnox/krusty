@@ -6484,6 +6484,22 @@ mod tests {
     }
 
     #[test]
+    fn projected_output_preserves_the_captures_readable_bound() {
+        let any = Ty::obj("kotlin/Any");
+        let nullable_any = Ty::nullable(any);
+        let output = Ty::obj_args("fixtures/Result", &[Ty::ty_param("R", any)]);
+
+        assert_eq!(
+            specialize_signature_output_type(
+                &EMPTY_SOURCE,
+                output,
+                &GSigBinds::from([("R".to_string(), Ty::star_projection(nullable_any),)]),
+            ),
+            Ty::obj_args("fixtures/Result", &[nullable_any])
+        );
+    }
+
+    #[test]
     fn inferred_generic_binding_joins_null_with_the_non_null_element_type() {
         let parameter = Ty::ty_param("T", Ty::obj("kotlin/Any"));
         let mut inferred = GSigBinds::new();
