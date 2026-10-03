@@ -12039,6 +12039,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `mutable_property_ref_e2e::property_reference_get_reports_the_property_type`,
   `toplevel_property_ref_e2e::toplevel_property_refs_run`.
 
+- **A property reference is mutable only where its setter is accessible.** `var foo` with
+  `private set` is a `KMutableProperty` inside the declaring class, including `Bar::foo` written
+  there, because that site can call the setter. The same reference from a subclass or from a
+  top-level function is a `KProperty` / `KProperty1`: the setter is invisible, so the value is not a
+  `KMutableProperty`. A `protected set` is mutable only on a receiver the accessing class may
+  use: inside `class Baz : Bar`, `Baz::shown` and `baz::shown` are `KMutableProperty`, while
+  `Bar::shown` and `bar::shown` are `KProperty` because the receiver is not a `Baz`. Inside
+  `Bar`, `Bar::shown` and `this::shown` stay mutable. Checking and signature inference share
+  that visibility operation, including the protected-receiver constraint. An inferred function
+  such as `fun ref() = Bar::foo` publishes that accessible type, and the reflective carrier uses
+  the same answer (`PropertyReference1Impl` when the setter is hidden,
+  `MutablePropertyReference1Impl` when it is visible). Tests:
+  `mutable_property_ref_e2e::inaccessible_private_setter_reference_is_immutable`,
+  `implicit_this_callable_ref_e2e` (`PrivateSetter`), box
+  `callableReference/property/privateSetterOutsideClass.kt`.
+
 - **Compiler-realized property reads are one list, shared by checking and signature inference.**
   `"s".length`, `c.code`, and an array's `size` are realized directly rather than through a declared
   getter — `Char.code` in particular resolves through no getter at all, since `Char` is a primitive
