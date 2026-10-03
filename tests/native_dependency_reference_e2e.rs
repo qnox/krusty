@@ -1,11 +1,9 @@
 //! `"KOTLIN"::get`, `Boolean::not`, `String::plus` — a callable reference to a DEPENDENCY
 //! declaration, whose site type is a reflective `KFunctionN`.
 //!
-//! Common lowering builds such a reference into an adapter when the site's type is a plain
-//! `FunctionN`, and leaves it CHECKED when the type is reflective, so that each target may choose
-//! its own reflection representation. The native backend's choice is the same adapter, with the
-//! declaration's identity kept beside it — which is what makes two references to one declaration
-//! equal and `name` answer the declaration's own name.
+//! Common lowering builds the checked invocation adapter and preserves the declaration's identity
+//! beside it. The native backend chooses the object representation for that value, which is what
+//! makes two references to one declaration equal and `name` answer the declaration's own name.
 //!
 //! Every expectation here is kotlinc's, taken by running the same program under it.
 

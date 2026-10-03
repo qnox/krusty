@@ -1861,7 +1861,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             IrExpr::Checked(IrCheckedOperation::PropertyReference { .. }) => {
                 self.property_reference(id)
             }
-            IrExpr::LocalPropertyReference { .. } => self.local_property_reference(id),
+            IrExpr::LocalPropertyReference(_) => self.local_property_reference(id),
             IrExpr::KClassLiteral {
                 classifier, value, ..
             } => self.class_literal(classifier, value),
@@ -2292,7 +2292,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     None => return None,
                 }
             }
-            IrExpr::LocalPropertyReference { .. } => Ty::obj("kotlin/reflect/KProperty"),
+            IrExpr::LocalPropertyReference(_) => Ty::obj("kotlin/reflect/KProperty"),
             // A class literal is an object of the reflection type Kotlin gives it, which is what
             // makes an equality between two of them an equality between references.
             IrExpr::KClassLiteral { .. } => classes_literal::kclass(),

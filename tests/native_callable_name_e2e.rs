@@ -100,6 +100,22 @@ fn a_reference_reaching_the_read_through_a_variable_answers_the_same_name() {
 }
 
 #[test]
+fn a_function_values_invoke_reference_keeps_its_checked_identity() {
+    expect_native_box(
+        "fun box(): String {\n\
+         \x20   val operation: (Int) -> Int = { value -> value + 1 }\n\
+         \x20   val first = operation::invoke\n\
+         \x20   val second = operation::invoke\n\
+         \x20   if (first(1) != 2) return \"fail: call\"\n\
+         \x20   if (first != second) return \"fail: equality\"\n\
+         \x20   return if (first.name == \"invoke\") \"OK\" else \"fail: ${first.name}\"\n\
+         }\n",
+        "FunctionValueInvokeReference",
+        "OK",
+    );
+}
+
+#[test]
 fn a_function_value_is_compared_through_its_own_table() {
     // Three things wear a function type, and `==` answers each differently. The site that lowers
     // the comparison cannot tell them apart — the static type is `() -> …` for all three — and

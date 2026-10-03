@@ -88,10 +88,6 @@ impl Backend for CraneliftBackend {
         // classifier local to a top-level function starts in the package: `box$MyLocalObject`,
         // `box$1`. Everything below, the name a failed cast reports included, reads that name.
         file.ir.realize_local_class_names_in_packages();
-        // Before the generator sees the file: a reflective dependency reference is a checked node
-        // the generator has no shape for, and this turns the realizable ones into the adapter form
-        // it already lowers. See `native::dependency_references`.
-        super::dependency_references::realize(&mut file.ir);
         // The accessors a reference to a DEPENDENCY property is reached through, which the
         // generator's own object is built from; see `native::dependency_references`.
         let properties = super::dependency_references::realize_properties(&mut file.ir);

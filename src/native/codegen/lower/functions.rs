@@ -119,16 +119,38 @@ fn reference_identity(reference: &crate::ir::IrCallableReference) -> String {
                 super::super::super::symbols::c_identifier(&classifier.render())
             )
         }
-        Target::Local { owner, name } => format!(
-            "l{}_{}",
+        Target::Local {
+            owner,
+            name,
+            function,
+        } => format!(
+            "l{}_{}_{}",
             super::super::super::symbols::c_identifier(
                 &owner.map(|o| o.render()).unwrap_or_default()
             ),
-            super::super::super::symbols::c_identifier(name)
+            super::super::super::symbols::c_identifier(name),
+            function,
         ),
         // The provider's own identity for the declaration, which is what two `Boolean::not`
         // written in two files share — and the only thing about it this side is entitled to read.
-        Target::External { declaration } => format!("e{}", declaration.raw()),
+        Target::External { declaration, .. } => format!("e{}", declaration.raw()),
+        Target::FunctionValueConversion { ordinal } => format!("conversion_{ordinal}"),
+        Target::FunctionInvoke => format!(
+            "function_invoke_{}_{}",
+            reference.declaration_parameters.len(),
+            u8::from(reference.declaration_suspend)
+        ),
+        Target::Classifier {
+            classifier,
+            operation,
+        } => format!(
+            "classifier_{}_{}",
+            super::super::super::symbols::c_identifier(&classifier.render()),
+            match operation {
+                crate::ir::IrClassifierCallable::EnumValueOf => "enum_value_of",
+                crate::ir::IrClassifierCallable::SamConstructor => "sam_constructor",
+            }
+        ),
     };
     let bound = if reference.bound_receiver.is_some() {
         "b"
@@ -845,19 +867,30 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     }
 
     /// The cell a captured `var` lives in, so the closure and the frame that made it share one.
-    pub(super) fn ref_new(&mut self, elem: Ty, init: u32) -> Result<Option<Value>, Unsupported> {
+    pub(super) fn ref_new(
+        &mut self,
+        elem: Ty,
+        init: Option<u32>,
+    ) -> Result<Option<Value>, Unsupported> {
         let descriptor = self.file.holder_type(elem)?;
         let (offsets, instance_size, _) = super::functions::layout(&[elem]);
-        let Some(value) = self.coerce(init, elem)? else {
-            return Err("a captured `Unit` variable".to_string());
+        let value = if let Some(init) = init {
+            let Some(value) = self.coerce(init, elem)? else {
+                return Err("a captured `Unit` variable".to_string());
+            };
+            Some(value)
+        } else {
+            None
         };
         if self.terminated {
             return Ok(None);
         }
         let holder = self.allocate(descriptor, instance_size)?;
-        self.builder
-            .ins()
-            .store(trusted(), value, holder, offsets[0] as i32);
+        if let Some(value) = value {
+            self.builder
+                .ins()
+                .store(trusted(), value, holder, offsets[0] as i32);
+        }
         Ok(Some(holder))
     }
 

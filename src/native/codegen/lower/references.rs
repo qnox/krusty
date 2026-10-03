@@ -139,7 +139,7 @@ impl<'a> FileLowering<'a> {
                 .map(|callable| callable.name.to_string()),
             // A dependency declaration publishes its Kotlin name in the frozen selected-callable
             // facts; the physical spelling is an emit handle and not what `name` answers.
-            crate::ir::IrCallableReferenceTarget::External { declaration } => {
+            crate::ir::IrCallableReferenceTarget::External { declaration, .. } => {
                 let realization = self.callables.callable(*declaration)?;
                 Some(
                     realization
@@ -148,6 +148,17 @@ impl<'a> FileLowering<'a> {
                         .unwrap_or_else(|| realization.name.clone()),
                 )
             }
+            crate::ir::IrCallableReferenceTarget::FunctionValueConversion { ordinal } => {
+                Some(format!("suspendConversion{ordinal}"))
+            }
+            crate::ir::IrCallableReferenceTarget::FunctionInvoke => Some("invoke".to_string()),
+            crate::ir::IrCallableReferenceTarget::Classifier { operation, .. } => Some(
+                match operation {
+                    crate::ir::IrClassifierCallable::EnumValueOf => "valueOf",
+                    crate::ir::IrClassifierCallable::SamConstructor => "<init>",
+                }
+                .to_string(),
+            ),
         }
     }
 
@@ -284,7 +295,7 @@ impl<'a> FileLowering<'a> {
                 continue;
             };
             let site = Site {
-                name,
+                name: name.to_string(),
                 access: Access::Accessor {
                     getter: realized.getter,
                     setter: realized.setter,
@@ -330,10 +341,10 @@ impl<'a> FileLowering<'a> {
     pub(super) fn declare_local_property_references(&mut self) -> Result<(), Unsupported> {
         let mut emitted: HashMap<Box<str>, ReferenceItems> = HashMap::new();
         for index in 0..self.ir.exprs.len() {
-            let IrExpr::LocalPropertyReference { name, .. } = &self.ir.exprs[index] else {
+            let IrExpr::LocalPropertyReference(reference) = &self.ir.exprs[index] else {
                 continue;
             };
-            let name = name.clone();
+            let name = reference.name.clone();
             let items = match emitted.get(&name) {
                 Some(items) => *items,
                 None => {
@@ -420,6 +431,7 @@ impl<'a> FileLowering<'a> {
                 setter,
                 receiver,
                 context_parameters,
+                ..
             }) if context_parameters.is_empty() => Access::Accessor {
                 getter: *getter,
                 setter: *setter,
