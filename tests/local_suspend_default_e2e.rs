@@ -33,3 +33,30 @@ fun box(): String {
         "local_suspend_function_omits_its_suspend_lambda_default",
     );
 }
+
+#[test]
+fn companion_suspend_function_omits_its_default() {
+    let src = r#"
+import kotlin.coroutines.*
+
+var observed = "Fail"
+
+class Host {
+    companion object {
+        suspend fun capture(value: String = "OK") {
+            observed = value
+        }
+    }
+}
+
+suspend fun exercise() {
+    Host.capture()
+}
+
+fun box(): String {
+    suspend { exercise() }.startCoroutine(Continuation(EmptyCoroutineContext) {})
+    return observed
+}
+"#;
+    expect_box_ok_with_stdlib(src, "companion_suspend_function_omits_its_default");
+}
