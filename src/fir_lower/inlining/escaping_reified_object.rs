@@ -74,6 +74,33 @@ fn constructed_class(ir: &crate::ir::IrFile, function: u32) -> u32 {
     panic!("function {function} constructs an anonymous object")
 }
 
+fn construction_params(ir: &crate::ir::IrFile, function: u32) -> Vec<Ty> {
+    let body = ir.functions[function as usize]
+        .body
+        .unwrap_or_else(|| panic!("{function} has a body"));
+    let mut pending = vec![body];
+    let mut seen = std::collections::HashSet::new();
+    while let Some(expression) = pending.pop() {
+        if !seen.insert(expression) {
+            continue;
+        }
+        if let IrExpr::New {
+            internal,
+            ctor_params,
+            ..
+        } = ir.expr(expression)
+        {
+            if let Some(class) = ir.class_id_by_name(*internal) {
+                if ir.classes[class as usize].is_anonymous_object {
+                    return ctor_params.clone().unwrap_or_default();
+                }
+            }
+        }
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+    }
+    panic!("function {function} constructs an anonymous object")
+}
+
 const REIFIED_OBJECT: &str = "\
 interface Face { fun foo(): String? }\n\
 class Token\n\
@@ -173,12 +200,28 @@ fn a_reified_anonymous_object_copies_its_property_accessors() {
     let call = constructed_class(&ir, function_named(&ir, "box"));
     assert_ne!(declaration, call);
     assert!(!ir.reified_anonymous_declarations.contains(&call));
+    let construction = construction_params(&ir, function_named(&ir, "box"));
+    assert_eq!(
+        construction,
+        ir.classes[call as usize]
+            .ctor_args
+            .iter()
+            .map(|argument| argument.ty)
+            .collect::<Vec<_>>()
+    );
+    assert!(construction
+        .iter()
+        .all(|ty| ty.non_null() != Ty::obj("Token")));
 
     for name in ["item", "slot"] {
         let (source_getter, source_setter) = property_named(&ir, declaration, name);
         let (copied_getter, copied_setter) = property_named(&ir, call, name);
         let getter = copied_getter.expect(name);
         assert_ne!(Some(getter), source_getter);
+        assert_eq!(
+            ir.functions[getter as usize].ret,
+            ir.functions[source_getter.expect(name) as usize].ret
+        );
         assert!(ir.classes[call as usize].methods.contains(&getter));
         assert!(!ir.classes[declaration as usize].methods.contains(&getter));
         let edge = override_named(&ir, call, name);
@@ -211,5 +254,46 @@ fn a_reified_anonymous_object_copies_its_property_accessors() {
     assert!(ir.classes[call as usize]
         .methods
         .contains(&copied_mark.getter));
-    assert_eq!(copied_mark.receiver.non_null(), Ty::obj("Token"));
+    assert_eq!(copied_mark.receiver, source_mark.receiver);
+    assert_eq!(
+        ir.functions[copied_mark.getter as usize].ret,
+        ir.functions[source_mark.getter as usize].ret
+    );
+
+    let shown = ir.classes[call as usize]
+        .methods
+        .iter()
+        .copied()
+        .find(|method| ir.functions[*method as usize].name == "shown")
+        .expect("shown");
+    let calls = method_calls(&ir, shown);
+    assert!(
+        calls.len() >= 2
+            && calls.iter().all(|method| {
+                ir.classes[call as usize].methods.contains(method)
+                    && !ir.classes[declaration as usize].methods.contains(method)
+            }),
+        "shown calls the copy's accessors, got {calls:?}"
+    );
+}
+
+fn method_calls(ir: &crate::ir::IrFile, function: u32) -> Vec<u32> {
+    let Some(body) = ir.functions[function as usize].body else {
+        return Vec::new();
+    };
+    let mut pending = vec![body];
+    let mut seen = std::collections::HashSet::new();
+    let mut calls = Vec::new();
+    while let Some(expression) = pending.pop() {
+        if !seen.insert(expression) {
+            continue;
+        }
+        if let IrExpr::MethodCall { class, index, .. } = ir.expr(expression) {
+            if let Some(method) = ir.classes[*class as usize].methods.get(*index as usize) {
+                calls.push(*method);
+            }
+        }
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+    }
+    calls
 }

@@ -4671,8 +4671,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   property overrides leave their accessor functions empty. Accessor functions are materialized
   after the copy, once property layouts exist; the same clone map then records those functions
   on the copy. The copy fills its overrides from the recorded layout through that map, and
-  publishes a copied member-extension property under the copied classifier with the specialized
-  receiver and type.
+  publishes a copied member-extension property under the copied classifier. Copied members keep
+  the declaration's erased signatures, and the call site invokes that erased constructor.
+  Reified operations inside the copied accessor bodies use the call-site argument.
   A missing accessor mapping fails the lowering; the construction is not left on the declaration
   class. The copy joins the caller's `{owner}${caller}$$inlined${callee}$N` sequence, shared
   with a specialized lambda of the same expansion. Mentioning only an ordinary type parameter

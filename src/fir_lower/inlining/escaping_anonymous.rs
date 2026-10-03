@@ -80,8 +80,30 @@ fn retarget(
         else {
             continue;
         };
-        if let IrExpr::New { internal, .. } = &mut ir.exprs[expression as usize] {
-            *internal = specialized;
+        // The call's parameter types were substituted to the reified argument. The copy's
+        // constructor keeps the declaration erasure, so the construction must invoke that
+        // descriptor rather than `<init>(Token)`.
+        let class = ir
+            .class_id_by_name(specialized)
+            .ok_or_else(|| malformed(internal))?;
+        let declared = ir.classes[class as usize]
+            .ctor_args
+            .iter()
+            .map(|argument| argument.ty)
+            .collect::<Vec<_>>();
+        if let IrExpr::New {
+            internal: name,
+            ctor_params,
+            ..
+        } = &mut ir.exprs[expression as usize]
+        {
+            *name = specialized;
+            if let Some(parameters) = ctor_params {
+                if parameters.len() != declared.len() {
+                    return Err(malformed(internal));
+                }
+                *parameters = declared;
+            }
         }
     }
     Ok(())
@@ -134,19 +156,15 @@ fn specialized_class(
         }
         let mut shape = function;
         shape.body = Some(cloned_body);
-        shape.params = shape
-            .params
-            .iter()
-            .copied()
-            .map(|ty| ty_subst_keep_unbound(ty, expansion.bindings))
-            .collect();
-        shape.ret = ty_subst_keep_unbound(shape.ret, expansion.bindings);
+        // Member descriptors stay the declaration's erasure. Reified operations in the body are
+        // specialized above; substituting the signature would emit a concrete descriptor plus a
+        // bridge where kotlinc keeps the erased member.
         shape.dispatch_receiver = Some(placeholder);
         cloned_methods.push(crate::ir::clone_class_method(
             ir,
             method,
             shape,
-            expansion.bindings,
+            &HashMap::new(),
         ));
     }
     let cloned = source_methods
@@ -159,7 +177,6 @@ fn specialized_class(
     copy.is_source_declared = false;
     copy.enclosure = expansion.site.caller.or(copy.enclosure);
     copy.methods = cloned_methods.clone();
-    specialize_class_types(&mut copy, expansion.bindings);
     remap_property_accessors(&mut copy, &cloned).map_err(|()| malformed(class_name))?;
     let (init_body, init_owned) = clone_optional_body(ir, copy.init_body, expansion, class_name)?;
     copy.init_body = init_body;
@@ -168,13 +185,13 @@ fn specialized_class(
     for method in &cloned_methods {
         ir.note_class_method(class_id, *method);
     }
-    copy_capture_edges(ir, source, class_id, expansion.bindings);
+    copy_capture_edges(ir, source, class_id);
     let source_name = ir.classes[source as usize].fq_name;
     let methods = source_methods
         .into_iter()
         .zip(cloned_methods)
         .collect::<Vec<_>>();
-    copy_override_edges(ir, source_name, placeholder, &methods, expansion.bindings)?;
+    copy_override_edges(ir, source_name, placeholder, &methods)?;
     remap_owned_class(ir, &owned, source, class_id, internal, placeholder);
     ir.specialized_anonymous_classes.insert(
         class_id,
@@ -249,36 +266,7 @@ fn malformed(class: TypeName) -> super::super::FirLoweringFailure {
     super::super::FirLoweringFailure::MalformedReifiedAnonymousObject { class }
 }
 
-fn specialize_class_types(class: &mut crate::ir::IrClass, bindings: &HashMap<String, Ty>) {
-    for ty in &mut class.supertypes {
-        *ty = ty_subst_keep_unbound(*ty, bindings);
-    }
-    for field in &mut class.fields {
-        field.ty = ty_subst_keep_unbound(field.ty, bindings);
-    }
-    for argument in &mut class.ctor_args {
-        argument.ty = ty_subst_keep_unbound(argument.ty, bindings);
-        if let Some(declared) = argument.declared_ty.as_mut() {
-            *declared = ty_subst_keep_unbound(*declared, bindings);
-        }
-    }
-    for property in &mut class.properties {
-        property.ty = ty_subst_keep_unbound(property.ty, bindings);
-        if let Some(storage) = property.storage_ty.as_mut() {
-            *storage = ty_subst_keep_unbound(*storage, bindings);
-        }
-    }
-    for argument in &mut class.super_ctor_params {
-        *argument = ty_subst_keep_unbound(*argument, bindings);
-    }
-}
-
-fn copy_capture_edges(
-    ir: &mut crate::ir::IrFile,
-    source: ClassId,
-    target: ClassId,
-    bindings: &HashMap<String, Ty>,
-) {
+fn copy_capture_edges(ir: &mut crate::ir::IrFile, source: ClassId, target: ClassId) {
     let fields = ir
         .shared_class_capture_fields
         .iter()
@@ -286,8 +274,7 @@ fn copy_capture_edges(
         .map(|((_, index), ty)| (*index, *ty))
         .collect::<Vec<_>>();
     for (index, ty) in fields {
-        ir.shared_class_capture_fields
-            .insert((target, index), ty_subst_keep_unbound(ty, bindings));
+        ir.shared_class_capture_fields.insert((target, index), ty);
     }
     let parameters = ir
         .shared_super_capture_parameters
@@ -297,7 +284,7 @@ fn copy_capture_edges(
         .collect::<Vec<_>>();
     for (index, ty) in parameters {
         ir.shared_super_capture_parameters
-            .insert((target, index), ty_subst_keep_unbound(ty, bindings));
+            .insert((target, index), ty);
     }
     let identities = ir
         .class_capture_identities
@@ -316,7 +303,6 @@ fn copy_override_edges(
     source_name: TypeName,
     target_name: TypeName,
     methods: &[(FunId, FunId)],
-    bindings: &HashMap<String, Ty>,
 ) -> Result<(), super::super::FirLoweringFailure> {
     let cloned = methods.iter().copied().collect::<HashMap<FunId, FunId>>();
     if let Some(edges) = ir.function_overrides.get(&source_name).cloned() {
@@ -333,21 +319,6 @@ fn copy_override_edges(
                     .ok_or_else(|| malformed(source_name))?,
                 );
                 edge.implementation_owner = target_name;
-                edge.applied_parameters = edge
-                    .applied_parameters
-                    .iter()
-                    .copied()
-                    .map(|ty| ty_subst_keep_unbound(ty, bindings))
-                    .collect();
-                edge.applied_result = ty_subst_keep_unbound(edge.applied_result, bindings);
-                edge.implementation_parameters = edge
-                    .implementation_parameters
-                    .iter()
-                    .copied()
-                    .map(|ty| ty_subst_keep_unbound(ty, bindings))
-                    .collect();
-                edge.implementation_result =
-                    ty_subst_keep_unbound(edge.implementation_result, bindings);
             }
             copied.push(edge);
         }
@@ -365,7 +336,6 @@ fn publish_property_members(
     source_name: TypeName,
     target_name: TypeName,
     cloned: &HashMap<FunId, FunId>,
-    bindings: &HashMap<String, Ty>,
 ) -> Result<(), super::super::FirLoweringFailure> {
     if let Some(edges) = ir.property_overrides.get(&source_name).cloned() {
         let mut copied = Vec::with_capacity(edges.len());
@@ -376,18 +346,12 @@ fn publish_property_members(
                 edge.implementation_getter = getter;
                 edge.implementation_setter = setter;
                 edge.implementation_owner = target_name;
-                edge.applied_type = ty_subst_keep_unbound(edge.applied_type, bindings);
-                edge.implementation_type =
-                    ty_subst_keep_unbound(edge.implementation_type, bindings);
-                edge.implementation_receiver = edge
-                    .implementation_receiver
-                    .map(|ty| ty_subst_keep_unbound(ty, bindings));
             }
             copied.push(edge);
         }
         ir.property_overrides.insert(target_name, copied);
     }
-    copy_member_extensions(ir, source_name, target_name, cloned, bindings)?;
+    copy_member_extensions(ir, source_name, target_name, cloned)?;
     Ok(())
 }
 
@@ -478,10 +442,7 @@ fn publish_one_copy(
         }
     }
     let new_fields = ir.classes[source as usize].fields[spec.field_count as usize..].to_vec();
-    for mut field in new_fields {
-        field.ty = ty_subst_keep_unbound(field.ty, &spec.bindings);
-        ir.classes[copy_id as usize].fields.push(field);
-    }
+    ir.classes[copy_id as usize].fields.extend(new_fields);
     let source_properties = ir.classes[source as usize].properties.clone();
     if source_properties.len() < spec.property_count as usize {
         return Err(malformed(source_name));
@@ -498,13 +459,6 @@ fn publish_one_copy(
             continue;
         }
         let mut property = source_property.clone();
-        property.ty = ty_subst_keep_unbound(property.ty, &spec.bindings);
-        if let Some(storage) = property.storage_ty.as_mut() {
-            *storage = ty_subst_keep_unbound(*storage, &spec.bindings);
-        }
-        for (_, _, ty) in &mut property.context_params {
-            *ty = ty_subst_keep_unbound(*ty, &spec.bindings);
-        }
         property.getter = getter;
         property.setter = setter;
         ir.classes[copy_id as usize].properties.push(property);
@@ -538,7 +492,8 @@ fn publish_one_copy(
             nested.push(body);
         }
     }
-    publish_property_members(ir, source, source_name, copy_name, &clones, &spec.bindings)?;
+    publish_property_members(ir, source, source_name, copy_name, &clones)?;
+    retarget_copied_property_calls(ir, copy_id, source, source_name, &clones)?;
     specialize(
         ir,
         nested,
@@ -557,6 +512,143 @@ fn publish_one_copy(
         record.method_clones = clones;
     }
     Ok(())
+}
+
+/// Property reads inside the copy still name the declaration's property. That layout's owner is
+/// the declaration class, and the copy does not inherit it, so a virtual call would target the
+/// declaration with the copy as the receiver. The copied accessor is an ordinary method of the copy.
+fn retarget_copied_property_calls(
+    ir: &mut crate::ir::IrFile,
+    copy_id: ClassId,
+    source: ClassId,
+    source_name: TypeName,
+    clones: &HashMap<FunId, FunId>,
+) -> Result<(), super::super::FirLoweringFailure> {
+    let mut roots = ir.classes[copy_id as usize]
+        .methods
+        .iter()
+        .filter_map(|method| ir.functions.get(*method as usize)?.body)
+        .collect::<Vec<_>>();
+    roots.extend(ir.classes[copy_id as usize].init_body);
+    let mut pending = roots;
+    let mut seen = HashSet::new();
+    let mut operations = Vec::new();
+    while let Some(expression) = pending.pop() {
+        if !seen.insert(expression) {
+            continue;
+        }
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+        if matches!(
+            ir.expr(expression),
+            IrExpr::Checked(
+                crate::ir::IrCheckedOperation::PropertyRead { .. }
+                    | crate::ir::IrCheckedOperation::PropertyWrite { .. }
+            )
+        ) {
+            operations.push(expression);
+        }
+    }
+    for expression in operations {
+        retarget_property_operation(ir, expression, copy_id, source, source_name, clones)?;
+    }
+    Ok(())
+}
+
+fn retarget_property_operation(
+    ir: &mut crate::ir::IrFile,
+    expression: ExprId,
+    copy_id: ClassId,
+    source: ClassId,
+    source_name: TypeName,
+    clones: &HashMap<FunId, FunId>,
+) -> Result<(), super::super::FirLoweringFailure> {
+    let IrExpr::Checked(operation) = ir.expr(expression).clone() else {
+        return Ok(());
+    };
+    let (target, dispatch_receiver, extension_receiver, context_arguments, value) = match operation
+    {
+        crate::ir::IrCheckedOperation::PropertyRead {
+            target,
+            dispatch_receiver,
+            extension_receiver,
+            context_arguments,
+            ..
+        } => (
+            target,
+            dispatch_receiver,
+            extension_receiver,
+            context_arguments,
+            None,
+        ),
+        crate::ir::IrCheckedOperation::PropertyWrite {
+            target,
+            dispatch_receiver,
+            extension_receiver,
+            context_arguments,
+            value,
+            ..
+        } => (
+            target,
+            dispatch_receiver,
+            extension_receiver,
+            context_arguments,
+            Some(value),
+        ),
+        _ => return Ok(()),
+    };
+    let Some((getter, setter)) = copied_layout_accessors(ir, target, source, source_name) else {
+        return Ok(());
+    };
+    let function = match value {
+        Some(_) => setter.ok_or_else(|| malformed(source_name))?,
+        None => getter.ok_or_else(|| malformed(source_name))?,
+    };
+    let cloned = require_clone(function, clones, source_name)?;
+    let index = ir.classes[copy_id as usize]
+        .methods
+        .iter()
+        .position(|method| *method == cloned)
+        .ok_or_else(|| malformed(source_name))?;
+    let index = u32::try_from(index).map_err(|_| malformed(source_name))?;
+    let receiver = dispatch_receiver.ok_or_else(|| malformed(source_name))?;
+    let mut args = context_arguments.into_iter().map(Some).collect::<Vec<_>>();
+    if let Some(extension_receiver) = extension_receiver {
+        args.push(Some(extension_receiver));
+    }
+    if let Some(value) = value {
+        args.push(Some(value));
+    }
+    ir.exprs[expression as usize] = IrExpr::MethodCall {
+        class: copy_id,
+        index,
+        receiver,
+        args,
+    };
+    Ok(())
+}
+
+fn copied_layout_accessors(
+    ir: &crate::ir::IrFile,
+    property: crate::fir::PropertyId,
+    source: ClassId,
+    source_name: TypeName,
+) -> Option<(Option<FunId>, Option<FunId>)> {
+    match ir.local_property_layouts.get(&property)? {
+        crate::ir::IrLocalPropertyLayout::Member {
+            class,
+            owner,
+            getter,
+            setter,
+            ..
+        } if *class == source || *owner == source_name => Some((*getter, *setter)),
+        crate::ir::IrLocalPropertyLayout::MemberExtension {
+            owner,
+            getter,
+            setter,
+            ..
+        } if *owner == source_name => Some((Some(*getter), *setter)),
+        _ => None,
+    }
 }
 
 fn clone_member_function(
@@ -582,16 +674,12 @@ fn clone_member_function(
     }
     let mut shape = function;
     shape.body = Some(cloned_body);
-    shape.params = shape
-        .params
-        .iter()
-        .copied()
-        .map(|ty| ty_subst_keep_unbound(ty, bindings))
-        .collect();
-    shape.ret = ty_subst_keep_unbound(shape.ret, bindings);
+    // Member descriptors stay the declaration's erasure. Reified operations in the body are
+    // specialized above; substituting the signature would emit a concrete descriptor plus a
+    // bridge where kotlinc keeps the erased accessor.
     shape.dispatch_receiver = Some(dispatch_receiver);
     Ok((
-        crate::ir::clone_class_method(ir, method, shape, bindings),
+        crate::ir::clone_class_method(ir, method, shape, &HashMap::new()),
         copied,
     ))
 }
@@ -680,7 +768,6 @@ fn copy_member_extensions(
     source_name: TypeName,
     target_name: TypeName,
     cloned: &HashMap<FunId, FunId>,
-    bindings: &HashMap<String, Ty>,
 ) -> Result<(), super::super::FirLoweringFailure> {
     let Some(properties) = ir.member_ext_props.get(&source_name).cloned() else {
         return Ok(());
@@ -690,8 +777,6 @@ fn copy_member_extensions(
         property.getter = require_clone(property.getter, cloned, source_name)?;
         property.setter =
             mapped_function(property.setter, cloned).map_err(|()| malformed(source_name))?;
-        property.receiver = ty_subst_keep_unbound(property.receiver, bindings);
-        property.ty = ty_subst_keep_unbound(property.ty, bindings);
         copied.push(property);
     }
     ir.member_ext_props.insert(target_name, copied);
@@ -733,10 +818,22 @@ fn remap_owned_class(
     to_name: TypeName,
 ) {
     for &expression in owned {
-        let Some(node) = ir.exprs.get_mut(expression as usize) else {
-            continue;
-        };
-        remap_class(node, from, to, from_name, to_name);
+        if let Some(node) = ir.exprs.get_mut(expression as usize) {
+            remap_class(node, from, to, from_name, to_name);
+        }
+        // A property read records the classifier its receiver statically has. Cloning the
+        // expression keeps the declaration class, so the copy would invoke that class's accessor
+        // with its own receiver.
+        if let Some(owner) = ir.dispatch_classes.get_mut(&expression) {
+            if *owner == from_name {
+                *owner = to_name;
+            }
+        }
+        if let Some(owner) = ir.expression_owners.get_mut(&expression) {
+            if *owner == from_name {
+                *owner = to_name;
+            }
+        }
     }
 }
 

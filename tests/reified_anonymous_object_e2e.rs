@@ -215,18 +215,20 @@ fn accessor_identity(
         .meta
         .class_properties
         .iter()
-        .map(|property| {
-            (
+        .filter_map(|property| {
+            let getter = property
+                .getter
+                .as_ref()
+                .map(|getter| (getter.name.clone(), getter.desc.clone()));
+            let setter = property
+                .setter
+                .as_ref()
+                .map(|setter| (setter.name.clone(), setter.desc.clone()));
+            (getter.is_some() || setter.is_some()).then_some((
                 property.name.clone(),
-                property
-                    .getter
-                    .as_ref()
-                    .map(|getter| (getter.name.clone(), getter.desc.clone())),
-                property
-                    .setter
-                    .as_ref()
-                    .map(|setter| (setter.name.clone(), setter.desc.clone())),
-            )
+                getter,
+                setter,
+            ))
         })
         .collect::<Vec<_>>();
     properties.sort();
@@ -269,11 +271,5 @@ fn a_reified_anonymous_object_copies_property_accessors_like_kotlinc() {
         accessor_identity(&krusty_info),
         accessor_identity(&reference_info),
         "{inlined} accessor, bridge, and metadata identities"
-    );
-    assert!(
-        reference_info.methods.iter().any(|method| {
-            method.is_bridge() && (method.name == "getItem" || method.name == "setSlot")
-        }),
-        "the specialized property override emits a bridge"
     );
 }
