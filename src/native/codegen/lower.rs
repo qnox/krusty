@@ -1963,7 +1963,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         &[left, right],
                     );
                 }
-                let owner = realization.physical_owner.render();
+                let owner = super::super::intrinsics::DeclarationOwner::callable(realization);
                 // The Kotlin name the declaration PUBLISHES, not the spelling it is realized under.
                 // A physical name is an emit handle: a JVM realization may RENAME a member, and
                 // where the signature mentions a value class kotlinc appends a hash of the erasure
@@ -1983,7 +1983,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         // path below crosses everything as a reference, which for a `Double` would
                         // mean allocating a box to ask a question about its bits.
                         if let Some(predicate) =
-                            super::super::intrinsics::float_predicate(&owner, &name)
+                            super::super::intrinsics::float_predicate(owner, &name)
                         {
                             return self.float_predicate(predicate, receiver);
                         }
@@ -1994,7 +1994,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         // the declaration is the same either way — so the operation is too, rather
                         // than a member of a type the runtime has no methods for.
                         if let Some(realized) =
-                            self.primitive_member(&owner, &name, receiver, args, *ret)
+                            self.primitive_member(owner, &name, receiver, args, *ret)
                         {
                             return realized;
                         }
@@ -2013,7 +2013,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         }
                         // `x++` where `x` is an `Int?`: the member is the primitive's, and so is
                         // the value, whatever it arrived carried as.
-                        if let Some(realized) = self.boxed_step(&owner, &name, params, receiver) {
+                        if let Some(realized) = self.boxed_step(owner, &name, params, receiver) {
                             return realized;
                         }
                         // `42.toUInt()`: a SIGNED receiver converted to an unsigned type.
@@ -2029,7 +2029,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         // truncates. Only an integer source is taken; a float one saturates
                         // instead and `unsigned_conversion` says why it is not here.
                         if let Some(target) =
-                            super::super::intrinsics::unsigned_conversion(&owner, &name)
+                            super::super::intrinsics::unsigned_conversion(owner, &name)
                         {
                             let source = self.type_of(receiver).map(Ty::non_null);
                             if let Some(source @ (Ty::Byte | Ty::Short | Ty::Int | Ty::Long)) =
@@ -2053,12 +2053,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         // makes `Int.mod(Long)` a `Long` question rather than a truncated one.
                         let receiver_type = self.type_of(receiver).map(Ty::non_null);
                         if let Some((symbol, operand)) = receiver_type.and_then(|receiver_type| {
-                            super::super::intrinsics::floor_mod(
-                                &owner,
-                                &name,
-                                receiver_type,
-                                params,
-                            )
+                            super::super::intrinsics::floor_mod(owner, &name, receiver_type, params)
                         }) {
                             let [argument] = args else {
                                 return Err("a `mod` with more than one operand".to_string());
@@ -2089,7 +2084,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         // they mean — so they are instructions here, not a call, which is also why
                         // they are not in `scalar_member`: that table boxes its receiver.
                         if let Some(op) =
-                            super::super::intrinsics::experimental_bitwise(&owner, &name, params)
+                            super::super::intrinsics::experimental_bitwise(owner, &name, params)
                         {
                             return self.experimental_bitwise(op, receiver, args, *ret);
                         }
@@ -2100,7 +2095,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         // `false` and nothing else. Anything else asks about Unicode case folding,
                         // which the runtime holds no table for, and declines below by name.
                         if let Some(symbol) = super::super::intrinsics::case_sensitive_text_member(
-                            &owner, &name, params,
+                            owner, &name, params,
                         ) {
                             // `ignoreCase` has a DEFAULT, and the two providers hand that over
                             // differently: a klib call materializes the default as a constant
@@ -2139,7 +2134,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         // receiver is that object and nothing reads it — there is no object to
                         // make and none is made. The operand's width says which of the two.
                         if let Some((symbol, operand, answer)) =
-                            super::super::intrinsics::bits_to_float(&owner, &name, params)
+                            super::super::intrinsics::bits_to_float(owner, &name, params)
                         {
                             let Some(bits) = self.coerce(args[0], operand)? else {
                                 return Ok(None);
@@ -2159,7 +2154,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         // type says which width, the declaration having no parameter to say it.
                         if let Some(receiver_ty) = self.type_of(receiver) {
                             if let Some((symbol, answer)) = super::super::intrinsics::float_to_bits(
-                                &owner,
+                                owner,
                                 &name,
                                 params,
                                 receiver_ty,
@@ -2184,7 +2179,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         // `toString` on such a receiver already read it — a boxed primitive at its
                         // own width, with Kotlin's TOTAL order for the floating ones, and a string
                         // by UTF-16 unit.
-                        if super::super::intrinsics::is_comparable_compare_to(&owner, &name, params)
+                        if super::super::intrinsics::is_comparable_compare_to(owner, &name, params)
                         {
                             let operands =
                                 vec![self.reference(receiver)?, self.reference(args[0])?];
@@ -2205,7 +2200,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         // A member that asks about a NUMBER rather than an object, carried as one:
                         // `s[i]` must not box its index to reach the runtime.
                         if let Some((symbol, carried, answer)) =
-                            super::super::intrinsics::scalar_member(&owner, &name, params)
+                            super::super::intrinsics::scalar_member(owner, &name, params)
                         {
                             let mut arguments = vec![self.reference(receiver)?];
                             for (argument, ty) in args.iter().zip(&carried[1..]) {
@@ -2238,9 +2233,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         }
                         // A companion member the runtime realizes takes its arguments alone:
                         // the receiver is an object carrying nothing, and it is not evaluated.
-                        if let Some(symbol) = super::super::intrinsics::runtime_companion_member(
-                            &owner, &name, params,
-                        ) {
+                        if let Some(symbol) =
+                            super::super::intrinsics::runtime_companion_member(owner, &name, params)
+                        {
                             let mut arguments = Vec::with_capacity(args.len());
                             for argument in args {
                                 arguments.push(self.reference(*argument)?);
@@ -2257,9 +2252,12 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                             return self.convert(produced, Some(any()), *ret);
                         }
                         let Some(symbol) =
-                            super::super::intrinsics::runtime_member(&owner, &name, params)
+                            super::super::intrinsics::runtime_member(owner, &name, params)
                         else {
-                            return Err(format!("the member `{}.{name}`", owner.replace('/', ".")));
+                            return Err(format!(
+                                "the member `{}.{name}`",
+                                realization.physical_owner.render().replace('/', ".")
+                            ));
                         };
                         let mut arguments = vec![self.reference(receiver)?];
                         for argument in args {
@@ -2277,7 +2275,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         // `Int` arguments arrives typed `Int`, and the comparison Kotlin makes is
                         // `==` on whatever the values are.
                         if let Some((symbol, compared)) =
-                            super::super::intrinsics::assertion_call(&owner, &name, params)
+                            super::super::intrinsics::assertion_call(owner, &name, params)
                         {
                             return self.assertion(symbol, compared, args);
                         }
@@ -2285,16 +2283,16 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         // runtime call: the message block runs only when the check fails, so the
                         // shape is a branch around a raise rather than a call with operands.
                         if let Some(precondition) =
-                            super::super::intrinsics::precondition(&owner, &name, params)
+                            super::super::intrinsics::precondition(owner, &name, params)
                         {
                             return self.precondition(precondition, args, *ret);
                         }
                         let Some(symbol) =
-                            super::super::intrinsics::runtime_function(&owner, &name, params)
+                            super::super::intrinsics::runtime_function(owner, &name, params)
                         else {
                             return Err(format!(
                                 "the declaration `{}.{name}`",
-                                owner.replace('/', ".")
+                                realization.physical_owner.render().replace('/', ".")
                             ));
                         };
                         let arguments = self.arguments(args, params)?;

@@ -20,7 +20,7 @@ impl BodyLowering<'_, '_, '_> {
     /// else.
     pub(super) fn boxed_step(
         &mut self,
-        owner: &str,
+        owner: super::super::super::intrinsics::DeclarationOwner,
         name: &str,
         params: &[Ty],
         receiver: u32,

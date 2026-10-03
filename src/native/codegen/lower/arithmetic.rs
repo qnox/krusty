@@ -670,7 +670,7 @@ impl BodyLowering<'_, '_, '_> {
     /// Returns `None` when this is somebody else's member, so the caller falls through.
     pub(super) fn primitive_member(
         &mut self,
-        owner: &str,
+        owner: super::super::super::intrinsics::DeclarationOwner,
         name: &str,
         receiver: u32,
         args: &[u32],
