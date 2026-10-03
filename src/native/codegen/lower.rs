@@ -18,10 +18,19 @@ mod calls;
 mod classes_literal;
 mod classifier_shapes;
 mod compiler_intrinsics;
+mod declared_capabilities;
+mod defaults;
 mod enums;
 mod exceptions;
 use arithmetic::{arithmetic_result, scalar_bound};
+use declared_capabilities::{
+    declares_its_own_comparable, implemented_collections, implemented_dependencies,
+    overrides_a_throwable_accessor,
+};
+mod functions;
 mod objects;
+mod references;
+mod scope;
 mod statics;
 mod strings;
 mod type_checks;
@@ -167,6 +176,10 @@ pub struct FileInput<'a> {
     /// Every symbol the prebuilt runtime defines, which the program's own names must avoid. Read
     /// once per build by the backend rather than once per file.
     pub runtime_symbols: &'a std::collections::HashSet<String>,
+    /// The accessors synthesized for each reference to a dependency property, by site; see
+    /// [`crate::native::dependency_references`].
+    pub dependency_properties:
+        &'a std::collections::HashMap<u32, super::super::dependency_references::DependencyProperty>,
 }
 
 pub fn lower_file(
@@ -179,6 +192,7 @@ pub fn lower_file(
         ir,
         classifiers,
         callables,
+        dependency_properties,
         runtime_symbols,
     } = input;
     let class_model = model::build(ir, classifiers)?;
@@ -207,7 +221,15 @@ pub fn lower_file(
         classes: Vec::new(),
         accessors: HashMap::new(),
         statics: Vec::new(),
+        lambdas: HashMap::new(),
+        default_wrappers: HashMap::new(),
+        default_constructors: HashMap::new(),
         enum_entries: HashMap::new(),
+        reference_identities: HashMap::new(),
+        holders: HashMap::new(),
+        references: HashMap::new(),
+        dependency_properties,
+        dependency_property_skips: HashMap::new(),
         implemented_collections: implemented_collections(ir, classifiers),
         overrides_a_throwable_accessor: overrides_a_throwable_accessor(ir),
         // Filled once the class model can be consulted: which classes are walkable is which ones
@@ -225,8 +247,17 @@ pub fn lower_file(
     lowering.declare_functions()?;
     lowering.declare_classes()?;
     lowering.declare_statics()?;
+    lowering.declare_lambdas()?;
+    lowering.declare_default_wrappers()?;
+    lowering.declare_default_constructors()?;
     lowering.declare_enum_entries()?;
+    // Constructors are bodies too, so property-reference artifacts must exist before classes are
+    // defined: a class initializer may itself contain `C::property`.
+    lowering.declare_property_references()?;
+    lowering.declare_local_property_references()?;
     lowering.define_classes()?;
+    lowering.define_default_wrappers()?;
+    lowering.define_default_constructors()?;
     lowering.define_enum_entries()?;
     let statics_init = lowering.define_statics_init()?;
     let mut defines_entry = false;
@@ -270,133 +301,6 @@ pub fn lower_file(
     })
 }
 
-/// The dependency types this file puts a class of its own behind, by resolved identity.
-///
-/// Read from the OVERRIDE edges, which is where a class's answer for a dependency member is
-/// recorded whether or not its supertype list names the declaring type.
-fn implemented_dependencies(ir: &IrFile) -> std::collections::HashSet<crate::types::TypeName> {
-    let mut owners = std::collections::HashSet::new();
-    for edge in ir.function_overrides.values().flatten() {
-        if matches!(
-            edge.overridden,
-            crate::fir::ResolvedFunctionOverrideTarget::External(_)
-        ) {
-            owners.insert(edge.overridden_owner);
-        }
-    }
-    for edge in ir.property_overrides.values().flatten() {
-        if matches!(
-            edge.overridden,
-            crate::fir::ResolvedPropertyOverrideTarget::External(_)
-        ) {
-            owners.insert(edge.overridden_owner);
-        }
-    }
-    owners
-}
-
-/// The collection SHAPES the file puts a class of its own behind.
-///
-/// Read from the OVERRIDE edges rather than from the supertype lists: what matters is that a
-/// member of this file answers for one of those types, which is exactly what an edge to a
-/// dependency declaration of it records — and it holds for a class reaching the type through
-/// another dependency type the supertype list does not name.
-///
-/// A SHAPE rather than a single flag, because the hazard is not the file's, it is the receiver's.
-/// An object of a class that answers for `Sequence` can stand behind a sequence and behind nothing
-/// else the runtime walks; a list receiver in the same file is as safe as it would be in a file
-/// that declared nothing. Each shape is recorded only from an edge that NAMES it, and no shape
-/// implies another: a class handing out an iterator of its own overrides `Iterator`'s members and
-/// is recorded there in its own right, and one returning a walk the runtime made is no hazard.
-/// Whether this file OVERRIDES `Throwable.message` or `Throwable.cause`.
-///
-/// Both are `open val`s of the runtime's own class, and this target reads them with a runtime
-/// function rather than through a slot — the class is the runtime's, and so is its layout. That is
-/// right for every throwable the runtime makes and wrong the moment a class of the program
-/// redeclares one: the read would answer the FIELD where Kotlin dispatches to the override. There
-/// is no slot to dispatch through, because the base declares none, so a file that overrides either
-/// declines the read rather than answering the wrong half of it.
-fn overrides_a_throwable_accessor(ir: &IrFile) -> bool {
-    ir.property_overrides.values().flatten().any(|edge| {
-        matches!(
-            edge.overridden,
-            crate::fir::ResolvedPropertyOverrideTarget::External(_)
-        ) && super::super::intrinsics::throwable_field(edge.overridden_owner, &edge.name).is_some()
-    })
-}
-
-fn implemented_collections(
-    ir: &IrFile,
-    classifiers: &dyn crate::backend::BackendClassifierSource,
-) -> std::collections::HashSet<super::super::intrinsics::CollectionShape> {
-    let mut shapes = std::collections::HashSet::new();
-    for edge in ir.function_overrides.values().flatten() {
-        if matches!(
-            edge.overridden,
-            crate::fir::ResolvedFunctionOverrideTarget::External(_)
-        ) {
-            shapes.extend(classifier_shapes::collection_shape(
-                classifiers,
-                edge.overridden_owner,
-            ));
-        }
-    }
-    for edge in ir.property_overrides.values().flatten() {
-        if matches!(
-            edge.overridden,
-            crate::fir::ResolvedPropertyOverrideTarget::External(_)
-        ) {
-            shapes.extend(classifier_shapes::collection_shape(
-                classifiers,
-                edge.overridden_owner,
-            ));
-        }
-    }
-    shapes
-}
-
-/// Whether this file declares a class an object of which could stand behind a `Comparable<T>`.
-///
-/// `compareTo` asked of a receiver typed only by `Comparable` is answered by the DESCRIPTOR — a
-/// boxed primitive at its own width and with Kotlin's total order for the floating ones, a string
-/// by UTF-16 unit — and those tables answer only for the objects the RUNTIME makes. An object of
-/// the program's could stand behind that type too, and no static type tells the two apart, which is
-/// why the answer is the runtime's at all. So a file that declares one declines instead.
-///
-/// Three shapes count, and none of them is an override edge — which is why this is not
-/// [`implemented_dependencies`]. A class may NAME `Comparable` among its supertypes without
-/// overriding anything there: `interface A : Comparable<A>` is that, and its implementor overrides
-/// `A`'s spelling rather than `Comparable`'s. An ENUM is a `Comparable` with nothing written at
-/// all, `kotlin.Enum` supplying the comparison — whose ordinal is a field this generator lays out
-/// and the runtime cannot read. And a class may reach `Comparable` through a supertype declared
-/// somewhere else entirely, which no name in this file spells; overriding an external `compareTo`
-/// is the evidence of that one.
-///
-/// Naming `Comparable` anywhere in the file is enough, without walking the hierarchy: the class
-/// that names it is itself declared here, so a single pass over the declarations finds it.
-fn declares_its_own_comparable(ir: &IrFile) -> bool {
-    let named = |class: &crate::ir::IrClass| {
-        std::iter::once(class.superclass)
-            .chain(class.interfaces.iter())
-            .chain(
-                class
-                    .supertypes
-                    .iter()
-                    .copied()
-                    .filter_map(Ty::obj_internal),
-            )
-            .any(super::super::intrinsics::is_comparable_supertype)
-    };
-    ir.classes.iter().any(|class| {
-        !class.enum_entries.is_empty() || class.enum_entry_of.is_some() || named(class)
-    }) || ir.function_overrides.values().flatten().any(|edge| {
-        matches!(
-            edge.overridden,
-            crate::fir::ResolvedFunctionOverrideTarget::External(_)
-        ) && edge.name == "compareTo"
-    })
-}
-
 struct FileLowering<'a> {
     ir: &'a IrFile,
     classifiers: &'a dyn crate::backend::BackendClassifierSource,
@@ -424,8 +328,20 @@ struct FileLowering<'a> {
     accessors: HashMap<Slot, FuncId>,
     /// The global slot of each top-level property, parallel to `ir.statics`.
     statics: Vec<DataId>,
+    /// The emitted pieces of each lambda, by the expression that creates it.
+    lambdas: HashMap<u32, functions::LambdaItems>,
+    /// One wrapper per omission shape a call in this file uses.
+    default_wrappers: HashMap<defaults::Omission, FuncId>,
+    /// The same, for a construction that leaves arguments out.
+    default_constructors: HashMap<defaults::CtorOmission, FuncId>,
     /// Per enum class, its constants' static slots and getters, in declaration order.
     enum_entries: HashMap<ClassId, enums::EnumItems>,
+    /// The holder type for a captured `var` of each carrier, by the carrier's spelling.
+    holders: HashMap<String, DataId>,
+    /// The emitted pieces of each property reference, by the expression that creates it.
+    references: HashMap<u32, references::ReferenceSite>,
+    /// One marker per (referenced declaration, bound-ness) this file mentions.
+    reference_identities: HashMap<String, DataId>,
     /// The runtime-known types this file puts a class of its OWN behind, by resolved identity.
     ///
     /// A receiver typed by one of these may be an object of the program's rather than one the
@@ -439,6 +355,11 @@ struct FileLowering<'a> {
     /// shape listed here declines by name instead of being answered wrongly. A receiver of any
     /// OTHER shape is answered as usual; see [`implemented_collections`].
     implemented_collections: std::collections::HashSet<super::super::intrinsics::CollectionShape>,
+    /// Accessors synthesized for each dependency-property reference, keyed by expression site.
+    dependency_properties:
+        &'a std::collections::HashMap<u32, super::super::dependency_references::DependencyProperty>,
+    /// Why a dependency-property reference was left without an object, keyed by expression site.
+    dependency_property_skips: HashMap<u32, String>,
     /// Whether this file redeclares `Throwable.message` or `Throwable.cause`; see
     /// [`overrides_a_throwable_accessor`].
     overrides_a_throwable_accessor: bool,
@@ -1300,6 +1221,10 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             IrExpr::Variable {
                 index, ty, init, ..
             } => {
+                let ty = match init.map(|init| self.file.ir.expr(init)) {
+                    Some(IrExpr::RefNew { .. }) => any(),
+                    _ => ty,
+                };
                 if carrier(ty) == Carrier::Void {
                     if let Some(init) = init {
                         self.expression(init)?;
@@ -1817,6 +1742,20 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             } => self.lateinit_initialized(receiver, class, index),
             IrExpr::SingletonValue { classifier } => self.singleton(classifier),
             IrExpr::GetStatic(index) => self.static_read(index),
+            IrExpr::Lambda { .. } | IrExpr::CallableReference(_) => self.lambda(id),
+            IrExpr::InvokeFunction {
+                func,
+                args,
+                params,
+                ret,
+            } => self.invoke_function(func, &args, &params, ret),
+            IrExpr::RefNew { elem, init } => self.ref_new(elem, init),
+            IrExpr::RefGet { holder, elem } => self.ref_get(holder, elem),
+            IrExpr::RefSet {
+                holder,
+                elem,
+                value,
+            } => self.ref_set(holder, elem, value),
             IrExpr::EnumEntry { classifier, name } => self.enum_entry(classifier, &name),
             // `declaration` separates the classifier's own `E.valueOf(name)` from the standard
             // library's INLINE `enumValueOf<E>(name)`. Both name the same lookup by entry name, and
@@ -1841,6 +1780,13 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 let member = self.enum_member_name(target).expect("checked by the guard");
                 self.enum_member(member, receiver)
             }
+            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
+                target,
+                receiver: Some(receiver),
+                ..
+            }) if self.reference_property(target, receiver).is_some() => self
+                .reference_property(target, receiver)
+                .expect("checked by the guard"),
             // `k.simpleName` / `k.qualifiedName`: the descriptor's own Kotlin name.
             IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
                 target,
@@ -1877,6 +1823,16 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 receiver: Some(receiver),
                 ..
             }) if self.is_text_length(target) => self.text_length(receiver),
+            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
+                target,
+                receiver: Some(receiver),
+                ..
+            }) if self.callable_reference_name(target, receiver).is_some() => {
+                let name = self
+                    .callable_reference_name(target, receiver)
+                    .expect("checked by the guard");
+                self.callable_name(receiver, &name)
+            }
             IrExpr::Checked(IrCheckedOperation::PropertyRead {
                 target,
                 dispatch_receiver,
@@ -1902,6 +1858,10 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     Err(reason) => Err(reason),
                 }
             }
+            IrExpr::Checked(IrCheckedOperation::PropertyReference { .. }) => {
+                self.property_reference(id)
+            }
+            IrExpr::LocalPropertyReference { .. } => self.local_property_reference(id),
             IrExpr::KClassLiteral {
                 classifier, value, ..
             } => self.class_literal(classifier, value),
@@ -2247,9 +2207,14 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             },
             IrExpr::Equality { .. } => Ty::Boolean,
             IrExpr::Call { callee, .. } => match callee {
-                Callee::Local(function) => self.file.ir.functions[*function as usize].ret,
+                Callee::Local(function)
+                | Callee::LocalWithDefaults { function, .. }
+                | Callee::ClassStaticWithDefaults { function, .. } => {
+                    self.file.ir.functions[*function as usize].ret
+                }
                 Callee::External { ret, .. }
                 | Callee::Intrinsic { ret, .. }
+                | Callee::ModuleWithDefaults { ret, .. }
                 | Callee::Super { ret, .. } => *ret,
                 Callee::Special { source, .. } => {
                     let function = self.file.ir.checked_callable_functions.get(&(*source)?)?;
@@ -2300,17 +2265,26 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 )
             }
             IrExpr::GetStatic(index) => self.file.ir.statics[*index as usize].ty,
+            IrExpr::InvokeFunction { ret, .. } => *ret,
+            IrExpr::RefGet { elem, .. } | IrExpr::RefSet { elem, .. } => *elem,
+            IrExpr::CallableReference(reference) => reference.function_type,
+            IrExpr::Lambda { .. } | IrExpr::RefNew { .. } => any(),
             // `name` and `ordinal` belong to `kotlin.Enum`, a class no file declares, so the
             // checked property table has nothing to say about them; their types are the language's
             // and are stated where the read itself is recognized.
-            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead { target, .. }) => {
-                // `cs.length` is an `Int`: the language's own type, stated here for the same
-                // reason `kotlin.Enum`'s two are.
+            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
+                target, receiver, ..
+            }) => {
                 if self.is_text_length(*target) {
                     return Some(Ty::Int);
                 }
                 if self.class_name_accessor(*target).is_some() {
                     return Some(Ty::nullable(Ty::String));
+                }
+                if let Some(receiver) = receiver {
+                    if self.callable_reference_name(*target, *receiver).is_some() {
+                        return Some(Ty::String);
+                    }
                 }
                 match self.enum_member_name(*target) {
                     Some("name") => Ty::String,
@@ -2318,9 +2292,23 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     None => return None,
                 }
             }
+            IrExpr::LocalPropertyReference { .. } => Ty::obj("kotlin/reflect/KProperty"),
             // A class literal is an object of the reflection type Kotlin gives it, which is what
             // makes an equality between two of them an equality between references.
             IrExpr::KClassLiteral { .. } => classes_literal::kclass(),
+            IrExpr::Checked(IrCheckedOperation::PropertyReference { mutable, .. }) => self
+                .file
+                .ir
+                .logical_types
+                .get(&id)
+                .copied()
+                .unwrap_or_else(|| {
+                    Ty::obj(if *mutable {
+                        "kotlin/reflect/KMutableProperty"
+                    } else {
+                        "kotlin/reflect/KProperty"
+                    })
+                }),
             // `x!!` yields `x` or fails, so its type is the OPERAND's with the nullability taken
             // off — which is what the lowering already does, unboxing a nullable primitive there.
             // Saying so here is what lets a CONSUMER of `x!!` know what it is holding: without it

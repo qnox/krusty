@@ -9,7 +9,7 @@
 //! Two halves, and both matter: the path that does not throw must run normally, and the one that
 //! does must stop the program, reporting the exception Kotlin names.
 
-use super::common::{expect_native_box, expect_native_exit};
+use super::common::{expect_native_box, expect_native_decline, expect_native_exit};
 
 #[test]
 fn an_unreached_todo_leaves_the_program_alone() {
@@ -60,6 +60,32 @@ fn a_todo_is_a_bottom_value_the_caller_never_reads() {
          fun box(): String = if (describe(3) == \"positive\") \"OK\" else \"fail\"\n",
         "TodoIsABottomValue",
         "OK",
+    );
+}
+
+/// A message block that RETURNS from the enclosing function still declines.
+///
+/// `lazyMessage` is a parameter of an `inline` declaration, so Kotlin lets the block written for it
+/// return from the caller. A klib publishes no body to splice, so what arrives is an ordinary
+/// function value, and a non-local return through one is a miscompile rather than a slower answer.
+///
+/// The decline comes from the block itself — the lowering finds no code behind the function value —
+/// rather than from a rule about preconditions, which is why this case is pinned here: the
+/// ordinary message form beside it IS realized (`tests/native_preconditions_e2e.rs`), so nothing
+/// else would notice if this one started being realized too.
+#[test]
+fn a_message_block_that_returns_non_locally_still_declines() {
+    expect_native_decline(
+        "fun check(n: Int): String {\n\
+         \x20   require(n > 0) { return \"nonlocal\" }\n\
+         \x20   return \"ok\"\n\
+         }\n\
+         fun box(): String = if (check(-1) == \"nonlocal\") \"OK\" else \"fail\"\n",
+        "RequireWithANonLocalReturn",
+        // The decline names WHY the body was not emitted: this lambda returns from `check`, which
+        // only a caller that spliced it can do, and `require` is a dependency whose body this
+        // target cannot splice.
+        "returns non-locally",
     );
 }
 
