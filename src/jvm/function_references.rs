@@ -803,7 +803,7 @@ fn realize_reflective_invoke_reference(
         .get(impl_fn as usize)
         .ok_or(FunctionReferenceRealizationTarget::Adapter(impl_fn))?
         .clone();
-    let (Some(callee), reference_parameters) = function.params.split_first() else {
+    let Some((callee, reference_parameters)) = function.params.split_first() else {
         return Err(FunctionReferenceRealizationTarget::Invalid);
     };
     let callee = *callee;
