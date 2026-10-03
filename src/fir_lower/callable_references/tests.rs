@@ -315,6 +315,7 @@ fn function_invoke_reference_becomes_a_capturing_suspend_forwarder() {
     ));
     assert_eq!(ir.functions[wrapper as usize].ret, Ty::obj("kotlin/Unit"));
     assert!(ir.suspend_funs.contains(&wrapper));
+    assert!(!ir.reflective_invoke_wrappers.contains(&wrapper));
     assert!(ir.exprs.iter().any(|expression| matches!(
         expression,
         IrExpr::Lambda {
@@ -329,6 +330,33 @@ fn function_invoke_reference_becomes_a_capturing_suspend_forwarder() {
             if args.is_empty() && params.is_empty() && *ret == Ty::Unit)
             && ir.suspend_calls.get(&(expression as u32)) == Some(&Ty::Unit)
     }));
+}
+
+#[test]
+fn reflective_function_invoke_reference_marks_its_forwarder() {
+    let platform: Box<dyn crate::libraries::SemanticPlatform> = Box::new(
+        crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(crate::toolchain::classpath_jars_for(
+                "// WITH_STDLIB",
+            )),
+        ))
+        .expect("JVM provider initialization"),
+    );
+    let ir = lower_single_source_with_platform(
+        "fun reference(block: suspend () -> Unit) {\n    val f = block::invoke\n}\n",
+        "ReflectiveInvokeReference",
+        platform,
+    );
+    let wrapper = ir
+        .functions
+        .iter()
+        .position(|function| function.name.starts_with("$fir_invoke_ref_"))
+        .expect("function invoke forwarding wrapper") as u32;
+    assert!(ir.reflective_invoke_wrappers.contains(&wrapper));
+    assert!(ir.exprs.iter().any(|expression| matches!(
+        expression,
+        IrExpr::Lambda { impl_fn, captures, .. } if *impl_fn == wrapper && captures.len() == 1
+    )));
 }
 
 #[test]

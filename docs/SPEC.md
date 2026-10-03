@@ -12339,13 +12339,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   as the inferred type of an unannotated local bound to an UNBOUND reference (`val f = A::b`).
   Everywhere else the reference keeps its function type — that is the shape argument passing, SAM
   conversion, and the backend's reference dispatch are written against, and re-typing them all regressed
-  reference dispatch broadly. Unbound only, because that is the set krusty realizes as a real
-  `FunctionReferenceImpl`; a bound reference on a value receiver can still lower to an `invokedynamic`
-  lambda, which is no `KFunction` (see `docs/IMPLEMENTATION_PLAN.md`). Invoking a `KFunction{N}` is
+  reference dispatch broadly. An unbound reference is realized as a real `FunctionReferenceImpl`. A
+  bound `value::invoke` is too, when its public type is the reflection classifier (`val f = block::invoke`):
+  the value has to implement `KFunction`, and an `invokedynamic` lambda does not. A function-typed
+  expected type (`fun reference(block: suspend () -> Unit): suspend () -> Unit = block::invoke`) stays
+  the forwarding function value. Invoking a `KFunction{N}` is
   typed from its type ARGUMENTS, not the erased reflection shape, so `::Greeter` invoked yields a
   `Greeter`. Tests:
   `classpath_unbound_callable_ref_e2e::classpath_callable_references_resolve_reflection_targets`,
-  corpus `reflection/functions/typeParameterInReturnType.kt`.
+  `suspend_invoke_reference_e2e::an_unannotated_suspend_invoke_reference_is_a_kfunction`,
+  corpus `reflection/functions/typeParameterInReturnType.kt` and
+  `coroutines/suspendFunctionMethodReference.kt`.
 
 - **A typealias applied to type arguments on a callable-reference LHS is a type.** kotlinc reads
   `Alias<Int>::label` as a type LHS even when the alias expands to an `object`, so the reference is

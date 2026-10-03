@@ -518,6 +518,7 @@ fn bound_function_invoke_reference_keeps_both_checked_function_shapes() {
         reference_parameters,
         reference_result,
         suspend,
+        reflective,
     } = &body
         .expr(root_expression(&body))
         .expect("function invoke reference")
@@ -535,6 +536,29 @@ fn bound_function_invoke_reference_keeps_both_checked_function_shapes() {
     assert!(reference_parameters.is_empty());
     assert_eq!(reference_result.get(), Ty::Unit);
     assert!(*suspend);
+    assert!(!*reflective);
+}
+
+#[test]
+fn unannotated_function_invoke_reference_is_reflective() {
+    let (body, _) = checked_function_body_with_platform(
+        "fun reference(block: suspend () -> Unit) {\n\
+             val f = block::invoke\n\
+         }\n",
+        "reference",
+        jvm_stdlib_semantics(),
+    );
+    let reflective = (0..body.expression_count()).any(|index| {
+        matches!(
+            body.expr(FirExprId::from_raw(index as u32))
+                .map(|expression| &expression.kind),
+            Some(FirExprKind::FunctionInvokeReference { reflective: true, .. })
+        )
+    });
+    assert!(
+        reflective,
+        "an unannotated value::invoke is a KFunction and must stay reflective"
+    );
 }
 
 #[test]

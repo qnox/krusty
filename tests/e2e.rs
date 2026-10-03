@@ -2058,6 +2058,8 @@ mod suspend_default_param_e2e;
 mod suspend_e2e;
 #[path = "suspend_fun_interface_e2e.rs"]
 mod suspend_fun_interface_e2e;
+#[path = "suspend_invoke_reference_e2e.rs"]
+mod suspend_invoke_reference_e2e;
 #[path = "suspend_in_try_body_hoist_e2e.rs"]
 mod suspend_in_try_body_hoist_e2e;
 #[path = "suspend_inline_collection_spill_e2e.rs"]

@@ -996,15 +996,30 @@ impl BodyLowering<'_> {
                 reference_parameters,
                 reference_result,
                 suspend,
-            } => self.checked_function_invoke_reference(
-                *callee,
-                target_parameters,
-                *target_result,
-                *target_suspend,
-                reference_parameters,
-                *reference_result,
-                *suspend,
-            )?,
+                reflective,
+            } => {
+                let reflective = *reflective;
+                let lowered = self.checked_function_invoke_reference(
+                    *callee,
+                    target_parameters,
+                    *target_result,
+                    *target_suspend,
+                    reference_parameters,
+                    *reference_result,
+                    *suspend,
+                )?;
+                if reflective {
+                    if let crate::ir::IrExpr::Lambda { impl_fn, .. } =
+                        self.ir.exprs[lowered as usize]
+                    {
+                        self.ir.reflective_invoke_wrappers.insert(impl_fn);
+                    }
+                    // The carrier class takes the source reference's name. The forwarding lambda
+                    // is the node that name is attached to; realization replaces that node.
+                    self.record_generated_class_provenance(expression_id, lowered as usize);
+                }
+                lowered
+            }
             FirExprKind::IndexedRead {
                 kind,
                 receiver,
