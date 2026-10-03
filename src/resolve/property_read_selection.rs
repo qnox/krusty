@@ -3,7 +3,7 @@
 //! Candidate collection and selection remain in the resolver facade. This boundary exposes only
 //! the semantic type, visibility check, and external-property identity consumed after selection.
 
-use super::{Origin, PropertyReadSelection, Ty, TypeName, Visibility};
+use super::{Checker, Origin, PropertyReadSelection, Ty, TypeName, Visibility};
 
 impl PropertyReadSelection {
     pub(super) fn ty(&self) -> Ty {
@@ -32,6 +32,25 @@ impl PropertyReadSelection {
         }
     }
 
+    /// A non-public read the visibility gate rejects. A member extension is gated on its dispatch
+    /// receiver — the extension receiver is an ordinary argument — so `f.observable` inside the
+    /// declaring class reads a `protected` member of `this`, not of `f`. Public reads stay visible.
+    pub(super) fn hidden_from(
+        &self,
+        receiver: Ty,
+        gate: impl FnOnce(Visibility, TypeName, Ty) -> bool,
+    ) -> Option<(Visibility, TypeName)> {
+        let (visibility, owner) = self.access()?;
+        if visibility == Visibility::Public {
+            return None;
+        }
+        let probed = match self {
+            Self::MemberExtension(property) => property.dispatch_receiver.ty,
+            Self::Member(_) | Self::Extension(..) => receiver,
+        };
+        (!gate(visibility, owner, probed)).then_some((visibility, owner))
+    }
+
     pub(super) fn external_property(&self) -> Option<crate::fir::ExternalPropertyId> {
         match self {
             Self::Member(member) => member
@@ -44,5 +63,17 @@ impl PropertyReadSelection {
                 .and_then(|getter| getter.external_property_identity),
             Self::Extension(access, _) => access.property.getter.external_property_identity,
         }
+    }
+}
+
+impl Checker<'_> {
+    pub(super) fn hidden_property_read(
+        &self,
+        selection: &PropertyReadSelection,
+        receiver: Ty,
+    ) -> Option<(Visibility, TypeName)> {
+        selection.hidden_from(receiver, |visibility, owner, probed| {
+            self.receiver_property_accessible(visibility, owner, probed)
+        })
     }
 }
