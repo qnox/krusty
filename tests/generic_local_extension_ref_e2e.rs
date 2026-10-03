@@ -4,8 +4,7 @@
 //! extension property. The classifiers here are repository-owned and invariant.
 
 use super::common::{
-    compiler_diagnostics, expect_box_run_against_kotlinc, expect_box_run_against_ref,
-    expect_box_same_as_kotlinc, expect_identical_rejection,
+    expect_box_run_against_kotlinc, expect_box_run_against_ref, expect_box_same_as_kotlinc,
 };
 
 #[test]
@@ -146,44 +145,50 @@ fun box(): String {
 fn receiver_qualified_local_extensions_adapt_for_function_and_sam_expectations() {
     expect_box_same_as_kotlinc(
         r#"
-class Counter(val seed: Int)
+class Counter(val seed: String)
+class Piece(val text: String)
 
-fun interface BoundZero { fun dispatch(): Int }
-fun interface BoundPair { fun dispatch(first: Int, second: Int): Int }
-fun interface UnboundZero { fun dispatch(counter: Counter): Int }
-fun interface UnboundPair { fun dispatch(counter: Counter, first: Int, second: Int): Int }
+fun interface BoundZero { fun dispatch(): String }
+fun interface BoundPair { fun dispatch(first: Piece, second: Piece): String }
+fun interface UnboundZero { fun dispatch(counter: Counter): String }
+fun interface UnboundPair {
+    fun dispatch(counter: Counter, first: Piece, second: Piece): String
+}
 
-fun consumeBoundFunction(action: () -> Int): Int = action()
-fun consumeBoundPairFunction(action: (Int, Int) -> Int): Int = action(3, 4)
-fun consumeUnboundFunction(action: (Counter) -> Int, counter: Counter): Int = action(counter)
-fun consumeUnboundPairFunction(action: (Counter, Int, Int) -> Int, counter: Counter): Int =
-    action(counter, 3, 4)
-fun consumeBoundZero(action: BoundZero): Int = action.dispatch()
-fun consumeBoundPair(action: BoundPair): Int = action.dispatch(3, 4)
-fun consumeUnboundZero(action: UnboundZero, counter: Counter): Int = action.dispatch(counter)
-fun consumeUnboundPair(action: UnboundPair, counter: Counter): Int =
-    action.dispatch(counter, 3, 4)
+fun consumeBoundFunction(action: () -> String): String = action()
+fun consumeBoundPairFunction(action: (Piece, Piece) -> String): String =
+    action(Piece("A"), Piece("B"))
+fun consumeUnboundFunction(action: (Counter) -> String, counter: Counter): String = action(counter)
+fun consumeUnboundPairFunction(
+    action: (Counter, Piece, Piece) -> String,
+    counter: Counter,
+): String = action(counter, Piece("A"), Piece("B"))
+fun consumeBoundZero(action: BoundZero): String = action.dispatch()
+fun consumeBoundPair(action: BoundPair): String = action.dispatch(Piece("A"), Piece("B"))
+fun consumeUnboundZero(action: UnboundZero, counter: Counter): String = action.dispatch(counter)
+fun consumeUnboundPair(action: UnboundPair, counter: Counter): String =
+    action.dispatch(counter, Piece("A"), Piece("B"))
 
 fun box(): String {
-    fun Counter.accumulate(first: Int = 5, vararg remaining: Int): Int =
-        seed + first + if (remaining.size == 0) 0 else remaining[0]
+    fun Counter.accumulate(first: Piece = Piece("D"), vararg remaining: Piece): String =
+        seed + first.text + if (first.text == "A") remaining[0].text else ""
 
-    val counter = Counter(10)
-    val boundDefault: () -> Int = counter::accumulate
-    val boundVararg: (Int, Int) -> Int = counter::accumulate
-    val unboundDefault: (Counter) -> Int = Counter::accumulate
-    val unboundVararg: (Counter, Int, Int) -> Int = Counter::accumulate
+    val counter = Counter("S")
+    val boundDefault: () -> String = counter::accumulate
+    val boundVararg: (Piece, Piece) -> String = counter::accumulate
+    val unboundDefault: (Counter) -> String = Counter::accumulate
+    val unboundVararg: (Counter, Piece, Piece) -> String = Counter::accumulate
 
     val values =
-        boundDefault() + boundVararg(3, 4) +
-        unboundDefault(counter) + unboundVararg(counter, 3, 4) +
+        boundDefault() + boundVararg(Piece("A"), Piece("B")) +
+        unboundDefault(counter) + unboundVararg(counter, Piece("A"), Piece("B")) +
         consumeBoundFunction(counter::accumulate) + consumeBoundPairFunction(counter::accumulate) +
         consumeUnboundFunction(Counter::accumulate, counter) +
         consumeUnboundPairFunction(Counter::accumulate, counter) +
         consumeBoundZero(counter::accumulate) + consumeBoundPair(counter::accumulate) +
         consumeUnboundZero(Counter::accumulate, counter) +
         consumeUnboundPair(Counter::accumulate, counter)
-    return if (values == 192) "OK" else "fail:$values"
+    return if (values == "SDSABSDSABSDSABSDSABSDSABSDSAB") "OK" else "fail:$values"
 }
 "#,
         "LocalExtensionReferenceExpectedShapes",
@@ -218,20 +223,22 @@ fun box(): String {
 }
 
 #[test]
-fn a_bound_reference_reports_an_ambiguous_local_extension_rung() {
-    const SOURCE: &str = r#"class AmbiguousReceiver
+fn a_bound_reference_selects_the_cheapest_local_extension_adaptation() {
+    expect_box_same_as_kotlinc(
+        r#"
+class Choice(val text: String)
+class ChoiceReceiver
 
-fun probe(receiver: AmbiguousReceiver) {
-    fun AmbiguousReceiver.choose(value: Int = 1): Int = value
-    fun AmbiguousReceiver.choose(vararg values: Int): Int = 2
-    val selected: () -> Int = receiver::choose
+fun box(): String {
+    fun ChoiceReceiver.choose(value: Choice = Choice("default")): String = value.text
+    fun ChoiceReceiver.choose(vararg values: Choice): String = "vararg"
+
+    val receiver = ChoiceReceiver()
+    val selected: () -> String = receiver::choose
+    return if (selected() == "vararg") "OK" else selected()
 }
-"#;
-
-    let result = compiler_diagnostics(&[("BoundLocalExtensionAmbiguity.kt", SOURCE)], &[]);
-    expect_identical_rejection(
-        &result,
-        "bound local-extension callable-reference ambiguity",
+"#,
+        "BoundLocalExtensionAdaptationCost",
     );
 }
 

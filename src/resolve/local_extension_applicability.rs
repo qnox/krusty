@@ -29,6 +29,25 @@ pub(super) struct LocalExtensionReferenceCandidate {
     pub(super) adaptation: Option<(Vec<AdaptedRefArgument>, bool)>,
 }
 
+pub(super) enum LocalExtensionReferenceSelection {
+    None,
+    Selected(Box<LocalExtensionReferenceCandidate>),
+    Ambiguous,
+}
+
+impl LocalExtensionReferenceSelection {
+    pub(super) fn is_ambiguous(&self) -> bool {
+        matches!(self, Self::Ambiguous)
+    }
+
+    pub(super) fn into_selected(self) -> Option<Box<LocalExtensionReferenceCandidate>> {
+        match self {
+            Self::Selected(candidate) => Some(candidate),
+            Self::None | Self::Ambiguous => None,
+        }
+    }
+}
+
 /// The specialized call shape of `signature` when `receiver` is a legal extension receiver.
 ///
 /// A non-generic extension is unchanged when its declared receiver accepts `receiver`. A generic
@@ -87,15 +106,92 @@ impl Checker<'_> {
         expected: &FnSig,
         leading_receiver_in_expected: bool,
     ) -> bool {
-        self.local_extension_reference_candidates(
+        matches!(
+            self.select_local_extension_reference(
+                scope,
+                name,
+                receiver,
+                Some(expected),
+                leading_receiver_in_expected,
+            ),
+            LocalExtensionReferenceSelection::Selected(_)
+        )
+    }
+
+    pub(super) fn select_local_extension_reference(
+        &self,
+        scope: &CheckerScope<'_>,
+        name: &str,
+        receiver: Ty,
+        expected: Option<&FnSig>,
+        leading_receiver_in_expected: bool,
+    ) -> LocalExtensionReferenceSelection {
+        let mut candidates = self.local_extension_reference_candidates(
             scope,
             name,
             receiver,
-            Some(expected),
+            expected,
             leading_receiver_in_expected,
-        )
-        .len()
-            == 1
+        );
+        let Some(best_cost) = candidates
+            .iter()
+            .map(|candidate| {
+                candidate.adaptation.as_ref().map_or(0, |(plan, _)| {
+                    super::callable_reference_selection::plan_cost(plan)
+                })
+            })
+            .min()
+        else {
+            return LocalExtensionReferenceSelection::None;
+        };
+        candidates.retain(|candidate| {
+            candidate.adaptation.as_ref().map_or(0, |(plan, _)| {
+                super::callable_reference_selection::plan_cost(plan)
+            }) == best_cost
+        });
+
+        // A repeated normalized fact is one candidate; distinct declarations with distinct
+        // semantic shapes remain overloads. This is the same duplicate boundary used for
+        // provider-neutral adapted references.
+        let mut unique = Vec::<LocalExtensionReferenceCandidate>::new();
+        for candidate in candidates {
+            if unique.iter().any(|existing| {
+                existing.parameters == candidate.parameters
+                    && existing.ret == candidate.ret
+                    && existing.signature.is_suspend() == candidate.signature.is_suspend()
+            }) {
+                continue;
+            }
+            unique.push(candidate);
+        }
+        let maximal = unique
+            .iter()
+            .enumerate()
+            .filter_map(|(index, current)| {
+                let dominated = unique.iter().enumerate().any(|(other_index, other)| {
+                    index != other_index
+                        && self.callable_ref_shape_at_least_as_specific(
+                            &other.parameters,
+                            other.ret,
+                            &current.parameters,
+                            current.ret,
+                        )
+                        && !self.callable_ref_shape_at_least_as_specific(
+                            &current.parameters,
+                            current.ret,
+                            &other.parameters,
+                            other.ret,
+                        )
+                });
+                (!dominated).then_some(index)
+            })
+            .collect::<Vec<_>>();
+        match maximal.as_slice() {
+            [selected] => {
+                LocalExtensionReferenceSelection::Selected(Box::new(unique.swap_remove(*selected)))
+            }
+            _ => LocalExtensionReferenceSelection::Ambiguous,
+        }
     }
 
     /// Local extensions applicable to `receiver::name` or `Receiver::name`.
@@ -103,7 +199,7 @@ impl Checker<'_> {
     /// `leading_receiver_in_expected` is the unbound `Receiver::name` shape: the expected callable's
     /// first parameter is that receiver, and the exposed function type puts it back in front. A
     /// bound `value::name` reference compares the expected value parameters directly.
-    pub(super) fn local_extension_reference_candidates(
+    fn local_extension_reference_candidates(
         &self,
         scope: &CheckerScope<'_>,
         name: &str,

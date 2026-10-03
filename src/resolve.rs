@@ -66106,14 +66106,17 @@ impl<'a> Checker<'a> {
                 Some(Ty::Fun(function)) => Some(function),
                 _ => None,
             };
-            let candidates = self.local_extension_reference_candidates(
+            let candidate = self.select_local_extension_reference(
                 scope,
                 name,
                 extension_receiver_ty,
                 expected_function,
                 true,
             );
-            if let [candidate] = candidates.as_slice() {
+            if candidate.is_ambiguous() {
+                return Some(self.report_local_extension_reference_ambiguity(expression, name));
+            }
+            if let Some(candidate) = candidate.into_selected() {
                 if let Some((plan, suspend_conversion)) = &candidate.adaptation {
                     if Self::adapted_ref_plan_is_identity(plan) && !suspend_conversion {
                         self.mark_local_function_ref(expression, candidate.statement, false);
@@ -66143,9 +66146,6 @@ impl<'a> Checker<'a> {
                     Ty::Fun,
                 );
                 return Some(ty);
-            }
-            if candidates.len() > 1 {
-                return Some(self.report_local_extension_reference_ambiguity(expression, name));
             }
             match self.nested_constructor_reference(
                 scope,
@@ -66972,14 +66972,18 @@ impl<'a> Checker<'a> {
                 } else {
                     self.callable_ref_candidates(extension_receiver, &name)
                 };
-                let candidates = self.local_extension_reference_candidates(
+                let candidate = self.select_local_extension_reference(
                     scope,
                     &name,
                     extension_receiver,
                     expected_function,
                     false,
                 );
-                if let [candidate] = candidates.as_slice() {
+                if candidate.is_ambiguous() {
+                    let error = self.report_local_extension_reference_ambiguity(e, &name);
+                    return self.set(e, error);
+                }
+                if let Some(candidate) = candidate.into_selected() {
                     if let Some((plan, suspend_conversion)) = &candidate.adaptation {
                         if Self::adapted_ref_plan_is_identity(plan) && !suspend_conversion {
                             self.mark_local_function_ref(e, candidate.statement, true);
@@ -67011,10 +67015,6 @@ impl<'a> Checker<'a> {
                         Ty::Fun,
                     );
                     return self.set(e, ty);
-                }
-                if candidates.len() > 1 {
-                    let error = self.report_local_extension_reference_ambiguity(e, &name);
-                    return self.set(e, error);
                 }
                 let extension_selection = self.select_extension_callable_ref(
                     &extension_candidates,
