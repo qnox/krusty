@@ -116,7 +116,7 @@ mod lambda_returns;
 mod lexical_bindings;
 mod local_capture_dependencies;
 mod local_class_scope;
-mod local_extension_callable_ref;
+mod local_extension_applicability;
 mod local_method_dependencies;
 mod loop_flow;
 mod member_extension_selection;
@@ -66120,111 +66120,54 @@ impl<'a> Checker<'a> {
             // it does in a bound `value::name` reference. Its receiver is the leading function parameter;
             // the local declaration's `Signature` remains the sole callable shape and lowering receives
             // the already-selected local declaration id.
-            if let Some(overloads) = self.lookup_local_fun_overloads(scope, name) {
-                let expected_function = match expected {
-                    Some(Ty::Fun(function)) => Some(function),
-                    _ => None,
-                };
-                let candidates = overloads
-                    .into_iter()
-                    .filter(|(_, signature)| {
-                        local_extension_callable_ref::applicable_local_extension_signature(
-                            &self.module,
-                            signature,
-                            extension_receiver_ty,
-                            |actual, expected| self.receiver_is_assignable(actual, expected),
-                        )
-                        .is_some()
-                    })
-                    .filter_map(|(statement, signature)| {
-                        let (value_parameters, ret) = match expected_function {
-                            Some(expected) => {
-                                let (_, expected_values) = expected.params.split_first()?;
-                                self.contextual_local_function_reference_shape(
-                                    &signature,
-                                    Some(extension_receiver_ty),
-                                    expected_values,
-                                    expected.ret,
-                                )?
-                            }
-                            None => Self::local_function_reference_shape(
-                                &signature,
-                                Some(extension_receiver_ty),
-                            ),
-                        };
-                        let mut parameters = vec![extension_receiver_ty];
-                        parameters.extend(value_parameters.iter().copied());
-                        let adaptation = expected_function.map(|expected| {
-                            let expected_receiver = *expected.params.first()?;
-                            if !self
-                                .receiver_is_assignable(expected_receiver, extension_receiver_ty)
-                                || (signature.is_suspend() && !expected.suspend)
-                                || (expected.ret != Ty::Unit
-                                    && !self.receiver_is_assignable(ret, expected.ret))
-                            {
-                                return None;
-                            }
-                            let call_sig = crate::libraries::CallSig {
-                                param_defaults: signature.param_defaults.clone(),
-                                required: signature.required,
-                                vararg: signature.vararg(),
-                                vararg_index: signature.vararg_index,
-                                ..crate::libraries::CallSig::default()
-                            };
-                            let plan = self.callable_ref_parameter_plan(
-                                &value_parameters,
-                                &call_sig,
-                                &expected.params[1..],
-                            )?;
-                            Some((plan, expected.suspend && !signature.is_suspend()))
-                        });
-                        if matches!(adaptation, Some(None)) {
-                            return None;
-                        }
-                        Some((statement, signature, parameters, ret, adaptation.flatten()))
-                    })
-                    .collect::<Vec<_>>();
-                if let [(statement, signature, parameters, ret, adaptation)] = candidates.as_slice()
-                {
-                    if let Some((plan, suspend_conversion)) = adaptation {
-                        if Self::adapted_ref_plan_is_identity(plan) && !suspend_conversion {
-                            self.mark_local_function_ref(expression, *statement, false);
-                        } else {
-                            self.expr_lowers.insert(
-                                expression,
-                                ExprLowering::AdaptedLocalFunctionRef {
-                                    stmt_id: *statement,
-                                    bound_receiver: false,
-                                    argument_mapping: plan.clone(),
-                                    signature: Ty::Fun(
-                                        expected_function.expect("adapted reference"),
-                                    ),
-                                    suspend_conversion: *suspend_conversion,
-                                },
-                            );
-                        }
+            let expected_function = match expected {
+                Some(Ty::Fun(function)) => Some(function),
+                _ => None,
+            };
+            let candidates = self.local_extension_reference_candidates(
+                scope,
+                name,
+                extension_receiver_ty,
+                expected_function,
+                true,
+            );
+            if let [candidate] = candidates.as_slice() {
+                if let Some((plan, suspend_conversion)) = &candidate.adaptation {
+                    if Self::adapted_ref_plan_is_identity(plan) && !suspend_conversion {
+                        self.mark_local_function_ref(expression, candidate.statement, false);
                     } else {
-                        self.mark_local_function_ref(expression, *statement, false);
+                        self.expr_lowers.insert(
+                            expression,
+                            ExprLowering::AdaptedLocalFunctionRef {
+                                stmt_id: candidate.statement,
+                                bound_receiver: false,
+                                argument_mapping: plan.clone(),
+                                signature: Ty::Fun(expected_function.expect("adapted reference")),
+                                suspend_conversion: *suspend_conversion,
+                            },
+                        );
                     }
-                    let ty = expected_function.map_or_else(
-                        || {
-                            if signature.is_suspend() {
-                                Ty::fun_suspend(parameters.clone(), *ret)
-                            } else {
-                                Ty::fun(parameters.clone(), *ret)
-                            }
-                        },
-                        Ty::Fun,
-                    );
-                    return Some(ty);
+                } else {
+                    self.mark_local_function_ref(expression, candidate.statement, false);
                 }
-                if candidates.len() > 1 {
-                    self.diags.error(
-                        self.member_name_span(expression, name),
-                        format!("overload resolution ambiguity for callable reference '{name}'"),
-                    );
-                    return Some(Ty::Error);
-                }
+                let ty = expected_function.map_or_else(
+                    || {
+                        if candidate.signature.is_suspend() {
+                            Ty::fun_suspend(candidate.parameters.clone(), candidate.ret)
+                        } else {
+                            Ty::fun(candidate.parameters.clone(), candidate.ret)
+                        }
+                    },
+                    Ty::Fun,
+                );
+                return Some(ty);
+            }
+            if candidates.len() > 1 {
+                self.diags.error(
+                    self.member_name_span(expression, name),
+                    format!("overload resolution ambiguity for callable reference '{name}'"),
+                );
+                return Some(Ty::Error);
             }
             match self.nested_constructor_reference(
                 scope,
@@ -67051,92 +66994,45 @@ impl<'a> Checker<'a> {
                 } else {
                     self.callable_ref_candidates(extension_receiver, &name)
                 };
-                if let Some(overloads) = self.lookup_local_fun_overloads(scope, &name) {
-                    let candidates = overloads
-                        .into_iter()
-                        .filter(|(_, signature)| {
-                            local_extension_callable_ref::applicable_local_extension_signature(
-                                &self.module,
-                                signature,
-                                extension_receiver,
-                                |actual, expected| self.receiver_is_assignable(actual, expected),
-                            )
-                            .is_some()
-                        })
-                        .filter_map(|(statement, signature)| {
-                            let (params, ret) = match expected_function {
-                                Some(expected) => self.contextual_local_function_reference_shape(
-                                    &signature,
-                                    Some(extension_receiver),
-                                    &expected.params,
-                                    expected.ret,
-                                )?,
-                                None => Self::local_function_reference_shape(
-                                    &signature,
-                                    Some(extension_receiver),
-                                ),
-                            };
-                            let adaptation = expected_function.map(|expected| {
-                                if (signature.is_suspend() && !expected.suspend)
-                                    || (expected.ret != Ty::Unit
-                                        && !self.receiver_is_assignable(ret, expected.ret))
-                                {
-                                    return None;
-                                }
-                                let call_sig = crate::libraries::CallSig {
-                                    param_defaults: signature.param_defaults.clone(),
-                                    required: signature.required,
-                                    vararg: signature.vararg(),
-                                    vararg_index: signature.vararg_index,
-                                    ..crate::libraries::CallSig::default()
-                                };
-                                let plan = self.callable_ref_parameter_plan(
-                                    &params,
-                                    &call_sig,
-                                    &expected.params,
-                                )?;
-                                Some((plan, expected.suspend && !signature.is_suspend()))
-                            });
-                            if matches!(adaptation, Some(None)) {
-                                return None;
-                            }
-                            Some((statement, signature, params, ret, adaptation.flatten()))
-                        })
-                        .collect::<Vec<_>>();
-                    if let [(statement, signature, params, ret, adaptation)] = candidates.as_slice()
-                    {
-                        if let Some((plan, suspend_conversion)) = adaptation {
-                            if Self::adapted_ref_plan_is_identity(plan) && !suspend_conversion {
-                                self.mark_local_function_ref(e, *statement, true);
-                            } else {
-                                self.expr_lowers.insert(
-                                    e,
-                                    ExprLowering::AdaptedLocalFunctionRef {
-                                        stmt_id: *statement,
-                                        bound_receiver: true,
-                                        argument_mapping: plan.clone(),
-                                        signature: Ty::Fun(
-                                            expected_function.expect("adapted reference"),
-                                        ),
-                                        suspend_conversion: *suspend_conversion,
-                                    },
-                                );
-                            }
+                let candidates = self.local_extension_reference_candidates(
+                    scope,
+                    &name,
+                    extension_receiver,
+                    expected_function,
+                    false,
+                );
+                if let [candidate] = candidates.as_slice() {
+                    if let Some((plan, suspend_conversion)) = &candidate.adaptation {
+                        if Self::adapted_ref_plan_is_identity(plan) && !suspend_conversion {
+                            self.mark_local_function_ref(e, candidate.statement, true);
                         } else {
-                            self.mark_local_function_ref(e, *statement, true);
+                            self.expr_lowers.insert(
+                                e,
+                                ExprLowering::AdaptedLocalFunctionRef {
+                                    stmt_id: candidate.statement,
+                                    bound_receiver: true,
+                                    argument_mapping: plan.clone(),
+                                    signature: Ty::Fun(
+                                        expected_function.expect("adapted reference"),
+                                    ),
+                                    suspend_conversion: *suspend_conversion,
+                                },
+                            );
                         }
-                        let ty = expected_function.map_or_else(
-                            || {
-                                if signature.is_suspend() {
-                                    Ty::fun_suspend(params.clone(), *ret)
-                                } else {
-                                    Ty::fun(params.clone(), *ret)
-                                }
-                            },
-                            Ty::Fun,
-                        );
-                        return self.set(e, ty);
+                    } else {
+                        self.mark_local_function_ref(e, candidate.statement, true);
                     }
+                    let ty = expected_function.map_or_else(
+                        || {
+                            if candidate.signature.is_suspend() {
+                                Ty::fun_suspend(candidate.parameters.clone(), candidate.ret)
+                            } else {
+                                Ty::fun(candidate.parameters.clone(), candidate.ret)
+                            }
+                        },
+                        Ty::Fun,
+                    );
+                    return self.set(e, ty);
                 }
                 let extension_selection = self.select_extension_callable_ref(
                     &extension_candidates,
@@ -68039,10 +67935,11 @@ impl<'a> Checker<'a> {
                 continue;
             };
             let Some(signature) =
-                local_extension_callable_ref::applicable_local_extension_signature(
-                    &self.module,
+                local_extension_applicability::applicable_local_extension_signature(
+                    &self.fed_source(),
                     &callable.signature,
                     receiver,
+                    |actual, bound| self.generic_bound_admits(actual, bound),
                     |actual, expected| self.receiver_is_assignable(actual, expected),
                 )
             else {

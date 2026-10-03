@@ -3,7 +3,9 @@
 //! decides visibility: a reference written before the local function binds the same-named
 //! extension property. The classifiers here are repository-owned and invariant.
 
-use super::common::expect_box_same_as_kotlinc;
+use super::common::{
+    expect_box_run_against_kotlinc, expect_box_run_against_ref, expect_box_same_as_kotlinc,
+};
 
 #[test]
 fn a_later_generic_local_extension_wins_an_unbound_reference() {
@@ -119,5 +121,56 @@ fun box(): String {
 }
 "#,
         "BoundedLocalExtensionPropertyFallback",
+    );
+}
+
+#[test]
+fn an_expectation_free_reference_exposes_the_specialized_receiver() {
+    expect_box_same_as_kotlinc(
+        r#"
+open class Base<T>(val value: T)
+
+fun box(): String {
+    fun <T> Base<T>.pick(): T = value
+    val unbound = Base<String>::pick
+    val bound = Base("ok")::pick
+    return if (unbound(Base("u")) == "u" && bound() == "ok") "OK" else "fail"
+}
+"#,
+        "ExpectationFreeLocalExtensionRef",
+    );
+}
+
+const LIB: &str = r#"
+package lib
+open class Base<T>
+class Derived : Base<String>()
+"#;
+
+const MAIN: &str = r#"
+import lib.Base
+import lib.Derived
+
+fun box(): String {
+    fun <T> Base<T>.pick(): String = "base"
+    val bound = Derived()::pick
+    val unbound = Derived::pick
+    return if (bound() == "base" && unbound(Derived()) == "base") "OK" else "fail"
+}
+"#;
+
+#[test]
+fn a_classpath_derived_receiver_specializes_a_base_local_extension() {
+    assert_eq!(
+        expect_box_run_against_ref("local_ext_hierarchy", LIB, MAIN).as_deref(),
+        Some("OK")
+    );
+}
+
+#[test]
+fn a_kotlinc_derived_receiver_specializes_a_base_local_extension() {
+    assert_eq!(
+        expect_box_run_against_kotlinc(LIB, MAIN).as_deref(),
+        Some("OK")
     );
 }

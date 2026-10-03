@@ -10697,13 +10697,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 
 - **A generic local extension is applicable to a callable reference once its receiver unifies.**
   `Items<T>::foo` and `value::foo` compare a local `fun <T> Items<T>.foo()` with that receiver after
-  substituting the local function's own type parameters through the symbol hierarchy, so
-  `Derived<U> : Base<U>` binds `T` in `fun <T> Base<T>.pick`. The unsubstituted receiver is
-  invariant, so the reference would otherwise miss the local function and bind a same-named
-  extension property. A binding that violates a formal bound (`<T : Marker>` against a
-  non-`Marker` argument) is not a candidate, and the property remains. The local function is
-  visible only from its declaration onward; an earlier reference still binds the property.
-  Tests: `tests/generic_local_extension_ref_e2e.rs`. Corpus:
+  substituting the local function's own type parameters through the federated symbol hierarchy,
+  including a dependency's `Derived : Base<String>`. An expectation-free reference exposes that
+  specialized shape, so `Base<String>::pick` is not left with an unbound `T`. Formal bounds use
+  the shared bound-admission contract; a `<T : Marker>` extension is not a candidate for a
+  non-`Marker` argument, and the same-named property remains. The local function is visible only
+  from its declaration onward; an earlier reference still binds the property. Tests:
+  `tests/generic_local_extension_ref_e2e.rs`. Corpus:
   `codegen/box/callableReference/property/extensionPropertyReferenceWithTypeParameter.kt`.
 
 - **Fully-qualified SOURCE class names (`pkg1.Cls`) in type position.** A dotted type name whose path
