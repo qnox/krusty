@@ -4069,6 +4069,9 @@ Two consequences follow from that divergence:
   which now skip instead of compiling: an unannotated `val` bound to an unbound reference is typed
   `KFunction{N}`, and lowering a use of that binding is not modelled for every shape yet. Removing the
   restriction (once every reference is a reference class) should recover them and more.
+  A `fun interface` constructor reference (`::Action`) is one of those shapes: it is a
+  `FunInterfaceConstructorReference` constructed with the interface `Class`, not an
+  `invokedynamic` lambda. See `docs/SPEC.md`.
 
 ## Phase — `kotlin.reflect.KFunctionN` and a callable reference's reflect type  ✅
 

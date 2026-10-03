@@ -48,7 +48,9 @@ pub(super) fn emit_func_ref_class(
     let call_owner = fr.call_owner_or_facade(facade);
     let call_owner = crate::jvm::jvm_class_map::to_jvm_internal(&call_owner).to_string();
     let fq = c.fq_name();
-    let superclass = if fr.adapted {
+    let superclass = if fr.fun_interface_constructor {
+        "kotlin/jvm/internal/FunInterfaceConstructorReference".to_string()
+    } else if fr.adapted {
         "kotlin/jvm/internal/AdaptedFunctionReference".to_string()
     } else {
         c.superclass()
@@ -306,6 +308,23 @@ pub(super) fn emit_func_ref_class(
             finish_code::<0x0000>(&mut cw, "<init>", "(Ljava/lang/Object;)V", &mut ctor, 2);
         }
         cw.set_method_debug("<init>", "(Ljava/lang/Object;)V", None, &locals);
+    } else if fr.fun_interface_constructor {
+        // `<init>()V`: super(interface.class). `FunInterfaceConstructorReference` fixes the arity.
+        cw.seed_utf8("<init>");
+        cw.seed_utf8("()V");
+        let mut ctor = CodeBuilder::new(2);
+        ctor.aload(0);
+        ctor.ldc_class(&owner_class, &mut cw);
+        let sup = cw.methodref(&superclass, "<init>", "(Ljava/lang/Class;)V");
+        ctor.invokespecial(sup, 1, 0);
+        ctor.ret_void();
+        let locals = function_reference_invoke::reference_constructor_locals(&mut cw, &fq, &[]);
+        if cross_package || inline_reachable {
+            finish_code::<0x0001>(&mut cw, "<init>", "()V", &mut ctor, 2);
+        } else {
+            finish_code::<0x0000>(&mut cw, "<init>", "()V", &mut ctor, 2);
+        }
+        cw.set_method_debug("<init>", "()V", None, &locals);
     } else {
         // `<init>()V`: super(arity, owner.class, name, sig, flags).
         cw.seed_utf8("<init>");
