@@ -552,7 +552,10 @@ fn unannotated_function_invoke_reference_is_reflective() {
         matches!(
             body.expr(FirExprId::from_raw(index as u32))
                 .map(|expression| &expression.kind),
-            Some(FirExprKind::FunctionInvokeReference { reflective: true, .. })
+            Some(FirExprKind::FunctionInvokeReference {
+                reflective: true,
+                ..
+            })
         )
     });
     assert!(

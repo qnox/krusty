@@ -315,7 +315,7 @@ fn function_invoke_reference_becomes_a_capturing_suspend_forwarder() {
     ));
     assert_eq!(ir.functions[wrapper as usize].ret, Ty::obj("kotlin/Unit"));
     assert!(ir.suspend_funs.contains(&wrapper));
-    assert!(!ir.reflective_invoke_wrappers.contains(&wrapper));
+    assert!(!ir.reflective_invoke_references.contains(&wrapper));
     assert!(ir.exprs.iter().any(|expression| matches!(
         expression,
         IrExpr::Lambda {
@@ -347,16 +347,23 @@ fn reflective_function_invoke_reference_marks_its_forwarder() {
         "ReflectiveInvokeReference",
         platform,
     );
-    let wrapper = ir
-        .functions
+    let references = ir
+        .exprs
         .iter()
-        .position(|function| function.name.starts_with("$fir_invoke_ref_"))
-        .expect("function invoke forwarding wrapper") as u32;
-    assert!(ir.reflective_invoke_wrappers.contains(&wrapper));
-    assert!(ir.exprs.iter().any(|expression| matches!(
-        expression,
-        IrExpr::Lambda { impl_fn, captures, .. } if *impl_fn == wrapper && captures.len() == 1
-    )));
+        .filter_map(|expression| match expression {
+            IrExpr::Lambda {
+                impl_fn, captures, ..
+            } if ir.reflective_invoke_references.contains(impl_fn) => {
+                Some((*impl_fn, captures.len()))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [(wrapper, capture_count)] = references.as_slice() else {
+        panic!("one reflective invoke reference, found {references:?}")
+    };
+    assert_eq!(*capture_count, 1);
+    assert!(ir.suspend_funs.contains(wrapper));
 }
 
 #[test]

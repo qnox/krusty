@@ -1009,11 +1009,12 @@ impl BodyLowering<'_> {
                     *suspend,
                 )?;
                 if reflective {
-                    if let crate::ir::IrExpr::Lambda { impl_fn, .. } =
-                        self.ir.exprs[lowered as usize]
-                    {
-                        self.ir.reflective_invoke_wrappers.insert(impl_fn);
-                    }
+                    let IrExpr::Lambda { impl_fn, .. } = self.ir.exprs[lowered as usize] else {
+                        return Err(FirLoweringFailure::MalformedReflectiveInvokeReference(
+                            expression_id,
+                        ));
+                    };
+                    self.ir.reflective_invoke_references.insert(impl_fn);
                     // The carrier class takes the source reference's name. The forwarding lambda
                     // is the node that name is attached to; realization replaces that node.
                     self.record_generated_class_provenance(expression_id, lowered as usize);

@@ -766,7 +766,7 @@ fn realize_reflective_invoke_references(
     ir: &mut IrFile,
     facades: Facades<'_>,
 ) -> Result<(), FunctionReferenceRealizationTarget> {
-    let reflective = ir.reflective_invoke_wrappers.clone();
+    let reflective = ir.reflective_invoke_references.clone();
     let sites = (0..ir.exprs.len())
         .filter(|&expression| {
             matches!(
