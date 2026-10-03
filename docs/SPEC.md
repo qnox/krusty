@@ -11737,6 +11737,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `src/frontend/tests.rs::settled_conversions_take_sequence_positions_and_number_per_callable`,
   `src/fir_lower/callable_references/tests.rs`; corpus `unitConversion/` and `suspendConversion/`.)
 
+- **An inline lambda copied into an unnamed temporary is still spliced.** An external inline
+  such as stdlib `run` evaluates a non-shared capture into an unnamed temporary and invokes
+  that temporary. When the capture is an inline lambda parameter, same-file expansion
+  substitutes the lambda into the temporary's initializer, but the invocation still reads the
+  temporary, so the direct-lambda splice never sees it. A non-local return makes that lambda
+  inline-only: the temporary's invocation then calls a method that is never emitted
+  (`NoSuchMethodError` on `box$lambda$N`). When every use of the temporary is an invocation
+  the lambda can be spliced into, those invocations are retargeted at the substituted lambda
+  and the temporary is not evaluated. A use that is not such an invocation keeps the
+  temporary, and a named binding of the parameter is left as a value (kotlinc rejects
+  `val y = x` for an inline parameter). A suspension inside the spliced body is a suspension
+  of the function the lambda was inlined into. (`tests/inline_capture_splice_e2e.rs`; corpus
+  `coroutines/nonLocalReturnFromInlineLambdaDeep.kt`.)
+
 - **`+EagerLambdaAnalysis`: a shared lambda argument discriminates overload candidates.** Ported from
   kotlinc FIR `EagerLambdaResolution` (`runEagerLambdaAnalysisAndFilterOutInapplicableCandidates`,
   run by `ConeOverloadConflictResolver` after override filtering). kotlinc 2.4.0, 2.4.10 and 2.4.20

@@ -1,12 +1,15 @@
-//! An inline lambda passed through a function-value conversion.
+//! An inline lambda hidden from the splicer by a local.
 //!
-//! `inline fun bar(f: () -> String) = foo(f)` converts `f` when `foo` expects a suspend
-//! function. The conversion is a callable reference stored for the parameter, so the
-//! invocation reads that local rather than the lambda the reference is bound to. A
-//! non-local return makes the lambda inline-only: leaving the reference in place calls a
-//! method that is never emitted. When every use of the converted local is an invocation
-//! the lambda can be spliced into, those invocations are retargeted at the lambda and the
-//! carrier local is dropped.
+//! Two carriers put the lambda in a local and invoke that local. A function-value
+//! conversion stores a callable reference for the parameter. An external inline such as
+//! `run` copies a non-shared capture into an unnamed temporary; same-file expansion then
+//! substitutes an inline lambda into that temporary's initializer. Either way the
+//! invocation reads the local, so the direct-lambda splice never sees the lambda. A
+//! non-local return makes the lambda inline-only: leaving the local in place calls a
+//! method that is never emitted. When every use of the local is an invocation the lambda
+//! can be spliced into, those invocations are retargeted at the lambda and the carrier
+//! is dropped. A named source binding stays a value: kotlinc rejects `val y = x` on an
+//! inline parameter.
 
 use std::collections::{HashMap, HashSet};
 
@@ -55,15 +58,47 @@ impl BodyLowering<'_> {
             }
             drop_variables.push(carrier.variable);
         }
-        for &variable in &drop_variables {
-            for &(_, copy) in copies {
-                let IrExpr::Block { stmts, .. } = &mut self.ir.exprs[copy as usize] else {
+        drop_variable_statements(self.ir, copies, &drop_variables);
+        unit_results
+    }
+
+    /// Retarget invocations of an unnamed temporary whose initializer is an inline lambda
+    /// substituted for an inline parameter. The temporary is the capture copy an external
+    /// inline left behind; dropping it lets the ordinary lambda splice consume the invocation.
+    pub(super) fn expose_inline_lambdas_behind_capture_copies(
+        &mut self,
+        copies: &[(ExprId, ExprId)],
+        substituted_lambdas: &HashSet<ExprId>,
+    ) {
+        let copied = copied_lambda_slots(self.ir, copies, substituted_lambdas);
+        if copied.is_empty() {
+            return;
+        }
+        let spliceable = spliceable_invocations(self.ir, copies, &copied);
+        let blocked = blocked_slots(self.ir, copies, &copied, &spliceable);
+        let mut drop_variables = Vec::new();
+        for (slot, carrier) in &copied {
+            if blocked.contains(slot) {
+                continue;
+            }
+            let invocations = spliceable
+                .iter()
+                .filter(|invoke| invoke.slot == *slot)
+                .map(|invoke| invoke.invocation)
+                .collect::<Vec<_>>();
+            if invocations.is_empty() {
+                continue;
+            }
+            for invocation in invocations {
+                let IrExpr::InvokeFunction { func, .. } = &mut self.ir.exprs[invocation as usize]
+                else {
                     continue;
                 };
-                stmts.retain(|statement| *statement != variable);
+                *func = carrier.lambda;
             }
+            drop_variables.push(carrier.variable);
         }
-        unit_results
+        drop_variable_statements(self.ir, copies, &drop_variables);
     }
 
     /// The conversion adapter evaluates the function and then yields `Unit`. A spliced lambda
@@ -94,6 +129,61 @@ struct SpliceableInvoke {
     invocation: ExprId,
     func: ExprId,
     slot: u32,
+}
+
+fn drop_variable_statements(
+    ir: &mut crate::ir::IrFile,
+    copies: &[(ExprId, ExprId)],
+    variables: &[ExprId],
+) {
+    for &variable in variables {
+        for &(_, copy) in copies {
+            let IrExpr::Block { stmts, .. } = &mut ir.exprs[copy as usize] else {
+                continue;
+            };
+            stmts.retain(|statement| *statement != variable);
+        }
+    }
+}
+
+fn copied_lambda_slots(
+    ir: &crate::ir::IrFile,
+    copies: &[(ExprId, ExprId)],
+    substituted_lambdas: &HashSet<ExprId>,
+) -> HashMap<u32, ConvertedCarrier> {
+    let mut copied = HashMap::new();
+    for &(_, copy) in copies {
+        let IrExpr::Variable {
+            index,
+            init: Some(init),
+            named: false,
+            ..
+        } = ir.expr(copy)
+        else {
+            continue;
+        };
+        if !substituted_lambdas.contains(init) {
+            continue;
+        }
+        if !matches!(
+            ir.expr(*init),
+            IrExpr::Lambda {
+                inline_body: Some(_),
+                ..
+            }
+        ) {
+            continue;
+        }
+        copied.insert(
+            *index,
+            ConvertedCarrier {
+                variable: copy,
+                lambda: *init,
+                result: Ty::Unit,
+            },
+        );
+    }
+    copied
 }
 
 fn converted_slots(
@@ -222,7 +312,7 @@ mod tests {
 
     use crate::ir::{IrCallableReferenceTarget, IrConst, IrExpr};
 
-    use super::{blocked_slots, ConvertedCarrier, SpliceableInvoke};
+    use super::{blocked_slots, copied_lambda_slots, ConvertedCarrier, SpliceableInvoke};
 
     fn function_body(ir: &crate::ir::IrFile, name: &str) -> crate::ir::ExprId {
         ir.functions
@@ -262,6 +352,41 @@ mod tests {
 
     fn lower(source: &str, stem: &str) -> crate::ir::IrFile {
         crate::fir_lower::tests::lower_single_source(source, stem)
+    }
+
+    #[test]
+    fn only_an_unnamed_temporary_of_a_substituted_lambda_is_a_capture_copy() {
+        let mut ir = crate::ir::IrFile::default();
+        let body = ir.add_expr(IrExpr::UnitInstance);
+        let lambda = ir.add_expr(IrExpr::Lambda {
+            impl_fn: 0,
+            arity: 0,
+            captures: Vec::new(),
+            sam: None,
+            inline_body: Some(body),
+        });
+        let function_ty = crate::types::Ty::fun(Vec::new(), crate::types::Ty::Unit);
+        let temporary = ir.add_expr(IrExpr::Variable {
+            index: 3,
+            ty: function_ty,
+            init: Some(lambda),
+            named: false,
+        });
+        let named = ir.add_expr(IrExpr::Variable {
+            index: 4,
+            ty: function_ty,
+            init: Some(lambda),
+            named: true,
+        });
+        let copies = [(0, temporary), (0, named)];
+        let substituted = std::collections::HashSet::from([lambda]);
+
+        let slots = copied_lambda_slots(&ir, &copies, &substituted);
+
+        let mut keys = slots.keys().copied().collect::<Vec<_>>();
+        keys.sort_unstable();
+        assert_eq!(keys, vec![3]);
+        assert_eq!(slots[&3].lambda, lambda);
     }
 
     #[test]
