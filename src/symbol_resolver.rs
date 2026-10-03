@@ -6487,15 +6487,18 @@ mod tests {
     fn projected_output_preserves_the_captures_readable_bound() {
         let any = Ty::obj("kotlin/Any");
         let nullable_any = Ty::nullable(any);
-        let output = Ty::obj_args("fixtures/Result", &[Ty::ty_param("R", any)]);
+        // The readable capture propagates through a covariant classifier argument. Using an
+        // unknown classifier here would correctly default its declaration-site variance to
+        // invariant and preserve `Producer<*>`, testing a different rule.
+        let output = Ty::obj_args("fixtures/Producer", &[Ty::ty_param("R", any)]);
 
         assert_eq!(
             specialize_signature_output_type(
-                &EMPTY_SOURCE,
+                &VarianceSource,
                 output,
                 &GSigBinds::from([("R".to_string(), Ty::star_projection(nullable_any),)]),
             ),
-            Ty::obj_args("fixtures/Result", &[nullable_any])
+            Ty::obj_args("fixtures/Producer", &[nullable_any])
         );
     }
 
