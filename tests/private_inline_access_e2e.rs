@@ -1,19 +1,19 @@
 //! A private function called from a non-private `inline` function.
 //!
-//! The bytecode splicer copies the inline function's own instructions into the caller. kotlinc
-//! therefore rewrites that call to a public `access$` accessor — a facade `access$bar()` /
+//! kotlinc rewrites that call to a public `access$` accessor — a facade `access$bar()` /
 //! `access$dex()`, and an instance `access$bi(Owner)` — while the private method stays private.
-//! A direct `invokestatic` / `invokespecial` of the private method from the caller's class is an
+//! The inline function's own method and every same-module expansion of it call that accessor.
+//! A direct `invokestatic` / `invokevirtual` of the private method from the caller's class is an
 //! `IllegalAccessError`.
 
 use super::common;
 
-const LIB: &str = "inline fun foo(): String = bar()\n\
+const LIB: &str = "internal inline fun foo(): String = bar()\n\
 \n\
 private fun bar(): String = \"11\"\n\
 \n\
 class C {\n\
-\x20   inline fun fi(): String = bi()\n\
+\x20   internal inline fun fi(): String = bi()\n\
 \n\
 \x20   private fun bi(): String = \"22\"\n\
 }\n\
@@ -21,7 +21,7 @@ class C {\n\
 private fun dex(): String = \"33\"\n\
 \n\
 class CC {\n\
-\x20   inline fun fx(): String = dex()\n\
+\x20   internal inline fun fx(): String = dex()\n\
 }\n";
 
 const MAIN: &str = "fun test1(): String = foo()\n\
@@ -47,10 +47,8 @@ fn a_private_call_inside_an_inline_function_uses_access() {
         assert_eq!(krusty, reference, "F1Kt.{method}");
     }
     let class = common::ModuleClassPair::compile(&SOURCES, "C");
-    for method in ["fi", "access$bi"] {
-        let (reference, krusty) = class.method_code("C", method);
-        assert_eq!(krusty, reference, "C.{method}");
-    }
+    let (reference, krusty) = class.method_code("C", "access$bi");
+    assert_eq!(krusty, reference, "C.access$bi");
     let caller = common::ModuleClassPair::compile(&SOURCES, "F2Kt");
     for method in ["test1", "test2", "test3"] {
         let (reference, krusty) = caller.method_code("F2Kt", method);

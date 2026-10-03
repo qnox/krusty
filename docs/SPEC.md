@@ -7277,11 +7277,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `::a_private_member_of_an_unrelated_class_stays_inaccessible`,
   `::property_inferred_from_generic_companion_method`, box `classes/kt504.kt`.
 - **A private function called from a non-private `inline` function is reached through `access$<name>`.**
-  The bytecode splicer copies the inline function's own method, so that method already calls the
-  public accessor and the private method stays private. A file facade forwards with
-  `access$bar()` / `access$dex()` (`invokestatic` of the private function). An instance method
-  forwards with `access$bi(Owner)`, which `invokespecial`s the private method. A private `inline`
-  function does not publish this boundary, and a lifted local function keeps its own name. Test:
+  The inline function's own method calls the public accessor, and a same-module caller that expands
+  the function into another class file calls that same accessor. Naming the private method from the
+  caller's class is an `IllegalAccessError`. A file facade forwards with `access$bar()` /
+  `access$dex()` (`invokestatic` of the private function). An instance method forwards with
+  `access$bi(Owner)`, which `invokespecial`s the private method. A private `inline` function does
+  not publish this boundary, and a lifted local function keeps its own name. Test:
   `tests/private_inline_access_e2e.rs`.
 - **A private member-extension accessor reached from another class calls `access$<name>`.** The
   accessor is an instance method of the declaring class (`getItem(Key)` for `val Key.item`).

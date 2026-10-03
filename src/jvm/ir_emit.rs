@@ -8981,6 +8981,14 @@ impl<'a> Emitter<'a> {
                         *module_target,
                     );
                     let (facade, name) = (facade.render(), name.clone());
+                    // A private function is reachable from this file only because a non-private
+                    // inline function called it. The caller's class file uses the public accessor
+                    // the declaring file published; naming the private method is illegal.
+                    let name = if access_bridges::private_module_callable(self.ir, *module_target) {
+                        format!("access${name}")
+                    } else {
+                        name
+                    };
                     let args = args.clone();
                     if let Err(mismatch) =
                         self.emit_call_descriptor_operands(e, 0, &args, &param_tys, code)
@@ -9131,7 +9139,7 @@ impl<'a> Emitter<'a> {
                     descriptor,
                     params,
                     interface,
-                    module_target: _,
+                    module_target,
                     target: _,
                 } => {
                     let recv = dispatch_receiver.expect("virtual call needs a receiver");
@@ -9185,25 +9193,34 @@ impl<'a> Emitter<'a> {
                         }
                         let aw: i32 = ptys.iter().map(|t| slot_words(*t) as i32).sum();
                         self.mark_call_start(e, code);
+                        let call = access_bridges::SelectedMemberCall {
+                            expression: e,
+                            owner_identity,
+                            owner: &owner,
+                            name: &name,
+                            descriptor: &descriptor,
+                            parameters: &ptys,
+                            result: ret,
+                            interface_owner: interface,
+                            argument_words: aw,
+                            protected: bridge.as_ref(),
+                            export_private_calls: self.export_private_calls,
+                        };
+                        // The private member is not a function of this file, so it has no bridge
+                        // id here. The declaring class still published `access$<name>(Owner)`.
+                        if access_bridges::private_module_callable(self.ir, *module_target) {
+                            access_bridges::emit_private_member_extension_call(
+                                self.cw, code, &call,
+                            );
+                            return;
+                        }
                         access_bridges::emit_selected_member_call(
                             self.ir,
                             self.run,
                             self.static_owner,
                             self.cw,
                             code,
-                            &access_bridges::SelectedMemberCall {
-                                expression: e,
-                                owner_identity,
-                                owner: &owner,
-                                name: &name,
-                                descriptor: &descriptor,
-                                parameters: &ptys,
-                                result: ret,
-                                interface_owner: interface,
-                                argument_words: aw,
-                                protected: bridge.as_ref(),
-                                export_private_calls: self.export_private_calls,
-                            },
+                            &call,
                         );
                         return;
                     }

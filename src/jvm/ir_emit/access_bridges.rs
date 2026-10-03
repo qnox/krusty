@@ -748,6 +748,16 @@ pub(super) fn private_member_accessor_access(
     }
 }
 
+/// A private declaration referenced from another file of this module. Its only legal cross-file
+/// use is the body of a non-private `inline` function, which the caller expands into its own class.
+pub(super) fn private_module_callable(ir: &IrFile, target: Option<crate::fir::CallableId>) -> bool {
+    target.is_some_and(|target| {
+        ir.referenced_module_callables
+            .get(&target)
+            .is_some_and(|callable| callable.visibility.is_private())
+    })
+}
+
 /// An already-selected member call: a protected or private access bridge, a same-owner private
 /// accessor, or the ordinary interface or class invocation.
 pub(super) struct SelectedMemberCall<'a> {
@@ -847,11 +857,11 @@ fn emit_direct_private_accessor_call(
     );
 }
 
-/// `invokestatic access$<name>(Owner, …)` for a private member-extension accessor.
+/// `invokestatic access$<name>(Owner, …)` for a private member reached from another class.
 ///
 /// An interface owner is an `InterfaceMethodref`; a class owner is a `Methodref`. The bridge method
 /// itself, including its `invokespecial` of the accessor, is emitted with the other access bridges.
-fn emit_private_member_extension_call(
+pub(super) fn emit_private_member_extension_call(
     cw: &mut ClassWriter,
     code: &mut CodeBuilder,
     call: &SelectedMemberCall<'_>,
