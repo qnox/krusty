@@ -271,7 +271,7 @@ impl Emitter<'_> {
             if let Some(line) = c.line {
                 code.mark_line(line);
             }
-            let exc_name = crate::jvm::jvm_class_map::to_jvm_classfile_type_name(c.exc_internal);
+            let exc_name = crate::jvm::jvm_class_map::to_jvm_classfile_type_name(c.jvm_class());
             let exc_internal = exc_name.jvm_binary_name();
             let exc_ci = self.cw.class_ref(&exc_internal);
             // Handler entry: the exception is the sole stack value; locals are the pre-`try` state.
@@ -288,6 +288,18 @@ impl Emitter<'_> {
             // of the `try` the finalizer belongs to.
             if let Some(finalizer) = finally {
                 self.open_finally_segment(finalizer, code);
+            }
+            if let Some(name) = c.reified_marker_name() {
+                // kotlinc's reified catch placeholder. The exception stays under the marker's
+                // two arguments; the bytecode inliner rewrites this handler's catch type from it.
+                code.push_int(7, self.cw);
+                code.push_string(name, self.cw);
+                let marker = self.cw.methodref(
+                    "kotlin/jvm/internal/Intrinsics",
+                    "reifiedOperationMarker",
+                    "(ILjava/lang/String;)V",
+                );
+                code.invokestatic(marker, 2, 0);
             }
             store(exc_ty, cslot, code);
             let local_start =

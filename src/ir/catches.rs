@@ -3,7 +3,11 @@
 use super::{ExprId, IrCatchBinding};
 use crate::types::{Ty, TypeName};
 
-/// One `catch (var: exc_internal) { body }` clause of an [`IrExpr::Try`].
+/// One `catch (var: ty) { body }` clause of an [`IrExpr::Try`].
+///
+/// `ty` is the only catch fact. A reified type parameter stays a type parameter until an inline
+/// call substitutes its argument. The JVM class and any reified-catch marker are derived from `ty`
+/// at the emission boundary.
 #[derive(Clone, Debug)]
 pub struct IrCatch {
     /// Value index the caught exception is bound to.
@@ -11,11 +15,8 @@ pub struct IrCatch {
     /// The debug-visible binding, absent for a compiler-generated handler — which binds no source
     /// name and must not appear in a local variable table.
     pub binding: Option<IrCatchBinding>,
-    /// Semantic catch type. A reified type parameter stays a type parameter here so an inline
-    /// call can substitute its argument before [`Self::exc_internal`] is read for emission.
+    /// Semantic catch type.
     pub ty: Ty,
-    /// JVM internal name of the caught exception type.
-    pub exc_internal: TypeName,
     pub body: ExprId,
     /// The source line of the clause's `catch` keyword, marked at the handler's entry; absent for a
     /// compiler-generated handler, which has no clause of its own.
@@ -24,16 +25,32 @@ pub struct IrCatch {
 
 impl IrCatch {
     /// A compiler-generated handler: no source clause, so neither a debug-visible binding nor a
-    /// `catch` line.
-    pub(crate) fn generated(var: u32, exc_internal: TypeName, body: ExprId) -> Self {
+    /// `catch` line. `class` is the JVM class the handler catches.
+    pub(crate) fn generated(var: u32, class: TypeName, body: ExprId) -> Self {
         Self {
             var,
             binding: None,
-            ty: Ty::obj_name(exc_internal),
-            exc_internal,
+            ty: Ty::obj_name(class),
             body,
             line: None,
         }
+    }
+
+    /// JVM class this handler catches. A type parameter catches its bound; a concrete class catches
+    /// itself. A catch that does not determine a class is invalid IR.
+    pub(crate) fn jvm_class(&self) -> TypeName {
+        self.ty
+            .non_null()
+            .obj_internal()
+            .unwrap_or_else(|| unreachable!("a catch type determines a JVM class"))
+    }
+
+    /// Source spelling of a still-reified catch parameter. Present only while [`Self::ty`] is that
+    /// parameter. The marker operand is the spelling kotlinc writes (`"E"`), not the semantic
+    /// identity; emission puts it in `reifiedOperationMarker` mode 7.
+    pub(crate) fn reified_marker_name(&self) -> Option<&'static str> {
+        let identity = self.ty.non_null().ty_param_name()?;
+        Some(crate::types::type_parameter_source_name(identity))
     }
 
     /// The source spelling of the binding, absent for a compiler-generated handler.

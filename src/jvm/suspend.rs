@@ -3477,7 +3477,7 @@ impl Flat<'_> {
                     let mut arms: Branches = Vec::new();
                     let mut full_cover = false;
                     for catch in catches {
-                        let exc_internal = catch.exc_internal;
+                        let exc_internal = catch.jvm_class();
                         let exc_ty = Ty::obj_name(exc_internal);
                         let arm_suspends = expr_calls_suspend(self.ir, catch.body, self.suspend);
                         let arm_stmts: Vec<ExprId> = if arm_suspends {
@@ -4391,7 +4391,7 @@ fn find_suspending_catch_tries(
                 if expr_calls_suspend(ir, catch.body, suspend_set)
                     && !catch_body_nests_suspending_catch(ir, catch.body, suspend_set)
                 {
-                    out.push((catch.var, catch.body, catch.exc_internal));
+                    out.push((catch.var, catch.body, catch.jvm_class()));
                 }
             }
         }

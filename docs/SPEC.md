@@ -4512,13 +4512,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `tests/reified_class_regeneration_e2e.rs`, `tests/classpath_reified_inline_toplevel_e2e.rs`.
 
 - **A reified `catch (e: E)` uses the inline call's type argument as its JVM catch type.** The
-  clause is checked as the reified parameter, whose erasure is the parameter's bound (`Throwable`).
-  Emitting that erasure at every call site catches every throwable. Inlining substitutes the
-  call's reified argument into the catch type and emits that class (`catch (Exception)` for
-  `catch<Exception>`), which is the handler kotlinc writes. A thrown type outside that class
-  falls through to the next handler. Before a backend sees the file, that semantic type must be a
-  determined class and that class must be the JVM catch type; a substituted argument whose handler
-  still names the bound is rejected. Test: `tests/reified_catch_e2e.rs`. Corpus:
+  clause is checked as the reified parameter. Common IR stores only that semantic type. While the
+  parameter is still unsubstituted, emission catches the parameter's bound (`Throwable`) and writes
+  `Intrinsics.reifiedOperationMarker(7, "E")` as the handler's first instructions, ahead of the
+  store of the exception. The bytecode inliner reads that marker: a concrete argument replaces
+  every typed `try_catch_blocks` entry of that handler with the argument's class and erases the
+  marker; a forwarded parameter (`inline fun <reified T> forward()` calling `eval<T>()`) renames
+  the marker and leaves the erasure for the outer caller. A catch-all handler is left alone. After
+  FIR substitution the semantic type is already the concrete class, so emission catches that class
+  and writes no marker. A thrown type outside the specialized class falls through to the next
+  handler. A catch type that does not determine a JVM class is invalid IR. Tests:
+  `tests/reified_catch_e2e.rs`. Corpus:
   `codegen/box/reified/catchParameter/tryCatchReifiedType.kt`.
 
 - **An escaping lambda inside `inline fun <reified T>` specializes `T` at the call that creates it.**

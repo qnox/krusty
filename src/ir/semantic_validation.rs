@@ -36,13 +36,6 @@ pub enum InvalidIrContract {
         secondary: u32,
         parameter: u32,
     },
-    /// A catch's semantic type and the class the backend would catch disagree.
-    CatchType {
-        expression: u32,
-        index: u32,
-        ty: Ty,
-        exc_internal: crate::types::TypeName,
-    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -853,21 +846,6 @@ impl IrFile {
                 });
             }
         }
-        for (expression, node) in self.exprs.iter().enumerate() {
-            let IrExpr::Try { catches, .. } = node else {
-                continue;
-            };
-            for (index, catch) in catches.iter().enumerate() {
-                if catch.ty.non_null().obj_internal() != Some(catch.exc_internal) {
-                    return Err(InvalidIrContract::CatchType {
-                        expression: expression as u32,
-                        index: index as u32,
-                        ty: catch.ty,
-                        exc_internal: catch.exc_internal,
-                    });
-                }
-            }
-        }
         Ok(())
     }
 }
@@ -1052,36 +1030,6 @@ mod tests {
                 class,
                 secondary: 0,
                 parameter: 0,
-            })
-        );
-    }
-
-    #[test]
-    fn rejects_a_catch_whose_class_is_not_its_semantic_type() {
-        let mut ir = IrFile::default();
-        let body = ir.add_expr(IrExpr::Const(IrConst::Int(0)));
-        let throwable = crate::types::type_name("java/lang/Throwable");
-        ir.exprs.push(IrExpr::Try {
-            body,
-            catches: vec![crate::ir::IrCatch {
-                var: 0,
-                binding: None,
-                ty: Ty::obj("java/lang/Exception"),
-                exc_internal: throwable,
-                body,
-                line: None,
-            }],
-            finally: None,
-            result: Ty::Unit,
-        });
-
-        assert_eq!(
-            ir.validate_semantic_contracts(),
-            Err(InvalidIrContract::CatchType {
-                expression: 1,
-                index: 0,
-                ty: Ty::obj("java/lang/Exception"),
-                exc_internal: throwable,
             })
         );
     }

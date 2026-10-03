@@ -307,7 +307,7 @@ impl ScopeWalk<'_> {
                     if !self.scope.iter().any(|e| e.slot == c.var) {
                         self.scope.push(ScopeEntry {
                             slot: c.var,
-                            ty: Ty::obj_name(c.exc_internal),
+                            ty: Ty::obj_name(c.jvm_class()),
                             // A spilled catch parameter is named through the same debug-local
                             // boundary as the local variable table's entry for it, so a spliced
                             // expansion's copy carries its inline depth in both.

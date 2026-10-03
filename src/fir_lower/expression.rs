@@ -1171,11 +1171,11 @@ impl BodyLowering<'_> {
                     .iter()
                     .map(|catch| {
                         let parameter_ty = catch.parameter_ty.get();
-                        let exc_internal = parameter_ty.non_null().obj_internal().ok_or(
-                            FirLoweringFailure::InvalidCatchType {
+                        if parameter_ty.non_null().obj_internal().is_none() {
+                            return Err(FirLoweringFailure::InvalidCatchType {
                                 origin: catch.origin,
-                            },
-                        )?;
+                            });
+                        }
                         Ok(IrCatch {
                             var: self.value_slot(catch.parameter),
                             binding: self
@@ -1183,7 +1183,6 @@ impl BodyLowering<'_> {
                                 .debug_value_name(catch.parameter)
                                 .map(|name| crate::ir::IrCatchBinding::source(name.to_owned())),
                             ty: parameter_ty,
-                            exc_internal,
                             body: self.expression(catch.body)?,
                             line: (catch.debug_line != 0).then_some(catch.debug_line),
                         })
