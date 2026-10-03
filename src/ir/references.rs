@@ -38,6 +38,10 @@ pub enum IrCallableReferenceTarget {
     FunctionValueConversion {
         ordinal: u32,
     },
+    /// A checked reference to a function value's `invoke` declaration. The function value is the
+    /// bound receiver; `adapter` performs the already-checked forwarding call. Backends realize
+    /// the reference carrier without rediscovering this target from the adapter's shape or name.
+    FunctionInvoke,
     /// A language-defined classifier callable. `operation` is the declaration the reference
     /// reflects; `classifier` is that declaration's owner.
     Classifier {

@@ -9064,7 +9064,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   suspend methods (including their continuation and generic function-field ABI), and a primitive
   result overriding a reference result (boxed implementation plus erased bridge). A regular
   function suspend-converted into the interface is stored as that function's own `FunctionN`
-  (`() -> Unit` is `Function0`); the method calls it and does not pass the continuation. The same
+  (`() -> Unit` is `Function0`); the method calls it and does not pass the continuation. A
+  suspend callable reference adapted to that method is itself a suspension: the adapter passes
+  the method's continuation to `FunctionN.invoke`. Leaving the call non-suspending selects
+  `Function0` and the reference cannot be cast to the suspend carrier. The same
   storage follows the value's callable view when that value is not itself a function type: a
   `KProperty0<R>` is `Function0`, and a fun interface whose method is not suspend (`Fn<T> :
   (T) -> Unit`) is `Function1` when passed to a suspend collector. A fun
@@ -9076,7 +9079,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`java_sam_class_mode_shares_one_wrapper`). Corpus:
   `inlineClasses/funInterface/mangledSamWrappers`, `mangledSamWrappersGeneric`,
   `callableReference/adaptedReferences/suspendConversion/propertyReferenceToSuspendFunction`,
-  and `coroutines/suspendConversion/suspendConversionBetweenFunInterfaces`.
+  `coroutines/suspendConversion/suspendConversionBetweenFunInterfaces`, and
+  `funInterface/suspendFunctionAndFunInterfaceSharedClassSplit`. Test:
+  `suspend_callable_reference_passes_the_sam_continuation`.
+  The callable-reference adapter and the forwarding method's continuation are distinct generated
+  classes. The adapter occupies the first local-class ordinal and captures the reference; if the
+  forwarding method needs a state machine, its continuation uses the next ordinal. Reusing the
+  adapter's class name replaces its constructor with a `ContinuationImpl` constructor and makes
+  the checked adapter instantiation fail at runtime. Corpus:
+  `funInterface/suspendFunInterfaceConversionCodegen.kt`.
 - **A value that already implements the expected fun interface is not wrapped.** Assignability
   to the exact applied interface — including its type arguments, variance, and projections — is
   an ordinary argument during overload ranking, even when the value also has a function
@@ -11788,7 +11799,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   rule. Checked FIR carries `FirConversionKind::FunctionValue { from, to, ordinal }`; common lowering
   realizes it as a callable reference bound to the value (`IrCallableReferenceTarget::
   FunctionValueConversion`) whose adapter invokes the value's `FunctionN.invoke`, discarding the
-  result for a unit conversion and otherwise handing it on as the erased suspend result. The JVM
+  result for a unit conversion and otherwise handing it on as the erased suspend result. An inline
+  lambda is not that runtime value. When an inline expansion's only uses of the converted local are
+  invocations, the lambda is spliced at those invocations and the carrier is not evaluated, so a
+  non-local return leaves the enclosing function and an inline-only lambda is not realized as the
+  method the carrier would call (`nonLocalReturns/suspendConversion.kt`). A function value that is
+  not an inline lambda still evaluates the carrier. The JVM
   carrier is kotlinc's: a synthetic `FunctionReferenceImpl` (not `AdaptedFunctionReference`, flags 0)
   implementing the target `FunctionN` (plus `SuspendFunction` for a suspend target), constructed with
   the value as bound receiver and reflecting `Intrinsics.Kotlin`'s `suspendConversion<N>` with the
@@ -12474,13 +12490,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   as the inferred type of an unannotated local bound to an UNBOUND reference (`val f = A::b`).
   Everywhere else the reference keeps its function type — that is the shape argument passing, SAM
   conversion, and the backend's reference dispatch are written against, and re-typing them all regressed
-  reference dispatch broadly. Unbound only, because that is the set krusty realizes as a real
-  `FunctionReferenceImpl`; a bound reference on a value receiver can still lower to an `invokedynamic`
-  lambda, which is no `KFunction` (see `docs/IMPLEMENTATION_PLAN.md`). Invoking a `KFunction{N}` is
+  reference dispatch broadly. An unbound reference is realized as a real `FunctionReferenceImpl`. A
+  bound `value::invoke` is too, when its public type is the reflection classifier (`val f = block::invoke`):
+  the value has to implement `KFunction`, and an `invokedynamic` lambda does not. A function-typed
+  expected type (`fun reference(block: suspend () -> Unit): suspend () -> Unit = block::invoke`) stays
+  the forwarding function value. Invoking a `KFunction{N}` is
   typed from its type ARGUMENTS, not the erased reflection shape, so `::Greeter` invoked yields a
   `Greeter`. Tests:
   `classpath_unbound_callable_ref_e2e::classpath_callable_references_resolve_reflection_targets`,
-  corpus `reflection/functions/typeParameterInReturnType.kt`.
+  `suspend_invoke_reference_e2e::an_unannotated_suspend_invoke_reference_is_a_kfunction`,
+  corpus `reflection/functions/typeParameterInReturnType.kt` and
+  `coroutines/suspendFunctionMethodReference.kt`.
 
 - **A typealias applied to type arguments on a callable-reference LHS is a type.** kotlinc reads
   `Alias<Int>::label` as a type LHS even when the alias expands to an `object`, so the reference is
@@ -13770,3 +13790,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   function's state machine treats it as a temporary, spilling it only by liveness rather than as a
   named variable in scope. Test: `tests/destructuring_loop_temporary_e2e.rs` (an ordinary class and a
   suspend function with its continuation class).
+
+- **A continuation's `EnclosingMethod` uses the method's JVM descriptor.** A parameter whose
+  semantic type is `Unit` is still a value, so the descriptor spells `Lkotlin/Unit;`, the same type
+  the method is declared with. Spelling that parameter `V` is not a method descriptor, and the JVM
+  rejects the continuation class while loading it. This is the receiver of `suspend Unit.() -> Unit`.
+  Test: `tests/suspend_unit_receiver_e2e.rs`. Corpus: `coroutines/kt28844.kt`.

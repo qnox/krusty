@@ -220,7 +220,7 @@ impl BodyLowering<'_, '_, '_> {
     /// `null` is not a floating-point value and never reaches the comparison: a reference operand
     /// is checked first, and a null equals only another null. A scalar operand cannot be null and
     /// is asked nothing.
-    fn ieee_equality(
+    pub(super) fn ieee_equality(
         &mut self,
         op: IrBinOp,
         lhs: u32,
