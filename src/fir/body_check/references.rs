@@ -88,6 +88,7 @@ impl BodyFirChecker<'_> {
                     .into_boxed_slice(),
                 reference_result: resolved(reference.ret)?,
                 suspend: reference.suspend,
+                reflective: self.reference_is_reflective(expression),
             });
         }
         if let Some(ExprLowering::TopLevelFunctionRef(reference)) =
