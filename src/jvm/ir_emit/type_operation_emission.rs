@@ -173,7 +173,7 @@ impl Emitter<'_> {
             self.ir.type_check_role(type_operand)
         {
             // `SuspendFunctionN` is not a class. kotlinc's cast names `Function{N+1}`.
-            return crate::jvm::names::function_interface_internal_name(usize::from(arity));
+            return crate::jvm::names::function_interface_internal_name(usize::from(arity) + 1);
         }
         let jvm_ty = ir_ty_to_jvm(&type_operand);
         self.ir
@@ -240,7 +240,7 @@ impl Emitter<'_> {
     /// kotlinc keeps the operand for the arity call only when the marker matches, and answers
     /// `false` otherwise:
     /// `dup; instanceof SuspendFunction; ifeq fail; isFunctionOfArity; goto end; fail: pop; iconst_0`.
-    fn emit_suspend_function_instance_check(&mut self, arity: u8, code: &mut CodeBuilder) {
+    fn emit_suspend_function_instance_check(&mut self, arity: u16, code: &mut CodeBuilder) {
         let fail = code.new_label();
         let end = code.new_label();
         code.dup();

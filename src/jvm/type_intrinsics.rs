@@ -68,7 +68,7 @@ fn jvm_interface(kind: CollectionKind) -> &'static str {
 /// One `invokestatic` on `TypeIntrinsics`, and the `int` arity pushed before it, if any.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct IntrinsicCall {
-    pub(crate) arity: Option<u8>,
+    pub(crate) arity: Option<u16>,
     pub(crate) name: String,
     pub(crate) descriptor: String,
 }
@@ -86,7 +86,7 @@ pub(crate) enum InstanceCheck {
     Call(IntrinsicCall),
     /// `instanceof SuspendFunction`, and `isFunctionOfArity` only when that marker matches.
     /// The number is the JVM arity.
-    SuspendFunction { arity: u8 },
+    SuspendFunction { arity: u16 },
 }
 
 /// `TypeIntrinsics.instanceOf`: the check that replaces `instanceof`, leaving an `int` 0/1.
@@ -97,13 +97,17 @@ pub(crate) fn instance_check(role: TypeCheckRole) -> InstanceCheck {
             name: format!("isMutable{}", suffix(kind)),
             descriptor: "(Ljava/lang/Object;)Z".to_owned(),
         }),
-        TypeCheckRole::FunctionOfArity(arity) => InstanceCheck::Call(function_arity_check(arity)),
-        TypeCheckRole::SuspendFunctionOfArity(arity) => InstanceCheck::SuspendFunction { arity },
+        TypeCheckRole::FunctionOfArity(arity) => {
+            InstanceCheck::Call(function_arity_check(arity.into()))
+        }
+        TypeCheckRole::SuspendFunctionOfArity(arity) => InstanceCheck::SuspendFunction {
+            arity: u16::from(arity) + 1,
+        },
     }
 }
 
 /// `TypeIntrinsics.isFunctionOfArity(x, arity)`.
-pub(crate) fn function_arity_check(arity: u8) -> IntrinsicCall {
+pub(crate) fn function_arity_check(arity: u16) -> IntrinsicCall {
     IntrinsicCall {
         arity: Some(arity),
         name: "isFunctionOfArity".to_owned(),
@@ -122,7 +126,7 @@ pub(crate) enum CastCheck {
     },
     /// `as SuspendFunctionN` is a plain `checkcast` to `Function{arity}`. The marker test belongs
     /// to `is` and `as?`; kotlinc does not call `beforeCheckcastToFunctionOfArity` here.
-    SuspendFunction { arity: u8 },
+    SuspendFunction { arity: u16 },
 }
 
 /// `TypeIntrinsics.checkcast` for a non-safe cast.
@@ -138,13 +142,15 @@ pub(crate) fn cast(role: TypeCheckRole) -> CastCheck {
         },
         TypeCheckRole::FunctionOfArity(arity) => CastCheck::Call {
             call: IntrinsicCall {
-                arity: Some(arity),
+                arity: Some(arity.into()),
                 name: "beforeCheckcastToFunctionOfArity".to_owned(),
                 descriptor: "(Ljava/lang/Object;I)Ljava/lang/Object;".to_owned(),
             },
             checkcast: true,
         },
-        TypeCheckRole::SuspendFunctionOfArity(arity) => CastCheck::SuspendFunction { arity },
+        TypeCheckRole::SuspendFunctionOfArity(arity) => CastCheck::SuspendFunction {
+            arity: u16::from(arity) + 1,
+        },
     }
 }
 
@@ -205,8 +211,8 @@ mod tests {
         let suspend = TypeCheckRole::SuspendFunctionOfArity(1);
         assert_eq!(
             instance_check(suspend),
-            InstanceCheck::SuspendFunction { arity: 1 }
+            InstanceCheck::SuspendFunction { arity: 2 }
         );
-        assert_eq!(cast(suspend), CastCheck::SuspendFunction { arity: 1 });
+        assert_eq!(cast(suspend), CastCheck::SuspendFunction { arity: 2 });
     }
 }

@@ -89,7 +89,7 @@ fn instance_check(node: &mut MethodNode, target: &ReifiedTarget<'_>) -> Vec<Node
 }
 
 /// `dup; instanceof SuspendFunction; ifeq fail; isFunctionOfArity; goto end; fail: pop; iconst_0`.
-fn suspend_function_instance_check(node: &mut MethodNode, arity: u8) -> Vec<Node> {
+fn suspend_function_instance_check(node: &mut MethodNode, arity: u16) -> Vec<Node> {
     let fail = node.new_label();
     let end = node.new_label();
     let mut nodes = vec![
@@ -236,9 +236,9 @@ fn intrinsic_call(call: &IntrinsicCall) -> Vec<Node> {
     nodes
 }
 
-fn push_arity(arity: u8) -> Insn {
+fn push_arity(arity: u16) -> Insn {
     match arity {
-        0..=5 => Insn::Op(ICONST_0 + arity),
+        0..=5 => Insn::Op(ICONST_0 + u8::try_from(arity).expect("small arity fits in u8")),
         6..=127 => Insn::Int {
             op: BIPUSH,
             operand: i32::from(arity),

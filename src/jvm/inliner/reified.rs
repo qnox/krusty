@@ -578,7 +578,7 @@ mod tests {
                 ReifiedArgument::Class {
                     internal: "kotlin/jvm/functions/Function1".to_owned(),
                     nullable: false,
-                    intrinsic: Some(crate::ir::TypeCheckRole::SuspendFunctionOfArity(1)),
+                    intrinsic: Some(crate::ir::TypeCheckRole::SuspendFunctionOfArity(0)),
                     rendered: String::new(),
                 },
             )]),

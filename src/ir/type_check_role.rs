@@ -17,8 +17,7 @@ pub enum TypeCheckRole {
     MutableCollection(CollectionKind),
     /// A non-suspend function type of this arity (receiver and context parameters included).
     FunctionOfArity(u8),
-    /// A non-reflective suspend function type. The number is the JVM arity: value parameters
-    /// plus the continuation.
+    /// A non-reflective suspend function type of this source arity.
     SuspendFunctionOfArity(u8),
 }
 
@@ -88,9 +87,9 @@ impl IrFile {
     }
 }
 
-/// JVM arity of a function type: value parameters, plus the continuation when it suspends.
+/// Source arity of a function type. A backend accounts for its own physical parameters.
 fn function_check_arity(value_params: usize, suspend: bool) -> Option<TypeCheckRole> {
-    let arity = u8::try_from(value_params + usize::from(suspend)).ok()?;
+    let arity = u8::try_from(value_params).ok()?;
     Some(if suspend {
         TypeCheckRole::SuspendFunctionOfArity(arity)
     } else {
@@ -225,7 +224,7 @@ mod tests {
         );
         assert_eq!(
             ir.type_check_role(function(true)),
-            Some(TypeCheckRole::SuspendFunctionOfArity(3))
+            Some(TypeCheckRole::SuspendFunctionOfArity(2))
         );
     }
 }
