@@ -237,6 +237,13 @@ fn realize_adapter_reference(
         }
         _ => None,
     };
+    let fun_interface_constructor = matches!(
+        &reference.target,
+        crate::ir::IrCallableReferenceTarget::Classifier {
+            operation: crate::ir::IrClassifierCallable::SamConstructor,
+            ..
+        }
+    );
     let (owner_class, name, top_level, reflection_signature) = match reference.target {
         crate::ir::IrCallableReferenceTarget::Module(target) => {
             let declaration = ir
@@ -270,6 +277,14 @@ fn realize_adapter_reference(
         } => match operation {
             crate::ir::IrClassifierCallable::EnumValueOf => {
                 (Some(classifier), "valueOf".to_string(), false, None)
+            }
+            crate::ir::IrClassifierCallable::SamConstructor => {
+                // The runtime carrier stores only the interface `Class`. A capture or a bound
+                // receiver has no slot on `FunInterfaceConstructorReference`.
+                if !reference.captures.is_empty() || reference.bound_receiver.is_some() {
+                    return Err(FunctionReferenceRealizationTarget::Invalid);
+                }
+                (Some(classifier), "<init>".to_string(), false, None)
             }
         },
         // A local function has no declaration of its own on the JVM: kotlinc reflects it on
@@ -329,13 +344,16 @@ fn realize_adapter_reference(
     let internal = reference_class_name(ir, facades.current, expression, "function");
     let mut class = IrClass::synthetic(internal);
     class.enclosure = reference_enclosure(ir, expression);
-    class.superclass = type_name(if adapted {
+    class.superclass = type_name(if fun_interface_constructor {
+        "kotlin/jvm/internal/FunInterfaceConstructorReference"
+    } else if adapted {
         "kotlin/jvm/internal/AdaptedFunctionReference"
     } else {
         "kotlin/jvm/internal/FunctionReferenceImpl"
     });
     class.func_ref = Some(FuncRef {
         adapted,
+        fun_interface_constructor,
         bound,
         field_capture_count: u32::try_from(reference.captures.len())
             .map_err(|_| FunctionReferenceRealizationTarget::Invalid)?,

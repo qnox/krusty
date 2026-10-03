@@ -1484,7 +1484,7 @@ fn fun_interface_constructor_reference_returns_a_checked_sam_delegate() {
         })
         .collect::<Vec<_>>();
     assert_eq!(delegates.len(), 1);
-    assert!(delegates[0].1.classifier.matches("Action"));
+    assert_eq!(delegates[0].1.classifier, crate::types::type_name("Action"));
     assert_eq!(delegates[0].1.method, "run");
     assert!(delegates[0].1.wraps_function_value);
     let action_run =
@@ -1497,13 +1497,18 @@ fn fun_interface_constructor_reference_returns_a_checked_sam_delegate() {
     );
     assert!(ir.exprs.iter().any(|expression| matches!(
         expression,
-        IrExpr::Lambda {
-            impl_fn,
-            arity: 1,
-            captures,
-            sam: None,
-            ..
-        } if *impl_fn == constructor && captures.is_empty()
+        IrExpr::CallableReference(reference)
+            if reference.adapter == constructor
+                && reference.captures.is_empty()
+                && reference.bound_receiver.is_none()
+                && reference.adaptation.is_none()
+                && matches!(
+                    reference.target,
+                    crate::ir::IrCallableReferenceTarget::Classifier {
+                        classifier,
+                        operation: crate::ir::IrClassifierCallable::SamConstructor,
+                    } if classifier == crate::types::type_name("Action")
+                )
     )));
     assert!(ir.exprs.iter().any(|expression| matches!(
         expression,
