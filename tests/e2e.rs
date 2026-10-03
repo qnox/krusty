@@ -1684,6 +1684,8 @@ mod platform_argument_expected_e2e;
 mod platform_call_assertions_e2e;
 #[path = "platform_classifier_identity_e2e.rs"]
 mod platform_classifier_identity_e2e;
+#[path = "platform_function_type_argument_e2e.rs"]
+mod platform_function_type_argument_e2e;
 #[path = "platform_map_index_assign_e2e.rs"]
 mod platform_map_index_assign_e2e;
 #[path = "plugins_e2e.rs"]
