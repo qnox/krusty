@@ -9367,6 +9367,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`tests/type_intrinsics_e2e.rs`,
   `jvm::inliner::reified::tests::a_suspend_function_argument_tests_the_marker_and_the_jvm_arity`,
   `fir::body_check::local_function_tests::suspend_local_function_reference_keeps_its_suspend_function_type`.)
+  Corpus: `coroutines/featureIntersection/suspendFunctionIsAs.kt`.
 - **Native `Double`/`Float` `toString`, `%` and `mod` answer what the JVM answers.** The native
   runtime (`src/native/runtime/krusty_fp.c`) renders a floating-point value as the SHORTEST decimal
   that reads back as it, in Java's layout (plain for 10^-3 <= |x| < 10^7, `d.dddEn` outside,
