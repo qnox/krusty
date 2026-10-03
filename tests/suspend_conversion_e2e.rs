@@ -85,6 +85,60 @@ fun box(): String {\n\
     return if (accept(sam::run) === Accepted) \"OK\" else \"fail\"\n\
 }\n";
 
+/// Corpus `nonLocalReturns/suspendConversion.kt`: `bar` takes a plain function and passes it to
+/// `foo`, which expects a suspend function. The lambda's non-local return is a return from `test`,
+/// not a call of an unemitted `test$lambda$0`.
+#[test]
+fn non_local_return_through_an_inline_suspend_conversion_returns_from_the_caller() {
+    const LIB: &str = "suspend inline fun foo(f: suspend () -> String) = f()\n\
+suspend inline fun bar(f: () -> String) = foo(f)\n";
+    const MAIN: &str = "import kotlin.coroutines.Continuation\n\
+import kotlin.coroutines.EmptyCoroutineContext\n\
+import kotlin.coroutines.startCoroutine\n\
+suspend fun test(): String {\n\
+    bar { return \"OK\" }\n\
+    return \"Fail\"\n\
+}\n\
+fun box(): String {\n\
+    var r = \"Fail\"\n\
+    ::test.startCoroutine(object : Continuation<String> {\n\
+        override val context = EmptyCoroutineContext\n\
+        override fun resumeWith(result: Result<String>) {\n\
+            r = result.getOrThrow()\n\
+        }\n\
+    })\n\
+    return r\n\
+}\n";
+    common::expect_box_ok_files_with_stdlib(
+        &[("lib.kt", LIB), ("main.kt", MAIN)],
+        "SuspendConversionNonLocal",
+    );
+}
+
+#[test]
+fn inline_lambda_value_through_a_suspend_conversion_is_the_call_result() {
+    const LIB: &str = "suspend inline fun foo(f: suspend () -> String) = f()\n\
+suspend inline fun bar(f: () -> String) = foo(f)\n";
+    const MAIN: &str = "import kotlin.coroutines.Continuation\n\
+import kotlin.coroutines.EmptyCoroutineContext\n\
+import kotlin.coroutines.startCoroutine\n\
+suspend fun test(): String = bar { \"OK\" }\n\
+fun box(): String {\n\
+    var r = \"Fail\"\n\
+    ::test.startCoroutine(object : Continuation<String> {\n\
+        override val context = EmptyCoroutineContext\n\
+        override fun resumeWith(result: Result<String>) {\n\
+            r = result.getOrThrow()\n\
+        }\n\
+    })\n\
+    return r\n\
+}\n";
+    common::expect_box_ok_files_with_stdlib(
+        &[("lib.kt", LIB), ("main.kt", MAIN)],
+        "SuspendConversionInlineValue",
+    );
+}
+
 #[test]
 fn bound_reference_converts_to_a_nullable_suspend_parameter() {
     common::expect_box_ok_with_stdlib(NULLABLE_SUSPEND_TARGET_SRC, "ScNullable");
