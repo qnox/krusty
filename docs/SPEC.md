@@ -5031,6 +5031,23 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `InnerClasses` remain the separately owned enclosure-realization contract.
   Frontend tests assert the exact declaration-to-provenance mapping. End-to-end JVM tests assert the
   complete emitted class set against kotlinc rather than inspecting parser-generated names.
+- **A `fun interface` constructor reference is a `FunInterfaceConstructorReference`.** `::Action`
+  for `fun interface Action` is not a lambda and not a `FunctionReferenceImpl`. The carrier extends
+  `kotlin.jvm.internal.FunInterfaceConstructorReference` and its constructor passes `Action.class`.
+  `invoke` builds the SAM wrapper from the function value. Equality and `hashCode` compare that
+  interface class, so two references to the same fun interface are equal across files and across
+  type arguments (`KSupplier<String>` and `KSupplier<Number>`). The carrier implements `KFunction`
+  because `FunInterfaceConstructorReference` extends `FunctionReference`. An invocation
+  emits `invokeinterface` on the selected `FunctionN`, and `checkcast`s the receiver to that
+  interface when its realized JVM type is a different representation. An unannotated binding
+  (`val kr = ::Action`) is stored as erased `kotlin.reflect.KFunction`, so the call site casts.
+  A receiver realized as `FunctionN` — a lambda, or a reference the use site typed as a
+  function — is invoked directly. The end-to-end comparison is keyed by each carrier's
+  internal name and includes its class flags, superclass, interfaces in class-file order, and
+  every field and method name, descriptor, and access flags. Tests:
+  `fir_lower::callable_references::tests::fun_interface_constructor_reference_returns_a_checked_sam_delegate`,
+  `tests/fun_interface_constructor_reference_e2e.rs`, and the
+  `callableReference/funInterfaceConstructor` boxes.
 - **Named arguments to a CLASSPATH constructor (`Point(y = 2, x = 1)`).** Descriptors don't carry
   parameter names, so this needs the ctor's `@Metadata`: `metadata::class_constructor_param_names` decodes
   `Class.constructor` (field 8) → `Constructor.value_parameter` (field 2, a DIFFERENT proto shape from a

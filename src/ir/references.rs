@@ -52,6 +52,9 @@ pub enum IrCallableReferenceTarget {
 pub enum IrClassifierCallable {
     /// The classifier's implicit `valueOf(String)` member.
     EnumValueOf,
+    /// A `fun interface` constructor (`::Action`). Equality compares the interface class, so the
+    /// carrier is not a lambda even when the reference is used as a function value.
+    SamConstructor,
 }
 
 /// A checked callable-reference value after common invocation lowering. `adapter` is an exact
@@ -81,6 +84,9 @@ pub struct FuncRef {
     /// Adapted callable references use Kotlin's `AdaptedFunctionReference` carrier so equality and
     /// hashing include the checked adaptation arity/flags instead of lambda identity.
     pub adapted: bool,
+    /// A `fun interface` constructor reference. The carrier extends
+    /// `FunInterfaceConstructorReference` and is constructed with that interface's `Class`.
+    pub fun_interface_constructor: bool,
     pub bound: bool,
     /// Leading adapter parameters stored as subclass fields rather than in the runtime callable
     /// reference's semantic receiver slot. This is fixed by JVM realization from the common
