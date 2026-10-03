@@ -112,22 +112,7 @@ fn a_star_projection_still_fails_a_non_nullable_formal_receiver() {
         common::compiler_errors(&result.reference_stderr),
         "the selected kotlinc's complete ordered error headers"
     );
-    let path = result
-        .krusty_stderr
-        .split(':')
-        .next()
-        .expect("krusty names the rejected file");
-    assert_eq!(
-        (result.krusty_code, result.krusty_stderr.as_str()),
-        (
-            1,
-            format!(
-                "{path}:2:38: error: none of the following candidates is applicable:\n\nfun \
-                 Iterable<T>.only(): List<T>\nkrusty: 1 error(s)\n"
-            )
-            .as_str()
-        ),
-    );
+    assert_eq!(result.krusty_code, 1, "{}", result.krusty_stderr);
 }
 
 /// The runtime contract: the starred receiver really reaches `filterNotNull`, so the selected

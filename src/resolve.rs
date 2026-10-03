@@ -20160,9 +20160,10 @@ impl<'a> Checker<'a> {
                         "name={name} receiver={rt:?} call={call:?} args={arg_tys:?} candidates={}",
                         inapplicable_candidates.len(),
                     );
-                    if self.report_single_mapped_candidate_type_errors(
+                    if let Some(rejected_result) = self.report_single_mapped_candidate_type_errors(
                         scope,
                         call,
+                        &name,
                         args,
                         &arg_tys,
                         CallConstraints {
@@ -20171,7 +20172,11 @@ impl<'a> Checker<'a> {
                             expected,
                         },
                         &inapplicable_candidates,
-                    ) || self.report_inapplicable_member_mapping_error(
+                    ) {
+                        self.diags.sort_source_order_from(call_diagnostics);
+                        return rejected_result;
+                    }
+                    if self.report_inapplicable_member_mapping_error(
                         call,
                         &name,
                         args,
@@ -20179,17 +20184,21 @@ impl<'a> Checker<'a> {
                     ) {
                         break 'report;
                     }
-                    self.diags.error(
-                        self.call_callee_name_span(call),
-                        if inapplicable_candidates.is_empty() {
-                            self.unresolved_member_diagnostic(scope, Some(receiver), &name, rt)
-                        } else {
+                    if inapplicable_candidates.is_empty() {
+                        self.diags.error(
+                            self.call_callee_name_span(call),
+                            self.unresolved_member_diagnostic(scope, Some(receiver), &name, rt),
+                        );
+                        self.report_unshaped_lambda_diagnostics(scope, args);
+                    } else {
+                        self.diags.error(
+                            self.call_callee_name_span(call),
                             self.inapplicable_member_candidates_message(
                                 &name,
                                 &inapplicable_candidates,
-                            )
-                        },
-                    );
+                            ),
+                        );
+                    }
                 }
                 self.diags.sort_source_order_from(call_diagnostics);
                 Ty::Error
@@ -43557,11 +43566,12 @@ impl<'a> Checker<'a> {
         &mut self,
         scope: &CheckerScope<'_>,
         call: ExprId,
+        name: &str,
         args: &[ExprId],
         arg_tys: &[Ty],
         constraints: CallConstraints<'_>,
         candidates: &[crate::libraries::FunctionInfo],
-    ) -> bool {
+    ) -> Option<Ty> {
         let type_args = constraints.type_args;
         let argument_names = self.file.call_arg_names.get(&call.0).map(Vec::as_slice);
         let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
@@ -43577,7 +43587,7 @@ impl<'a> Checker<'a> {
                 if !type_args.is_empty() && signature.formals.len() != type_args.len() {
                     return None;
                 }
-                let bindings = constraints.bindings(&signature);
+                let bindings = constraints.bindings(&self.fed_source(), &signature);
                 let params = crate::symbol_resolver::ty_subst_all(&signature.params, &bindings);
                 let shape = self.contextual_call_shape(
                     scope,
@@ -43597,7 +43607,7 @@ impl<'a> Checker<'a> {
             })
             .collect::<Vec<_>>();
         let [(candidate, shape, parameters)] = mapped.as_slice() else {
-            return false;
+            return None;
         };
         if self.report_dnn_null_inference(
             call,
@@ -43607,7 +43617,7 @@ impl<'a> Checker<'a> {
             trailing_lambda,
             type_args.len(),
         ) {
-            return true;
+            return Some(Ty::Error);
         }
         let checkpoint = self.diags.diags.len();
         if let Some(signature) = candidate.generic_sig.as_ref() {
@@ -43651,7 +43661,7 @@ impl<'a> Checker<'a> {
                             crate::types::type_parameter_source_name(formal)
                         ),
                     );
-                    return true;
+                    return Some(Ty::Error);
                 }
             }
         }
@@ -43678,7 +43688,71 @@ impl<'a> Checker<'a> {
                 self.expect_call_arg(scope, expected, args[source], actual);
             }
         }
-        self.diags.diags.len() > checkpoint
+        if self.diags.diags.len() > checkpoint {
+            return Some(Ty::Error);
+        }
+
+        // A single extension candidate whose arguments map cleanly can still be rejected by its
+        // declaration receiver or by a bound on a type variable contributed by that receiver. Keep
+        // this declaration-aware: the same normalized candidate shape covers source, module and
+        // dependency callables, and no spelling or provider-origin branch participates.
+        let signature = candidate.semantic_signature();
+        let bindings = constraints.bindings(&self.fed_source(), &signature);
+        let declared_receiver = signature
+            .receiver
+            .or_else(|| candidate.semantic_receiver())
+            .map(|receiver| crate::symbol_resolver::ty_subst_keep_unbound(receiver, &bindings));
+        let receiver_type_mismatch = candidate.is_extension()
+            && declared_receiver.is_some_and(|declared| {
+                !self.receiver_is_assignable(constraints.receiver, declared)
+            });
+        let receiver_bound_mismatch = candidate.is_extension()
+            && signature.receiver.is_some_and(|receiver| {
+                signature
+                    .formals
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, formal)| {
+                        ty_mentions_param(receiver, std::slice::from_ref(*formal))
+                    })
+                    .any(|(index, formal)| {
+                        let Some(&actual) = bindings.get(formal) else {
+                            return false;
+                        };
+                        signature
+                            .formal_bounds
+                            .get(index)
+                            .into_iter()
+                            .flatten()
+                            .copied()
+                            .map(|bound| {
+                                crate::symbol_resolver::ty_subst_keep_unbound(bound, &bindings)
+                            })
+                            .any(|bound| !self.generic_bound_admits(actual, bound))
+                    })
+            });
+        if !receiver_type_mismatch && !receiver_bound_mismatch {
+            return None;
+        }
+
+        let display = self
+            .source_callable_display(candidate)
+            .unwrap_or_else(|| Self::callable_candidate_display(name, candidate));
+        self.diags.error(
+            self.call_callee_name_span(call),
+            format!("candidate '{display}' is inapplicable because of a receiver type mismatch."),
+        );
+
+        // Although the candidate is inapplicable, kotlinc retains its inferred result for the
+        // enclosing expression's own type check. Returning that provisional type lets the existing
+        // initializer/return/assignment boundary emit its context-specific mismatch without
+        // committing a selected call or inventing that diagnostic here.
+        let inferred = crate::symbol_resolver::ty_subst_keep_unbound(signature.ret, &bindings);
+        Some(
+            candidate
+                .ret
+                .apply(signature.apply_return_policy(self.libraries, inferred)),
+        )
     }
 
     // Call-site sugar over the ONE resolution entry point [`SymbolResolver::resolve_symbol`]: each
@@ -63194,18 +63268,21 @@ impl<'a> Checker<'a> {
                         &name,
                         args.as_deref().unwrap_or_default(),
                         &candidates,
-                    ) || self.report_single_mapped_candidate_type_errors(
-                        scope,
-                        e,
-                        args.as_deref().unwrap_or_default(),
-                        &checked_arg_tys,
-                        CallConstraints {
-                            type_args: &type_args,
-                            receiver: safe_rt,
-                            expected,
-                        },
-                        &candidates,
-                    );
+                    ) || self
+                        .report_single_mapped_candidate_type_errors(
+                            scope,
+                            e,
+                            &name,
+                            args.as_deref().unwrap_or_default(),
+                            &checked_arg_tys,
+                            CallConstraints {
+                                type_args: &type_args,
+                                receiver: safe_rt,
+                                expected,
+                            },
+                            &candidates,
+                        )
+                        .is_some();
                     if !reported_inapplicable {
                         self.diags.error(
                             self.call_callee_name_span(e),
@@ -67598,15 +67675,16 @@ impl<'a> Checker<'a> {
                     );
                     return Some(Ty::Error);
                 }
-                if self.report_single_mapped_candidate_type_errors(
+                if let Some(rejected_result) = self.report_single_mapped_candidate_type_errors(
                     scope,
                     e,
+                    name,
                     args,
                     arg_tys,
                     constraints,
                     &overloads,
                 ) {
-                    return Some(Ty::Error);
+                    return Some(rejected_result);
                 }
                 return None;
             }

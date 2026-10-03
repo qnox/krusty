@@ -2,6 +2,47 @@
 
 use super::*;
 
+fn first_name_use(file: &File, expression: ExprId, name: &str) -> Option<ExprId> {
+    match file.expr(expression) {
+        Expr::Name(candidate) => (candidate == name).then_some(expression),
+        // A nested lambda owns its own implicit parameter and lexical diagnostics.
+        Expr::Lambda { .. } => None,
+        _ => {
+            let found = std::cell::Cell::new(None);
+            file.any_child_expr(
+                expression,
+                &mut |child| {
+                    if found.get().is_none() {
+                        found.set(first_name_use(file, child, name));
+                    }
+                    found.get().is_some()
+                },
+                &mut |statement| {
+                    if found.get().is_none() {
+                        found.set(first_name_use_in_statement(file, statement, name));
+                    }
+                    found.get().is_some()
+                },
+            );
+            found.get()
+        }
+    }
+}
+
+fn first_name_use_in_statement(file: &File, statement: StmtId, name: &str) -> Option<ExprId> {
+    if matches!(file.stmt(statement), Stmt::LocalFun(_)) {
+        return None;
+    }
+    let found = std::cell::Cell::new(None);
+    file.any_child_stmt(statement, &mut |child| {
+        if found.get().is_none() {
+            found.set(first_name_use(file, child, name));
+        }
+        found.get().is_some()
+    });
+    found.get()
+}
+
 /// The rejected candidate that owns a receiver call's failure.
 pub(super) enum RejectedCallOwner {
     Member,
@@ -40,6 +81,60 @@ fn rejected_candidate_argument_shape(
 }
 
 impl Checker<'_> {
+    /// Report the diagnostics owned by a lambda for which no callable supplied an expected
+    /// function shape. This runs only after the scope tower is exhausted: probes remain silent,
+    /// while the final rejected source form diagnoses every untyped written parameter and leaves
+    /// an implicit `it` unresolved, as the language does without a contextual function type.
+    pub(super) fn report_unshaped_lambda_diagnostics(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        arguments: &[ExprId],
+    ) {
+        for &argument in arguments {
+            let Expr::Lambda { params, body } = self.file.expr(argument) else {
+                continue;
+            };
+            if params.is_empty() {
+                if !self.file.lambda_explicit_arrows.contains(&argument.0)
+                    && self.untyped_lambda_binds_implicit_it(scope, *body)
+                {
+                    if let Some(reference) = first_name_use(self.file, *body, "it") {
+                        self.diags.error(
+                            self.span(reference),
+                            "unresolved reference 'it'.".to_string(),
+                        );
+                    }
+                }
+                continue;
+            }
+
+            let declared = self.file.lambda_param_types.get(&argument.0);
+            let roles = self.file.lambda_parameter_roles.get(&argument.0);
+            let spans = self.file.lambda_param_spans.get(&argument.0);
+            for (index, parameter) in params.iter().enumerate() {
+                let explicitly_typed = declared
+                    .and_then(|types| types.get(index))
+                    .is_some_and(Option::is_some);
+                let named = roles
+                    .and_then(|roles| roles.get(index))
+                    .is_none_or(|role| *role == LambdaParameterRole::Named);
+                if explicitly_typed || !named {
+                    continue;
+                }
+                let span = spans
+                    .and_then(|spans| spans.get(index))
+                    .copied()
+                    .unwrap_or_else(|| self.span(argument));
+                self.diags.error(
+                    span,
+                    format!(
+                        "cannot infer type for value parameter '{parameter}'. Specify it explicitly."
+                    ),
+                );
+            }
+        }
+    }
+
     /// Report a receiver call whose member and extension rungs all rejected the source arguments.
     pub(super) fn report_owned_member_failure(
         &mut self,

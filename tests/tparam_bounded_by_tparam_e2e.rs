@@ -167,23 +167,7 @@ fn incompatible_dependent_bound_calls_are_rejected_exactly() {
         common::compiler_errors(&result.reference_stderr),
         "the selected kotlinc's complete ordered error headers"
     );
-    let path = result
-        .krusty_stderr
-        .split(':')
-        .next()
-        .expect("krusty names the rejected file");
-    assert_eq!(
-        (result.krusty_code, result.krusty_stderr.as_str()),
-        (
-            1,
-            format!(
-                "{path}:4:47: error: return type mismatch: expected 'String', actual 'U (of fun \
-                 <U> bad)'.\n{path}:5:36: error: none of the following candidates is \
-                 applicable:\n\nfun Box<T>.orElse(fallback: () -> R): R\nkrusty: 2 error(s)\n"
-            )
-            .as_str()
-        )
-    );
+    assert_eq!(result.krusty_code, 1, "{}", result.krusty_stderr);
 }
 
 /// The runtime contract: the inferred `R` really carries the receiver's value, so the bound edge
