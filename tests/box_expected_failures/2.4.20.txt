@@ -20,7 +20,6 @@ coroutines/inlineClasses/direct/boxUnboxInsideCoroutine_suspendFunType.kt
 coroutines/inlineClasses/kt84305.kt
 coroutines/inlineClasses/resume/boxUnboxInsideCoroutine_suspendFunType.kt
 coroutines/kt28844.kt
-coroutines/kt49168.kt
 coroutines/localFunctions/named/defaultArgument.kt
 coroutines/nonLocalReturnFromInlineLambdaDeep.kt
 coroutines/suspendFunctionAsCoroutine/superCallInterface.kt
@@ -45,8 +44,6 @@ fullValueClasses/nonFinalThisInInitSideEffects.kt
 fullValueClasses/recursive.kt
 fullValueClasses/reservedNames.kt
 fullValueClasses/vararg.kt
-funInterface/suspendFunInterfaceConversionCodegen.kt
-funInterface/suspendFunctionAndFunInterfaceSharedClassSplit.kt
 functions/functionNtoString.kt
 functions/functionNtoStringGeneric.kt
 inference/capturedSelfInsideIntersection.kt
