@@ -55,6 +55,8 @@ mod annotation_impl_class_e2e;
 mod annotation_instance_class_rows_e2e;
 #[path = "annotation_instantiation_e2e.rs"]
 mod annotation_instantiation_e2e;
+#[path = "annotation_kclass_member_e2e.rs"]
+mod annotation_kclass_member_e2e;
 #[path = "annotation_nested_const_template_e2e.rs"]
 mod annotation_nested_const_template_e2e;
 #[path = "annotation_target_emission_e2e.rs"]

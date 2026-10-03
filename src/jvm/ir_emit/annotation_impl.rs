@@ -12,6 +12,42 @@ use crate::jvm::classfile::{ClassWriter, CodeBuilder};
 use crate::jvm::names::type_descriptor;
 use crate::types::Ty;
 
+/// Descriptor and generic signature of one annotation-interface member.
+///
+/// A `KClass` member's descriptor is `()Ljava/lang/Class;` (or `[Ljava/lang/Class;` for an array).
+/// The signature keeps the type argument (`()Ljava/lang/Class<*>;`, `()Ljava/lang/Class<Ljava/lang/String;>;`).
+pub(super) fn annotation_interface_member(
+    formatter: &super::JvmSignatureFormatter<'_>,
+    ty: Ty,
+) -> (String, Option<String>) {
+    let stored = crate::jvm::annotation_kclass::annotation_member_jvm_type(jvm_declared_ty(&ty));
+    let descriptor = format!("(){}", type_descriptor(stored));
+    (descriptor, annotation_kclass_signature(formatter, ty))
+}
+
+fn annotation_kclass_signature(
+    formatter: &super::JvmSignatureFormatter<'_>,
+    ty: Ty,
+) -> Option<String> {
+    use crate::jvm::annotation_kclass::{
+        is_annotation_kclass, is_annotation_kclass_array, kclass_argument, KClassArgument,
+    };
+    let (prefix, argument_owner) = if is_annotation_kclass(ty) {
+        ("()Ljava/lang/Class<", ty)
+    } else if is_annotation_kclass_array(ty) {
+        ("()[Ljava/lang/Class<", ty.non_null().array_elem()?)
+    } else {
+        return None;
+    };
+    let rendered = match kclass_argument(argument_owner)? {
+        KClassArgument::Star => "*".to_string(),
+        KClassArgument::Projected(argument) => {
+            formatter.ty_at(&argument, super::signature_formatter::Wildcards::Generic)?
+        }
+    };
+    Some(format!("{prefix}{rendered}>;"))
+}
+
 /// The boxed-wrapper internal name + a static `hashCode` helper descriptor for a primitive `Ty`, used by
 /// the annotation impl's `hashCode`. Returns `(wrapper_internal, hashCode_arg_descriptor)`.
 fn prim_wrapper(t: Ty) -> Option<(&'static str, &'static str)> {
@@ -42,10 +78,16 @@ pub(super) fn emit_annotation_impl_class(
     opts: &EmitOptions,
 ) -> Vec<u8> {
     let fq = c.fq_name();
+    // Semantic member types. A `KClass` member stays `KClass` here: the constructor receives that
+    // value. The field and the accessor store `java.lang.Class` instead.
     let members: Vec<(String, Ty)> = c
         .fields
         .iter()
         .map(|f| (f.name.clone(), jvm_declared_ty(&f.ty)))
+        .collect();
+    let stored: Vec<Ty> = members
+        .iter()
+        .map(|(_, ty)| crate::jvm::annotation_kclass::annotation_member_jvm_type(*ty))
         .collect();
     let mut cw = new_writer(&fq, "java/lang/Object", opts);
     cw.set_access(0x0001 | 0x0010 | 0x0020 | 0x1000); // PUBLIC | FINAL | SUPER | SYNTHETIC
@@ -57,7 +99,7 @@ pub(super) fn emit_annotation_impl_class(
         "an annotation implementation is enclosed by its owner as a whole"
     );
     cw.set_enclosing_class(&owner);
-    for (name, jt) in &members {
+    for ((name, _), jt) in members.iter().zip(&stored) {
         // SYNTHETIC: nothing in source declares these — the class is generated for an annotation
         // instantiation, and kotlinc marks its fields and member accessors so tooling skips them.
         // The constructor and the `Object` overrides are NOT marked, which is kotlinc's split.
@@ -100,16 +142,43 @@ pub(super) fn emit_annotation_impl_class(
         ctor.aload(0);
         let obj_init = cw.methodref("java/lang/Object", "<init>", "()V");
         ctor.invokespecial(obj_init, 0, 0);
+        let converts_kclass_array = members
+            .iter()
+            .any(|(_, ty)| crate::jvm::annotation_kclass::is_annotation_kclass_array(*ty));
+        let index_slot = 1 + params_words;
+        let size_slot = index_slot + 1;
+        let result_slot = size_slot + 1;
         let mut slot = 1u16;
-        for (name, jt) in &members {
-            ctor.aload(0);
-            load(*jt, slot, &mut ctor);
-            let fref = cw.fieldref(&fq, name, &type_descriptor(*jt));
-            ctor.putfield(fref, slot_words(*jt) as i32);
-            slot += slot_words(*jt);
+        for ((name, param_ty), field_ty) in members.iter().zip(&stored) {
+            if crate::jvm::annotation_kclass::is_annotation_kclass_array(*param_ty) {
+                crate::jvm::annotation_kclass::emit_kclass_array_to_class_array(
+                    &mut cw,
+                    &mut ctor,
+                    slot,
+                    index_slot,
+                    size_slot,
+                    result_slot,
+                );
+                ctor.aload(0);
+                ctor.aload(result_slot);
+            } else {
+                ctor.aload(0);
+                load(*param_ty, slot, &mut ctor);
+                if crate::jvm::annotation_kclass::is_annotation_kclass(*param_ty) {
+                    crate::jvm::annotation_kclass::emit_kclass_to_class(&mut cw, &mut ctor);
+                }
+            }
+            let fref = cw.fieldref(&fq, name, &type_descriptor(*field_ty));
+            ctor.putfield(fref, slot_words(*field_ty) as i32);
+            slot += slot_words(*param_ty);
         }
         ctor.ret_void();
-        finish_code::<0x0001>(&mut cw, "<init>", &desc, &mut ctor, 1 + params_words);
+        let ctor_locals = if converts_kclass_array {
+            result_slot + 1
+        } else {
+            1 + params_words
+        };
+        finish_code::<0x0001>(&mut cw, "<init>", &desc, &mut ctor, ctor_locals);
         let mut locals = vec![("this".to_string(), format!("L{fq};"), 0)];
         let mut debug_slot = 1u16;
         for (name, jt) in &members {
@@ -142,8 +211,8 @@ pub(super) fn emit_annotation_impl_class(
         }
     }
 
-    // Per-member accessor `x()T`: return this.x.
-    for (name, jt) in &members {
+    // Per-member accessor `x()T`: return this.x. A `KClass` member returns `java.lang.Class`.
+    for ((name, _), jt) in members.iter().zip(&stored) {
         let accessor_desc = format!("(){}", type_descriptor(*jt));
         cw.reserve_method_pool(name, &accessor_desc, None, &[]);
         let mut g = CodeBuilder::new(1);
@@ -162,9 +231,9 @@ pub(super) fn emit_annotation_impl_class(
         );
     }
 
-    emit_annotation_equals(env, &mut cw, &fq, iface, &members);
-    emit_annotation_hashcode(ir, &mut cw, &fq, &members);
-    emit_annotation_tostring(&mut cw, &fq, iface, &members);
+    emit_annotation_equals(env, &mut cw, &fq, iface, &members, &stored);
+    emit_annotation_hashcode(ir, env, &mut cw, &fq, &stored, &members);
+    emit_annotation_tostring(&mut cw, &fq, iface, &stored, &members);
     // annotationType(): return <iface>.class. LAST, after the `Object` overrides — kotlinc's member
     // order, and the method table is part of the class file, so emitting it beside the member
     // accessors diverged from the reference on every annotation that is instantiated.
@@ -197,6 +266,7 @@ fn emit_annotation_equals(
     fq: &str,
     iface: &str,
     members: &[(String, Ty)],
+    stored: &[Ty],
 ) {
     // kotlinc's shape. Three things differ from the obvious encoding, all visible in the class file:
     //
@@ -223,28 +293,38 @@ fn emit_annotation_equals(
     cb.aload(1);
     cb.checkcast(icls);
     cb.astore(2);
-    for (name, jt) in members {
-        let aref = cw.interface_methodref(iface, name, &format!("(){}", type_descriptor(*jt)));
+    for ((name, semantic), stored_ty) in members.iter().zip(stored) {
+        let aref =
+            cw.interface_methodref(iface, name, &format!("(){}", type_descriptor(*stored_ty)));
         let next = cb.new_label();
+        let restore_kclass = |cb: &mut CodeBuilder, cw: &mut ClassWriter| {
+            if crate::jvm::annotation_kclass::is_annotation_kclass(*semantic) {
+                crate::jvm::annotation_kclass::emit_class_to_kclass(cw, cb);
+            } else if crate::jvm::annotation_kclass::is_annotation_kclass_array(*semantic) {
+                crate::jvm::annotation_kclass::emit_classes_to_kclasses(cw, cb);
+            }
+        };
         cb.aload(0);
         cb.checkcast(icls);
-        cb.invokeinterface(aref, 0, slot_words(*jt) as i32);
+        cb.invokeinterface(aref, 0, slot_words(*stored_ty) as i32);
+        restore_kclass(&mut cb, cw);
         cb.aload(2);
-        cb.invokeinterface(aref, 0, slot_words(*jt) as i32);
-        match *jt {
+        cb.invokeinterface(aref, 0, slot_words(*stored_ty) as i32);
+        restore_kclass(&mut cb, cw);
+        match *semantic {
             Ty::Int | Ty::Short | Ty::Byte | Ty::Char | Ty::Boolean => cb.if_icmpeq(next),
             Ty::Long => {
                 cb.lcmp();
                 cb.ifeq(next);
             }
             Ty::Float | Ty::Double => {
-                let (wrap, pd) = prim_wrapper(*jt).unwrap();
+                let (wrap, pd) = prim_wrapper(*semantic).unwrap();
                 let compare = cw.methodref(wrap, "compare", &format!("({pd}{pd})I"));
-                cb.invokestatic(compare, 2 * slot_words(*jt) as i32, 1);
+                cb.invokestatic(compare, 2 * slot_words(*semantic) as i32, 1);
                 cb.ifeq(next);
             }
-            _ if jt.is_array() => {
-                let arr_desc = arrays_param_desc(*jt);
+            _ if semantic.is_array() => {
+                let arr_desc = arrays_param_desc(*semantic);
                 let eq = cw.methodref(
                     "java/util/Arrays",
                     "equals",
@@ -306,7 +386,14 @@ fn emit_annotation_equals(
 /// `hashCode()I` for an annotation impl: the contract sum of `(127 * memberName.hashCode()) ^
 /// memberValue.hashCode()` over members (arrays via `Arrays.hashCode`, primitives via their wrappers'
 /// static `hashCode`). Straight-line (no frames).
-fn emit_annotation_hashcode(ir: &IrFile, cw: &mut ClassWriter, fq: &str, members: &[(String, Ty)]) {
+fn emit_annotation_hashcode(
+    ir: &IrFile,
+    env: &EmitEnv,
+    cw: &mut ClassWriter,
+    fq: &str,
+    stored: &[Ty],
+    members: &[(String, Ty)],
+) {
     // kotlinc's shape, instruction for instruction. Two things are deliberate rather than
     // incidental, because both are visible in the class file even though neither changes the value:
     //
@@ -320,7 +407,7 @@ fn emit_annotation_hashcode(ir: &IrFile, cw: &mut ClassWriter, fq: &str, members
     let accumulates = members.len() > 1;
     cw.reserve_method_pool("hashCode", "()I", None, &[]);
     let mut cb = CodeBuilder::new(if accumulates { 2 } else { 1 });
-    for (index, (name, jt)) in members.iter().enumerate() {
+    for (index, ((name, _), jt)) in members.iter().zip(stored).enumerate() {
         cb.push_string(name, cw);
         let string_hash = cw.methodref("java/lang/String", "hashCode", "()I");
         cb.invokevirtual(string_hash, 0, 1);
@@ -341,22 +428,16 @@ fn emit_annotation_hashcode(ir: &IrFile, cw: &mut ClassWriter, fq: &str, members
                     cb.invokestatic(hc, slot_words(other) as i32, 1);
                 }
                 None => {
-                    // The DECLARED class owns the call (`E.hashCode`, `String.hashCode`) — kotlinc
-                    // resolves it against the member's static type, not `Object`. An INTERFACE-typed
-                    // member (a nested annotation) cannot: `invokevirtual` on an interface type is
-                    // illegal, so kotlinc falls back to `Object.hashCode` there, and so does this.
-                    let owner = other
-                        .obj_internal()
-                        .map(crate::jvm::names::classfile_internal_name_of)
-                        .filter(|internal| {
-                            !ir.classes.iter().any(|class| {
-                                class.fq_name() == *internal
-                                    // An annotation class IS emitted as an interface.
-                                    && (class.is_interface || class.is_annotation)
-                            })
-                        })
-                        .unwrap_or("java/lang/Object");
-                    let hc = cw.methodref(owner, "hashCode", "()I");
+                    // The DECLARED class owns the call (`E.hashCode`, `String.hashCode`). An
+                    // interface (a nested annotation, including one from the classpath) and
+                    // `java.lang.Class` (a stored `KClass`, which declares no `hashCode`) use
+                    // `Object.hashCode`.
+                    let owner = crate::jvm::annotation_kclass::annotation_hash_owner(
+                        ir,
+                        env.signature_symbols,
+                        other,
+                    );
+                    let hc = cw.methodref(&owner, "hashCode", "()I");
                     cb.invokevirtual(hc, 0, 1);
                 }
             },
@@ -389,7 +470,13 @@ fn emit_annotation_hashcode(ir: &IrFile, cw: &mut ClassWriter, fq: &str, members
 
 /// `toString()` for an annotation impl: `@<fqName>(m1=v1, m2=v2, …)` built with a `StringBuilder` (arrays
 /// rendered via `Arrays.toString`). Straight-line (no frames).
-fn emit_annotation_tostring(cw: &mut ClassWriter, fq: &str, iface: &str, members: &[(String, Ty)]) {
+fn emit_annotation_tostring(
+    cw: &mut ClassWriter,
+    fq: &str,
+    iface: &str,
+    stored: &[Ty],
+    members: &[(String, Ty)],
+) {
     cw.reserve_method_pool("toString", "()Ljava/lang/String;", None, &[]);
     let mut cb = CodeBuilder::new(1);
     // A MEMBERLESS annotation renders to a constant, so kotlinc emits no `StringBuilder` at all.
@@ -424,7 +511,7 @@ fn emit_annotation_tostring(cw: &mut ClassWriter, fq: &str, iface: &str, members
         cb.push_string(s, cw);
         cb.invokevirtual(append_str(cw), 1, 1);
     };
-    for (i, (name, jt)) in members.iter().enumerate() {
+    for (i, ((name, _), jt)) in members.iter().zip(stored).enumerate() {
         // Adjacent literals are ONE `ldc`: the class prefix runs into the first member's name
         // (`"@Mk(v="`), and each later member's separator into its own (`", s="`). kotlinc builds the
         // constant that way, so emitting `"@Mk("` and `"v="` as two appends diverged on every
