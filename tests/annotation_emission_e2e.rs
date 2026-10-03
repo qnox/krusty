@@ -1549,11 +1549,10 @@ fn enum_annotations_survive_disabled_kotlin_metadata() {
 
 /// An annotation with a `KClass` member can be INSTANTIATED and read back.
 ///
-/// Regression guard for a shape no descriptor assertion catches: the annotation interface and the
-/// synthesized `…$annotationImpl$…` class must agree on the member's type. Typing the interface
-/// member `java.lang.Class` while the implementation still returns `KClass` produces two class files
-/// that compile, pass every metadata check, and throw `NoSuchMethodError` the moment the member is
-/// read. So this compiles AND RUNS the program.
+/// Both the annotation interface and the synthesized implementation return `java.lang.Class`.
+/// The read rebuilds a `KClass`, so `make().k` compares equal to `String::class`. A mismatch
+/// between those two descriptors is a `NoSuchMethodError` at the read, which a descriptor-only
+/// check would not run.
 #[test]
 fn an_instantiated_kclass_annotation_reads_its_member() {
     let out = common::compile_and_run_box(

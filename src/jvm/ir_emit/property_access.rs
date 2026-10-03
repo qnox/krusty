@@ -233,6 +233,13 @@ impl Emitter<'_> {
         // site (`Int?` in a safe-call chain). `reference_slot` is the descriptor category, so a class
         // descriptor is not boxed again just because its classifier is also a semantic scalar.
         let (physical, reference_slot) = physical;
+        // An annotation member declared `KClass` is returned as `java.lang.Class`. The Kotlin
+        // value is the rebuilt `KClass` (`Int::class` equals `Integer::class`).
+        let physical = if reference_slot {
+            crate::jvm::annotation_kclass::adapt_read_kclass(self.cw, code, *ty, physical)
+        } else {
+            physical
+        };
         let logical = ir_ty_to_jvm(&stored_value_ty(*ty));
         let value_class = self.is_value_class_ty(ty);
         if !value_class && !reference_slot && logical.is_reference() && !logical.is_jvm_scalar() {

@@ -4,10 +4,7 @@
 # The goal is to empty this list of expected failures.
 annotations/instances/AnnotationInstantiationWithArray.kt
 annotations/instances/annotationInstancesEmptyDefaultLowered.kt
-annotations/instances/arraysAndKClass.kt
-annotations/instances/enumAndKClass.kt
 annotations/instances/multimoduleTypeParams.kt
-annotations/instances/typeAliasesAndGenericsInterop.kt
 bridges/internalMethodOverrideInOtherModule.kt
 bridges/internalMethodOverrideMultipleInheritance.kt
 callableReference/property/extensionPropertyReferenceWithTypeParameter.kt

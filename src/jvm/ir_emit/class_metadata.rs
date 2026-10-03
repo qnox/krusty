@@ -320,7 +320,10 @@ pub(super) fn build_class_metadata_with_facts(
                     })
                 });
             let getter = if c.is_annotation {
-                Some((property.name.clone(), format!("(){}", desc(property.ty))))
+                let stored = crate::jvm::annotation_kclass::annotation_member_jvm_type(
+                    jvm_declared_ty(&property.ty),
+                );
+                Some((property.name.clone(), format!("(){}", desc(stored))))
             } else {
                 ordinary_getter
             };

@@ -51,7 +51,11 @@ impl Emitter<'_> {
                 } else {
                     f.name.clone()
                 },
-                descriptor: ir_method_desc(&f.params, &f.ret),
+                descriptor: if class.is_annotation {
+                    annotation_member_descriptor(&f.params, f.ret)
+                } else {
+                    ir_method_desc(&f.params, &f.ret)
+                },
                 is_static: f.is_static,
                 is_interface: interface,
                 static_receiver: (f.is_static && f.dispatch_receiver == Some(owner))
@@ -121,7 +125,11 @@ impl Emitter<'_> {
             return Some(PropertyAccess::Accessor {
                 owner,
                 name: accessor_name,
-                descriptor: ir_method_desc(&[], &stored_value_ty(ty)),
+                descriptor: if class.is_annotation {
+                    annotation_member_descriptor(&[], ty)
+                } else {
+                    ir_method_desc(&[], &stored_value_ty(ty))
+                },
                 is_static: false,
                 is_interface: interface,
                 static_receiver: None,
@@ -130,15 +138,18 @@ impl Emitter<'_> {
         // Outside the declaring class the backing field is private, so the read goes through the
         // accessor — the one synthesized for this declaration, which carries no IR method of its own.
         if !direct_field {
+            let return_ty = declared
+                .map(|property| declared_property_accessor_jvm(self.ir, property, field))
+                .unwrap_or_else(|| jvm_declared_ty(&field.ty));
+            let return_ty = if class.is_annotation {
+                crate::jvm::annotation_kclass::annotation_member_jvm_type(return_ty)
+            } else {
+                return_ty
+            };
             return Some(PropertyAccess::Accessor {
                 owner,
                 name: accessor_name,
-                descriptor: method_descriptor(
-                    &[],
-                    declared
-                        .map(|property| declared_property_accessor_jvm(self.ir, property, field))
-                        .unwrap_or_else(|| jvm_declared_ty(&field.ty)),
-                ),
+                descriptor: method_descriptor(&[], return_ty),
                 is_static: false,
                 is_interface: interface,
                 static_receiver: None,
@@ -226,4 +237,14 @@ impl Emitter<'_> {
             inline_uninitialized_guard: None,
         })
     }
+}
+
+/// Descriptor of an annotation-interface member. `KClass` is returned as `java.lang.Class`.
+fn annotation_member_descriptor(
+    parameters: &[crate::types::Ty],
+    result: crate::types::Ty,
+) -> String {
+    let stored =
+        crate::jvm::annotation_kclass::annotation_member_jvm_type(jvm_declared_ty(&result));
+    method_descriptor(&crate::jvm::method_descriptors::jvm_tys(parameters), stored)
 }

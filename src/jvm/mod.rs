@@ -2,6 +2,7 @@
 
 mod abstract_method_nullability;
 mod annotation_constructions;
+mod annotation_kclass;
 mod anonymous_context_labels;
 mod array_representation;
 pub mod backend;

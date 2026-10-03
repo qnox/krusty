@@ -12687,6 +12687,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/annotation_class_element_e2e.rs::a_java_class_element_accepts_a_class_literal`,
   `…::the_emitted_class_constants_match_kotlinc`.
 
+- **A Kotlin annotation member declared `KClass` is stored and returned as `java.lang.Class`.**
+  The interface method's descriptor is `()Ljava/lang/Class;` (or `()[Ljava/lang/Class;` for
+  `Array<KClass<*>>`); its generic signature keeps the type argument
+  (`()Ljava/lang/Class<*>;`, `()Ljava/lang/Class<Ljava/lang/String;>;`,
+  `()Ljava/lang/Class<+Ljava/lang/Number;>;`). The synthetic implementation stores that class.
+  Its constructor still receives the `KClass` the call site built and converts it with
+  `JvmClassMappingKt.getJavaClass` (an array is copied element by element). `equals` reads the
+  interface, rebuilds `KClass` with `Reflection.getOrCreateKotlinClass`, and compares those:
+  `Int::class` and `Integer::class` are equal. `hashCode` hashes the stored `Class` through
+  `Object.hashCode`, so those two instances hash differently. A Kotlin read of the member
+  invokes the `Class`-returning method and rebuilds the `KClass`. Metadata records the Kotlin
+  type `kotlin.reflect.KClass` and the JVM getter descriptor `()Ljava/lang/Class;`. Tests:
+  `tests/annotation_kclass_member_e2e.rs`,
+  `tests/annotation_emission_e2e.rs::an_instantiated_kclass_annotation_reads_its_member`.
+
 - **A missing context argument names its parameter, and a loop's `hasNext` belongs to its iterator.**
   The emitted diagnostics below are checked directly against kotlinc; extracted templates are only
   audit leads. A failed context lookup carries the parameter index and type from selection, while
