@@ -43,7 +43,6 @@ inference/overrideDefaultProperty.kt
 inference/overrideGenericDefaultMethod.kt
 inference/pcla/pclaRootIsTrySyntheticCallWithDelegate.kt
 inline/callableReferenceOfLocalFun.kt
-inline/localDeclarationsClash.kt
 inlineSizeReduction/lastBreak.kt
 innerNested/nestedInPackage.kt
 ir/privateSignatures/privateLeakThroughInline.kt
