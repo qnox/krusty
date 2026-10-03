@@ -17728,7 +17728,7 @@ impl<'a> Checker<'a> {
                 if constraint != ConstructorParameterConstraint::Concrete {
                     continue;
                 }
-                if self.implicit_integer_coercion_applies(
+                if self.commit_implicit_integer_coercion(
                     argument,
                     expected,
                     selected
@@ -39857,6 +39857,23 @@ impl<'a> Checker<'a> {
         access.property.is_const && access.property.implicit_integer_coercion
     }
 
+    /// The selected argument is a signed literal or annotated constant that the unsigned parameter
+    /// accepts. Checked FIR reads this record and lowers it as a carrier conversion (`i2l`, `i2b`,
+    /// `i2s`); probing must keep using [`Self::implicit_integer_coercion_applies`] so a rejected
+    /// overload does not publish a conversion.
+    fn commit_implicit_integer_coercion(
+        &mut self,
+        argument: ExprId,
+        expected: Ty,
+        marked_parameter: bool,
+    ) -> bool {
+        if !self.implicit_integer_coercion_applies(argument, expected, marked_parameter) {
+            return false;
+        }
+        self.selected_numeric_conversions.insert(argument, expected);
+        true
+    }
+
     /// Declaration shape shared by semantic member-property reads and writes. The federated source
     /// covers this file, sibling source files, and the classpath, so call sites do not need origin-specific
     /// interface probes merely to preserve the dispatch shape selected during resolution.
@@ -49066,7 +49083,7 @@ impl<'a> Checker<'a> {
             if constraint != ConstructorParameterConstraint::Concrete {
                 continue;
             }
-            if self.implicit_integer_coercion_applies(
+            if self.commit_implicit_integer_coercion(
                 argument,
                 expected,
                 selected
@@ -56404,7 +56421,7 @@ impl<'a> Checker<'a> {
                         .unwrap_or(false);
                     let actual =
                         self.check_argument_expected(scope, argument, expected, has_receiver, None);
-                    if !self.implicit_integer_coercion_applies(
+                    if !self.commit_implicit_integer_coercion(
                         argument,
                         expected,
                         selected
@@ -58486,7 +58503,7 @@ impl<'a> Checker<'a> {
                 self.expect_whole_array_vararg_arg(Some(scope), argument, actual, substituted);
                 continue;
             }
-            if self.implicit_integer_coercion_applies(
+            if self.commit_implicit_integer_coercion(
                 argument,
                 substituted,
                 implicit_integer_coercion
