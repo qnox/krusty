@@ -587,16 +587,31 @@ impl BodyLowering<'_> {
             let parameter = u32::try_from(parameter).expect("too many local parameters");
             arguments.push(match argument {
                 crate::fir::FirAdaptedReferenceArgument::Value(source) => {
-                    if reference.params.get(*source as usize).is_none() {
+                    let Some(actual) = reference.params.get(*source as usize).copied() else {
                         return Ok(None);
-                    }
+                    };
+                    // The adapter parameter has the reference's substituted type. The local
+                    // function is compiled once against its declared parameter, so a primitive
+                    // substituted for a type parameter is coerced here. The backend boxes it.
+                    let declaration = parameter as usize;
+                    let physical = capture_count
+                        + declaration
+                        + declaration_parameter_slot_offset(realization, declaration);
+                    let Some(declared) = self.ir.functions[realization.function as usize]
+                        .params
+                        .get(physical)
+                        .copied()
+                    else {
+                        return Ok(None);
+                    };
+                    let value = self.ir.add_expr(IrExpr::GetValue(
+                        own_start
+                            .checked_add(*source)
+                            .expect("adapted reference parameter overflow"),
+                    ));
                     crate::ir::IrCheckedArgument::Expression {
                         parameter,
-                        value: self.ir.add_expr(IrExpr::GetValue(
-                            own_start
-                                .checked_add(*source)
-                                .expect("adapted reference parameter overflow"),
-                        )),
+                        value: self.coerce_to_declared(value, actual, declared),
                     }
                 }
                 crate::fir::FirAdaptedReferenceArgument::Default => {
@@ -606,20 +621,6 @@ impl BodyLowering<'_> {
                     values,
                     whole_array,
                 } => {
-                    let mut elements = Vec::with_capacity(values.len());
-                    for source in values.iter().copied() {
-                        if reference.params.get(source as usize).is_none() {
-                            return Ok(None);
-                        }
-                        elements.push((
-                            self.ir.add_expr(IrExpr::GetValue(
-                                own_start
-                                    .checked_add(source)
-                                    .expect("adapted reference parameter overflow"),
-                            )),
-                            *whole_array,
-                        ));
-                    }
                     let declaration = parameter as usize;
                     let physical = capture_count
                         + declaration
@@ -631,6 +632,29 @@ impl BodyLowering<'_> {
                     else {
                         return Ok(None);
                     };
+                    let declared = if *whole_array {
+                        array_type
+                    } else {
+                        let Some(element) = array_type.array_elem() else {
+                            return Ok(None);
+                        };
+                        element
+                    };
+                    let mut elements = Vec::with_capacity(values.len());
+                    for source in values.iter().copied() {
+                        let Some(actual) = reference.params.get(source as usize).copied() else {
+                            return Ok(None);
+                        };
+                        let value = self.ir.add_expr(IrExpr::GetValue(
+                            own_start
+                                .checked_add(source)
+                                .expect("adapted reference parameter overflow"),
+                        ));
+                        elements.push((
+                            self.coerce_to_declared(value, actual, declared),
+                            *whole_array,
+                        ));
+                    }
                     crate::ir::IrCheckedArgument::Vararg {
                         parameter,
                         array_type,

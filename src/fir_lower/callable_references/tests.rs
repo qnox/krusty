@@ -614,6 +614,67 @@ fn source_callable_references_become_structural_values_or_adapters() {
 }
 
 #[test]
+fn a_local_reference_coerces_substituted_arguments_to_declared_slots() {
+    let ir = lower_single_source(
+        r#"
+            fun substituted(): (Boolean) -> Unit {
+                fun <F> localFunction(flag: F) {}
+                return ::localFunction
+            }
+            fun identical(): (Boolean) -> Unit {
+                fun localFunction(flag: Boolean) {}
+                return ::localFunction
+            }
+            fun vararg(): (Boolean) -> Unit {
+                fun <F> localFunction(vararg flags: F) {}
+                return ::localFunction
+            }
+        "#,
+        "LocalGenericReferenceCoercion",
+    );
+
+    let declared = Ty::obj("kotlin/Any");
+    let coercions = ir
+        .exprs
+        .iter()
+        .filter_map(|expression| match expression {
+            IrExpr::TypeOp {
+                op: IrTypeOp::ImplicitCoercion,
+                arg,
+                type_operand,
+            } if *type_operand == declared => Some(*arg),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        coercions.len(),
+        2,
+        "the erased value and vararg element are coerced, but the identical value is not; ops={:?} functions={:?}",
+        ir.exprs
+            .iter()
+            .filter_map(|expression| match expression {
+                IrExpr::TypeOp {
+                    op: IrTypeOp::ImplicitCoercion,
+                    type_operand,
+                    ..
+                } => Some(*type_operand),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        ir.functions
+            .iter()
+            .map(|function| (function.name.as_str(), function.params.clone()))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        coercions
+            .iter()
+            .all(|argument| matches!(ir.expr(*argument), IrExpr::GetValue(_))),
+        "the coerced values are reference parameters"
+    );
+}
+
+#[test]
 fn adapted_reference_arguments_keep_checked_target_coercions() {
     let ir = lower_single_source(
         r#"
