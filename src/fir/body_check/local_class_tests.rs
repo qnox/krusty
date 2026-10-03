@@ -1067,7 +1067,7 @@ fn inner_subclass_keeps_the_extension_receiver_its_superclass_constructor_needs(
                       }\n\
                       return Outer().Inner().result()\n\
                   }\n";
-    let (outer, _) = checked_function_body(source, "bar");
+    let (outer, index) = checked_function_body(source, "bar");
     let FirExprKind::Block { statements, .. } = &outer
         .expr(root_expression(&outer))
         .expect("extension body block")
@@ -1088,12 +1088,53 @@ fn inner_subclass_keeps_the_extension_receiver_its_superclass_constructor_needs(
         2,
         "Local and Outer are the function's local classes: {captures:?}"
     );
-    assert!(
-        captures
-            .iter()
-            .all(|captures| captures.iter().any(string_extension_receiver)),
-        "Local reads this@bar, and Outer stores it for Inner's super call: {captures:?}"
+    let local_identity = receiver_identity(captures[0]);
+    let outer_identity = receiver_identity(captures[1]);
+    assert_eq!(
+        local_identity, outer_identity,
+        "Outer stores the same receiver rung Local's constructor takes: {captures:?}"
     );
+
+    let inner_calls = (0..outer.expression_count())
+        .filter_map(|raw| {
+            let expression = outer.expr(FirExprId::from_raw(raw as u32))?;
+            let FirExprKind::ConstructorCall(call) = &expression.kind else {
+                return None;
+            };
+            let owner = expression.ty.get().obj_internal()?;
+            let declaration = index.classifier_declaration(owner)?;
+            index
+                .local_class_name_provenance(declaration)
+                .is_some_and(|provenance| {
+                    provenance
+                        .segments
+                        .last()
+                        .is_some_and(|segment| segment == "Inner")
+                })
+                .then_some(call)
+        })
+        .collect::<Vec<_>>();
+    let [inner_call] = inner_calls.as_slice() else {
+        panic!("the function constructs Inner once: {inner_calls:?}")
+    };
+    assert!(
+        inner_call.outer_receiver.is_some() && inner_call.arguments.is_empty(),
+        "Inner's constructor takes its enclosing instance and no value arguments: {inner_call:?}"
+    );
+    assert!(
+        inner_call.external_capture_arguments.is_none(),
+        "Inner does not take its own copy of the extension receiver: {inner_call:?}"
+    );
+}
+
+fn receiver_identity(captures: &[FirLocalClassCapture]) -> ClassCaptureIdentity {
+    let receiver = captures
+        .iter()
+        .find(|capture| string_extension_receiver(capture))
+        .expect("the extension receiver is a capture");
+    receiver
+        .capture_identity
+        .expect("the extension receiver has a closure identity")
 }
 
 fn string_extension_receiver(capture: &FirLocalClassCapture) -> bool {

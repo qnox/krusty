@@ -430,33 +430,35 @@ impl Checker<'_> {
                 continue;
             };
             required.extend(superclass_captures.iter().filter_map(|capture| {
-                matches!(
+                if !matches!(
                     capture.source,
                     AnonymousObjectCaptureSource::ImplicitReceiver { .. }
-                )
-                .then_some((
-                    capture.source,
-                    capture.receiver_capture,
-                    capture.capture_dependency,
-                ))
+                ) {
+                    return None;
+                }
+                // The coordinate on `source` is relative to the superclass body. Only the closure
+                // identity is shared with this class, and publication assigns it to every implicit
+                // receiver. Matching the coordinate, or inventing the identity when it is absent,
+                // would retain a different rung.
+                let receiver_capture = capture.receiver_capture.expect(
+                    "an implicit receiver published on a local class has a closure identity",
+                );
+                Some((receiver_capture, capture.capture_dependency))
             }));
         }
-        for (source, receiver_capture, dependency) in required {
-            let Some(local) = captures.iter_mut().find(|local| {
-                (local.receiver_capture.is_some() && local.receiver_capture == receiver_capture)
-                    || local.source == source
-            }) else {
+        for (receiver_capture, dependency) in required {
+            let Some(local) = captures
+                .iter_mut()
+                .find(|local| local.receiver_capture == Some(receiver_capture))
+            else {
                 continue;
             };
-            if local.receiver_capture.is_none() {
-                local.receiver_capture = receiver_capture;
-            }
             if local.capture_dependency.is_none() {
-                local.capture_dependency = dependency.or_else(|| {
-                    local
-                        .receiver_capture
-                        .map(crate::fir::ClassCaptureIdentity::Receiver)
-                });
+                // A direct superclass capture has no further edge. The dependency recorded here is
+                // that same identity, which is what keeps an unread receiver on this constructor.
+                local.capture_dependency = dependency.or(Some(
+                    crate::fir::ClassCaptureIdentity::Receiver(receiver_capture),
+                ));
             }
         }
     }
