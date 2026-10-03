@@ -10785,6 +10785,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/generic_local_extension_ref_e2e.rs`. Corpus:
   `codegen/box/callableReference/property/extensionPropertyReferenceWithTypeParameter.kt`.
 
+- **A local function reference passes each argument at the function's declared type.** The
+  reference's function type carries the substitution (`(Boolean) -> Unit` for
+  `fun <F> local(flag: F)`), while the lifted function is compiled once against `F`. The adapter
+  records an `ImplicitCoercion` from the substituted argument to that declared parameter, the same
+  boundary a direct local call already crosses. Identical types add nothing; a primitive
+  substituted for a type parameter is boxed by the backend when it emits the coercion. A bound
+  extension receiver is already stored at the declaration's receiver type, so only the value
+  arguments are coerced here. Tests: `a_local_reference_coerces_only_a_substituted_argument`,
+  `tests/local_fun_ref_e2e.rs` (`a_generic_local_function_reference_boxes_a_primitive_argument`,
+  `a_generic_local_extension_reference_boxes_a_primitive_argument`).
+
 - **Fully-qualified SOURCE class names (`pkg1.Cls`) in type position.** A dotted type name whose path
   matches a class declared in the same module (a sibling file's package, no `import` needed — as
   kotlinc accepts) resolves to that source class, shadowing any classpath type of the same path. The

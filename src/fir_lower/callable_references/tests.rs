@@ -614,6 +614,42 @@ fn source_callable_references_become_structural_values_or_adapters() {
 }
 
 #[test]
+fn a_local_reference_coerces_only_a_substituted_argument() {
+    let ir = lower_single_source(
+        r#"
+            fun substituted(): (Boolean) -> Unit {
+                fun <F> localFunction(flag: F) {}
+                ::localFunction
+            }
+            fun identical(): (Boolean) -> Unit {
+                fun localFunction(flag: Boolean) {}
+                ::localFunction
+            }
+        "#,
+        "LocalGenericReferenceCoercion",
+    );
+
+    let coercions = ir
+        .exprs
+        .iter()
+        .filter(|expression| {
+            matches!(
+                expression,
+                IrExpr::TypeOp {
+                    op: IrTypeOp::ImplicitCoercion,
+                    type_operand: Ty::TyParam(_, _),
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(
+        coercions, 1,
+        "only the type-parameter argument of the substituted local reference is coerced"
+    );
+}
+
+#[test]
 fn adapted_reference_arguments_keep_checked_target_coercions() {
     let ir = lower_single_source(
         r#"

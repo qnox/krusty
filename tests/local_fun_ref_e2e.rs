@@ -27,3 +27,39 @@ fun box(): String {\n\
     let out = run(SRC).expect("local function reference should compile + run");
     assert_eq!(out, "OK");
 }
+
+#[test]
+fn a_generic_local_function_reference_boxes_a_primitive_argument() {
+    common::expect_box_same_as_kotlinc(
+        r#"
+fun box(): String {
+    var status = "FAIL"
+    fun <F> localFunction(flag: F) {
+        status = if (flag!!.equals(true)) "OK" else "FAIL"
+    }
+    val update: (Boolean) -> Unit = ::localFunction
+    update(true)
+    return status
+}
+"#,
+        "GenericLocalFunctionReference",
+    );
+}
+
+#[test]
+fn a_generic_local_extension_reference_boxes_a_primitive_argument() {
+    common::expect_box_same_as_kotlinc(
+        r#"
+fun box(): String {
+    var status = "FAIL"
+    fun <T, F> T.localFunction(flag: F) {
+        status = if (flag!!.equals(true)) this.toString() else "FAIL"
+    }
+    val update: (Boolean) -> Unit = "OK"::localFunction
+    update(true)
+    return status
+}
+"#,
+        "GenericLocalExtensionReference",
+    );
+}
