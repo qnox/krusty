@@ -8,6 +8,18 @@ use std::process::Command;
 
 use super::common_core as common;
 
+/// Compile with an internal metadata stamp (`[X, Y, 0]`; `None` keeps the default). This is not
+/// `-language-version`. It lives in the e2e-only helper so the conformance binary does not compile
+/// an unused entry point.
+pub fn compile_in_process_files_metadata_version(
+    sources: &[(&str, &str)],
+    cp_jars: &[PathBuf],
+    jdk_modules: Option<&std::path::Path>,
+    metadata_version: Option<[i32; 3]>,
+) -> Option<Vec<(String, Vec<u8>)>> {
+    common::source_set_compile::compile(sources, cp_jars, jdk_modules, None, metadata_version)
+}
+
 /// A positive front-end coverage test upgraded to true e2e: the source must be checker-clean, the
 /// backend must emit it (a lowering/emit bail is a failure, not a skip), and when it declares
 /// `fun box()`, running it must return "OK". This belongs in the e2e-only helper module so the

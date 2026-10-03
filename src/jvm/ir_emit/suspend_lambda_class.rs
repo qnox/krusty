@@ -219,7 +219,13 @@ pub(super) fn emit_suspend_lambda_class(
     emit_bridge(&mut cw, &shape);
     // A lambda class is local to the scope it was written in.
     let (d1, d2) = lambda_metadata(ir, lambda, &formatter);
-    cw.set_kotlin_metadata(3, &[2, 4, 0], synthetic_class_xi(SYNTHETIC_LOCAL), &d1, &d2);
+    cw.set_kotlin_metadata(
+        3,
+        &opts.metadata_version(),
+        synthetic_class_xi(SYNTHETIC_LOCAL),
+        &d1,
+        &d2,
+    );
     env.run.finish_class(cw)
 }
 

@@ -215,14 +215,16 @@ pub fn compile(opts: &cli::Options) -> Result<usize, String> {
     );
 
     // A `-jvm-target` sets the emitted class-file version (kotlinc's `jvmToolchain(25)` ⇒ v69).
-    // Absent, the backend keeps krusty's v52 default.
+    // Absent, the backend keeps krusty's v52 default. `-language-version X.Y` stamps the
+    // `@kotlin.Metadata` `mv` and `.kotlin_module` header `[X, Y, 0]`, as kotlinc does.
     let backend = krusty::jvm::JvmBackend::new(cp)
         .with_class_major(opts.jvm_target_major)
         .with_jvm_default(opts.jvm_default)
         .with_java_parameters(opts.java_parameters)
         .with_lambda_modes(opts.lambda_modes)
         .with_param_assertions(!opts.no_param_assertions)
-        .with_call_assertions(!opts.no_call_assertions);
+        .with_call_assertions(!opts.no_call_assertions)
+        .with_metadata_version(opts.metadata_version);
     let outputs =
         krusty::compiler::emit_analyzed(analysis, &stems, &backend, &opts.module_name, &mut diags);
 

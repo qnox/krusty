@@ -48,7 +48,13 @@ pub(super) fn finish_local_synthetic_class(
     mut cw: crate::jvm::classfile::ClassWriter,
     env: &super::EmitEnv,
 ) -> Vec<u8> {
-    cw.set_kotlin_metadata(3, &[2, 4, 0], synthetic_class_xi(SYNTHETIC_LOCAL), &[], &[]);
+    cw.set_kotlin_metadata(
+        3,
+        &env.metadata_version,
+        synthetic_class_xi(SYNTHETIC_LOCAL),
+        &[],
+        &[],
+    );
     env.run.finish_class(cw)
 }
 

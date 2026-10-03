@@ -352,6 +352,9 @@ pub struct JvmBackend {
     /// Whether to emit the `Intrinsics.checkNotNullExpressionValue` guard on a narrowed platform
     /// value (`-Xno-call-assertions` clears this).
     call_assertions: bool,
+    /// `-language-version X.Y`: the `@kotlin.Metadata` `mv` and `.kotlin_module` header version to
+    /// stamp; `None` keeps the default ([`crate::jvm::ir_emit::DEFAULT_METADATA_VERSION`]).
+    metadata_version: Option<[i32; 3]>,
 }
 
 impl JvmBackend {
@@ -364,7 +367,15 @@ impl JvmBackend {
             lambda_modes: crate::jvm::ir_emit::LambdaModes::default(),
             param_assertions: true,
             call_assertions: true,
+            metadata_version: None,
         }
+    }
+
+    /// `-language-version X.Y` stamps every `@kotlin.Metadata` `mv` and the `.kotlin_module`
+    /// header with `[X, Y, 0]`; `None` keeps kotlinc's no-flag stamp.
+    pub fn with_metadata_version(mut self, version: Option<[i32; 3]>) -> JvmBackend {
+        self.metadata_version = version;
+        self
     }
 
     /// `-Xno-param-assertions` passes `false`: emit no `Intrinsics.checkNotNullParameter` guards.
@@ -449,6 +460,9 @@ pub fn shipping_emit_options(
         param_assertions: true,
         inner_class_resolver: Some(classpath_inner_class_resolver(cp)),
         value_classes: std::rc::Rc::default(),
+        // `-language-version` is a per-invocation option; the backend applies it with
+        // `EmitOptions::with_metadata_version`. The default keeps kotlinc's no-flag stamp.
+        metadata_version: None,
     }
 }
 
@@ -788,6 +802,8 @@ impl JvmBackend {
             (module_name, facade_locals),
             self.param_assertions,
             &classifiers,
+            self.metadata_version
+                .unwrap_or(crate::jvm::ir_emit::DEFAULT_METADATA_VERSION),
         );
         let has_facade_members = metadata.is_some();
         let inner_class_resolver =
@@ -842,6 +858,7 @@ impl JvmBackend {
                 .with_jvm_default(self.jvm_default)
                 .with_lambda_modes(self.lambda_modes)
                 .with_param_assertions(self.param_assertions)
+                .with_metadata_version(self.metadata_version)
                 .with_java_parameters(self.java_parameters);
         emit_opts.inner_class_resolver = Some(inner_class_resolver);
         let run = crate::jvm::ir_emit::EmitRun::default();
@@ -1115,7 +1132,11 @@ impl Backend for JvmBackend {
         // it unconditionally — omitting it byte-diverges the artifact set from the reference
         // compiler.
         let packages: Vec<(String, Vec<String>)> = state.module_packages.into_iter().collect();
-        let module_bytes = crate::metadata::module::build_kotlin_module(&packages);
+        let module_bytes = crate::metadata::module::build_kotlin_module(
+            &packages,
+            self.metadata_version
+                .unwrap_or(crate::jvm::ir_emit::DEFAULT_METADATA_VERSION),
+        );
         vec![(
             crate::metadata::module::kotlin_module_file_name(module_name),
             module_bytes,
@@ -1131,6 +1152,7 @@ pub fn facade_package_metadata_from_ir(
     (module_name, locals): (&str, &[LocalPropertyMeta]),
     param_assertions: bool,
     symbols: &dyn crate::backend::BackendClassifierSource,
+    metadata_version: [i32; 3],
 ) -> Option<crate::jvm::ir_emit::KotlinMetadata> {
     let functions = ir
         .package_functions
@@ -1379,6 +1401,7 @@ pub fn facade_package_metadata_from_ir(
         (module_name, locals),
         param_assertions,
         Some(&approximate),
+        metadata_version,
     )
 }
 
@@ -1438,6 +1461,7 @@ fn build_facade_metadata(
     (module_name, locals): (&str, &[LocalPropertyMeta]),
     param_assertions: bool,
     intersection_approximation: Option<&dyn Fn(crate::types::Ty) -> Option<crate::types::Ty>>,
+    metadata_version: [i32; 3],
 ) -> Option<crate::jvm::ir_emit::KotlinMetadata> {
     (!functions.is_empty() || !properties.is_empty() || !aliases.is_empty()).then(|| {
         let (d1_bytes, d2) =
@@ -1451,7 +1475,7 @@ fn build_facade_metadata(
             );
         crate::jvm::ir_emit::KotlinMetadata {
             k: 2,
-            mv: vec![2, 4, 0],
+            mv: metadata_version.to_vec(),
             xi: 48,
             d1: vec![d1_bytes.iter().map(|&byte| byte as char).collect()],
             d2,
@@ -1682,9 +1706,14 @@ mod tests {
             source_order: 0,
         });
 
-        let metadata =
-            facade_package_metadata_from_ir(&ir, ("main", &[]), true, &NoClassifierFacts)
-                .expect("a package property requires facade metadata");
+        let metadata = facade_package_metadata_from_ir(
+            &ir,
+            ("main", &[]),
+            true,
+            &NoClassifierFacts,
+            [2, 4, 0],
+        )
+        .expect("a package property requires facade metadata");
         let decoded = crate::jvm::metadata::decode_metadata(
             &metadata.d1,
             &metadata.d2,

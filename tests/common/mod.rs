@@ -1,7 +1,7 @@
 //! Shared test helpers.
 
 pub(crate) mod byte_dump;
-mod kotlin_metadata;
+pub(crate) mod kotlin_metadata;
 mod kotlinc_lib;
 pub mod language_directives;
 mod metadata_diff;
@@ -572,7 +572,7 @@ pub fn compile_to_dir(
     } else {
         Vec::new()
     };
-    let module_bytes = krusty::metadata::module::build_kotlin_module(&packages);
+    let module_bytes = krusty::metadata::module::build_kotlin_module(&packages, [2, 4, 0]);
     let meta_inf = out_dir.join("META-INF");
     std::fs::create_dir_all(&meta_inf).ok()?;
     std::fs::write(meta_inf.join("main.kotlin_module"), module_bytes).ok()?;
