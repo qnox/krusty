@@ -621,20 +621,6 @@ impl BodyLowering<'_> {
                     values,
                     whole_array,
                 } => {
-                    let mut elements = Vec::with_capacity(values.len());
-                    for source in values.iter().copied() {
-                        if reference.params.get(source as usize).is_none() {
-                            return Ok(None);
-                        }
-                        elements.push((
-                            self.ir.add_expr(IrExpr::GetValue(
-                                own_start
-                                    .checked_add(source)
-                                    .expect("adapted reference parameter overflow"),
-                            )),
-                            *whole_array,
-                        ));
-                    }
                     let declaration = parameter as usize;
                     let physical = capture_count
                         + declaration
@@ -646,6 +632,29 @@ impl BodyLowering<'_> {
                     else {
                         return Ok(None);
                     };
+                    let declared = if *whole_array {
+                        array_type
+                    } else {
+                        let Some(element) = array_type.array_elem() else {
+                            return Ok(None);
+                        };
+                        element
+                    };
+                    let mut elements = Vec::with_capacity(values.len());
+                    for source in values.iter().copied() {
+                        let Some(actual) = reference.params.get(source as usize).copied() else {
+                            return Ok(None);
+                        };
+                        let value = self.ir.add_expr(IrExpr::GetValue(
+                            own_start
+                                .checked_add(source)
+                                .expect("adapted reference parameter overflow"),
+                        ));
+                        elements.push((
+                            self.coerce_to_declared(value, actual, declared),
+                            *whole_array,
+                        ));
+                    }
                     crate::ir::IrCheckedArgument::Vararg {
                         parameter,
                         array_type,

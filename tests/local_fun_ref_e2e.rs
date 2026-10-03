@@ -63,3 +63,21 @@ fun box(): String {
         "GenericLocalExtensionReference",
     );
 }
+
+#[test]
+fn a_generic_local_vararg_reference_boxes_a_primitive_element() {
+    common::expect_box_same_as_kotlinc(
+        r#"
+fun box(): String {
+    var status = "FAIL"
+    fun <F> localFunction(vararg flags: F) {
+        status = if (flags[0]!!.equals(true)) "OK" else "FAIL"
+    }
+    val update: (Boolean) -> Unit = ::localFunction
+    update(true)
+    return status
+}
+"#,
+        "GenericLocalVarargReference",
+    );
+}

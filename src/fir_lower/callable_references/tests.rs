@@ -614,7 +614,7 @@ fn source_callable_references_become_structural_values_or_adapters() {
 }
 
 #[test]
-fn a_local_reference_coerces_only_a_substituted_argument() {
+fn a_local_reference_coerces_substituted_arguments_to_declared_slots() {
     let ir = lower_single_source(
         r#"
             fun substituted(): (Boolean) -> Unit {
@@ -623,6 +623,10 @@ fn a_local_reference_coerces_only_a_substituted_argument() {
             }
             fun identical(): (Boolean) -> Unit {
                 fun localFunction(flag: Boolean) {}
+                return ::localFunction
+            }
+            fun vararg(): (Boolean) -> Unit {
+                fun <F> localFunction(vararg flags: F) {}
                 return ::localFunction
             }
         "#,
@@ -644,8 +648,8 @@ fn a_local_reference_coerces_only_a_substituted_argument() {
         })
         .count();
     assert_eq!(
-        coercions, 1,
-        "only the type-parameter argument of the substituted local reference is coerced"
+        coercions, 2,
+        "the substituted value and vararg element are coerced, but the identical value is not"
     );
 }
 
