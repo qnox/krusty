@@ -45602,8 +45602,32 @@ impl<'a> Checker<'a> {
             self.resolved_source_calls.insert(call, source_key);
         }
     }
-    fn enter_public_api_inline(&mut self, function: &FunDecl) -> bool {
-        let entered = function.is_inline() && function.visibility.is_public_api();
+    /// Public or protected visibility, or `@PublishedApi` on an `internal` declaration. The
+    /// annotation is the resolved classifier identity already stored on the candidate, never the
+    /// source spelling.
+    fn is_public_api_for_inline_access(visibility: Visibility, annotations: &[TypeName]) -> bool {
+        visibility.is_public_api()
+            || annotations
+                .iter()
+                .any(|annotation| annotation.matches("kotlin/PublishedApi"))
+    }
+
+    fn declaration_is_public_api_inline(
+        &self,
+        scope: &CheckerScope<'_>,
+        function: &FunDecl,
+    ) -> bool {
+        let annotations = function
+            .annotations
+            .iter()
+            .filter_map(|annotation| self.annotation_identity_in_scope(scope, annotation))
+            .collect::<Vec<_>>();
+        function.is_inline()
+            && Self::is_public_api_for_inline_access(function.visibility, &annotations)
+    }
+
+    fn enter_public_api_inline(&mut self, scope: &CheckerScope<'_>, function: &FunDecl) -> bool {
+        let entered = self.declaration_is_public_api_inline(scope, function);
         if entered {
             self.public_api_inline_depth += 1;
         }
@@ -45616,16 +45640,17 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// A public or protected `inline` function publishes its body into every caller. A
-    /// non-public-API callee is rejected at the reference. An inline callee names the transitive
-    /// form, because its own body would be published too.
+    /// A public-API `inline` function publishes its body into every caller. A non-public-API
+    /// callee is rejected at the reference. `@PublishedApi internal` is public API for this
+    /// check. An inline callee names the transitive form, because its own body would be
+    /// published too.
     fn reject_non_public_api_from_public_inline(
         &mut self,
         call: ExprId,
-        visibility: Visibility,
+        callee_is_public_api: bool,
         inline: InlineKind,
     ) {
-        if self.public_api_inline_depth == 0 || visibility.is_public_api() {
+        if self.public_api_inline_depth == 0 || callee_is_public_api {
             return;
         }
         if !self.public_inline_access_calls.insert(call) {
@@ -45712,7 +45737,7 @@ impl<'a> Checker<'a> {
         } = selected;
         self.reject_non_public_api_from_public_inline(
             call,
-            selected.visibility,
+            Self::is_public_api_for_inline_access(selected.visibility, &selected.annotations),
             selected.flags.inline,
         );
         let mut ret = selected.callable.ret;
@@ -51985,7 +52010,7 @@ impl<'a> Checker<'a> {
     }
 
     fn check_fun(&mut self, scope: &CheckerScope<'_>, f: &FunDecl, source_decl: Option<DeclId>) {
-        let public_api_inline = self.enter_public_api_inline(f);
+        let public_api_inline = self.enter_public_api_inline(scope, f);
         let enclosing_return_frame = self.lambda_returns.enter_function(Some(f.name.clone()));
         let suppression_depth = self.check_function_annotation_applications(scope, f);
         self.check_infix_declaration(f, false);
@@ -56450,7 +56475,7 @@ impl<'a> Checker<'a> {
         source_member: Option<crate::libraries::SourceMember>,
         stable_declaration: Option<crate::fir::DeclarationId>,
     ) {
-        let public_api_inline = self.enter_public_api_inline(f);
+        let public_api_inline = self.enter_public_api_inline(scope, f);
         let selected_default_method = source_member
             .is_some_and(|member| self.selected_signature_default_source_member(member));
         let default_owned_method = self.signature_defaults_only
@@ -68526,7 +68551,10 @@ impl<'a> Checker<'a> {
         }
         self.reject_non_public_api_from_public_inline(
             call,
-            selected.member.visibility,
+            Self::is_public_api_for_inline_access(
+                selected.member.visibility,
+                &selected.member.annotations,
+            ),
             selected.member.inline,
         );
         // A direct function parameter contextually CHECKS a postponed lambda body. Apply the

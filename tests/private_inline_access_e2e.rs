@@ -92,3 +92,119 @@ private inline fun inner(): String = bar()\n";
         "a public inline function calling a non-public function",
     );
 }
+
+/// `@PublishedApi internal` is public API for an inline call. A public inline function may call
+/// it. An `@PublishedApi internal inline` function is itself that boundary and cannot call a
+/// private function.
+#[test]
+fn published_api_internal_is_public_api_for_inline_access() {
+    const SOURCE: &str = "@PublishedApi\n\
+internal fun publishedTop(): String = \"T\"\n\
+\n\
+class A {\n\
+\x20   @PublishedApi\n\
+\x20   internal fun publishedMember(): String = \"M\"\n\
+\n\
+\x20   inline fun readMember(): String = publishedMember()\n\
+}\n\
+\n\
+inline fun readTop(): String = publishedTop()\n\
+\n\
+fun box(): String {\n\
+\x20   if (readTop() != \"T\") return \"FAIL top\"\n\
+\x20   if (A().readMember() != \"M\") return \"FAIL member\"\n\
+\x20   return \"OK\"\n\
+}\n";
+    let sources = [("main.kt", SOURCE)];
+    let jdk = common::jdk_modules();
+    let result =
+        common::compile_and_run_box_files(&sources, &[common::stdlib_jar()], Some(jdk.as_path()))
+            .expect("krusty accepts @PublishedApi from a public inline function");
+    assert_eq!(result, common::kotlinc_box_files_result(&sources, "MainKt"));
+    assert_eq!(result, "OK");
+
+    const REJECTED: &str = "@PublishedApi\n\
+internal inline fun boundary(): String = hidden()\n\
+\n\
+private fun hidden(): String = \"NO\"\n\
+\n\
+class C {\n\
+\x20   @PublishedApi\n\
+\x20   internal inline fun callsSecret(): String = secret()\n\
+\n\
+\x20   private fun secret(): String = \"NO\"\n\
+}\n";
+    let rejected = common::compiler_diagnostics(&[("f1.kt", REJECTED)], &[]);
+    common::expect_identical_rejection(
+        &rejected,
+        "@PublishedApi internal inline calling a private function",
+    );
+}
+
+/// A private top-level function with a default, called from an internal inline function, is
+/// reached through `access$foo$default` with the `$default` stub's descriptor.
+#[test]
+fn a_private_top_level_default_uses_the_default_bridge_accessor() {
+    const LIB: &str = "private fun foo(x: Int = 1): Int = x\n\
+\n\
+private fun bar(x: String = \"A\", y: String = \"B\"): String = x + y\n\
+\n\
+internal inline fun useFoo(): Int = foo()\n\
+\n\
+internal inline fun useBar(): String = bar(\"Z\")\n";
+    const MAIN: &str = "fun box(): String {\n\
+\x20   if (useFoo() != 1) return \"FAIL foo\"\n\
+\x20   if (useBar() != \"ZB\") return \"FAIL bar\"\n\
+\x20   return \"OK\"\n\
+}\n";
+    let sources = [("f1.kt", LIB), ("f2.kt", MAIN)];
+    let facade = common::ModuleClassPair::compile(&sources, "F1Kt");
+    for method in [
+        "access$foo$default",
+        "access$bar$default",
+        "useFoo",
+        "useBar",
+    ] {
+        let (reference, krusty) = facade.method_code("F1Kt", method);
+        assert_eq!(krusty, reference, "F1Kt.{method}");
+    }
+    let caller = common::ModuleClassPair::compile(&sources, "F2Kt");
+    let (reference, krusty) = caller.method_code("F2Kt", "box");
+    assert_eq!(krusty, reference, "F2Kt.box");
+    let jdk = common::jdk_modules();
+    let result =
+        common::compile_and_run_box_files(&sources, &[common::stdlib_jar()], Some(jdk.as_path()))
+            .expect("krusty runs the top-level default accessor");
+    assert_eq!(result, common::kotlinc_box_files_result(&sources, "F2Kt"));
+    assert_eq!(result, "OK");
+}
+
+/// A private member with a default, called from an internal inline function, is reached through
+/// `access$mem$default` with the instance `$default` stub's receiver, mask, and marker.
+#[test]
+fn a_private_member_default_uses_the_default_bridge_accessor() {
+    const LIB: &str = "class C {\n\
+\x20   private fun mem(z: Int = 3): Int = z\n\
+\n\
+\x20   internal inline fun useMem(): Int = mem()\n\
+}\n";
+    const MAIN: &str = "fun box(): String {\n\
+\x20   if (C().useMem() != 3) return \"FAIL\"\n\
+\x20   return \"OK\"\n\
+}\n";
+    let sources = [("f1.kt", LIB), ("f2.kt", MAIN)];
+    let class = common::ModuleClassPair::compile(&sources, "C");
+    for method in ["access$mem$default", "useMem"] {
+        let (reference, krusty) = class.method_code("C", method);
+        assert_eq!(krusty, reference, "C.{method}");
+    }
+    let caller = common::ModuleClassPair::compile(&sources, "F2Kt");
+    let (reference, krusty) = caller.method_code("F2Kt", "box");
+    assert_eq!(krusty, reference, "F2Kt.box");
+    let jdk = common::jdk_modules();
+    let result =
+        common::compile_and_run_box_files(&sources, &[common::stdlib_jar()], Some(jdk.as_path()))
+            .expect("krusty runs the member default accessor");
+    assert_eq!(result, common::kotlinc_box_files_result(&sources, "F2Kt"));
+    assert_eq!(result, "OK");
+}

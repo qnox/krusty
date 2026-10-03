@@ -7276,19 +7276,27 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `::a_nested_class_reaches_the_outer_class_private_member`,
   `::a_private_member_of_an_unrelated_class_stays_inaccessible`,
   `::property_inferred_from_generic_companion_method`, box `classes/kt504.kt`.
-- **A public or protected `inline` function cannot call a non-public-API function.** The reference
-  is rejected where it is resolved: `public-API inline function cannot access non-public-API function.`
-  A non-public-API `inline` callee uses the transitive wording, because publishing it would publish
-  its body too. An `internal` or `private` inline function may call a private function. Test:
-  `tests/private_inline_access_e2e.rs`.
+- **A public-API `inline` function cannot call a non-public-API function.** Public and protected
+  are public API, and so is `@PublishedApi internal`: the annotation's resolved classifier
+  identity (`kotlin/PublishedApi`) is the declaration fact, on both the inline function and the
+  callee, for a top-level function and for a member. The reference is rejected where it is
+  resolved: `public-API inline function cannot access non-public-API function.` A non-public-API
+  `inline` callee uses the transitive wording, because publishing it would publish its body too.
+  An `internal` or `private` inline function may call a private function. `@PublishedApi internal
+  inline` is itself a public-API inline boundary. Test: `tests/private_inline_access_e2e.rs`.
 - **A private function called from an `internal` `inline` function is reached through `access$<name>`.**
   The inline function's own method calls the public accessor, and a same-module caller that expands
   the function into another class file calls that same accessor. Naming the private method from the
   caller's class is an `IllegalAccessError`. A file facade forwards with `access$bar()` /
   `access$dex()` (`invokestatic` of the private function). An instance method forwards with
-  `access$bi(Owner)`, which `invokespecial`s the private method. A private `inline` function does
-  not publish this boundary, and a lifted local function keeps its own name. Test:
-  `tests/private_inline_access_e2e.rs`. Box `ir/privateSignatures/privateLeakThroughInline.kt`.
+  `access$bi(Owner)`, which `invokespecial`s the private method. A call that omits a default
+  argument keeps the selected `$default` bridge: the accessor is `access$<name>$default` with that
+  bridge's descriptor, masks, marker, and receiver, and its body `invokestatic`s `<name>$default`.
+  A non-inline caller in the same package still calls the package-private `$default` stub directly.
+  A private `inline` function does not publish this boundary, and a lifted local function keeps
+  its own name. A private `inline` function that a non-private inline function expands does publish
+  the accessor for a private default it calls. Test: `tests/private_inline_access_e2e.rs`. Box
+  `ir/privateSignatures/privateLeakThroughInline.kt`.
 - **A private member-extension accessor reached from another class calls `access$<name>`.** The
   accessor is an instance method of the declaring class (`getItem(Key)` for `val Key.item`).
   A local class inside the owner is a separate class file, so it cannot call that private method.

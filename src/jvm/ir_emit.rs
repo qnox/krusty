@@ -8646,21 +8646,29 @@ impl<'a> Emitter<'a> {
                     stub_params.push(Ty::obj("java/lang/Object"));
                     let aw: i32 = stub_params.iter().map(|t| slot_words(*t) as i32).sum();
                     let stub_desc = method_descriptor(&stub_params, ret);
-                    let stub_name = format!("{name}$default");
+                    let plain_stub = format!("{name}$default");
                     // The `$default` stub of an INTERFACE method is a STATIC interface method —
                     // referenced via an `InterfaceMethodref` constant (a plain `Methodref` is an
                     // `IncompatibleClassChangeError`), still invoked with `invokestatic`. Under
                     // `enable`/`no-compatibility` kotlinc puts that stub on the interface and call
                     // sites use it; under `disable` the interface holds nothing executable and the
                     // stub exists only on `<Iface>$DefaultImpls`, so a call site aimed at the
-                    // interface would link to a method that was never emitted.
+                    // interface would link to a method that was never emitted. The inline
+                    // `access$` bridge is published on the owner next to its `$default` stub, so
+                    // the holder path keeps the stub name.
                     let holder;
-                    let (stub_owner, stub_on_interface) =
+                    let (stub_owner, stub_on_interface, stub_name) =
                         if is_iface && self.jvm_default == JvmDefaultMode::Disable {
                             holder = format!("{owner}$DefaultImpls");
-                            (&holder, false)
+                            (&holder, false, plain_stub)
                         } else {
-                            (&owner, is_iface)
+                            let stub_name = method_defaults::default_call_name(
+                                self.ir,
+                                self.export_private_calls,
+                                fid,
+                                &plain_stub,
+                            );
+                            (&owner, is_iface, stub_name)
                         };
                     let m = if stub_on_interface {
                         self.cw
@@ -8824,9 +8832,16 @@ impl<'a> Emitter<'a> {
                         param_tys.iter().map(|ty| slot_words(*ty) as i32).sum();
                     let descriptor = method_descriptor(&param_tys, ret);
                     let owner = owner.render();
-                    let method =
-                        self.cw
-                            .methodref(&owner, &format!("{}$default", f.name), &descriptor);
+                    let method = self.cw.methodref(
+                        &owner,
+                        &method_defaults::default_call_name(
+                            self.ir,
+                            self.export_private_calls,
+                            *function,
+                            &format!("{}$default", f.name),
+                        ),
+                        &descriptor,
+                    );
                     self.mark_call_start(e, code);
                     code.invokestatic(method, argument_words, physical_call_result_words(ret));
                 }
@@ -8836,7 +8851,12 @@ impl<'a> Emitter<'a> {
                     let f = &self.ir.functions[*fid as usize];
                     let param_tys = static_default_stub_params(self.ir, *fid);
                     let ret = jvm_declared_ty(&f.ret);
-                    let name = format!("{}$default", f.name);
+                    let name = method_defaults::default_call_name(
+                        self.ir,
+                        self.export_private_calls,
+                        *fid,
+                        &format!("{}$default", f.name),
+                    );
                     let args = args.clone();
                     if let Err(mismatch) =
                         self.emit_source_default_call_operands(e, &args, &param_tys, code)
