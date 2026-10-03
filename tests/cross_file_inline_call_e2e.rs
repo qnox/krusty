@@ -735,18 +735,19 @@ fn reified_inline_member_called_from_another_file_is_spliced() {
 }
 
 /// The same-file form: a call from another class of the file is spliced too, and a private member
-/// the spliced body reads is reached through the declaring class's synthetic accessor.
+/// the spliced body reads is reached through the declaring class's synthetic accessor. A public
+/// inline member cannot call that private inline member; kotlinc rejects it as a public-API inline
+/// reaching a non-public-API inline function.
 #[test]
 fn inline_member_of_another_class_in_the_same_file_is_spliced() {
     const SRC: &str = "class Probe(private val value: Any?) {\n\
                        \x20   private inline fun <reified T> holds(): Boolean = value is T\n\
                        \x20   class Reader { fun read(p: Probe): Boolean = p.holds<Other>() }\n\
-                       \x20   inline fun <reified T> matches(): Boolean = holds<T>()\n\
                        }\n\
                        class Other\n\
                        fun box(): String {\n\
                        \x20   if (!Probe.Reader().read(Probe(Other()))) return \"fail: reader\"\n\
-                       \x20   if (Probe(null).matches<Other>()) return \"fail: matches\"\n\
+                       \x20   if (Probe.Reader().read(Probe(null))) return \"fail: null\"\n\
                        \x20   return \"OK\"\n\
                        }\n";
     common::expect_box_ok_with_stdlib(SRC, "same_file_reified_inline_member");
