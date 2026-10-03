@@ -1,7 +1,7 @@
 //! The names of suspend functions' continuation classes and the declaration paths kotlinc gives
 //! them.
 
-use crate::ir::IrFile;
+use crate::ir::{IrExpr, IrFile};
 use crate::types::{type_name, TypeName};
 
 /// How many SUSPEND functions sharing this one's continuation NAME the file declares before it.
@@ -70,9 +70,30 @@ pub(crate) fn continuation_ordinal(ir: &IrFile, fid: u32) -> usize {
             );
             // A lowering-made function has no source declaration, so no anonymous source object
             // can consume its generated sequence. Its target-private overloads number themselves.
-            same_name_ordinal(ir, fid) + 1
+            // A callable-reference SAM adapter is emitted as its own class at this same
+            // `{owner}${function}$1` spelling. Leaving the continuation there replaces the
+            // adapter, and the call site still constructs it with the function value.
+            let occupied = usize::from(sam_adapter_class_occupies_first_ordinal(ir, fid));
+            same_name_ordinal(ir, fid) + 1 + occupied
         }
     }
+}
+
+/// Whether `fid` is the forwarding method of a callable-reference SAM adapter.
+///
+/// The exact `impl_fn` edge and checked `function_adapter` role identify this class. Its generated
+/// function spelling is deliberately not semantic input.
+fn sam_adapter_class_occupies_first_ordinal(ir: &IrFile, fid: u32) -> bool {
+    ir.exprs.iter().any(|expression| {
+        matches!(
+            expression,
+            IrExpr::Lambda {
+                impl_fn,
+                sam: Some(target),
+                ..
+            } if *impl_fn == fid && target.function_adapter
+        )
+    })
 }
 
 /// The continuation class for an ordinal from [`continuation_ordinal`]. The one place a generated

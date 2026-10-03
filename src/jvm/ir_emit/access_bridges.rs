@@ -225,7 +225,7 @@ pub(super) fn cross_owner_member_calls(
 ) -> MemberAccessBridges {
     let mut private = std::collections::HashSet::new();
     let mut protected = std::collections::HashMap::new();
-    let mut scan = |owner: &str, roots: Vec<crate::ir::ExprId>| {
+    let mut scan = |owner: &str, roots: Vec<crate::ir::ExprId>, export_private: bool| {
         let mut seen = std::collections::HashSet::new();
         let mut stack = roots;
         while let Some(expression) = stack.pop() {
@@ -285,7 +285,12 @@ pub(super) fn cross_owner_member_calls(
             if let Some((class, target, receiver)) = local_target {
                 let target_class = &ir.classes[class as usize];
                 let visibility = ir.method_visibility(target);
-                if target_class.fq_name() != owner
+                let crosses_owner = target_class.fq_name() != owner;
+                // A non-private inline function's own body is copied into other classes, so a
+                // private method of this same class still needs a public accessor.
+                let export_same_owner =
+                    export_private && !crosses_owner && !ir.lifted_functions.contains_key(&target);
+                if (crosses_owner || export_same_owner)
                     && (private_interface_bodies_are_members || !target_class.is_interface)
                     && visibility.is_private()
                 {
@@ -533,7 +538,14 @@ pub(super) fn cross_owner_member_calls(
     };
 
     for context in contexts {
-        scan(&context.owner.internal_name(facade), context.roots.clone());
+        let owner = context.owner.internal_name(facade);
+        for &root in &context.roots {
+            scan(
+                &owner,
+                vec![root],
+                static_accessors::non_private_inline_body(ir, root),
+            );
+        }
     }
     MemberAccessBridges { private, protected }
 }
@@ -736,6 +748,16 @@ pub(super) fn private_member_accessor_access(
     }
 }
 
+/// A private declaration referenced from another file of this module. Its only legal cross-file
+/// use is the body of a non-private `inline` function, which the caller expands into its own class.
+pub(super) fn private_module_callable(ir: &IrFile, target: Option<crate::fir::CallableId>) -> bool {
+    target.is_some_and(|target| {
+        ir.referenced_module_callables
+            .get(&target)
+            .is_some_and(|callable| callable.visibility.is_private())
+    })
+}
+
 /// An already-selected member call: a protected or private access bridge, a same-owner private
 /// accessor, or the ordinary interface or class invocation.
 pub(super) struct SelectedMemberCall<'a> {
@@ -749,6 +771,9 @@ pub(super) struct SelectedMemberCall<'a> {
     pub(super) interface_owner: bool,
     pub(super) argument_words: i32,
     pub(super) protected: Option<&'a ProtectedMemberAccessBridge>,
+    /// The caller is a non-private `inline` function, so a same-class private member goes through
+    /// its accessor: the copied body must not name the private method.
+    pub(super) export_private_calls: bool,
 }
 
 /// Emit [`SelectedMemberCall`]. The exact selected declaration determines whether the physical
@@ -763,7 +788,7 @@ pub(super) fn emit_selected_member_call(
 ) {
     let member_target = ir.jvm_member_targets.get(&call.expression).copied();
     let private_extension_bridge = member_target.is_some_and(|function| {
-        source_owner != Some(StaticOwner::Class(call.owner_identity))
+        (source_owner != Some(StaticOwner::Class(call.owner_identity)) || call.export_private_calls)
             && run
                 .private_member_access_bridges
                 .borrow()
@@ -832,11 +857,11 @@ fn emit_direct_private_accessor_call(
     );
 }
 
-/// `invokestatic access$<name>(Owner, …)` for a private member-extension accessor.
+/// `invokestatic access$<name>(Owner, …)` for a private member reached from another class.
 ///
 /// An interface owner is an `InterfaceMethodref`; a class owner is a `Methodref`. The bridge method
 /// itself, including its `invokespecial` of the accessor, is emitted with the other access bridges.
-fn emit_private_member_extension_call(
+pub(super) fn emit_private_member_extension_call(
     cw: &mut ClassWriter,
     code: &mut CodeBuilder,
     call: &SelectedMemberCall<'_>,

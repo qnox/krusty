@@ -1,6 +1,6 @@
-use super::{Checker, CheckerScope, ResolvedEnumEntry};
+use super::{Checker, CheckerScope, ExprLowering, ResolvedEnumEntry};
 use crate::ast::ExprId;
-use crate::types::TypeName;
+use crate::types::{Ty, TypeName};
 
 impl Checker<'_> {
     pub(super) fn classifier_enum_entry_ordinal(
@@ -65,6 +65,29 @@ impl Checker<'_> {
         };
         let is_entry = self.classifier_has_enum_entry(owner, &declared_name);
         is_entry.then_some((owner, declared_name))
+    }
+
+    /// The synthetic classifier property on the owner the scope tower already selected.
+    ///
+    /// The prioritized rung carries that owner. `name` is only the lookup spelling;
+    /// [`crate::libraries::ImplicitClassifierProperty`] decides the result.
+    pub(super) fn prioritized_classifier_property(
+        &mut self,
+        expression: ExprId,
+        name: &str,
+        owner: TypeName,
+    ) -> Option<Ty> {
+        let (owner, property) = self.classifier_property_for_owner(owner, name)?;
+        let crate::libraries::ImplicitClassifierProperty::EnumEntries = property.operation;
+        let ty = property.ty;
+        self.expr_lowers.insert(
+            expression,
+            ExprLowering::ClassifierPropertyRead {
+                owner,
+                property: Box::new(property),
+            },
+        );
+        Some(ty)
     }
 
     pub(super) fn star_imported_enum_entry(

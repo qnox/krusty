@@ -332,6 +332,48 @@ fn function_invoke_reference_becomes_a_capturing_suspend_forwarder() {
 }
 
 #[test]
+fn reflective_function_invoke_reference_marks_its_forwarder() {
+    let platform: Box<dyn crate::libraries::SemanticPlatform> = Box::new(
+        crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(crate::toolchain::classpath_jars_for(
+                "// WITH_STDLIB",
+            )),
+        ))
+        .expect("JVM provider initialization"),
+    );
+    let ir = lower_single_source_with_platform(
+        "fun reference(block: suspend () -> Unit) {\n    val f = block::invoke\n}\n",
+        "ReflectiveInvokeReference",
+        platform,
+    );
+    let references = ir
+        .exprs
+        .iter()
+        .filter_map(|expression| match expression {
+            IrExpr::CallableReference(reference)
+                if matches!(
+                    reference.target,
+                    crate::ir::IrCallableReferenceTarget::FunctionInvoke
+                ) =>
+            {
+                Some((
+                    reference.adapter,
+                    reference.captures.len(),
+                    reference.bound_receiver.is_some(),
+                ))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [(wrapper, capture_count, bound)] = references.as_slice() else {
+        panic!("one reflective invoke reference, found {references:?}")
+    };
+    assert_eq!(*capture_count, 0);
+    assert!(*bound);
+    assert!(ir.suspend_funs.contains(wrapper));
+}
+
+#[test]
 fn vararg_adapted_local_reference_packs_wrapper_parameters() {
     let ir = lower_single_source(
         r#"
@@ -369,6 +411,35 @@ fn vararg_adapted_local_reference_packs_wrapper_parameters() {
         .exprs
         .iter()
         .all(|expression| !matches!(expression, IrExpr::Checked(_))));
+}
+
+#[test]
+fn extension_vararg_reference_packs_the_declaration_array() {
+    let ir = lower_single_source(
+        r#"
+            class Counter(val seed: Int)
+            fun outer(counter: Counter): (Int, Int) -> Int {
+                fun Counter.accumulate(first: Int = 5, vararg remaining: Int): Int =
+                    seed + first + remaining[0]
+                return counter::accumulate
+            }
+        "#,
+        "ExtensionVarargReference",
+    );
+
+    let packed = ir.exprs.iter().find_map(|expression| match expression {
+        IrExpr::Vararg {
+            array_type,
+            elements,
+            spreads,
+        } => Some((*array_type, elements.len(), spreads.clone())),
+        _ => None,
+    });
+    assert_eq!(
+        packed,
+        Some((Ty::obj("kotlin/IntArray"), 1, vec![false])),
+        "the packed value is the vararg parameter, after the extension receiver"
+    );
 }
 
 #[test]

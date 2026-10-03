@@ -869,6 +869,7 @@ pub(crate) fn member_from_signature(
     m.plugin_expression = sig.plugin_expression;
     m.stable_declaration = sig.stable_declaration;
     m.source_member = sig.source_member;
+    m.annotations = sig.annotations.clone();
     m
 }
 

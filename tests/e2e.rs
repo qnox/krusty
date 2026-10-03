@@ -106,6 +106,8 @@ mod bounded_type_param_e2e;
 mod box_harness_skip_semantics_e2e;
 #[path = "box_lists_guard_e2e.rs"]
 mod box_lists_guard_e2e;
+#[path = "box_runtime_reflect_e2e.rs"]
+mod box_runtime_reflect_e2e;
 #[path = "boxed_array_construction_e2e.rs"]
 mod boxed_array_construction_e2e;
 #[path = "boxed_override_results_e2e.rs"]
@@ -896,6 +898,8 @@ mod generic_hof_vc_binding_e2e;
 mod generic_inferred_primitive_return_e2e;
 #[path = "generic_inferred_return_e2e.rs"]
 mod generic_inferred_return_e2e;
+#[path = "generic_local_extension_ref_e2e.rs"]
+mod generic_local_extension_ref_e2e;
 #[path = "generic_member_extension_lambda_result_e2e.rs"]
 mod generic_member_extension_lambda_result_e2e;
 #[path = "generic_receiver_extension_lambda_shape_e2e.rs"]
@@ -1723,6 +1727,7 @@ mod primitive_to_string_e2e;
 mod private_classifier_access_e2e;
 #[path = "private_constructor_access_e2e.rs"]
 mod private_constructor_access_e2e;
+mod private_inline_access_e2e;
 #[path = "private_member_extension_accessor_e2e.rs"]
 mod private_member_extension_accessor_e2e;
 #[path = "private_set_e2e.rs"]
@@ -2068,6 +2073,8 @@ mod suspend_inline_statementless_block_e2e;
 mod suspend_interface_delegation_e2e;
 #[path = "suspend_interface_impl_e2e.rs"]
 mod suspend_interface_impl_e2e;
+#[path = "suspend_invoke_reference_e2e.rs"]
+mod suspend_invoke_reference_e2e;
 #[path = "suspend_lambda_class_e2e.rs"]
 mod suspend_lambda_class_e2e;
 #[path = "suspend_lambda_metadata_e2e.rs"]

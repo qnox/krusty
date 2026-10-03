@@ -1892,7 +1892,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   name's companion value does not hide it: `Enum.entries` is that property when the reference is
   inside the companion and when the expression's type is inferred. A companion member of the same
   spelling is `Enum.Companion.entries`. With `-PrioritizedEnumEntries`, that companion member is
-  selected first. Source/module and dependency shapes therefore share one target handoff; lowering
+  selected first. With `+PrioritizedEnumEntries`, an unqualified `entries` inside the enum is the
+  same synthetic property once the enum's own instance members miss, ahead of the companion and any
+  lexically enclosing classifier (`object Outer { val entries = …; enum class E { fun test() = entries } }`
+  reads `E.entries`). A constructor property, a property declared on the enum, or an inherited
+  interface property of that spelling still wins. With `-PrioritizedEnumEntries`, the enclosing
+  classifier's member wins that unqualified read. Source/module and dependency shapes therefore share
+  one target handoff; lowering
   never reconstructs a call from the declaration origin. If a provider exposes the enum kind but no
   direct accessor realization, the valid property is typed but rejected before emission with a stable
   boundary until an alternative cached-mapping realization is implemented. Test:
@@ -3733,9 +3739,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Two soundness declines gate every splice: a
   `$default` body is never spliced (the caller's placeholder nulls would type its parameter locals
   `Object`, a VerifyError — the real call is verifier-correct), and a body referencing an
-  `ACC_PRIVATE` method/field is never spliced (the member is legal only inside the defining class;
-  kotlinc rewrites to a synthetic `access$…` bridge krusty does not model — the fallback real call
-  stays in the class).
+  `ACC_PRIVATE` member that was not rewritten to a public accessor is never spliced (the member is
+  legal only inside the defining class; the fallback real call stays in the class). A private
+  function called from a non-private `inline` function is rewritten before that body is published:
+  the inline function itself calls `access$<name>`, so every splice of it does too.
   **An `invokedynamic` relocates with its whole bootstrap entry, and only if that entry may move.**
   The instruction names a `BootstrapMethods` entry of its DEFINING class by index, not a pool entry,
   so relocation re-interns the entry — its method handle, its static arguments and its name/type —
@@ -4653,9 +4660,26 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   identities in reified declarations and the exact recorded lambda-method domain, including after
   a lambda node becomes a class value. Closure realization preserves implementation identities
   and their owned nested/helper methods across that boundary; an anonymous object's ordinary
-  generic members are not in this domain merely because they use the same semantic parameter.
-  The enum-bound anonymous delegate negative control executes its erased cast without a marker
+  generic members are not in this lambda domain merely because they use the same semantic parameter.
+  The enum-bound anonymous delegate's call-site copy executes its cast without a reification marker
   (`erased_anonymous_delegate_member_is_not_a_reified_closure_method`).
+  Those members are still reified operations of the anonymous class. The declaration class keeps
+  the marker, and the inline method calls `needClassReification` before constructing it. That
+  guard is the declaration class recorded when the copy is made; emission does not walk the
+  class's bodies again. A same-module inline call copies the class and substitutes the call's
+  reified arguments, so the copy executes the specialized operation with no marker.   Source
+  property overrides leave their accessor functions empty. Accessor functions are materialized
+  after the copy, once property layouts exist; the same clone map then records those functions
+  on the copy. The copy fills its overrides from the recorded layout through that map, and
+  publishes a copied member-extension property under the copied classifier. Copied members keep
+  the declaration's erased signatures, and the call site invokes that erased constructor.
+  Reified operations inside the copied accessor bodies use the call-site argument.
+  A missing accessor mapping fails the lowering; the construction is not left on the declaration
+  class. The copy joins the caller's `{owner}${caller}$$inlined${callee}$N` sequence, shared
+  with a specialized lambda of the same expansion. Mentioning only an ordinary type parameter
+  does not copy the class.
+  Tests: `fir_lower::inlining::escaping_reified_object`, `tests/reified_anonymous_object_e2e.rs`,
+  boxes `reified/capture.kt` and `reified/innerObject.kt`.
   A singleton closure whose owned methods retain typed reified operations emits
   `needClassReification()` before creating its instance; a concrete specialized copy does not.
   Common lowering records the nearest source lambda identity and containing checked inline
@@ -5024,6 +5048,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   differing type other than `Object` takes a `checkcast`, so `val g: Greeter = Ann()` stores and
   frames a `Greeter` while `val g: Any = Ann()` frames an `Ann`. An assignment stores the value as
   emitted (`tests/unboxing_coercion_e2e.rs`).
+- **An inline function's anonymous-object result is its declared supertype.** A private
+  non-inline function may return the synthetic anonymous classifier, so `t.unused` sees a member
+  declared only on that object. An inline function, private or not, does not: each call site
+  copies the class, and the result the caller names is the single declared supertype (`I` for
+  `object : I`), or `Any` when none is written. `arrayOf` of two such calls is therefore an
+  array of that supertype, and the copied class is not cast back to the declaration class.
+  Tests: `tests/reified_anonymous_object_e2e.rs`, box
+  `reified/kt39256_privateInlineWithAnonymousObject.kt`.
 - **A hoisted anonymous object retains its construction site's lexical classifier scope.** The parser
   stores an anonymous object's class as a file-level synthetic declaration, but its member signatures,
   supertype arguments, superclass constructor arguments, and inferred member returns may still name a
@@ -7275,6 +7307,27 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `::a_nested_class_reaches_the_outer_class_private_member`,
   `::a_private_member_of_an_unrelated_class_stays_inaccessible`,
   `::property_inferred_from_generic_companion_method`, box `classes/kt504.kt`.
+- **A public-API `inline` function cannot call a non-public-API function.** Public and protected
+  are public API, and so is `@PublishedApi internal`: the annotation's resolved classifier
+  identity (`kotlin/PublishedApi`) is the declaration fact, on both the inline function and the
+  callee, for a top-level function and for a member. The reference is rejected where it is
+  resolved: `public-API inline function cannot access non-public-API function.` A non-public-API
+  `inline` callee uses the transitive wording, because publishing it would publish its body too.
+  An `internal` or `private` inline function may call a private function. `@PublishedApi internal
+  inline` is itself a public-API inline boundary. Test: `tests/private_inline_access_e2e.rs`.
+- **A private function called from an `internal` `inline` function is reached through `access$<name>`.**
+  The inline function's own method calls the public accessor, and a same-module caller that expands
+  the function into another class file calls that same accessor. Naming the private method from the
+  caller's class is an `IllegalAccessError`. A file facade forwards with `access$bar()` /
+  `access$dex()` (`invokestatic` of the private function). An instance method forwards with
+  `access$bi(Owner)`, which `invokespecial`s the private method. A call that omits a default
+  argument keeps the selected `$default` bridge: the accessor is `access$<name>$default` with that
+  bridge's descriptor, masks, marker, and receiver, and its body `invokestatic`s `<name>$default`.
+  A non-inline caller in the same package still calls the package-private `$default` stub directly.
+  A private `inline` function does not publish this boundary, and a lifted local function keeps
+  its own name. A private `inline` function that a non-private inline function expands does publish
+  the accessor for a private default it calls. Test: `tests/private_inline_access_e2e.rs`. Box
+  `ir/privateSignatures/privateLeakThroughInline.kt`.
 - **A private member-extension accessor reached from another class calls `access$<name>`.** The
   accessor is an instance method of the declaring class (`getItem(Key)` for `val Key.item`).
   A local class inside the owner is a separate class file, so it cannot call that private method.
@@ -8897,7 +8950,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   suspend methods (including their continuation and generic function-field ABI), and a primitive
   result overriding a reference result (boxed implementation plus erased bridge). A regular
   function suspend-converted into the interface is stored as that function's own `FunctionN`
-  (`() -> Unit` is `Function0`); the method calls it and does not pass the continuation. The same
+  (`() -> Unit` is `Function0`); the method calls it and does not pass the continuation. A
+  suspend callable reference adapted to that method is itself a suspension: the adapter passes
+  the method's continuation to `FunctionN.invoke`. Leaving the call non-suspending selects
+  `Function0` and the reference cannot be cast to the suspend carrier. The same
   storage follows the value's callable view when that value is not itself a function type: a
   `KProperty0<R>` is `Function0`, and a fun interface whose method is not suspend (`Fn<T> :
   (T) -> Unit`) is `Function1` when passed to a suspend collector. A fun
@@ -8909,7 +8965,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`java_sam_class_mode_shares_one_wrapper`). Corpus:
   `inlineClasses/funInterface/mangledSamWrappers`, `mangledSamWrappersGeneric`,
   `callableReference/adaptedReferences/suspendConversion/propertyReferenceToSuspendFunction`,
-  and `coroutines/suspendConversion/suspendConversionBetweenFunInterfaces`.
+  `coroutines/suspendConversion/suspendConversionBetweenFunInterfaces`, and
+  `funInterface/suspendFunctionAndFunInterfaceSharedClassSplit`. Test:
+  `suspend_callable_reference_passes_the_sam_continuation`.
+  The callable-reference adapter and the forwarding method's continuation are distinct generated
+  classes. The adapter occupies the first local-class ordinal and captures the reference; if the
+  forwarding method needs a state machine, its continuation uses the next ordinal. Reusing the
+  adapter's class name replaces its constructor with a `ContinuationImpl` constructor and makes
+  the checked adapter instantiation fail at runtime. Corpus:
+  `funInterface/suspendFunInterfaceConversionCodegen.kt`.
 - **A value that already implements the expected fun interface is not wrapped.** Assignability
   to the exact applied interface — including its type arguments, variance, and projections — is
   an ordinary argument during overload ranking, even when the value also has a function
@@ -10688,6 +10752,31 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   while an applicable local function wins without mixing priorities. The chosen semantic callable is
   recorded for lowering; overload selection never changes or retries the qualifier.
 
+- **A generic local extension is applicable to a callable reference once its receiver unifies.**
+  `Items<T>::foo` and `value::foo` compare a local `fun <T> Items<T>.foo()` with that receiver after
+  substituting the local function's own type parameters through the federated symbol hierarchy,
+  including a dependency's `Derived : Base<String>`. An expectation-free reference exposes that
+  specialized shape, so `Base<String>::pick` is not left with an unbound `T`. Formal bounds use
+  the shared bound-admission contract; a `<T : Marker>` extension is not a candidate for a
+  non-`Marker` argument, and the same-named property remains. A bound `counter::accumulate` or
+  unbound `Counter::accumulate` reference adapts that declaration's defaults and vararg to the
+  expected function or SAM shape. The packed value is the declaration's vararg array — the
+  parameter after the extension receiver — so a preceding value parameter is not the array. On one
+  lexical rung the nearest declared receiver wins, a concrete receiver domain beats a generic one,
+  and then the most specific applicable overload wins: passed parameter types are compared,
+  an equally specific non-vararg beats a vararg, and a shorter declaration beats a longer one.
+  `choose(value: Int = 1)` therefore beats `choose(vararg values: Int)` for `() -> Int` and
+  `(Int) -> Int`, while `(Int, Int) -> Int` still selects the vararg. A context-parameter
+  local extension keeps that receiver after the context parameters in the reference
+  (`context(Prefix) (Target) -> String` for an unbound `Target::join`). kotlinc 2.4.20 does not
+  compile a callable reference to a context-parameter function, so that runtime order is checked
+  on krusty and the rejection is checked against kotlinc. Two single-parameter
+  defaults such as `choose(value: Any = ...)` and `choose(value: Int = ...)` stay ambiguous for
+  `() -> Int` and do not fall through to a non-local candidate. The local function is visible only
+  from its declaration onward; an earlier reference still binds the property. Tests:
+  `tests/generic_local_extension_ref_e2e.rs`. Corpus:
+  `codegen/box/callableReference/property/extensionPropertyReferenceWithTypeParameter.kt`.
+
 - **Fully-qualified SOURCE class names (`pkg1.Cls`) in type position.** A dotted type name whose path
   matches a class declared in the same module (a sibling file's package, no `import` needed — as
   kotlinc accepts) resolves to that source class, shadowing any classpath type of the same path. The
@@ -11753,7 +11842,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   and is the one that fails if the allocation moves back ahead of the proof — and
   `tests/inline_tail_expansion_shape_e2e.rs`, which reads the lowered IR: a sole tail return expands
   with no exit loop, an early return keeps one, a non-tail `Unit` return keeps one, and a `Unit` tail
-  return is compiled and RUN to show its returned expression is evaluated exactly once.
+  return is compiled and RUN to show its returned expression is evaluated exactly once. A non-tail
+  `return expr` in that `Unit` loop still evaluates `expr` before the labelled break. There is no
+  result local, so the expression is a statement; dropping it deletes a nested inline call
+  (`return f2(y)` / `return f2(z)`). The same exit is used when an inline property accessor's body
+  has more than one return. Test: `a_non_tail_unit_return_evaluates_its_expression`. Corpus:
+  `codegen/box/inlineSizeReduction/lastBreak.kt`.
 
 - **An uninitialized type-parameter local keeps that parameter's erased slot when inlined.**
   `var result: R` with no initializer records that declaration fact in common IR while its semantic
@@ -12116,6 +12210,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `mutable_property_ref_e2e::property_reference_get_reports_the_property_type`,
   `toplevel_property_ref_e2e::toplevel_property_refs_run`.
 
+- **`KProperty.getDelegate` follows the runtime classpath.** The stdlib method throws
+  `KotlinReflectionNotSupportedError` when `kotlin-reflect` is absent. With that jar on the
+  classpath, and after `kotlin.reflect.jvm.isAccessible` is set on the reference, the same call
+  returns the property delegate. A runner that always exposes `kotlin-reflect` changes the first
+  outcome into the second. Tests:
+  `box_runtime_reflect_e2e::get_delegate_without_reflect_reports_reflection_not_supported`,
+  `box_runtime_reflect_e2e::get_delegate_with_reflect_returns_the_delegate`.
+
 - **A property reference is mutable only where its setter is accessible.** `var foo` with
   `private set` is a `KMutableProperty` inside the declaring class, including `Bar::foo` written
   there, because that site can call the setter. The same reference from a subclass or from a
@@ -12187,6 +12289,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   slot that must still box), corpus `inlineClasses/funInterface/{argumentResult,returnResult}.kt`,
   `inlineClasses/kt44141.kt`.
 
+- **A fun-interface conversion whose lambda parameter erased to `Object` is a class, not indy.**
+  `fun interface Consumer<T : Top> { fun accept(t: T) }` erases `accept` to `(Top)V`. A lambda
+  passed as `Consumer<in T>` after a `when` joins two holders (`GenericHolder<ConcreteType>` and
+  `GenericHolder<ConcreteType2>`) types its parameter as the intersection, and that intersection
+  erases to `Object`. `LambdaMetafactory` requires the instantiated parameter to be a subtype of the
+  SAM slot and rejects `Object` against `Top` (`LambdaConversionException` at the first call). The
+  same rejection applies to the result. The conversion is then the class strategy: the class
+  implements the erased `accept(Top)` and casts into the implementation, which is the shape kotlinc
+  uses for this specialization. A more specific instantiated parameter (`Integer` against `Object`,
+  or `Top` against `Top`) stays `invokedynamic`. Tests:
+  `sam_generic_lambda_param_e2e::contravariant_intersection_sam_runs`,
+  `sam_generic_lambda_param_e2e::unrelated_intersection_sam_runs`. Corpus
+  `funInterface/contravariantIntersectionTypeWithNonTrivialCommonSupertype.kt`,
+  `funInterface/contravariantIntersectionTypeWithNonTrivialCommonSupertype2.kt`.
+
 - **A nullable function value converted to a nullable fun interface stays null.** Adapting
   `(() -> Unit)?` to `KRunnable?` wraps only a non-null function. `null` remains `null`; wrapping it
   would produce a non-null SAM whose method throws. The checker records that on the conversion from
@@ -12254,13 +12371,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   as the inferred type of an unannotated local bound to an UNBOUND reference (`val f = A::b`).
   Everywhere else the reference keeps its function type — that is the shape argument passing, SAM
   conversion, and the backend's reference dispatch are written against, and re-typing them all regressed
-  reference dispatch broadly. Unbound only, because that is the set krusty realizes as a real
-  `FunctionReferenceImpl`; a bound reference on a value receiver can still lower to an `invokedynamic`
-  lambda, which is no `KFunction` (see `docs/IMPLEMENTATION_PLAN.md`). Invoking a `KFunction{N}` is
+  reference dispatch broadly. An unbound reference is realized as a real `FunctionReferenceImpl`. A
+  bound `value::invoke` is too, when its public type is the reflection classifier (`val f = block::invoke`):
+  the value has to implement `KFunction`, and an `invokedynamic` lambda does not. A function-typed
+  expected type (`fun reference(block: suspend () -> Unit): suspend () -> Unit = block::invoke`) stays
+  the forwarding function value. Invoking a `KFunction{N}` is
   typed from its type ARGUMENTS, not the erased reflection shape, so `::Greeter` invoked yields a
   `Greeter`. Tests:
   `classpath_unbound_callable_ref_e2e::classpath_callable_references_resolve_reflection_targets`,
-  corpus `reflection/functions/typeParameterInReturnType.kt`.
+  `suspend_invoke_reference_e2e::an_unannotated_suspend_invoke_reference_is_a_kfunction`,
+  corpus `reflection/functions/typeParameterInReturnType.kt` and
+  `coroutines/suspendFunctionMethodReference.kt`.
 
 - **A typealias applied to type arguments on a callable-reference LHS is a type.** kotlinc reads
   `Alias<Int>::label` as a type LHS even when the alias expands to an `object`, so the reference is

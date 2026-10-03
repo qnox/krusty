@@ -7,12 +7,10 @@ annotations/instances/annotationInstancesEmptyDefaultLowered.kt
 annotations/instances/multimoduleTypeParams.kt
 bridges/internalMethodOverrideInOtherModule.kt
 bridges/internalMethodOverrideMultipleInheritance.kt
-callableReference/property/extensionPropertyReferenceWithTypeParameter.kt
 compileKotlinAgainstKotlin/inlineClasses/privateCompanionObjectValInDifferentModule.kt
 compileKotlinAgainstKotlin/inlineClasses/privateTopLevelValInDifferentModule.kt
 coroutines/featureIntersection/callableReference/function/adapted.kt
 coroutines/featureIntersection/callableReference/function/local/equalsHashCode.kt
-coroutines/featureIntersection/inlineSuspendFinally.kt
 coroutines/featureIntersection/overrideInInlineClass.kt
 coroutines/featureIntersection/suspendFunctionIsAs.kt
 coroutines/generate.kt
@@ -21,17 +19,11 @@ coroutines/inlineClasses/direct/boxUnboxInsideCoroutine_suspendFunType.kt
 coroutines/inlineClasses/kt84305.kt
 coroutines/inlineClasses/resume/boxUnboxInsideCoroutine_suspendFunType.kt
 coroutines/kt28844.kt
-coroutines/kt49168.kt
 coroutines/localFunctions/named/defaultArgument.kt
 coroutines/nonLocalReturnFromInlineLambdaDeep.kt
 coroutines/suspendFunctionAsCoroutine/superCallInterface.kt
-coroutines/suspendFunctionMethodReference.kt
 coroutines/tailCallOptimizations/crossinline.kt
-enum/enumEntriesCompatibilityCheckPrioritized.kt
 extensionFunctions/kt475.kt
-funInterface/contravariantIntersectionTypeWithNonTrivialCommonSupertype.kt
-funInterface/contravariantIntersectionTypeWithNonTrivialCommonSupertype2.kt
-funInterface/suspendFunInterfaceConversionCodegen.kt
 functions/functionNtoString.kt
 functions/functionNtoStringGeneric.kt
 inference/capturedSelfInsideIntersection.kt
@@ -39,9 +31,7 @@ inference/overrideDefaultProperty.kt
 inference/overrideGenericDefaultMethod.kt
 inference/pcla/pclaRootIsTrySyntheticCallWithDelegate.kt
 inline/callableReferenceOfLocalFun.kt
-inlineSizeReduction/lastBreak.kt
 innerNested/nestedInPackage.kt
-ir/privateSignatures/privateLeakThroughInline.kt
 multiplatform/k2/defaultArguments/bothInExpectAndActual.kt
 multiplatform/k2/defaultArguments/bothInExpectAndActual2.kt
 multiplatform/k2/kt66970.kt
@@ -53,6 +43,4 @@ reflection/typeOf/intersectionType.kt
 reflection/typeOf/localClass.kt
 reflection/typeOf/reifiedAsNestedArgument.kt
 reflection/typeOf/typeAliasedType.kt
-reified/capture.kt
-reified/innerObject.kt
 typeErasure/funWithReifiedTypeParameterContextParameterAndExtensionReceiverInsideClass.kt

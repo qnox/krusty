@@ -112,6 +112,7 @@ impl Checker<'_> {
                     .as_ref()
                     .map(|(_, companion)| *companion)
             },
+            self.file.prioritized_enum_entries,
         )
     }
 

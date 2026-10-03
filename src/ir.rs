@@ -1518,6 +1518,36 @@ pub struct IrSpecializedFunction {
     pub parent: Option<FunId>,
 }
 
+/// A call-site copy of an anonymous class whose members use a reified type parameter.
+///
+/// The declaration class stays in place for the inline method's own body. This record is the
+/// expansion that copied it. A backend owns the physical `{owner}${caller}$$inlined${callee}$N`
+/// name and shares that ordinal sequence with a specialized lambda of the same expansion.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IrSpecializedAnonymousClass {
+    pub source: ClassId,
+    /// Expression identity of the copied construction, so the copy sorts with a specialized lambda
+    /// of the same expansion.
+    pub order: u32,
+    pub caller_declaration: crate::fir::DeclarationId,
+    pub caller: Option<IrEnclosure>,
+    pub caller_is_default: bool,
+    pub caller_source_name: String,
+    pub inline_callee: crate::fir::CallableId,
+    pub inline_callee_source_name: String,
+    /// Source function → the function on this copy. Accessor functions materialized after the
+    /// copy are added here before bridges and metadata read the copy.
+    pub method_clones: std::collections::HashMap<FunId, FunId>,
+    /// Call-site substitutions. Property accessors are materialized after this copy, and their
+    /// bodies are specialized with these bindings.
+    pub bindings: std::collections::HashMap<String, Ty>,
+    pub reified_bindings: std::collections::HashMap<String, Ty>,
+    /// Fields and properties already on the declaration class when this copy was taken.
+    /// Later materialization appends backing fields and accessors past these prefixes.
+    pub field_count: u32,
+    pub property_count: u32,
+}
+
 /// One lowered source file (`IrFile`) — its arenas. Index-based, bulk-freeable.
 #[derive(Default)]
 pub struct IrFile {
@@ -1812,6 +1842,17 @@ pub struct IrFile {
     pub lambda_origins: std::collections::HashMap<u32, IrLambdaOrigin>,
     /// Specialized function → the implementation it was copied from and the expansion that copied it.
     pub specialized_functions: std::collections::HashMap<FunId, IrSpecializedFunction>,
+    /// Copied construction → its position in the expansion, shared with
+    /// [`Self::specialized_anonymous_classes`] so one call numbers lambdas and anonymous objects
+    /// together.
+    pub(crate) specialized_expansion_order: std::collections::HashMap<FunId, u32>,
+    /// Specialized anonymous class → the class it was copied from and the expansion that copied it.
+    pub(crate) specialized_anonymous_classes:
+        std::collections::HashMap<ClassId, IrSpecializedAnonymousClass>,
+    /// Declaration classes of anonymous objects whose members use a reified inline parameter.
+    /// Recorded when a call site copies the class. The JVM emits `needClassReification` for these
+    /// classes from this set alone.
+    pub(crate) reified_anonymous_declarations: std::collections::HashSet<ClassId>,
     /// Lambda implementations whose bodies execute a runtime reified operation. Every source
     /// implementation, including a nested one, and each specialized call-site copy are recorded
     /// semantically. A backend independently chooses the physical closure representation needed
@@ -2720,7 +2761,9 @@ mod clone;
 pub use clone::clone_expression_dag;
 #[cfg(test)]
 pub(crate) use clone::make_expression_children_unique;
-pub(crate) use clone::{clone_function_implementation, make_expression_children_unique_tracked};
+pub(crate) use clone::{
+    clone_class_method, clone_function_implementation, make_expression_children_unique_tracked,
+};
 mod semantic_validation;
 pub use semantic_validation::{
     IncompleteIrFact, InvalidIrContract, NullableSamContractViolation, UndeterminedIrType,
