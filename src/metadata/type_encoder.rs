@@ -289,9 +289,6 @@ pub(crate) struct TypeParameters {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum TypeParameterRef {
     Id(u64),
-    /// Captured by an inner class from an enclosing class: the joint index, plus the name (f9),
-    /// since the isolated reader has no enclosing-chain context to resolve a bare joint index.
-    Captured(u64),
     /// Owned by the declaration being written, by its source name.
     Named(String),
     /// Captured by a local or anonymous class from an enclosing declaration: numbered on first
@@ -590,11 +587,6 @@ fn encode_type_with_parameter(
             }
             match reference {
                 TypeParameterRef::Id(id) => message.field_varint(7, *id),
-                TypeParameterRef::Captured(id) => {
-                    message.field_varint(7, *id);
-                    let source_name = crate::types::type_parameter_source_name(name);
-                    message.field_varint(9, strings.local(source_name) as u64);
-                }
                 TypeParameterRef::CapturedOnUse => {
                     message.field_varint(7, type_parameters.captured.intern(name));
                 }

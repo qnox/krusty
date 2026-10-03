@@ -181,10 +181,14 @@ Reverse-engineered from kotlinc for `class Point(val x: Int, var y: String)` (se
   `return_type` (f3) precedes its `type_parameter` (f4). Interning order in `d2` is independent of
   it. A `Type` naming a type parameter the declaration being written owns (a member function's or
   property's own, bounds included) uses `type_parameter_name` (f9); an enclosing class's uses
-  `type_parameter` (f7). A setter is a declaration of its own, so its value parameter addresses the
-  property's type parameter by id (`var <V> Cell<V>.content: V` names `V` in the return and receiver
-  types but writes `type_parameter` in `setter_value_parameter`). krusty builds the record in any
-  order and `Pb::canonical` sorts it. Test: `tests/metadata_type_reference_e2e.rs`.
+  `type_parameter` (f7) ALONE, with no f9 name. The class's OWN level — its type-parameter bounds,
+  supertype list, and a value class's underlying type — is written with the class itself as the
+  current declaration, so it names the class's own parameters (f9) rather than addressing them by
+  id; members keep the id form. A setter is a declaration of its own, so its value parameter
+  addresses the property's type parameter by id (`var <V> Cell<V>.content: V` names `V` in the
+  return and receiver types but writes `type_parameter` in `setter_value_parameter`). krusty
+  builds the record in any order and `Pb::canonical` sorts it. Test:
+  `tests/metadata_type_reference_e2e.rs`.
 - Version requirements (kotlinc 2.4.20, `FirJvmSerializerExtension`): a named, non-private,
   non-suspend inline function with a value parameter (context parameters excluded) or extension
   receiver of a function type (`Function*`, `SuspendFunction*`, `KFunction*`, `KSuspendFunction*`,
@@ -234,8 +238,16 @@ Reverse-engineered from kotlinc for `class Point(val x: Int, var y: String)` (se
   of an enclosing declaration by id alone (`Type.type_parameter`). Ids come from kotlinc's
   per-declaration interner: the class's own parameters first, then each captured one on first use,
   and a member's first use is numbered in that member's own scope. An inner class instead keeps its
-  outer classes' parameters at the ids before its own. Test:
-  `tests/metadata_captured_type_parameters_e2e.rs`.
+  outer classes' parameters at the ids before its own: every enclosing class's OWN parameters are
+  reserved eagerly, outermost first, so `class Outer<E> { class Nested<E> }` numbers the nested
+  `E` 1 and `class Outer<E> { inner class Inner(val e: E) }` addresses the outer `E` as id 0. The
+  reader decodes per classfile, so a reference to an enclosing class's parameter (absent from the
+  class's own `type_parameter` table) becomes a placeholder carrying the joint id
+  (`\0tp:enclosing:N`); the classpath provider rebinds it to the enclosing parameter's name and
+  declared bound from the owner chain's metadata, in member signatures and in the class's own
+  bounds and supertypes alike (`metadata::rebind_enclosing_type_parameters`).
+  Test: `tests/metadata_captured_type_parameters_e2e.rs`,
+  `tests/metadata_type_reference_e2e.rs`.
 - Inline parameter modifiers (kotlinc 2.4.20): `ValueParameter.flags` bit 2 for `crossinline` and
   bit 3 for `noinline`, beside `DECLARES_DEFAULT_VALUE` (bit 1). Also written on a nullable
   function type and on extensions. Test: `tests/metadata_inline_parameter_modifiers_e2e.rs`.

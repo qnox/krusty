@@ -470,7 +470,15 @@ pub(super) fn build_class_metadata_with_facts(
                     field_desc: backing
                         .map(|(_, field)| field)
                         .or(delegate)
-                        .filter(|field| property.ty != field.ty || names_local(field.ty))
+                        // A bare type-parameter property erases its field to the bound's carrier
+                        // (`Ljava/lang/Object;` for an unbounded one), which a reader cannot
+                        // derive from the declared type — own parameter or an enclosing class's
+                        // (`class Outer<E> { inner class Inner(val e: E) }`), kotlinc records it.
+                        .filter(|field| {
+                            property.ty != field.ty
+                                || names_local(field.ty)
+                                || matches!(property.ty.non_null(), Ty::TyParam(..))
+                        })
                         .map(|field| desc(field.ty)),
                     // The PHYSICAL field name when the JVM realization mangles it — an instance
                     // property beside a same-named hoisted companion static (`result` → `result$1`).
@@ -1264,6 +1272,8 @@ pub(super) fn build_class_metadata_with_facts(
         .class_signature(&c.fq_name())
         .map(|signature| signature.type_params.as_slice())
         .unwrap_or_default();
+    let enclosing_type_parameters =
+        super::super::local_classifiers::enclosing_type_parameters(ir, c);
     // `c.fields` is the JVM storage realization by this point: value-class lowering may replace a
     // generic underlying parameter with the carrier of its bound. Kotlin metadata instead describes
     // the source property. Keep those two facts separate, especially for `V<T : U<Int>>(val value: T)`:
@@ -1349,7 +1359,11 @@ pub(super) fn build_class_metadata_with_facts(
             supertype_spellings: &supertype_spellings,
             type_params: &c.type_params,
             type_param_bounds: class_type_parameters,
-            captured_type_params: super::super::local_classifiers::captured_type_parameters(c),
+            captured_type_params: super::super::local_classifiers::captured_type_parameters(
+                ir,
+                c,
+                &enclosing_type_parameters,
+            ),
             ctor_param_tparams: &ctor_param_tparams,
             ctor_param_annotations: &named_ctor_param_annotations,
             flags: class_metadata_flags(ir, c),

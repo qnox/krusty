@@ -586,11 +586,12 @@ pub enum ClassMemberOrder {
     EnumEntry(usize),
 }
 
-/// The type parameters a class captures from enclosing declarations, and how kotlinc numbers them.
+/// The type parameters a class's `@Metadata` places before its own, and how kotlinc numbers them.
 #[derive(Clone, Copy, Debug)]
 pub enum CapturedTypeParameters<'a> {
-    /// An inner class's: the enclosing classes' parameters hold the ids before its own, outermost
-    /// first.
+    /// A class nested in another: every enclosing class's own parameters hold the ids before its
+    /// own, outermost first — kotlinc's parent serializers intern those eagerly, so they are
+    /// reserved whether or not the nested class references them.
     Reserved(&'a [String]),
     /// A local or anonymous class's: its own parameters come first, and each captured one takes
     /// the next id on first use (see `TypeParameters`).
@@ -824,7 +825,7 @@ pub fn build_class(
         numbered_on_use.iter().cloned(),
     );
     for (index, semantic) in reserved.iter().enumerate() {
-        class_type_parameters.insert(semantic.clone(), TypeParameterRef::Captured(index as u64));
+        class_type_parameters.insert(semantic.clone(), TypeParameterRef::Id(index as u64));
     }
     for (index, (source, parameter)) in tail
         .type_params
@@ -836,6 +837,17 @@ pub fn build_class(
         class_type_parameters.insert(source.clone(), id.clone());
         class_type_parameters.insert(parameter.semantic_name.clone(), id);
     }
+    // The class's OWN level — type-parameter bounds, the supertype list, a value class's
+    // underlying type — is written with the class itself as the current declaration, where
+    // kotlinc names its own parameters (`Type.type_parameter_name`, f9) rather than addressing
+    // them by id. Members keep the id form (`class_type_parameters`).
+    let mut class_level_type_parameters = class_type_parameters.clone();
+    class_level_type_parameters.extend(semantic_named_type_parameters(
+        tail.type_params.iter().map(String::as_str),
+        tail.type_param_bounds
+            .iter()
+            .map(|parameter| parameter.semantic_name.as_str()),
+    ));
     let tparam_msgs: Vec<Pb> = tail
         .type_param_bounds
         .iter()
@@ -856,7 +868,7 @@ pub fn build_class(
                         .cloned()
                         .unwrap_or_default(),
                 },
-                &class_type_parameters,
+                &class_level_type_parameters,
             )
             .unwrap_or_else(|error| panic!("invalid emitted metadata type parameter: {error}"))
         })
@@ -877,7 +889,7 @@ pub fn build_class(
                 tail.supertype_spellings
                     .get(index)
                     .unwrap_or(crate::spelling::Spelled::NONE),
-                &class_type_parameters,
+                &class_level_type_parameters,
             ));
         }
         supertype_msgs.push(type_pb(
@@ -886,13 +898,13 @@ pub fn build_class(
                 crate::types::wk::kotlin_enum(),
                 &[Ty::obj_name(class_internal)],
             ),
-            &class_type_parameters,
+            &class_level_type_parameters,
         ));
     } else if tail.supertypes.is_empty() {
         supertype_msgs.push(type_pb(
             &mut st,
             Ty::obj("kotlin/Any"),
-            &class_type_parameters,
+            &class_level_type_parameters,
         ));
     } else {
         for (index, supertype) in tail.supertypes.iter().enumerate() {
@@ -902,7 +914,7 @@ pub fn build_class(
                 tail.supertype_spellings
                     .get(index)
                     .unwrap_or(crate::spelling::Spelled::NONE),
-                &class_type_parameters,
+                &class_level_type_parameters,
             ));
         }
     }
@@ -1143,13 +1155,6 @@ pub fn build_class(
                     .as_ref()
                     .and_then(|(_, d)| d.rsplit(')').next().map(str::to_string))
             }
-            // A bare type-parameter property erases to `Ljava/lang/Object;`, which the reader
-            // cannot derive from the type `T` — so kotlinc records the descriptor explicitly, the
-            // same way it does for a boxed nullable primitive.
-            _ if p.tparam.is_some() => p
-                .getter
-                .as_ref()
-                .and_then(|(_, d)| d.rsplit(')').next().map(str::to_string)),
             _ => None,
         });
         let mut field = Pb::new();
@@ -1508,7 +1513,7 @@ pub fn build_class(
     let inline_underlying: Option<(u32, Option<Pb>)> = tail.inline_underlying.map(|(name, ty)| {
         (
             st.local(name),
-            ty.map(|ty| type_pb(&mut st, ty, &class_type_parameters)),
+            ty.map(|ty| type_pb(&mut st, ty, &class_level_type_parameters)),
         )
     });
 

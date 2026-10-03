@@ -14,6 +14,204 @@ fn assert_identical(stem: &str, src: &str, class_internal: &str) {
         .unwrap_or_else(|diff| panic!("{diff}"));
 }
 
+/// A class-level payload — a type-parameter bound or a supertype — is written with the class as
+/// the current declaration, so its own type parameter is NAMED there
+/// (`Type.type_parameter_name`); a member refers to the same parameter by id.
+#[test]
+fn a_class_names_its_own_type_parameter_in_its_bounds_and_supertypes() {
+    const SRC: &str = "package app\n\
+        \n\
+        class Node<T : Comparable<T>> : Comparable<Node<T>> {\n\
+        \x20   override fun compareTo(other: Node<T>): Int = 0\n\
+        }\n";
+    assert_identical("class_level_own_type_parameter", SRC, "app/Node");
+}
+
+/// A nested class's own type parameters take the ids after its enclosing classes' parameters,
+/// which kotlinc's parent serializers intern eagerly: the nested `E` is id 1 even though nothing
+/// in `Nested` references the outer `E`.
+#[test]
+fn a_nested_class_reserves_the_enclosing_type_parameter_ids() {
+    const SRC: &str = "package app\n\
+        \n\
+        class Outer<E> {\n\
+        \x20   class Nested<E>(val e: E)\n\
+        }\n";
+    assert_identical("nested_type_parameter_ids", SRC, "app/Outer$Nested");
+}
+
+/// The reservation counts the WHOLE chain, outermost first: `Deep`'s own `Z` is id 2 after
+/// `Outer`'s `X` (0) and `Middle`'s `Y` (1), and a reference to a grandparent's parameter is
+/// addressed by its reserved id.
+#[test]
+fn a_deeply_nested_class_reserves_every_enclosing_type_parameter_id() {
+    const SRC: &str = "package app\n\
+        \n\
+        class Outer<X> {\n\
+        \x20   class Middle<Y> {\n\
+        \x20       class Deep<Z>(val z: Z)\n\
+        \x20   }\n\
+        }\n";
+    assert_identical(
+        "deeply_nested_type_parameter_ids",
+        SRC,
+        "app/Outer$Middle$Deep",
+    );
+}
+
+/// An inner class's members address an enclosing class's type parameter by id
+/// (`Type.type_parameter`), never by name.
+#[test]
+fn an_inner_class_addresses_an_enclosing_type_parameter_by_id() {
+    const SRC: &str = "package app\n\
+        \n\
+        class Outer<E> {\n\
+        \x20   inner class Inner(val e: E)\n\
+        }\n";
+    assert_identical(
+        "inner_class_captured_type_parameter",
+        SRC,
+        "app/Outer$Inner",
+    );
+}
+
+/// An inner class's OWN level — a type-parameter bound and a supertype — addresses an enclosing
+/// class's parameter by the same id-only encoding as its members (`T : E` writes `E` as the
+/// reserved id 0; the class's own `T` is named, as at every class level).
+#[test]
+fn an_inner_class_addresses_an_enclosing_type_parameter_by_id_in_its_bounds_and_supertypes() {
+    const SRC: &str = "package app\n\
+        \n\
+        class Outer<E> {\n\
+        \x20   inner class Inner<T : E> : Comparable<E> {\n\
+        \x20       override fun compareTo(other: E): Int = 0\n\
+        \x20   }\n\
+        }\n";
+    assert_identical(
+        "inner_class_level_captured_type_parameter",
+        SRC,
+        "app/Outer$Inner",
+    );
+}
+
+/// The reader side of that id-only reference: a dependent module resolves an inner class's
+/// members whose types name an enclosing class's parameter — against a krusty-built library and
+/// against the real kotlinc's (the per-classfile decode carries a placeholder, rebound at the
+/// classpath boundary from the enclosing class's metadata, declared bound included). Receiver
+/// instantiation does not yet substitute an enclosing class's argument into such a member (the
+/// classpath classifier publishes only the class's own parameters), so the member type reads at
+/// the parameter's declared bound and a member whose signature still names the parameter is not
+/// an applicable call target.
+#[test]
+fn an_inner_class_member_reads_an_enclosing_type_parameter_across_modules() {
+    const LIB: &str = "package lib\n\
+        \n\
+        class Outer<E : CharSequence> {\n\
+        \x20   inner class Inner<T : E>(val e: E) : Comparable<E> {\n\
+        \x20       override fun compareTo(other: E): Int = 0\n\
+        \x20       fun take(x: E): E = x\n\
+        \x20   }\n\
+        }\n";
+    const MAIN: &str = "import lib.Outer\n\
+        \n\
+        fun box(): String {\n\
+        \x20   val inner = Outer<String>().Inner<String>(\"b\")\n\
+        \x20   val bound: CharSequence = inner.e\n\
+        \x20   val read: Any? = inner.e\n\
+        \x20   return if (read == \"b\" && bound == \"b\") \"OK\" else \"fail\"\n\
+        }\n";
+    assert_eq!(
+        common::expect_box_run_against("inner_enclosing_tp", LIB, MAIN)
+            .expect("krusty-built library"),
+        "OK"
+    );
+    assert_eq!(
+        common::expect_box_run_against_kotlinc(LIB, MAIN).expect("kotlinc-built library"),
+        "OK"
+    );
+}
+
+/// A `$` inside a top-level backticked classifier name is not another owner boundary. The
+/// classfile's `InnerClasses` row says that `Outer$Literal$Inner` belongs directly to
+/// `Outer$Literal`; the unrelated `Outer` declaration must not contribute an earlier parameter id.
+#[test]
+fn an_enclosing_type_parameter_follows_inner_classes_not_dollar_segments() {
+    const LIB: &str = "package lib\n\
+        \n\
+        interface Marker { fun text(): String }\n\
+        interface Decoy\n\
+        class Word(private val value: String) : Marker {\n\
+        \x20   override fun text(): String = value\n\
+        }\n\
+        class Outer<D : Decoy>\n\
+        class `Outer$Literal`<E : Marker> {\n\
+        \x20   inner class Inner(val value: E) {\n\
+        \x20       fun read(): E = value\n\
+        \x20   }\n\
+        }\n";
+    const MAIN: &str = "import lib.Marker\n\
+        import lib.`Outer$Literal`\n\
+        import lib.Word\n\
+        \n\
+        fun box(): String {\n\
+        \x20   val outer = `Outer$Literal`<Word>()\n\
+        \x20   val value: Marker = outer.Inner(Word(\"OK\")).read()\n\
+        \x20   return value.text()\n\
+        }\n";
+    assert_eq!(
+        common::expect_box_run_against("dollar_enclosing_tp", LIB, MAIN)
+            .expect("krusty-built library"),
+        "OK"
+    );
+    assert_eq!(
+        common::expect_box_run_against_kotlinc(LIB, MAIN).expect("kotlinc-built library"),
+        "OK"
+    );
+}
+
+/// Source spelling is not type-parameter identity. Applying `Inner<Int>` must not substitute its
+/// own `E` into the captured `Outer<String>.E`; the provider qualifies the captured parameter by
+/// its declaring classifier before publishing the member signature.
+#[test]
+fn same_spelled_inner_and_outer_parameters_stay_distinct_across_modules() {
+    const LIB: &str = "package lib\n\
+        \n\
+        class Outer<E : CharSequence>(val outer: E) {\n\
+        \x20   inner class Inner<E : Number>(val inner: E) {\n\
+        \x20       fun outerValue() = this@Outer.outer\n\
+        \x20   }\n\
+        }\n";
+    const MAIN: &str = "import lib.Outer\n\
+        \n\
+        fun box(): String {\n\
+        \x20   val value = Outer<String>(\"OK\").Inner<Int>(7)\n\
+        \x20   val outer: CharSequence = value.outerValue()\n\
+        \x20   val inner: Number = value.inner\n\
+        \x20   return if (outer == \"OK\" && inner == 7) \"OK\" else \"fail\"\n\
+        }\n";
+    assert_eq!(
+        common::expect_box_run_against("shadowed_inner_enclosing_tp", LIB, MAIN)
+            .expect("krusty-built library"),
+        "OK"
+    );
+    assert_eq!(
+        common::expect_box_run_against_kotlinc(LIB, MAIN).expect("kotlinc-built library"),
+        "OK"
+    );
+}
+
+/// A value class's underlying type is a class-level payload, so its own type parameter is named
+/// there — and it surfaces at all only because a non-public underlying property has the type
+/// recorded on the class itself.
+#[test]
+fn a_value_class_names_its_own_type_parameter_in_its_underlying_type() {
+    const SRC: &str = "package app\n\
+        \n\
+        @JvmInline\n\
+        value class Token<T>(private val value: T)\n";
+    assert_identical("value_class_underlying_type_parameter", SRC, "app/Token");
+}
+
 #[test]
 fn a_member_function_names_its_own_type_parameters() {
     const SRC: &str = "package app\n\
