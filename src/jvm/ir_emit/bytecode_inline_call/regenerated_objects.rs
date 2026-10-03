@@ -81,6 +81,9 @@ pub(super) struct CallObjects<'a> {
     site: Option<RegenerationSite<'a>>,
     call_expression: u32,
     major: u16,
+    /// The `@Metadata` version the caller writes: the inlining module's `mv`, as kotlinc's
+    /// `AnonymousObjectTransformer` rewrites the copied class's annotation with it.
+    metadata_version: [i32; 3],
     callee: String,
     commit: bool,
     /// The caller's source map as the call's lambdas left it: their lines are lines of it.
@@ -113,6 +116,7 @@ impl<'a> Emitter<'a> {
             site: self.regeneration_site.clone(),
             call_expression,
             major: self.cw.major(),
+            metadata_version: self.metadata_version,
             callee: callee.to_string(),
             commit,
             caller_lines,
@@ -121,9 +125,6 @@ impl<'a> Emitter<'a> {
         }
     }
 }
-
-/// The `@Metadata` version this compiler writes.
-const METADATA_VERSION: [i32; 3] = [2, 4, 0];
 
 impl CallObjects<'_> {
     /// Each of the callee's type parameters with its argument at this call, as the signature
@@ -194,7 +195,7 @@ impl AnonymousObjects for CallObjects<'_> {
             type_arguments: &type_arguments,
             prior_classes,
             major: self.major,
-            metadata_version: &METADATA_VERSION,
+            metadata_version: &self.metadata_version,
             lambdas,
             caller_lines: &self.caller_lines,
             classes: &self.bodies,

@@ -21,6 +21,16 @@ pub fn compile_in_process_files_target(
     jdk_modules: Option<&std::path::Path>,
     class_major: Option<u16>,
 ) -> Option<Vec<(String, Vec<u8>)>> {
+    compile(sources, cp_jars, jdk_modules, class_major, None)
+}
+
+pub(crate) fn compile(
+    sources: &[(&str, &str)],
+    cp_jars: &[PathBuf],
+    jdk_modules: Option<&std::path::Path>,
+    class_major: Option<u16>,
+    metadata_version: Option<[i32; 3]>,
+) -> Option<Vec<(String, Vec<u8>)>> {
     let _pg = super::ProfGuard::new("krusty");
     let mut diags = DiagSink::new();
     let stems = sources
@@ -44,7 +54,9 @@ pub fn compile_in_process_files_target(
         |files, symbols| krusty::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diags,
     );
-    let backend = krusty::jvm::JvmBackend::new(cp).with_class_major(class_major);
+    let backend = krusty::jvm::JvmBackend::new(cp)
+        .with_class_major(class_major)
+        .with_metadata_version(metadata_version);
     let outputs = krusty::compiler::emit_analyzed(analysis, &stems, &backend, "main", &mut diags);
     let classes = outputs
         .into_iter()

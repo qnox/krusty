@@ -1293,6 +1293,8 @@ mod metadata_inline_parameter_modifiers_e2e;
 mod metadata_jvm_field_e2e;
 #[path = "metadata_kept_params.rs"]
 mod metadata_kept_params;
+#[path = "metadata_language_version_e2e.rs"]
+mod metadata_language_version_e2e;
 #[path = "metadata_local_classes_e2e.rs"]
 mod metadata_local_classes_e2e;
 #[path = "metadata_member_order_e2e.rs"]

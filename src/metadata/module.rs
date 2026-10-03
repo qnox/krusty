@@ -6,10 +6,11 @@
 //! flags word), then a `JvmModuleProtoBuf.Module` protobuf:
 //!   Module { package_parts = field 1 (repeated) }
 //!   PackageParts { package_fq_name = field 1, short_class_name = field 2 (repeated) }
-//! The version must match the `@Metadata` `mv` the classes carry — the reference kotlinc (2.4.0)
-//! stamps `[2,4,0]` (decoded from its output; the 1.9.24-era `[1,9,0]` bytes read fine but
-//! byte-diverge from the pinned toolchain). kotlinc also writes the file for a CLASS-ONLY module
-//! (an empty parts list), so an all-classes lib still carries `META-INF/<module>.kotlin_module`.
+//! The version must match the `@Metadata` `mv` the classes carry: the reference kotlinc stamps its
+//! default language version (`[2,4,0]` on the pinned 2.4.x toolchain; the 1.9.24-era `[1,9,0]`
+//! bytes read fine but byte-diverge) and, under `-language-version X.Y`, `[X,Y,0]`. kotlinc also
+//! writes the file for a CLASS-ONLY module (an empty parts list), so an all-classes lib still
+//! carries `META-INF/<module>.kotlin_module`.
 
 use crate::metadata::protobuf::Pb;
 
@@ -28,11 +29,13 @@ pub fn kotlin_module_file_name(module_name: &str) -> String {
     format!("META-INF/{sanitised}.kotlin_module")
 }
 
-/// `packages`: `(package fq-name, [file-facade short class names])`.
-pub fn build_kotlin_module(packages: &[(String, Vec<String>)]) -> Vec<u8> {
+/// `packages`: `(package fq-name, [file-facade short class names])`. `version` is the `@Metadata`
+/// `mv` the module's classes carry (`[X, Y, 0]` for `-language-version X.Y`, the default stamp
+/// otherwise).
+pub fn build_kotlin_module(packages: &[(String, Vec<String>)], version: [i32; 3]) -> Vec<u8> {
     let mut out = Vec::new();
-    for v in [3i32, 2, 4, 0, 0] {
-        out.extend_from_slice(&v.to_be_bytes()); // version [2,4,0] length-prefixed + flags=0
+    for v in [3i32, version[0], version[1], version[2], 0] {
+        out.extend_from_slice(&v.to_be_bytes()); // version length-prefixed + flags=0
     }
     let mut module = Pb::new();
     for (pkg, facades) in packages {
@@ -83,7 +86,7 @@ mod tests {
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0a, 0x0d, 0x0a, 0x04, 0x64, 0x65, 0x6d, 0x6f,
             0x12, 0x05, 0x4c, 0x69, 0x62, 0x4b, 0x74, 0x22, 0x00, 0x2a, 0x00,
         ];
-        let got = build_kotlin_module(&[("demo".into(), vec!["LibKt".into()])]);
+        let got = build_kotlin_module(&[("demo".into(), vec!["LibKt".into()])], [2, 4, 0]);
         assert_eq!(
             got, reference,
             "\n got: {:02x?}\n ref: {:02x?}",
@@ -99,11 +102,32 @@ mod tests {
             0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00,
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x22, 0x00, 0x2a, 0x00,
         ];
-        let got = build_kotlin_module(&[]);
+        let got = build_kotlin_module(&[], [2, 4, 0]);
         assert_eq!(
             got, reference,
             "\n got: {:02x?}\n ref: {:02x?}",
             got, reference
+        );
+    }
+
+    /// Under `-language-version X.Y` kotlinc stamps the header with `[X, Y, 0]` — measured on
+    /// 2.4.20 with `-language-version 2.2` (`[3, 2, 2, 0, 0]`), payload unchanged.
+    #[test]
+    fn language_version_stamps_the_header() {
+        let got = build_kotlin_module(&[("demo".into(), vec!["LibKt".into()])], [2, 2, 0]);
+        assert_eq!(
+            &got[..20],
+            &[
+                0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            ][..]
+        );
+        assert_eq!(
+            &got[20..],
+            &[
+                0x0a, 0x0d, 0x0a, 0x04, 0x64, 0x65, 0x6d, 0x6f, 0x12, 0x05, 0x4c, 0x69, 0x62, 0x4b,
+                0x74, 0x22, 0x00, 0x2a, 0x00,
+            ][..]
         );
     }
 }

@@ -3679,10 +3679,13 @@ mod module_reader_tests {
 
     #[test]
     fn round_trips_package_facades() {
-        let bytes = build_kotlin_module(&[
-            ("kotlin.collections".into(), vec!["CollectionsKt".into()]),
-            ("demo".into(), vec!["Lib1Kt".into(), "Lib2Kt".into()]),
-        ]);
+        let bytes = build_kotlin_module(
+            &[
+                ("kotlin.collections".into(), vec!["CollectionsKt".into()]),
+                ("demo".into(), vec!["Lib1Kt".into(), "Lib2Kt".into()]),
+            ],
+            [2, 4, 0],
+        );
         let got = read_kotlin_module(&bytes);
         assert!(got.contains(&(
             "kotlin/collections".to_string(),
