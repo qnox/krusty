@@ -13650,3 +13650,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   function's state machine treats it as a temporary, spilling it only by liveness rather than as a
   named variable in scope. Test: `tests/destructuring_loop_temporary_e2e.rs` (an ordinary class and a
   suspend function with its continuation class).
+
+- **A continuation's `EnclosingMethod` uses the method's JVM descriptor.** A parameter whose
+  semantic type is `Unit` is still a value, so the descriptor spells `Lkotlin/Unit;`, the same type
+  the method is declared with. Spelling that parameter `V` is not a method descriptor, and the JVM
+  rejects the continuation class while loading it. This is the receiver of `suspend Unit.() -> Unit`.
+  Test: `tests/suspend_unit_receiver_e2e.rs`. Corpus: `coroutines/kt28844.kt`.

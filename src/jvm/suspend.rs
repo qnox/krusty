@@ -2056,9 +2056,9 @@ fn build_state_machine(
             v: 2,
             enclosing_class: cont_owner.clone(),
             enclosing_method: fname.clone(),
-            enclosing_descriptor: crate::jvm::names::method_descriptor(
+            enclosing_descriptor: crate::jvm::method_descriptors::ir_method_desc(
                 &ir.functions[fid as usize].params,
-                ir.functions[fid as usize].ret,
+                &ir.functions[fid as usize].ret,
             ),
         };
         continuation_metadata.insert(cont_internal.clone(), metadata);
