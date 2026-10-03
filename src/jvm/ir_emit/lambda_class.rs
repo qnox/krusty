@@ -269,52 +269,25 @@ pub(super) fn unrealized(ir: &IrFile, lambda: u32) -> String {
     )
 }
 
-/// Whether `LambdaMetafactory` can adapt `instantiated` to the erased SAM method `sam`.
-///
-/// Each instantiated parameter and the instantiated result must be a subtype of the corresponding
-/// SAM slot. A lambda whose own parameter erased to `Object` (an intersection, or a contravariant
-/// `in` argument) while the fun-interface method erased to its bound (`T : Top` → `Top`) is not
-/// that subtype: the bootstrap throws `LambdaConversionException` before the call runs. Those
-/// conversions are classes, which implement the erased slot and cast into the implementation.
-pub(super) fn indy_specialization_links(sam: &str, instantiated: &str) -> bool {
-    let Some((sam_params, sam_ret)) = crate::jvm::names::parse_method_descriptor(sam) else {
-        return false;
-    };
-    let Some((inst_params, inst_ret)) = crate::jvm::names::parse_method_descriptor(instantiated)
-    else {
-        return false;
-    };
-    sam_params.len() == inst_params.len()
-        && sam_params
-            .iter()
-            .zip(inst_params)
-            .all(|(slot, specialized)| !erased_top_against_bound(specialized, slot))
-        && !erased_top_against_bound(inst_ret, sam_ret)
+/// JVM descriptors passed to `LambdaMetafactory` for one selected SAM conversion.
+pub(super) struct SamBootstrapDescriptors {
+    pub(super) erased_method: String,
+    pub(super) instantiated_method: String,
 }
 
-/// `Object`/`Any` is not a subtype of a more specific reference. That is the mismatch
-/// `LambdaMetafactory` reports as "class java.lang.Object is not a subtype of …".
-fn erased_top_against_bound(specialized: &str, sam_slot: &str) -> bool {
-    is_erased_top(specialized) && descriptor_is_reference(sam_slot) && !is_erased_top(sam_slot)
-}
-
-fn is_erased_top(descriptor: &str) -> bool {
-    descriptor == "Ljava/lang/Object;" || descriptor == "Lkotlin/Any;"
-}
-
-/// Whether this SAM conversion's instantiated signature is not a subtype of the erased interface
-/// method, so the closure must be a class (and its implementation must be visible to that class).
-pub(super) fn bounded_erasure_needs_class(
+/// Build the erased SAM and instantiated method descriptors once for class-mode selection and
+/// indy emission. Keeping this at the lambda-class boundary prevents a representation decision
+/// from drifting away from the actual bootstrap arguments.
+pub(super) fn sam_bootstrap_descriptors(
     ir: &IrFile,
     impl_fn: u32,
     target: &crate::ir::IrSamTarget,
     captures: usize,
-) -> bool {
+) -> Result<SamBootstrapDescriptors, &'static str> {
     let impl_params = super::declaration_types::jvm_function_params(ir, impl_fn);
-    if impl_params.len() < captures {
-        return false;
-    }
-    let lam_tys = &impl_params[captures..];
+    let lam_tys = impl_params
+        .get(captures..)
+        .ok_or("lambda implementation has fewer parameters than captured values")?;
     let impl_ret =
         crate::jvm::method_descriptors::jvm_declared_ty(&ir.functions[impl_fn as usize].ret);
     let (sam_parameters, sam_result) = ir
@@ -334,12 +307,11 @@ pub(super) fn bounded_erasure_needs_class(
     } else {
         crate::jvm::method_descriptors::jvm_declared_ty(&sam_result)
     };
-    let sam_desc = crate::jvm::names::method_descriptor(&sam_parameters, sam_result);
-    let Some((sam_params, sam_ret)) = crate::jvm::names::parse_method_descriptor(&sam_desc) else {
-        return false;
-    };
+    let erased_method = crate::jvm::names::method_descriptor(&sam_parameters, sam_result);
+    let (sam_params, sam_ret) = crate::jvm::names::parse_method_descriptor(&erased_method)
+        .ok_or("selected SAM descriptor is malformed")?;
     if sam_params.len() != lam_tys.len() {
-        return false;
+        return Err("selected SAM descriptor has the wrong parameter count");
     }
     let params: String = lam_tys
         .iter()
@@ -359,20 +331,65 @@ pub(super) fn bounded_erasure_needs_class(
     } else {
         crate::jvm::names::type_descriptor(impl_ret)
     };
-    !indy_specialization_links(&sam_desc, &format!("({params}){ret}"))
+    Ok(SamBootstrapDescriptors {
+        erased_method,
+        instantiated_method: format!("({params}){ret}"),
+    })
+}
+
+/// Whether the instantiated descriptor has the one mismatch this class strategy repairs: an
+/// `Object` slot against a more specific erased reference bound. Other impossible adaptations are
+/// frontend errors and must not silently select a backend fallback.
+fn has_bounded_erasure_mismatch(sam: &str, instantiated: &str) -> bool {
+    let Some((sam_params, sam_ret)) = crate::jvm::names::parse_method_descriptor(sam) else {
+        return false;
+    };
+    let Some((inst_params, inst_ret)) = crate::jvm::names::parse_method_descriptor(instantiated)
+    else {
+        return false;
+    };
+    sam_params.len() == inst_params.len()
+        && (sam_params
+            .iter()
+            .zip(inst_params)
+            .any(|(slot, specialized)| erased_top_against_bound(specialized, slot))
+            || erased_top_against_bound(inst_ret, sam_ret))
+}
+
+/// `Object`/`Any` is not a subtype of a more specific reference. That is the mismatch
+/// `LambdaMetafactory` reports as "class java.lang.Object is not a subtype of …".
+fn erased_top_against_bound(specialized: &str, sam_slot: &str) -> bool {
+    is_erased_top(specialized) && descriptor_is_reference(sam_slot) && !is_erased_top(sam_slot)
+}
+
+fn is_erased_top(descriptor: &str) -> bool {
+    descriptor == "Ljava/lang/Object;"
+}
+
+/// Whether this SAM conversion's instantiated signature is not a subtype of the erased interface
+/// method, so the closure must be a class (and its implementation must be visible to that class).
+pub(super) fn bounded_erasure_needs_class(
+    ir: &IrFile,
+    impl_fn: u32,
+    target: &crate::ir::IrSamTarget,
+    captures: usize,
+) -> bool {
+    sam_bootstrap_descriptors(ir, impl_fn, target, captures).is_ok_and(|descriptors| {
+        has_bounded_erasure_mismatch(&descriptors.erased_method, &descriptors.instantiated_method)
+    })
 }
 
 #[cfg(test)]
 mod specialization_tests {
-    use super::indy_specialization_links;
+    use super::has_bounded_erasure_mismatch;
 
     #[test]
     fn object_parameter_does_not_link_against_a_bounded_sam_slot() {
-        assert!(!indy_specialization_links(
+        assert!(has_bounded_erasure_mismatch(
             "(LTop;)V",
             "(Ljava/lang/Object;)V"
         ));
-        assert!(!indy_specialization_links(
+        assert!(has_bounded_erasure_mismatch(
             "(LTop;)LCommon;",
             "(Ljava/lang/Object;)Ljava/lang/Object;"
         ));
@@ -380,12 +397,12 @@ mod specialization_tests {
 
     #[test]
     fn a_more_specific_parameter_still_links() {
-        assert!(indy_specialization_links(
+        assert!(!has_bounded_erasure_mismatch(
             "(Ljava/lang/Object;Ljava/lang/Object;)I",
             "(Ljava/lang/Integer;Ljava/lang/Integer;)I"
         ));
-        assert!(indy_specialization_links("(LTop;)V", "(LTop;)V"));
-        assert!(indy_specialization_links(
+        assert!(!has_bounded_erasure_mismatch("(LTop;)V", "(LTop;)V"));
+        assert!(!has_bounded_erasure_mismatch(
             "(Ljava/lang/String;)V",
             "(Ljava/lang/String;)V"
         ));
