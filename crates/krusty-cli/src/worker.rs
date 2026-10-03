@@ -717,17 +717,14 @@ mod tests {
         ]))
         .expect("standard version settings translate");
         assert!(unit.inert.is_empty(), "{:?}", unit.inert);
+        assert_eq!(unit.sources, vec![PathBuf::from("A.kt")]);
+        assert_eq!(unit.output_jar, PathBuf::from("out.jar"));
+        // Sources and the output jar stay on the work unit. `kotlinc_args` is only the flags the
+        // shared CLI parses; appending the source here would make the worker refuse the request
+        // as an unexpected positional value.
         assert_eq!(
             unit.kotlinc_args,
-            args(&[
-                "-language-version",
-                "2.2",
-                "-api-version",
-                "2.2",
-                "A.kt",
-                "-d",
-                "out.jar",
-            ])
+            args(&["-language-version", "2.2", "-api-version", "2.2"])
         );
         let parsed = crate::cli::parse(unit.kotlinc_args);
         assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
