@@ -60,7 +60,10 @@ fn assert_interface_super_suspend_call_matches_kotlinc(source: &str) {
     )
     .expect("reference kotlinc and javap are provisioned");
     let super_suspend_calls = |disassembly: &str| {
-        common::method_instructions(disassembly, "suspendHere$suspendImpl")
+        // The trampoline's `invokestatic` comment names `suspendHere$suspendImpl` and ends
+        // with `;`, so the method marker has to be the header's parameter list. Otherwise the
+        // scan starts inside the trampoline and never reaches the super call.
+        common::method_instructions(disassembly, "suspendHere$suspendImpl(A2")
             .into_iter()
             .filter_map(|row| row.split_once(": ").map(|(_, instruction)| instruction.to_owned()))
             .filter(|instruction| {
