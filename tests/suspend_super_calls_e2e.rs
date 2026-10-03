@@ -112,6 +112,48 @@ class B : I {\n\
     }\n\
 }\n";
 
+const INTERFACE_OVERRIDE: &str = "import kotlin.coroutines.*\n\
+import kotlin.coroutines.intrinsics.*\n\
+interface A {\n\
+    suspend fun suspendThere(v: String): String = suspendCoroutineUninterceptedOrReturn { x ->\n\
+        x.resume(v)\n\
+        COROUTINE_SUSPENDED\n\
+    }\n\
+    suspend fun suspendHere(): String = suspendThere(\"O\") + suspendThere(\"K\")\n\
+}\n\
+interface A2 : A {\n\
+    override suspend fun suspendHere(): String = super.suspendHere() + suspendThere(\"56\")\n\
+}\n\
+class B : A2\n\
+fun builder(c: suspend () -> String): String {\n\
+    var result = \"\"\n\
+    c.startCoroutine(object : Continuation<String> {\n\
+        override val context = EmptyCoroutineContext\n\
+        override fun resumeWith(value: Result<String>) { result = value.getOrThrow() }\n\
+    })\n\
+    return result\n\
+}\n\
+fun box(): String {\n\
+    val result = builder { B().suspendHere() }\n\
+    if (result != \"OK56\") return \"fail: $result\"\n\
+    return \"OK\"\n\
+}\n";
+
+/// The override lives on the interface, so its machine is `suspendHere$suspendImpl` and the super
+/// call is `invokespecial` of the superinterface default. The base body suspends, and the resume
+/// must return to this override rather than re-dispatch.
+#[test]
+fn an_interface_override_of_a_suspending_super_call_runs() {
+    assert_runs(INTERFACE_OVERRIDE, "SuspendSuperInterface");
+    assert_method_matches_kotlinc(
+        "SuspendSuperInterfaceCode",
+        &[],
+        INTERFACE_OVERRIDE,
+        "A2",
+        "public static java.lang.Object suspendHere$suspendImpl(",
+    );
+}
+
 /// The TYPED spelling `super<I>.f()`, which reaches an interface's default body.
 #[test]
 fn a_typed_super_call_to_an_interface_default_runs() {

@@ -11013,7 +11013,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   JVM backend consumes as published, and only a source declaration's parameters derive a descriptor.
   Declaration in the same file, a sibling file or a dependency (an interface default method, or the
   receiver-first `$DefaultImpls` static under `-jvm-default=disable`), reached through a class or an
-  interface (`super<I>.f()`), all run, and the override's instructions match kotlinc's.
+  interface (`super<I>.f()`), all run, and the override's instructions match kotlinc's. An override
+  that itself lives on an interface is taken by the same transformer: its machine is
+  `suspendHere$suspendImpl` and `super.suspendHere()` is `invokespecial` of the superinterface
+  default (`coroutines/suspendFunctionAsCoroutine/superCallInterface.kt`).
   Tests: `tests/suspend_super_calls_e2e.rs`, and
   `a_super_call_resumes_in_the_base_body_rather_than_the_override` in
   `tests/suspend_bytecode_transformer_e2e.rs`, which fails under virtual re-entry.
