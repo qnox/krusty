@@ -633,23 +633,44 @@ fn a_local_reference_coerces_substituted_arguments_to_declared_slots() {
         "LocalGenericReferenceCoercion",
     );
 
+    let declared = Ty::obj("kotlin/Any");
     let coercions = ir
         .exprs
         .iter()
-        .filter(|expression| {
-            matches!(
-                expression,
+        .filter_map(|expression| match expression {
+            IrExpr::TypeOp {
+                op: IrTypeOp::ImplicitCoercion,
+                arg,
+                type_operand,
+            } if *type_operand == declared => Some(*arg),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        coercions.len(),
+        2,
+        "the erased value and vararg element are coerced, but the identical value is not; ops={:?} functions={:?}",
+        ir.exprs
+            .iter()
+            .filter_map(|expression| match expression {
                 IrExpr::TypeOp {
                     op: IrTypeOp::ImplicitCoercion,
-                    type_operand: Ty::TyParam(_, _),
+                    type_operand,
                     ..
-                }
-            )
-        })
-        .count();
-    assert_eq!(
-        coercions, 2,
-        "the substituted value and vararg element are coerced, but the identical value is not"
+                } => Some(*type_operand),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        ir.functions
+            .iter()
+            .map(|function| (function.name.as_str(), function.params.clone()))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        coercions
+            .iter()
+            .all(|argument| matches!(ir.expr(*argument), IrExpr::GetValue(_))),
+        "the coerced values are reference parameters"
     );
 }
 
