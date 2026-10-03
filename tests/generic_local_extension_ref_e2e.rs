@@ -245,6 +245,27 @@ fun box(): String {
 }
 
 #[test]
+fn a_defaulted_local_extension_beats_an_equally_specific_vararg() {
+    expect_box_same_as_kotlinc(
+        r#"
+class AmbiguousReceiver
+
+fun box(): String {
+    fun AmbiguousReceiver.choose(value: Int = 1): Int = 10 + value
+    fun AmbiguousReceiver.choose(vararg values: Int): Int = 20 + values.size
+    val receiver = AmbiguousReceiver()
+    val zero: () -> Int = receiver::choose
+    val one: (Int) -> Int = receiver::choose
+    val two: (Int, Int) -> Int = receiver::choose
+    val log = "${zero()}-${one(7)}-${two(3, 4)}"
+    return if (log == "11-17-22") "OK" else "fail:$log"
+}
+"#,
+        "LocalExtensionReferenceSpecificity",
+    );
+}
+
+#[test]
 fn concrete_receiver_domain_beats_a_generic_receiver_domain() {
     expect_box_same_as_kotlinc(
         r#"
@@ -265,7 +286,7 @@ fun box(): String {
 }
 
 #[test]
-fn a_bound_reference_selects_the_cheapest_local_extension_adaptation() {
+fn a_defaulted_local_extension_beats_an_empty_vararg() {
     expect_box_same_as_kotlinc(
         r#"
 class Choice(val text: String)
@@ -277,7 +298,7 @@ fun box(): String {
 
     val receiver = ChoiceReceiver()
     val selected: () -> String = receiver::choose
-    return if (selected() == "vararg") "OK" else selected()
+    return if (selected() == "default") "OK" else selected()
 }
 "#,
         "BoundLocalExtensionAdaptationCost",

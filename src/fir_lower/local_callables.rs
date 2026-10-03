@@ -256,13 +256,7 @@ impl BodyLowering<'_> {
             logical_count,
             |parameter| {
                 let parameter = parameter as usize;
-                Some(
-                    parameter
-                        + usize::from(
-                            realization.has_extension_receiver
-                                && parameter >= realization.context_parameter_count as usize,
-                        ),
-                )
+                Some(parameter + declaration_parameter_slot_offset(realization, parameter))
             },
             |_, argument| match argument {
                 CheckedArgumentValue::Expression(value)
@@ -620,10 +614,20 @@ impl BodyLowering<'_> {
                             *whole_array,
                         ));
                     }
+                    let declaration = parameter as usize;
+                    let physical = capture_count
+                        + declaration
+                        + declaration_parameter_slot_offset(realization, declaration);
+                    let Some(array_type) = self.ir.functions[realization.function as usize]
+                        .params
+                        .get(physical)
+                        .copied()
+                    else {
+                        return Ok(None);
+                    };
                     crate::ir::IrCheckedArgument::Vararg {
                         parameter,
-                        array_type: self.ir.functions[realization.function as usize].params
-                            [capture_count + parameter as usize],
+                        array_type,
                         elements,
                     }
                 }
@@ -1246,6 +1250,20 @@ fn inline_callable_body(
             value: Some(value),
         })
     }
+}
+
+/// Where a declaration parameter sits among the logical parameters.
+///
+/// Context receivers stay in declaration order. The extension receiver is inserted at
+/// `context_parameter_count`, so every later declaration parameter moves one slot right.
+fn declaration_parameter_slot_offset(
+    realization: &LocalCallableRealization,
+    declaration_parameter: usize,
+) -> usize {
+    usize::from(
+        realization.has_extension_receiver
+            && declaration_parameter >= realization.context_parameter_count as usize,
+    )
 }
 
 fn local_function_parameters(body: &FirBody) -> Vec<Ty> {

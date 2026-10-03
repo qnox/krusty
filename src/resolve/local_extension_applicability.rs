@@ -37,6 +37,9 @@ pub(super) struct LocalExtensionReferenceCandidate {
     pub(super) parameters: Vec<Ty>,
     pub(super) ret: Ty,
     pub(super) adaptation: Option<(Vec<AdaptedRefArgument>, bool)>,
+    /// Declared types of the parameters the expected callable actually passes. Defaults contribute
+    /// nothing, so two empty adaptations compare as equally specific.
+    adaptation_shape: Vec<Ty>,
 }
 
 enum LocalExtensionReferenceSelection {
@@ -188,22 +191,6 @@ impl Checker<'_> {
             return LocalExtensionReferenceSelection::None;
         };
         candidates.retain(|candidate| candidate.receiver_rank == nearest_receiver);
-        let Some(best_cost) = candidates
-            .iter()
-            .map(|candidate| {
-                candidate.adaptation.as_ref().map_or(0, |(plan, _)| {
-                    super::callable_reference_selection::plan_cost(plan)
-                })
-            })
-            .min()
-        else {
-            return LocalExtensionReferenceSelection::None;
-        };
-        candidates.retain(|candidate| {
-            candidate.adaptation.as_ref().map_or(0, |(plan, _)| {
-                super::callable_reference_selection::plan_cost(plan)
-            }) == best_cost
-        });
 
         // A repeated normalized fact for the same declaration is one candidate. Distinct local
         // declarations remain overloads even when adaptation erases their visible difference;
@@ -243,22 +230,35 @@ impl Checker<'_> {
                     if other_receiver_is_subtype != current_receiver_is_subtype {
                         return other_receiver_is_subtype;
                     }
+                    if current.adaptation.is_some() && other.adaptation.is_some() {
+                        return self.callable_ref_shape_at_least_as_specific(
+                            &other.adaptation_shape,
+                            other.ret,
+                            &current.adaptation_shape,
+                            current.ret,
+                        ) && !self.callable_ref_shape_at_least_as_specific(
+                            &current.adaptation_shape,
+                            current.ret,
+                            &other.adaptation_shape,
+                            other.ret,
+                        );
+                    }
                     self.callable_ref_shape_at_least_as_specific(
                         &other.parameters,
                         other.ret,
                         &current.parameters,
                         current.ret,
+                    ) && !self.callable_ref_shape_at_least_as_specific(
+                        &current.parameters,
+                        current.ret,
+                        &other.parameters,
+                        other.ret,
                     )
-                        && !self.callable_ref_shape_at_least_as_specific(
-                            &current.parameters,
-                            current.ret,
-                            &other.parameters,
-                            other.ret,
-                        )
                 });
                 (!dominated).then_some(index)
             })
             .collect::<Vec<_>>();
+        let maximal = prefer_non_vararg_then_shorter_declaration(self, &unique, maximal);
         match maximal.as_slice() {
             [selected] => {
                 LocalExtensionReferenceSelection::Selected(Box::new(unique.swap_remove(*selected)))
@@ -366,6 +366,11 @@ impl Checker<'_> {
                     if matches!(adaptation, Some(None)) {
                         return None;
                     }
+                    let adaptation = adaptation.flatten();
+                    let adaptation_shape = adaptation
+                        .as_ref()
+                        .map(|(plan, _)| adaptation_specificity_shape(&value_parameters, plan))
+                        .unwrap_or_default();
                     Some(LocalExtensionReferenceCandidate {
                         statement,
                         signature,
@@ -374,7 +379,8 @@ impl Checker<'_> {
                         generic_receiver,
                         parameters,
                         ret,
-                        adaptation: adaptation.flatten(),
+                        adaptation,
+                        adaptation_shape,
                     })
                 })
                 .collect::<Vec<_>>();
@@ -384,6 +390,90 @@ impl Checker<'_> {
         }
         Vec::new()
     }
+}
+
+fn adaptation_specificity_shape(params: &[Ty], plan: &[AdaptedRefArgument]) -> Vec<Ty> {
+    let mut shape = Vec::new();
+    for (index, argument) in plan.iter().enumerate() {
+        let Some(&declared) = params.get(index) else {
+            continue;
+        };
+        match argument {
+            AdaptedRefArgument::Value(_) => shape.push(declared),
+            AdaptedRefArgument::Default => {}
+            AdaptedRefArgument::Vararg {
+                values,
+                whole_array: true,
+            } => {
+                if !values.is_empty() {
+                    shape.push(declared);
+                }
+            }
+            AdaptedRefArgument::Vararg { values, .. } => {
+                let element = declared.array_read_elem().unwrap_or(declared);
+                shape.extend(std::iter::repeat(element).take(values.len()));
+            }
+        }
+    }
+    shape
+}
+
+/// When every remaining adaptation is equally specific, a non-vararg declaration beats a vararg
+/// and a shorter declaration beats a longer one. A strictly more specific passed-parameter shape
+/// has already won, so `vararg Int` still beats a wider fixed `Number`.
+fn prefer_non_vararg_then_shorter_declaration(
+    checker: &Checker<'_>,
+    candidates: &[LocalExtensionReferenceCandidate],
+    mut maximal: Vec<usize>,
+) -> Vec<usize> {
+    if maximal.len() <= 1 || !adapted_shapes_are_mutually_specific(checker, candidates, &maximal) {
+        return maximal;
+    }
+    let non_vararg = maximal
+        .iter()
+        .copied()
+        .filter(|&index| candidates[index].signature.vararg_index.is_none())
+        .collect::<Vec<_>>();
+    if !non_vararg.is_empty() && non_vararg.len() < maximal.len() {
+        maximal = non_vararg;
+    }
+    let Some(minimum) = maximal
+        .iter()
+        .map(|&index| candidates[index].signature.params.len())
+        .min()
+    else {
+        return maximal;
+    };
+    let shorter = maximal
+        .iter()
+        .copied()
+        .filter(|&index| candidates[index].signature.params.len() == minimum)
+        .collect::<Vec<_>>();
+    if !shorter.is_empty() && shorter.len() < maximal.len() {
+        shorter
+    } else {
+        maximal
+    }
+}
+
+fn adapted_shapes_are_mutually_specific(
+    checker: &Checker<'_>,
+    candidates: &[LocalExtensionReferenceCandidate],
+    indices: &[usize],
+) -> bool {
+    indices
+        .iter()
+        .all(|&index| candidates[index].adaptation.is_some())
+        && indices.iter().all(|&left| {
+            indices.iter().all(|&right| {
+                checker.callable_ref_shape_at_least_as_specific(
+                    &candidates[left].adaptation_shape,
+                    candidates[left].ret,
+                    &candidates[right].adaptation_shape,
+                    candidates[right].ret,
+                )
+            })
+        })
 }
 
 /// Apply a local extension's own generic receiver bindings to its call-site signature. The

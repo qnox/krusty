@@ -10701,7 +10701,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   including a dependency's `Derived : Base<String>`. An expectation-free reference exposes that
   specialized shape, so `Base<String>::pick` is not left with an unbound `T`. Formal bounds use
   the shared bound-admission contract; a `<T : Marker>` extension is not a candidate for a
-  non-`Marker` argument, and the same-named property remains. The local function is visible only
+  non-`Marker` argument, and the same-named property remains. A bound `counter::accumulate` or
+  unbound `Counter::accumulate` reference adapts that declaration's defaults and vararg to the
+  expected function or SAM shape. The packed value is the declaration's vararg array — the
+  parameter after the extension receiver — so a preceding value parameter is not the array. On one
+  lexical rung the nearest declared receiver wins, a concrete receiver domain beats a generic one,
+  and then the most specific applicable overload wins: passed parameter types are compared,
+  an equally specific non-vararg beats a vararg, and a shorter declaration beats a longer one.
+  `choose(value: Int = 1)` therefore beats `choose(vararg values: Int)` for `() -> Int` and
+  `(Int) -> Int`, while `(Int, Int) -> Int` still selects the vararg. Two single-parameter
+  defaults such as `choose(value: Any = ...)` and `choose(value: Int = ...)` stay ambiguous for
+  `() -> Int` and do not fall through to a non-local candidate. The local function is visible only
   from its declaration onward; an earlier reference still binds the property. Tests:
   `tests/generic_local_extension_ref_e2e.rs`. Corpus:
   `codegen/box/callableReference/property/extensionPropertyReferenceWithTypeParameter.kt`.
