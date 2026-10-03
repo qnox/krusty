@@ -4,7 +4,8 @@
 //! extension property. The classifiers here are repository-owned and invariant.
 
 use super::common::{
-    expect_box_run_against_kotlinc, expect_box_run_against_ref, expect_box_same_as_kotlinc,
+    compiler_diagnostics, expect_box_run_against_kotlinc, expect_box_run_against_ref,
+    expect_box_same_as_kotlinc, expect_identical_rejection,
 };
 
 #[test]
@@ -213,6 +214,24 @@ fun box(): String {
 }
 "#,
         "LocalExtensionReferenceLexicalRungs",
+    );
+}
+
+#[test]
+fn a_bound_reference_reports_an_ambiguous_local_extension_rung() {
+    const SOURCE: &str = r#"class AmbiguousReceiver
+
+fun probe(receiver: AmbiguousReceiver) {
+    fun AmbiguousReceiver.choose(value: Int = 1): Int = value
+    fun AmbiguousReceiver.choose(vararg values: Int): Int = 2
+    val selected: () -> Int = receiver::choose
+}
+"#;
+
+    let result = compiler_diagnostics(&[("BoundLocalExtensionAmbiguity.kt", SOURCE)], &[]);
+    expect_identical_rejection(
+        &result,
+        "bound local-extension callable-reference ambiguity",
     );
 }
 

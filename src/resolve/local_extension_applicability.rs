@@ -6,7 +6,7 @@
 //! available. Formal bounds use the shared bound-admission contract; the receiver check stays
 //! ordinary assignability.
 
-use crate::ast::StmtId;
+use crate::ast::{ExprId, StmtId};
 use crate::libraries::GenericSig;
 use crate::symbol_resolver::{
     generic_bindings_satisfy_bounds, instantiate_slot, unify_ty_from_symbols, GSigBinds,
@@ -67,6 +67,18 @@ pub(super) fn applicable_local_extension_signature(
 }
 
 impl Checker<'_> {
+    pub(super) fn report_local_extension_reference_ambiguity(
+        &mut self,
+        expression: ExprId,
+        name: &str,
+    ) -> Ty {
+        self.diags.error(
+            self.member_name_span(expression, name),
+            "overload resolution ambiguity between candidates:".to_string(),
+        );
+        Ty::Error
+    }
+
     pub(super) fn local_extension_reference_adapts_to(
         &self,
         scope: &CheckerScope<'_>,

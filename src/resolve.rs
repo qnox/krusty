@@ -66145,11 +66145,7 @@ impl<'a> Checker<'a> {
                 return Some(ty);
             }
             if candidates.len() > 1 {
-                self.diags.error(
-                    self.member_name_span(expression, name),
-                    format!("overload resolution ambiguity for callable reference '{name}'"),
-                );
-                return Some(Ty::Error);
+                return Some(self.report_local_extension_reference_ambiguity(expression, name));
             }
             match self.nested_constructor_reference(
                 scope,
@@ -67015,6 +67011,10 @@ impl<'a> Checker<'a> {
                         Ty::Fun,
                     );
                     return self.set(e, ty);
+                }
+                if candidates.len() > 1 {
+                    let error = self.report_local_extension_reference_ambiguity(e, &name);
+                    return self.set(e, error);
                 }
                 let extension_selection = self.select_extension_callable_ref(
                     &extension_candidates,
