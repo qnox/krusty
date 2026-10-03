@@ -3745,10 +3745,13 @@ fn emit_annotation_class(
     // PUBLIC | INTERFACE | ABSTRACT | ANNOTATION
     cw.set_access(class_public_bit(ir, c) | 0x0200 | 0x0400 | 0x2000);
     cw.add_interface("java/lang/annotation/Annotation");
+    let signature_formatter = JvmSignatureFormatter::new(ir, env);
     for field in &c.fields {
-        let ret = jvm_declared_ty(&field.ty);
-        cw.add_abstract_method(0x0401, &field.name, &format!("(){}", type_descriptor(ret)));
-        // PUBLIC|ABSTRACT
+        // PUBLIC|ABSTRACT. A `KClass` member's descriptor is `java.lang.Class`; the signature
+        // keeps the type argument.
+        let (descriptor, signature) =
+            annotation_impl::annotation_interface_member(&signature_formatter, field.ty);
+        cw.add_abstract_method_sig(0x0401, &field.name, &descriptor, signature.as_deref());
     }
     emit_jvm_interface_companion_surface(ir, c, facade, env, &mut cw);
     // Retention/target meta-annotations, matching kotlinc's ORDER: everything the source declares
