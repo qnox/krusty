@@ -202,8 +202,8 @@ fn specialized_lambda_function(
     );
     ir.runtime_reified_lambda_implementations
         .insert(specialized);
-    for expression in cloned.values().copied() {
-        let Some(enclosure) = ir.callable_reference_enclosures.get_mut(&expression) else {
+    for expression in cloned.values() {
+        let Some(enclosure) = ir.callable_reference_enclosures.get_mut(expression) else {
             continue;
         };
         *enclosure = match *enclosure {
@@ -556,12 +556,13 @@ fn node_uses_binding(expression: &IrExpr, bindings: &HashMap<String, Ty>) -> boo
             classifier.is_some_and(|ty| uses_binding(ty, bindings))
         }
         IrExpr::Call {
-            callee: Callee::Intrinsic { operation, .. },
+            callee:
+                Callee::Intrinsic {
+                    operation: crate::ir::IrIntrinsic::TypeOf { ty },
+                    ..
+                },
             ..
-        } => match operation {
-            crate::ir::IrIntrinsic::TypeOf { ty } => uses_binding(*ty, bindings),
-            _ => false,
-        },
+        } => uses_binding(*ty, bindings),
         _ => false,
     }
 }

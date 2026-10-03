@@ -747,7 +747,8 @@ fun box(): String {\n\
 }\n";
     let jdk = common::jdk_modules();
     let classpath = [library.clone(), common::stdlib_jar(), jdk.clone()];
-    let reference = common::kotlinc_box_result_with_classpath(source, &[library.clone()]);
+    let reference =
+        common::kotlinc_box_result_with_classpath(source, std::slice::from_ref(&library));
     assert_eq!(reference, "OK", "kotlinc fixture must succeed");
     assert_eq!(
         common::compile_and_run_box(source, "ExternalMixedReified", &classpath, Some(&jdk)),

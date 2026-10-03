@@ -594,9 +594,7 @@ impl Checker<'_> {
                 // An enclosing class instance has a field identity and is supplied by the
                 // ordinary local-capture dependency path. This rule is only for a receiver rung
                 // whose exact cross-class identity was published by the checker.
-                let Some(receiver) = capture.receiver_capture else {
-                    return None;
-                };
+                let receiver = capture.receiver_capture?;
                 Some((receiver, capture.capture_dependency))
             }));
         }
