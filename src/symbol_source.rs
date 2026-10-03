@@ -73,6 +73,14 @@ pub trait SymbolSource {
         false
     }
 
+    /// `name` on `owner` was withheld because its `@SinceKotlin` is newer than this compilation's
+    /// API level. The declaration is already absent from candidates; diagnostics use this only to
+    /// omit the receiver type from `UNRESOLVED_REFERENCE`, which is what kotlinc does when the
+    /// applicable callable was removed before selection.
+    fn api_withheld_callable(&self, _owner: TypeName, _name: &str) -> bool {
+        false
+    }
+
     /// Return the complete declaration record for one `(namespace, name)` key. This is the sole
     /// declaration API. `Package(TypeName::ROOT)` is the default package. Providers may map the key to
     /// an already-interned classifier, but must not intern it merely because it was probed. Parallel
