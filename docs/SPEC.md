@@ -7999,7 +7999,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     constructor makes the call from its own secondary constructor (`constructor(x, y): super(x, y)`).
     Each of those `super(…)` delegations that is short by exactly the superclass prefix is filled
     the same way. A `this(…)` delegation is not a superclass call; it keeps forwarding the
-    subclass's own prefix.
+    subclass's own prefix. A recorded secondary capture that does not name a `super(…)` parameter
+    is invalid IR and is rejected before a backend can skip it.
 
   The same lexical value captured twice is ONE capture. A class that captures `x` for its own body
   and is then found to need `x` for a declaration it reaches carries one field, not two — the second

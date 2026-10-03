@@ -457,6 +457,64 @@ fun box(): String {
     );
 }
 
+/// The secondary `super(n)` descriptor carries the superclass capture prefix, in capture order,
+/// ahead of the written `Int`. The observation is each local class's `<init>` access and JVM
+/// descriptor, not a value's `toString` and not the generic Signature attribute.
+#[test]
+fn a_secondary_super_call_keeps_the_capture_prefix_in_its_descriptor() {
+    let source = "fun box(): String {\n\
+         \x20   val kept = \"K\"\n\
+         \x20   var changed = \"C\"\n\
+         \x20   abstract class Base {\n\
+         \x20       constructor(n: Int) { changed = n.toString() }\n\
+         \x20       fun read(): String = kept + changed\n\
+         \x20   }\n\
+         \x20   class Child : Base {\n\
+         \x20       constructor(n: Int): super(n)\n\
+         \x20   }\n\
+         \x20   val child = Child(2)\n\
+         \x20   return if (child.read() == \"K2\") \"OK\" else child.read()\n\
+         }\n";
+    let classes = common::classes_against_kotlinc_module(&[("CapturePrefix.kt", source)]);
+    let constructors = |suffix: &str| {
+        let name = classes
+            .reference
+            .keys()
+            .find(|name| name.ends_with(suffix))
+            .cloned()
+            .unwrap_or_else(|| {
+                panic!(
+                    "kotlinc wrote no {suffix}: {:?}",
+                    classes.reference.keys().collect::<Vec<_>>()
+                )
+            });
+        let descriptors = |bytes: &[u8]| {
+            common::member_table(bytes)
+                .into_iter()
+                .filter_map(|member| {
+                    let method = member.strip_prefix("method ")?;
+                    let (access, rest) = method.split_once(' ')?;
+                    let (name_desc, _) = rest.split_once(' ')?;
+                    name_desc
+                        .starts_with("<init>")
+                        .then(|| format!("{access} {name_desc}"))
+                })
+                .collect::<Vec<_>>()
+        };
+        let reference = descriptors(&classes.reference[&name]);
+        let krusty_bytes = classes
+            .krusty
+            .get(&name)
+            .unwrap_or_else(|| panic!("krusty wrote no {name}"));
+        let krusty = descriptors(krusty_bytes);
+        (name, reference, krusty)
+    };
+    let (base, reference, krusty) = constructors("$Base");
+    assert_eq!(krusty, reference, "{base} constructors");
+    let (child, reference, krusty) = constructors("$Child");
+    assert_eq!(krusty, reference, "{child} constructors");
+}
+
 /// Anonymous-object capture discovery uses the same resolved superclass edge. The object body does
 /// not mention `result`; it carries that value solely because its local superclass requires it.
 #[test]

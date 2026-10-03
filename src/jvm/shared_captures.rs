@@ -99,7 +99,9 @@ pub(super) fn lower_class_capture_slots(ir: &mut IrFile) {
         let crate::ir::CtorDelegateTarget::Super { target_params, .. } =
             &mut ir.classes[class as usize].secondary_ctors[secondary as usize].delegate
         else {
-            continue;
+            unreachable!(
+                "secondary superclass capture ({class}, {secondary}, {parameter}) is not a super delegation"
+            );
         };
         target_params[parameter as usize] = holder_ty(&element);
     }

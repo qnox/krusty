@@ -29,6 +29,13 @@ pub enum InvalidIrContract {
         expression: u32,
         violation: NullableSamContractViolation,
     },
+    /// `shared_secondary_super_capture_parameters` names a constructor that does not delegate
+    /// to the superclass, or a parameter that constructor does not have.
+    SecondarySuperCapture {
+        class: u32,
+        secondary: u32,
+        parameter: u32,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -814,6 +821,26 @@ impl IrFile {
                 });
             }
         }
+        for (&(class, secondary, parameter), _) in &self.shared_secondary_super_capture_parameters {
+            let delegates_super = self
+                .classes
+                .get(class as usize)
+                .and_then(|declaration| declaration.secondary_ctors.get(secondary as usize))
+                .is_some_and(|constructor| {
+                    matches!(
+                        &constructor.delegate,
+                        CtorDelegateTarget::Super { target_params, .. }
+                            if (parameter as usize) < target_params.len()
+                    )
+                });
+            if !delegates_super {
+                return Err(InvalidIrContract::SecondarySuperCapture {
+                    class,
+                    secondary,
+                    parameter,
+                });
+            }
+        }
         Ok(())
     }
 }
@@ -956,6 +983,48 @@ mod tests {
             Err(InvalidIrContract::NullableSam {
                 expression: 1,
                 violation: NullableSamContractViolation::CaptureType { ty: Some(Ty::Int) },
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_a_secondary_capture_that_is_not_a_super_delegation() {
+        let mut ir = IrFile::default();
+        let mut class = crate::ir::IrClass::synthetic(crate::types::type_name("Child"));
+        class.secondary_ctors.push(crate::ir::IrSecondaryCtor {
+            annotations: crate::ir::DeclarationAnnotations::default(),
+            source_order: u32::MAX,
+            lines: crate::ir::IrSecondaryCtorLines::default(),
+            prefix_params: Vec::new(),
+            params: vec![Ty::Int],
+            named_params: Vec::new(),
+            metadata_visibility: None,
+            generated_debug: crate::ir::IrGeneratedDeclarationDebug::None,
+            vararg_index: None,
+            defaults: Vec::new(),
+            delegate_prelude: Vec::new(),
+            delegate_args: Vec::new(),
+            default_parameters: Vec::new(),
+            body: None,
+            delegate: CtorDelegateTarget::This {
+                target_params: vec![Ty::Int],
+                target: crate::ir::IrConstructorTarget::UNRESTRICTED_PRIMARY,
+                default_masks: Vec::new(),
+            },
+            synthetic: false,
+            vc_params: false,
+            param_checks: Vec::new(),
+        });
+        let class = ir.add_class(class);
+        ir.shared_secondary_super_capture_parameters
+            .insert((class, 0, 0), Ty::String);
+
+        assert_eq!(
+            ir.validate_semantic_contracts(),
+            Err(InvalidIrContract::SecondarySuperCapture {
+                class,
+                secondary: 0,
+                parameter: 0,
             })
         );
     }
