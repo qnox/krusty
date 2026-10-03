@@ -329,6 +329,9 @@ private fun compilerArguments(task: KotlinJvmCompile): List<String> {
     reject(options.progressiveMode.getOrElse(false), "progressiveMode")
     reject(options.extraWarnings.getOrElse(false), "extraWarnings")
     reject(options.suppressWarnings.getOrElse(false), "suppressWarnings")
+    // The CLI currently accepts warning-policy switches without changing diagnostic severity.
+    // Reject them at the Gradle boundary instead of reporting a successful but weaker compile.
+    reject(options.allWarningsAsErrors.getOrElse(false), "allWarningsAsErrors")
     reject(options.verbose.getOrElse(false), "verbose")
     reject(task.multiPlatformEnabled.getOrElse(false), "multiPlatformEnabled")
     reject(task.useModuleDetection.getOrElse(false), "useModuleDetection")
@@ -344,7 +347,6 @@ private fun compilerArguments(task: KotlinJvmCompile): List<String> {
     }
     languageVersion?.let { arguments.addPair("-language-version", it) }
     apiVersion?.let { arguments.addPair("-api-version", it) }
-    if (options.allWarningsAsErrors.getOrElse(false)) arguments.add("-Werror")
     options.optIn.getOrElse(emptyList()).takeIf(List<String>::isNotEmpty)?.let {
         arguments.add(it.joinToString(",", prefix = "-opt-in="))
     }
@@ -376,8 +378,6 @@ private val NAME_DESTRUCTURING_MODES = setOf("only-syntax", "name-mismatch", "co
 
 private val JVM_DEFAULT_MODES = setOf("enable", "no-compatibility", "disable")
 private val JVM_DEFAULT_LEGACY_MODES = setOf("all", "all-compatibility", "disable")
-private val WARNING_LEVELS = setOf("error", "warning", "disabled")
-
 private fun isFreeJvmDefault(argument: String): Boolean =
     argument == "-jvm-default" || argument == "-Xjvm-default" ||
         argument.startsWith("-jvm-default=") || argument.startsWith("-Xjvm-default=")
@@ -403,7 +403,10 @@ private fun validateFreeArguments(input: List<String>): ArrayList<String> {
             // Several -opt-in arguments are legal (the Kotlin build applies one per opt-in); only an
             // exact repeat is a duplicate, so the key is the argument itself.
             argument.startsWith("-opt-in=") && argument.substringAfter('=').isNotEmpty() -> argument
-            argument.startsWith("-Xwarning-level=") -> warningLevelKey(argument)
+            argument == "-Werror" || argument.startsWith("-Xwarning-level=") ->
+                throw GradleException(
+                    "krusty does not support warning policy freeCompilerArg '$argument'",
+                )
             argument.startsWith("-Xlambdas=") && argument.substringAfter('=') in setOf("indy", "class") -> "-Xlambdas"
             argument.startsWith("-Xsam-conversions=") && argument.substringAfter('=') in setOf("indy", "class") -> "-Xsam-conversions"
             argument == "-Xname-based-destructuring" -> "-Xname-based-destructuring"
@@ -417,19 +420,6 @@ private fun validateFreeArguments(input: List<String>): ArrayList<String> {
         result.add(argument)
     }
     return result
-}
-
-private fun warningLevelKey(argument: String): String {
-    val diagnostic = argument.removePrefix("-Xwarning-level=")
-    val (name, level) = diagnostic.split(':', limit = 2).let {
-        if (it.size == 2) it[0] to it[1] else "" to ""
-    }
-    if (name.isEmpty() || level !in WARNING_LEVELS) {
-        throw GradleException(
-            "unsupported freeCompilerArg '$argument'; expected -Xwarning-level=<NAME>:error|warning|disabled",
-        )
-    }
-    return "-Xwarning-level=$name"
 }
 
 private fun reservedFreeArgument(argument: String): String? {

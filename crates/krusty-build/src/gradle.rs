@@ -515,12 +515,10 @@ mod tests {
                 util_classpath.as_str(),
                 "-Xconsistent-data-class-copy-visibility",
                 "-Xskip-prerelease-check",
-                "-Xwarning-level=REDUNDANT_CLI_ARG:disabled",
                 "-language-version",
                 "2.4",
                 "-api-version",
                 "2.4",
-                "-Werror",
                 "-opt-in=kotlin.ExperimentalStdlibApi",
                 "-module-name",
                 "kotlin-compiler-util",
@@ -547,12 +545,10 @@ mod tests {
                 friend_argument.as_str(),
                 "-Xconsistent-data-class-copy-visibility",
                 "-Xskip-prerelease-check",
-                "-Xwarning-level=REDUNDANT_CLI_ARG:disabled",
                 "-language-version",
                 "2.4",
                 "-api-version",
                 "2.4",
-                "-Werror",
                 "-opt-in=kotlin.ExperimentalStdlibApi",
                 "-module-name",
                 "kotlin-compiler-util",
@@ -875,12 +871,16 @@ mod tests {
                     "duplicate freeCompilerArg '-Xskip-prerelease-check'",
                 ),
                 (
-                    "bad-warning-level",
-                    "unsupported freeCompilerArg '-Xwarning-level=NOPE'; expected -Xwarning-level=<NAME>:error|warning|disabled",
+                    "all-warnings-as-errors",
+                    "krusty does not support compilerOptions.allWarningsAsErrors",
                 ),
                 (
-                    "duplicate-warning-level",
-                    "duplicate freeCompilerArg '-Xwarning-level=REDUNDANT_CLI_ARG'",
+                    "free-werror",
+                    "krusty does not support warning policy freeCompilerArg '-Werror'",
+                ),
+                (
+                    "warning-level",
+                    "krusty does not support warning policy freeCompilerArg '-Xwarning-level=REDUNDANT_CLI_ARG:disabled'",
                 ),
                 (
                     "jvm-target",
@@ -1302,13 +1302,12 @@ tasks.withType<KotlinJvmCompile>().configureEach {
         apiVersion.set(KotlinVersion.KOTLIN_2_4)
         jvmDefault.set(JvmDefaultMode.NO_COMPATIBILITY)
         javaParameters.set(true)
-        allWarningsAsErrors.set(true)
         optIn.set(listOf("kotlin.ExperimentalStdlibApi"))
         freeCompilerArgs.add("-Xconsistent-data-class-copy-visibility")
         freeCompilerArgs.add("-Xskip-prerelease-check")
-        freeCompilerArgs.add("-Xwarning-level=REDUNDANT_CLI_ARG:disabled")
         when (krustyNegative) {
             "structured-option" -> progressiveMode.set(true)
+            "all-warnings-as-errors" -> allWarningsAsErrors.set(true)
             "reserved-free-argument" -> freeCompilerArgs.add("-d=forbidden")
             "duplicate-free-argument" -> freeCompilerArgs.addAll(
                 listOf("-Xlambdas=indy", "-Xlambdas=class"),
@@ -1323,8 +1322,8 @@ tasks.withType<KotlinJvmCompile>().configureEach {
             "jspecify-free-argument" -> freeCompilerArgs.add("-Xjspecify-annotations=strict")
             "jdk-release-free-argument" -> freeCompilerArgs.add("-Xjdk-release=8")
             "duplicate-inert-flag" -> freeCompilerArgs.add("-Xskip-prerelease-check")
-            "bad-warning-level" -> freeCompilerArgs.add("-Xwarning-level=NOPE")
-            "duplicate-warning-level" -> freeCompilerArgs.add("-Xwarning-level=REDUNDANT_CLI_ARG:error")
+            "free-werror" -> freeCompilerArgs.add("-Werror")
+            "warning-level" -> freeCompilerArgs.add("-Xwarning-level=REDUNDANT_CLI_ARG:disabled")
         }
     }
 }
