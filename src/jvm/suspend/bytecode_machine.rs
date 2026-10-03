@@ -11,8 +11,10 @@
 //! are all plain calls and which call no inline function; a call to a member, on any receiver, is
 //! as plain as a call to a top-level function. An overridable member's machine is built in the
 //! `$suspendImpl` its body moves to (`jvm::suspend_impls`). Suspend lambdas of that shape go through
-//! `suspend_lambda`, which shares the eligibility and suspension collection here. Interface bodies
-//! and spliced inline bodies keep the IR machine until their steps land.
+//! `suspend_lambda`, which shares the eligibility and suspension collection here. An interface
+//! default whose own suspension points include a `super` call is taken the same way: the machine
+//! lives in its `$suspendImpl` and the super call is `invokespecial`. Other interface bodies, and
+//! spliced inline bodies, keep the IR machine.
 
 use std::collections::HashSet;
 
@@ -26,7 +28,7 @@ use super::{
     ensure_tail_return, realize_coroutine_context, recorded_suspension_result, shift_locals,
     suspend_call_fid, value_class_suspension_result, EmitTimeMachines, MachineContext,
 };
-use crate::ir::{for_each_child, ExprId, IrExpr, IrFile, IrValueClassSuspendResult};
+use crate::ir::{for_each_child, Callee, ExprId, IrExpr, IrFile, IrValueClassSuspendResult};
 use crate::jvm::local_class_names::name_continuation;
 use crate::types::Ty;
 
@@ -211,16 +213,26 @@ pub(super) fn eligible_points(
 ) -> Option<Vec<ExprId>> {
     let function = &ir.functions[fid as usize];
     let top_level = function.is_static && function.dispatch_receiver.is_none();
-    // A class member: its machine stays in the member, or, for an overridable one, moves with its
-    // body to `$suspendImpl`. An interface body's is a later step.
-    let class_member = !function.is_static
-        && function.dispatch_receiver.is_some_and(|owner| {
-            ir.classes
-                .iter()
-                .any(|class| class.fq_name_id() == owner && !class.is_interface)
-        });
     let suspend_set = route.suspend_set;
     let points = suspension_points_in_order(ir, body, suspend_set);
+    // A class member: its machine stays in the member, or, for an overridable one, moves with its
+    // body to `$suspendImpl`. An interface default is the same machine when one of its own
+    // suspension points is a `super` call; the IR machine declines that invokespecial.
+    let super_suspension = points.iter().any(|&call| {
+        matches!(
+            &ir.exprs[call as usize],
+            IrExpr::Call {
+                callee: Callee::Special { .. },
+                ..
+            }
+        )
+    });
+    let class_member = !function.is_static
+        && function.dispatch_receiver.is_some_and(|owner| {
+            ir.classes.iter().any(|class| {
+                class.fq_name_id() == owner && (!class.is_interface || super_suspension)
+            })
+        });
     // Shapes the transformer cannot take at all: a suspension spliced in from an inline body, or
     // a read of the function's own continuation, which kotlinc realizes through a fake one.
     let body_declines: [(&dyn Fn() -> bool, &str); 2] = [
