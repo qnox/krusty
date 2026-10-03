@@ -11,7 +11,6 @@ compileKotlinAgainstKotlin/inlineClasses/privateCompanionObjectValInDifferentMod
 compileKotlinAgainstKotlin/inlineClasses/privateTopLevelValInDifferentModule.kt
 coroutines/featureIntersection/callableReference/function/adapted.kt
 coroutines/featureIntersection/callableReference/function/local/equalsHashCode.kt
-coroutines/featureIntersection/inlineSuspendFinally.kt
 coroutines/featureIntersection/overrideInInlineClass.kt
 coroutines/featureIntersection/suspendFunctionIsAs.kt
 coroutines/generate.kt
@@ -35,7 +34,6 @@ inference/overrideDefaultProperty.kt
 inference/overrideGenericDefaultMethod.kt
 inference/pcla/pclaRootIsTrySyntheticCallWithDelegate.kt
 inline/callableReferenceOfLocalFun.kt
-inlineSizeReduction/lastBreak.kt
 innerNested/nestedInPackage.kt
 multiplatform/k2/defaultArguments/bothInExpectAndActual.kt
 multiplatform/k2/defaultArguments/bothInExpectAndActual2.kt

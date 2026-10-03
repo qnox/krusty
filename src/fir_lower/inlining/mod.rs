@@ -854,18 +854,7 @@ impl BodyLowering<'_> {
             let exit = self.ir.add_expr(IrExpr::Break {
                 label: Some(label.clone()),
             });
-            self.ir.exprs[copy as usize] = if let (Some(slot), Some(value)) = (result_slot, value) {
-                let assign = self.ir.add_expr(IrExpr::SetValue { var: slot, value });
-                IrExpr::Block {
-                    stmts: vec![assign, exit],
-                    value: None,
-                }
-            } else {
-                IrExpr::Block {
-                    stmts: vec![exit],
-                    value: None,
-                }
-            };
+            self.ir.exprs[copy as usize] = inline_return_exit(self.ir, result_slot, value, exit);
         }
 
         let mut statements = operand_declarations;
@@ -1704,6 +1693,28 @@ fn specialize_checked_operation(
         | IrCheckedOperation::BackingFieldRead { .. }
         | IrCheckedOperation::BackingFieldWrite { .. } => {}
     }
+}
+
+/// The block that replaces one cloned `return` inside an expansion's exit loop.
+///
+/// A non-`Unit` result is stored and read after the loop. A `Unit` result has no slot, but
+/// `return expr` still evaluates `expr`: the call in `return f2(y)` is that expression.
+fn inline_return_exit(
+    ir: &mut crate::ir::IrFile,
+    result_slot: Option<u32>,
+    value: Option<ExprId>,
+    exit: ExprId,
+) -> IrExpr {
+    let mut stmts = Vec::new();
+    if let Some(value) = value {
+        if let Some(slot) = result_slot {
+            stmts.push(ir.add_expr(IrExpr::SetValue { var: slot, value }));
+        } else {
+            stmts.push(value);
+        }
+    }
+    stmts.push(exit);
+    IrExpr::Block { stmts, value: None }
 }
 
 /// Rewrite `root` to PRODUCE the value of its sole rewritten return, or leave it exactly as it was.
