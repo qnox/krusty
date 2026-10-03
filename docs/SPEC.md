@@ -3733,9 +3733,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Two soundness declines gate every splice: a
   `$default` body is never spliced (the caller's placeholder nulls would type its parameter locals
   `Object`, a VerifyError — the real call is verifier-correct), and a body referencing an
-  `ACC_PRIVATE` method/field is never spliced (the member is legal only inside the defining class;
-  kotlinc rewrites to a synthetic `access$…` bridge krusty does not model — the fallback real call
-  stays in the class).
+  `ACC_PRIVATE` member that was not rewritten to a public accessor is never spliced (the member is
+  legal only inside the defining class; the fallback real call stays in the class). A private
+  function called from a non-private `inline` function is rewritten before that body is published:
+  the inline function itself calls `access$<name>`, so every splice of it does too.
   **An `invokedynamic` relocates with its whole bootstrap entry, and only if that entry may move.**
   The instruction names a `BootstrapMethods` entry of its DEFINING class by index, not a pool entry,
   so relocation re-interns the entry — its method handle, its static arguments and its name/type —
@@ -7275,6 +7276,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `::a_nested_class_reaches_the_outer_class_private_member`,
   `::a_private_member_of_an_unrelated_class_stays_inaccessible`,
   `::property_inferred_from_generic_companion_method`, box `classes/kt504.kt`.
+- **A private function called from a non-private `inline` function is reached through `access$<name>`.**
+  The bytecode splicer copies the inline function's own method, so that method already calls the
+  public accessor and the private method stays private. A file facade forwards with
+  `access$bar()` / `access$dex()` (`invokestatic` of the private function). An instance method
+  forwards with `access$bi(Owner)`, which `invokespecial`s the private method. A private `inline`
+  function does not publish this boundary, and a lifted local function keeps its own name. Test:
+  `tests/private_inline_access_e2e.rs`.
 - **A private member-extension accessor reached from another class calls `access$<name>`.** The
   accessor is an instance method of the declaring class (`getItem(Key)` for `val Key.item`).
   A local class inside the owner is a separate class file, so it cannot call that private method.

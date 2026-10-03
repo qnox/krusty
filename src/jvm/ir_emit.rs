@@ -5505,6 +5505,10 @@ fn emit_method_inner_with_holder(
     let param_tys = jvm_function_params(ir, fid);
     let ret = jvm_declared_ty(&env.override_results.physical_result(ir, fid));
     let mut e = Emitter::new(ir, cw, env, static_owner, owner, facade, ret, [body]);
+    // The bytecode splicer copies this method. A non-private inline function therefore calls
+    // public accessors for its private callees, so every copy is legal in another class.
+    e.export_private_calls =
+        ir.inline_fns.contains(&fid) && !ir.method_visibility(fid).is_private();
     // kotlinc's transformer keeps a suspend body's own local names: they name the spills.
     let transformed = env.emit_time_machines.transformed(fid);
     // Suspend lowering does not preserve source-local expression IDs.
@@ -6460,6 +6464,9 @@ struct Emitter<'a> {
     /// The exact source class whose code this emitter is writing. A generated holder has no
     /// source-static ownership; it must route every private static access through the owner.
     static_owner: Option<StaticOwner>,
+    /// This method is a non-private `inline` function. Private calls in it name `access$`
+    /// accessors, because the splicer copies these instructions into other classes.
+    export_private_calls: bool,
     /// Interface companion `$$INSTANCE` self-reads for this class, fixed from `static_owner`.
     self_companion: Option<TypeName>,
     /// Checked classifier declarations: which kind of classifier an operand's type names.
@@ -6610,6 +6617,7 @@ impl<'a> Emitter<'a> {
             self_companion: singleton_instance_load::self_companion(ir, static_owner),
             intrinsic_probe_continuations: env.intrinsic_probe_continuations,
             static_owner,
+            export_private_calls: false,
             classifiers: env.signature_symbols,
             dispatch_classifiers: env.dispatch_classifiers.clone(),
             owner: owner.to_string(),
@@ -8732,7 +8740,7 @@ impl<'a> Emitter<'a> {
                     // `InterfaceMethodref`), so it never dispatches to a same-named override. Under
                     // `disable` the body moved to the holder, and an `invokespecial` naming the
                     // interface from another class is not even verifiable.
-                    if self.owner != owner
+                    if (self.owner != owner || self.export_private_calls)
                         && self
                             .run
                             .private_member_access_bridges
@@ -9194,6 +9202,7 @@ impl<'a> Emitter<'a> {
                                 interface_owner: interface,
                                 argument_words: aw,
                                 protected: bridge.as_ref(),
+                                export_private_calls: self.export_private_calls,
                             },
                         );
                         return;

@@ -45,6 +45,10 @@ impl Emitter<'_> {
             self.local_delegate_access,
             emitted_by_owner,
             function,
+        ) || static_accessors::inline_exports_private_call(
+            self.ir,
+            self.export_private_calls,
+            function,
         ) {
             format!("access${}", declaration.name)
         } else {

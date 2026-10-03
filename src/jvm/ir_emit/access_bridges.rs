@@ -225,7 +225,7 @@ pub(super) fn cross_owner_member_calls(
 ) -> MemberAccessBridges {
     let mut private = std::collections::HashSet::new();
     let mut protected = std::collections::HashMap::new();
-    let mut scan = |owner: &str, roots: Vec<crate::ir::ExprId>| {
+    let mut scan = |owner: &str, roots: Vec<crate::ir::ExprId>, export_private: bool| {
         let mut seen = std::collections::HashSet::new();
         let mut stack = roots;
         while let Some(expression) = stack.pop() {
@@ -285,7 +285,12 @@ pub(super) fn cross_owner_member_calls(
             if let Some((class, target, receiver)) = local_target {
                 let target_class = &ir.classes[class as usize];
                 let visibility = ir.method_visibility(target);
-                if target_class.fq_name() != owner
+                let crosses_owner = target_class.fq_name() != owner;
+                // A non-private inline function's own body is copied into other classes, so a
+                // private method of this same class still needs a public accessor.
+                let export_same_owner =
+                    export_private && !crosses_owner && !ir.lifted_functions.contains_key(&target);
+                if (crosses_owner || export_same_owner)
                     && (private_interface_bodies_are_members || !target_class.is_interface)
                     && visibility.is_private()
                 {
@@ -533,7 +538,14 @@ pub(super) fn cross_owner_member_calls(
     };
 
     for context in contexts {
-        scan(&context.owner.internal_name(facade), context.roots.clone());
+        let owner = context.owner.internal_name(facade);
+        for &root in &context.roots {
+            scan(
+                &owner,
+                vec![root],
+                static_accessors::non_private_inline_body(ir, root),
+            );
+        }
     }
     MemberAccessBridges { private, protected }
 }
@@ -749,6 +761,9 @@ pub(super) struct SelectedMemberCall<'a> {
     pub(super) interface_owner: bool,
     pub(super) argument_words: i32,
     pub(super) protected: Option<&'a ProtectedMemberAccessBridge>,
+    /// The caller is a non-private `inline` function, so a same-class private member goes through
+    /// its accessor: the copied body must not name the private method.
+    pub(super) export_private_calls: bool,
 }
 
 /// Emit [`SelectedMemberCall`]. The exact selected declaration determines whether the physical
@@ -763,7 +778,7 @@ pub(super) fn emit_selected_member_call(
 ) {
     let member_target = ir.jvm_member_targets.get(&call.expression).copied();
     let private_extension_bridge = member_target.is_some_and(|function| {
-        source_owner != Some(StaticOwner::Class(call.owner_identity))
+        (source_owner != Some(StaticOwner::Class(call.owner_identity)) || call.export_private_calls)
             && run
                 .private_member_access_bridges
                 .borrow()
