@@ -892,6 +892,9 @@ impl super::IrFile {
         self.shared_super_capture_parameters
             .values_mut()
             .for_each(|value| *value = ty(*value, names));
+        self.shared_secondary_super_capture_parameters
+            .values_mut()
+            .for_each(|value| *value = ty(*value, names));
         self.logical_types
             .values_mut()
             .for_each(|value| *value = ty(*value, names));

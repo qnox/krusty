@@ -527,6 +527,12 @@ impl IrFile {
             "shared superclass-constructor capture parameter",
             self.shared_super_capture_parameters.values().copied(),
         )?;
+        reject_all(
+            "shared secondary superclass-constructor capture parameter",
+            self.shared_secondary_super_capture_parameters
+                .values()
+                .copied(),
+        )?;
         for class in &self.classes {
             validate_class(class)?;
         }
