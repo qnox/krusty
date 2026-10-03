@@ -59604,13 +59604,7 @@ impl<'a> Checker<'a> {
         self.stable_classifier_callable_signatures(ty)
             .into_iter()
             .next()
-            .map(|function| {
-                if ty.is_nullable() {
-                    Ty::nullable(function)
-                } else {
-                    function
-                }
-            })
+            .map(|function| ty.rewrap_nullability(function))
             .unwrap_or(ty)
     }
 

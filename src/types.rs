@@ -973,6 +973,19 @@ impl Ty {
         }
     }
 
+    /// Re-apply this type's nullability wrapper to `inner`, which must be this type's non-null
+    /// semantic content. `T?` yields `inner?` and Java's `T!` yields `inner!`; any other shape
+    /// yields `inner` unchanged. Normalization that replaces the nominal classifier (for example a
+    /// `FunctionN` projection onto its callable shape) must go through here so a platform wrapper
+    /// is not silently collapsed to non-null.
+    pub fn rewrap_nullability(self, inner: Ty) -> Ty {
+        match self {
+            Ty::Nullable(_) => Ty::nullable(inner),
+            Ty::PlatformNullable(_) => Ty::platform_nullable(inner),
+            _ => inner,
+        }
+    }
+
     pub fn in_projection(inner: Ty) -> Ty {
         Ty::InProjection(intern_ty(inner))
     }

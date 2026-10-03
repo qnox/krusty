@@ -2073,6 +2073,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   reference operand) as `dup` + `kotlin/jvm/internal/Intrinsics.checkNotNull(Object)V` — the value
   stays on the stack and the duplicate is consumed by the check, matching kotlinc. On a non-null
   primitive operand it is a no-op (`tests/not_null_assert_e2e.rs`).
+- **Classifier normalization preserves the platform wrapper.** Projecting a nominal `FunctionN<P…, R>`
+  classifier onto its callable shape (`declared_function_type`,
+  `declared_function_semantic_type`) re-applies the original nullability through
+  `Ty::rewrap_nullability`: `T?` stays nullable and Java's `T!` stays platform, so a Java platform
+  parameter whose substituted type is a function classifier (`AtomicReference<(F) -> T>.getAndSet`)
+  still admits the `null` literal. Collapsing `T!` to the non-null shape rejects it.
+  Tests: `function_classifier_normalization_keeps_the_nullability_wrapper` in
+  `src/symbol_resolver/callable_shapes.rs` (plain, nullable, and platform function classifiers
+  versus a nominal callable object); `tests/platform_function_type_argument_e2e.rs` (platform and
+  nullable acceptance against kotlinc, and the complete non-null rejection diagnostic).
 - **A PLATFORM value narrowed to a declared non-null type is guarded where it enters.** A Java value
   arrives as `T!` (`Ty::PlatformNullable`), usable as both `T` and `T?`. Where the source commits it to
   a declared non-null type, kotlinc emits `dup` + `ldc "<expression>"` +
