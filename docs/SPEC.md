@@ -10695,6 +10695,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   while an applicable local function wins without mixing priorities. The chosen semantic callable is
   recorded for lowering; overload selection never changes or retries the qualifier.
 
+- **A generic local extension is applicable to a callable reference once its receiver unifies.**
+  `List<T>::foo` and `value::foo` compare a local `fun <T> List<T>.foo()` with that receiver after
+  substituting the local function's own type parameters. The unsubstituted `List<T>` is invariant, so
+  the reference would otherwise miss the local function and bind a same-named extension property.
+  The local function is visible only from its declaration onward; an earlier reference still binds
+  the property. Tests: `tests/generic_local_extension_ref_e2e.rs`. Corpus:
+  `codegen/box/callableReference/property/extensionPropertyReferenceWithTypeParameter.kt`.
+
 - **Fully-qualified SOURCE class names (`pkg1.Cls`) in type position.** A dotted type name whose path
   matches a class declared in the same module (a sibling file's package, no `import` needed — as
   kotlinc accepts) resolves to that source class, shadowing any classpath type of the same path. The

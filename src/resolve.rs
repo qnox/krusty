@@ -66192,6 +66192,11 @@ impl<'a> Checker<'a> {
                 let candidates = overloads
                     .into_iter()
                     .filter(|(_, signature)| {
+                        let signature = specialize_local_extension_signature(
+                            &self.module,
+                            signature,
+                            extension_receiver_ty,
+                        );
                         signature.source_receiver.is_some_and(|declared| {
                             self.receiver_is_assignable(extension_receiver_ty, declared)
                         })
@@ -67115,6 +67120,11 @@ impl<'a> Checker<'a> {
                     let candidates = overloads
                         .into_iter()
                         .filter(|(_, signature)| {
+                            let signature = specialize_local_extension_signature(
+                                &self.module,
+                                signature,
+                                extension_receiver,
+                            );
                             signature.source_receiver.is_some_and(|declared| {
                                 self.receiver_is_assignable(extension_receiver, declared)
                             })
