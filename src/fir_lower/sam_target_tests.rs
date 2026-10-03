@@ -121,7 +121,7 @@ fn a_suspend_function_value_adapter_marks_its_forwarding_invoke_as_a_suspension(
                 impl_fn,
                 sam: Some(target),
                 ..
-            } if target.wraps_function_value => Some((*impl_fn, target)),
+            } if target.function_adapter => Some((*impl_fn, target)),
             _ => None,
         })
         .collect::<Vec<_>>();
