@@ -3259,9 +3259,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 None => property.ty,
             };
             let ty = self
-                .table
-                .libraries
-                .property_reference_type(0, property.setter.is_some(), &[result])
+                .top_level_property_reference_type(scope, &property, result)
                 .ok_or_else(Self::failure)?;
             return crate::fir::ResolvedTy::new(ty).map_err(|_| Self::failure());
         }
@@ -3674,11 +3672,11 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 vec![result]
             };
             let natural = self
-                .table
-                .libraries
-                .property_reference_type(
-                    usize::from(unbound),
-                    property.setter.is_some(),
+                .member_property_reference_type(
+                    scope,
+                    unbound,
+                    &property,
+                    receiver.get(),
                     &arguments,
                 )
                 .ok_or_else(Self::failure)?;

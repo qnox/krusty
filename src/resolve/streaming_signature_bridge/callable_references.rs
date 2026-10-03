@@ -395,4 +395,170 @@ impl ProductionSignatureSemantics<'_> {
         );
         crate::fir::ResolvedTy::new(contextual).ok()
     }
+
+    /// Whether a reflective property reference exposes a setter. A `var` whose setter the use site
+    /// cannot access is a `KProperty`. `receiver` is the bound value's type, or the classifier the
+    /// unbound reference is formed on. A top-level reference has no receiver.
+    pub(super) fn reflective_property_is_mutable(
+        &self,
+        scope: crate::fir::SignatureScope,
+        setter_present: bool,
+        setter_visibility: crate::types::Visibility,
+        owner: crate::types::TypeName,
+        receiver: Option<Ty>,
+    ) -> bool {
+        let site = SignatureMemberSite {
+            semantics: self,
+            scope,
+            classes: self.lexical_class_names(scope),
+        };
+        let mutable = setter_present
+            && match receiver {
+                Some(receiver) => super::super::access_control::site_receiver_member_accessible(
+                    &site,
+                    setter_visibility,
+                    owner,
+                    receiver,
+                ),
+                None => super::super::access_control::site_member_accessible(
+                    &site,
+                    setter_visibility,
+                    owner,
+                ),
+            };
+        crate::trace_compiler!(
+            "resolve",
+            "property reference mutability owner={} visibility={setter_visibility:?} setter={setter_present} mutable={mutable}",
+            owner.render(),
+        );
+        mutable
+    }
+
+    pub(super) fn top_level_property_reference_type(
+        &self,
+        scope: crate::fir::SignatureScope,
+        property: &crate::libraries::PropertyInfo,
+        result: Ty,
+    ) -> Option<Ty> {
+        self.table.libraries.property_reference_type(
+            0,
+            self.reflective_property_is_mutable(
+                scope,
+                property.setter.is_some(),
+                property.setter_visibility,
+                property.owner,
+                None,
+            ),
+            &[result],
+        )
+    }
+
+    pub(super) fn member_property_reference_type(
+        &self,
+        scope: crate::fir::SignatureScope,
+        unbound: bool,
+        property: &crate::symbol_resolver::ResolvedPropertyRef,
+        receiver: Ty,
+        arguments: &[Ty],
+    ) -> Option<Ty> {
+        self.table.libraries.property_reference_type(
+            usize::from(unbound),
+            self.reflective_property_is_mutable(
+                scope,
+                property.setter.is_some(),
+                property.setter_visibility,
+                property.getter.owner,
+                Some(receiver),
+            ),
+            arguments,
+        )
+    }
+}
+
+struct SignatureMemberSite<'site, 'data> {
+    semantics: &'site ProductionSignatureSemantics<'data>,
+    scope: crate::fir::SignatureScope,
+    classes: Vec<crate::types::TypeName>,
+}
+
+impl super::super::access_control::SourceMemberSite for SignatureMemberSite<'_, '_> {
+    fn visibility_suppressed(&self) -> bool {
+        false
+    }
+
+    fn source_package(&self) -> Option<crate::types::TypeName> {
+        self.semantics
+            .headers
+            .sources
+            .get(self.scope.source)
+            .map(|file| file.package)
+    }
+
+    fn module_owns(&self, owner: crate::types::TypeName) -> bool {
+        let module = crate::module_symbols::ModuleSymbols::for_file(
+            self.semantics.table,
+            self.scope.source.raw(),
+        );
+        super::super::access_control::module_declares_classifier(&module, owner)
+    }
+
+    fn internal_friend(&self, owner: crate::types::TypeName) -> bool {
+        self.semantics.table.libraries.internal_accessible(owner)
+    }
+
+    fn access_classes(&self) -> Vec<crate::types::TypeName> {
+        self.classes.clone()
+    }
+
+    fn protected_classes(&self) -> Vec<crate::types::TypeName> {
+        self.classes.clone()
+    }
+
+    fn companion_of(&self, enclosing: crate::types::TypeName) -> Option<crate::types::TypeName> {
+        self.semantics
+            .table
+            .class_by_type_name(enclosing)
+            .and_then(|class| class.companion_internal)
+    }
+
+    fn is_subtype(
+        &self,
+        subclass: crate::types::TypeName,
+        superclass: crate::types::TypeName,
+    ) -> bool {
+        self.with_oracle(|oracle| {
+            crate::assignable::is_subtype(
+                &crate::assignable::TyCtx::new(),
+                oracle,
+                Ty::obj_name(subclass),
+                Ty::obj_name(superclass),
+            )
+        })
+    }
+
+    fn receiver_assignable(&self, receiver: Ty, access_classifier: crate::types::TypeName) -> bool {
+        self.with_oracle(|oracle| {
+            crate::assignable::is_assignable(
+                &crate::assignable::TyCtx::new(),
+                oracle,
+                receiver,
+                Ty::obj_name(access_classifier),
+            )
+        })
+    }
+}
+
+impl SignatureMemberSite<'_, '_> {
+    fn with_oracle<T>(&self, body: impl FnOnce(&dyn crate::assignable::TypeOracle) -> T) -> T {
+        let module = crate::module_symbols::ModuleSymbols::for_file(
+            self.semantics.table,
+            self.scope.source.raw(),
+        );
+        let source = crate::symbol_source::CompositeSource::new(vec![
+            &module as &dyn crate::symbol_source::SymbolSource,
+            &*self.semantics.table.libraries as &dyn crate::symbol_source::SymbolSource,
+        ]);
+        let oracle = crate::symbol_resolver::SourceOracle(&source);
+        body(&oracle)
+    }
 }
