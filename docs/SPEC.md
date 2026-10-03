@@ -7283,7 +7283,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `access$dex()` (`invokestatic` of the private function). An instance method forwards with
   `access$bi(Owner)`, which `invokespecial`s the private method. A private `inline` function does
   not publish this boundary, and a lifted local function keeps its own name. Test:
-  `tests/private_inline_access_e2e.rs`.
+  `tests/private_inline_access_e2e.rs`. Box `ir/privateSignatures/privateLeakThroughInline.kt`.
 - **A private member-extension accessor reached from another class calls `access$<name>`.** The
   accessor is an instance method of the declaring class (`getItem(Key)` for `val Key.item`).
   A local class inside the owner is a separate class file, so it cannot call that private method.
