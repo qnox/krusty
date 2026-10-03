@@ -10144,7 +10144,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   header without claiming those language semantics. The accepted levels are the one contract
   2.0, 2.1, 2.2, 2.3, and 2.4; a patch segment, a sign, or any other pair (including kotlinc's
   experimental 2.5) is an unknown version. `-api-version` stays an accepted-and-ignored
-  compatibility flag. (`tests/metadata_language_version_e2e.rs` compares class, facade,
+  compatibility flag. The Gradle plugin exposes the split as an opt-in: with
+  `-Pkrusty.bridgeLanguageVersion=true`, a requested `compilerOptions.languageVersion` other than
+  2.4 is not rejected and not forwarded — krusty compiles with 2.4 semantics and the requested
+  level (2.0–2.4, validated) is appended as `-Xmetadata-version`, with `languageVersion` the sole
+  source of the stamp (`apiVersion` alone adds no override; a requested 2.4 keeps the existing
+  `-language-version 2.4` behavior).
+  (`tests/metadata_language_version_e2e.rs` compares class, facade,
   `$DefaultImpls`, suspend-lambda, and regenerated-inline-object stamps with kotlinc's
   `-language-version 2.2` output; `language_version_rejects_unimplemented_levels_and_the_stamp_is_internal`
   in `crates/krusty-cli/src/cli.rs`; `language_version_stamps_the_header` in

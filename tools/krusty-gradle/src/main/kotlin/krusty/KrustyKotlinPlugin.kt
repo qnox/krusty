@@ -320,11 +320,15 @@ private fun compilerArguments(task: KotlinJvmCompile): List<String> {
     fun reject(condition: Boolean, name: String) {
         if (condition) throw GradleException("krusty does not support compilerOptions.$name")
     }
+    // Fail-closed: any value other than "true" (case-insensitive) leaves the bridge off.
+    val bridgeLanguageVersion = task.project.providers.gradleProperty(BRIDGE_LANGUAGE_VERSION_PROPERTY)
+        .orNull
+        ?.equals("true", ignoreCase = true) == true
     val languageVersion = options.languageVersion.orNull?.let {
-        supportedKotlinLevel("languageVersion", it.version)
+        if (bridgeLanguageVersion) it.version else supportedKotlinLevel("languageVersion", it.version)
     }
     val apiVersion = options.apiVersion.orNull?.let {
-        supportedKotlinLevel("apiVersion", it.version)
+        if (bridgeLanguageVersion) it.version else supportedKotlinLevel("apiVersion", it.version)
     }
     reject(options.progressiveMode.getOrElse(false), "progressiveMode")
     reject(options.extraWarnings.getOrElse(false), "extraWarnings")
@@ -351,8 +355,37 @@ private fun compilerArguments(task: KotlinJvmCompile): List<String> {
             )
         }
     }
-    languageVersion?.let { arguments.addPair("-language-version", it) }
-    apiVersion?.let { arguments.addPair("-api-version", it) }
+    // Under the bridge the requested language version is not a semantics input: krusty compiles
+    // with 2.4 semantics and stamps the requested level as the artifact metadata version instead
+    // of forwarding `-language-version`/`-api-version`. languageVersion is the source of truth
+    // for the stamp; apiVersion alone adds no override.
+    if (bridgeLanguageVersion && languageVersion != null && languageVersion != "2.4") {
+        if (languageVersion !in METADATA_STAMP_LEVELS) {
+            throw GradleException(
+                "krusty does not support $BRIDGE_LANGUAGE_VERSION_PROPERTY with " +
+                    "compilerOptions.languageVersion=$languageVersion; " +
+                    "supported metadata versions: ${METADATA_STAMP_LEVELS.joinToString()}",
+            )
+        }
+        freeArguments.firstOrNull { it.startsWith("-Xmetadata-version=") }?.let { free ->
+            throw GradleException(
+                "compilerOptions.languageVersion=$languageVersion (bridged) and freeCompilerArg '$free' both select the metadata stamp; configure exactly one",
+            )
+        }
+        arguments.add("-Xmetadata-version=$languageVersion")
+        task.logger.warn(
+            "$BRIDGE_LANGUAGE_VERSION_PROPERTY: {} requests languageVersion {}; " +
+                "krusty compiles with 2.4 semantics and stamps metadata version {}",
+            task.path,
+            languageVersion,
+            languageVersion,
+        )
+    } else {
+        languageVersion?.let { arguments.addPair("-language-version", it) }
+    }
+    apiVersion?.let {
+        if (!bridgeLanguageVersion || it == "2.4") arguments.addPair("-api-version", it)
+    }
     structuredOptIns.forEach { marker ->
         arguments.add("-opt-in=$marker")
     }
@@ -384,6 +417,16 @@ private val NAME_DESTRUCTURING_MODES = setOf("only-syntax", "name-mismatch", "co
 
 private val JVM_DEFAULT_MODES = setOf("enable", "no-compatibility", "disable")
 private val JVM_DEFAULT_LEGACY_MODES = setOf("all", "all-compatibility", "disable")
+
+// The stamp contract of the CLI's `-Xmetadata-version` (METADATA_STAMP_LEVELS in krusty-cli):
+// an artifact stamp, not a language-semantics switch.
+private val METADATA_STAMP_LEVELS = setOf("2.0", "2.1", "2.2", "2.3", "2.4")
+
+// Opt-in bridge for builds that pin an older compilerOptions.languageVersion in Gradle (the
+// Kotlin repository requests 2.2): krusty still compiles with 2.4 semantics and stamps the
+// requested level as the artifact metadata version.
+private const val BRIDGE_LANGUAGE_VERSION_PROPERTY = "krusty.bridgeLanguageVersion"
+
 private fun isFreeJvmDefault(argument: String): Boolean =
     argument == "-jvm-default" || argument == "-Xjvm-default" ||
         argument.startsWith("-jvm-default=") || argument.startsWith("-Xjvm-default=")
