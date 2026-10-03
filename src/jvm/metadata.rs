@@ -1887,14 +1887,21 @@ pub fn rebind_enclosing_type_parameters(ty: Ty, enclosing: &[(String, Vec<Ty>)])
         return ty;
     }
     match ty {
-        Ty::TyParam(name, bound) => match enclosing_type_parameter_id(name) {
-            Some(id) if id < enclosing.len() => {
-                let (name, bounds) = &enclosing[id];
-                let bound = bounds.first().copied().unwrap_or(*bound);
-                Ty::ty_param(name, bound)
+        Ty::TyParam(name, bound) => {
+            let rebound_bound = rebind_enclosing_type_parameters(*bound, enclosing);
+            match enclosing_type_parameter_id(name) {
+                Some(id) if id < enclosing.len() => {
+                    let (name, bounds) = &enclosing[id];
+                    let bound = bounds
+                        .first()
+                        .copied()
+                        .map(|bound| rebind_enclosing_type_parameters(bound, enclosing))
+                        .unwrap_or(rebound_bound);
+                    Ty::ty_param(name, bound)
+                }
+                _ => Ty::ty_param(name, rebound_bound),
             }
-            _ => ty,
-        },
+        }
         Ty::Nullable(inner) => Ty::nullable(rebind_enclosing_type_parameters(*inner, enclosing)),
         Ty::PlatformNullable(inner) => {
             Ty::platform_nullable(rebind_enclosing_type_parameters(*inner, enclosing))

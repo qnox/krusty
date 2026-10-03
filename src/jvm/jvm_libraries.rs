@@ -339,32 +339,45 @@ impl JvmLibraries {
             owner = name.nested_owner();
         }
         owners.reverse();
-        owners
-            .into_iter()
-            .flat_map(|owner| {
-                self.cp
-                    .find_name(owner)
-                    .map(|class| {
-                        let parameters = &class.meta.class_type_parameters;
-                        parameters
-                            .type_params()
-                            .iter()
-                            .zip(parameters.type_param_bounds())
-                            .enumerate()
-                            .map(|(ordinal, (source, bounds))| {
-                                (
-                                    crate::types::external_classifier_type_parameter(
-                                        owner, ordinal, source,
-                                    )
-                                    .to_string(),
-                                    bounds.clone(),
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default()
-            })
-            .collect()
+        let mut collected = Vec::new();
+        for owner in owners {
+            let Some(class) = self.cp.find_name(owner) else {
+                continue;
+            };
+            let parameters = &class.meta.class_type_parameters;
+            let identities = parameters
+                .type_params()
+                .iter()
+                .enumerate()
+                .map(|(ordinal, source)| {
+                    (
+                        source.as_str(),
+                        crate::types::external_classifier_type_parameter(owner, ordinal, source),
+                    )
+                })
+                .collect::<std::collections::HashMap<_, _>>();
+            let level = parameters
+                .type_params()
+                .iter()
+                .zip(parameters.type_param_bounds())
+                .enumerate()
+                .map(|(ordinal, (source, bounds))| {
+                    let semantic =
+                        crate::types::external_classifier_type_parameter(owner, ordinal, source);
+                    let bounds = bounds
+                        .iter()
+                        .map(|bound| {
+                            let bound =
+                                metadata::rebind_enclosing_type_parameters(*bound, &collected);
+                            crate::types::ty_rename_params(bound, &identities)
+                        })
+                        .collect();
+                    (semantic.to_string(), bounds)
+                })
+                .collect::<Vec<_>>();
+            collected.extend(level);
+        }
+        collected
     }
 
     fn member_scope_names(
