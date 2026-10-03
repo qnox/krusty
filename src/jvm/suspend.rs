@@ -1393,10 +1393,13 @@ fn function_value_types_with(
 }
 
 /// For a same-file suspend call, the callee `FunId` — used to recover the callee's LOGICAL return type
-/// (its index into `orig_rets`). Handles a static call (`Call{Local}`) and a same-file member call
-/// (`MethodCall`, whose `FunId` is the class's method at `index`). Returns `None` for a cross-unit
-/// suspend call (a `Callee::Static` to another file / the classpath) — that call has no local `FunId`;
-/// its logical type comes from `ir.suspend_calls` instead.
+/// (its index into `orig_rets`). Handles a static call (`Call{Local}`), the same function's `$default`
+/// edge after omitted arguments are realized (`LocalDefault` / `ClassStaticDefault`), and a same-file
+/// member call (`MethodCall`, whose `FunId` is the class's method at `index`). The default edge is
+/// still that suspend declaration: its continuation belongs before the mask and marker, and dropping
+/// it here leaves the call with the pre-CPS arity. Returns `None` for a cross-unit suspend call (a
+/// `Callee::Static` to another file / the classpath) — that call has no local `FunId`; its logical
+/// type comes from `ir.suspend_calls` instead.
 pub(in crate::jvm) fn suspend_call_fid(
     ir: &IrFile,
     e: ExprId,
@@ -1404,11 +1407,12 @@ pub(in crate::jvm) fn suspend_call_fid(
 ) -> Option<u32> {
     match &ir.exprs[e as usize] {
         IrExpr::Call {
-            callee: Callee::Local(fid),
+            callee: Callee::Local(fid) | Callee::LocalDefault(fid),
             ..
         } if suspend_set.contains(fid) => Some(*fid),
         IrExpr::Call {
-            callee: Callee::ClassStatic { function, .. },
+            callee:
+                Callee::ClassStatic { function, .. } | Callee::ClassStaticDefault { function, .. },
             ..
         } if suspend_set.contains(function) => Some(*function),
         IrExpr::MethodCall { class, index, .. } => {
