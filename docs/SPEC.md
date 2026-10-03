@@ -4511,6 +4511,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the body is read from (`MapsKt__MapsKt`), and that is the method the in-place read follows.
   Tests: `tests/reified_class_regeneration_e2e.rs`, `tests/classpath_reified_inline_toplevel_e2e.rs`.
 
+- **A reified `catch (e: E)` uses the inline call's type argument as its JVM catch type.** The
+  clause is checked as the reified parameter, whose erasure is the parameter's bound (`Throwable`).
+  Emitting that erasure at every call site catches every throwable. Inlining substitutes the
+  call's reified argument into the catch type and emits that class (`catch (Exception)` for
+  `catch<Exception>`), which is the handler kotlinc writes. A thrown type outside that class
+  falls through to the next handler. Test: `tests/reified_catch_e2e.rs`. Corpus:
+  `codegen/box/reified/catchParameter/tryCatchReifiedType.kt`.
+
 - **An escaping lambda inside `inline fun <reified T>` specializes `T` at the call that creates it.**
   `func = { it as? T }` stores a closure, so the body is not spliced into the caller. The
   declaration's implementation keeps the reified marker. Each call copies that implementation,

@@ -1239,11 +1239,23 @@ pub(super) fn specialize_typed_expression(
         | IrExpr::NewArray {
             array_type: type_operand,
             ..
-        }
-        | IrExpr::Try {
-            result: type_operand,
-            ..
         } => specialize_ty(type_operand, bindings),
+        IrExpr::Try {
+            result: type_operand,
+            catches,
+            ..
+        } => {
+            specialize_ty(type_operand, bindings);
+            // A reified `catch (e: E)` erased to E's bound at lowering. The call's reified
+            // argument is the JVM catch type kotlinc emits (`catch (Exception)`, not
+            // `catch (Throwable)` plus a filter).
+            for catch in catches {
+                specialize_ty(&mut catch.ty, runtime);
+                if let Some(internal) = catch.ty.non_null().obj_internal() {
+                    catch.exc_internal = internal;
+                }
+            }
+        }
         IrExpr::New {
             ctor_params: Some(parameters),
             ..

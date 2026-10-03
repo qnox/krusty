@@ -1238,6 +1238,7 @@ fn bind_value_try_to_local(
         .map(|catch| crate::ir::IrCatch {
             var: catch.var,
             binding: catch.binding,
+            ty: catch.ty,
             exc_internal: catch.exc_internal,
             line: catch.line,
             body: assign_branch_to_tmp(
