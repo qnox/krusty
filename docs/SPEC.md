@@ -5001,7 +5001,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   interface when its realized JVM type is a different representation. An unannotated binding
   (`val kr = ::Action`) is stored as erased `kotlin.reflect.KFunction`, so the call site casts.
   A receiver realized as `FunctionN` — a lambda, or a reference the use site typed as a
-  function — is invoked directly. Tests:
+  function — is invoked directly. The end-to-end comparison is keyed by each carrier's
+  internal name and includes its class flags, superclass, interfaces in class-file order, and
+  every field and method name, descriptor, and access flags. Tests:
   `fir_lower::callable_references::tests::fun_interface_constructor_reference_returns_a_checked_sam_delegate`,
   `tests/fun_interface_constructor_reference_e2e.rs`, and the
   `callableReference/funInterfaceConstructor` boxes.
