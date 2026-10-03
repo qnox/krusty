@@ -387,13 +387,16 @@ impl BodyLowering<'_, '_, '_> {
             .runtime_call_unchecked("kt_pending_exception", &[], any(), &[])?
             .expect("the pending exception is a reference");
         for catch in catches {
-            let Some(descriptor) = self
-                .file
-                .type_descriptor(Ty::obj_name(catch.exc_internal))?
-            else {
+            // A reified catch keeps its semantic type parameter in common IR. Native runtime
+            // dispatch, like the JVM exception table, tests that parameter's declaration bound.
+            let runtime_type = match catch.ty.non_null() {
+                Ty::TyParam(_, bound) => *bound,
+                concrete => concrete,
+            };
+            let Some(descriptor) = self.file.type_descriptor(runtime_type)? else {
                 return Err(format!(
-                    "a `catch` of `{}`, which wears no runtime descriptor",
-                    catch.exc_internal.render()
+                    "a `catch` of `{:?}`, which wears no runtime descriptor",
+                    catch.ty
                 ));
             };
             let descriptor = self.data_address(descriptor);
@@ -414,7 +417,7 @@ impl BodyLowering<'_, '_, '_> {
             // Cleared BEFORE the handler runs: from here the exception is this clause's value, not
             // something in flight, and the handler's own calls check the slot like any others.
             self.runtime_call_unchecked("kt_clear_pending", &[], Ty::Unit, &[])?;
-            let variable = self.declare_value(catch.var, Ty::obj_name(catch.exc_internal))?;
+            let variable = self.declare_value(catch.var, catch.ty)?;
             self.builder.def_var(variable, thrown);
             entered(self);
             if let Some(cleanup_dispatch) = cleanup_dispatch {

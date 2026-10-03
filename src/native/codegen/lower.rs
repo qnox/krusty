@@ -807,12 +807,71 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         self.terminated = false;
     }
 
+    /// Whether this exact declaration-initializer store writes the bits already present in a
+    /// freshly allocated native field. The expression identity comes from common lowering; the
+    /// all-zero carrier decision belongs to this backend's representation.
+    fn is_elided_initializer_store(&self, id: u32) -> bool {
+        fn is_null(ir: &IrFile, expression: u32) -> bool {
+            match ir.expr(expression) {
+                IrExpr::Const(IrConst::Null) => true,
+                IrExpr::TypeOp {
+                    op: IrTypeOp::ImplicitCoercion,
+                    arg,
+                    ..
+                } => is_null(ir, *arg),
+                _ => false,
+            }
+        }
+
+        fn is_scalar_zero(ir: &IrFile, expression: u32) -> bool {
+            match ir.expr(expression) {
+                IrExpr::Const(IrConst::Boolean(false))
+                | IrExpr::Const(IrConst::Byte(0))
+                | IrExpr::Const(IrConst::Short(0))
+                | IrExpr::Const(IrConst::Int(0))
+                | IrExpr::Const(IrConst::Long(0))
+                | IrExpr::Const(IrConst::Char(0))
+                | IrExpr::Const(IrConst::UByte(0))
+                | IrExpr::Const(IrConst::UShort(0))
+                | IrExpr::Const(IrConst::UInt(0))
+                | IrExpr::Const(IrConst::ULong(0)) => true,
+                IrExpr::Const(IrConst::Float(value)) => value.to_bits() == 0,
+                IrExpr::Const(IrConst::Double(value)) => value.to_bits() == 0,
+                IrExpr::TypeOp {
+                    op: IrTypeOp::ImplicitCoercion,
+                    arg,
+                    ..
+                } => is_scalar_zero(ir, *arg),
+                _ => false,
+            }
+        }
+
+        if !self.file.ir.property_initializer_stores.contains(&id) {
+            return false;
+        }
+        let IrExpr::SetField {
+            class,
+            index,
+            value,
+            ..
+        } = self.file.ir.expr(id)
+        else {
+            return false;
+        };
+        let slot = self.file.ir.classes[*class as usize].fields[*index as usize].ty;
+        match carrier(slot) {
+            Carrier::Scalar(_, _) => is_scalar_zero(self.file.ir, *value),
+            Carrier::Ref => is_null(self.file.ir, *value),
+            Carrier::Void => false,
+        }
+    }
+
     fn statement(&mut self, id: u32) -> Result<(), Unsupported> {
         // `var x = 0` in a class body stores NOTHING. The rule is Kotlin's, it is observable
         // rather than an optimization, and the IR is what knows which store is a declaration's —
-        // see `IrFile::is_elided_initializer_store`. A fresh object's storage is already zero
-        // here, as it is on every target krusty emits for.
-        if self.file.ir.is_elided_initializer_store(id) {
+        // see `property_initializer_stores`. A fresh object's storage is already zero here, as it
+        // is on every target krusty emits for.
+        if self.is_elided_initializer_store(id) {
             return Ok(());
         }
         match self.file.ir.expr(id).clone() {
@@ -1886,6 +1945,24 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 let Some(realization) = self.file.callables.callable(*target) else {
                     return Err("an unresolvable dependency call".to_string());
                 };
+                if realization.compiler_intrinsic
+                    == Some(crate::libraries::CompilerIntrinsic::StringPlus)
+                {
+                    let (Some(receiver), [argument]) = (dispatch_receiver, args) else {
+                        return Err("a malformed `String.plus`".to_string());
+                    };
+                    let left = self.reference(receiver)?;
+                    let right = self.reference(*argument)?;
+                    if self.terminated {
+                        return Ok(None);
+                    }
+                    return self.runtime_call(
+                        "kt_string_plus",
+                        &[any(), any()],
+                        *ret,
+                        &[left, right],
+                    );
+                }
                 let owner = realization.physical_owner.render();
                 // The Kotlin name the declaration PUBLISHES, not the spelling it is realized under.
                 // A physical name is an emit handle: a JVM realization may RENAME a member, and
@@ -2277,17 +2354,6 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     &[left, right],
                 )
             }
-            IrIntrinsic::StringPlus => {
-                let (Some(receiver), [argument]) = (receiver, args) else {
-                    return Err("a malformed `String.plus`".to_string());
-                };
-                let left = self.reference(receiver)?;
-                let right = self.reference(*argument)?;
-                if self.terminated {
-                    return Ok(None);
-                }
-                self.runtime_call("kt_string_plus", &[any(), any()], ret, &[left, right])
-            }
             // `s[i]`, and the read a `for (c in s)` loop is lowered into: common lowering turns
             // that loop into a counted one over `StringLength` and this, so the two arrive
             // together and only one of them was answered.
@@ -2349,13 +2415,13 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 }
                 self.runtime_call("kt_to_string", &[any()], ret, &[value])
             }
-            IrIntrinsic::DataClassFieldHash { ty } => {
+            IrIntrinsic::GeneratedPropertyHash { ty } => {
                 let [value] = args else {
                     return Err("a malformed data-class field hash".to_string());
                 };
                 self.field_hash(*value, ty)
             }
-            IrIntrinsic::DataClassFieldEquals { ty } => {
+            IrIntrinsic::GeneratedPropertyEquals { ty } => {
                 let [left, right] = args else {
                     return Err("a malformed data-class field comparison".to_string());
                 };
@@ -2691,17 +2757,20 @@ fn describe(node: &IrExpr) -> String {
     // A CHECKED callable reference is one whose invocation common lowering did not turn into an
     // adapter, so the target is what says which piece of work it is. Reporting the node alone put
     // every one of them under one line of the backlog, which cannot be worked from.
-    if let IrExpr::Checked(IrCheckedOperation::CallableReference { target, .. }) = node {
-        use crate::fir::FirCallableReferenceTarget as Target;
-        return match target {
+    if let IrExpr::CallableReference(reference) = node {
+        use crate::ir::IrCallableReferenceTarget as Target;
+        return match &reference.target {
             Target::Module(_) => {
                 "a reference to a declaration of this file, kept as a reflection value".to_string()
             }
-            Target::ArrayFactory { .. } => "a reference to an array factory".to_string(),
             Target::Constructor { .. } => "a reference to a CONSTRUCTOR".to_string(),
             Target::External { .. } => "a reference to a DEPENDENCY declaration".to_string(),
             Target::Classifier { .. } => {
                 "a reference to a classifier's implicit member".to_string()
+            }
+            Target::Local { .. } => "a reference to a local declaration".to_string(),
+            Target::FunctionValueConversion { .. } => {
+                "a reference adapting another function value".to_string()
             }
         };
     }
