@@ -1892,7 +1892,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   name's companion value does not hide it: `Enum.entries` is that property when the reference is
   inside the companion and when the expression's type is inferred. A companion member of the same
   spelling is `Enum.Companion.entries`. With `-PrioritizedEnumEntries`, that companion member is
-  selected first. Source/module and dependency shapes therefore share one target handoff; lowering
+  selected first. With `+PrioritizedEnumEntries`, an unqualified `entries` inside the enum is the
+  same synthetic property once the enum's own instance members miss, ahead of the companion and any
+  lexically enclosing classifier (`object Outer { val entries = …; enum class E { fun test() = entries } }`
+  reads `E.entries`). A constructor property, a property declared on the enum, or an inherited
+  interface property of that spelling still wins. With `-PrioritizedEnumEntries`, the enclosing
+  classifier's member wins that unqualified read. Source/module and dependency shapes therefore share
+  one target handoff; lowering
   never reconstructs a call from the declaration origin. If a provider exposes the enum kind but no
   direct accessor realization, the valid property is typed but rejected before emission with a stable
   boundary until an alternative cached-mapping realization is implemented. Test:

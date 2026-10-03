@@ -23115,6 +23115,9 @@ impl<'a> Checker<'a> {
                 let mut receivers_closed = false;
                 for rung in self.implicit_rungs_with(scope, callee_receivers.clone()) {
                     let implicit_receiver = match rung {
+                        implicit_rungs::ImplicitRung::PrioritizedClassifierProperties(_) => {
+                            continue
+                        }
                         implicit_rungs::ImplicitRung::StaticScope(classifier) => {
                             if let Some(ret) = self.static_scope_call(
                                 scope,
@@ -24570,7 +24573,8 @@ impl<'a> Checker<'a> {
                 ),
                 PropertyWriteSelection::None
                 | PropertyWriteSelection::Implicit(_)
-                | PropertyWriteSelection::Receiverless(_) => self
+                | PropertyWriteSelection::Receiverless(_)
+                | PropertyWriteSelection::ClassifierProperty(_) => self
                     .diags
                     .error(span, format!("unresolved reference '{name}'.")),
             },
@@ -24823,6 +24827,18 @@ impl<'a> Checker<'a> {
                             );
                             self.stmt_lowers
                                 .insert(s, StmtLowering::TopLevelPropertySet(property));
+                        }
+                        PropertyWriteSelection::ClassifierProperty(property) => {
+                            self.report_val_reassignment(
+                                target_span,
+                                "'val' cannot be reassigned.",
+                            );
+                            self.expect_assignable(
+                                property.ty,
+                                vt,
+                                self.value_diagnostic_span(value, vt),
+                                "assignment",
+                            );
                         }
                         PropertyWriteSelection::Ambiguous => self.diags.error(
                             target_span,
@@ -62526,7 +62542,8 @@ impl<'a> Checker<'a> {
                             ),
                             PropertyWriteSelection::None
                             | PropertyWriteSelection::Implicit(_)
-                            | PropertyWriteSelection::Receiverless(_) => self
+                            | PropertyWriteSelection::Receiverless(_)
+                            | PropertyWriteSelection::ClassifierProperty(_) => self
                                 .diags
                                 .error(self.span(e), format!("unresolved reference '{name}'.")),
                         }
@@ -63639,6 +63656,15 @@ impl<'a> Checker<'a> {
                     // scope is a rung of that tower too.
                     for rung in self.implicit_rungs(scope) {
                         let receiver = match rung {
+                            implicit_rungs::ImplicitRung::PrioritizedClassifierProperties(
+                                owner,
+                            ) => {
+                                if let Some(ty) = self.prioritized_classifier_property(e, &n, owner)
+                                {
+                                    return self.set(e, ty);
+                                }
+                                continue;
+                            }
                             implicit_rungs::ImplicitRung::StaticScope(classifier) => {
                                 let selection =
                                     self.select_static_scope_property(scope, classifier, &n);
@@ -63820,6 +63846,12 @@ impl<'a> Checker<'a> {
                 // the tower group after package and top-level names.
                 for rung in self.implicit_rungs(scope) {
                     let implicit_receiver = match rung {
+                        implicit_rungs::ImplicitRung::PrioritizedClassifierProperties(owner) => {
+                            if let Some(ty) = self.prioritized_classifier_property(e, &n, owner) {
+                                return self.set(e, ty);
+                            }
+                            continue;
+                        }
                         implicit_rungs::ImplicitRung::StaticScope(classifier) => {
                             let selection =
                                 self.select_static_scope_property(scope, classifier, &n);
@@ -66668,6 +66700,9 @@ impl<'a> Checker<'a> {
                 // The static scopes open here name associated declarations without a receiver.
                 for rung in self.implicit_rungs(scope) {
                     let implicit_receiver = match rung {
+                        implicit_rungs::ImplicitRung::PrioritizedClassifierProperties(_) => {
+                            continue
+                        }
                         implicit_rungs::ImplicitRung::StaticScope(classifier) => {
                             let resolver = self.resolver();
                             let functions =
