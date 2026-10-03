@@ -12723,6 +12723,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   by the ordinary facade stub emitter unchanged. Tests: `tests/metadata_kept_params.rs`,
   `tests/unsigned_classpath_call_e2e.rs` (both krusty-built by default).
 
+- **A same-file call that omits a default of a `suspend` function is still that suspension.**
+  After JVM default realization the edge is `Callee::LocalDefault` or `Callee::ClassStaticDefault`,
+  and it still names the suspend declaration. The caller's continuation is inserted immediately
+  before the mask and marker (`doAction$run$default(String, Function2, Continuation, int, Object)`),
+  the same slot a member `$default` uses. A local `suspend fun` whose omitted argument is a suspend
+  lambda therefore forwards the enclosing continuation and evaluates the default. Corpus:
+  `coroutines/localFunctions/named/defaultArgument.kt`. Test:
+  `tests/local_suspend_default_e2e.rs`.
+
 - **Safe-call `invoke` on a nullable fun-typed value resolves through the invoke convention.** For
   `op?.invoke(a, b)` where `op: ((Int, Int) -> Int)?`, the ordinary member paths know no `invoke`
   member on `Function{N}` and typed the call `Error` (the whole file then bailed at SafeCall
