@@ -335,17 +335,30 @@ fn unary(
         };
         return Some(boolean(!value));
     }
+    // A signed literal is negated before it is narrowed to the checked result type. This ordering
+    // is observable at the lower bound: `val b: Byte = -128` has an `Int` literal `128` under the
+    // unary operation, and narrowing that magnitude first produces `-128`, whose negation is the
+    // out-of-range `128`. Kotlin instead treats the signed source literal as one constant and only
+    // then records its `Byte` identity.
+    if operation == FirUnaryOperation::Negate {
+        let negated = match operand.value {
+            FirConstant::Int(value) => FirConstant::Int(value.wrapping_neg()),
+            FirConstant::Long(value) => FirConstant::Long(value.wrapping_neg()),
+            FirConstant::Float(value) => FirConstant::Float(-value),
+            FirConstant::Double(value) => FirConstant::Double(-value),
+            _ => return None,
+        };
+        return numeric(
+            &EvaluatedConstant {
+                value: negated,
+                ty: operand.ty,
+            },
+            ty,
+        );
+    }
     let operand = numeric(&operand, ty)?;
     let value = match (operation, operand.value) {
         (FirUnaryOperation::Identity, value) => value,
-        (FirUnaryOperation::Negate, FirConstant::Int(value)) => {
-            FirConstant::Int(i64::from((value as i32).wrapping_neg()))
-        }
-        (FirUnaryOperation::Negate, FirConstant::Long(value)) => {
-            FirConstant::Long(value.wrapping_neg())
-        }
-        (FirUnaryOperation::Negate, FirConstant::Float(value)) => FirConstant::Float(-value),
-        (FirUnaryOperation::Negate, FirConstant::Double(value)) => FirConstant::Double(-value),
         (FirUnaryOperation::BitwiseNot, FirConstant::Int(value)) if ty == Ty::Int => {
             FirConstant::Int(!value)
         }
@@ -675,5 +688,28 @@ mod tests {
             rendered(FirConstant::UInt(i64::from(u32::MAX)), Ty::UInt),
             Some("4294967295".to_string())
         );
+    }
+
+    #[test]
+    fn signed_minimum_literals_are_negated_before_narrowing() {
+        let minimum = |magnitude, ty| {
+            unary(
+                FirUnaryOperation::Negate,
+                EvaluatedConstant {
+                    value: FirConstant::Int(magnitude),
+                    ty: Ty::Int,
+                },
+                ty,
+            )
+            .expect("a signed literal folds")
+        };
+
+        let byte = minimum(128, Ty::Byte);
+        assert_eq!(byte.value, FirConstant::Int(-128));
+        assert_eq!(byte.ty, Ty::Byte);
+
+        let short = minimum(32_768, Ty::Short);
+        assert_eq!(short.value, FirConstant::Int(-32_768));
+        assert_eq!(short.ty, Ty::Short);
     }
 }

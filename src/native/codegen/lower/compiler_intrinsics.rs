@@ -49,18 +49,35 @@ impl BodyLowering<'_, '_, '_> {
 }
 
 pub(super) fn runtime_member_role(
-    fact: &crate::backend::BackendCallableFact,
+    compiler_intrinsic: Option<crate::backend::BackendCompilerIntrinsic>,
+    semantic_role: Option<crate::backend::BackendSemanticCallRole>,
 ) -> Option<super::super::super::intrinsics::RuntimeMemberRole> {
     use super::super::super::intrinsics::RuntimeMemberRole;
     use crate::backend::{BackendCompilerIntrinsic, BackendSemanticCallRole};
 
-    match (fact.compiler_intrinsic, fact.semantic_role) {
+    match (compiler_intrinsic, semantic_role) {
         (Some(BackendCompilerIntrinsic::NullableAnyToString), _)
         | (_, Some(BackendSemanticCallRole::KotlinAnyToString)) => {
             Some(RuntimeMemberRole::ToString)
         }
         (_, Some(BackendSemanticCallRole::KotlinAnyHashCode)) => Some(RuntimeMemberRole::HashCode),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn checked_any_member_role_survives_a_roleless_physical_override() {
+        assert_eq!(
+            runtime_member_role(
+                None,
+                Some(crate::backend::BackendSemanticCallRole::KotlinAnyToString),
+            ),
+            Some(crate::native::intrinsics::RuntimeMemberRole::ToString)
+        );
     }
 }
 

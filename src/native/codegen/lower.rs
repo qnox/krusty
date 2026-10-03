@@ -1367,7 +1367,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 callee,
                 dispatch_receiver,
                 args,
-            } => self.call(&callee, dispatch_receiver, &args),
+            } => self.call(id, &callee, dispatch_receiver, &args),
             IrExpr::TypeOp {
                 op,
                 arg,
@@ -1912,6 +1912,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
 
     fn call(
         &mut self,
+        site: u32,
         callee: &Callee,
         dispatch_receiver: Option<u32>,
         args: &[u32],
@@ -2243,7 +2244,15 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                             owner,
                             &name,
                             params,
-                            compiler_intrinsics::runtime_member_role(realization),
+                            compiler_intrinsics::runtime_member_role(
+                                realization.compiler_intrinsic,
+                                self.file
+                                    .ir
+                                    .semantic_call_roles
+                                    .get(&site)
+                                    .copied()
+                                    .or(realization.semantic_role),
+                            ),
                         ) else {
                             return Err(format!(
                                 "the member `{}.{name}`",
