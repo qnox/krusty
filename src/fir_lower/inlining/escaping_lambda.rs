@@ -9,7 +9,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::ir::{Callee, ExprId, IrCheckedOperation, IrCheckedSubstitution, IrExpr};
+use crate::ir::{ExprId, IrExpr};
 use crate::types::{ty_subst_keep_unbound, Ty};
 
 /// Point each cloned escaping lambda at an implementation specialized for this expansion.
@@ -156,13 +156,11 @@ fn specialized_lambda_function(
     // Only a reified argument is a runtime class. Cloning for an ordinary parameter would turn an
     // erased `as? T` into a check of whatever this call inferred. A use that exists only in a nested
     // implementation still counts: that implementation is a separate function, not an expression child.
-    if !function_uses_binding(
+    if !super::reified_binding_use::function_executes_binding(
         ir,
         function,
         reified_bindings,
         state.decisions,
-        &mut HashSet::new(),
-        &mut HashSet::new(),
     ) {
         return None;
     }
@@ -239,92 +237,6 @@ fn specialized_lambda_function(
     }
     remap_implementation_provenance(ir, cloned_body, state.replacements);
     Some(specialized)
-}
-
-fn function_uses_binding(
-    ir: &crate::ir::IrFile,
-    function: u32,
-    bindings: &HashMap<String, Ty>,
-    decisions: &mut HashMap<u32, bool>,
-    functions: &mut HashSet<u32>,
-    plans: &mut HashSet<u32>,
-) -> bool {
-    if bindings.is_empty() {
-        return false;
-    }
-    if let Some(done) = decisions.get(&function).copied() {
-        return done;
-    }
-    if !functions.insert(function) {
-        return false;
-    }
-    let used = ir
-        .functions
-        .get(function as usize)
-        .and_then(|function| function.body)
-        .is_some_and(|body| dag_uses_binding(ir, body, bindings, functions, decisions, plans));
-    decisions.insert(function, used);
-    used
-}
-
-fn dag_uses_binding(
-    ir: &crate::ir::IrFile,
-    root: ExprId,
-    bindings: &HashMap<String, Ty>,
-    functions: &mut HashSet<u32>,
-    decisions: &mut HashMap<u32, bool>,
-    plans: &mut HashSet<u32>,
-) -> bool {
-    let mut pending = vec![root];
-    let mut seen = HashSet::new();
-    while let Some(expression) = pending.pop() {
-        if !seen.insert(expression) {
-            continue;
-        }
-        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
-        if node_uses_binding(ir.expr(expression), bindings)
-            || expression_facts_use_binding(ir, expression, bindings)
-        {
-            return true;
-        }
-        if let IrExpr::Lambda { impl_fn, .. } = ir.expr(expression) {
-            if function_uses_binding(ir, *impl_fn, bindings, decisions, functions, plans) {
-                return true;
-            }
-        }
-        if let IrExpr::LocalDelegateAccess(access) = ir.expr(expression) {
-            if local_delegate_plan_uses_binding(
-                ir,
-                access.plan,
-                bindings,
-                functions,
-                decisions,
-                plans,
-            ) {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-fn local_delegate_plan_uses_binding(
-    ir: &crate::ir::IrFile,
-    plan: u32,
-    bindings: &HashMap<String, Ty>,
-    functions: &mut HashSet<u32>,
-    decisions: &mut HashMap<u32, bool>,
-    plans: &mut HashSet<u32>,
-) -> bool {
-    if !plans.insert(plan) {
-        return false;
-    }
-    let Some(plan) = ir.local_delegate_plans.get(plan as usize) else {
-        return false;
-    };
-    std::iter::once(plan.getter.body)
-        .chain(plan.setter.as_ref().map(|setter| setter.body))
-        .any(|body| dag_uses_binding(ir, body, bindings, functions, decisions, plans))
 }
 
 /// Markers and inline-lambda receivers name an implementation by [`FunId`]. After a nested
@@ -457,115 +369,5 @@ fn enqueue_local_delegate_plan_bodies(
     pending: &mut Vec<ExprId>,
     plans: &mut HashSet<u32>,
 ) {
-    let IrExpr::LocalDelegateAccess(access) = ir.expr(expression) else {
-        return;
-    };
-    if !plans.insert(access.plan) {
-        return;
-    }
-    let Some(plan) = ir.local_delegate_plans.get(access.plan as usize) else {
-        return;
-    };
-    pending.push(plan.getter.body);
-    pending.extend(plan.setter.as_ref().map(|setter| setter.body));
-}
-
-fn uses_binding(ty: Ty, bindings: &HashMap<String, Ty>) -> bool {
-    ty_subst_keep_unbound(ty, bindings) != ty
-}
-
-fn substitution_uses_binding(
-    substitution: &IrCheckedSubstitution,
-    bindings: &HashMap<String, Ty>,
-) -> bool {
-    substitution.reified
-        && (uses_binding(substitution.value, bindings)
-            || substitution
-                .additional_bounds
-                .iter()
-                .copied()
-                .any(|bound| uses_binding(bound, bindings)))
-}
-
-fn substitutions_use_binding(
-    substitutions: &[IrCheckedSubstitution],
-    bindings: &HashMap<String, Ty>,
-) -> bool {
-    substitutions
-        .iter()
-        .any(|substitution| substitution_uses_binding(substitution, bindings))
-}
-
-/// Runtime call facts that carry a reified type argument. Static result/signature/storage facts are
-/// deliberately excluded: specializing those types may be necessary once a copy exists, but they
-/// do not cause a closure implementation to execute a reified operation.
-fn expression_facts_use_binding(
-    ir: &crate::ir::IrFile,
-    expression: ExprId,
-    bindings: &HashMap<String, Ty>,
-) -> bool {
-    if ir
-        .reified_call_subst
-        .get(&expression)
-        .is_some_and(|substitutions| {
-            substitutions
-                .iter()
-                .any(|(_, ty)| uses_binding(*ty, bindings))
-        })
-    {
-        return true;
-    }
-    match ir.expr(expression) {
-        IrExpr::Call {
-            callee: Callee::External { substitutions, .. },
-            ..
-        } => substitutions_use_binding(substitutions, bindings),
-        IrExpr::Checked(operation) => checked_substitutions(operation)
-            .is_some_and(|substitutions| substitutions_use_binding(substitutions, bindings)),
-        IrExpr::ReifiedTypeOp { name, .. } | IrExpr::ReifiedClassMarker { name, .. } => {
-            bindings.contains_key(name)
-        }
-        _ => false,
-    }
-}
-
-fn checked_substitutions(operation: &IrCheckedOperation) -> Option<&[IrCheckedSubstitution]> {
-    match operation {
-        IrCheckedOperation::Call { substitutions, .. }
-        | IrCheckedOperation::ConstructorDelegation { substitutions, .. }
-        | IrCheckedOperation::PropertyRead { substitutions, .. }
-        | IrCheckedOperation::PropertyWrite { substitutions, .. } => Some(substitutions),
-        IrCheckedOperation::PropertyReference { .. }
-        | IrCheckedOperation::ExternalPropertyRead { .. }
-        | IrCheckedOperation::ExternalPropertyWrite { .. }
-        | IrCheckedOperation::LateinitFieldRead { .. }
-        | IrCheckedOperation::BackingFieldRead { .. }
-        | IrCheckedOperation::BackingFieldWrite { .. }
-        | IrCheckedOperation::RangeConstruction { .. }
-        | IrCheckedOperation::RangeContains { .. }
-        | IrCheckedOperation::IllegalProgressionStep { .. }
-        | IrCheckedOperation::RangeLoop { .. } => None,
-    }
-}
-
-/// Whether this node carries a runtime type operation the reified map would change.
-///
-/// Static signature slots are not a reason to copy. [`super::specialize_typed_expression`] applies
-/// the same split when the copy is built, so detection does not clone the expression to compare it.
-fn node_uses_binding(expression: &IrExpr, bindings: &HashMap<String, Ty>) -> bool {
-    match expression {
-        IrExpr::TypeOp { type_operand, .. } => uses_binding(*type_operand, bindings),
-        IrExpr::KClassLiteral { classifier, .. } => {
-            classifier.is_some_and(|ty| uses_binding(ty, bindings))
-        }
-        IrExpr::Call {
-            callee:
-                Callee::Intrinsic {
-                    operation: crate::ir::IrIntrinsic::TypeOf { ty },
-                    ..
-                },
-            ..
-        } => uses_binding(*ty, bindings),
-        _ => false,
-    }
+    super::reified_binding_use::enqueue_local_delegate_plan_bodies(ir, expression, pending, plans);
 }

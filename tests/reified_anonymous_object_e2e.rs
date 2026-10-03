@@ -275,6 +275,30 @@ fn a_reified_anonymous_object_copies_property_accessors_like_kotlinc() {
 }
 
 #[test]
+fn an_external_reified_call_copies_the_anonymous_class() {
+    const SOURCE: &str = "\
+interface Face { fun value(): String? }\n\
+class Token\n\
+class Other\n\
+inline fun <reified T> externalInline(): String? = T::class.simpleName\n\
+inline fun <reified T> make(): Face = object : Face {\n\
+    override fun value(): String? = externalInline<T>()\n\
+}\n\
+fun box(): String {\n\
+    val face = make<Token>()\n\
+    if (face.value() != \"Token\") return \"fail:${face.value()}\"\n\
+    if (make<Other>().value() != \"Other\") return \"other\"\n\
+    return \"OK\"\n\
+}\n";
+    common::expect_box_same_as_kotlinc(SOURCE, "ReifiedAnonymousExternal");
+    let (reference, krusty) = class_names("ReifiedAnonymousExternal", SOURCE);
+    assert_eq!(krusty, reference);
+    assert!(reference
+        .iter()
+        .any(|name| name.contains("$$inlined$make$")));
+}
+
+#[test]
 fn a_private_inline_anonymous_object_is_used_as_its_supertype() {
     // Two call sites each get a class. The values meet as the interface, not as the declaration
     // class, so neither copy is cast back to `...$f$1`.

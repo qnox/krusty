@@ -23,6 +23,7 @@ use super::BodyLowering;
 mod escaping_anonymous;
 mod escaping_lambda;
 mod property_accessors;
+mod reified_binding_use;
 
 #[cfg(test)]
 mod escaping_reified_lambda;

@@ -4676,8 +4676,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Reified operations inside the copied accessor bodies use the call-site argument.
   A missing accessor mapping fails the lowering; the construction is not left on the declaration
   class. The copy joins the caller's `{owner}${caller}$$inlined${callee}$N` sequence, shared
-  with a specialized lambda of the same expansion. Mentioning only an ordinary type parameter
-  does not copy the class.
+  with a specialized lambda of the same expansion.   Mentioning only an ordinary type parameter
+  does not copy the class. The copy is selected by the same execution walk as an escaping lambda:
+  a direct type operation, a recorded reified call such as `externalInline<T>()`, and a
+  local-delegate plan getter or setter. A plan that executes the binding is cloned with the
+  call-site arguments; a plan that does not stays the shared erased helper.
   Tests: `fir_lower::inlining::escaping_reified_object`, `tests/reified_anonymous_object_e2e.rs`,
   boxes `reified/capture.kt` and `reified/innerObject.kt`.
   A singleton closure whose owned methods retain typed reified operations emits
