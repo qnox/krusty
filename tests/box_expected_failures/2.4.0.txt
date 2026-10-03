@@ -12,7 +12,6 @@ compileKotlinAgainstKotlin/inlineClasses/privateCompanionObjectValInDifferentMod
 compileKotlinAgainstKotlin/inlineClasses/privateTopLevelValInDifferentModule.kt
 coroutines/featureIntersection/callableReference/function/adapted.kt
 coroutines/featureIntersection/callableReference/function/local/equalsHashCode.kt
-coroutines/featureIntersection/inlineSuspendFinally.kt
 coroutines/featureIntersection/overrideInInlineClass.kt
 coroutines/featureIntersection/suspendFunctionIsAs.kt
 coroutines/generate.kt
