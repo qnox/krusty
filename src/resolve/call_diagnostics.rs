@@ -256,4 +256,127 @@ impl Checker<'_> {
             self.inapplicable_member_candidates_message(name, contenders),
         );
     }
+
+    pub(super) fn report_retained_member_mapping_failure(
+        &mut self,
+        call: ExprId,
+        name: &str,
+        args: &[ExprId],
+        retained: MemberMappingFailure,
+    ) {
+        let candidate = retained.candidate;
+        self.report_callable_arg_mapping_error(
+            call,
+            args,
+            DiagnosticFunction {
+                name,
+                params: &candidate.semantic_params(),
+                param_names: &candidate.call_sig.param_names,
+                param_defaults: &candidate.call_sig.param_defaults,
+                required: candidate.call_sig.required,
+                vararg: candidate.call_sig.vararg,
+                context_count: candidate.context_count,
+                ret: candidate.callable.ret,
+                // Retained mapping failures can name an inherited declaration whose SourceMember
+                // ordinal belongs to a different bounded parse. The selected FunctionInfo already
+                // carries the complete stable generic/default/context shape; render that record
+                // directly instead of indexing the current transient AST.
+                source_display: Some(Self::generic_callable_display(name, &candidate)),
+            },
+            retained.failure,
+        );
+    }
+
+    pub(super) fn same_argument_mapping_shape(
+        first: &crate::libraries::FunctionInfo,
+        candidate: &crate::libraries::FunctionInfo,
+    ) -> bool {
+        candidate.semantic_receiver() == first.semantic_receiver()
+            && candidate.semantic_params() == first.semantic_params()
+            && candidate.context_count == first.context_count
+            && candidate.call_sig.param_names == first.call_sig.param_names
+            && candidate.call_sig.param_defaults == first.call_sig.param_defaults
+            && candidate.call_sig.required == first.call_sig.required
+            && candidate.call_sig.vararg == first.call_sig.vararg
+            && candidate.call_sig.vararg_index == first.call_sig.vararg_index
+    }
+
+    /// Report a mapped extension rejected only by its declaration receiver or receiver bounds.
+    pub(super) fn report_extension_receiver_type_mismatch(
+        &mut self,
+        call: ExprId,
+        name: &str,
+        candidate: &crate::libraries::FunctionInfo,
+        constraints: CallConstraints<'_>,
+    ) -> Option<Ty> {
+        // A single extension candidate whose arguments map cleanly can still be rejected by its
+        // declaration receiver or by a bound on a type variable contributed by that receiver. Keep
+        // this declaration-aware: the same normalized candidate shape covers source, module and
+        // dependency callables, and no spelling or provider-origin branch participates.
+        let signature = candidate.semantic_signature();
+        let bindings = constraints.bindings(&self.fed_source(), &signature);
+        let declared_receiver = signature
+            .receiver
+            .or_else(|| candidate.semantic_receiver())
+            .map(|receiver| crate::symbol_resolver::ty_subst_keep_unbound(receiver, &bindings));
+        let receiver_type_mismatch = candidate.is_extension()
+            && declared_receiver.is_some_and(|declared| {
+                !self.receiver_is_assignable(constraints.receiver, declared)
+            });
+        let receiver_bound_mismatch = candidate.is_extension()
+            && signature.receiver.is_some_and(|receiver| {
+                signature
+                    .formals
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, formal)| {
+                        ty_mentions_param(receiver, std::slice::from_ref(*formal))
+                    })
+                    .any(|(index, formal)| {
+                        let Some(&actual) = bindings.get(formal) else {
+                            return false;
+                        };
+                        signature
+                            .formal_bounds
+                            .get(index)
+                            .into_iter()
+                            .flatten()
+                            .copied()
+                            .map(|bound| {
+                                crate::symbol_resolver::ty_subst_keep_unbound(bound, &bindings)
+                            })
+                            .any(|bound| !self.generic_bound_admits(actual, bound))
+                    })
+            });
+        if !receiver_type_mismatch && !receiver_bound_mismatch {
+            return None;
+        }
+
+        let display = self
+            .source_callable_display(candidate)
+            .unwrap_or_else(|| Self::callable_candidate_display(name, candidate));
+        self.diags.error(
+            self.call_callee_name_span(call),
+            format!("candidate '{display}' is inapplicable because of a receiver type mismatch."),
+        );
+
+        // Although the candidate is inapplicable, kotlinc retains its inferred result for the
+        // enclosing expression's own type check. Returning that provisional type lets the existing
+        // initializer/return/assignment boundary emit its context-specific mismatch without
+        // committing a selected call or inventing that diagnostic here.
+        // A projection is a constraint on a classifier argument, not a value type. Materialize the
+        // provisional result through the same position-aware specialization as a selected call:
+        // `List<*>` constraining `T` makes `fun <T> ...: List<T>` read as `List<Any?>`, not as the
+        // non-denotable recovery type `List<*>`.
+        let inferred = crate::symbol_resolver::specialize_signature_output_type(
+            &self.fed_source(),
+            signature.ret,
+            &bindings,
+        );
+        Some(
+            candidate
+                .ret
+                .apply(signature.apply_return_policy(self.libraries, inferred)),
+        )
+    }
 }
