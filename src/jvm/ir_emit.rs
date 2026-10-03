@@ -683,6 +683,9 @@ pub struct EmitOptions {
     /// the `META-INF/<module>.kotlin_module` header. `None` keeps kotlinc's no-flag stamp, the
     /// compiler's default language version [`DEFAULT_METADATA_VERSION`].
     pub metadata_version: Option<[i32; 3]>,
+    /// Whether the finalized source-language feature set enables declaration annotation records in
+    /// Kotlin metadata. Kept separate from `metadata_version`: the latter is only an output stamp.
+    pub annotations_in_metadata: bool,
 }
 
 /// The `mv` krusty writes without `-language-version`: kotlinc's default-language-version stamp.
@@ -697,6 +700,12 @@ impl EmitOptions {
     /// Select the `-language-version` metadata stamp, keeping every other field as configured.
     pub fn with_metadata_version(mut self, version: Option<[i32; 3]>) -> Self {
         self.metadata_version = version;
+        self
+    }
+
+    /// Select declaration-annotation record emission from source-language settings.
+    pub fn with_annotations_in_metadata(mut self, enabled: bool) -> Self {
+        self.annotations_in_metadata = enabled;
         self
     }
 
@@ -733,6 +742,7 @@ impl Default for EmitOptions {
             inner_class_resolver: None,
             value_classes: std::rc::Rc::default(),
             metadata_version: None,
+            annotations_in_metadata: true,
         }
     }
 }
@@ -844,44 +854,10 @@ fn data_copy_fn_flags(ir: &IrFile, c: &crate::ir::IrClass) -> u64 {
 ///   inline record — being known as a value class at all IS the evidence that a record exists.
 fn value_class_is_readable(ir: &IrFile, fq_name: crate::types::TypeName) -> bool {
     if let Some(declared) = ir.classes.iter().find(|other| other.fq_name == fq_name) {
-        return value_class_metadata_shape_admitted(ir, declared);
+        return class_metadata::value_class_metadata_shape_admitted(ir, declared);
     }
     !ir.module_source_value_classes.contains(&fq_name)
         || ir.module_readable_value_classes.contains(&fq_name)
-}
-
-/// Common class-shape admission shared by the writer and transitive value-class readability. Keeping
-/// these kind/constructor bails in one predicate is correctness-critical: if the writer withholds a
-/// value class but the transitive check independently admits it, a mentioning class publishes a type
-/// a downstream compiler reads as an ordinary box.
-fn class_metadata_common_shape_admitted(_ir: &IrFile, c: &crate::ir::IrClass) -> bool {
-    !(c.prop_ref.is_some()
-        || c.func_ref.is_some()
-        // A published secondary constructor is described from its recorded semantic parameter
-        // identities. A malformed publication contract would advertise the wrong parameter list,
-        // so the class declines instead. Unpublished target realizations carry no record.
-        || c.secondary_ctors
-            .iter()
-            .any(|sc| sc.metadata_visibility.is_some() && sc.named_params.len() != sc.params.len())
-        || (!c.has_primary_ctor
-            && c.secondary_ctors.is_empty()
-            && !c.is_interface
-            && !c.is_enum)
-        || (c.fields.len() as u32) < c.ctor_param_count)
-}
-
-/// The single admission predicate for a VALUE class's own metadata record. Both
-/// [`build_class_metadata`] and [`value_class_is_readable`] call it, so adding a new write-side bail
-/// cannot silently let a different class describe the withheld value class downstream.
-fn value_class_metadata_shape_admitted(ir: &IrFile, c: &crate::ir::IrClass) -> bool {
-    c.is_value
-        && class_metadata_common_shape_admitted(ir, c)
-        // A value class's ctors realize as mangled static `constructor-impl` overloads, which the
-        // secondary-ctor record path does not model — keep declining that combination.
-        && c.secondary_ctors.is_empty()
-        && c.fields.len() == 1
-        && c.fields[0].is_final()
-        && !ir.has_value_param_ctor(&c.fq_name())
 }
 
 /// The JVM accessor spellings a class's synthesized property accessors are emitted under: the value-class

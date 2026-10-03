@@ -58,8 +58,8 @@ fn only_releases_and_rc_tags_are_cached() {
 }
 
 #[test]
-fn an_open_range_covers_a_newer_release_without_rewriting() {
-    let root = temp_root("open");
+fn recordings_are_scoped_to_one_exact_compiler_version() {
+    let root = temp_root("exact-version");
     let fingerprint = fingerprint_parts(&[b"source"]);
     let release = version("2.4.20");
     store_files(
@@ -72,15 +72,25 @@ fn an_open_range_covers_a_newer_release_without_rewriting() {
     );
     let index = disk_index(&root);
     assert!(index.contains("[[mod]]"), "{index}");
-    assert!(index.contains("2.4.20.. "), "{index}");
+    assert!(index.contains("2.4.20 "), "{index}");
+    assert!(!index.contains(".."), "{index}");
     assert!(archive_path(&root).is_file());
     assert!(!index.contains("2.4.10"), "{index}");
+    assert!(
+        parse_modules(
+            "[[mod]]\n[key]\n2.4.20.. 00000000000000000000000000000000 00000000000000000000000000000000\n"
+        )
+        .is_none(),
+        "the current archive format must reject version inheritance"
+    );
     let newer = DumpVersion {
         version: KotlinVersion::new(2, 4, 30),
         channel: Channel::Release,
     };
-    let hit = load_files(&root, "mod", "case|Stem|default|plain", newer, fingerprint);
-    assert_eq!(hit.unwrap().get("pkg/A").unwrap(), b"one");
+    assert!(
+        load_files(&root, "mod", "case|Stem|default|plain", newer, fingerprint).is_none(),
+        "a newer compiler must not inherit another version's observation"
+    );
     store_files(
         &root,
         "mod",
@@ -90,10 +100,9 @@ fn an_open_range_covers_a_newer_release_without_rewriting() {
         &files(b"one"),
     );
     let again = disk_index(&root);
-    assert_eq!(
-        again, index,
-        "matching bytes leave the open range untouched"
-    );
+    assert!(again.contains("2.4.20 "), "{again}");
+    assert!(again.contains("2.4.30 "), "{again}");
+    assert!(!again.contains(".."), "{again}");
 
     store_files(
         &root,
@@ -105,7 +114,7 @@ fn an_open_range_covers_a_newer_release_without_rewriting() {
     );
     let split = disk_index(&root);
     assert!(split.contains("2.4.20 "), "{split}");
-    assert!(split.contains("2.4.30.. "), "{split}");
+    assert!(split.contains("2.4.30 "), "{split}");
     assert_eq!(
         load_files(
             &root,
@@ -537,6 +546,30 @@ fn an_invocation_fingerprint_ignores_the_output_directory() {
         .expect("right invocation");
     assert_eq!(left.fingerprint, right.fingerprint);
     assert_ne!(left.out, right.out);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn an_invocation_fingerprint_includes_language_and_api_levels() {
+    let root = temp_root("language-level");
+    let source = root.join("Lib.kt");
+    std::fs::write(&source, "fun box() = \"OK\"\n").unwrap();
+    let invocation = |language: &str, api: &str| {
+        parse_invocation(&[
+            "-d".to_string(),
+            root.join("out").to_string_lossy().into_owned(),
+            "-language-version".to_string(),
+            language.to_string(),
+            "-api-version".to_string(),
+            api.to_string(),
+            source.to_string_lossy().into_owned(),
+        ])
+        .expect("invocation inputs")
+        .expect("invocation")
+        .fingerprint
+    };
+    assert_ne!(invocation("2.2", "2.2"), invocation("2.4", "2.4"));
+    assert_ne!(invocation("2.4", "2.2"), invocation("2.4", "2.4"));
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -1459,7 +1492,7 @@ fn dirty_publication_reloads_a_replacement_with_an_equal_cached_stamp() {
             .modules
             .get("mod")
             .and_then(|entries| entries.get(key))
-            .is_some_and(|spans| spans.iter().all(|span| span.lo != foreign.version)),
+            .is_some_and(|entries| entries.iter().all(|entry| entry.version != foreign.version)),
         "the in-memory snapshot must be stale for this regression"
     );
     slot.stamp = Some(replacement_stamp);

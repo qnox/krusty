@@ -11,7 +11,8 @@ const IS_CROSSINLINE: u64 = 1 << 2;
 const IS_NOINLINE: u64 = 1 << 3;
 
 /// The declaration facts one value parameter records. `HAS_ANNOTATIONS` (bit 0) is not here: it
-/// follows from the annotation records the writer emits beside it.
+/// follows from the declaration's applied annotations — the writer sets it even below metadata
+/// version 2.4, where no annotation records are emitted beside it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DeclaredValueParameter {
     pub declares_default: bool,

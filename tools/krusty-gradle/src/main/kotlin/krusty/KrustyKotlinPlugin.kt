@@ -320,17 +320,14 @@ private fun compilerArguments(task: KotlinJvmCompile): List<String> {
     fun reject(condition: Boolean, name: String) {
         if (condition) throw GradleException("krusty does not support compilerOptions.$name")
     }
-    val languageVersion = options.languageVersion.orNull?.let {
-        supportedKotlinLevel("languageVersion", it.version)
-    }
-    val apiVersion = options.apiVersion.orNull?.let {
-        supportedKotlinLevel("apiVersion", it.version)
-    }
+    val languageVersion = options.languageVersion.orNull?.version
+    val apiVersion = options.apiVersion.orNull?.version
     reject(options.progressiveMode.getOrElse(false), "progressiveMode")
     reject(options.extraWarnings.getOrElse(false), "extraWarnings")
     reject(options.suppressWarnings.getOrElse(false), "suppressWarnings")
-    // The CLI currently accepts warning-policy switches without changing diagnostic severity.
-    // Reject them at the Gradle boundary instead of reporting a successful but weaker compile.
+    // `-Werror` is not yet modeled, so its structured equivalent stays rejected. Named
+    // `-Xwarning-level` policy is forwarded to the compiler, whose diagnostic registry is the
+    // authoritative place to validate names and apply severities.
     reject(options.allWarningsAsErrors.getOrElse(false), "allWarningsAsErrors")
     reject(options.verbose.getOrElse(false), "verbose")
     reject(task.multiPlatformEnabled.getOrElse(false), "multiPlatformEnabled")
@@ -384,6 +381,7 @@ private val NAME_DESTRUCTURING_MODES = setOf("only-syntax", "name-mismatch", "co
 
 private val JVM_DEFAULT_MODES = setOf("enable", "no-compatibility", "disable")
 private val JVM_DEFAULT_LEGACY_MODES = setOf("all", "all-compatibility", "disable")
+
 private fun isFreeJvmDefault(argument: String): Boolean =
     argument == "-jvm-default" || argument == "-Xjvm-default" ||
         argument.startsWith("-jvm-default=") || argument.startsWith("-Xjvm-default=")
@@ -422,10 +420,14 @@ private fun validateFreeArguments(input: List<String>): ArrayList<String> {
             // Several -opt-in arguments are legal (the Kotlin build applies one per opt-in); only an
             // exact repeat is a duplicate, so the key is the argument itself.
             argument.startsWith("-opt-in=") && argument.substringAfter('=').isNotEmpty() -> argument
-            argument == "-Werror" || argument.startsWith("-Xwarning-level=") ->
+            argument == "-Werror" ->
                 throw GradleException(
                     "krusty does not support warning policy freeCompilerArg '$argument'",
                 )
+            // The compiler owns the typed diagnostic registry and severity validation. Several
+            // entries are legal (one per diagnostic), so only an exact repeated argument shares a
+            // key at this transport boundary.
+            argument.startsWith("-Xwarning-level=") -> argument
             argument.startsWith("-Xlambdas=") && argument.substringAfter('=') in setOf("indy", "class") -> "-Xlambdas"
             argument.startsWith("-Xsam-conversions=") && argument.substringAfter('=') in setOf("indy", "class") -> "-Xsam-conversions"
             argument == "-Xname-based-destructuring" -> "-Xname-based-destructuring"
@@ -459,18 +461,6 @@ private fun reservedFreeArgument(argument: String): String? {
         isOption("-Xplugin", "-P") -> "compiler plugin configuration"
         else -> null
     }
-}
-
-// `-language-version` selects source semantics, and the compiler implements 2.4 only. `-api-version`
-// remains a compatibility input, but an older level would likewise promise an API boundary the
-// compiler does not enforce. Reject both mismatches instead of compiling them under 2.4 rules.
-private fun supportedKotlinLevel(name: String, version: String): String {
-    if (version != "2.4") {
-        throw GradleException(
-            "krusty does not support compilerOptions.$name=$version; only 2.4 is supported",
-        )
-    }
-    return version
 }
 
 private fun supportedKotlinPluginVersion(version: String): String = when (version) {
