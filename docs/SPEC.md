@@ -4516,7 +4516,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Emitting that erasure at every call site catches every throwable. Inlining substitutes the
   call's reified argument into the catch type and emits that class (`catch (Exception)` for
   `catch<Exception>`), which is the handler kotlinc writes. A thrown type outside that class
-  falls through to the next handler. Test: `tests/reified_catch_e2e.rs`. Corpus:
+  falls through to the next handler. Before a backend sees the file, that semantic type must be a
+  determined class and that class must be the JVM catch type; a substituted argument whose handler
+  still names the bound is rejected. Test: `tests/reified_catch_e2e.rs`. Corpus:
   `codegen/box/reified/catchParameter/tryCatchReifiedType.kt`.
 
 - **An escaping lambda inside `inline fun <reified T>` specializes `T` at the call that creates it.**

@@ -36,6 +36,13 @@ pub enum InvalidIrContract {
         secondary: u32,
         parameter: u32,
     },
+    /// A catch's semantic type and the class the backend would catch disagree.
+    CatchType {
+        expression: u32,
+        index: u32,
+        ty: Ty,
+        exc_internal: crate::types::TypeName,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -327,7 +334,12 @@ fn validate_expr(expression: &IrExpr) -> Result<(), UndeterminedIrType> {
         IrExpr::Vararg { array_type, .. } | IrExpr::NewArray { array_type, .. } => {
             reject("array type", *array_type)
         }
-        IrExpr::Try { result, .. } => reject("try result", *result),
+        IrExpr::Try {
+            result, catches, ..
+        } => {
+            reject("try result", *result)?;
+            reject_all("catch type", catches.iter().map(|catch| catch.ty))
+        }
         IrExpr::Const(_)
         | IrExpr::BottomValue { .. }
         | IrExpr::ClassConst { .. }
@@ -841,6 +853,21 @@ impl IrFile {
                 });
             }
         }
+        for (expression, node) in self.exprs.iter().enumerate() {
+            let IrExpr::Try { catches, .. } = node else {
+                continue;
+            };
+            for (index, catch) in catches.iter().enumerate() {
+                if catch.ty.non_null().obj_internal() != Some(catch.exc_internal) {
+                    return Err(InvalidIrContract::CatchType {
+                        expression: expression as u32,
+                        index: index as u32,
+                        ty: catch.ty,
+                        exc_internal: catch.exc_internal,
+                    });
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -1025,6 +1052,63 @@ mod tests {
                 class,
                 secondary: 0,
                 parameter: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_a_catch_whose_class_is_not_its_semantic_type() {
+        let mut ir = IrFile::default();
+        let body = ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+        let throwable = crate::types::type_name("java/lang/Throwable");
+        ir.exprs.push(IrExpr::Try {
+            body,
+            catches: vec![crate::ir::IrCatch {
+                var: 0,
+                binding: None,
+                ty: Ty::obj("java/lang/Exception"),
+                exc_internal: throwable,
+                body,
+                line: None,
+            }],
+            finally: None,
+            result: Ty::Unit,
+        });
+
+        assert_eq!(
+            ir.validate_semantic_contracts(),
+            Err(InvalidIrContract::CatchType {
+                expression: 1,
+                index: 0,
+                ty: Ty::obj("java/lang/Exception"),
+                exc_internal: throwable,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_an_undetermined_catch_type() {
+        let mut ir = IrFile::default();
+        let body = ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+        ir.exprs.push(IrExpr::Try {
+            body,
+            catches: vec![crate::ir::IrCatch::generated(
+                0,
+                crate::types::type_name("java/lang/Throwable"),
+                body,
+            )],
+            finally: None,
+            result: Ty::Unit,
+        });
+        if let IrExpr::Try { catches, .. } = ir.exprs.last_mut().unwrap() {
+            catches[0].ty = Ty::Error;
+        }
+
+        assert_eq!(
+            ir.validate_determined_types(),
+            Err(UndeterminedIrType {
+                location: "catch type",
+                ty: Ty::Error,
             })
         );
     }

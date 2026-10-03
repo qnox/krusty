@@ -72,6 +72,7 @@ mod tail_forward;
 mod value_class_results;
 use value_class_results::{boxed_carrier, boxed_on_resume, resumed_carrier};
 mod value_liveness;
+mod value_try;
 
 use crate::ir::{
     for_each_child, Callee, ClassId, ExprId, IrBinOp, IrConst, IrExpr, IrFile, IrTypeOp,
@@ -94,28 +95,14 @@ use statement_normalization::{
 use std::collections::{HashMap, HashSet};
 use tail_forward::{record_return_adaptations, rewrite_forward_body, tail_forward};
 use value_liveness::{kills_value, pending_reads_after};
+use value_try::{
+    assign_branch_to_tmp, bind_value_try_to_fresh_local, bind_value_try_to_local,
+    suspending_value_try, ValueBranchWrap,
+};
 
 const I32_MIN: i32 = i32::MIN;
 /// `when` branches: each `(condition, body)` (an `else` branch has `condition = None`).
 type Branches = Vec<(Option<ExprId>, ExprId)>;
-/// The semantic pieces of a value-position `try`, after peeling the optional result coercion that
-/// must instead be applied to each selected branch. Keeping this extraction in one place ensures
-/// return-bound and local-bound forms recognize exactly the same IR shapes.
-struct ValueTryParts {
-    body: ExprId,
-    catches: Vec<crate::ir::IrCatch>,
-    finally: Option<ExprId>,
-    branch_wrap: Option<ValueBranchWrap>,
-}
-
-#[derive(Clone)]
-enum ValueBranchWrap {
-    TypeOp(IrTypeOp, Ty),
-    /// A JVM value-class representation wrapper already selected and emitted by the preceding target
-    /// pass. It is a pure one-argument conversion, so applying it to each selected `try` value preserves
-    /// the wrapper around the value while exposing the suspension to the state-machine normalizer.
-    ValueClassBox(Callee),
-}
 /// A direct suspension at a statement: `(optional bound local + type, the call ExprId, completion)`.
 /// The call is reused and receives the continuation; completion preserves the two independent facts
 /// owned by a peeled [`IrExpr::BottomValue`] in the statement's exact use context.
@@ -1143,122 +1130,6 @@ fn desugar_value_try(ir: &mut IrFile, b: ExprId, suspend_set: &HashSet<u32>, ret
     }
 }
 
-fn bind_value_try_to_fresh_local(
-    ir: &mut IrFile,
-    expression: ExprId,
-    ty: &Ty,
-    suspend_set: &HashSet<u32>,
-) -> Option<(ExprId, ExprId, ExprId)> {
-    let parts = suspending_value_try(ir, expression, suspend_set)?;
-    let target = max_value_index(ir) + 1;
-    let dflt = zero_value(ir, ty);
-    let declaration = ir.add_expr(IrExpr::Variable {
-        index: target,
-        ty: *ty,
-        init: Some(dflt),
-        named: false,
-    });
-    // Publish the declaration before rewriting branches: a suspending branch may allocate another
-    // temporary via `max_value_index`, which must not reuse the result slot.
-    let value_try = bind_value_try_to_local(ir, parts, target, ty, suspend_set);
-    let value = ir.add_expr(IrExpr::GetValue(target));
-    Some((declaration, value_try, value))
-}
-
-/// Recognize the one semantic value-`try` shape supported by the state-machine desugar. The source
-/// context (`return` versus a local initializer) is intentionally absent: both consumers must peel
-/// the same optional result coercion and apply the same suspension predicate.
-fn suspending_value_try(
-    ir: &IrFile,
-    expression: ExprId,
-    suspend_set: &HashSet<u32>,
-) -> Option<ValueTryParts> {
-    // An expression body whose value coerces to its declared return type wraps the `Try` in a
-    // `TypeOp`. Move that operation onto each selected branch, like `desugar_value_when`.
-    let (try_expr, branch_wrap) = match ir.exprs[expression as usize].clone() {
-        IrExpr::TypeOp {
-            op,
-            arg,
-            type_operand,
-        } if matches!(ir.exprs[arg as usize], IrExpr::Try { .. }) => {
-            (arg, Some(ValueBranchWrap::TypeOp(op, type_operand)))
-        }
-        IrExpr::Call {
-            callee,
-            dispatch_receiver: None,
-            args,
-        } if matches!(&callee, Callee::Static { name, .. } if name == "box-impl")
-            && matches!(args.as_slice(), [arg] if matches!(ir.exprs[*arg as usize], IrExpr::Try { .. })) =>
-        {
-            (args[0], Some(ValueBranchWrap::ValueClassBox(callee)))
-        }
-        _ => (expression, None),
-    };
-    if !expr_calls_suspend(ir, try_expr, suspend_set) {
-        return None;
-    }
-    let IrExpr::Try {
-        body,
-        catches,
-        finally,
-        ..
-    } = ir.exprs[try_expr as usize].clone()
-    else {
-        return None;
-    };
-    Some(ValueTryParts {
-        body,
-        catches,
-        finally,
-        branch_wrap,
-    })
-}
-
-/// Turn the recognized value-`try` into a statement-position `try` assigning every value-producing
-/// branch to `target`. This single reconstruction path prevents return-bound and local-bound forms
-/// from drifting in catch/finally handling or coercion placement.
-fn bind_value_try_to_local(
-    ir: &mut IrFile,
-    parts: ValueTryParts,
-    target: u32,
-    ty: &Ty,
-    suspend_set: &HashSet<u32>,
-) -> ExprId {
-    let new_body = assign_branch_to_tmp(
-        ir,
-        parts.body,
-        target,
-        ty,
-        suspend_set,
-        parts.branch_wrap.clone(),
-    );
-    let new_catches: Vec<crate::ir::IrCatch> = parts
-        .catches
-        .into_iter()
-        .map(|catch| crate::ir::IrCatch {
-            var: catch.var,
-            binding: catch.binding,
-            ty: catch.ty,
-            exc_internal: catch.exc_internal,
-            line: catch.line,
-            body: assign_branch_to_tmp(
-                ir,
-                catch.body,
-                target,
-                ty,
-                suspend_set,
-                parts.branch_wrap.clone(),
-            ),
-        })
-        .collect();
-    ir.add_expr(IrExpr::Try {
-        body: new_body,
-        catches: new_catches,
-        finally: parts.finally,
-        result: Ty::Unit,
-    })
-}
-
 /// Desugar a VALUE-position `when`/`if` in `return` position whose BRANCH VALUES suspend (but whose
 /// CONDITIONS do not — a suspending condition is hoisted earlier) into a STATEMENT-position `when` binding
 /// a temp: `return when (x) { a -> v0; else -> v1 }` becomes `var tmp = <default>; when (x) { a -> { …
@@ -1367,74 +1238,6 @@ fn bind_value_when_to_fresh_local(
     let conditional = ir.add_expr(IrExpr::When { branches });
     let value = ir.add_expr(IrExpr::GetValue(tmp));
     Some((declaration, conditional, value))
-}
-
-/// Rewrite a `try`/`catch` branch into a value-LESS block that runs its statements and assigns its VALUE
-/// to `tmp`. A suspending value is bound to a fresh `Variable` (so the flattener handles the suspension),
-/// then copied to `tmp`; a non-suspending value is assigned directly. A branch with no value (a divergent
-/// `return`/`throw`) is left unchanged.
-fn assign_branch_to_tmp(
-    ir: &mut IrFile,
-    branch: ExprId,
-    tmp: u32,
-    ty: &Ty,
-    suspend_set: &HashSet<u32>,
-    wrap: Option<ValueBranchWrap>,
-) -> ExprId {
-    let (mut stmts, value) = match ir.exprs[branch as usize].clone() {
-        IrExpr::Block { stmts, value } => (stmts, value),
-        _ => (Vec::new(), Some(branch)),
-    };
-    if let Some(mut v) = value {
-        if stmt_diverges(ir, v) {
-            // A divergent branch VALUE (`else -> throw …`, `-> return …`, or a nested all-arms-divergent
-            // `if`/`when`) produces no value to bind: emit it as a plain statement. Assigning it to `tmp`
-            // would leave a dead `goto` after the `athrow`/`return` (a frameless VerifyError);
-            // `stmt_diverges` on this same value suppresses that trailing goto.
-            stmts.push(v);
-        } else {
-            if let Some(wrap) = wrap {
-                v = match wrap {
-                    ValueBranchWrap::TypeOp(op, type_operand) => ir.add_expr(IrExpr::TypeOp {
-                        op,
-                        arg: v,
-                        type_operand,
-                    }),
-                    ValueBranchWrap::ValueClassBox(callee) => ir.add_expr(IrExpr::Call {
-                        callee,
-                        dispatch_receiver: None,
-                        args: vec![v],
-                    }),
-                };
-            }
-            if let Some((declaration, value_try, value)) =
-                bind_value_try_to_fresh_local(ir, v, ty, suspend_set)
-            {
-                stmts.push(declaration);
-                stmts.push(value_try);
-                stmts.push(ir.add_expr(IrExpr::SetValue { var: tmp, value }));
-            } else if expr_calls_suspend(ir, v, suspend_set) {
-                let fresh = max_value_index(ir) + 1;
-                let var = ir.add_expr(IrExpr::Variable {
-                    index: fresh,
-                    ty: *ty,
-                    init: Some(v),
-                    named: false,
-                });
-                let get = ir.add_expr(IrExpr::GetValue(fresh));
-                let set = ir.add_expr(IrExpr::SetValue {
-                    var: tmp,
-                    value: get,
-                });
-                stmts.push(var);
-                stmts.push(set);
-            } else {
-                let set = ir.add_expr(IrExpr::SetValue { var: tmp, value: v });
-                stmts.push(set);
-            }
-        }
-    }
-    ir.add_expr(IrExpr::Block { stmts, value: None })
 }
 
 /// Hoist each suspension call that sits at an *unconditional* position inside a top-level statement's
