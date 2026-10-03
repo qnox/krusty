@@ -43,7 +43,8 @@
 //! Emission must be deterministic, or a content-addressed cache *inverts*: an unchanged module's
 //! hash changes on rebuild, so every dependent rebuilds rather than none — and the cache then hides
 //! the defect, because a nondeterminism bug that would surface as a byte diff instead surfaces as a
-//! cache hit. `tests/emission_determinism_e2e.rs` gates that property.
+//! cache hit. The box harness's `KRUSTY_CLASS_DUMP` double-build comparison is how a regression is
+//! caught.
 
 pub mod abi;
 pub mod cache;

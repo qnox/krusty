@@ -127,9 +127,9 @@ pub struct AbiClass {
     /// belongs in the fingerprint rather than beside it.
     pub metadata: Option<AbiAnnotation>,
     /// Members in declaration order. Order is preserved rather than sorted: it is deterministic
-    /// (gated by `tests/emission_determinism_e2e.rs`), and preserving it is conservative — a pure
-    /// member reordering then invalidates dependents unnecessarily, which costs a rebuild but can
-    /// never serve a stale artifact.
+    /// by construction (members append in declaration order), and preserving it is conservative —
+    /// a pure member reordering then invalidates dependents unnecessarily, which costs a rebuild
+    /// but can never serve a stale artifact.
     pub members: Vec<AbiMember>,
 }
 
