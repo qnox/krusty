@@ -24479,12 +24479,19 @@ impl<'a> Checker<'a> {
         let source_props = self.file.destructuring.source_properties.get(&s.0).cloned();
         let entry_types = self.file.destructuring.entry_types.get(&s.0).cloned();
         for (idx, entry) in entries.iter().enumerate() {
-            if entry.ignored {
+            let named_property = source_props
+                .as_ref()
+                .and_then(|props| props.get(idx))
+                .and_then(Option::as_ref)
+                .is_some();
+            // A positional `_` skips that component: no binding and no `componentN` call. A
+            // name-based `_ = prop` still reads `prop`, so the getter runs, and then discards it.
+            if entry.ignored && !named_property {
                 continue;
-            } // `_` skips this component (no binding, no call)
+            }
             let name = &entry.name;
             let is_var = entry.mutable;
-            if self.declared_in_current_scope(scope, name) {
+            if !entry.ignored && self.declared_in_current_scope(scope, name) {
                 self.diags.error(
                     span,
                     format!("krusty: conflicting local declaration '{name}'"),
@@ -24525,14 +24532,18 @@ impl<'a> Checker<'a> {
                             .unwrap_or(component);
                         self.resolved_destructure_components
                             .insert((s, idx), target);
-                        self.declare(scope, name, t, is_var);
+                        if !entry.ignored {
+                            self.declare(scope, name, t, is_var);
+                        }
                     }
                     None => {
                         self.diags.error(
                             span,
                             format!("krusty: unresolved property '{prop}' in destructuring"),
                         );
-                        self.declare(scope, name, Ty::Error, is_var);
+                        if !entry.ignored {
+                            self.declare(scope, name, Ty::Error, is_var);
+                        }
                     }
                 }
                 continue;

@@ -487,8 +487,9 @@ pub enum LambdaParameterRole {
     Destructured,
 }
 
-/// One destructuring binding. `ignored` is syntax, not a spelling test: bare `_` skips a component,
-/// while backtick-escaped `` `_` `` declares an ordinary local whose source name is `_`.
+/// One destructuring binding. `ignored` is syntax, not a spelling test: a positional bare `_`
+/// skips that component, while backtick-escaped `` `_` `` declares an ordinary local. A name-based
+/// `_ = prop` is still ignored as a binding, and the checker reads `prop` before discarding it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DestructureEntry {
     pub name: String,

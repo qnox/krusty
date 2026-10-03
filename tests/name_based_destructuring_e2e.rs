@@ -144,6 +144,38 @@ fn name_based_lambda_shortform() {
     assert_eq!(run_stdlib(SRC).expect("name-based lambda"), "OK");
 }
 
+#[test]
+fn name_based_underscore_still_reads_the_renamed_property() {
+    common::expect_box_same_as_kotlinc(
+        r#"
+// LANGUAGE: +NameBasedDestructuring, +EnableNameBasedDestructuringShortForm
+
+object O {
+    var counter = 0
+
+    val first: Int
+        get() = counter++
+}
+
+fun box(): String {
+    val (_ = first) = O
+    (val _ = first) = O
+
+    for ((_ = first) in arrayOf(O)) {}
+    for ((val _ = first) in arrayOf(O)) {}
+
+    fun foo(f: (O) -> Unit) = f(O)
+
+    foo { (_ = first) -> }
+    foo { (val _ = first) -> }
+
+    return if (O.counter == 6) "OK" else "FAIL: ${O.counter}"
+}
+"#,
+        "NameBasedUnderscore",
+    );
+}
+
 /// A `for` bracket pattern without the feature is one language-version error. The loop is still
 /// parsed, so the ledger is that gate and nothing else.
 #[test]

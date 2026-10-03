@@ -201,7 +201,13 @@ fn underscore_destructure_entry_has_no_binding_or_component_call() {
         panic!("destructuring must have a dedicated checked FIR statement")
     };
     assert_eq!(entries.len(), 1);
-    assert!(matches!(entries[0], FirDestructureEntry::Ignored { .. }));
+    assert!(matches!(
+        entries[0],
+        FirDestructureEntry::Ignored {
+            component: None,
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -260,6 +266,55 @@ fn name_based_destructure_publishes_a_property_read_not_a_getter_call() {
         extension_receiver,
         ..
     } = &body.expr(component).expect("component property read").kind
+    else {
+        panic!("a selected source property is a FIR property read")
+    };
+    assert!(index.property(target.module().unwrap()).is_some());
+    assert_eq!(
+        dispatch_receiver
+            .expect("member property uses the destructured value")
+            .value,
+        *initializer
+    );
+    assert!(extension_receiver.is_none());
+}
+
+#[test]
+fn name_based_underscore_reads_the_named_property_and_discards_it() {
+    let (body, index) = checked_function_body(
+        "// LANGUAGE: +NameBasedDestructuring, +EnableNameBasedDestructuringShortForm\n\
+         class Props { val computed: Int get() = 2 }\n\
+         fun read(props: Props) { val (_ = computed) = props }\n",
+        "read",
+    );
+    let FirExprKind::Block { statements, .. } =
+        &body.expr(root_expression(&body)).expect("root block").kind
+    else {
+        panic!("function body must be a FIR block")
+    };
+    let FirStatementKind::Destructure {
+        initializer,
+        entries,
+    } = &body
+        .statement(statements[0])
+        .expect("name-based destructuring statement")
+        .kind
+    else {
+        panic!("name-based destructuring must have checked FIR")
+    };
+    let FirDestructureEntry::Ignored {
+        component: Some(component),
+        ..
+    } = entries[0]
+    else {
+        panic!("name-based underscore must read the property and discard the value")
+    };
+    let FirExprKind::PropertyRead {
+        target,
+        dispatch_receiver,
+        extension_receiver,
+        ..
+    } = &body.expr(component).expect("discarded property read").kind
     else {
         panic!("a selected source property is a FIR property read")
     };
