@@ -5048,6 +5048,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   differing type other than `Object` takes a `checkcast`, so `val g: Greeter = Ann()` stores and
   frames a `Greeter` while `val g: Any = Ann()` frames an `Ann`. An assignment stores the value as
   emitted (`tests/unboxing_coercion_e2e.rs`).
+- **An inline function's anonymous-object result is its declared supertype.** A private
+  non-inline function may return the synthetic anonymous classifier, so `t.unused` sees a member
+  declared only on that object. An inline function, private or not, does not: each call site
+  copies the class, and the result the caller names is the single declared supertype (`I` for
+  `object : I`), or `Any` when none is written. `arrayOf` of two such calls is therefore an
+  array of that supertype, and the copied class is not cast back to the declaration class.
+  Tests: `tests/reified_anonymous_object_e2e.rs`, box
+  `reified/kt39256_privateInlineWithAnonymousObject.kt`.
 - **A hoisted anonymous object retains its construction site's lexical classifier scope.** The parser
   stores an anonymous object's class as a file-level synthetic declaration, but its member signatures,
   supertype arguments, superclass constructor arguments, and inferred member returns may still name a

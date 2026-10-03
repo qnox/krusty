@@ -273,3 +273,27 @@ fn a_reified_anonymous_object_copies_property_accessors_like_kotlinc() {
         "{inlined} accessor, bridge, and metadata identities"
     );
 }
+
+#[test]
+fn a_private_inline_anonymous_object_is_used_as_its_supertype() {
+    // Two call sites each get a class. The values meet as the interface, not as the declaration
+    // class, so neither copy is cast back to `...$f$1`.
+    common::expect_box_same_as_kotlinc(
+        r#"
+interface I
+class C<T>
+
+private inline fun <reified T> C<T>.f() = object : I {
+    val unused = T::class
+}
+
+fun box(): String {
+    val t1 = C<String>().f()
+    val t2 = C<String>().f()
+    arrayOf(t1, t2)
+    return "OK"
+}
+"#,
+        "PrivateInlineAnonymousSupertype",
+    );
+}
