@@ -12947,10 +12947,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `…::secondary_constructor_annotation_reaches_metadata`,
   `…::annotated_suspend_member_interns_its_signature_before_the_annotation`,
   `…::annotated_suspend_top_level_function_interns_its_signature_before_the_annotation`.
-  PROPERTY annotations now take their own route (below). Still DROPPED before the IR, so there is
-  nothing to mirror yet (each needs the class-file side first, not just the metadata record): a
-  PRIMARY constructor's own annotations (`class C @Anno constructor(…)`) and VALUE-PARAMETER
-  annotations (no `RuntimeVisibleParameterAnnotations` is emitted at all).
+  PROPERTY annotations now take their own route (below). The annotation RECORDS themselves are
+  gated by kotlinc's `LanguageFeature.AnnotationsInMetadata`, stable since language version 2.4,
+  while the `HAS_ANNOTATIONS` flag bits — and a property's `syntheticMethod` marker pointer — stay
+  set at older language levels. krusty gates only the record appends on that finalized source
+  feature (`ClassTail::annotations_in_metadata` and the facade builder's matching parameter), never
+  the flags and never an independently overridden metadata stamp. Test:
+  `tests/metadata_language_version_e2e.rs::language_version_2_2_omits_annotation_records_like_kotlinc`
+  (byte-identical `d1`/`d2` to kotlinc `-language-version 2.2` across class, constructor, member,
+  property, enum-entry, and facade records). One class-file gap remains: a VALUE-PARAMETER
+  annotation reaches its metadata record, but no `RuntimeVisibleParameterAnnotations` attribute is
+  emitted for it.
 - **A line break inside a property declaration is a continuation, an explicit `;` is not.** Kotlin's
   property grammar is `… (':' NL* type)? (NL* '=' NL* expression)?`, so a declaration whose type
   fills the line may put the type or the initializer on the next one — which is exactly what a
@@ -12967,9 +12974,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   destructuring `val (a, b)`, and a `when` subject binding.
   Tests: `tests/property_initializer_newline_e2e.rs`.
   PROPERTY annotations now take their own route (below), and the PRIMARY constructor's the one after
-  it. Still DROPPED before the IR, so there is nothing to mirror yet (it needs the class-file side
-  first, not just the metadata record): VALUE-PARAMETER annotations (no
-  `RuntimeVisibleParameterAnnotations` is emitted at all).
+  it. A VALUE-PARAMETER annotation reaches its metadata record; what is still missing is the
+  class-file side (no `RuntimeVisibleParameterAnnotations` attribute is emitted).
 
 - **A primary constructor's own annotations reach both halves.** `class C @Mark constructor(val x: Int)`
   parsed its annotations but dropped them: the emitted `<init>` carried no annotation attribute and the

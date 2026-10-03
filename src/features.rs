@@ -48,6 +48,7 @@ const OBSERVED_FEATURES: &[(&str, Option<(u16, u16)>)] = &[
         "AllowAccessToProtectedFieldFromSuperCompanion",
         Some((2, 1)),
     ),
+    ("AnnotationsInMetadata", Some((2, 4))),
     ("BareArrayClassLiteral", Some((1, 4))),
     ("ContextParameters", Some((2, 4))),
     ("ContextReceivers", None),
