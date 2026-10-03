@@ -105,6 +105,12 @@ fn classifier_matches(owner: TypeName, kotlin: &str) -> bool {
     jvm.iter().any(|candidate| owner.matches(candidate))
 }
 
+fn classifier_matches_any(owner: TypeName, kotlin: &[&str]) -> bool {
+    kotlin
+        .iter()
+        .any(|candidate| classifier_matches(owner, candidate))
+}
+
 /// Is this `kotlin.Any` — the root class, under either spelling the provider may hand over?
 ///
 /// The root declares no state and no constructor to run, so a `super()` reaching it is nothing to
@@ -506,8 +512,8 @@ pub(super) fn float_predicate(owner: DeclarationOwner, name: &str) -> Option<Flo
 ///
 /// Every enum constant answers `name` and `ordinal` from the storage its base contributes. The
 /// accessor arrives as the property's Kotlin name, so these are the only two spellings.
-pub(super) fn enum_member(owner: &str, accessor: &str) -> Option<&'static str> {
-    if kotlin_owner(owner) != "kotlin/Enum" {
+pub(super) fn enum_member(owner: TypeName, accessor: &str) -> Option<&'static str> {
+    if !classifier_matches(owner, "kotlin/Enum") {
         return None;
     }
     match accessor {
@@ -529,124 +535,6 @@ pub(super) enum IterationRole {
     Iterable,
     /// The iterator itself.
     Iterator,
-}
-
-/// Which role a type name plays, or `None` for anything that plays neither.
-///
-/// The concrete ranges are `Iterable` here as much as the interfaces are, because the runtime's own
-/// `kt_iterable_*` walk dispatches on the DESCRIPTOR and reaches a range as readily as a list. They
-/// are safe to name for the same reason the interfaces are: a file declaring a class that extends
-/// one of them overrides a dependency method and is declined whole. A member that must not be
-/// answered this way — one whose result depends on the receiver being a list — is read by
-/// `list_symbol` behind an `is_list` check, never through this.
-pub(super) fn iteration_role(internal: crate::types::TypeName) -> Option<IterationRole> {
-    // The table below is written in Kotlin names; a JVM jar's spelling is normalized to one first.
-    let internal = crate::types::type_name(kotlin_owner(&internal.render()));
-    [
-        ("kotlin/collections/Iterable", IterationRole::Iterable),
-        ("kotlin/collections/Collection", IterationRole::Iterable),
-        ("kotlin/collections/List", IterationRole::Iterable),
-        // The growable list. It is iterated exactly as a read-only list is: the runtime hands out
-        // the one list iterator, whose cursor is an index and whose bound is `kt_list_size`, which
-        // both shapes answer.
-        (
-            "kotlin/collections/MutableIterable",
-            IterationRole::Iterable,
-        ),
-        (
-            "kotlin/collections/MutableCollection",
-            IterationRole::Iterable,
-        ),
-        ("kotlin/collections/MutableList", IterationRole::Iterable),
-        ("kotlin/collections/ArrayList", IterationRole::Iterable),
-        (
-            "kotlin/collections/MutableIterator",
-            IterationRole::Iterator,
-        ),
-        // The SETS. A set is walked as the list of its elements, which is its insertion order —
-        // and a `Map` is walked as its ENTRIES, which is what Kotlin's `Map.iterator()` extension
-        // answers, so both reach the same descriptor dispatch a list does.
-        ("kotlin/collections/Set", IterationRole::Iterable),
-        ("kotlin/collections/MutableSet", IterationRole::Iterable),
-        ("kotlin/collections/HashSet", IterationRole::Iterable),
-        ("kotlin/collections/LinkedHashSet", IterationRole::Iterable),
-        ("kotlin/collections/Map", IterationRole::Iterable),
-        ("kotlin/collections/MutableMap", IterationRole::Iterable),
-        ("kotlin/collections/HashMap", IterationRole::Iterable),
-        ("kotlin/collections/LinkedHashMap", IterationRole::Iterable),
-        // A SEQUENCE. Iterating one is the one member `Sequence` declares, and the wrapper the
-        // runtime makes holds the source it walks — so the role is the same and the dispatch is
-        // the descriptor's. Which OTHER members a sequence may be asked is narrower than an
-        // iterable's, and that is the sequence lowering's to enforce, not this table's.
-        ("kotlin/sequences/Sequence", IterationRole::Iterable),
-        ("kotlin/ranges/IntRange", IterationRole::Iterable),
-        ("kotlin/ranges/LongRange", IterationRole::Iterable),
-        ("kotlin/ranges/CharRange", IterationRole::Iterable),
-        // A PROGRESSION is a walk with a step, and `10 downTo 1` is typed by one rather than by
-        // the range above it. The runtime needs nothing new for it: one struct serves a range and
-        // a progression — a plain range is the one whose step is 1 — and the object a `downTo`
-        // builds wears the very descriptor a range does, so every `kt_iterable_*` walk already
-        // reaches it. What was missing is only the STATIC name, which is what a call site has.
-        ("kotlin/ranges/IntProgression", IterationRole::Iterable),
-        ("kotlin/ranges/LongProgression", IterationRole::Iterable),
-        ("kotlin/ranges/CharProgression", IterationRole::Iterable),
-        // The unsigned pair the runtime owns, and their progressions. Kotlin declares exactly two
-        // unsigned ranges, since `UByte.rangeTo` and `UShort.rangeTo` both answer a `UIntRange`.
-        ("kotlin/ranges/UIntRange", IterationRole::Iterable),
-        ("kotlin/ranges/ULongRange", IterationRole::Iterable),
-        ("kotlin/ranges/UIntProgression", IterationRole::Iterable),
-        ("kotlin/ranges/ULongProgression", IterationRole::Iterable),
-        ("kotlin/collections/Iterator", IterationRole::Iterator),
-        // The primitive iterators an array hands out. Each is a concrete stdlib class rather than
-        // an interface, and naming them is safe for the reason the interfaces are: the only objects
-        // wearing one here are the runtime's own walks, and a file declaring its own subclass of
-        // one overrides a dependency method and is declined whole. `IntIterator`, `LongIterator`
-        // and `CharIterator` are deliberately ABSENT — a range's iterator wears those, and they are
-        // read by the narrow protocol before this is consulted at all.
-        ("kotlin/collections/ByteIterator", IterationRole::Iterator),
-        ("kotlin/collections/ShortIterator", IterationRole::Iterator),
-        (
-            "kotlin/collections/BooleanIterator",
-            IterationRole::Iterator,
-        ),
-        ("kotlin/collections/FloatIterator", IterationRole::Iterator),
-        ("kotlin/collections/DoubleIterator", IterationRole::Iterator),
-    ]
-    .into_iter()
-    .find_map(|(candidate, role)| internal.matches(candidate).then_some(role))
-}
-
-/// Whether a type name is a list the native runtime builds.
-pub(super) fn is_list_type(internal: crate::types::TypeName) -> bool {
-    matches!(
-        kotlin_owner(&internal.render()),
-        "kotlin/collections/List"
-            // The MUTABLE ones read the same way: every question `List` answers, a `MutableList`
-            // answers identically, and the runtime gives both one entry point. `Collection` is not
-            // here: a `Set` is one, and the runtime's set is not laid out as its list.
-            | "kotlin/collections/MutableList"
-            | "kotlin/collections/ArrayList"
-    )
-}
-
-/// Whether a type name is the one an `is` answers with the runtime's LIST marker.
-///
-/// Narrower than [`is_list_type`] in BOTH directions, and for the same reason each way: the marker
-/// says only "this object is a `kotlin.collections.List`", so the name it answers for has to be one
-/// every object wearing it really is and one no object without it could be.
-///
-/// `Collection` is out because a SET is one and wears no marker, so `x is Collection<*>` would have
-/// said `false` of an object that is one. `MutableList` and `ArrayList` are out for the mirror
-/// reason: both kinds of list the runtime builds wear this marker, the immutable one included, so
-/// `listOf(1) is MutableList<*>` would have said `true` where Kotlin/Native says false. Those two
-/// keep declining, as they did before the marker existed — the runtime has nothing that tells one
-/// kind from the other in a check.
-///
-/// It is also the descriptor `List::class` names, which is why the spelling has to be exact: a
-/// class literal reads the descriptor's own Kotlin name, and `kt_type_list_interface` is named
-/// `kotlin.collections.List` and nothing else.
-pub(super) fn is_list_check_type(internal: crate::types::TypeName) -> bool {
-    kotlin_owner(&internal.render()) == "kotlin/collections/List"
 }
 
 /// `Float.fromBits(n)` / `Double.fromBits(n)`, as (runtime symbol, operand, answer).
@@ -708,50 +596,12 @@ pub(super) fn is_comparable_compare_to(owner: DeclarationOwner, name: &str, para
 /// Both are what a DECLARED class naming one of them makes observable: an object of the program's
 /// standing behind a `Comparable` receiver, which the runtime's descriptor tables cannot order.
 pub(super) fn is_comparable_supertype(internal: crate::types::TypeName) -> bool {
-    matches!(
-        kotlin_owner(&internal.render()),
-        "kotlin/Comparable" | "kotlin/Enum"
-    )
+    classifier_matches_any(internal, &["kotlin/Comparable", "kotlin/Enum"])
 }
 
 /// Whether a type name is the SEQUENCE the native runtime makes.
 pub(super) fn is_sequence_type(internal: crate::types::TypeName) -> bool {
-    kotlin_owner(&internal.render()) == "kotlin/sequences/Sequence"
-}
-
-/// Whether a type name is the MAP the native runtime builds.
-///
-/// `MutableMap`, `HashMap` and `LinkedHashMap` are one object there: the map that runtime builds is
-/// growable and insertion-ordered, which satisfies all three — the unordered spellings leave their
-/// order unspecified, and insertion order is one of the orders left unspecified.
-pub(super) fn is_map_type(internal: crate::types::TypeName) -> bool {
-    matches!(
-        kotlin_owner(&internal.render()),
-        "kotlin/collections/Map"
-            | "kotlin/collections/MutableMap"
-            | "kotlin/collections/HashMap"
-            | "kotlin/collections/LinkedHashMap"
-    )
-}
-
-/// Whether a type name is the SET the native runtime builds — the same four spellings, one level
-/// down.
-pub(super) fn is_set_type(internal: crate::types::TypeName) -> bool {
-    matches!(
-        kotlin_owner(&internal.render()),
-        "kotlin/collections/Set"
-            | "kotlin/collections/MutableSet"
-            | "kotlin/collections/HashSet"
-            | "kotlin/collections/LinkedHashSet"
-    )
-}
-
-/// Whether a type name is a map ENTRY, which `entries` hands out and a destructuring reads.
-pub(super) fn is_map_entry_type(internal: crate::types::TypeName) -> bool {
-    matches!(
-        kotlin_owner(&internal.render()),
-        "kotlin/collections/Map$Entry" | "kotlin/collections/MutableMap$MutableEntry"
-    )
+    classifier_matches(internal, "kotlin/sequences/Sequence")
 }
 
 /// One SHAPE of the runtime's collections.
@@ -782,35 +632,6 @@ pub(super) enum CollectionShape {
     /// iterator, so a class of the program behind one is reached differently from one behind a
     /// list. That is the whole reason it is a shape of its own.
     Text,
-}
-
-/// The shape a type NAME belongs to. The narrow kinds are asked first: every one of them is an
-/// `Iterable` by [`iteration_role`], which walks a map as its entries and a sequence as its source,
-/// and that role is about walking rather than about which objects are interchangeable.
-pub(super) fn collection_shape(internal: crate::types::TypeName) -> Option<CollectionShape> {
-    if is_map_entry_type(internal) {
-        return Some(CollectionShape::MapEntry);
-    }
-    if is_map_type(internal) {
-        return Some(CollectionShape::Map);
-    }
-    if is_sequence_type(internal) {
-        return Some(CollectionShape::Sequence);
-    }
-    if is_list_type(internal) || is_set_type(internal) {
-        return Some(CollectionShape::Iterable);
-    }
-    // TEXT is walkable here and is no collection at all, so [`iteration_role`] does not name it.
-    if matches!(
-        kotlin_owner(&internal.render()),
-        "kotlin/String" | "kotlin/CharSequence" | "kotlin/text/StringBuilder"
-    ) {
-        return Some(CollectionShape::Text);
-    }
-    match iteration_role(internal)? {
-        IterationRole::Iterable => Some(CollectionShape::Iterable),
-        IterationRole::Iterator => Some(CollectionShape::Iterator),
-    }
 }
 
 /// Whether this names `kotlin.CharSequence`, under either spelling a provider may hand over.
@@ -1035,66 +856,21 @@ pub(super) fn boxed_step(owner: DeclarationOwner, name: &str, params: &[Ty]) -> 
     Some((ty, step))
 }
 
-/// A dependency type's KOTLIN name, whichever spelling a provider presented it under.
-///
-/// `java.lang.CharSequence` and `kotlin.CharSequence` are one type; which one a call carries is
-/// the provider's business, so anything keyed on the type has to ask for the Kotlin name first.
-pub(super) fn kotlin_name_of(owner: crate::types::TypeName) -> String {
-    kotlin_owner(&owner.render()).to_string()
-}
-
 /// Whether a name is one of Kotlin's function types (`kotlin.Function0`..`Function22`, or the
 /// arity-less `kotlin.Function` they all extend).
 ///
 /// The one dependency type whose member this target gives a FIXED slot: a function value's
 /// `invoke` sits right after `kotlin.Any`'s three, and the runtime names that number itself.
+#[cfg(test)]
 pub(super) fn is_function_type_name(owner: crate::types::TypeName) -> bool {
-    let rendered = kotlin_owner(&owner.render()).to_string();
-    let Some(suffix) = rendered.strip_prefix("kotlin/Function") else {
-        return false;
-    };
-    suffix.is_empty() || suffix.chars().all(|digit| digit.is_ascii_digit())
+    owner == crate::types::wk::function_root() || function_type_arity(owner).is_some()
 }
 
-/// The runtime marker an `is` against a FUNCTION TYPE asks about, for a type that names one.
-///
-/// A function value is an object of a type of its own — one per lambda and per callable reference —
-/// so the type written at the site is never the object's. The markers stand in for it: each
-/// function value's descriptor names its arity's and the bare `kotlin.Function` beside it. A
-/// `suspend` function type spells the same names and is left to the paths that read it, which
-/// decline before reaching here.
-pub(super) fn function_type_descriptor(owner: crate::types::TypeName) -> Option<&'static str> {
-    const ARITIES: [&str; 23] = [
-        "kt_type_function0",
-        "kt_type_function1",
-        "kt_type_function2",
-        "kt_type_function3",
-        "kt_type_function4",
-        "kt_type_function5",
-        "kt_type_function6",
-        "kt_type_function7",
-        "kt_type_function8",
-        "kt_type_function9",
-        "kt_type_function10",
-        "kt_type_function11",
-        "kt_type_function12",
-        "kt_type_function13",
-        "kt_type_function14",
-        "kt_type_function15",
-        "kt_type_function16",
-        "kt_type_function17",
-        "kt_type_function18",
-        "kt_type_function19",
-        "kt_type_function20",
-        "kt_type_function21",
-        "kt_type_function22",
-    ];
-    let rendered = kotlin_owner(&owner.render()).to_string();
-    let suffix = rendered.strip_prefix("kotlin/Function")?;
-    if suffix.is_empty() {
-        return Some("kt_type_function");
-    }
-    ARITIES.get(suffix.parse::<usize>().ok()?).copied()
+#[cfg(test)]
+fn function_type_arity(owner: crate::types::TypeName) -> Option<usize> {
+    owner
+        .unsigned_suffix_after_prefix("kotlin/Function")
+        .or_else(|| owner.unsigned_suffix_after_prefix("kotlin/jvm/functions/Function"))
 }
 
 /// The runtime marker an `is` against one of Kotlin's REFLECTION types asks about.
@@ -1103,18 +879,31 @@ pub(super) fn function_type_descriptor(owner: crate::types::TypeName) -> Option<
 /// so the type written at the site is never the object's, exactly as for a function value. These
 /// markers are what the two have in common.
 pub(super) fn reflection_type_descriptor(owner: crate::types::TypeName) -> Option<&'static str> {
-    Some(match kotlin_owner(&owner.render()) {
-        "kotlin/reflect/KCallable" => "kt_type_kcallable",
-        "kotlin/reflect/KProperty" => "kt_type_kproperty",
-        "kotlin/reflect/KProperty0" => "kt_type_kproperty0",
-        "kotlin/reflect/KProperty1" => "kt_type_kproperty1",
-        "kotlin/reflect/KProperty2" => "kt_type_kproperty2",
-        "kotlin/reflect/KMutableProperty" => "kt_type_kmutable_property",
-        "kotlin/reflect/KMutableProperty0" => "kt_type_kmutable_property0",
-        "kotlin/reflect/KMutableProperty1" => "kt_type_kmutable_property1",
-        "kotlin/reflect/KMutableProperty2" => "kt_type_kmutable_property2",
-        _ => return None,
-    })
+    [
+        ("kotlin/reflect/KCallable", "kt_type_kcallable"),
+        ("kotlin/reflect/KProperty", "kt_type_kproperty"),
+        ("kotlin/reflect/KProperty0", "kt_type_kproperty0"),
+        ("kotlin/reflect/KProperty1", "kt_type_kproperty1"),
+        ("kotlin/reflect/KProperty2", "kt_type_kproperty2"),
+        (
+            "kotlin/reflect/KMutableProperty",
+            "kt_type_kmutable_property",
+        ),
+        (
+            "kotlin/reflect/KMutableProperty0",
+            "kt_type_kmutable_property0",
+        ),
+        (
+            "kotlin/reflect/KMutableProperty1",
+            "kt_type_kmutable_property1",
+        ),
+        (
+            "kotlin/reflect/KMutableProperty2",
+            "kt_type_kmutable_property2",
+        ),
+    ]
+    .into_iter()
+    .find_map(|(classifier, descriptor)| owner.matches(classifier).then_some(descriptor))
 }
 
 /// `a.mod(b)` — the remainder carrying the DIVISOR's sign, as (runtime symbol, operand type): both
@@ -1295,12 +1084,9 @@ pub(super) fn class_name_accessor(
 /// something to materialize, and for such an object the honest answer is the null reference —
 /// there is no object, and nothing dereferences it.
 pub(super) fn is_stateless_runtime_object(classifier: crate::types::TypeName) -> bool {
-    matches!(
-        kotlin_owner(&classifier.render()),
-        // The stdlib's standard delegates. `Delegates` declares no state and every member of it
-        // this runtime answers takes its arguments alone.
-        "kotlin/properties/Delegates"
-    )
+    // The stdlib's standard delegates. `Delegates` declares no state and every member of it this
+    // runtime answers takes its arguments alone.
+    classifier.matches("kotlin/properties/Delegates")
 }
 
 /// The runtime entry point answering the companion object of a BUILT-IN type, if this names one.
@@ -1313,29 +1099,19 @@ pub(super) fn is_stateless_runtime_object(classifier: crate::types::TypeName) ->
 /// Apart from [`is_stateless_runtime_object`], which answers a NULL for an object nothing reads:
 /// that will not do here, because `o === Int.Companion` is exactly what the corpus asks.
 pub(super) fn builtin_companion(classifier: crate::types::TypeName) -> Option<&'static str> {
-    let suffix = match kotlin_owner(&classifier.render()) {
-        "kotlin/Byte$Companion" => "byte",
-        "kotlin/Short$Companion" => "short",
-        "kotlin/Int$Companion" => "int",
-        "kotlin/Long$Companion" => "long",
-        "kotlin/Char$Companion" => "char",
-        "kotlin/Boolean$Companion" => "boolean",
-        "kotlin/Float$Companion" => "float",
-        "kotlin/Double$Companion" => "double",
-        "kotlin/String$Companion" => "string",
-        _ => return None,
-    };
-    Some(match suffix {
-        "byte" => "kt_byte_companion",
-        "short" => "kt_short_companion",
-        "int" => "kt_int_companion",
-        "long" => "kt_long_companion",
-        "char" => "kt_char_companion",
-        "boolean" => "kt_boolean_companion",
-        "float" => "kt_float_companion",
-        "double" => "kt_double_companion",
-        _ => "kt_string_companion",
-    })
+    [
+        ("kotlin/Byte$Companion", "kt_byte_companion"),
+        ("kotlin/Short$Companion", "kt_short_companion"),
+        ("kotlin/Int$Companion", "kt_int_companion"),
+        ("kotlin/Long$Companion", "kt_long_companion"),
+        ("kotlin/Char$Companion", "kt_char_companion"),
+        ("kotlin/Boolean$Companion", "kt_boolean_companion"),
+        ("kotlin/Float$Companion", "kt_float_companion"),
+        ("kotlin/Double$Companion", "kt_double_companion"),
+        ("kotlin/String$Companion", "kt_string_companion"),
+    ]
+    .into_iter()
+    .find_map(|(owner, symbol)| classifier.matches(owner).then_some(symbol))
 }
 
 /// A member of a COMPANION the runtime realizes, whose receiver carries nothing.

@@ -91,7 +91,7 @@ pub(super) const ENUM_FIELDS_END: u32 = HEADER_SIZE + 12;
 
 /// Whether a class is an enum: it extends `kotlin.Enum`, which no file declares.
 pub(super) fn is_enum(class: &IrClass) -> bool {
-    class.superclass.matches("kotlin/Enum")
+    class.superclass == crate::types::wk::kotlin_enum()
 }
 
 /// A base class no file declares, whose layout the RUNTIME owns.
@@ -380,7 +380,10 @@ pub(super) fn check_supported(class: &IrClass) -> Result<(), Unsupported> {
 }
 
 /// Build the layout and vtable of every class in `ir`, superclasses first.
-pub(super) fn build(ir: &IrFile) -> Result<ClassModel, Unsupported> {
+pub(super) fn build(
+    ir: &IrFile,
+    classifiers: &dyn crate::backend::BackendClassifierSource,
+) -> Result<ClassModel, Unsupported> {
     for class in &ir.classes {
         check_supported(class)?;
     }
@@ -400,7 +403,14 @@ pub(super) fn build(ir: &IrFile) -> Result<ClassModel, Unsupported> {
                     .as_ref()
                     .expect("superclasses are laid out first")
             });
-            layout_class(ir, id, superclass, parent, &interfaces[id as usize])?
+            layout_class(
+                ir,
+                classifiers,
+                id,
+                superclass,
+                parent,
+                &interfaces[id as usize],
+            )?
         };
         layouts[id as usize] = Some(layout);
     }
@@ -909,8 +919,8 @@ fn supplied(member: &InterfaceMember, class: ClassId, interfaces: &[Vec<ClassId>
 /// superclass reads a layout that does not exist yet.
 fn hierarchy_order(ir: &IrFile) -> Result<Vec<ClassId>, Unsupported> {
     for class in &ir.classes {
-        if !class.superclass.matches("kotlin/Any")
-            && !class.superclass.matches("kotlin/Enum")
+        if class.superclass != crate::types::wk::any()
+            && class.superclass != crate::types::wk::kotlin_enum()
             && external_base(class.superclass).is_none()
             && ir.class_id_by_name(class.superclass).is_none()
         {
@@ -970,6 +980,7 @@ fn round_up(value: u32, alignment: u32) -> u32 {
 
 fn layout_class(
     ir: &IrFile,
+    classifiers: &dyn crate::backend::BackendClassifierSource,
     id: ClassId,
     superclass: Option<ClassId>,
     parent: Option<&ClassLayout>,
@@ -1065,7 +1076,7 @@ fn layout_class(
             .filter(|edge| {
                 edge.name == "invoke"
                     && matches!(edge.overridden, ResolvedFunctionOverrideTarget::External(_))
-                    && super::intrinsics::is_function_type_name(edge.overridden_owner)
+                    && is_function_classifier(classifiers, edge.overridden_owner)
             })
             .map(|edge| edge.overridden_owner)
             .collect::<std::collections::HashSet<_>>();
@@ -1168,8 +1179,7 @@ fn layout_class(
                         == Some(&fid)
             })
             .filter(|edge| {
-                edge.name == "invoke"
-                    && super::intrinsics::is_function_type_name(edge.overridden_owner)
+                edge.name == "invoke" && is_function_classifier(classifiers, edge.overridden_owner)
             });
         let replaces = match any_slot(function) {
             Some(slot) => {
@@ -1184,7 +1194,9 @@ fn layout_class(
             // `invoke` on a class implementing a FUNCTION TYPE takes the one other fixed slot this
             // target has: the runtime names it (`KT_SLOT_INVOKE`) and every caller through a
             // function type reads it, a lambda's body included.
-            None => invoke_edge.and_then(|edge| external_invoke_slot(ir, edge, function)),
+            None => {
+                invoke_edge.and_then(|edge| external_invoke_slot(ir, classifiers, edge, function))
+            }
         };
         // Whether the FUNCTION SLOT needs a stand-in for this method: it is an `invoke` over a
         // function type that could not take the slot outright, because it does not carry
@@ -1940,6 +1952,7 @@ const FUNCTION_SLOT: u32 = 3;
 
 fn external_invoke_slot(
     ir: &IrFile,
+    classifiers: &dyn crate::backend::BackendClassifierSource,
     edge: &crate::ir::IrFunctionOverride,
     function: &IrFunction,
 ) -> Option<u32> {
@@ -1947,12 +1960,32 @@ fn external_invoke_slot(
     if edge.name != "invoke" {
         return None;
     }
-    if !super::intrinsics::is_function_type_name(edge.overridden_owner) {
+    if !is_function_classifier(classifiers, edge.overridden_owner) {
         return None;
     }
     let reference = |ty: Ty| c_kind(ty) == CKind::Ref;
     (function.params.iter().copied().all(reference) && reference(function.ret))
         .then_some(FUNCTION_SLOT)
+}
+
+fn is_function_classifier(
+    classifiers: &dyn crate::backend::BackendClassifierSource,
+    classifier: TypeName,
+) -> bool {
+    let published = matches!(
+        classifiers
+            .classifier(classifier)
+            .and_then(|fact| fact.role),
+        Some(crate::types::ClassifierRole::FunctionOfArity(_))
+    );
+    #[cfg(test)]
+    {
+        // Synthetic unit-test IR has no declaration provider. Production always consumes the
+        // published classifier role above; this fallback exists only for those isolated fixtures.
+        published || super::intrinsics::is_function_type_name(classifier)
+    }
+    #[cfg(not(test))]
+    published
 }
 
 /// Implementation method → the method it overrides, for the methods `class` declares. Both ends
@@ -2084,6 +2117,21 @@ fn same_representation(implementation: &IrFunction, overridden: &IrFunction) -> 
 mod tests {
     use super::*;
     use crate::ir::{IrField, IrProperty, IrfFlags};
+
+    struct NoClassifiers;
+
+    impl crate::backend::BackendClassifierSource for NoClassifiers {
+        fn classifier(
+            &self,
+            _classifier: TypeName,
+        ) -> Option<std::sync::Arc<crate::backend::BackendClassifierFact>> {
+            None
+        }
+    }
+
+    fn build(ir: &IrFile) -> Result<ClassModel, Unsupported> {
+        super::build(ir, &NoClassifiers)
+    }
 
     fn function(name: &str, owner: &str, params: Vec<Ty>, ret: Ty, abstract_: bool) -> IrFunction {
         IrFunction {

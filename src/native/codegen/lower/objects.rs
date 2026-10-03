@@ -816,7 +816,7 @@ impl<'a> FileLowering<'a> {
                 continue;
             }
             match (
-                super::super::super::intrinsics::collection_shape(edge.overridden_owner),
+                self.file.collection_shape(edge.overridden_owner),
                 edge.name.as_str(),
             ) {
                 (Some(CollectionShape::Iterable), "iterator") => iterable = true,
@@ -845,7 +845,7 @@ impl<'a> FileLowering<'a> {
                 edge.overridden,
                 crate::fir::ResolvedPropertyOverrideTarget::External(_)
             ) && matches!(
-                super::super::super::intrinsics::collection_shape(edge.overridden_owner),
+                self.file.collection_shape(edge.overridden_owner),
                 Some(CollectionShape::Text)
             ) {
                 text = true;
@@ -2592,7 +2592,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     pub(super) fn singleton(&mut self, classifier: TypeName) -> Result<Option<Value>, Unsupported> {
         // `Unit` is the runtime's, not the program's: every file that mentions it means the same
         // one value, so there is nothing per-file to declare.
-        if classifier.matches("kotlin/Unit") {
+        if classifier == crate::types::wk::unit() {
             return self.runtime_call("kt_unit", &[], any(), &[]);
         }
         // An object the runtime realizes entirely has no instance and needs none: every member of
@@ -2814,7 +2814,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             source,
             params,
         } = target;
-        if owner.matches("kotlin/Any") {
+        if super::super::super::intrinsics::is_any(owner) {
             let symbol = match (name, args.len()) {
                 ("toString", 0) => "kt_any_to_string",
                 ("hashCode", 0) => "kt_any_hash_code",

@@ -356,18 +356,15 @@ impl BodyLowering<'_, '_, '_> {
     /// Whether an external property is one of `kotlin.Enum`'s two, and which.
     ///
     /// The property reaches here as an opaque identity; what it names is recovered through the
-    /// getter the provider interned for it, and `intrinsics` turns that provider's spelling into
-    /// Kotlin's.
+    /// getter frozen at the frontend/backend boundary. Emission consumes that selected identity;
+    /// it never reopens the provider or looks the property up by spelling.
     pub(super) fn enum_member_name(
         &self,
         target: crate::fir::ExternalPropertyId,
     ) -> Option<&'static str> {
-        let property = self.file.provider.external_property(target)?;
-        let getter = self.file.provider.external_callable(property.getter)?;
-        super::super::super::intrinsics::enum_member(
-            &getter.callable.owner.render(),
-            &property.name,
-        )
+        let property = self.file.callables.property(target)?;
+        let getter = self.file.callables.callable(property.getter)?;
+        super::super::super::intrinsics::enum_member(getter.physical_owner, &property.name)
     }
 
     /// `name` and `ordinal`, which every enum constant answers from its own storage.

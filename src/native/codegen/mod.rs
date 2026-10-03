@@ -107,6 +107,7 @@ impl Backend for CraneliftBackend {
         let lowered = match lower::lower_file(
             lower::FileInput {
                 ir: &file.ir,
+                classifiers: &file.classifiers,
                 callables: &file.callables,
                 runtime_symbols,
             },

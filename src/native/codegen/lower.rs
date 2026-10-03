@@ -16,6 +16,7 @@ mod arithmetic;
 mod boxed;
 mod calls;
 mod classes_literal;
+mod classifier_shapes;
 mod compiler_intrinsics;
 mod enums;
 mod exceptions;
@@ -159,6 +160,8 @@ fn isa_for(target: NativeTarget) -> Result<cranelift_codegen::isa::OwnedTargetIs
 /// pass that made them owns them for the whole lowering.
 pub struct FileInput<'a> {
     pub ir: &'a IrFile,
+    /// Provider-normalized facts for classifiers whose representation this file needs.
+    pub classifiers: &'a dyn crate::backend::BackendClassifierSource,
     /// Provider-normalized facts for exactly the dependency identities this checked file names.
     pub callables: &'a crate::backend::CheckedBackendCallables,
     /// Every symbol the prebuilt runtime defines, which the program's own names must avoid. Read
@@ -174,10 +177,11 @@ pub fn lower_file(
 ) -> Result<Lowered, Unsupported> {
     let FileInput {
         ir,
+        classifiers,
         callables,
         runtime_symbols,
     } = input;
-    let class_model = model::build(ir)?;
+    let class_model = model::build(ir, classifiers)?;
 
     let isa = isa_for(target)?;
     let builder = ObjectBuilder::new(
@@ -190,6 +194,7 @@ pub fn lower_file(
 
     let mut lowering = FileLowering {
         ir,
+        classifiers,
         callables,
         module: &mut module,
         symbols: super::super::symbols::symbols(ir, runtime_symbols.clone()),
@@ -203,7 +208,7 @@ pub fn lower_file(
         accessors: HashMap::new(),
         statics: Vec::new(),
         enum_entries: HashMap::new(),
-        implemented_collections: implemented_collections(ir),
+        implemented_collections: implemented_collections(ir, classifiers),
         overrides_a_throwable_accessor: overrides_a_throwable_accessor(ir),
         // Filled once the class model can be consulted: which classes are walkable is which ones
         // a thunk could be emitted for, and only the model knows that.
@@ -265,20 +270,18 @@ pub fn lower_file(
     })
 }
 
-/// The dependency types this file puts a class of its own behind, by Kotlin name.
+/// The dependency types this file puts a class of its own behind, by resolved identity.
 ///
 /// Read from the OVERRIDE edges, which is where a class's answer for a dependency member is
 /// recorded whether or not its supertype list names the declaring type.
-fn implemented_dependencies(ir: &IrFile) -> std::collections::HashSet<String> {
+fn implemented_dependencies(ir: &IrFile) -> std::collections::HashSet<crate::types::TypeName> {
     let mut owners = std::collections::HashSet::new();
     for edge in ir.function_overrides.values().flatten() {
         if matches!(
             edge.overridden,
             crate::fir::ResolvedFunctionOverrideTarget::External(_)
         ) {
-            owners.insert(super::super::intrinsics::kotlin_name_of(
-                edge.overridden_owner,
-            ));
+            owners.insert(edge.overridden_owner);
         }
     }
     for edge in ir.property_overrides.values().flatten() {
@@ -286,9 +289,7 @@ fn implemented_dependencies(ir: &IrFile) -> std::collections::HashSet<String> {
             edge.overridden,
             crate::fir::ResolvedPropertyOverrideTarget::External(_)
         ) {
-            owners.insert(super::super::intrinsics::kotlin_name_of(
-                edge.overridden_owner,
-            ));
+            owners.insert(edge.overridden_owner);
         }
     }
     owners
@@ -326,6 +327,7 @@ fn overrides_a_throwable_accessor(ir: &IrFile) -> bool {
 
 fn implemented_collections(
     ir: &IrFile,
+    classifiers: &dyn crate::backend::BackendClassifierSource,
 ) -> std::collections::HashSet<super::super::intrinsics::CollectionShape> {
     let mut shapes = std::collections::HashSet::new();
     for edge in ir.function_overrides.values().flatten() {
@@ -333,7 +335,8 @@ fn implemented_collections(
             edge.overridden,
             crate::fir::ResolvedFunctionOverrideTarget::External(_)
         ) {
-            shapes.extend(super::super::intrinsics::collection_shape(
+            shapes.extend(classifier_shapes::collection_shape(
+                classifiers,
                 edge.overridden_owner,
             ));
         }
@@ -343,7 +346,8 @@ fn implemented_collections(
             edge.overridden,
             crate::fir::ResolvedPropertyOverrideTarget::External(_)
         ) {
-            shapes.extend(super::super::intrinsics::collection_shape(
+            shapes.extend(classifier_shapes::collection_shape(
+                classifiers,
                 edge.overridden_owner,
             ));
         }
@@ -395,6 +399,7 @@ fn declares_its_own_comparable(ir: &IrFile) -> bool {
 
 struct FileLowering<'a> {
     ir: &'a IrFile,
+    classifiers: &'a dyn crate::backend::BackendClassifierSource,
     callables: &'a crate::backend::CheckedBackendCallables,
     module: &'a mut ObjectModule,
     /// Symbols of this file's classes and functions.
@@ -421,11 +426,11 @@ struct FileLowering<'a> {
     statics: Vec<DataId>,
     /// Per enum class, its constants' static slots and getters, in declaration order.
     enum_entries: HashMap<ClassId, enums::EnumItems>,
-    /// The runtime-known types this file puts a class of its OWN behind, by their Kotlin name.
+    /// The runtime-known types this file puts a class of its OWN behind, by resolved identity.
     ///
     /// A receiver typed by one of these may be an object of the program's rather than one the
     /// runtime made, and the tables that answer a dependency member answer only for the runtime's.
-    implemented_dependencies: std::collections::HashSet<String>,
+    implemented_dependencies: std::collections::HashSet<crate::types::TypeName>,
     /// The collection SHAPES this file declares a class of its own behind.
     ///
     /// A receiver typed by one of those goes to the runtime's own dispatch, which knows only the
@@ -461,10 +466,24 @@ struct FileLowering<'a> {
 }
 
 impl<'a> FileLowering<'a> {
+    fn collection_shape(
+        &self,
+        internal: crate::types::TypeName,
+    ) -> Option<super::super::intrinsics::CollectionShape> {
+        classifier_shapes::collection_shape(self.classifiers, internal)
+    }
+
+    fn is_list_check_type(&self, internal: crate::types::TypeName) -> bool {
+        classifier_shapes::is_list_check_type(self.classifiers, internal)
+    }
+
+    fn function_type_descriptor(&self, internal: crate::types::TypeName) -> Option<&'static str> {
+        classifier_shapes::function_type_descriptor(self.classifiers, internal)
+    }
+
     /// Whether a class of this file answers for the dependency type `internal`.
     fn implements_dependency(&self, internal: crate::types::TypeName) -> bool {
-        self.implemented_dependencies
-            .contains(&super::super::intrinsics::kotlin_name_of(internal))
+        self.implemented_dependencies.contains(&internal)
     }
 
     /// Decide which classes of this file the runtime can WALK, and which collection shapes it
@@ -510,7 +529,10 @@ impl<'a> FileLowering<'a> {
                 return;
             }
             self.unwalkable_collections
-                .extend(super::super::intrinsics::collection_shape(overridden));
+                .extend(classifier_shapes::collection_shape(
+                    self.classifiers,
+                    overridden,
+                ));
         };
         for (owner, edges) in &self.ir.function_overrides {
             for edge in edges {

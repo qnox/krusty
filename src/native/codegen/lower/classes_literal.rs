@@ -47,9 +47,9 @@ impl BodyLowering<'_, '_, '_> {
         &self,
         target: crate::fir::ExternalPropertyId,
     ) -> Option<&'static str> {
-        let property = self.file.provider.external_property(target)?;
-        let getter = self.file.provider.external_callable(property.getter)?;
-        super::super::super::intrinsics::class_name_accessor(getter.callable.owner, &property.name)
+        let property = self.file.callables.property(target)?;
+        let getter = self.file.callables.callable(property.getter)?;
+        super::super::super::intrinsics::class_name_accessor(getter.physical_owner, &property.name)
     }
 
     pub(super) fn class_name(

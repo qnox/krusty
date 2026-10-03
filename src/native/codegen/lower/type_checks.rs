@@ -120,7 +120,7 @@ impl<'a> FileLowering<'a> {
             // `Ty::Unit` names, and it is one type either way.
             _ if target
                 .obj_internal()
-                .is_some_and(|name| name.matches("kotlin/Unit")) =>
+                .is_some_and(|name| name == crate::types::wk::unit()) =>
             {
                 "kt_type_unit"
             }
@@ -144,12 +144,12 @@ impl<'a> FileLowering<'a> {
             // names, and the arity is what separates one from another.
             _ if target
                 .obj_internal()
-                .and_then(super::super::super::intrinsics::function_type_descriptor)
+                .and_then(|internal| self.function_type_descriptor(internal))
                 .is_some() =>
             {
                 target
                     .obj_internal()
-                    .and_then(super::super::super::intrinsics::function_type_descriptor)
+                    .and_then(|internal| self.function_type_descriptor(internal))
                     .expect("just matched")
             }
             // `kotlin.collections.List`. The runtime builds two kinds and a check names neither,
@@ -159,7 +159,7 @@ impl<'a> FileLowering<'a> {
             // decline. That file keeps declining, exactly as it did before.
             _ if target
                 .obj_internal()
-                .is_some_and(super::super::super::intrinsics::is_list_check_type)
+                .is_some_and(|internal| self.is_list_check_type(internal))
                 && !self.implements_collection_shape(
                     super::super::super::intrinsics::CollectionShape::Iterable,
                 ) =>
