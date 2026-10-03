@@ -382,3 +382,63 @@ fn property_reference_get_reports_the_property_type() {
     };
     assert_eq!(out, "OK");
 }
+
+#[test]
+fn inaccessible_private_setter_reference_is_immutable() {
+    // KT-12337: a reference whose setter the use site cannot call is a KProperty. A protected
+    // setter stays mutable only on a receiver the accessing class may use: inside `Baz : Bar`,
+    // `Baz::shown` and `this::shown` are mutable, while `Bar::shown` and `bar::shown` are not.
+    const MAIN: &str = r#"
+import kotlin.reflect.KMutableProperty
+import kotlin.reflect.KMutableProperty0
+import kotlin.reflect.KMutableProperty1
+import kotlin.reflect.KProperty1
+
+open class Bar(name: String) {
+    var foo: String = name
+        private set
+    var shown: String = name
+        protected set
+    fun insideFoo() = Bar::foo
+    fun insideShown() = Bar::shown
+    fun boundInside() = this::shown
+}
+
+class Baz(name: String) : Bar(name) {
+    fun hidden() = Bar::foo
+    fun barShown() = Bar::shown
+    fun bazShown() = Baz::shown
+    fun boundBar(bar: Bar) = bar::shown
+    fun boundBaz() = this::shown
+}
+
+fun box(): String {
+    val p1: KProperty1<Bar, String> = Bar::foo
+    if (p1 is KMutableProperty<*>) return "Fail p1"
+    if (Baz("").hidden() is KMutableProperty<*>) return "Fail hidden"
+    if (Bar("")::foo is KMutableProperty<*>) return "Fail bound foo"
+    if (p1.get(Bar("OK")) != "OK") return "Fail get"
+    val owner = Bar("O")
+    owner.insideFoo().set(owner, "K")
+    if (owner.foo != "K") return "Fail inside foo"
+    if (owner.insideShown() !is KMutableProperty1<*, *>) return "Fail inside shown"
+    owner.insideShown().set(owner, "S")
+    if (owner.shown != "S") return "Fail inside shown set"
+    if (owner.boundInside() !is KMutableProperty0<*>) return "Fail bound inside"
+    owner.boundInside().set("T")
+    if (owner.shown != "T") return "Fail bound inside set"
+
+    val baz = Baz("B")
+    if (baz.barShown() is KMutableProperty<*>) return "Fail Bar::shown"
+    if (baz.boundBar(Bar("x")) is KMutableProperty<*>) return "Fail bar::shown"
+    if (baz.bazShown() !is KMutableProperty1<*, *>) return "Fail Baz::shown"
+    baz.bazShown().set(baz, "Z")
+    if (baz.shown != "Z") return "Fail Baz::shown set"
+    if (baz.boundBaz() !is KMutableProperty0<*>) return "Fail baz::shown"
+    baz.boundBaz().set("Q")
+    if (baz.shown != "Q") return "Fail baz::shown set"
+    return "OK"
+}
+"#;
+    common::expect_box_same_as_kotlinc(MAIN, "InaccessiblePrivateSetter");
+}
