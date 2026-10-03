@@ -1,13 +1,15 @@
-//! The class kotlinc writes for a function value converted to a Kotlin fun interface.
+//! The class kotlinc writes for a function value converted to a functional interface.
 //!
-//! A lambda literal converted to a fun interface is an `invokedynamic` of `LambdaMetafactory`, and
-//! so is any function value converted to a Java interface. A function value that already exists
-//! (a variable, a parameter, a call result) converted to a Kotlin fun interface is instead wrapped
-//! in a class kotlinc generates once per file and interface (`SingleAbstractMethodLowering`):
+//! A lambda literal converted to a fun interface is an `invokedynamic` of `LambdaMetafactory`. A
+//! function value that already exists (a variable, a parameter, a call result) converted to a
+//! Kotlin fun interface is instead wrapped in a class kotlinc generates once per file and
+//! interface (`SingleAbstractMethodLowering`):
 //! `<FileFacade>$sam$<interface FQ name, dots as underscores>$0`, `final synthetic`, implementing
 //! the interface and `FunctionAdapter`. Its one field holds the function value; its single method,
 //! typed as the interface declares it, calls the value's `invoke`; and `equals`/`hashCode` compare
-//! the wrapped values, so two wrappers of one function are equal.
+//! the wrapped values, so two wrappers of one function are equal. A function value converted to a
+//! Java interface uses that same shared class only under `-Xsam-conversions=class`, and then
+//! implements only the Java interface.
 //!
 //! Checked lowering marks such a conversion on its SAM target and captures the value as the
 //! conversion's lambda. This pass replaces each such lambda with a construction of the file's
@@ -34,8 +36,13 @@ impl SamWrapperRealizations {
 }
 
 /// Wrap every function value converted to a Kotlin fun interface in the file's wrapper class for
-/// that interface.
-pub(super) fn realize(ir: &mut IrFile, facade: &str) -> SamWrapperRealizations {
+/// that interface. `class_java_sam` is `-Xsam-conversions=class`: a function value converted to a
+/// Java interface then uses the same shared class, without `FunctionAdapter`.
+pub(super) fn realize(
+    ir: &mut IrFile,
+    facade: &str,
+    class_java_sam: bool,
+) -> SamWrapperRealizations {
     let mut realizations = SamWrapperRealizations::default();
     let owners = expression_functions(ir);
     let mut sites = ir
@@ -52,7 +59,7 @@ pub(super) fn realize(ir: &mut IrFile, facade: &str) -> SamWrapperRealizations {
             else {
                 return None;
             };
-            if !wraps(target) {
+            if !wraps(target, class_java_sam) {
                 return None;
             }
             let [value] = captures.as_slice() else {
@@ -119,12 +126,13 @@ pub(super) fn realize(ir: &mut IrFile, facade: &str) -> SamWrapperRealizations {
     realizations
 }
 
-/// Whether `target` converts an existing function value to a Kotlin fun interface. Every checked
-/// conversion of this semantic shape uses the wrapper path; representation details such as suspend,
-/// context parameters, bridge results, arity, or enclosing inline declarations do not select a
-/// different realization.
-fn wraps(target: &IrSamTarget) -> bool {
-    target.wraps_function_value && target.kotlin_interface
+/// Whether `target` converts an existing function value into the file's shared wrapper.
+///
+/// A Kotlin fun interface always does. A Java interface does only under
+/// `-Xsam-conversions=class`. Representation details such as suspend, context parameters, bridge
+/// results, arity, or enclosing inline declarations do not select a different realization.
+fn wraps(target: &IrSamTarget, class_java_sam: bool) -> bool {
+    target.wraps_function_value && (target.kotlin_interface || class_java_sam)
 }
 
 /// The exact function whose body each reachable expression belongs to. This identity selects the
@@ -220,10 +228,13 @@ fn declare_wrapper(
     class.decl_start_line = source_line;
     class.superclass = crate::types::type_name("java/lang/Object");
     class.enclosure = Some(crate::ir::IrEnclosure::File);
+    let function_adapter = target.kotlin_interface;
     class.interfaces.push_name(target.classifier);
-    class.interfaces.push_name(crate::types::type_name(
-        "kotlin/jvm/internal/FunctionAdapter",
-    ));
+    if function_adapter {
+        class.interfaces.push_name(crate::types::type_name(
+            "kotlin/jvm/internal/FunctionAdapter",
+        ));
+    }
     class
         .fields
         .push(IrField::new("function".to_string(), function_type).with_is_final(true));
@@ -295,6 +306,7 @@ fn declare_wrapper(
         boxes_primitive_result,
         suspend_arity: (!suspend_adapted && target.suspend).then_some(arity),
         public_inline,
+        function_adapter,
     });
     name
 }

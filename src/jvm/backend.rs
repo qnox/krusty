@@ -213,7 +213,8 @@ fn run_backend_passes_after_plugins(
     // A checked Kotlin function-value conversion is represented by one file-owned wrapper class.
     // Create it before generic erasure and bridge/value-class realization process its generated
     // method, retaining nullable-construction sites only in JVM pass facts.
-    facts.sam_wrapper_realizations = crate::jvm::sam_wrappers::realize(ir, facade);
+    let class_java_sam = lambda_modes.sam_conversions == crate::jvm::ir_emit::LambdaMode::Class;
+    facts.sam_wrapper_realizations = crate::jvm::sam_wrappers::realize(ir, facade, class_java_sam);
     crate::jvm::generic_erasure::lower_function_type_parameters(ir);
     crate::jvm::deferred_local_storage::realize(ir);
     crate::jvm::call_result_boundaries::realize_call_result_boundaries(ir);

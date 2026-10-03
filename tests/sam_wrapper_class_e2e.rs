@@ -143,6 +143,85 @@ fn every_supported_wrapper_shape_matches_kotlinc() {
     }
 }
 
+const JAVA_CLASS_MODE_SRC: &str = "fun box(): String {\n\
+    val f = { }\n\
+    val class1 = (Runnable(f) as Object).getClass()\n\
+    val class2 = (Runnable(f) as Object).getClass()\n\
+    return if (class1 == class2) \"OK\" else \"$class1 $class2\"\n\
+}\n";
+
+/// `-Xsam-conversions=class` wraps two `Runnable` conversions of one function value in one class.
+/// The class implements only `java.lang.Runnable`; the lambda literal itself stays `invokedynamic`.
+#[test]
+fn java_sam_class_mode_shares_one_wrapper() {
+    common::expect_box_same_as_kotlinc_with_args(
+        JAVA_CLASS_MODE_SRC,
+        "JavaSamClassWrapper",
+        &["-Xsam-conversions=class"],
+    );
+
+    let work = common::scratch_dir().expect("allocate Java SAM class-mode fixture");
+    let source = work.join("Main.kt");
+    std::fs::write(&source, JAVA_CLASS_MODE_SRC).expect("write fixture");
+    let krusty_out = work.join("krusty");
+    let reference_out = work.join("kotlinc");
+    std::fs::create_dir_all(&krusty_out).expect("create krusty output");
+    std::fs::create_dir_all(&reference_out).expect("create kotlinc output");
+    let krusty = std::process::Command::new(common::krusty_binary())
+        .args([
+            "-d",
+            krusty_out.to_str().expect("UTF-8 output"),
+            "-no-reflect",
+        ])
+        .args(["-Xsam-conversions=class"])
+        .arg(&source)
+        .output()
+        .expect("run krusty");
+    assert!(
+        krusty.status.success(),
+        "krusty rejected class-mode Java SAM: {}",
+        String::from_utf8_lossy(&krusty.stderr)
+    );
+    let (code, stderr) = common::kotlinc_compile(&[
+        "-d".to_string(),
+        reference_out.to_string_lossy().into_owned(),
+        "-Xsam-conversions=class".to_string(),
+        source.to_string_lossy().into_owned(),
+    ])
+    .expect("reference compiler unavailable");
+    assert_eq!(code, 0, "kotlinc rejected class-mode Java SAM: {stderr}");
+
+    let wrapper = "MainKt$sam$java_lang_Runnable$0";
+    let disassemble = |dir: &std::path::Path, class: &str| {
+        common::javap(&["-p", "-c", "-v", "-cp", &dir.to_string_lossy(), class])
+            .unwrap_or_else(|| panic!("javap {class}"))
+    };
+    let krusty_wrapper = disassemble(&krusty_out, wrapper);
+    let reference_wrapper = disassemble(&reference_out, wrapper);
+    let header = |text: &str| {
+        text.lines()
+            .find(|line| line.contains(" implements "))
+            .expect("wrapper class declaration")
+            .to_string()
+    };
+    assert_eq!(header(&krusty_wrapper), header(&reference_wrapper));
+    assert!(
+        !header(&krusty_wrapper).contains("FunctionAdapter"),
+        "a Java SAM wrapper implements only the Java interface: {}",
+        header(&krusty_wrapper)
+    );
+    assert_eq!(
+        common::member_blocks(&krusty_wrapper),
+        common::member_blocks(&reference_wrapper)
+    );
+    let facade = "MainKt";
+    assert_eq!(
+        common::method_instructions(&disassemble(&krusty_out, facade), "box("),
+        common::method_instructions(&disassemble(&reference_out, facade), "box(")
+    );
+    let _ = std::fs::remove_dir_all(work);
+}
+
 /// Java SAM declarations do not take the Kotlin fun-interface wrapper route. The conversion keeps
 /// the `invokedynamic` that asks LambdaMetafactory to implement the selected Java interface.
 #[test]

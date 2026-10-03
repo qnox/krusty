@@ -1795,7 +1795,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (kotlinc's pre-2.0 realization, selected per module by 40 intellij-community `BUILD.bazel` files)
   is emitted too: each lambda becomes its own class extending `kotlin/jvm/internal/Lambda` — a
   non-capturing one a static `INSTANCE` singleton, a capturing one constructed per evaluation. The
-  two flags are independent; each selects only its own closure kind. **Synthetic class names match
+  two flags are independent; each selects only its own closure kind. Under
+  `-Xsam-conversions=class`, an existing function value converted to a Java interface is the
+  shared `$sam$` wrapper (see the fun-interface wrapper entry), while a lambda literal still
+  follows `-Xlambdas`. **Synthetic class names match
   kotlinc's declaration-derived scheme**, taken from the lambda's stable lexical origin recorded at
   lowering (`IrLambdaOrigin`), never from a generated method spelling or a value-table scan: a lambda
   initializing a binding is `Owner$fn$binding$1`; in a CLASS-INITIALIZATION context (a property
@@ -8871,7 +8874,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   is typed as `B` declares it (mangled for value classes) and calls `function.invoke`; and
   `getFunctionDelegate`, `equals` and `hashCode` make two wrappers of one function equal. The
   conversion is `new` of the wrapper cast to `B`. A Java interface keeps the `invokedynamic`
-  conversion.   The same route owns extension receivers, context parameters, `FunctionN` arities,
+  conversion under the default `-Xsam-conversions=indy`. Under `-Xsam-conversions=class`, a
+  function value converted to a Java interface uses one shared
+  `<FileFacade>$sam$<interface FQ name, dots as underscores>$0` that implements only that
+  interface: the constructor still checks and stores the function, and the interface method
+  forwards to `invoke`, but the class does not implement `FunctionAdapter` and has no
+  `equals` or `hashCode`. A lambda literal converted to the same interface stays on the lambda
+  strategy. The same route owns extension receivers, context parameters, `FunctionN` arities,
   suspend methods (including their continuation and generic function-field ABI), and a primitive
   result overriding a reference result (boxed implementation plus erased bridge). A regular
   function suspend-converted into the interface is stored as that function's own `FunctionN`
@@ -8883,7 +8892,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   interface. A conversion in
   an inline function uses kotlinc's public `$sam$i$` class and constructor. The statement line
   starts at the wrapped value rather than at `new`; bridge debug provenance comes from the first
-  exact conversion site. Tests: `tests/sam_wrapper_class_e2e.rs`. Corpus:
+  exact conversion site. Tests: `tests/sam_wrapper_class_e2e.rs`
+  (`java_sam_class_mode_shares_one_wrapper`). Corpus:
   `inlineClasses/funInterface/mangledSamWrappers`, `mangledSamWrappersGeneric`,
   `callableReference/adaptedReferences/suspendConversion/propertyReferenceToSuspendFunction`,
   and `coroutines/suspendConversion/suspendConversionBetweenFunInterfaces`.
