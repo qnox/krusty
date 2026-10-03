@@ -382,3 +382,47 @@ fn property_reference_get_reports_the_property_type() {
     };
     assert_eq!(out, "OK");
 }
+
+#[test]
+fn inaccessible_private_setter_reference_is_immutable() {
+    // KT-12337: a reference whose setter the use site cannot call is a KProperty. The declaring
+    // class still receives a KMutableProperty, and a protected setter stays mutable in a subclass.
+    const MAIN: &str = r#"
+import kotlin.reflect.KMutableProperty
+import kotlin.reflect.KProperty1
+
+open class Bar(name: String) {
+    var foo: String = name
+        private set
+    var shown: String = name
+        protected set
+    fun inside() = Bar::foo
+}
+
+class Baz : Bar("") {
+    fun hidden() = Bar::foo
+    fun opened() = Bar::shown
+}
+
+fun box(): String {
+    val p1: KProperty1<Bar, String> = Bar::foo
+    if (p1 is KMutableProperty<*>) return "Fail p1"
+    val p2 = Baz().hidden()
+    if (p2 is KMutableProperty<*>) return "Fail p2"
+    val p3 = Bar("")::foo
+    if (p3 is KMutableProperty<*>) return "Fail p3"
+    if (p1.get(Bar("OK")) != "OK") return "Fail get"
+    val target = Bar("O")
+    target.inside().set(target, "K")
+    if (target.foo != "K") return "Fail inside"
+    val opened = Baz().opened()
+    opened.set(target, "P")
+    if (target.shown != "P") return "Fail protected"
+    return "OK"
+}
+"#;
+    assert_eq!(
+        run(MAIN).expect("inaccessible private setter reference"),
+        "OK"
+    );
+}

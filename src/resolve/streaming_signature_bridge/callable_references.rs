@@ -395,4 +395,78 @@ impl ProductionSignatureSemantics<'_> {
         );
         crate::fir::ResolvedTy::new(contextual).ok()
     }
+
+    /// Whether a reflective property reference exposes a setter. A `var` whose setter the use site
+    /// cannot access is a `KProperty`, using the same class, package, and module reachability as
+    /// member access in the checker.
+    pub(super) fn reflective_property_is_mutable(
+        &self,
+        scope: crate::fir::SignatureScope,
+        setter_present: bool,
+        setter_visibility: crate::types::Visibility,
+        owner: crate::types::TypeName,
+    ) -> bool {
+        let mutable = setter_present && self.setter_visible_at(scope, setter_visibility, owner);
+        crate::trace_compiler!(
+            "resolve",
+            "property reference mutability owner={} visibility={setter_visibility:?} setter={setter_present} mutable={mutable}",
+            owner.render(),
+        );
+        mutable
+    }
+
+    fn setter_visible_at(
+        &self,
+        scope: crate::fir::SignatureScope,
+        visibility: crate::types::Visibility,
+        owner: crate::types::TypeName,
+    ) -> bool {
+        use crate::types::Visibility;
+        match visibility {
+            Visibility::Public => true,
+            Visibility::Internal => {
+                self.table.class_by_type_name(owner).is_some()
+                    || self.table.libraries.internal_accessible(owner)
+            }
+            Visibility::PackagePrivate => self
+                .headers
+                .sources
+                .get(scope.source)
+                .is_some_and(|file| file.package == owner.namespace()),
+            Visibility::Private | Visibility::Protected => self
+                .lexical_class_names(scope)
+                .into_iter()
+                .any(|enclosing| {
+                    let companion = self
+                        .table
+                        .class_by_type_name(enclosing)
+                        .and_then(|class| class.companion_internal);
+                    let nested_in_owner =
+                        std::iter::successors(enclosing.nested_owner(), |current| {
+                            current.nested_owner()
+                        })
+                        .any(|ancestor| ancestor == owner);
+                    let protected_subtype = visibility == Visibility::Protected
+                        && (self.classifier_extends(enclosing, owner)
+                            || companion.is_some_and(|companion| {
+                                self.classifier_extends(companion, owner)
+                            }));
+                    enclosing == owner
+                        || nested_in_owner
+                        || companion == Some(owner)
+                        || protected_subtype
+                }),
+        }
+    }
+
+    fn classifier_extends(
+        &self,
+        subclass: crate::types::TypeName,
+        superclass: crate::types::TypeName,
+    ) -> bool {
+        self.table
+            .applied_hierarchy(Ty::obj_name(subclass))
+            .iter()
+            .any(|(name, _, _)| *name == superclass)
+    }
 }

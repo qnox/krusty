@@ -3261,7 +3261,16 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             let ty = self
                 .table
                 .libraries
-                .property_reference_type(0, property.setter.is_some(), &[result])
+                .property_reference_type(
+                    0,
+                    self.reflective_property_is_mutable(
+                        scope,
+                        property.setter.is_some(),
+                        property.setter_visibility,
+                        property.owner,
+                    ),
+                    &[result],
+                )
                 .ok_or_else(Self::failure)?;
             return crate::fir::ResolvedTy::new(ty).map_err(|_| Self::failure());
         }
@@ -3678,7 +3687,12 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 .libraries
                 .property_reference_type(
                     usize::from(unbound),
-                    property.setter.is_some(),
+                    self.reflective_property_is_mutable(
+                        scope,
+                        property.setter.is_some(),
+                        property.setter_visibility,
+                        property.getter.owner,
+                    ),
                     &arguments,
                 )
                 .ok_or_else(Self::failure)?;
