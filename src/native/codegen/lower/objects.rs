@@ -816,7 +816,7 @@ impl<'a> FileLowering<'a> {
                 continue;
             }
             match (
-                self.file.collection_shape(edge.overridden_owner),
+                self.collection_shape(edge.overridden_owner),
                 edge.name.as_str(),
             ) {
                 (Some(CollectionShape::Iterable), "iterator") => iterable = true,
@@ -845,7 +845,7 @@ impl<'a> FileLowering<'a> {
                 edge.overridden,
                 crate::fir::ResolvedPropertyOverrideTarget::External(_)
             ) && matches!(
-                self.file.collection_shape(edge.overridden_owner),
+                self.collection_shape(edge.overridden_owner),
                 Some(CollectionShape::Text)
             ) {
                 text = true;
@@ -972,10 +972,10 @@ impl<'a> FileLowering<'a> {
         let (target, target_params): (Option<FuncId>, Vec<Ty>) = match &secondary.delegate {
             crate::ir::CtorDelegateTarget::This {
                 target_params,
-                to_primary,
+                target,
                 ..
             } => {
-                let target = if *to_primary {
+                let target = if target.primary() {
                     self.classes[class as usize].constructor.ok_or_else(|| {
                         format!(
                             "a delegation to a primary constructor the class does not have (`{}`)",
@@ -2028,8 +2028,7 @@ pub(super) struct SuperTarget<'c> {
     pub(super) owner: TypeName,
     pub(super) name: &'c str,
     pub(super) kind: crate::ir::IrSuperCallKind,
-    pub(super) source: Option<crate::fir::CallableId>,
-    pub(super) params: Option<&'c [Ty]>,
+    pub(super) declaration: Option<crate::fir::ResolvedFunctionOverrideTarget>,
 }
 
 impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
@@ -2686,40 +2685,28 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     fn direct_property(
         &mut self,
         class: ClassId,
-        name: &str,
-        kind: crate::ir::IrSuperCallKind,
+        target: crate::fir::PropertyId,
+        setter: bool,
         receiver: u32,
         args: &[u32],
-    ) -> Option<Result<Option<Value>, Unsupported>> {
-        // `name` is the ACCESSOR's own name as selection resolved it — `getB`, not `b` — because a
-        // property's accessors are published accessor-shaped. `IrSuperCallKind` is the semantic
-        // fact that says which accessor, and its contract is that a backend REALIZES the spelling
-        // rather than recovering a property from one: so each candidate property's own accessor
-        // name is derived here and compared forwards. Parsing `getB` back into `b` would be the
-        // same inversion that named `getGetValue` on the JVM side, and it cannot be right for a
-        // property whose accessor carries a `@JvmName` the spelling does not encode.
-        let index = self.file.ir.classes[class as usize]
-            .properties
-            .iter()
-            .position(|property| match kind {
-                crate::ir::IrSuperCallKind::Function => property.name == name,
-                crate::ir::IrSuperCallKind::PropertyGetter => {
-                    crate::names::property_getter_name(&property.name) == name
-                }
-                crate::ir::IrSuperCallKind::PropertySetter => {
-                    crate::names::property_setter_name(&property.name) == name
-                }
-            })?;
-        Some(match args {
-            [] => self.direct_property_read(class, index, receiver),
-            [value] => self
+    ) -> Result<Option<Value>, Unsupported> {
+        let (property_class, index) = self.checked_property(&target)?;
+        if property_class != class {
+            return Err("a `super` property target owned by another class".to_string());
+        }
+        let name = self.file.ir.classes[class as usize].properties[index]
+            .name
+            .clone();
+        match (setter, args) {
+            (false, []) => self.direct_property_read(class, index, receiver),
+            (true, [value]) => self
                 .direct_property_write(class, index, receiver, *value)
                 .map(|()| None),
             _ => Err(format!(
                 "a `super` access to `{name}` with {} operands",
                 args.len()
             )),
-        })
+        }
     }
 
     fn direct_property_read(
@@ -2811,8 +2798,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             owner,
             name,
             kind,
-            source,
-            params,
+            declaration,
         } = target;
         if super::super::super::intrinsics::is_any(owner) {
             let symbol = match (name, args.len()) {
@@ -2832,28 +2818,22 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             return self.runtime_call(symbol, &params, ret, &arguments);
         }
         let class = self.file.class_of(owner, "a `super` call to a method of")?;
-        let ir = self.file.ir;
-        let found = source
-            .and_then(|callable| ir.checked_callable_functions.get(&callable).copied())
-            .or_else(|| {
-                ir.classes[class as usize]
-                    .methods
-                    .iter()
-                    .copied()
-                    .find(|&fid| {
-                        let function = &ir.functions[fid as usize];
-                        function.name == name
-                            && params.is_none_or(|params| function.params == params)
-                    })
-            });
-        // `super.p` on a PROPERTY names the property, not an accessor, and a class whose accessors
-        // are the default ones declares no method at all for it — so the search above finds
-        // nothing to call. What the program asked for is still perfectly well defined: the named
-        // class's own realization, reached without dispatch.
-        let Some(fid) = found else {
-            if let Some(realized) = self.direct_property(class, name, kind, receiver, args) {
-                return realized;
+        match kind {
+            crate::ir::IrSuperCallKind::PropertyGetter(property) => {
+                return self.direct_property(class, property, false, receiver, args);
             }
+            crate::ir::IrSuperCallKind::PropertySetter(property) => {
+                return self.direct_property(class, property, true, receiver, args);
+            }
+            crate::ir::IrSuperCallKind::Function => {}
+        }
+        let ir = self.file.ir;
+        let Some(crate::fir::ResolvedFunctionOverrideTarget::Module(source)) = declaration else {
+            return Err(format!(
+                "a `super` call without a source declaration (`{name}`)"
+            ));
+        };
+        let Some(&fid) = ir.checked_callable_functions.get(&source) else {
             return Err(format!("a `super` call to an unknown method (`{name}`)"));
         };
         let Some(id) = self.file.functions[fid as usize] else {

@@ -1721,7 +1721,7 @@ fn inherited_open_slot(
 ) -> Option<u32> {
     let slot = inherited_slot(ir, superclass, function, slots)?;
     let overridable = |candidate: &FunId| {
-        ir.open_methods.contains(candidate) && !ir.private_methods.contains(candidate)
+        ir.open_methods.contains(candidate) && !ir.method_visibility(*candidate).is_private()
     };
     let mut at = superclass;
     while let Some(class) = at {
@@ -1803,7 +1803,7 @@ fn inherited_slot(
                 || signature(other) != mine
                 || other.params != function.params
                 || !ir.open_methods.contains(&candidate)
-                || ir.private_methods.contains(&candidate)
+                || ir.method_visibility(candidate).is_private()
             {
                 continue;
             }
@@ -2211,6 +2211,7 @@ mod tests {
                 overridden_owner: ir.functions[overridden as usize]
                     .dispatch_receiver
                     .expect("instance method"),
+                collection_barrier: None,
                 overridden_is_interface: false,
                 name,
                 declared_parameters: Vec::new(),
@@ -2219,8 +2220,10 @@ mod tests {
                 applied_result: Ty::Unit,
                 implementation_parameters: Vec::new(),
                 implementation_parameter_identities: Vec::new(),
+                overridden_parameter_identities: Vec::new(),
                 implementation_result: Ty::Unit,
                 suspend: false,
+                has_kotlin_superclass_override: false,
                 depth: 1,
             });
     }
@@ -2464,15 +2467,19 @@ mod tests {
             source_order: 0,
             decl_line: 1,
             ty: Ty::Int,
+            type_params: Vec::new(),
             visibility: crate::types::Visibility::Public,
+            return_value_status: Default::default(),
             annotations: Box::new([]),
             initializer: None,
             storage_ty: None,
             backing_field: Some(0),
             is_var: false,
             is_open: true,
+            modifiers: Default::default(),
+            delegate_field: None,
             is_private: false,
-            setter_is_private: false,
+            setter_visibility: crate::types::Visibility::Public,
             getter: None,
             setter: None,
             getter_jvm_name: None,
@@ -2500,6 +2507,7 @@ mod tests {
             .ctor_args
             .push(crate::ir::IrCtorArg {
                 name: Some("rest".to_string()),
+                context_kind: crate::types::ContextParameterKind::None,
                 ty: Ty::obj_args("kotlin/Array", &[Ty::Int]),
                 declared_ty: None,
                 is_field: false,
@@ -2508,6 +2516,10 @@ mod tests {
                 is_vararg: true,
                 type_param: None,
                 check: None,
+                anonymous_super_forward: None,
+                capture: None,
+                provenance: crate::ir::IrCtorParameterProvenance::Value,
+                capture_identity: None,
             });
         build(&ir).expect("a vararg constructor parameter is an array parameter");
 
@@ -2552,6 +2564,7 @@ mod tests {
                     1,
                 )),
                 overridden_owner: crate::types::type_name(&format!("kotlin/Function{arity}")),
+                collection_barrier: None,
                 overridden_is_interface: true,
                 name: "invoke".to_string(),
                 declared_parameters: Vec::new(),
@@ -2560,8 +2573,10 @@ mod tests {
                 applied_result: Ty::Unit,
                 implementation_parameters: Vec::new(),
                 implementation_parameter_identities: Vec::new(),
+                overridden_parameter_identities: Vec::new(),
                 implementation_result: Ty::Unit,
                 suspend: false,
+                has_kotlin_superclass_override: false,
                 depth: 1,
             });
     }
@@ -2622,7 +2637,7 @@ mod tests {
         // `private fun hidden()` in A is invisible to B, whose `hidden()` is a new member.
         let a_hidden = add_method(&mut ir, a, function("hidden", "A", vec![], Ty::Int, false));
         ir.open_methods.insert(a_hidden);
-        ir.private_methods.insert(a_hidden);
+        ir.set_method_visibility(a_hidden, crate::types::Visibility::Private);
         let b_hidden = add_method(&mut ir, b, function("hidden", "B", vec![], Ty::Int, false));
 
         let model = build(&ir).expect("layout");

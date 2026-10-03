@@ -1902,7 +1902,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     Err(reason) => Err(reason),
                 }
             }
-            IrExpr::KClassLiteral { classifier, value } => self.class_literal(classifier, value),
+            IrExpr::KClassLiteral {
+                classifier, value, ..
+            } => self.class_literal(classifier, value),
             IrExpr::LateinitCheck { operand, name } => self.lateinit_check(operand, &name),
             IrExpr::Throw { operand } => self.throw(operand),
             IrExpr::Try {

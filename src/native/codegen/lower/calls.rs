@@ -42,8 +42,7 @@ impl BodyLowering<'_, '_, '_> {
                 owner,
                 name,
                 kind,
-                source,
-                params,
+                declaration,
                 ..
             } => {
                 let Some(receiver) = dispatch_receiver else {
@@ -53,8 +52,7 @@ impl BodyLowering<'_, '_, '_> {
                     owner: *owner,
                     name,
                     kind: *kind,
-                    source: *source,
-                    params: Some(params),
+                    declaration: *declaration,
                 };
                 self.direct_call(target, receiver, args)
             }
@@ -84,8 +82,7 @@ impl BodyLowering<'_, '_, '_> {
                     owner: *owner,
                     name,
                     kind: crate::ir::IrSuperCallKind::Function,
-                    source: *source,
-                    params: None,
+                    declaration: source.map(crate::fir::ResolvedFunctionOverrideTarget::Module),
                 };
                 self.direct_call(target, receiver, args)
             }

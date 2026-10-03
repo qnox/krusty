@@ -51,10 +51,12 @@ impl<'a> FileLowering<'a> {
     /// placement fact the owner carries has nothing to say about them.
     fn order_independent(&self, declaration: &IrStatic) -> bool {
         declaration.is_const
-            || matches!(
-                self.ir.expr(declaration.init),
-                IrExpr::Checked(IrCheckedOperation::PropertyReference { .. })
-            )
+            || declaration.init.is_none_or(|init| {
+                matches!(
+                    self.ir.expr(init),
+                    IrExpr::Checked(IrCheckedOperation::PropertyReference { .. })
+                )
+            })
     }
 
     /// Declare a slot per top-level property. Declared before any body is compiled, because a
@@ -107,7 +109,7 @@ impl<'a> FileLowering<'a> {
         let symbol = self.statics_init_symbol();
         let id = self.declare_local_function(&symbol, &[], Ty::Unit)?;
         let signature = self.signature_of(&[], Ty::Unit)?;
-        let declarations: Vec<(DataId, Ty, u32)> = self
+        let declarations: Vec<(DataId, Ty, Option<u32>)> = self
             .ir
             .statics
             .iter()
@@ -124,6 +126,9 @@ impl<'a> FileLowering<'a> {
                 body.runtime_call("kt_gc_add_global_root", &[any()], Ty::Unit, &[address])?;
             }
             for (slot, ty, init) in &declarations {
+                let Some(init) = init else {
+                    continue;
+                };
                 let value = body.coerce(*init, *ty)?;
                 if body.terminated {
                     return Ok(());
