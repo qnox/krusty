@@ -2157,6 +2157,7 @@ fn lower_constant(
     ty: Ty,
     origin: crate::fir::OriginId,
 ) -> Result<IrConst, FirLoweringFailure> {
+    let ty = ty.canonical_semantic();
     Ok(match constant {
         FirConstant::Int(value) => {
             let value = i32::try_from(*value)

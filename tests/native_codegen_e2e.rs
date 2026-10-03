@@ -742,14 +742,14 @@ fn a_not_null_assertion_passes_a_value_through_and_fails_on_null() {
 }
 
 #[test]
-fn a_slice_between_the_halves_of_one_character_fails_loudly() {
+fn a_slice_between_the_halves_of_one_character_keeps_the_selected_utf16_units() {
     let Some(target) = host() else {
         eprintln!("skipping: this build of krusty has no prebuilt native runtime for the host");
         return;
     };
     // Kotlin lets a program cut a surrogate pair in half and answers with an unpaired surrogate.
-    // UTF-8 has no encoding for one, so this runtime has no string to hand back — and handing back
-    // a different text would be the worst of the three answers available.
+    // The runtime retains that UTF-16 unit in its three-byte WTF-8 spelling rather than rejecting
+    // the program or replacing the value.
     let (artifacts, diagnostics) = compile(
         &[(
             "Main",
@@ -777,16 +777,9 @@ fn a_slice_between_the_halves_of_one_character_fails_loudly() {
     }
     let output = common::run_freshly_written(std::process::Command::new(&executable).env_clear())
         .expect("run");
-    assert!(
-        !output.status.success(),
-        "a half-character slice must not continue"
-    );
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "before\n");
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("inside a surrogate pair"),
-        "stderr: {:?}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "stderr: {:?}", output.stderr);
+    assert_eq!(output.stdout, b"before\na\xed\xa0\xb4\n");
+    assert!(output.stderr.is_empty(), "stderr: {:?}", output.stderr);
 }
 
 #[test]

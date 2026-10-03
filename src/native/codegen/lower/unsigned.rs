@@ -22,17 +22,20 @@
 use super::*;
 
 impl BodyLowering<'_, '_, '_> {
-    /// A member of one of the unsigned types, or `None` when `owner` is none of them.
+    /// A member whose checked receiver is one of the unsigned types, or `None` otherwise.
     pub(super) fn unsigned_member(
         &mut self,
-        owner: crate::types::TypeName,
+        element: Ty,
         name: &str,
         params: &[Ty],
         ret: Ty,
         receiver: u32,
         args: &[u32],
     ) -> Option<Result<Option<Value>, Unsupported>> {
-        let element = super::super::super::intrinsics::unsigned_owner(owner)?;
+        let element = element.non_null().canonical_semantic();
+        if !element.is_unsigned() {
+            return None;
+        }
         Some(self.unsigned_call(element, name, params, ret, receiver, args))
     }
 

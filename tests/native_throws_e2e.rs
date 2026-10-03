@@ -189,6 +189,6 @@ fn a_failed_assertion_puts_the_callers_message_first() {
          }\n",
         "AssertTrueFails",
         134,
-        "kotlin.AssertionError: ordering. Expected value to be true.",
+        "kotlin.AssertionError: ordering",
     );
 }

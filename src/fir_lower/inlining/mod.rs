@@ -1390,7 +1390,7 @@ pub(super) fn specialize_recorded_facts(
 }
 
 fn specialize_ty(ty: &mut Ty, bindings: &HashMap<String, Ty>) {
-    *ty = ty_subst_keep_unbound(*ty, bindings);
+    *ty = ty_subst_keep_unbound(*ty, bindings).canonical_semantic();
 }
 
 fn specialize_optional_ty(ty: &mut Option<Ty>, bindings: &HashMap<String, Ty>) {
@@ -1406,7 +1406,7 @@ fn specialize_tys(types: &mut [Ty], bindings: &HashMap<String, Ty>) {
 }
 
 fn specialize_resolved_ty(ty: &mut ResolvedTy, bindings: &HashMap<String, Ty>) {
-    *ty = ResolvedTy::new(ty_subst_keep_unbound(ty.get(), bindings))
+    *ty = ResolvedTy::new(ty_subst_keep_unbound(ty.get(), bindings).canonical_semantic())
         .expect("inline specialization preserves resolved types");
 }
 

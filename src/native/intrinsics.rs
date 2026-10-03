@@ -29,6 +29,7 @@ impl DeclarationOwner {
         }
     }
 
+    #[cfg(test)]
     fn classifier(physical: TypeName) -> Self {
         Self {
             physical,
@@ -767,15 +768,6 @@ pub(super) fn boxed_step(owner: DeclarationOwner, name: &str, params: &[Ty]) -> 
     Some((ty, step))
 }
 
-/// The unsigned integer a member is declared on, for an owner classifier that is one.
-///
-/// The classifier's IDENTITY decides, through the same canonical semantic type every backend reads
-/// — never the spelling a provider realizes the member under. What the caller gets back is the
-/// TYPE, which is what decides how wide the operands are and which questions are asked unsigned.
-pub(super) fn unsigned_owner(owner: crate::types::TypeName) -> Option<Ty> {
-    Some(Ty::obj_name(owner).canonical_semantic()).filter(|ty| ty.is_unsigned())
-}
-
 /// `a.mod(b)` — the remainder carrying the DIVISOR's sign, as (runtime symbol, operand type): both
 /// operands are read at the operand type and the answer is that type.
 ///
@@ -867,7 +859,7 @@ pub(super) fn experimental_bitwise(
 /// one: `42.toUInt()`, `(-1).toUByte()`.
 ///
 /// These are NOT members of an unsigned type — the receiver is SIGNED, so they live on the facade
-/// beside it rather than on the value class, and [`unsigned_owner`] does not see them.
+/// beside it rather than on the value class, and receiver-type dispatch does not see them.
 ///
 /// Kotlin defines each as the ordinary signed conversion to the target's width followed by
 /// reinterpreting those bits: `Int.toUByte()` is `UByte(this.toByte())`. So the answer here is only
@@ -884,7 +876,7 @@ pub(super) fn unsigned_conversion(owner: DeclarationOwner, name: &str) -> Option
     // the file facade kotlinc split them across, a klib names the package. The declarations these
     // four names can denote in `kotlin` are exactly these, so the package is discrimination
     // enough; `UInt.toUInt()` is a MEMBER of its own type and answers `kotlin/UInt`, which is not
-    // this package and is handled by `unsigned_owner`.
+    // this package and is handled from the receiver's checked type.
     if !owner.package_matches("kotlin") {
         return None;
     }
@@ -1109,14 +1101,6 @@ mod tests {
             console_intrinsic(ConsoleIntrinsic::Println, &[]).as_deref(),
             Some("kt_println_unit")
         );
-    }
-
-    #[test]
-    fn an_unsigned_member_is_recognized_by_its_value_class() {
-        let owner = crate::types::type_name;
-        assert_eq!(unsigned_owner(owner("kotlin/UInt")), Some(Ty::UInt));
-        assert_eq!(unsigned_owner(owner("kotlin/ULong")), Some(Ty::ULong));
-        assert_eq!(unsigned_owner(owner("kotlin/Int")), None);
     }
 
     #[test]

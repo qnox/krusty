@@ -1005,6 +1005,10 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 };
                 self.builder.def_var(variable, value);
             }
+            // A debug-frame boundary has no native machine effect. This backend does not emit a
+            // debug-local table yet, so it consumes the marker exactly as the JavaScript backend
+            // does instead of rejecting an otherwise ordinary inline expansion.
+            IrExpr::InlineFrameMarker => {}
             IrExpr::When { branches } => {
                 self.when(&branches, None)?;
             }
@@ -1988,15 +1992,12 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         // The unsigned integers: a value class the erasure made look like the
                         // signed number sharing its bits, so every member where that difference
                         // shows is answered on purpose rather than by the signed instruction.
-                        if let Some(realized) = self.unsigned_member(
-                            realization.physical_owner,
-                            &name,
-                            params,
-                            *ret,
-                            receiver,
-                            args,
-                        ) {
-                            return realized;
+                        if let Some(element) = self.type_of(receiver) {
+                            if let Some(realized) =
+                                self.unsigned_member(element, &name, params, *ret, receiver, args)
+                            {
+                                return realized;
+                            }
                         }
                         // `x++` where `x` is an `Int?`: the member is the primitive's, and so is
                         // the value, whatever it arrived carried as.
@@ -2367,6 +2368,24 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     return Err("a malformed string read".to_string());
                 };
                 self.string_get(receiver, *index, ret)
+            }
+            IrIntrinsic::Ieee754Equals { operand } => {
+                let [left, right] = args else {
+                    return Err("a malformed IEEE floating-point equality".to_string());
+                };
+                let operand = operand.canonical_semantic();
+                if !matches!(operand, Ty::Float | Ty::Double) {
+                    return Err(format!(
+                        "an IEEE equality whose operand is not floating-point (`{operand:?}`)"
+                    ));
+                }
+                self.ieee_equality(
+                    IrBinOp::Eq,
+                    *left,
+                    self.type_of(*left),
+                    *right,
+                    self.type_of(*right),
+                )
             }
             // `"$u"`: the frontend names the conversion rather than letting the template reach for
             // `Any.toString()`, because the value it would reach for is the signed number sharing
