@@ -10796,7 +10796,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `a_local_reference_coerces_substituted_arguments_to_declared_slots`,
   `tests/local_fun_ref_e2e.rs` (`a_generic_local_function_reference_boxes_a_primitive_argument`,
   `a_generic_local_extension_reference_boxes_a_primitive_argument`,
-  `a_generic_local_vararg_reference_boxes_a_primitive_element`).
+  `a_generic_local_vararg_reference_boxes_a_primitive_element`). Corpus:
+  `codegen/box/inline/callableReferenceOfLocalFun.kt`.
 
 - **Fully-qualified SOURCE class names (`pkg1.Cls`) in type position.** A dotted type name whose path
   matches a class declared in the same module (a sibling file's package, no `import` needed — as
