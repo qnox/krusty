@@ -382,11 +382,14 @@ impl SignatureConstraintExtractor {
             self.lexical_values.push(parameters);
             self.lexical_callables.push(callables);
             self.lexical_types.push(HashMap::new());
+            // A private inline function still approximates: each call site materializes its own
+            // anonymous class, so the synthetic classifier is not a result type the caller can name.
             self.approximate_anonymous_result = stub.visibility
                 != crate::types::Visibility::Private
                 || function.is_some_and(|function| {
-                    function.is_override()
-                        && function.visibility != crate::types::Visibility::Private
+                    function.is_inline()
+                        || (function.is_override()
+                            && function.visibility != crate::types::Visibility::Private)
                 });
             match self.expression(file, expression, scope, &mut origin) {
                 Ok(mut result) => {
@@ -1489,8 +1492,10 @@ impl SignatureConstraintExtractor {
             // Kotlin exposes a non-private anonymous-object result through its single declared
             // supertype. Keeping the synthetic classifier here leaks an unpublishable local type
             // into the module signature and also hides the applied generic convention members of
-            // that supertype (a common `provideDelegate` factory shape). Private declarations keep
-            // their anonymous type because its extra members remain source-visible.
+            // that supertype (a common `provideDelegate` factory shape). An inline function does
+            // the same even when it is private, because the class is copied at each call site.
+            // A private non-inline declaration keeps its anonymous type: its extra members remain
+            // source-visible.
             let result = if self.approximate_anonymous_result {
                 if let Some(base) = classifier.base_class.as_ref() {
                     let supertype = TypeRef {

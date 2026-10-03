@@ -48,6 +48,4 @@ reflection/typeOf/intersectionType.kt
 reflection/typeOf/localClass.kt
 reflection/typeOf/reifiedAsNestedArgument.kt
 reflection/typeOf/typeAliasedType.kt
-reified/capture.kt
-reified/innerObject.kt
 typeErasure/funWithReifiedTypeParameterContextParameterAndExtensionReceiverInsideClass.kt

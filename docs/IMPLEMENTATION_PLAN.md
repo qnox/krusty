@@ -4116,7 +4116,8 @@ Remaining:
 - Six `typeErasure/*InsideClass` cases. A reified MEMBER inline function is called, not inlined, so it
   throws whatever its body does. That is not specific to `typeOf`.
 - Reified parameters in anonymous objects regenerated per call site (`reifiedAsNestedArgument`,
-  `localClass`).
+  `localClass`). Same-module `object` members (`reified/capture.kt`, `reified/innerObject.kt`)
+  are copied at the inline call.
 - Reified intersection-type arguments (`intersectionType`,
   `reifiedTypeArgumentWithIntersectionTypeAsTypeArgument`).
 - Typealias use-site projections (`typeAliasedType`).

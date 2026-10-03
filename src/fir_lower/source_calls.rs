@@ -1578,14 +1578,16 @@ impl BodyLowering<'_> {
             operands.extend(slots.iter().copied());
             inlined_lambda_operands.extend(inline_lambdas.iter().copied());
             let first_generated = self.ir.exprs.len();
+            let mut malformed_anonymous = None;
             let Some(inlined) = self.inline_same_file_call(
                 target,
                 function,
                 &operands,
                 &inlined_lambda_operands,
                 substitutions,
+                &mut malformed_anonymous,
             ) else {
-                return Some(Err(declined));
+                return Some(Err(malformed_anonymous.unwrap_or(declined)));
             };
             if let Some(source_line) = source_line {
                 for expression in first_generated..self.ir.exprs.len() {

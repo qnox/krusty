@@ -64,11 +64,14 @@ pub(super) fn specialize(
         let IrExpr::Lambda { impl_fn, .. } = ir.expr(copy).clone() else {
             continue;
         };
-        let Some(_) =
+        let Some(specialized) =
             specialized_lambda_function(ir, impl_fn, bindings, reified_bindings, &mut state, None)
         else {
             continue;
         };
+        ir.specialized_expansion_order
+            .entry(specialized)
+            .or_insert(copy);
         if let Some(caller) = state.caller {
             ir.callable_reference_enclosures.insert(copy, caller);
         }

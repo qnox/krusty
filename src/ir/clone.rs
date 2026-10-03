@@ -477,6 +477,19 @@ pub(crate) fn clone_function_implementation(
     target
 }
 
+/// Copy one class method without attaching it to the source class or recording it as a specialized
+/// lambda. The caller publishes it on the class copy.
+pub(crate) fn clone_class_method(
+    ir: &mut IrFile,
+    source: FunId,
+    shape: IrFunction,
+    bindings: &HashMap<String, Ty>,
+) -> FunId {
+    let target = ir.add_fun(shape);
+    copy_function_implementation_facts(ir, source, target, bindings);
+    target
+}
+
 fn copy_function_implementation_facts(
     ir: &mut IrFile,
     source: FunId,

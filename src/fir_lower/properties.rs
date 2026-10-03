@@ -415,6 +415,7 @@ pub(super) fn finalize_properties(
     // Splice `inline` accessors before a backend turns the read into a call and drops those
     // arguments: a reified `T::class` in the accessor is the call site's class.
     super::inlining::splice_inline_property_accessors(ir)?;
+    super::inlining::publish_reified_anonymous_accessors(ir)?;
     Ok(())
 }
 

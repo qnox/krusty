@@ -97,4 +97,10 @@ pub enum FirLoweringFailure {
     },
     ValueIdentityOverflow,
     InvalidLocalDelegatePlan(crate::fir::BodyOwnerId),
+    /// An anonymous object inside an inline function uses a reified parameter, but the call-site
+    /// copy could not keep that object's accessors. Leaving the construction on the declaration
+    /// class would erase the parameter.
+    MalformedReifiedAnonymousObject {
+        class: crate::types::TypeName,
+    },
 }

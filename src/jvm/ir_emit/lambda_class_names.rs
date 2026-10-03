@@ -140,6 +140,29 @@ pub(in crate::jvm) fn specialization_ordinal(
 ) -> Option<u32> {
     let specialization = ir.specialized_functions.get(&implementation)?;
     let location = specialization_location(ir, specialization, facade, modes)?;
+    if specialization.parent.is_none()
+        && anonymous_peer(
+            ir,
+            &location,
+            &specialization.inline_callee_source_name,
+            facade,
+            modes,
+        )
+    {
+        let order = ir
+            .specialized_expansion_order
+            .get(&implementation)
+            .copied()
+            .expect("a specialized lambda sharing an anonymous-object expansion records its order");
+        return expansion_ordinal(
+            ir,
+            &location,
+            &specialization.inline_callee_source_name,
+            order,
+            facade,
+            modes,
+        );
+    }
     let mut ordinal = 0u32;
     for function in 0..=implementation {
         let Some(candidate) = ir.specialized_functions.get(&function) else {
@@ -160,6 +183,110 @@ pub(in crate::jvm) fn specialization_ordinal(
         }
     }
     (ordinal != 0).then_some(ordinal)
+}
+
+fn anonymous_view(
+    specialization: &crate::ir::IrSpecializedAnonymousClass,
+) -> crate::ir::IrSpecializedFunction {
+    crate::ir::IrSpecializedFunction {
+        source: 0,
+        caller_declaration: specialization.caller_declaration,
+        caller: specialization.caller,
+        caller_is_default: specialization.caller_is_default,
+        caller_source_name: specialization.caller_source_name.clone(),
+        inline_callee: specialization.inline_callee,
+        inline_callee_source_name: specialization.inline_callee_source_name.clone(),
+        parent: None,
+    }
+}
+
+fn anonymous_peer(
+    ir: &IrFile,
+    location: &(String, String),
+    callee: &str,
+    facade: &str,
+    modes: LambdaModes,
+) -> bool {
+    ir.specialized_anonymous_classes
+        .values()
+        .any(|specialization| {
+            specialization.inline_callee_source_name == callee
+                && specialization_location(ir, &anonymous_view(specialization), facade, modes)
+                    .as_ref()
+                    == Some(location)
+        })
+}
+
+fn expansion_ordinal(
+    ir: &IrFile,
+    location: &(String, String),
+    callee: &str,
+    order: u32,
+    facade: &str,
+    modes: LambdaModes,
+) -> Option<u32> {
+    let mut orders = Vec::new();
+    for (function, specialization) in &ir.specialized_functions {
+        if specialization.parent.is_some()
+            || specialization.inline_callee_source_name != callee
+            || specialization_location(ir, specialization, facade, modes).as_ref() != Some(location)
+        {
+            continue;
+        }
+        orders.push(
+            ir.specialized_expansion_order
+                .get(function)
+                .copied()
+                .expect(
+                    "a specialized lambda sharing an anonymous-object expansion records its order",
+                ),
+        );
+    }
+    for specialization in ir.specialized_anonymous_classes.values() {
+        if specialization.inline_callee_source_name != callee
+            || specialization_location(ir, &anonymous_view(specialization), facade, modes).as_ref()
+                != Some(location)
+        {
+            continue;
+        }
+        orders.push(specialization.order);
+    }
+    orders.sort_unstable();
+    orders
+        .iter()
+        .position(|candidate| *candidate == order)
+        .map(|position| u32::try_from(position).expect("expansion ordinal fits") + 1)
+}
+
+/// JVM class name of a specialized anonymous object, from the same expansion sequence as a
+/// specialized lambda of that call.
+pub(in crate::jvm) fn anonymous_class_name(
+    ir: &IrFile,
+    class: crate::ir::ClassId,
+    facade: &str,
+    modes: LambdaModes,
+) -> Option<String> {
+    let specialization = ir.specialized_anonymous_classes.get(&class)?;
+    let view = anonymous_view(specialization);
+    let (owner, caller) = specialization_location(ir, &view, facade, modes)?;
+    let ordinal = expansion_ordinal(
+        ir,
+        &(owner.clone(), caller.clone()),
+        &specialization.inline_callee_source_name,
+        specialization.order,
+        facade,
+        modes,
+    )?;
+    let mut name = owner;
+    if !caller.is_empty() {
+        name.push('$');
+        name.push_str(&caller);
+    }
+    name.push_str("$$inlined$");
+    name.push_str(&specialization.inline_callee_source_name);
+    name.push('$');
+    name.push_str(&ordinal.to_string());
+    Some(name)
 }
 
 fn specialized_class_name(

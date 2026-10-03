@@ -28,11 +28,12 @@ pub(super) fn derive_bridges(
     argument_arrays: &mut crate::jvm::function_argument_arrays::FunctionArgumentArrays,
 ) -> Result<(), SkipReason> {
     for cid in 0..ir.classes.len() {
-        // Source-declared classes and declaration-owned enum-entry subclasses only. Lambdas and
-        // callable-reference classes have emitter-chosen supertypes and no Kotlin override edges;
-        // an enum-entry body, however, contains source override declarations whose stable edges are
-        // attached to its common-IR subclass before this JVM representation pass.
-        if !ir.classes[cid].is_source_declared && ir.classes[cid].enum_entry_of.is_none() {
+        // Source-declared classes, declaration-owned enum-entry subclasses, and anonymous classes
+        // copied at a reified inline call. Lambdas and callable-reference classes have
+        // emitter-chosen supertypes and no Kotlin override edges. An enum-entry body contains
+        // source override declarations. A reified copy carries those edges retargeted at its
+        // specialized methods.
+        if !crate::jvm::override_results::realizes_overrides(ir, cid) {
             continue;
         }
         let first = ir.classes[cid].bridges.len();
