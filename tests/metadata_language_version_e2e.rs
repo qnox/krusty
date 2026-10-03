@@ -38,7 +38,7 @@ const SYNTHETIC_STAMPS: &[&str] = &[
 
 /// The `mv` of a class's `@kotlin.Metadata`, or `None` for a class without one.
 fn metadata_mv(bytes: &[u8]) -> Option<Vec<i32>> {
-    common::kotlin_metadata_ints(bytes)?
+    super::common_core::kotlin_metadata::kotlin_metadata_ints(bytes)?
         .into_iter()
         .find(|(name, _)| name == "mv")
         .map(|(_, ints)| ints)

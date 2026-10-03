@@ -8,8 +8,6 @@ use std::process::Command;
 
 use super::common_core as common;
 
-pub use super::common_core::kotlin_metadata::kotlin_metadata_ints;
-
 /// Compile with an internal metadata stamp (`[X, Y, 0]`; `None` keeps the default). This is not
 /// `-language-version`. It lives in the e2e-only helper so the conformance binary does not compile
 /// an unused entry point.
