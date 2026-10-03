@@ -98,6 +98,40 @@ fn a_unit_tail_return_evaluates_its_expression_once() {
     assert_eq!(out.trim(), "OK");
 }
 
+/// Two `return`s from a `Unit` inline function each carry another inline call. The exit loop has
+/// no result local, and the returned call still has to run.
+#[test]
+fn a_non_tail_unit_return_evaluates_its_expression() {
+    let src = "var even = 0\n\
+        var odd = 0\n\
+        inline fun f2(x: Int) {\n\
+        \x20   if (x % 2 == 0) {\n\
+        \x20       even += x\n\
+        \x20       return\n\
+        \x20   }\n\
+        \x20   odd += x\n\
+        \x20   return\n\
+        }\n\
+        inline fun f1(flag: Boolean, y: Int, z: Int) {\n\
+        \x20   if (flag) return f2(y)\n\
+        \x20   return f2(z)\n\
+        }\n\
+        fun box(): String {\n\
+        \x20   f1(true, 2, 1)\n\
+        \x20   f1(false, 2, 1)\n\
+        \x20   return if (even == 2 && odd == 1) \"OK\" else \"even=$even odd=$odd\"\n\
+        }\n";
+    let jdk = common::jdk_modules();
+    let out = common::compile_and_run_box(
+        src,
+        "UnitNonTailReturn",
+        &[common::stdlib_jar()],
+        Some(jdk.as_path()),
+    )
+    .expect("a JVM runner is required to observe the returned inline call");
+    assert_eq!(out.trim(), "OK");
+}
+
 /// The other half of the `Unit` case, and the one the shape rule must REFUSE: a `Unit` expansion
 /// whose sole return is not its tail keeps the loop form. It is the path that used to allocate a
 /// `UnitInstance` placeholder before finding that out.

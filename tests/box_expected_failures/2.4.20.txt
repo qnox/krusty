@@ -59,7 +59,6 @@ inference/overrideGenericDefaultMethod.kt
 inference/pcla/pclaRootIsTrySyntheticCallWithDelegate.kt
 inline/callableReferenceOfLocalFun.kt
 inlineClasses/callableRefClassMergingNestedValueClass.kt
-inlineSizeReduction/lastBreak.kt
 innerNested/nestedInPackage.kt
 multiplatform/k2/defaultArguments/bothInExpectAndActual.kt
 multiplatform/k2/defaultArguments/bothInExpectAndActual2.kt

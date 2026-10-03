@@ -11760,7 +11760,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   and is the one that fails if the allocation moves back ahead of the proof — and
   `tests/inline_tail_expansion_shape_e2e.rs`, which reads the lowered IR: a sole tail return expands
   with no exit loop, an early return keeps one, a non-tail `Unit` return keeps one, and a `Unit` tail
-  return is compiled and RUN to show its returned expression is evaluated exactly once.
+  return is compiled and RUN to show its returned expression is evaluated exactly once. A non-tail
+  `return expr` in that `Unit` loop still evaluates `expr` before the labelled break. There is no
+  result local, so the expression is a statement; dropping it deletes a nested inline call
+  (`return f2(y)` / `return f2(z)`). The same exit is used when an inline property accessor's body
+  has more than one return. Test: `a_non_tail_unit_return_evaluates_its_expression`. Corpus:
+  `codegen/box/inlineSizeReduction/lastBreak.kt`.
 
 - **An uninitialized type-parameter local keeps that parameter's erased slot when inlined.**
   `var result: R` with no initializer records that declaration fact in common IR while its semantic
