@@ -222,11 +222,9 @@ fn malformed_class_header_fails() {
 }
 
 #[test]
-fn unreadable_class_entry_fails() {
-    use std::os::unix::fs::PermissionsExt;
-
+fn non_directory_class_root_fails() {
     let dir = std::env::temp_dir().join(format!(
-        "krusty-fun-iface-unreadable-{}-{}",
+        "krusty-fun-iface-not-directory-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -234,19 +232,13 @@ fn unreadable_class_entry_fails() {
             .as_nanos()
     ));
     std::fs::create_dir_all(&dir).expect("temp dir");
-    let file = dir.join("Broken.class");
-    std::fs::write(&file, b"class").expect("temp class");
-    let mut permissions = std::fs::metadata(&file).expect("metadata").permissions();
-    permissions.set_mode(0);
-    std::fs::set_permissions(&file, permissions).expect("permissions");
-    let caught = std::panic::catch_unwind(|| class_bytes(&dir));
-    let mut permissions = std::fs::metadata(&file).expect("metadata").permissions();
-    permissions.set_mode(0o644);
-    std::fs::set_permissions(&file, permissions).expect("restore");
+    let file = dir.join("not-a-directory");
+    std::fs::write(&file, b"regular file").expect("temp file");
+    let caught = std::panic::catch_unwind(|| class_bytes(&file));
     std::fs::remove_dir_all(&dir).expect("cleanup");
     assert!(
         caught.is_err(),
-        "an unreadable class entry must fail the oracle"
+        "a non-directory class root must fail the oracle"
     );
 }
 
