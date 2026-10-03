@@ -90,33 +90,53 @@ fun box(): String {\n\
 /// not a call of an unemitted `test$lambda$0`.
 #[test]
 fn non_local_return_through_an_inline_suspend_conversion_returns_from_the_caller() {
-    const SRC: &str = "import kotlin.coroutines.*\n\
-suspend inline fun foo(f: suspend () -> String) = f()\n\
-suspend inline fun bar(f: () -> String) = foo(f)\n\
+    const LIB: &str = "suspend inline fun foo(f: suspend () -> String) = f()\n\
+suspend inline fun bar(f: () -> String) = foo(f)\n";
+    const MAIN: &str = "import kotlin.coroutines.Continuation\n\
+import kotlin.coroutines.EmptyCoroutineContext\n\
+import kotlin.coroutines.startCoroutine\n\
 suspend fun test(): String {\n\
     bar { return \"OK\" }\n\
     return \"Fail\"\n\
 }\n\
 fun box(): String {\n\
     var r = \"Fail\"\n\
-    ::test.startCoroutine(Continuation(EmptyCoroutineContext) { r = it.getOrThrow() })\n\
+    ::test.startCoroutine(object : Continuation<String> {\n\
+        override val context = EmptyCoroutineContext\n\
+        override fun resumeWith(result: Result<String>) {\n\
+            r = result.getOrThrow()\n\
+        }\n\
+    })\n\
     return r\n\
 }\n";
-    common::expect_box_ok_with_stdlib(SRC, "SuspendConversionNonLocal");
+    common::expect_box_ok_files_with_stdlib(
+        &[("lib.kt", LIB), ("main.kt", MAIN)],
+        "SuspendConversionNonLocal",
+    );
 }
 
 #[test]
 fn inline_lambda_value_through_a_suspend_conversion_is_the_call_result() {
-    const SRC: &str = "import kotlin.coroutines.*\n\
-suspend inline fun foo(f: suspend () -> String) = f()\n\
-suspend inline fun bar(f: () -> String) = foo(f)\n\
+    const LIB: &str = "suspend inline fun foo(f: suspend () -> String) = f()\n\
+suspend inline fun bar(f: () -> String) = foo(f)\n";
+    const MAIN: &str = "import kotlin.coroutines.Continuation\n\
+import kotlin.coroutines.EmptyCoroutineContext\n\
+import kotlin.coroutines.startCoroutine\n\
 suspend fun test(): String = bar { \"OK\" }\n\
 fun box(): String {\n\
     var r = \"Fail\"\n\
-    ::test.startCoroutine(Continuation(EmptyCoroutineContext) { r = it.getOrThrow() })\n\
+    ::test.startCoroutine(object : Continuation<String> {\n\
+        override val context = EmptyCoroutineContext\n\
+        override fun resumeWith(result: Result<String>) {\n\
+            r = result.getOrThrow()\n\
+        }\n\
+    })\n\
     return r\n\
 }\n";
-    common::expect_box_ok_with_stdlib(SRC, "SuspendConversionInlineValue");
+    common::expect_box_ok_files_with_stdlib(
+        &[("lib.kt", LIB), ("main.kt", MAIN)],
+        "SuspendConversionInlineValue",
+    );
 }
 
 #[test]
