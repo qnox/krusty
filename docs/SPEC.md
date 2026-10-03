@@ -8943,6 +8943,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `coroutines/suspendConversion/suspendConversionBetweenFunInterfaces`, and
   `funInterface/suspendFunctionAndFunInterfaceSharedClassSplit`. Test:
   `suspend_callable_reference_passes_the_sam_continuation`.
+  The callable-reference adapter and the forwarding method's continuation are distinct generated
+  classes. The adapter occupies the first local-class ordinal and captures the reference; if the
+  forwarding method needs a state machine, its continuation uses the next ordinal. Reusing the
+  adapter's class name replaces its constructor with a `ContinuationImpl` constructor and makes
+  the checked adapter instantiation fail at runtime. Corpus:
+  `funInterface/suspendFunInterfaceConversionCodegen.kt`.
 - **A value that already implements the expected fun interface is not wrapped.** Assignability
   to the exact applied interface — including its type arguments, variance, and projections — is
   an ordinary argument during overload ranking, even when the value also has a function
