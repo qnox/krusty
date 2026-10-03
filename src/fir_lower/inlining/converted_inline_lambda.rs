@@ -227,7 +227,7 @@ fn blocked_slots(
                 IrExpr::Block {
                     value: Some(value),
                     ..
-                } if value == carrier.variable
+                } if *value == carrier.variable
             )
         });
         if quoted {
