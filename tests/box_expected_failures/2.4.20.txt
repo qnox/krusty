@@ -48,7 +48,6 @@ fullValueClasses/recursive.kt
 fullValueClasses/reservedNames.kt
 fullValueClasses/vararg.kt
 funInterface/suspendFunInterfaceConversionCodegen.kt
-funInterface/suspendFunctionAndFunInterfaceSharedClassSplit.kt
 functions/functionNtoString.kt
 functions/functionNtoStringGeneric.kt
 inference/capturedSelfInsideIntersection.kt

@@ -8925,7 +8925,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   suspend methods (including their continuation and generic function-field ABI), and a primitive
   result overriding a reference result (boxed implementation plus erased bridge). A regular
   function suspend-converted into the interface is stored as that function's own `FunctionN`
-  (`() -> Unit` is `Function0`); the method calls it and does not pass the continuation. The same
+  (`() -> Unit` is `Function0`); the method calls it and does not pass the continuation. A
+  suspend callable reference adapted to that method is itself a suspension: the adapter passes
+  the method's continuation to `FunctionN.invoke`. Leaving the call non-suspending selects
+  `Function0` and the reference cannot be cast to the suspend carrier. The same
   storage follows the value's callable view when that value is not itself a function type: a
   `KProperty0<R>` is `Function0`, and a fun interface whose method is not suspend (`Fn<T> :
   (T) -> Unit`) is `Function1` when passed to a suspend collector. A fun
@@ -8937,7 +8940,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`java_sam_class_mode_shares_one_wrapper`). Corpus:
   `inlineClasses/funInterface/mangledSamWrappers`, `mangledSamWrappersGeneric`,
   `callableReference/adaptedReferences/suspendConversion/propertyReferenceToSuspendFunction`,
-  and `coroutines/suspendConversion/suspendConversionBetweenFunInterfaces`.
+  `coroutines/suspendConversion/suspendConversionBetweenFunInterfaces`, and
+  `funInterface/suspendFunctionAndFunInterfaceSharedClassSplit`. Test:
+  `suspend_callable_reference_passes_the_sam_continuation`.
 - **A value that already implements the expected fun interface is not wrapped.** Assignability
   to the exact applied interface — including its type arguments, variance, and projections — is
   an ordinary argument during overload ranking, even when the value also has a function
