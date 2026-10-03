@@ -4664,11 +4664,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   The enum-bound anonymous delegate's call-site copy executes its cast without a reification marker
   (`erased_anonymous_delegate_member_is_not_a_reified_closure_method`).
   Those members are still reified operations of the anonymous class. The declaration class keeps
-  the marker, and the inline method calls `needClassReification` before constructing it. A
-  same-module inline call copies the class and substitutes the call's reified arguments, so the
-  copy executes the specialized operation with no marker. The copy joins the caller's
-  `{owner}${caller}$$inlined${callee}$N` sequence, shared with a specialized lambda of the same
-  expansion. Mentioning only an ordinary type parameter does not copy the class.
+  the marker, and the inline method calls `needClassReification` before constructing it. That
+  guard is the declaration class recorded when the copy is made; emission does not walk the
+  class's bodies again. A same-module inline call copies the class and substitutes the call's
+  reified arguments, so the copy executes the specialized operation with no marker.   Source
+  property overrides leave their accessor functions empty. Accessor functions are materialized
+  after the copy, once property layouts exist; the same clone map then records those functions
+  on the copy. The copy fills its overrides from the recorded layout through that map, and
+  publishes a copied member-extension property under the copied classifier with the specialized
+  receiver and type.
+  A missing accessor mapping fails the lowering; the construction is not left on the declaration
+  class. The copy joins the caller's `{owner}${caller}$$inlined${callee}$N` sequence, shared
+  with a specialized lambda of the same expansion. Mentioning only an ordinary type parameter
+  does not copy the class.
   Tests: `fir_lower::inlining::escaping_reified_object`, `tests/reified_anonymous_object_e2e.rs`,
   boxes `reified/capture.kt` and `reified/innerObject.kt`.
   A singleton closure whose owned methods retain typed reified operations emits

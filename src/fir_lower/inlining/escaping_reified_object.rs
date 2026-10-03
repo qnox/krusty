@@ -113,4 +113,103 @@ fn an_inlined_reified_anonymous_object_specializes_only_the_call_site_class() {
             .any(|ty| matches!(ty.non_null(), Ty::TyParam(..))),
         "the call-site class does not keep the reified parameter"
     );
+    assert!(ir.reified_anonymous_declarations.contains(&declaration));
+    assert!(!ir.reified_anonymous_declarations.contains(&call));
+}
+
+const REIFIED_PROPERTIES: &str = "\
+interface Cell<T> {\n\
+    val item: T\n\
+    var slot: T\n\
+    fun shown(): String\n\
+}\n\
+class Token\n\
+inline fun <reified T : Any> make(seed: T): Cell<T> = object : Cell<T> {\n\
+    override val item: T\n\
+        get() = if (T::class.simpleName != null) seed else seed\n\
+    override var slot: T = seed\n\
+        get() = field\n\
+        set(value) {\n\
+            val probe: Any = value\n\
+            if (probe is T) field = value\n\
+        }\n\
+    val T.mark: Boolean\n\
+        get() = T::class.simpleName != null\n\
+    override fun shown(): String = if (item.mark) \"y\" else \"n\"\n\
+}\n\
+fun box(): String = make(Token()).shown()\n";
+
+fn property_named(ir: &crate::ir::IrFile, class: u32, name: &str) -> (Option<u32>, Option<u32>) {
+    let property = ir.classes[class as usize]
+        .properties
+        .iter()
+        .find(|property| property.name == name)
+        .unwrap_or_else(|| panic!("{name} on class {class}"));
+    (property.getter, property.setter)
+}
+
+fn override_named(ir: &crate::ir::IrFile, class: u32, name: &str) -> crate::ir::IrPropertyOverride {
+    let owner = ir.classes[class as usize].fq_name;
+    ir.property_overrides
+        .get(&owner)
+        .and_then(|edges| edges.iter().find(|edge| edge.name == name))
+        .cloned()
+        .unwrap_or_else(|| panic!("override {name} on {class}"))
+}
+
+#[test]
+fn a_reified_anonymous_object_copies_its_property_accessors() {
+    let ir = lower(REIFIED_PROPERTIES, "ReifiedAnonymousProperties");
+    let declaration = ir
+        .classes
+        .iter()
+        .enumerate()
+        .find_map(|(index, class)| {
+            let index = u32::try_from(index).expect("class index");
+            (class.is_anonymous_object && ir.reified_anonymous_declarations.contains(&index))
+                .then_some(index)
+        })
+        .expect("the declaration class is recorded for reification");
+    let call = constructed_class(&ir, function_named(&ir, "box"));
+    assert_ne!(declaration, call);
+    assert!(!ir.reified_anonymous_declarations.contains(&call));
+
+    for name in ["item", "slot"] {
+        let (source_getter, source_setter) = property_named(&ir, declaration, name);
+        let (copied_getter, copied_setter) = property_named(&ir, call, name);
+        let getter = copied_getter.expect(name);
+        assert_ne!(Some(getter), source_getter);
+        assert!(ir.classes[call as usize].methods.contains(&getter));
+        assert!(!ir.classes[declaration as usize].methods.contains(&getter));
+        let edge = override_named(&ir, call, name);
+        assert_eq!(edge.implementation_owner, ir.classes[call as usize].fq_name);
+        assert_eq!(edge.implementation_getter, Some(getter));
+        if name == "slot" {
+            let setter = copied_setter.expect("slot setter");
+            assert_ne!(Some(setter), source_setter);
+            assert!(ir.classes[call as usize].methods.contains(&setter));
+            assert_eq!(edge.implementation_setter, Some(setter));
+        } else {
+            assert!(copied_setter.is_none());
+            assert!(edge.implementation_setter.is_none());
+        }
+    }
+
+    let source_name = ir.classes[declaration as usize].fq_name;
+    let copy_name = ir.classes[call as usize].fq_name;
+    let source_mark = ir
+        .member_ext_props
+        .get(&source_name)
+        .and_then(|properties| properties.iter().find(|property| property.name == "mark"))
+        .expect("the declaration publishes the member extension");
+    let copied_mark = ir
+        .member_ext_props
+        .get(&copy_name)
+        .and_then(|properties| properties.iter().find(|property| property.name == "mark"))
+        .expect("the copy publishes the member extension");
+    assert_ne!(copied_mark.getter, source_mark.getter);
+    assert!(ir.classes[call as usize]
+        .methods
+        .contains(&copied_mark.getter));
+    assert_eq!(copied_mark.receiver.non_null(), Ty::obj("Token"));
 }

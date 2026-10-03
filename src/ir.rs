@@ -1535,6 +1535,17 @@ pub struct IrSpecializedAnonymousClass {
     pub caller_source_name: String,
     pub inline_callee: crate::fir::CallableId,
     pub inline_callee_source_name: String,
+    /// Source function → the function on this copy. Accessor functions materialized after the
+    /// copy are added here before bridges and metadata read the copy.
+    pub method_clones: std::collections::HashMap<FunId, FunId>,
+    /// Call-site substitutions. Property accessors are materialized after this copy, and their
+    /// bodies are specialized with these bindings.
+    pub bindings: std::collections::HashMap<String, Ty>,
+    pub reified_bindings: std::collections::HashMap<String, Ty>,
+    /// Fields and properties already on the declaration class when this copy was taken.
+    /// Later materialization appends backing fields and accessors past these prefixes.
+    pub field_count: u32,
+    pub property_count: u32,
 }
 
 /// One lowered source file (`IrFile`) — its arenas. Index-based, bulk-freeable.
@@ -1838,6 +1849,10 @@ pub struct IrFile {
     /// Specialized anonymous class → the class it was copied from and the expansion that copied it.
     pub(crate) specialized_anonymous_classes:
         std::collections::HashMap<ClassId, IrSpecializedAnonymousClass>,
+    /// Declaration classes of anonymous objects whose members use a reified inline parameter.
+    /// Recorded when a call site copies the class. The JVM emits `needClassReification` for these
+    /// classes from this set alone.
+    pub(crate) reified_anonymous_declarations: std::collections::HashSet<ClassId>,
     /// Lambda implementations whose bodies execute a runtime reified operation. Every source
     /// implementation, including a nested one, and each specialized call-site copy are recorded
     /// semantically. A backend independently chooses the physical closure representation needed

@@ -35,6 +35,12 @@ pub(super) fn splice_inline_property_accessors(
     property_accessors::splice_inline_property_accessors(ir)
 }
 
+pub(super) fn publish_reified_anonymous_accessors(
+    ir: &mut crate::ir::IrFile,
+) -> Result<(), super::FirFileLoweringFailure> {
+    escaping_anonymous::publish_accessors(ir).map_err(super::FirFileLoweringFailure::Body)
+}
+
 /// Specialize one expression copied across an inline boundary. A local delegated-property access
 /// keeps the checker-selected declaration plan: kotlinc's local-delegate helper remains the erased
 /// declaration helper and is reused (or rehomed by the JVM) across call-site substitutions.
@@ -247,6 +253,7 @@ impl BodyLowering<'_> {
         operands: &[Option<ExprId>],
         inline_lambdas: &[Option<ExprId>],
         substitutions: &[FirTypeSubstitution],
+        malformed_anonymous: &mut Option<super::FirLoweringFailure>,
     ) -> Option<ExprId> {
         let template = self.ir.functions.get(function as usize)?.body?;
         let close_line = self.ir.fn_close_lines.get(&function).copied();
@@ -748,7 +755,7 @@ impl BodyLowering<'_> {
         );
         // An anonymous object's methods are not children of the inlined template. Cloning only the
         // `new` reuses the declaration class, whose reified parameter is erased.
-        escaping_anonymous::specialize(
+        if let Err(failure) = escaping_anonymous::specialize(
             self.ir,
             escaping_copies
                 .iter()
@@ -764,7 +771,10 @@ impl BodyLowering<'_> {
                 inline_callee: target,
                 inline_callee_source_name: &callee,
             },
-        );
+        ) {
+            *malformed_anonymous = Some(failure);
+            return None;
+        }
 
         let inline_invocations = copies
             .iter()

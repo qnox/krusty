@@ -107,3 +107,173 @@ fn a_reified_anonymous_instance_test_matches_kotlinc() {
         .iter()
         .any(|name| name.ends_with("$b$1") && !name.contains("$$inlined$")));
 }
+
+const PROPERTIES: &str = "\
+interface Cell<T> {\n\
+    val item: T\n\
+    var slot: T\n\
+    fun shown(): String\n\
+}\n\
+class Token\n\
+inline fun <reified T : Any> make(seed: T): Cell<T> = object : Cell<T> {\n\
+    override val item: T\n\
+        get() = if (T::class.simpleName != null) seed else seed\n\
+    override var slot: T = seed\n\
+        get() = field\n\
+        set(value) {\n\
+            val probe: Any = value\n\
+            if (probe is T) field = value\n\
+        }\n\
+    val T.mark: Boolean\n\
+        get() = T::class.simpleName != null\n\
+    override fun shown(): String = if (item.mark) \"y\" else \"n\"\n\
+}\n\
+fun box(): String {\n\
+    val cell = make(Token())\n\
+    val first = cell.item\n\
+    if (cell.shown() != \"y\") return \"mark\"\n\
+    cell.slot = Token()\n\
+    if (cell.slot === first) return \"slot\"\n\
+    return \"OK\"\n\
+}\n";
+
+fn compiled_classes(stem: &str, source: &str) -> (Vec<(String, Vec<u8>)>, Vec<(String, Vec<u8>)>) {
+    let work = common::scratch_dir().expect("allocate anonymous-object fixture");
+    let source_path = work.join(format!("{stem}.kt"));
+    let krusty_output = work.join("krusty");
+    let reference_output = work.join("reference");
+    std::fs::write(&source_path, source).expect("write anonymous-object fixture");
+    std::fs::create_dir_all(&krusty_output).expect("create krusty output");
+    std::fs::create_dir_all(&reference_output).expect("create reference output");
+    let krusty = std::process::Command::new(common::krusty_binary())
+        .args(["-d", krusty_output.to_str().expect("UTF-8 output")])
+        .arg("-no-reflect")
+        .arg(&source_path)
+        .output()
+        .expect("run krusty");
+    assert!(
+        krusty.status.success(),
+        "{stem}: krusty failed: {}",
+        String::from_utf8_lossy(&krusty.stderr)
+    );
+    let reference_args = vec![
+        "-d".to_string(),
+        reference_output.to_string_lossy().into_owned(),
+        "-nowarn".to_string(),
+        source_path.to_string_lossy().into_owned(),
+    ];
+    let (code, stderr) =
+        common::kotlinc_compile(&reference_args).expect("reference kotlinc is provisioned");
+    assert_eq!(code, 0, "{stem}: kotlinc failed: {stderr}");
+    let read = |root: &Path| {
+        let mut classes = Vec::new();
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(directory) = pending.pop() {
+            for entry in std::fs::read_dir(&directory).expect("read compiler output") {
+                let path = entry.expect("read compiler output entry").path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else if path.extension().and_then(|extension| extension.to_str()) == Some("class")
+                {
+                    let name = path
+                        .strip_prefix(root)
+                        .expect("class below output root")
+                        .with_extension("")
+                        .to_string_lossy()
+                        .replace(std::path::MAIN_SEPARATOR, "/");
+                    classes.push((name, std::fs::read(&path).expect("read compiled class")));
+                }
+            }
+        }
+        classes.sort_by(|left, right| left.0.cmp(&right.0));
+        classes
+    };
+    let compiled = (read(&reference_output), read(&krusty_output));
+    let _ = std::fs::remove_dir_all(work);
+    compiled
+}
+
+fn accessor_identity(
+    info: &krusty::jvm::classreader::ClassInfo,
+) -> (
+    Vec<(String, String, bool)>,
+    Vec<(String, Option<(String, String)>, Option<(String, String)>)>,
+) {
+    let mut methods = info
+        .methods
+        .iter()
+        .map(|method| {
+            (
+                method.name.clone(),
+                method.descriptor.clone(),
+                method.is_bridge(),
+            )
+        })
+        .collect::<Vec<_>>();
+    methods.sort();
+    let mut properties = info
+        .meta
+        .class_properties
+        .iter()
+        .map(|property| {
+            (
+                property.name.clone(),
+                property
+                    .getter
+                    .as_ref()
+                    .map(|getter| (getter.name.clone(), getter.desc.clone())),
+                property
+                    .setter
+                    .as_ref()
+                    .map(|setter| (setter.name.clone(), setter.desc.clone())),
+            )
+        })
+        .collect::<Vec<_>>();
+    properties.sort();
+    (methods, properties)
+}
+
+#[test]
+fn a_reified_anonymous_object_copies_property_accessors_like_kotlinc() {
+    common::expect_box_same_as_kotlinc(PROPERTIES, "ReifiedAnonymousProperties");
+    let (reference, krusty) = compiled_classes("ReifiedAnonymousProperties", PROPERTIES);
+    let reference_names = reference
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
+    let krusty_names = krusty
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(krusty_names, reference_names);
+    let inlined = reference_names
+        .iter()
+        .find(|name| name.contains("$$inlined$make$"))
+        .expect("the call site has its own anonymous class")
+        .clone();
+    let reference_bytes = reference
+        .iter()
+        .find(|(name, _)| name == &inlined)
+        .map(|(_, bytes)| bytes.as_slice())
+        .expect("reference class");
+    let krusty_bytes = krusty
+        .iter()
+        .find(|(name, _)| name == &inlined)
+        .map(|(_, bytes)| bytes.as_slice())
+        .expect("krusty class");
+    let reference_info =
+        krusty::jvm::classreader::parse_class(reference_bytes).expect("parse reference class");
+    let krusty_info =
+        krusty::jvm::classreader::parse_class(krusty_bytes).expect("parse krusty class");
+    assert_eq!(
+        accessor_identity(&krusty_info),
+        accessor_identity(&reference_info),
+        "{inlined} accessor, bridge, and metadata identities"
+    );
+    assert!(
+        reference_info.methods.iter().any(|method| {
+            method.is_bridge() && (method.name == "getItem" || method.name == "setSlot")
+        }),
+        "the specialized property override emits a bridge"
+    );
+}
