@@ -277,6 +277,125 @@ fn a_reified_anonymous_object_copies_its_property_accessors() {
     );
 }
 
+const EXTERNAL_CALL: &str = "\
+interface Face { fun value(): String }\n\
+class Token\n\
+inline fun <reified T> externalInline(): String = T::class.simpleName ?: \"none\"\n\
+inline fun <reified T> make(): Face = object : Face {\n\
+    override fun value() = externalInline<T>()\n\
+}\n\
+fun box(): String = make<Token>().value()\n";
+
+const DELEGATE_PLAN: &str = "\
+import kotlin.reflect.KProperty\n\
+interface Face { fun value(): String }\n\
+interface Item\n\
+class Token : Item\n\
+class Delegate<T>(val value: Any?)\n\
+inline operator fun <reified T> Delegate<T>.getValue(owner: Any?, property: KProperty<*>): String =\n\
+    if (value is T) \"yes\" else \"no\"\n\
+inline fun <reified T : Item> make(value: Any?): Face = object : Face {\n\
+    override fun value(): String {\n\
+        val local by Delegate<T>(value)\n\
+        return local\n\
+    }\n\
+}\n\
+fun box(): String = make<Token>(Token()).value()\n";
+
+#[test]
+fn an_external_reified_call_copies_the_anonymous_class() {
+    let ir = lower(EXTERNAL_CALL, "ReifiedAnonymousExternal");
+    assert_call_site_executes_token(&ir);
+}
+
+#[test]
+fn a_local_delegate_plan_copies_the_anonymous_class() {
+    let ir = lower(DELEGATE_PLAN, "ReifiedAnonymousDelegate");
+    assert_call_site_executes_token(&ir);
+}
+
+fn assert_call_site_executes_token(ir: &crate::ir::IrFile) {
+    let declaration = ir
+        .classes
+        .iter()
+        .enumerate()
+        .find_map(|(index, class)| {
+            let index = u32::try_from(index).expect("class index");
+            (class.is_anonymous_object && ir.reified_anonymous_declarations.contains(&index))
+                .then_some(index)
+        })
+        .expect("the declaration class is recorded for reification");
+    let call = constructed_class(ir, function_named(ir, "box"));
+    assert_ne!(declaration, call);
+    let executed = executed_types(ir, call);
+    assert!(
+        executed.iter().any(|ty| ty.non_null() == Ty::obj("Token")),
+        "the call-site class executes Token, got {executed:?}"
+    );
+    assert!(
+        !executed
+            .iter()
+            .any(|ty| matches!(ty.non_null(), Ty::TyParam(..))),
+        "the call-site class does not keep the reified parameter, got {executed:?}"
+    );
+}
+
+fn executed_types(ir: &crate::ir::IrFile, class: u32) -> Vec<Ty> {
+    let mut pending = ir.classes[class as usize]
+        .methods
+        .iter()
+        .filter_map(|method| ir.functions[*method as usize].body)
+        .collect::<Vec<_>>();
+    let mut seen = std::collections::HashSet::new();
+    let mut plans = std::collections::HashSet::new();
+    let mut types = Vec::new();
+    while let Some(expression) = pending.pop() {
+        if !seen.insert(expression) {
+            continue;
+        }
+        match ir.expr(expression) {
+            IrExpr::TypeOp { type_operand, .. } => types.push(*type_operand),
+            IrExpr::KClassLiteral {
+                classifier: Some(classifier),
+                ..
+            } => types.push(*classifier),
+            IrExpr::Call {
+                callee: crate::ir::Callee::External { substitutions, .. },
+                ..
+            } => types.extend(
+                substitutions
+                    .iter()
+                    .filter(|substitution| substitution.reified)
+                    .map(|substitution| substitution.value),
+            ),
+            IrExpr::Checked(operation) => {
+                if let crate::ir::IrCheckedOperation::Call { substitutions, .. } = operation {
+                    types.extend(
+                        substitutions
+                            .iter()
+                            .filter(|substitution| substitution.reified)
+                            .map(|substitution| substitution.value),
+                    );
+                }
+            }
+            IrExpr::LocalDelegateAccess(access) => {
+                if plans.insert(access.plan) {
+                    if let Some(plan) = ir.local_delegate_plans.get(access.plan as usize) {
+                        pending.push(plan.getter.body);
+                        pending.extend(plan.setter.as_ref().map(|setter| setter.body));
+                    }
+                }
+            }
+            _ => {}
+        }
+        if let Some(substitutions) = ir.reified_call_subst.get(&expression) {
+            types.extend(substitutions.iter().map(|(_, ty)| *ty));
+        }
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+    }
+    types
+}
+
 fn method_calls(ir: &crate::ir::IrFile, function: u32) -> Vec<u32> {
     let Some(body) = ir.functions[function as usize].body else {
         return Vec::new();

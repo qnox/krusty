@@ -9,7 +9,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::ir::{ClassId, ExprId, FunId, IrExpr};
-use crate::types::{ty_subst_keep_unbound, Ty, TypeName};
+use crate::types::{Ty, TypeName};
 
 use super::specialize_inline_copy;
 
@@ -126,7 +126,7 @@ fn specialized_class(
     if !anonymous {
         return Ok(None);
     }
-    if !class_uses_binding(ir, source, expansion.reified_bindings, &mut HashSet::new()) {
+    if !super::reified_binding_use::class_executes_binding(ir, source, expansion.reified_bindings) {
         return Ok(None);
     }
     let class_name = ir.classes[source as usize].fq_name;
@@ -154,6 +154,13 @@ fn specialized_class(
                 .ok_or_else(|| malformed(class_name))?;
             owned.push(copy);
         }
+        specialize_delegate_plans(
+            ir,
+            cloned_body,
+            expansion.bindings,
+            expansion.reified_bindings,
+        )
+        .ok_or_else(|| malformed(class_name))?;
         let mut shape = function;
         shape.body = Some(cloned_body);
         // Member descriptors stay the declaration's erasure. Reified operations in the body are
@@ -238,7 +245,98 @@ fn clone_optional_body(
         specialize_inline_copy(ir, *copy, expansion.bindings, expansion.reified_bindings)
             .ok_or_else(|| malformed(class_name))?;
     }
+    specialize_delegate_plans(
+        ir,
+        cloned_body,
+        expansion.bindings,
+        expansion.reified_bindings,
+    )
+    .ok_or_else(|| malformed(class_name))?;
     Ok((Some(cloned_body), copied))
+}
+
+/// A local-delegate plan is a detached body. Copying the access keeps the declaration plan, whose
+/// reified operation would stay erased. A plan that executes the binding is cloned and specialized
+/// with the call-site arguments; a plan that does not is the shared erased helper.
+fn specialize_delegate_plans(
+    ir: &mut crate::ir::IrFile,
+    root: ExprId,
+    bindings: &HashMap<String, Ty>,
+    runtime: &HashMap<String, Ty>,
+) -> Option<()> {
+    let mut pending = vec![root];
+    let mut seen = HashSet::new();
+    let mut accesses = Vec::new();
+    while let Some(expression) = pending.pop() {
+        if !seen.insert(expression) {
+            continue;
+        }
+        if let IrExpr::LocalDelegateAccess(access) = ir.expr(expression) {
+            accesses.push((expression, access.plan));
+        }
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+    }
+    let mut rewritten = HashMap::new();
+    for (expression, plan_id) in accesses {
+        let mapped = if let Some(done) = rewritten.get(&plan_id).copied() {
+            done
+        } else if plan_executes_binding(ir, plan_id, runtime) {
+            let cloned = clone_delegate_plan(ir, plan_id, bindings, runtime)?;
+            rewritten.insert(plan_id, cloned);
+            cloned
+        } else {
+            continue;
+        };
+        if let IrExpr::LocalDelegateAccess(access) = &mut ir.exprs[expression as usize] {
+            access.plan = mapped;
+        }
+    }
+    Some(())
+}
+
+fn plan_executes_binding(
+    ir: &crate::ir::IrFile,
+    plan: u32,
+    bindings: &HashMap<String, Ty>,
+) -> bool {
+    let Some(plan) = ir.local_delegate_plans.get(plan as usize) else {
+        return false;
+    };
+    super::reified_binding_use::root_executes_binding(ir, plan.getter.body, bindings)
+        || plan.setter.as_ref().is_some_and(|setter| {
+            super::reified_binding_use::root_executes_binding(ir, setter.body, bindings)
+        })
+}
+
+fn clone_delegate_plan(
+    ir: &mut crate::ir::IrFile,
+    plan: u32,
+    bindings: &HashMap<String, Ty>,
+    runtime: &HashMap<String, Ty>,
+) -> Option<u32> {
+    let mut cloned = ir.local_delegate_plans.get(plan as usize)?.clone();
+    cloned.getter.body = specialize_plan_body(ir, cloned.getter.body, bindings, runtime)?;
+    if let Some(setter) = cloned.setter.as_mut() {
+        setter.body = specialize_plan_body(ir, setter.body, bindings, runtime)?;
+    }
+    let id = u32::try_from(ir.local_delegate_plans.len()).ok()?;
+    ir.local_delegate_plans.push(cloned);
+    Some(id)
+}
+
+fn specialize_plan_body(
+    ir: &mut crate::ir::IrFile,
+    body: ExprId,
+    bindings: &HashMap<String, Ty>,
+    runtime: &HashMap<String, Ty>,
+) -> Option<ExprId> {
+    let (cloned_body, cloned) = crate::ir::clone_expression_dag(ir, body);
+    let mut copied = cloned.values().copied().collect::<Vec<_>>();
+    copied.sort_unstable();
+    for copy in copied {
+        specialize_inline_copy(ir, copy, bindings, runtime)?;
+    }
+    Some(cloned_body)
 }
 
 fn remap_property_accessors(
@@ -870,101 +968,5 @@ fn remap_class(
         }
         IrExpr::PropertyRead { owner, .. } | IrExpr::PropertyWrite { owner, .. } => name(owner),
         _ => {}
-    }
-}
-
-fn class_uses_binding(
-    ir: &crate::ir::IrFile,
-    class: ClassId,
-    bindings: &HashMap<String, Ty>,
-    seen: &mut HashSet<ClassId>,
-) -> bool {
-    if bindings.is_empty() || !seen.insert(class) {
-        return false;
-    }
-    let Some(class_decl) = ir.classes.get(class as usize) else {
-        return false;
-    };
-    let mut functions = class_decl.methods.clone();
-    functions.extend(
-        class_decl
-            .properties
-            .iter()
-            .flat_map(|property| property.getter.into_iter().chain(property.setter)),
-    );
-    if let Some(extensions) = ir.member_ext_props.get(&class_decl.fq_name) {
-        functions.extend(
-            extensions
-                .iter()
-                .flat_map(|property| std::iter::once(property.getter).chain(property.setter)),
-        );
-    }
-    let mut roots = functions
-        .into_iter()
-        .filter_map(|function| ir.functions.get(function as usize)?.body)
-        .collect::<Vec<_>>();
-    roots.extend(class_decl.init_body);
-    // Accessor functions are materialized after inlining. Their checked bodies are already
-    // expressions on the property, and a reified operation there must still select the copy.
-    roots.extend(
-        ir.checked_properties
-            .values()
-            .filter(|property| property.class == Some(class))
-            .flat_map(|property| {
-                property
-                    .getter
-                    .into_iter()
-                    .chain(property.setter)
-                    .chain(property.initializer)
-            }),
-    );
-    for root in roots {
-        if dag_uses_binding(ir, root, bindings, seen) {
-            return true;
-        }
-    }
-    false
-}
-
-fn dag_uses_binding(
-    ir: &crate::ir::IrFile,
-    root: ExprId,
-    bindings: &HashMap<String, Ty>,
-    classes: &mut HashSet<ClassId>,
-) -> bool {
-    let mut pending = vec![root];
-    let mut seen = HashSet::new();
-    while let Some(expression) = pending.pop() {
-        if !seen.insert(expression) {
-            continue;
-        }
-        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
-        if node_uses_binding(ir.expr(expression), bindings) {
-            return true;
-        }
-        if let IrExpr::New { internal, .. } = ir.expr(expression) {
-            if let Some(class) = ir.class_id_by_name(*internal) {
-                if class_uses_binding(ir, class, bindings, classes) {
-                    return true;
-                }
-            }
-        }
-    }
-    false
-}
-
-fn node_uses_binding(expression: &IrExpr, bindings: &HashMap<String, Ty>) -> bool {
-    let uses = |ty: Ty| ty_subst_keep_unbound(ty, bindings) != ty;
-    match expression {
-        IrExpr::TypeOp { type_operand, .. } => uses(*type_operand),
-        IrExpr::KClassLiteral { classifier, .. } => classifier.is_some_and(uses),
-        IrExpr::Call {
-            callee: crate::ir::Callee::Intrinsic { operation, .. },
-            ..
-        } => match operation {
-            crate::ir::IrIntrinsic::TypeOf { ty } => uses(*ty),
-            _ => false,
-        },
-        _ => false,
     }
 }
