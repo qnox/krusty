@@ -128,11 +128,18 @@ fn kotlinc_specializes_a_krusty_reified_catch_forwarding_and_defaults() {
     );
 }
 
+// Keep the finalizer's observable mutation behind a public non-inline callable. A direct write to
+// the top-level property's private backing field tests inline-access bridge rewriting instead of
+// the split exception-table ranges this fixture owns.
 const SPLIT_LIB: &str = "\
 // LANGUAGE: +AllowReifiedTypeInCatchClause
 package lib
 
 var cleanup = -1
+
+fun recordCleanup(which: Int) {
+    cleanup = which
+}
 
 inline fun <reified E : Throwable> eval(which: Int, block: () -> Unit): String {
     try {
@@ -143,7 +150,7 @@ inline fun <reified E : Throwable> eval(which: Int, block: () -> Unit): String {
     } catch (ignore: E) {
         return \"C\"
     } finally {
-        cleanup = which
+        recordCleanup(which)
     }
 }
 ";
@@ -175,6 +182,7 @@ const SPLIT_SOURCE: &str = concat!(
     "open class ParentFailure : Throwable()\n",
     "class ChildFailure : ParentFailure()\n",
     "var cleanup = -1\n",
+    "fun recordCleanup(which: Int) { cleanup = which }\n",
     "inline fun <reified E : Throwable> eval(which: Int, block: () -> Unit): String {\n",
     "    try {\n",
     "        if (which == 1) block()\n",
@@ -184,7 +192,7 @@ const SPLIT_SOURCE: &str = concat!(
     "    } catch (ignore: E) {\n",
     "        return \"C\"\n",
     "    } finally {\n",
-    "        cleanup = which\n",
+    "        recordCleanup(which)\n",
     "    }\n",
     "}\n",
     "fun box(): String {\n",
