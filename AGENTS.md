@@ -189,10 +189,16 @@ review explanation tied to an active migration plan.
   a temporary body-check overlay; only selected inputs enter the declaration-owned capture ledger.
   Memoized local methods do not repeat receiver-use accounting on inference revisits. Preserve their
   proven selections and refresh current types/bindings instead of treating zero new uses as non-use.
-  Receiver coordinates may correlate visits of the same declaration, never join different classes.
+  Receiver declaration roles (source lambda span and slot, or declared extension/context span)
+  own capture identity across rebuilt scopes. Transient scope addresses and receiver coordinates
+  never correlate revisits; they describe only the current checked body's operand. Isolated class
+  bodies reinstate the recorded role, never infer it from a label, type, or relative depth.
+  Enclosing-instance revisits correlate by resolved classifier identity and remain outside the
+  closure-id namespace.
 
 ```text
 rg -n 'registered_local_method_is_complete|finalized_.*captures|uses_before|drop_unused_implicit_receivers' src/resolve.rs src/resolve
+rg -n 'receiver_capture_ids|receiver_role|implicit_receiver_role|refreshed_local_receiver_capture' src/resolve.rs src/resolve
 ```
 
 ## Interned-name rule

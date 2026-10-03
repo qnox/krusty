@@ -137,8 +137,15 @@ impl Checker<'_> {
             captures[existing].capture_dependency = captures[existing]
                 .capture_dependency
                 .or(candidate.capture_dependency);
-            if captures[existing].receiver_capture.is_none() {
+            if captures[existing].receiver_role.is_none() && candidate.receiver_role.is_some() {
                 captures[existing].receiver_capture = candidate.receiver_capture;
+                captures[existing].receiver_role = candidate.receiver_role;
+            } else if candidate.receiver_role.is_some() {
+                assert_eq!(
+                    captures[existing].receiver_capture,
+                    candidate.receiver_capture
+                );
+                assert_eq!(captures[existing].receiver_role, candidate.receiver_role);
             }
             return;
         }
@@ -236,6 +243,7 @@ impl Checker<'_> {
                         lexical_shadow_depth,
                         capture_dependency: None,
                         receiver_capture: None,
+                        receiver_role: None,
                     },
                     required_identity,
                 );

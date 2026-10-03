@@ -1557,8 +1557,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   types and bindings, and does not treat the absence of new use-counter increments as non-use.
   A local class whose body never selects the receiver still has no receiver constructor input.
   When secondary-constructor/default scopes rebuild the receiver tower, a retained capture is
-  refreshed by its published receiver identity, not its earlier relative coordinate or type.
+  refreshed by its recorded receiver declaration role, not its earlier scope address, relative
+  coordinate, label, or type. A lambda role is its source expression span and receiver slot;
+  a declared extension or context receiver uses its source type-reference span. The checker assigns
+  one closure identity to that exact role, including across separately rebuilt scopes, and isolated
+  class bodies carry the role into their reconstructed receiver tower. A non-class capture without
+  declaration provenance fails closed. Enclosing instances remap by their resolved classifier
+  identity and remain outside the closure-id namespace on the class/dependency path.
   Tests: `receiver_remap_tests::constructor_scope_remap_selects_identity_not_old_coordinate_or_same_type`,
+  `receiver_remap_tests::a_coordinate_without_receiver_provenance_cannot_remap_a_proven_selection`,
+  `receiver_remap_tests::every_class_receiver_rung_is_an_enclosing_instance_not_a_closure`,
+  `receiver_capture_identity::tests::rebuilt_scopes_keep_receiver_declaration_identity_at_a_shifted_depth`,
+  `receiver_capture_identity::tests::a_legacy_receiver_without_declaration_provenance_fails_closed`,
   `tests/local_class_capture_constructors_e2e.rs::local_constructor_init_lambda_keeps_its_revisited_receiver_like_kotlinc`
   (the KT-61929 nested-init shape with test-owned callables).
   Tests: `local_class_does_not_capture_an_unused_extension_receiver`,

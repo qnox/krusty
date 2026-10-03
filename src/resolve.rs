@@ -132,10 +132,12 @@ mod property_write_selection;
 mod qualified_call_shaping;
 mod qualifiers;
 mod receiver_capture_identity;
+use receiver_capture_identity::{LambdaReceiverSlot, ReceiverDeclarationRole, ReceiverLabel};
 mod receiver_flow;
 use receiver_flow::CompletedFlow;
 mod receiver_function_values;
 use receiver_function_values::ImplicitReceiverFunctionInvoke;
+mod receiver_tower;
 mod receiver_uses;
 mod reflection_locals;
 mod resolved_type_occurrences;
@@ -285,6 +287,7 @@ fn lexical_context_receiver(file: &File, parameter: &Param, ty: Ty) -> ContextRe
         crate::types::ContextParameterKind::None => unreachable!("a context parameter has a kind"),
     };
     ContextReceiver::new(ty, kind, Some(lexical_receiver_label(file, &parameter.ty)))
+        .with_declaration(parameter.ty.span)
 }
 
 fn header_type_has_annotation(
@@ -5863,19 +5866,29 @@ fn delegated_getvalue_ret_for_signature(
 /// semantic context: alias/import edges are file-scoped, so passing either independently invites a
 /// mismatched lookup and needlessly widens every inference helper's argument list.
 #[derive(Clone, Copy)]
-struct InferenceSource<'a>(&'a File, u32, Option<TypeName>, Option<Ty>);
+struct InferenceSource<'a>(&'a File, u32, Option<InferenceReceiver>);
+
+#[derive(Clone, Copy)]
+enum InferenceReceiver {
+    Singleton(TypeName),
+    Extension { ty: Ty, declaration: Span },
+}
 
 impl<'a> InferenceSource<'a> {
     fn file(file: &'a File, file_index: u32) -> Self {
-        Self(file, file_index, None, None)
+        Self(file, file_index, None)
     }
 
     fn with_implicit_classifier(self, classifier: Option<TypeName>) -> Self {
-        Self(self.0, self.1, classifier, self.3)
+        Self(self.0, self.1, classifier.map(InferenceReceiver::Singleton))
     }
 
-    fn with_implicit_value(self, value: Option<Ty>) -> Self {
-        Self(self.0, self.1, self.2, value)
+    fn with_extension_receiver(self, ty: Ty, declaration: Span) -> Self {
+        Self(
+            self.0,
+            self.1,
+            Some(InferenceReceiver::Extension { ty, declaration }),
+        )
     }
 }
 
@@ -8081,9 +8094,7 @@ fn infer_class_member_ty(
             .collect::<Vec<_>>(),
     );
     let root = CheckerScope::root();
-    let dispatch_scope = root.child(ScopeKind::Function {
-        receiver: Some(dispatch),
-    });
+    let dispatch_scope = root.dispatch_receiver_child(dispatch);
     let scope = &dispatch_scope;
     scope.declare_tparams(&class.type_params, &class_tparams, |_| false);
     checker
@@ -8183,9 +8194,7 @@ fn infer_member_ext_property_ty(
             .collect::<Vec<_>>(),
     );
     let root = CheckerScope::root();
-    let dispatch_scope = root.child(ScopeKind::Function {
-        receiver: Some(dispatch),
-    });
+    let dispatch_scope = root.dispatch_receiver_child(dispatch);
     let scope = &dispatch_scope;
     scope.declare_tparams(&class.type_params, &class_tparams, |_| false);
     checker
@@ -8209,14 +8218,19 @@ fn infer_member_ext_property_ty(
         |_| false,
     );
     let receiver_ty = checker.type_ref_ty(scope, receiver);
-    checker
-        .this_labels
-        .push((property.name.clone(), receiver_ty, false));
+    checker.this_labels.push((
+        property.name.clone(),
+        receiver_ty,
+        false,
+        Some(ReceiverDeclarationRole::Extension(receiver.span)),
+    ));
     let outer = std::mem::replace(&mut checker.symbolic_signature_inference, true);
     let inferred = {
-        let getter_scope = scope.child(ScopeKind::Function {
-            receiver: Some(receiver_ty),
-        });
+        let getter_scope = scope.declaration_function_child_with_context(
+            Some(receiver_ty),
+            Some(lexical_receiver_declaration(file, receiver)),
+            &[],
+        );
         let scope = &getter_scope;
         for parameter in &property.context_params {
             if parameter.name == "_" {
@@ -8296,9 +8310,7 @@ fn infer_method_return_ty(
             .collect::<Vec<_>>(),
     );
     let root = CheckerScope::root();
-    let dispatch_scope = root.child(ScopeKind::Function {
-        receiver: Some(dispatch),
-    });
+    let dispatch_scope = root.dispatch_receiver_child(dispatch);
     let scope = &dispatch_scope;
     scope.declare_tparams(&class.type_params, &class_tparams, |_| false);
     checker
@@ -8335,9 +8347,18 @@ fn infer_method_return_ty(
         .as_ref()
         .map(|receiver| checker.type_ref_ty(rung, receiver));
     if let Some(receiver) = extension_receiver {
-        checker
-            .this_labels
-            .push((method.name.clone(), receiver, false));
+        checker.this_labels.push((
+            method.name.clone(),
+            receiver,
+            false,
+            Some(ReceiverDeclarationRole::Extension(
+                method
+                    .receiver
+                    .as_ref()
+                    .expect("extension receiver declared")
+                    .span,
+            )),
+        ));
     }
     // The scope `check_method` is handed carries the DISPATCH receiver, not the extension one: it
     // pushes the extension receiver itself, and it reads `scope.this_ty()` BEFORE doing so to decide
@@ -8345,9 +8366,7 @@ fn infer_method_return_ty(
     // extension receiver made that read the receiver — a type PARAMETER for
     // `fun <T : Any> T.self()` — so the return was recorded in neither table and the declaration
     // settled to `Unit`.
-    let method_scope = rung.child(ScopeKind::Function {
-        receiver: Some(dispatch),
-    });
+    let method_scope = rung.dispatch_receiver_child(dispatch);
     let method_scope = &method_scope;
     let outer = std::mem::replace(&mut checker.symbolic_signature_inference, true);
     checker.check_method(method_scope, method, &properties, None, None);
@@ -8545,7 +8564,7 @@ fn infer_lit_ty_scoped_on_demand(
     demand: &dyn Fn(&str) -> Option<Ty>,
     demand_member: DemandMember<'_>,
 ) -> Ty {
-    let InferenceSource(file, file_index, implicit_classifier, implicit_value) = source;
+    let InferenceSource(file, file_index, implicit_receiver) = source;
     let mut scratch = DiagSink::new();
     let mut checker = make_checker(file, file_index, None, table, &mut scratch);
     checker.demand_name = Some(&demand);
@@ -8557,18 +8576,37 @@ fn infer_lit_ty_scoped_on_demand(
     // the bound into the field descriptor.
     checker.symbolic_signature_inference = false;
 
-    // A lexical singleton or classifier whose members are visible is an implicit receiver, which
-    // the checker models as a `this` rung rather than as a separate lookup channel.
-    let receiver = implicit_value.or_else(|| implicit_classifier.map(Ty::obj_name));
     let root = CheckerScope::root();
-    let declaration = root.child(ScopeKind::Function { receiver });
-    let scope = if receiver.is_some() {
+    let declaration = match implicit_receiver {
+        Some(InferenceReceiver::Singleton(classifier)) => {
+            root.singleton_receiver_child(Some(Ty::obj_name(classifier)))
+        }
+        Some(InferenceReceiver::Extension { ty, declaration }) => root
+            .declaration_function_child_with_context(
+                Some(ty),
+                Some((declaration, String::new())),
+                &[],
+            ),
+        None => root.child(ScopeKind::Block),
+    };
+    let scope = if implicit_receiver.is_some() {
         &declaration
     } else {
         &root
     };
-    if let Some(receiver) = receiver {
-        checker.this_labels.push((String::new(), receiver, false));
+    if let Some(receiver) = implicit_receiver {
+        let (ty, role) = match receiver {
+            InferenceReceiver::Singleton(classifier) => (Ty::obj_name(classifier), None),
+            InferenceReceiver::Extension { ty, declaration } => {
+                (ty, Some(ReceiverDeclarationRole::Extension(declaration)))
+            }
+        };
+        checker.this_labels.push((String::new(), ty, false, role));
+        if let InferenceReceiver::Extension { declaration, .. } = receiver {
+            checker
+                .extension_receiver_labels
+                .push((checker.this_labels.len() - 1, declaration));
+        }
     }
     for (name, ty, is_var) in props {
         checker.declare(scope, name, *ty, *is_var);
@@ -15683,6 +15721,7 @@ impl<'a> Checker<'a> {
         );
         (singleton.classifier == classifier).then_some((
             ImplicitReceiver {
+                receiver_role: None,
                 ty: Ty::obj_name(classifier),
                 declared_ty: Ty::obj_name(classifier),
                 identity: (0, 0),
@@ -18255,6 +18294,7 @@ impl<'a> Checker<'a> {
                         semantic_receiver: None,
                         receiver_identity: None,
                         receiver_capture: None,
+                        receiver_role: None,
                     });
                 });
                 candidates.sort_by(|left, right| left.name.cmp(&right.name));
@@ -18335,8 +18375,9 @@ impl<'a> Checker<'a> {
                                 )),
                                 receiver_capture: self.implicit_receiver_capture_id(
                                     receiver.class_receiver,
-                                    identity,
+                                    receiver.receiver_role,
                                 ),
+                                receiver_role: receiver.receiver_role,
                                 receiver_label: self
                                     .anonymous_capture_receiver_label(scope, receiver),
                                 semantic_receiver: Some(semantic_receiver),
@@ -24179,6 +24220,7 @@ impl<'a> Checker<'a> {
                             lexical_shadow_depth: 0,
                             capture_dependency: None,
                             receiver_capture: None,
+                            receiver_role: None,
                         });
                     }
                 }
@@ -25673,7 +25715,14 @@ impl<'a> Checker<'a> {
                     if let (Some(receiver), Some(receiver_ref)) =
                         (semantic_receiver, f.receiver.as_ref())
                     {
-                        self.this_labels.push((f.name.clone(), receiver, false));
+                        self.this_labels.push((
+                            f.name.clone(),
+                            receiver,
+                            false,
+                            Some(ReceiverDeclarationRole::Extension(
+                                f.receiver.as_ref().expect("receiver was resolved").span,
+                            )),
+                        ));
                         let label_index = self.this_labels.len() - 1;
                         self.extension_receiver_labels
                             .push((label_index, receiver_ref.span));
@@ -25831,7 +25880,14 @@ impl<'a> Checker<'a> {
         self.with_ret(semantic_ret_ty, |c| {
             let previous_extension_receiver = c.this_extension_receiver;
             if let (Some(receiver), Some(receiver_ref)) = (semantic_receiver, f.receiver.as_ref()) {
-                c.this_labels.push((f.name.clone(), receiver, false));
+                c.this_labels.push((
+                    f.name.clone(),
+                    receiver,
+                    false,
+                    Some(ReceiverDeclarationRole::Extension(
+                        f.receiver.as_ref().expect("receiver was resolved").span,
+                    )),
+                ));
                 let label_index = c.this_labels.len() - 1;
                 c.extension_receiver_labels
                     .push((label_index, receiver_ref.span));
@@ -36365,7 +36421,7 @@ fn class_receiver_labels(
     file: &File,
     symbols: &SymbolTable,
     current: Option<Ty>,
-) -> Vec<(String, Ty, bool)> {
+) -> Vec<ReceiverLabel> {
     // Start from the collected signature's semantic nesting edge. Reconstructing the owner from
     // `ClassDecl::name` / `inner_of` would make receiver labels depend on whether this declaration was
     // spelled as a dotted nested source name, and previously required a separate fallback for an
@@ -36406,19 +36462,24 @@ fn class_receiver_labels(
         if let Some(label) = labels
             .iter_mut()
             .rev()
-            .find(|(_, candidate, _)| *candidate == receiver)
+            .find(|(_, candidate, _, _)| *candidate == receiver)
         {
             label.0 = entry;
             label.2 = false;
         } else {
-            labels.push((entry, receiver, false));
+            labels.push((entry, receiver, false, None));
         }
     }
     if let Some(ty) = current {
         // The current AST declaration is the authoritative source spelling for its explicit label;
         // using a reverse symbol-table lookup here would be ambiguous in an already-diagnosed duplicate
         // declaration, even though either entry may normalize to the same internal name.
-        labels.push((class_declaration_label(&class.name).to_string(), ty, true));
+        labels.push((
+            class_declaration_label(&class.name).to_string(),
+            ty,
+            true,
+            None,
+        ));
     }
     labels
 }
@@ -36452,7 +36513,7 @@ fn anonymous_enclosing_instance_classifier(
 fn enclosing_receiver_labels(
     symbols: &SymbolTable,
     roots: impl IntoIterator<Item = TypeName>,
-) -> Vec<(String, Ty, bool)> {
+) -> Vec<ReceiverLabel> {
     let mut owners = Vec::new();
     for root in roots {
         let mut current = Some(root);
@@ -36493,6 +36554,7 @@ fn enclosing_receiver_labels(
                         .collect::<Vec<_>>(),
                 ),
                 true,
+                None,
             ))
         })
         .collect()
@@ -38316,6 +38378,7 @@ impl CallableCandidateSelection {
 
 #[derive(Clone, Copy)]
 pub(crate) struct ImplicitReceiver {
+    receiver_role: Option<ReceiverDeclarationRole>,
     ty: Ty,
     /// Receiver type before data-flow narrowing. Runtime identity and storage keep this type even
     /// when member selection uses `ty`'s narrowed view.
@@ -38344,6 +38407,7 @@ impl ImplicitReceiver {
     /// tower, so it is the current receiver at depth 0.
     fn signature_receiver(ty: Ty) -> Self {
         ImplicitReceiver {
+            receiver_role: None,
             ty,
             declared_ty: ty,
             identity: (0, 0),
@@ -38802,7 +38866,7 @@ struct Checker<'a> {
     /// nothing but classes between) lowers through the current class's captured enclosing-instance
     /// field. Anything else type-checks but the lowerer skips it (it can't yet reach a captured /
     /// multi-level outer receiver).
-    this_labels: Vec<(String, Ty, bool)>,
+    this_labels: Vec<ReceiverLabel>,
     /// Source class owners of a hoisted anonymous-object declaration, nearest first. They contribute
     /// lexical classifier scope but are not implicit runtime receivers (captures remain a separate ABI).
     lexical_class_context: Vec<TypeName>,
@@ -44282,201 +44346,7 @@ impl<'a> Checker<'a> {
 
     /// The receiver tower with each receiver's declared type.
     fn declared_implicit_receivers(&self, scope: &CheckerScope<'_>) -> Vec<ImplicitReceiver> {
-        // Scope owns receiver ordering. Do not reconstruct it from labels or deduplicate equal types:
-        // two same-typed receivers remain distinct runtime values and the selected depth is the exact
-        // identity handed to lowering.
-        let mut receivers = scope
-            .implicit_receivers_with_declarations()
-            .into_iter()
-            .enumerate()
-            .map(
-                |(receiver_depth, (ty, extension_receiver, identity, class_receiver))| {
-                    ImplicitReceiver {
-                        ty,
-                        declared_ty: ty,
-                        identity,
-                        extension_receiver,
-                        class_receiver,
-                        current: receiver_depth == 0,
-                        receiver_depth,
-                    }
-                },
-            )
-            .collect::<Vec<_>>();
-        let unavailable_class_receiver = (self.this_unavailable
-            && self.static_companion_this.is_none()
-            && self.static_singleton_this.is_none())
-        .then(|| {
-            self.this_labels
-                .iter()
-                .rev()
-                .find(|(_, _, is_class)| *is_class)
-                .map(|(_, ty, _)| *ty)
-        })
-        .flatten();
-        // A superclass-constructor argument is evaluated before the current class instance exists.
-        // Remove that exact class-rung identity, not the first same-typed receiver: a receiver lambda
-        // may introduce another `Outer.Inner` immediately above it, and that value remains valid.
-        if unavailable_class_receiver.is_some() {
-            let identity = scope
-                .innermost_class_receiver_identity()
-                .expect("an unavailable class receiver must have a class scope rung");
-            receivers.retain(|receiver| receiver.identity != identity);
-        }
-        // A retained local/anonymous classifier can be checked independently from the expression
-        // that introduced it. Its captured receiver labels carry the already-selected semantic
-        // types at the same nearest-first coordinates used by checked FIR. Reinstall a missing rung,
-        // or repair a provisional `Pending` receiver on a live postponed-inference scope, without
-        // changing an existing runtime identity.
-        if let Some(top) = self.this_labels.len().checked_sub(1) {
-            for (index, (_, ty, is_class)) in self.this_labels.iter().enumerate() {
-                if *is_class || ty.mentions_pending() {
-                    continue;
-                }
-                let depth = top - index;
-                if let Some(receiver) = receivers.get_mut(depth) {
-                    if receiver.ty.mentions_pending() {
-                        receiver.ty = *ty;
-                    }
-                } else if receivers.len() == depth {
-                    receivers.push(ImplicitReceiver {
-                        ty: *ty,
-                        declared_ty: *ty,
-                        identity: (0, depth),
-                        extension_receiver: None,
-                        class_receiver: false,
-                        current: depth == 0,
-                        receiver_depth: depth,
-                    });
-                }
-            }
-        }
-        // Nested declarations are stored flat in the AST, so an inner class's `ScopeKind::Class`
-        // rung carries its current receiver while `this_labels` carries the semantic `inner_of`
-        // chain. Complete that same receiver tower here. These are runtime receivers (unlike the
-        // lexical-classifier fall-through below), and their ordinal is the exact `this$0` walk that
-        // lowering consumes. Do not deduplicate equal types: recursively nested instances of the
-        // same classifier are distinct values.
-        let class_receivers = self
-            .this_labels
-            .iter()
-            .enumerate()
-            .rev()
-            .filter(|(index, (label, ty, is_class))| {
-                *is_class
-                    || (*index + 1 < self.this_labels.len()
-                        && ty
-                            .obj_internal()
-                            .is_some_and(|owner| self.classifier_has_enum_entry(owner, label)))
-            })
-            .skip(usize::from(unavailable_class_receiver.is_some()))
-            .map(|(label_index, (_, ty, _))| (label_index, *ty))
-            .collect::<Vec<_>>();
-        if let Some(current_index) = class_receivers.first().and_then(|(_, current)| {
-            receivers
-                .iter()
-                .position(|receiver| receiver.ty == *current)
-        }) {
-            let already_present = class_receivers
-                .iter()
-                .enumerate()
-                .take_while(|(offset, (_, expected))| {
-                    receivers
-                        .get(current_index + *offset)
-                        .is_some_and(|receiver| receiver.ty == *expected)
-                })
-                .count();
-            for (label_index, ty) in class_receivers.into_iter().skip(already_present) {
-                receivers.push(ImplicitReceiver {
-                    ty,
-                    declared_ty: ty,
-                    identity: receiver_label_identity(label_index),
-                    extension_receiver: None,
-                    class_receiver: true,
-                    current: false,
-                    receiver_depth: receivers.len(),
-                });
-            }
-        } else if unavailable_class_receiver.is_some() {
-            let first_receiver_depth = receivers
-                .iter()
-                .map(|receiver| receiver.receiver_depth)
-                .max()
-                .map_or(1, |depth| depth + 1);
-            for (offset, (label_index, ty)) in class_receivers.into_iter().enumerate() {
-                let receiver_depth = first_receiver_depth + offset;
-                receivers.push(ImplicitReceiver {
-                    ty,
-                    declared_ty: ty,
-                    identity: receiver_label_identity(label_index),
-                    extension_receiver: None,
-                    class_receiver: true,
-                    current: false,
-                    receiver_depth,
-                });
-            }
-        }
-        // A declaration nested in an `object` does not capture an outer instance, but the lexical
-        // singleton is still an implicit receiver in Kotlin. Add only resolved object classifiers
-        // from the lexical owner chain; ordinary nested classes remain a receiver cut. Lowering can
-        // materialize this exact selection from the object's `INSTANCE`, so no storage inference or
-        // name-based retry is involved.
-        for owner in self.lexical_source_class_names() {
-            let receiver = Ty::obj_name(owner);
-            if self.classifier_is_object(owner)
-                && !receivers
-                    .iter()
-                    .any(|existing: &ImplicitReceiver| existing.ty == receiver)
-            {
-                receivers.push(ImplicitReceiver {
-                    ty: receiver,
-                    declared_ty: receiver,
-                    identity: (0, receivers.len()),
-                    extension_receiver: None,
-                    class_receiver: false,
-                    current: false,
-                    receiver_depth: usize::MAX,
-                });
-            }
-        }
-        // Companions of the lexically enclosing classes AND of everything they inherit: a subclass
-        // reaches its superclass's companion members by bare name (`open class A { companion object
-        // { fun getO() } }; class C : A() { fun t() = getO() }`). Nearest first — the own companion
-        // outranks an inherited one — and every rung is kept, not just the first class that has one,
-        // because two levels of the chain may each declare different members.
-        let source = self.fed_source();
-        let companions = self
-            .lexical_source_class_names()
-            .into_iter()
-            .flat_map(|owner| {
-                crate::symbol_resolver::applied_hierarchy(&source, Ty::obj_name(owner))
-                    .into_iter()
-                    .map(|(inherited, _, _)| inherited)
-            })
-            .filter_map(|owner| {
-                source.classifier(owner).and_then(|class| {
-                    class
-                        .companion_object
-                        .as_ref()
-                        .map(|(_, companion)| *companion)
-                })
-            })
-            .collect::<Vec<_>>();
-        for companion in companions {
-            let ty = Ty::obj_name(companion);
-            if !receivers.iter().any(|receiver| receiver.ty == ty) {
-                receivers.push(ImplicitReceiver {
-                    ty,
-                    declared_ty: ty,
-                    identity: (0, receivers.len()),
-                    extension_receiver: None,
-                    class_receiver: false,
-                    current: false,
-                    receiver_depth: usize::MAX,
-                });
-            }
-        }
-        receivers
+        receiver_tower::declared_receivers(self, scope)
     }
 
     fn implicit_receiver_types(&self, scope: &CheckerScope<'_>) -> Vec<Ty> {
@@ -47295,14 +47165,11 @@ impl<'a> Checker<'a> {
     /// checked independently from its lexical construction expression. Capture discovery already
     /// selected the exact receiver coordinate; this projects only its source label back into the
     /// transient checker stack. The checked FIR keeps the coordinate, never this spelling.
-    fn body_class_captured_receiver_labels(
-        &mut self,
-        declaration: DeclId,
-    ) -> Vec<(String, Ty, bool)> {
+    fn body_class_captured_receiver_labels(&mut self, declaration: DeclId) -> Vec<ReceiverLabel> {
         let captures = self.body_class_storage_captures(declaration);
         let mut labels = Vec::new();
         for capture in captures {
-            let AnonymousObjectCaptureSource::ImplicitReceiver { current, depth } = capture.source
+            let AnonymousObjectCaptureSource::ImplicitReceiver { depth, .. } = capture.source
             else {
                 continue;
             };
@@ -47310,35 +47177,30 @@ impl<'a> Checker<'a> {
                 continue;
             };
             let label = receiver_label.into_string();
-            let coordinate = if current { 0 } else { depth as usize };
-            let existing_index =
-                self.this_labels
-                    .len()
-                    .checked_sub(coordinate + 1)
-                    .filter(|index| {
-                        self.this_labels
-                            .get(*index)
-                            .is_some_and(|(candidate, _, is_class)| {
-                                !*is_class && candidate == &label
-                            })
-                    });
+            let role = capture
+                .receiver_role
+                .expect("a captured non-class receiver has recorded declaration provenance");
+            let existing_index = self
+                .this_labels
+                .iter()
+                .position(|(_, _, is_class, recorded)| !*is_class && *recorded == Some(role));
             if let Some(index) = existing_index {
                 // A postponed contextual probe may temporarily publish `Pending` on the live
                 // lambda receiver. Capture discovery already retained its exact symbolic
-                // receiver; repair the same lexical coordinate instead of inserting a second
+                // receiver; repair that exact declaration role instead of inserting a second
                 // rung that would change receiver depth.
                 if self.this_labels[index].1.mentions_pending() && !capture.ty.mentions_pending() {
                     self.this_labels[index].1 = capture.ty;
                 }
                 continue;
             }
-            labels.push((depth, label, capture.ty));
+            labels.push((depth, label, capture.ty, capture.receiver_role));
         }
         // `this_labels` is outermost-first, while capture depths are nearest-first.
-        labels.sort_by_key(|(depth, _, _)| std::cmp::Reverse(*depth));
+        labels.sort_by_key(|(depth, _, _, _)| std::cmp::Reverse(*depth));
         labels
             .into_iter()
-            .map(|(_, label, ty)| (label, ty, false))
+            .map(|(_, label, ty, role)| (label, ty, false, role))
             .collect()
     }
 
@@ -47349,7 +47211,7 @@ impl<'a> Checker<'a> {
         &self,
         class: &ClassDecl,
         current: Option<Ty>,
-    ) -> Vec<(String, Ty, bool)> {
+    ) -> Vec<ReceiverLabel> {
         let source = self.fed_source();
         let mut owners = Vec::new();
         let mut outer = current
@@ -47390,6 +47252,7 @@ impl<'a> Checker<'a> {
                     owner.nested_segment_ref().to_owned(),
                     Ty::obj_args_name(owner, &arguments),
                     true,
+                    None,
                 ))
             })
             .collect::<Vec<_>>();
@@ -47398,12 +47261,12 @@ impl<'a> Checker<'a> {
             if let Some(label) = labels
                 .iter_mut()
                 .rev()
-                .find(|(_, candidate, _)| *candidate == receiver)
+                .find(|(_, candidate, _, _)| *candidate == receiver)
             {
                 label.0 = entry.name.clone();
                 label.2 = false;
             } else {
-                labels.push((entry.name.clone(), receiver, false));
+                labels.push((entry.name.clone(), receiver, false, None));
             }
         }
         if let Some(current) = current {
@@ -47411,6 +47274,7 @@ impl<'a> Checker<'a> {
                 class_declaration_label(&class.name).to_owned(),
                 current,
                 true,
+                None,
             ));
         }
         labels
@@ -49435,6 +49299,7 @@ impl<'a> Checker<'a> {
             .map(|companion| companion.1)?;
         let singleton = self.classifier_singleton_value(companion)?;
         let receiver = ImplicitReceiver {
+            receiver_role: None,
             ty: Ty::obj_name(singleton.classifier),
             declared_ty: Ty::obj_name(singleton.classifier),
             identity: (0, 0),
@@ -49454,8 +49319,8 @@ impl<'a> Checker<'a> {
             .this_labels
             .iter()
             .rev()
-            .filter(|(_, _, is_class)| *is_class)
-            .filter_map(|(_, receiver, _)| receiver.obj_internal())
+            .filter(|(_, _, is_class, _)| *is_class)
+            .filter_map(|(_, receiver, _, _)| receiver.obj_internal())
             .chain(self.lexical_class_context.iter().copied());
         let source = self.fed_source();
         let mut classes = Vec::new();
@@ -52317,7 +52182,12 @@ impl<'a> Checker<'a> {
         if let Some(recv_ref) = &f.receiver {
             let recv_ty = extension_receiver.expect("receiver was resolved");
             if companion_classifier.is_none() {
-                self.this_labels.push((f.name.clone(), recv_ty, false));
+                self.this_labels.push((
+                    f.name.clone(),
+                    recv_ty,
+                    false,
+                    Some(ReceiverDeclarationRole::Extension(recv_ref.span)),
+                ));
                 let label_index = self.this_labels.len() - 1;
                 self.extension_receiver_labels
                     .push((label_index, recv_ref.span));
@@ -52741,7 +52611,14 @@ impl<'a> Checker<'a> {
                 self.declare_context_parameter(scope, &parameter.name, parameter_type);
             }
             if let Some(rt) = value_receiver {
-                self.this_labels.push((p.name.clone(), rt, false));
+                self.this_labels.push((
+                    p.name.clone(),
+                    rt,
+                    false,
+                    Some(ReceiverDeclarationRole::Extension(
+                        p.receiver.as_ref().expect("receiver was resolved").span,
+                    )),
+                ));
                 let label_index = self.this_labels.len() - 1;
                 let receiver_span = p.receiver.as_ref().expect("receiver was resolved").span;
                 self.extension_receiver_labels
@@ -53905,8 +53782,8 @@ impl<'a> Checker<'a> {
                             self.this_labels
                                 .iter()
                                 .rev()
-                                .filter(|(_, _, is_class)| *is_class)
-                                .map(|(_, ty, _)| *ty),
+                                .filter(|(_, _, is_class, _)| *is_class)
+                                .map(|(_, ty, _, _)| *ty),
                         )
                         .filter_map(|receiver| {
                             let owner = receiver.kotlin_class_internal()?;
@@ -54500,7 +54377,7 @@ impl<'a> Checker<'a> {
                 receiver
                     .label
                     .clone()
-                    .map(|label| (label, receiver.ty, false))
+                    .map(|label| (label, receiver.ty, false, receiver.declaration_role()))
             }));
             labels.extend(self.stable_class_receiver_labels(cl, scope.this_ty()));
             let enclosing_label_depth = self.this_labels.len();
@@ -54858,7 +54735,8 @@ impl<'a> Checker<'a> {
                     }
                     let label_depth = self.this_labels.len();
                     if let Some(this_ty) = scope.this_ty() {
-                        self.this_labels.push((entry.name.clone(), this_ty, false));
+                        self.this_labels
+                            .push((entry.name.clone(), this_ty, false, None));
                     }
                     let entry_receiver = scope
                         .this_ty()
@@ -55043,7 +54921,14 @@ impl<'a> Checker<'a> {
                         if let (Some(receiver), Some(reference)) =
                             (extension_receiver, bp.receiver.as_ref())
                         {
-                            self.this_labels.push((bp.name.clone(), receiver, false));
+                            self.this_labels.push((
+                                bp.name.clone(),
+                                receiver,
+                                false,
+                                Some(ReceiverDeclarationRole::Extension(
+                                    bp.receiver.as_ref().expect("receiver was resolved").span,
+                                )),
+                            ));
                             let label_index = self.this_labels.len() - 1;
                             self.extension_receiver_labels
                                 .push((label_index, reference.span));
@@ -55466,11 +55351,11 @@ impl<'a> Checker<'a> {
                         Ty::obj_name(owner),
                     )
                 });
-                let delegation_scope = scope.child(ScopeKind::Function {
-                    receiver: static_this
+                let delegation_scope = scope.singleton_receiver_child(
+                    static_this
                         .as_ref()
                         .map(|instance| Ty::obj_name(instance.companion)),
-                });
+                );
                 let delegation_scope = &delegation_scope;
                 let previous_static_this =
                     std::mem::replace(&mut self.static_companion_this, static_this);
@@ -55687,8 +55572,8 @@ impl<'a> Checker<'a> {
                     current_owner.and_then(|owner| self.direct_superclass_name(owner)),
                 );
                 {
-                    let header_scope = scope.child(ScopeKind::Function {
-                        receiver: singleton_this
+                    let header_scope = scope.singleton_receiver_child(
+                        singleton_this
                             .as_ref()
                             .map(|instance| Ty::obj_name(instance.classifier))
                             .or_else(|| {
@@ -55696,7 +55581,7 @@ impl<'a> Checker<'a> {
                                     .as_ref()
                                     .map(|instance| Ty::obj_name(instance.companion))
                             }),
-                    });
+                    );
                     let header_scope = &header_scope;
                     let previous_static_this =
                         std::mem::replace(&mut self.static_companion_this, static_this);
@@ -56236,7 +56121,14 @@ impl<'a> Checker<'a> {
                     let dispatch_extension_receiver = self.this_extension_receiver;
                     let outer_symbolic_signature_inference = self.symbolic_signature_inference;
                     if let Some(receiver) = extension_receiver {
-                        self.this_labels.push((bp.name.clone(), receiver, false));
+                        self.this_labels.push((
+                            bp.name.clone(),
+                            receiver,
+                            false,
+                            Some(ReceiverDeclarationRole::Extension(
+                                bp.receiver.as_ref().expect("receiver was resolved").span,
+                            )),
+                        ));
                         let label_index = self.this_labels.len() - 1;
                         let receiver_span =
                             bp.receiver.as_ref().expect("receiver was resolved").span;
@@ -56427,11 +56319,11 @@ impl<'a> Checker<'a> {
                     Ty::obj_name(owner),
                 )
             });
-            let entry_scope = scope.child(ScopeKind::Function {
-                receiver: static_this
+            let entry_scope = scope.singleton_receiver_child(
+                static_this
                     .as_ref()
                     .map(|instance| Ty::obj_name(instance.companion)),
-            });
+            );
             let scope = &entry_scope;
             let previous_static_this =
                 std::mem::replace(&mut self.static_companion_this, static_this);
@@ -56685,7 +56577,14 @@ impl<'a> Checker<'a> {
         });
         if let Some(recv_ref) = &f.receiver {
             let receiver = extension_receiver.expect("receiver was resolved");
-            self.this_labels.push((f.name.clone(), receiver, false));
+            self.this_labels.push((
+                f.name.clone(),
+                receiver,
+                false,
+                Some(ReceiverDeclarationRole::Extension(
+                    f.receiver.as_ref().expect("receiver was resolved").span,
+                )),
+            ));
             let label_index = self.this_labels.len() - 1;
             self.extension_receiver_labels
                 .push((label_index, recv_ref.span));
@@ -61481,7 +61380,7 @@ impl<'a> Checker<'a> {
                                 && self.static_companion_this.is_none()
                                 && self.static_singleton_this.is_none()
                                 && self.this_labels.last().is_some_and(
-                                    |(_, receiver, is_class)| *is_class && *receiver == t,
+                                    |(_, receiver, is_class, _)| *is_class && *receiver == t,
                                 ) =>
                         {
                             self.diags.error(
@@ -61547,7 +61446,7 @@ impl<'a> Checker<'a> {
             // nonexistent bare `this`.
             Expr::Name(n) if n.starts_with("this@") => {
                 let label = &n["this@".len()..];
-                match self.this_labels.iter().rposition(|(l, _, _)| l == label) {
+                match self.this_labels.iter().rposition(|(l, _, _, _)| l == label) {
                     Some(idx) => {
                         let ty = self.this_labels[idx].1;
                         let top = self.this_labels.len() - 1;
@@ -61558,40 +61457,44 @@ impl<'a> Checker<'a> {
                             .rev()
                             .find_map(|(index, span)| (*index == idx).then_some(*span));
                         let semantic_receivers = self.implicit_receivers(scope);
+                        let receiver_role = self.this_labels[idx].3;
                         // Named context parameters occupy receiver-tower rungs but do not enter the
                         // `this@label` stack. Therefore label ordinal is not a receiver depth. Bind
                         // extension/receiver-lambda labels through their exact declaration identity;
                         // only class labels, which have no source receiver declaration, use the
                         // structural label depth completed by `implicit_receivers`.
-                        let receiver = extension_declaration
-                            .and_then(|declaration| {
-                                semantic_receivers.iter().find(|receiver| {
-                                    receiver.extension_receiver == Some(declaration)
+                        let receiver = match receiver_role {
+                            Some(role) => semantic_receivers
+                                .iter()
+                                .find(|receiver| receiver.receiver_role == Some(role)),
+                            None => semantic_receivers
+                                .iter()
+                                .find(|receiver| {
+                                    self.this_labels[idx].2
+                                        && receiver.identity == receiver_label_identity(idx)
                                 })
-                            })
-                            .or_else(|| {
-                                self.this_labels[idx].2.then(|| {
+                                .or_else(|| {
                                     semantic_receivers.iter().find(|receiver| {
-                                        receiver.identity == receiver_label_identity(idx)
-                                    })
-                                })?
-                            })
-                            .or_else(|| {
-                                self.this_labels[idx].2.then(|| {
-                                    semantic_receivers.iter().find(|receiver| {
-                                        receiver.class_receiver
+                                        self.this_labels[idx].2
+                                            && receiver.class_receiver
                                             && receiver.ty.canonical_semantic()
                                                 == ty.canonical_semantic()
                                     })
-                                })?
-                            })
-                            .or_else(|| {
-                                semantic_receivers
-                                    .iter()
-                                    .find(|receiver| receiver.receiver_depth == label_depth)
-                            })
-                            .copied()
-                            .unwrap_or(ImplicitReceiver {
+                                })
+                                .or_else(|| {
+                                    semantic_receivers
+                                        .iter()
+                                        .find(|receiver| receiver.receiver_depth == label_depth)
+                                }),
+                        }
+                        .copied();
+                        let receiver = match (receiver, receiver_role) {
+                            (Some(receiver), _) => receiver,
+                            (None, Some(_)) => panic!(
+                                "a recorded labeled receiver remains in its declaration's tower"
+                            ),
+                            (None, None) => ImplicitReceiver {
+                                receiver_role: None,
                                 ty,
                                 declared_ty: ty,
                                 identity: (0, label_depth),
@@ -61599,7 +61502,8 @@ impl<'a> Checker<'a> {
                                 class_receiver: self.this_labels[idx].2,
                                 current: idx == top,
                                 receiver_depth: label_depth,
-                            });
+                            },
+                        };
                         self.mark_implicit_receiver_selection(e, receiver);
                         if idx == top {
                             self.expr_lowers.insert(e, ExprLowering::LabeledThisInner);
@@ -62840,7 +62744,7 @@ impl<'a> Checker<'a> {
                 .this_labels
                 .iter()
                 .rev()
-                .map(|(_, ty, _)| *ty)
+                .map(|(_, ty, _, _)| *ty)
                 .collect();
             return tower.into_iter().find_map(|dispatch| {
                 (dispatch != Ty::Error && !dispatch.mentions_pending())
@@ -62925,7 +62829,7 @@ impl<'a> Checker<'a> {
                     .this_labels
                     .iter()
                     .rev()
-                    .map(|(_, ty, _)| *ty)
+                    .map(|(_, ty, _, _)| *ty)
                     .collect();
                 if let Some(ty) = tower
                     .into_iter()
@@ -62976,7 +62880,7 @@ impl<'a> Checker<'a> {
                     .this_labels
                     .iter()
                     .rev()
-                    .map(|(_, ty, _)| *ty)
+                    .map(|(_, ty, _, _)| *ty)
                     .collect();
                 tower
                     .into_iter()
@@ -63758,7 +63662,7 @@ impl<'a> Checker<'a> {
                             .this_labels
                             .iter()
                             .rev()
-                            .map(|(_, ty, _)| *ty)
+                            .map(|(_, ty, _, _)| *ty)
                             .collect();
                         let answered = tower.into_iter().find_map(|receiver| {
                             (receiver != Ty::Error && !receiver.mentions_pending())
@@ -69743,6 +69647,7 @@ impl<'a> Checker<'a> {
             }
             let prev_extension_receiver = self.this_extension_receiver;
             let labels_depth = self.this_labels.len();
+            let lambda_expression = self.span(e);
             let receiver_context_types = context_types
                 .get(named_context_count.min(context_types.len())..)
                 .unwrap_or_default();
@@ -69750,12 +69655,37 @@ impl<'a> Checker<'a> {
             implicit_types.extend(extension_receiver);
             if let Some((&current, outer)) = implicit_types.split_last() {
                 for (index, receiver) in outer.iter().enumerate() {
-                    self.this_labels
-                        .push((format!("$context{index}"), *receiver, false));
+                    self.this_labels.push((
+                        format!("$context{index}"),
+                        *receiver,
+                        false,
+                        Some(ReceiverDeclarationRole::Lambda {
+                            expression: lambda_expression,
+                            slot: LambdaReceiverSlot::Context(
+                                u32::try_from(named_context_count + index)
+                                    .expect("too many lambda context parameters"),
+                            ),
+                        }),
+                    ));
                 }
                 self.this_extension_receiver = None;
                 if let Some(label) = receiver_label {
-                    self.this_labels.push((label.to_string(), current, false));
+                    self.this_labels.push((
+                        label.to_string(),
+                        current,
+                        false,
+                        Some(ReceiverDeclarationRole::Lambda {
+                            expression: lambda_expression,
+                            slot: if extension_receiver.is_some() {
+                                LambdaReceiverSlot::Extension
+                            } else {
+                                LambdaReceiverSlot::Context(
+                                    u32::try_from(context_types.len() - 1)
+                                        .expect("too many lambda context parameters"),
+                                )
+                            },
+                        }),
+                    ));
                 }
             }
             let bret = {
@@ -69779,6 +69709,7 @@ impl<'a> Checker<'a> {
                 .then(|| receiver_context_types.to_vec());
                 let lambda_scope = scope
                     .function_child(current_receiver, current_receiver_name, &outer_receivers)
+                    .with_lambda_expression(lambda_expression)
                     .with_lambda_label(receiver_label.map(str::to_string))
                     .with_current_receiver_context(current_context);
                 let scope = &lambda_scope;

@@ -54,6 +54,9 @@ pub struct AnonymousObjectCapture {
     /// and for an enclosing class instance. Two classifiers that capture the same rung share it;
     /// the callable or lambda label is not this identity.
     pub(crate) receiver_capture: Option<u32>,
+    /// Stable declaration/classifier role used to find the same semantic receiver after a scope
+    /// rebuild. Enclosing instances carry a role but deliberately have no closure id above.
+    pub(crate) receiver_role: Option<super::ReceiverDeclarationRole>,
 }
 
 impl AnonymousObjectCapture {
@@ -138,7 +141,7 @@ impl Checker<'_> {
             .rev()
             .find(|(_, candidate)| *candidate == declaration)
             .expect("an extension callable's receiver is labeled while its body is checked");
-        let (label, _, _) = &self.this_labels[*index];
+        let (label, _, _, _) = &self.this_labels[*index];
         FirCapturedReceiver::Callable(label.clone().into_boxed_str())
     }
 }
@@ -159,8 +162,21 @@ pub(super) struct AnonymousCaptureCandidate {
     /// Exact live checker-scope identity when this candidate is a receiver. It exists only long
     /// enough to project a direct nested anonymous object's use onto this class's capture field.
     pub(super) receiver_identity: Option<(usize, usize)>,
-    /// Closure identity assigned from `receiver_identity`. This is the coordinate checked FIR keeps.
+    /// Closure identity assigned from the recorded declaration role, not the transient scope.
     pub(super) receiver_capture: Option<u32>,
+    pub(super) receiver_role: Option<super::ReceiverDeclarationRole>,
+}
+
+fn receiver_capture_source(
+    class_receiver: bool,
+    current: bool,
+    depth: u32,
+) -> AnonymousObjectCaptureSource {
+    if class_receiver {
+        AnonymousObjectCaptureSource::EnclosingInstance { current, depth }
+    } else {
+        AnonymousObjectCaptureSource::ImplicitReceiver { current, depth }
+    }
 }
 
 impl Checker<'_> {
@@ -201,7 +217,6 @@ impl Checker<'_> {
         &mut self,
         scope: &CheckerScope<'_>,
     ) -> Vec<ObservedReceiverCapture> {
-        let innermost_class = scope.innermost_class_receiver_identity();
         let mut class_receiver_ordinal = 0usize;
         let implicit_receivers = self.implicit_receivers(scope);
         implicit_receivers
@@ -220,7 +235,7 @@ impl Checker<'_> {
                             .iter()
                             .enumerate()
                             .rev()
-                            .filter(|(_, (_, _, is_class))| *is_class)
+                            .filter(|(_, (_, _, is_class, _))| *is_class)
                             .nth(ordinal)
                             .map(|(index, _)| super::receiver_label_identity(index))
                     })
@@ -230,23 +245,16 @@ impl Checker<'_> {
                     .len()
                     .checked_sub(receiver.receiver_depth + 1)
                     .and_then(|index| self.this_labels.get(index))
-                    .filter(|(_, _, is_class)| !*is_class)
-                    .map(|(label, _, _)| label.clone().into_boxed_str());
-                let source = if innermost_class == Some(receiver.identity) {
-                    AnonymousObjectCaptureSource::EnclosingInstance {
-                        current: receiver.current,
-                        depth: u32::try_from(receiver.receiver_depth)
-                            .expect("too many implicit receiver rungs"),
-                    }
-                } else {
-                    AnonymousObjectCaptureSource::ImplicitReceiver {
-                        current: receiver.current,
-                        depth: u32::try_from(receiver.receiver_depth)
-                            .expect("too many implicit receiver rungs"),
-                    }
-                };
-                let receiver_capture =
-                    self.implicit_receiver_capture_id(receiver.class_receiver, receiver.identity);
+                    .filter(|(_, _, is_class, _)| !*is_class)
+                    .map(|(label, _, _, _)| label.clone().into_boxed_str());
+                let source = receiver_capture_source(
+                    receiver.class_receiver,
+                    receiver.current,
+                    u32::try_from(receiver.receiver_depth)
+                        .expect("too many implicit receiver rungs"),
+                );
+                let receiver_capture = self
+                    .implicit_receiver_capture_id(receiver.class_receiver, receiver.receiver_role);
                 let capture = AnonymousObjectCapture {
                     name: if matches!(
                         source,
@@ -290,6 +298,7 @@ impl Checker<'_> {
                     lexical_shadow_depth: 0,
                     capture_dependency: None,
                     receiver_capture,
+                    receiver_role: receiver.receiver_role,
                 };
                 let mut identities = vec![receiver.identity];
                 if let Some(identity) = class_label_identity {
@@ -338,8 +347,12 @@ fn merge_local_receiver_capture(
         .iter_mut()
         .find(|existing| existing.source == candidate.source)
     {
-        if existing.receiver_capture.is_none() {
+        if existing.receiver_role.is_none() && candidate.receiver_role.is_some() {
             existing.receiver_capture = candidate.receiver_capture;
+            existing.receiver_role = candidate.receiver_role;
+        } else if candidate.receiver_role.is_some() {
+            assert_eq!(existing.receiver_capture, candidate.receiver_capture);
+            assert_eq!(existing.receiver_role, candidate.receiver_role);
         }
         return;
     }
@@ -363,9 +376,9 @@ impl Checker<'_> {
     }
 
     /// Refresh a prior proven receiver from this declaration's current lexical inventory. Source
-    /// coordinates can change when constructor/default scopes are rebuilt: a published receiver
-    /// identity owns the remap. Only captures without that identity correlate by same-declaration
-    /// coordinate; cross-class joins always use their independently published receiver identity.
+    /// coordinates can change when constructor/default scopes are rebuilt: the recorded receiver
+    /// declaration role owns the remap. Enclosing instances use their stable classifier role and
+    /// remain outside the closure-id namespace.
     pub(super) fn restore_proven_local_receiver_captures(
         &self,
         established: &mut LocalClassCaptureInventory,
@@ -373,14 +386,20 @@ impl Checker<'_> {
         captures: &mut Vec<AnonymousObjectCapture>,
         bindings: &mut Vec<Option<u32>>,
     ) {
+        let established_finalized = established.finalized;
         for prior in &mut established.captures {
-            if !matches!(
+            let declaration_owned_receiver = matches!(
                 prior.source,
                 AnonymousObjectCaptureSource::ImplicitReceiver { .. }
-            ) {
+            ) || (matches!(
+                prior.source,
+                AnonymousObjectCaptureSource::EnclosingInstance { .. }
+            ) && prior.receiver_role.is_some());
+            if !declaration_owned_receiver {
                 continue;
             }
-            let current = refreshed_local_receiver_capture(prior, candidates);
+            let current =
+                refreshed_local_receiver_capture(prior, candidates, established_finalized);
             // The proof remains declaration-owned, but its source operand belongs to this visit's
             // reconstructed tower. Keep established exact types for pending-type reconciliation.
             prior.source = current.source;
@@ -453,6 +472,7 @@ impl Checker<'_> {
                 matches!(
                     capture.source,
                     AnonymousObjectCaptureSource::ImplicitReceiver { .. }
+                        | AnonymousObjectCaptureSource::EnclosingInstance { .. }
                 )
                 .then_some(capture.source)
             })
@@ -611,17 +631,42 @@ impl Checker<'_> {
 fn refreshed_local_receiver_capture(
     prior: &AnonymousObjectCapture,
     candidates: &[ObservedReceiverCapture],
+    established_finalized: bool,
 ) -> AnonymousObjectCapture {
-    let mut current = candidates
+    let role = prior
+        .receiver_role
+        .expect("a proven implicit receiver has recorded declaration provenance");
+    let Some(mut current) = candidates
         .iter()
-        .find(|candidate| match prior.receiver_capture {
-            Some(identity) => candidate.capture.receiver_capture == Some(identity),
-            None => candidate.capture.source == prior.source,
-        })
-        .expect("a proven local-class receiver remains in its declaration's lexical tower")
-        .capture
-        .clone();
-    current.receiver_capture = prior.receiver_capture;
+        .find(|candidate| candidate.capture.receiver_role == Some(role))
+        .map(|candidate| candidate.capture.clone())
+    else {
+        assert!(
+            established_finalized,
+            "a provisional local-class receiver remains in its declaration's lexical tower"
+        );
+        // A memoized revisit may not reconstruct an already-completed inline call's transient
+        // receiver scope. The finalized inventory is the authoritative checked decision from the
+        // declaration's construction site; retain that exact role, coordinate and storage source
+        // instead of matching another live receiver by depth or type.
+        return prior.clone();
+    };
+    match prior.source {
+        AnonymousObjectCaptureSource::ImplicitReceiver { .. } => {
+            let identity = prior
+                .receiver_capture
+                .expect("a proven implicit receiver has a declaration-owned capture identity");
+            assert_eq!(current.receiver_capture, Some(identity));
+        }
+        AnonymousObjectCaptureSource::EnclosingInstance { .. } => {
+            assert_eq!(prior.receiver_capture, None);
+            assert_eq!(current.receiver_capture, None);
+        }
+        AnonymousObjectCaptureSource::LexicalValue
+        | AnonymousObjectCaptureSource::ClassStorage { .. } => {
+            panic!("only receiver captures are refreshed")
+        }
+    }
     current.capture_dependency = prior.capture_dependency;
     current
 }
@@ -629,8 +674,14 @@ fn refreshed_local_receiver_capture(
 #[cfg(test)]
 mod receiver_remap_tests {
     use super::*;
+    use crate::resolve::receiver_capture_identity::ReceiverCaptureIds;
+    use crate::resolve::scope::{Scope, ScopeKind};
 
-    fn receiver(identity: u32, depth: u32) -> AnonymousObjectCapture {
+    fn receiver(
+        identity: u32,
+        role: super::super::ReceiverDeclarationRole,
+        depth: u32,
+    ) -> AnonymousObjectCapture {
         AnonymousObjectCapture {
             name: "captured".into(),
             ty: Ty::obj("CaptureToken"),
@@ -649,17 +700,50 @@ mod receiver_remap_tests {
             lexical_shadow_depth: 0,
             capture_dependency: None,
             receiver_capture: Some(identity),
+            receiver_role: Some(role),
         }
     }
 
     #[test]
     fn constructor_scope_remap_selects_identity_not_old_coordinate_or_same_type() {
-        let mut prior = receiver(7, 1);
-        prior.capture_dependency = Some(crate::fir::ClassCaptureIdentity::Receiver(7));
-        let shifted = receiver(7, 0);
+        let root: Scope<'_, ()> = Scope::root();
+        let source_lambda = crate::diag::Span { lo: 7, hi: 19 };
+        let first = root
+            .function_child(Some(Ty::obj("CaptureToken")), None, &[])
+            .with_lambda_expression(source_lambda);
+        let rebuilt = root
+            .function_child(Some(Ty::obj("CaptureToken")), None, &[])
+            .with_lambda_expression(source_lambda);
+        let shifted_scope = rebuilt.child(ScopeKind::Class {
+            ty: Ty::obj("CaptureHost"),
+            carries_outer: true,
+        });
+        let first_identity = first.implicit_receivers_with_declarations()[0].2;
+        let shifted_identity = shifted_scope.implicit_receivers_with_declarations()[1].2;
+        assert_ne!(first_identity, shifted_identity);
+        let role = first
+            .implicit_receiver_role(first_identity)
+            .expect("recorded source lambda");
+        let shifted_role = shifted_scope
+            .implicit_receiver_role(shifted_identity)
+            .expect("rebuilt source lambda");
+        let mut ids = ReceiverCaptureIds::default();
+        let prior_id = ids.id(role);
+        let shifted_id = ids.id(shifted_role);
+        let mut prior = receiver(prior_id, role, 0);
+        prior.capture_dependency = Some(crate::fir::ClassCaptureIdentity::Receiver(prior_id));
+        let shifted = receiver(shifted_id, shifted_role, 1);
+        let wrong_scope = root
+            .function_child(Some(Ty::obj("CaptureToken")), None, &[])
+            .with_lambda_expression(crate::diag::Span { lo: 20, hi: 32 });
+        let wrong_identity = wrong_scope.implicit_receivers_with_declarations()[0].2;
+        let wrong_role = wrong_scope
+            .implicit_receiver_role(wrong_identity)
+            .expect("distinct source lambda");
+        let wrong_id = ids.id(wrong_role);
         let candidates = [
             ObservedReceiverCapture {
-                capture: receiver(8, 1),
+                capture: receiver(wrong_id, wrong_role, 0),
                 uses_before: Vec::new(),
             },
             ObservedReceiverCapture {
@@ -667,12 +751,153 @@ mod receiver_remap_tests {
                 uses_before: Vec::new(),
             },
         ];
-        let current = refreshed_local_receiver_capture(&prior, &candidates);
-        assert_eq!(current.receiver_capture, Some(7));
+        let current = refreshed_local_receiver_capture(&prior, &candidates, false);
+        assert_eq!(current.receiver_capture, Some(prior_id));
+        assert_eq!(current.receiver_role, Some(role));
         assert_eq!(current.source, shifted.source);
         assert_eq!(current.semantic_receiver, shifted.semantic_receiver);
         assert_eq!(current.capture_dependency, prior.capture_dependency);
         assert_eq!(current.ty, shifted.ty);
+    }
+
+    #[test]
+    fn a_coordinate_without_receiver_provenance_cannot_remap_a_proven_selection() {
+        let role = super::super::ReceiverDeclarationRole::Lambda {
+            expression: crate::diag::Span { lo: 7, hi: 19 },
+            slot: super::super::LambdaReceiverSlot::Extension,
+        };
+        let identity = ReceiverCaptureIds::default().id(role);
+        let mut prior = receiver(identity, role, 0);
+        prior.receiver_role = None;
+        prior.receiver_capture = None;
+        let candidate = ObservedReceiverCapture {
+            capture: prior.clone(),
+            uses_before: Vec::new(),
+        };
+        let failure = std::panic::catch_unwind(|| {
+            refreshed_local_receiver_capture(&prior, &[candidate], false)
+        })
+        .expect_err("a matching old coordinate does not prove receiver identity");
+        assert_eq!(
+            failure
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| failure.downcast_ref::<&str>().copied()),
+            Some("a proven implicit receiver has recorded declaration provenance")
+        );
+    }
+
+    #[test]
+    fn every_class_receiver_rung_is_an_enclosing_instance_not_a_closure() {
+        let root: Scope<'_, ()> = Scope::root();
+        let outer = root.child(ScopeKind::Class {
+            ty: Ty::obj("CaptureOuter"),
+            carries_outer: false,
+        });
+        let inner = outer.child(ScopeKind::Class {
+            ty: Ty::obj("CaptureInner"),
+            carries_outer: true,
+        });
+        let lambda = inner
+            .function_child(Some(Ty::obj("CaptureToken")), None, &[])
+            .with_lambda_expression(crate::diag::Span { lo: 7, hi: 19 });
+        let mut ids = ReceiverCaptureIds::default();
+        let classification = lambda
+            .implicit_receivers_with_declarations()
+            .into_iter()
+            .enumerate()
+            .map(|(depth, (_, _, identity, class_receiver))| {
+                (
+                    receiver_capture_source(class_receiver, depth == 0, depth as u32),
+                    ids.capture_id(class_receiver, lambda.implicit_receiver_role(identity)),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            classification,
+            vec![
+                (
+                    AnonymousObjectCaptureSource::ImplicitReceiver {
+                        current: true,
+                        depth: 0,
+                    },
+                    Some(0),
+                ),
+                (
+                    AnonymousObjectCaptureSource::EnclosingInstance {
+                        current: false,
+                        depth: 1,
+                    },
+                    None,
+                ),
+                (
+                    AnonymousObjectCaptureSource::EnclosingInstance {
+                        current: false,
+                        depth: 2,
+                    },
+                    None,
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_proven_enclosing_instance_remaps_by_classifier_not_old_depth() {
+        let outer = crate::types::type_name("test/CaptureOuter");
+        let other = crate::types::type_name("test/OtherOuter");
+        let outer_role = super::super::ReceiverDeclarationRole::EnclosingClass(outer);
+        let other_role = super::super::ReceiverDeclarationRole::EnclosingClass(other);
+        let mut prior = receiver(0, outer_role, 1);
+        prior.source = AnonymousObjectCaptureSource::EnclosingInstance {
+            current: false,
+            depth: 1,
+        };
+        prior.semantic_receiver = Some(AnonymousObjectReceiverSource::EnclosingInstance {
+            current: false,
+            depth: 1,
+        });
+        prior.receiver_capture = None;
+        let mut wrong = prior.clone();
+        wrong.receiver_role = Some(other_role);
+        let mut shifted = prior.clone();
+        shifted.source = AnonymousObjectCaptureSource::EnclosingInstance {
+            current: false,
+            depth: 2,
+        };
+        shifted.semantic_receiver = Some(AnonymousObjectReceiverSource::EnclosingInstance {
+            current: false,
+            depth: 2,
+        });
+        let current = refreshed_local_receiver_capture(
+            &prior,
+            &[
+                ObservedReceiverCapture {
+                    capture: wrong,
+                    uses_before: Vec::new(),
+                },
+                ObservedReceiverCapture {
+                    capture: shifted.clone(),
+                    uses_before: Vec::new(),
+                },
+            ],
+            false,
+        );
+        assert_eq!(current.receiver_role, Some(outer_role));
+        assert_eq!(current.source, shifted.source);
+        assert_eq!(current.receiver_capture, None);
+    }
+
+    #[test]
+    fn a_finalized_receiver_survives_a_memoized_visit_without_transient_candidates() {
+        let role = super::super::ReceiverDeclarationRole::Lambda {
+            expression: crate::diag::Span { lo: 7, hi: 19 },
+            slot: super::super::LambdaReceiverSlot::Extension,
+        };
+        let identity = ReceiverCaptureIds::default().id(role);
+        let mut prior = receiver(identity, role, 1);
+        prior.capture_dependency = Some(crate::fir::ClassCaptureIdentity::Receiver(identity));
+
+        assert_eq!(refreshed_local_receiver_capture(&prior, &[], true), prior);
     }
 }
 
@@ -869,6 +1094,7 @@ pub(super) fn record_anonymous_construction_captures(
             lexical_shadow_depth: 0,
             capture_dependency: None,
             receiver_capture: candidate.receiver_capture,
+            receiver_role: candidate.receiver_role,
         })
         .collect::<Vec<_>>();
     crate::trace_compiler!(

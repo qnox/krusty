@@ -600,6 +600,21 @@ fun localSetter() {
         }
     }
 }
+class CaptureOuter(val text: String) {
+    fun read(): String {
+        var answer = "missing enclosing instance"
+        val sink = collectCaptured {
+            class Local {
+                fun probe(): String {
+                    remember(CaptureToken("seen"))
+                    return this@CaptureOuter.text
+                }
+            }
+            answer = Local().probe()
+        }
+        return if (sink.count == 1) answer else "missing receiver"
+    }
+}
 fun box(): String {
     anonymousMethod()
     localMethod()
@@ -611,7 +626,7 @@ fun box(): String {
         Used().probe()
         Unused()
     }
-    return if (sink.count == 1) "OK" else "missing receiver"
+    return if (sink.count == 1) CaptureOuter("OK").read() else "missing receiver"
 }
 "#;
 
@@ -627,6 +642,17 @@ fn local_constructor_init_lambda_keeps_its_revisited_receiver_like_kotlinc() {
         r#"
 inline fun <T, R> T.inCaptureRegion(action: T.() -> R): R = action()
 fun dispatchCapture(action: () -> Unit) { action() }
+class CaptureAnonymousOwner(value: String) {
+    var result: String = "missing anonymous capture"
+    init {
+        inCaptureRegion {
+            object {
+                init { dispatchCapture { completed(value) } }
+            }
+        }
+    }
+    fun completed(value: String) { this.result = value }
+}
 class CaptureOwner(result: String) {
     var result: String = "OK"
     init {
@@ -648,8 +674,35 @@ class CaptureOwner(result: String) {
     }
     fun completed(value: String) { this.result = value }
 }
-fun box(): String = CaptureOwner("OK").result
+fun box(): String {
+    val anonymous = CaptureAnonymousOwner("OK").result
+    if (anonymous != "OK") return anonymous
+    return CaptureOwner("OK").result
+}
 "#,
         "ConstructorInitReceiverRemap",
+    );
+}
+
+#[test]
+fn an_inner_class_of_a_local_class_uses_each_exact_enclosing_classifier() {
+    common::expect_box_same_as_kotlinc(
+        r#"
+class CaptureTree {
+    val root = 1
+    fun total(): Int {
+        class CaptureBranch {
+            val branch = 2
+            inner class CaptureLeaf {
+                val leaf = 3
+                fun total() = this@CaptureTree.root + this@CaptureBranch.branch + this.leaf
+            }
+        }
+        return CaptureBranch().CaptureLeaf().total()
+    }
+}
+fun box(): String = if (CaptureTree().total() == 6) "OK" else "wrong enclosing receiver"
+"#,
+        "LocalInnerReceiverIdentity",
     );
 }
