@@ -8807,7 +8807,7 @@ Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodType;Ljava/lang/invoke/Meth
 Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/CallSite;";
 
 /// The boxed (wrapper) descriptor for a `Ty` — primitives map to their wrapper, references unchanged.
-fn boxed_descriptor(t: Ty) -> String {
+pub(super) fn boxed_descriptor(t: Ty) -> String {
     if t.non_null().is_unsigned() {
         let owner = t
             .non_null()

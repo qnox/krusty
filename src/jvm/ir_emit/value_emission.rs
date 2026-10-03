@@ -9,12 +9,12 @@ use crate::jvm::value_classes::instance_representation;
 use crate::types::Ty;
 
 use super::{
-    access_bridges, array_jvm_element, bottom_values, boxed_descriptor, boxes_sam_result,
-    bytecode_inline_call, class_ctor_jvm_tys, constant_emission, constructor_accessors,
-    declared_jvm_interface, default_mask_bit, default_mask_count, descriptor_is_reference,
-    emit_box_impl, emit_constructor_default_arguments, instance_field_jvm_name, ir_ty_to_jvm,
-    jvm_declared_ty, jvm_function_interface, jvm_function_invoke_descriptor, jvm_function_params,
-    jvm_tys, lambda_class, lambda_class_names, load, mapped_builtin_virtual_name, method_defaults,
+    access_bridges, array_jvm_element, bottom_values, boxed_descriptor, bytecode_inline_call,
+    class_ctor_jvm_tys, constant_emission, constructor_accessors, declared_jvm_interface,
+    default_mask_bit, default_mask_count, descriptor_is_reference, emit_box_impl,
+    emit_constructor_default_arguments, instance_field_jvm_name, ir_ty_to_jvm, jvm_declared_ty,
+    jvm_function_interface, jvm_function_invoke_descriptor, jvm_function_params, jvm_tys,
+    lambda_class, lambda_class_names, load, mapped_builtin_virtual_name, method_defaults,
     native_unsigned_impl_target, parse_descriptor_params, physical_call_result_words,
     prim_newarray_atype, push_zero, ref_class, singleton_instance_load, slot_words, try_emission,
     ty_from_descriptor_ret, vararg, JvmDefaultMode, LambdaClassPlan, LambdaMode, PropertyOperation,
@@ -1462,7 +1462,6 @@ impl super::Emitter<'_> {
                 // pass keeps it; separately record only the indy realization for target-version checks.
                 self.run.used_lambdas.borrow_mut().insert(*impl_fn);
                 let function_adapter = sam.as_ref().is_some_and(|target| target.function_adapter);
-                let boxed_sam_result = sam.as_ref().is_some_and(boxes_sam_result);
                 let mut lambda_mode = self.lambda_modes.for_lambda(sam.as_ref(), *arity);
                 // This implementation executes a runtime reified operation. The common IR records
                 // that semantic requirement; the JVM realizes it as a class independently of the
@@ -1472,6 +1471,19 @@ impl super::Emitter<'_> {
                     .runtime_reified_lambda_implementations
                     .contains(impl_fn)
                 {
+                    lambda_mode = LambdaMode::Class;
+                }
+                // A bounded fun-interface slot cannot be bootstrapped when the lambda parameter
+                // erased to `Object`. Decide that here, before access flags are read, so the
+                // implementation is package-visible to the class that calls it.
+                if sam.as_ref().is_some_and(|target| {
+                    lambda_class::bounded_erasure_needs_class(
+                        self.ir,
+                        *impl_fn,
+                        target,
+                        captures.len(),
+                    )
+                }) {
                     lambda_mode = LambdaMode::Class;
                 }
                 if lambda_mode == LambdaMode::Indy {
