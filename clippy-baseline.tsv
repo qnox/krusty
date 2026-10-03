@@ -10,9 +10,12 @@
 1	src/fir_lower/constructors.rs	using `map` over `inspect`
 1	src/fir_lower/external_references.rs	this function has too many arguments (8/7)
 1	src/fir_lower/external_references.rs	unnecessary closure used to substitute value for `Option::None`
+1	src/fir_lower/inlining/escaping_lambda.rs	this function has too many arguments (11/7)
+1	src/fir_lower/local_callables.rs	this function has too many arguments (8/7)
 1	src/fir_lower/module_declarations.rs	this `if` can be collapsed into the outer `match`
 1	src/fir_lower/properties.rs	this function has too many arguments (10/7)
 1	src/fir_lower/properties.rs	this function has too many arguments (8/7)
+1	src/fir_lower/property_references.rs	this function has too many arguments (8/7)
 1	src/fir_lower/ranges.rs	returning the result of a `let` binding from a block
 1	src/fir_lower/source_calls.rs	this function has too many arguments (9/7)
 1	src/fir_lower/source_calls.rs	very complex type used. Consider factoring parts into `type` definitions
@@ -35,7 +38,6 @@
 1	src/fir/body_check/properties.rs	this function has too many arguments (8/7)
 1	src/fir/body_check/property_tests.rs	this call to `as_ref` does nothing: help: try: `arguments`
 1	src/fir/body_check/test_support.rs	the function `crate::resolve::publish_checked_local_signatures` doesn't need a mutable reference
-1	src/fir/body_work.rs	these patterns are unneeded as the `..` pattern can match those elements: help: remove them
 1	src/fir/header.rs	called `expect` on `property.init` after checking its variant with `is_some`
 1	src/fir/header.rs	this function has too many arguments (10/7)
 1	src/fir/inline_body.rs	large size difference between variants: the entire enum is at least 360 bytes
@@ -51,6 +53,7 @@
 1	src/frontend/tests/streaming.rs	using `clone` on type `ResolvedCallableHeader` which implements the `Copy` trait: help: try removing the `clone` call: `callable`
 1	src/ir/value_class_constructors.rs	redundant closure: help: replace the closure with the function itself: `&remap_ty`
 1	src/jvm/backend.rs	this function has too many arguments (8/7)
+1	src/jvm/backend.rs	this function has too many arguments (9/7)
 1	src/jvm/bytecode_passes/temporaries/null_check_folds.rs	this `if` can be collapsed into the outer `match`
 1	src/jvm/classfile/control_flow.rs	this function has too many arguments (8/7)
 1	src/jvm/classfile/stack_maps.rs	very complex type used. Consider factoring parts into `type` definitions
@@ -66,7 +69,7 @@
 1	src/jvm/method_node/stack_shape.rs	very complex type used. Consider factoring parts into `type` definitions
 1	src/jvm/ranges.rs	this function has too many arguments (8/7)
 1	src/jvm/shared_captures.rs	you seem to want to iterate on a map's keys
-1	src/jvm/suspend.rs	this function has too many arguments (8/7)
+1	src/jvm/suspend.rs	this function has too many arguments (9/7)
 1	src/jvm/suspend.rs	unneeded `return` statement
 1	src/jvm/suspend.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try dereferencing it: `*ret_ty`
 1	src/jvm/suspend.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try dereferencing it: `*target`
@@ -85,7 +88,7 @@
 1	src/plugins/mod.rs	this `map_or` can be simplified
 1	src/resolve.rs	called `expect` on `current_owner` after checking its variant with `is_some`
 1	src/resolve.rs	iterating on a map's keys
-1	src/resolve.rs	large size difference between variants: the entire enum is at least 432 bytes
+1	src/resolve.rs	large size difference between variants: the entire enum is at least 456 bytes
 1	src/resolve.rs	redundant closure: help: replace the closure with the function itself: `matches_qual`
 1	src/resolve.rs	returning the result of a `let` binding from a block
 1	src/resolve.rs	this function has too many arguments (12/7)
@@ -103,13 +106,13 @@
 1	src/resolve/interface_delegation.rs	this method chain can be written more clearly with `if .. else ..`: help: try: `if setter { Ty::Unit } else { property_type }`
 1	src/resolve/interface_delegation.rs	you are using an explicit closure for copying elements
 1	src/resolve/local_method_dependencies.rs	this `let...else` may be rewritten with the `?` operator: help: replace it with: `let (inherited, provider) = self.inherited_body_local_default_candidate(owner, candidate)?;`
-1	src/resolve/operator_calls.rs	large size difference between variants: the entire enum is at least 1208 bytes
 1	src/resolve/operator_calls.rs	this function has too many arguments (9/7)
 1	src/resolve/scope.rs	this `if` can be collapsed into the outer `match`
 1	src/resolve/scope.rs	very complex type used. Consider factoring parts into `type` definitions
 1	src/resolve/source_constructors.rs	very complex type used. Consider factoring parts into `type` definitions
 1	src/resolve/streaming_signature_bridge.rs	redundant closure: help: replace the closure with the associated function itself: `Box::<str>::from`
 1	src/resolve/streaming_signature_bridge.rs	this method chain can be written more clearly with `if .. else ..`: help: try: `if member.ret.obj_internal() == Some(owner) { member.ret.type_args() } else { Default::default() }`
+1	src/resolve/streaming_signature_bridge/demanded_source_call.rs	this function has too many arguments (8/7)
 1	src/resolve/streaming_signature_bridge/local_signatures.rs	this function has too many arguments (10/7)
 1	src/resolve/streaming_signature_bridge/local_signatures.rs	this method chain can be written more clearly with `if .. else ..`
 1	src/resolve/streaming_signature_bridge/lookups.rs	this function has too many arguments (8/7)
@@ -139,7 +142,7 @@
 2	src/fir/header.rs	this function has too many arguments (9/7)
 2	src/fir/module_symbols.rs	this method chain can be written more clearly with `if .. else ..`
 2	src/frontend/inline_preparation.rs	the function `crate::fir::check_and_dispatch_body_in_session` doesn't need a mutable reference
-2	src/jvm/ir_emit/comparison_branches.rs	this function has too many arguments (8/7)
+2	src/jvm/ir_emit/comparison_branches/mod.rs	this function has too many arguments (8/7)
 2	src/jvm/jvm_libraries.rs	using `clone` on type `SingletonDispatch` which implements the `Copy` trait: help: try removing the `clone` call: `singleton`
 2	src/resolve.rs	the `Err`-variant returned from this function is very large
 2	src/resolve.rs	this `match` can be collapsed into the outer `match`

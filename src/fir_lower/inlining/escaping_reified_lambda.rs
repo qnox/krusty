@@ -417,13 +417,15 @@ fn type_of_arguments(ir: &crate::ir::IrFile, function: u32) -> Vec<Ty> {
             continue;
         }
         if let IrExpr::Call {
-            callee: crate::ir::Callee::Intrinsic { operation, .. },
+            callee:
+                crate::ir::Callee::Intrinsic {
+                    operation: crate::ir::IrIntrinsic::TypeOf { ty },
+                    ..
+                },
             ..
         } = ir.expr(expression)
         {
-            if let crate::ir::IrIntrinsic::TypeOf { ty } = operation {
-                arguments.push(*ty);
-            }
+            arguments.push(*ty);
         }
         crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
     }
@@ -469,7 +471,7 @@ fn an_ordinary_type_parameter_keeps_one_shared_lambda() {
         .find(|function| call.contains(function))
         .expect("the call reuses the declaration lambda");
     assert!(
-        ir.specialized_functions.get(&shared).is_none(),
+        !ir.specialized_functions.contains_key(&shared),
         "an ordinary type parameter does not create a second implementation"
     );
 }
