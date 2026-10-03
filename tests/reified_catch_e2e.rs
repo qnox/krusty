@@ -5,8 +5,8 @@
 //! handler. The classpath case is the same contract for a body that was compiled ahead of its
 //! caller: the dependency keeps a mode-7 marker, and a later compilation specializes the
 //! exception table, including a forwarded `<T>` that renames the marker to the outer parameter.
-//! The same library built here is also run by kotlinc, which specializes the marker this
-//! compiler wrote.
+//! Declaration-owned default expressions use the same plan. The same library built here is also
+//! run by kotlinc, which specializes the markers this compiler wrote.
 
 use super::common;
 
@@ -27,12 +27,23 @@ fn reified_catch_uses_the_call_type_argument() {
          \x20       \"N\"\n\
          \x20   }\n\
          }\n\
+         inline fun <reified E : Throwable> defaultCatch(\n\
+         \x20   result: String = try {\n\
+         \x20       throw ParentFailure()\n\
+         \x20   } catch (ignore: E) {\n\
+         \x20       \"Y\"\n\
+         \x20   } catch (throwable: Throwable) {\n\
+         \x20       \"N\"\n\
+         \x20   }\n\
+         ): String = result\n\
          fun box(): String {\n\
          \x20   val log = evalCatch<ParentFailure> { throw Throwable() } +\n\
          \x20       evalCatch<ParentFailure> { throw ParentFailure() } +\n\
          \x20       evalCatch<ChildFailure> { throw ParentFailure() } +\n\
-         \x20       evalCatch<ChildFailure> { throw ChildFailure() }\n\
-         \x20   return if (log == \"NYNY\") \"OK\" else log\n\
+         \x20       evalCatch<ChildFailure> { throw ChildFailure() } +\n\
+         \x20       defaultCatch<ParentFailure>() +\n\
+         \x20       defaultCatch<ChildFailure>()\n\
+         \x20   return if (log == \"NYNYYN\") \"OK\" else log\n\
          }\n",
         "ReifiedCatchType",
     );
@@ -55,9 +66,25 @@ inline fun <reified E : Throwable> eval(block: () -> Nothing): String {
 }
 
 inline fun <reified T : Throwable> forward(block: () -> Nothing): String = eval<T>(block)
+
+open class DefaultParentFailure : Throwable()
+class DefaultChildFailure : DefaultParentFailure()
+
+inline fun <reified E : Throwable> defaultEval(
+    result: String = try {
+        throw DefaultParentFailure()
+    } catch (ignore: E) {
+        \"Y\"
+    } catch (throwable: Throwable) {
+        \"N\"
+    }
+): String = result
 ";
 
 const MAIN: &str = "\
+import lib.DefaultChildFailure
+import lib.DefaultParentFailure
+import lib.defaultEval
 import lib.eval
 import lib.forward
 
@@ -68,13 +95,15 @@ fun box(): String {
     val log = eval<ChildFailure> { throw ParentFailure() } +
         eval<ChildFailure> { throw ChildFailure() } +
         forward<ChildFailure> { throw ParentFailure() } +
-        forward<ChildFailure> { throw ChildFailure() }
-    return if (log == \"NYNY\") \"OK\" else log
+        forward<ChildFailure> { throw ChildFailure() } +
+        defaultEval<DefaultParentFailure>() +
+        defaultEval<DefaultChildFailure>()
+    return if (log == \"NYNYYN\") \"OK\" else log
 }
 ";
 
 #[test]
-fn a_classpath_reified_catch_specializes_including_a_forwarded_parameter() {
+fn a_classpath_reified_catch_specializes_forwarding_and_defaults() {
     assert_eq!(
         common::expect_box_run_against_ref("reified_catch_forward", LIB, MAIN).as_deref(),
         Some("OK")
@@ -82,7 +111,7 @@ fn a_classpath_reified_catch_specializes_including_a_forwarded_parameter() {
 }
 
 #[test]
-fn a_kotlinc_reified_catch_specializes_including_a_forwarded_parameter() {
+fn a_kotlinc_reified_catch_specializes_forwarding_and_defaults() {
     assert_eq!(
         common::expect_box_run_against_kotlinc(LIB, MAIN).as_deref(),
         Some("OK")
@@ -90,7 +119,7 @@ fn a_kotlinc_reified_catch_specializes_including_a_forwarded_parameter() {
 }
 
 #[test]
-fn kotlinc_specializes_a_krusty_reified_catch_including_a_forwarded_parameter() {
+fn kotlinc_specializes_a_krusty_reified_catch_forwarding_and_defaults() {
     let library = common::compile_libs("reified_catch_for_kotlinc", &[("Lib.kt", LIB)])
         .expect("krusty builds the reified catch library");
     assert_eq!(
@@ -103,6 +132,8 @@ const SPLIT_LIB: &str = "\
 // LANGUAGE: +AllowReifiedTypeInCatchClause
 package lib
 
+var cleanup = -1
+
 inline fun <reified E : Throwable> eval(which: Int, block: () -> Unit): String {
     try {
         if (which == 1) block()
@@ -112,12 +143,13 @@ inline fun <reified E : Throwable> eval(which: Int, block: () -> Unit): String {
     } catch (ignore: E) {
         return \"C\"
     } finally {
-        which.hashCode()
+        cleanup = which
     }
 }
 ";
 
 const SPLIT_MAIN: &str = "\
+import lib.cleanup
 import lib.eval
 
 open class ParentFailure : Throwable()
@@ -134,7 +166,7 @@ fun box(): String {
         }
     }
     val log = run(1, false) + run(1, true) + run(2, false) + run(2, true)
-    return log
+    return if (cleanup == 2) log else \"cleanup:$cleanup\"
 }
 ";
 
@@ -142,6 +174,7 @@ const SPLIT_SOURCE: &str = concat!(
     "// LANGUAGE: +AllowReifiedTypeInCatchClause\n",
     "open class ParentFailure : Throwable()\n",
     "class ChildFailure : ParentFailure()\n",
+    "var cleanup = -1\n",
     "inline fun <reified E : Throwable> eval(which: Int, block: () -> Unit): String {\n",
     "    try {\n",
     "        if (which == 1) block()\n",
@@ -151,7 +184,7 @@ const SPLIT_SOURCE: &str = concat!(
     "    } catch (ignore: E) {\n",
     "        return \"C\"\n",
     "    } finally {\n",
-    "        which.hashCode()\n",
+    "        cleanup = which\n",
     "    }\n",
     "}\n",
     "fun box(): String {\n",
@@ -164,7 +197,8 @@ const SPLIT_SOURCE: &str = concat!(
     "            \"N\"\n",
     "        }\n",
     "    }\n",
-    "    return run(1, false) + run(1, true) + run(2, false) + run(2, true)\n",
+    "    val log = run(1, false) + run(1, true) + run(2, false) + run(2, true)\n",
+    "    return if (cleanup == 2) log else \"cleanup:$cleanup\"\n",
     "}\n",
 );
 

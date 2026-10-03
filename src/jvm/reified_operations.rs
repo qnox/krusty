@@ -296,16 +296,9 @@ pub(super) fn realize(ir: &mut IrFile, lambdas: &super::lambda_classes::LambdaMe
     // a declaration or specialized lambda body and must not execute a reification marker.
     let parameters = collect_reified_parameters(ir);
     let functions = reified_marker_functions(ir, lambdas);
-    let bodies = functions
-        .iter()
-        .filter_map(|function| {
-            ir.functions
-                .get(*function as usize)
-                .and_then(|function| function.body)
-        })
-        .collect::<Vec<_>>();
-    for body in bodies {
-        realize_expression_dag(ir, body, &parameters);
+    let roots = marker_roots(ir, &functions);
+    for root in roots {
+        realize_expression_dag(ir, root, &parameters);
     }
     record_reified_catches(ir, &parameters, &functions);
 }
@@ -661,11 +654,26 @@ mod tests {
     }
 
     #[test]
-    fn a_default_expression_catch_is_marked_only_for_the_reified_declaration() {
+    fn a_default_expression_realizes_operations_and_catches_only_for_the_reified_declaration() {
         let identity = "E@eval";
         let mut ir = IrFile::default();
         let body = ir.add_expr(IrExpr::UnitInstance);
-        let declaration_default = reified_catch(&mut ir, identity);
+        let operand = ir.add_expr(IrExpr::GetValue(0));
+        let type_operation = ir.add_expr(IrExpr::TypeOp {
+            op: IrTypeOp::Cast,
+            arg: operand,
+            type_operand: Ty::ty_param(identity, Ty::obj("kotlin/Throwable")),
+        });
+        let class_literal = ir.add_expr(IrExpr::KClassLiteral {
+            classifier: Some(Ty::ty_param(identity, Ty::obj("kotlin/Throwable"))),
+            value: None,
+            type_argument: true,
+        });
+        let declaration_default_catch = reified_catch(&mut ir, identity);
+        let declaration_default = ir.add_expr(IrExpr::Block {
+            stmts: vec![type_operation, class_literal],
+            value: Some(declaration_default_catch),
+        });
         let other_default = reified_catch(&mut ir, identity);
         ir.functions.push(IrFunction {
             name: "eval".to_owned(),
@@ -717,8 +725,20 @@ mod tests {
 
         realize(&mut ir, &Default::default());
 
+        assert!(matches!(
+            ir.expr(type_operation),
+            IrExpr::ReifiedTypeOp { cast: true, name, .. } if name == "E"
+        ));
+        assert!(matches!(
+            ir.expr(class_literal),
+            IrExpr::ReifiedClassMarker {
+                name,
+                kclass: true,
+                ..
+            } if name == "E"
+        ));
         assert_eq!(
-            ir.reified_catch_markers.get(&declaration_default),
+            ir.reified_catch_markers.get(&declaration_default_catch),
             Some(&vec![Some("E".to_owned())])
         );
         assert!(!ir.reified_catch_markers.contains_key(&other_default));

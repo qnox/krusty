@@ -275,34 +275,46 @@ fn retarget_catch(node: &mut MethodNode, operation: usize, class: &str) -> Resul
 /// The handler label kotlinc's `ReifiedTypeInliner.processCatch` selects.
 ///
 /// The nearest preceding label is the handler when it owns a typed exception entry. A line-number
-/// label immediately followed by its `LineNumber` is not: the label before that one is.
+/// label followed only by matching line metadata is not: the label before that one is. Executable
+/// instructions and line metadata naming another label fail closed instead of broadening the search.
 fn handler_label_before(node: &MethodNode, at: usize) -> Option<LabelId> {
-    let nearest = previous_label(node, at)?;
+    let nearest = preceding_debug_label(node, at)?;
     if !typed_handler_entries(node, nearest.label).is_empty() {
         return Some(nearest.label);
     }
-    let next_is_line = matches!(node.nodes.get(nearest.index + 1), Some(Node::Line { .. }));
-    if !next_is_line {
+    if !nearest.has_line {
         return None;
     }
-    let fallback = previous_label(node, nearest.index)?;
-    (!typed_handler_entries(node, fallback.label).is_empty()).then_some(fallback.label)
+    let preceding = preceding_debug_label(node, nearest.index)?;
+    (!typed_handler_entries(node, preceding.label).is_empty()).then_some(preceding.label)
 }
 
 struct PrecedingLabel {
     index: usize,
     label: LabelId,
+    has_line: bool,
 }
 
-fn previous_label(node: &MethodNode, before: usize) -> Option<PrecedingLabel> {
+/// The label immediately preceding `before`, separated only by line metadata that names that same
+/// label. This recognizes debug layout without skipping an executable instruction.
+fn preceding_debug_label(node: &MethodNode, before: usize) -> Option<PrecedingLabel> {
     let mut index = before;
+    let mut line_starts = Vec::new();
     while index > 0 {
         index -= 1;
-        if let Node::Label(label) = &node.nodes[index] {
-            return Some(PrecedingLabel {
-                index,
-                label: *label,
-            });
+        match &node.nodes[index] {
+            Node::Line { start, .. } => line_starts.push(*start),
+            Node::Label(label) => {
+                if line_starts.iter().any(|start| start != label) {
+                    return None;
+                }
+                return Some(PrecedingLabel {
+                    index,
+                    label: *label,
+                    has_line: !line_starts.is_empty(),
+                });
+            }
+            Node::Insn(_) => return None,
         }
     }
     None
@@ -798,6 +810,47 @@ mod tests {
         let mut second = node.try_catch_blocks[0].clone();
         second.catch_type = Some("java/lang/Exception".to_owned());
         node.try_catch_blocks.insert(1, second);
+        let original = node.clone();
+
+        assert_eq!(
+            specialize(&mut node, &child_failure()),
+            Err(InlineError::MalformedReifiedMarker),
+        );
+        assert_eq!(node, original);
+    }
+
+    #[test]
+    fn executable_code_between_the_handler_metadata_and_marker_is_rejected_unchanged() {
+        let mut node = catch_handler("E");
+        node.nodes.insert(2, Node::Insn(Insn::Op(0x00)));
+        let original = node.clone();
+
+        assert_eq!(
+            specialize(&mut node, &child_failure()),
+            Err(InlineError::MalformedReifiedMarker),
+        );
+        assert_eq!(node, original);
+    }
+
+    #[test]
+    fn a_line_node_naming_the_handler_does_not_belong_to_a_separate_line_label() {
+        let mut node = catch_handler("E");
+        let line_label = node.new_label();
+        node.nodes.insert(1, Node::Label(line_label));
+        let original = node.clone();
+
+        assert_eq!(
+            specialize(&mut node, &child_failure()),
+            Err(InlineError::MalformedReifiedMarker),
+        );
+        assert_eq!(node, original);
+    }
+
+    #[test]
+    fn an_unmarked_label_between_the_handler_and_marker_is_rejected_unchanged() {
+        let mut node = catch_handler("E");
+        let unrelated = node.new_label();
+        node.nodes.insert(2, Node::Label(unrelated));
         let original = node.clone();
 
         assert_eq!(

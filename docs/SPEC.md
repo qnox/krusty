@@ -4518,11 +4518,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   semantic identity. Emission catches the parameter's bound (`Throwable`) and writes
   `Intrinsics.reifiedOperationMarker(7, "E")` as the handler's first instructions, ahead of the
   store of the exception. The plan is recorded only for the reified declaration and its lambda
-  implementations, including a catch in a declaration-owned default expression. An ordinary object
-  member that mentions the same identity is not a marker. The bytecode inliner selects the handler
-  the way kotlinc does: the nearest preceding label, or the label before that when the nearest one
-  is only a line-number label followed by its line node. Every typed exception entry of that
-  handler is retargeted when those entries name the same class, which is how a `finally` splits
+  implementations. Declaration-owned defaults are roots of that same domain, so their type
+  operations, class literals, and catches receive markers too. An ordinary object member that
+  mentions the same identity is not a marker. The bytecode inliner selects the handler
+  the way kotlinc does: the nearest preceding handler label, or the label before an optional
+  line-number label whose following line metadata names that exact label. It does not skip an
+  executable instruction, a bare unrelated label, or mismatched line metadata. Every typed
+  exception entry of that handler is retargeted when those entries name the same class, which is
+  how a `finally` splits
   one catch across disjoint ranges. Kotlinc's inliner rewrites only the first of those entries, so
   a parent thrown from a later range is still caught as the erasure when kotlinc compiles the
   call. A caller compiled here rewrites every agreeing entry. A concrete argument replaces those
