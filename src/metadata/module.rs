@@ -43,7 +43,10 @@ pub fn build_kotlin_module(packages: &[(String, Vec<String>)], version: [i32; 3]
         let mut pp = Pb::new();
         pp.field_bytes(1, pkg.as_bytes()); // package_fq_name
         let mut facades: Vec<&String> = facades.iter().collect();
-        facades.sort();
+        // ModuleMapping uses the JVM's String ordering. Rust's `str` order agrees for BMP text but
+        // not when a facade contains a supplementary-plane character: Java compares the leading
+        // surrogate before a later BMP code unit, while Rust compares Unicode scalar values.
+        facades.sort_by(|left, right| left.encode_utf16().cmp(right.encode_utf16()));
         for f in facades {
             pp.field_bytes(2, f.as_bytes()); // short_class_name
         }
@@ -159,6 +162,25 @@ mod tests {
             got, reference,
             "\n got: {:02x?}\n ref: {:02x?}",
             got, reference
+        );
+    }
+
+    #[test]
+    fn package_parts_use_jvm_utf16_order() {
+        let astral = "\u{10000}Kt";
+        let later_bmp = "\u{e000}Kt";
+        let got = build_kotlin_module(
+            &[("demo".into(), vec![later_bmp.into(), astral.into()])],
+            [2, 4, 0],
+        );
+        let position = |name: &str| {
+            got.windows(name.len())
+                .position(|window| window == name.as_bytes())
+                .expect("facade in encoded package-parts table")
+        };
+        assert!(
+            position(astral) < position(later_bmp),
+            "JVM String order compares the astral character's leading surrogate before U+E000"
         );
     }
 }
