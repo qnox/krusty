@@ -664,15 +664,15 @@ mod tests {
     #[test]
     fn narrow_unsigned_constants_render_at_their_checked_width() {
         assert_eq!(
-            rendered(FirConstant::UInt(u64::from(u32::MAX)), Ty::UByte),
+            rendered(FirConstant::UInt(i64::from(u32::MAX)), Ty::UByte),
             Some("255".to_string())
         );
         assert_eq!(
-            rendered(FirConstant::UInt(u64::from(u32::MAX)), Ty::UShort),
+            rendered(FirConstant::UInt(i64::from(u32::MAX)), Ty::UShort),
             Some("65535".to_string())
         );
         assert_eq!(
-            rendered(FirConstant::UInt(u64::from(u32::MAX)), Ty::UInt),
+            rendered(FirConstant::UInt(i64::from(u32::MAX)), Ty::UInt),
             Some("4294967295".to_string())
         );
     }

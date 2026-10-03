@@ -2777,6 +2777,9 @@ fn describe(node: &IrExpr) -> String {
             Target::FunctionValueConversion { .. } => {
                 "a reference adapting another function value".to_string()
             }
+            Target::FunctionInvoke => {
+                "a reference to a function value's `invoke` declaration".to_string()
+            }
         };
     }
     // The first two identifiers, not one: `Checked(Call { … })` and `Checked(PropertyRead { … })`
