@@ -81,6 +81,46 @@ fn rejected_candidate_argument_shape(
 }
 
 impl Checker<'_> {
+    /// Report a generic call whose contextual result constraints disagree on a formal that also
+    /// shapes a lambda argument. The call itself owns the inference failure, but each affected
+    /// lambda remains a separately diagnosed source expression and its body must still be checked
+    /// without the unavailable contextual input. This preserves the complete source-ordered
+    /// diagnostic set instead of returning after the callee error and hiding body failures.
+    pub(super) fn report_contextual_result_inference_failure(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        call: ExprId,
+        args: &[ExprId],
+        argument_parameters: Option<&[usize]>,
+        signature: &crate::libraries::GenericSig,
+        formal: &String,
+        implicit_lambda_label: Option<&str>,
+    ) {
+        let message = format!(
+            "cannot infer type for type parameter '{}'. Specify it explicitly.",
+            crate::types::type_parameter_source_name(formal)
+        );
+        self.diags
+            .error(self.call_callee_name_span(call), message.clone());
+
+        for (source, &argument) in args.iter().enumerate() {
+            let Some(parameter) = argument_parameters
+                .and_then(|parameters| parameters.get(source))
+                .and_then(|&parameter| signature.params.get(parameter))
+            else {
+                continue;
+            };
+            if !ty_mentions_param(*parameter, std::slice::from_ref(formal)) {
+                continue;
+            }
+            let Expr::Lambda { params, body } = self.file.expr(argument).clone() else {
+                continue;
+            };
+            self.diags.error(self.span(argument), message.clone());
+            self.expr_inner_lambda(scope, argument, None, params, body, implicit_lambda_label);
+        }
+    }
+
     /// Report the diagnostics owned by a lambda for which no callable supplied an expected
     /// function shape. This runs only after the scope tower is exhausted: probes remain silent,
     /// while the final rejected source form diagnoses every untyped written parameter and leaves

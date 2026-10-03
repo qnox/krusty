@@ -14698,11 +14698,12 @@ impl<'a> Checker<'a> {
                 if report_diagnostics {
                     let nullable_member_span =
                         Span::new(diagnostic_span.lo.saturating_sub(1), diagnostic_span.hi);
+                    let receiver = self.diagnostic_type_name(rt, &[rt]);
                     self.diags.error(
                         nullable_member_span,
                         format!(
                             "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type '{}'.",
-                            rt.source_name()
+                            receiver
                         ),
                     );
                 }
@@ -21340,21 +21341,22 @@ impl<'a> Checker<'a> {
                         }
                     }
                     if let Some(expected) = expected {
-                        let result_bindings = match self
-                            .contextual_lambda_result_bindings(generic, expected)
-                        {
-                            Ok(bindings) => bindings,
-                            Err(formal) => {
-                                self.diags.error(
-                                    span,
-                                    format!(
-                                        "cannot infer type for type parameter '{}'. Specify it explicitly.",
-                                        crate::types::type_parameter_source_name(&formal)
-                                    ),
-                                );
-                                return self.set(call, Ty::Error);
-                            }
-                        };
+                        let result_bindings =
+                            match self.contextual_lambda_result_bindings(generic, expected) {
+                                Ok(bindings) => bindings,
+                                Err(formal) => {
+                                    self.report_contextual_result_inference_failure(
+                                        scope,
+                                        call,
+                                        args,
+                                        known_argument_parameters.as_deref(),
+                                        generic,
+                                        &formal,
+                                        call_fn_name.as_deref(),
+                                    );
+                                    return self.set(call, Ty::Error);
+                                }
+                            };
                         for (formal, actual) in result_bindings {
                             bindings.entry(formal).or_insert(actual);
                         }
@@ -45235,11 +45237,12 @@ impl<'a> Checker<'a> {
     }
 
     fn report_nullable_receiver_call(&mut self, call: ExprId, receiver: Ty) {
+        let receiver = self.diagnostic_type_name(receiver, &[receiver]);
         self.diags.error(
             self.nullable_receiver_call_span(call),
             format!(
                 "only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type '{}'.",
-                receiver.source_name()
+                receiver
             ),
         );
     }
