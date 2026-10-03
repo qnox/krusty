@@ -4517,13 +4517,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   source spelling on that `try` — the spelling the marker carries, not a name recovered from the
   semantic identity. Emission catches the parameter's bound (`Throwable`) and writes
   `Intrinsics.reifiedOperationMarker(7, "E")` as the handler's first instructions, ahead of the
-  store of the exception. The bytecode inliner reads that marker and requires exactly one typed
-  exception-table entry for its handler. The nearest preceding label is that handler, except when
-  it is only a line-number label followed by its line node: the label before that one is the
-  handler. A concrete argument replaces that
-  entry with the argument's class and erases the marker; a forwarded parameter (`inline fun
+  store of the exception. The plan is recorded only for the reified declaration and its lambda
+  implementations, including a catch in a declaration-owned default expression. An ordinary object
+  member that mentions the same identity is not a marker. The bytecode inliner selects the handler
+  the way kotlinc does: the nearest preceding label, or the label before that when the nearest one
+  is only a line-number label followed by its line node. Every typed exception entry of that
+  handler is retargeted when those entries name the same class, which is how a `finally` splits
+  one catch across disjoint ranges. Kotlinc's inliner rewrites only the first of those entries, so
+  a parent thrown from a later range is still caught as the erasure when kotlinc compiles the
+  call. A caller compiled here rewrites every agreeing entry. A concrete argument replaces those
+  entries with the argument's class and erases the marker; a forwarded parameter (`inline fun
   <reified T> forward()` calling `eval<T>()`) renames the marker and leaves the erasure for the
-  outer caller. A missing or ambiguous handler is left unchanged. A catch-all is not that entry.
+  outer caller. A missing handler, or typed entries whose classes disagree, leaves the method
+  unchanged. A catch-all on the same label is not one of those entries.
   After FIR substitution the semantic type is already the concrete class, so emission catches that
   class and writes no marker. A thrown type outside the specialized class falls through to the
   next handler. A catch type that does not determine a JVM class is invalid IR. Tests:

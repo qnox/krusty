@@ -98,3 +98,108 @@ fn kotlinc_specializes_a_krusty_reified_catch_including_a_forwarded_parameter() 
         "OK"
     );
 }
+
+const SPLIT_LIB: &str = "\
+// LANGUAGE: +AllowReifiedTypeInCatchClause
+package lib
+
+inline fun <reified E : Throwable> eval(which: Int, block: () -> Unit): String {
+    try {
+        if (which == 1) block()
+        if (which == 0) return \"S\"
+        if (which == 2) block()
+        return \"Y\"
+    } catch (ignore: E) {
+        return \"C\"
+    } finally {
+        which.hashCode()
+    }
+}
+";
+
+const SPLIT_MAIN: &str = "\
+import lib.eval
+
+open class ParentFailure : Throwable()
+class ChildFailure : ParentFailure()
+
+fun box(): String {
+    fun run(which: Int, child: Boolean): String {
+        return try {
+            eval<ChildFailure>(which) {
+                if (child) throw ChildFailure() else throw ParentFailure()
+            }
+        } catch (throwable: Throwable) {
+            \"N\"
+        }
+    }
+    val log = run(1, false) + run(1, true) + run(2, false) + run(2, true)
+    return log
+}
+";
+
+const SPLIT_SOURCE: &str = concat!(
+    "// LANGUAGE: +AllowReifiedTypeInCatchClause\n",
+    "open class ParentFailure : Throwable()\n",
+    "class ChildFailure : ParentFailure()\n",
+    "inline fun <reified E : Throwable> eval(which: Int, block: () -> Unit): String {\n",
+    "    try {\n",
+    "        if (which == 1) block()\n",
+    "        if (which == 0) return \"S\"\n",
+    "        if (which == 2) block()\n",
+    "        return \"Y\"\n",
+    "    } catch (ignore: E) {\n",
+    "        return \"C\"\n",
+    "    } finally {\n",
+    "        which.hashCode()\n",
+    "    }\n",
+    "}\n",
+    "fun box(): String {\n",
+    "    fun run(which: Int, child: Boolean): String {\n",
+    "        return try {\n",
+    "            eval<ChildFailure>(which) {\n",
+    "                if (child) throw ChildFailure() else throw ParentFailure()\n",
+    "            }\n",
+    "        } catch (throwable: Throwable) {\n",
+    "            \"N\"\n",
+    "        }\n",
+    "    }\n",
+    "    return run(1, false) + run(1, true) + run(2, false) + run(2, true)\n",
+    "}\n",
+);
+
+/// `which == 0` returns from the middle of the `try`, so the protected region is two ranges of
+/// one handler. A caller compiled here rewrites both. Kotlinc's inliner rewrites the first typed
+/// entry only, so a parent thrown from the second range is still caught as the erasure.
+#[test]
+fn a_finally_splits_a_reified_catch_across_two_ranges() {
+    assert_eq!(
+        common::kotlinc_box_result(SPLIT_SOURCE),
+        "NCCC",
+        "kotlinc rewrites the first split range"
+    );
+    assert_eq!(
+        common::expect_box_run_with_stdlib(SPLIT_SOURCE, "ReifiedCatchFinallySplit"),
+        "NCNC",
+        "every agreeing range is the specialized class"
+    );
+}
+
+#[test]
+fn a_classpath_finally_split_retargets_every_range() {
+    assert_eq!(
+        common::expect_box_run_against_ref("reified_catch_finally_split", SPLIT_LIB, SPLIT_MAIN)
+            .as_deref(),
+        Some("NCNC")
+    );
+}
+
+#[test]
+fn kotlinc_leaves_the_later_range_of_a_krusty_finally_split() {
+    let library = common::compile_libs("reified_catch_finally_split", &[("Lib.kt", SPLIT_LIB)])
+        .expect("krusty builds the split reified catch library");
+    assert_eq!(
+        common::kotlinc_box_result_with_classpath(SPLIT_MAIN, std::slice::from_ref(&library)),
+        "NCCC"
+    );
+}

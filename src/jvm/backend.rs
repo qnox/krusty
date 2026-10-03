@@ -855,7 +855,7 @@ impl JvmBackend {
         }
         // Suspend lowering can move a catch onto a fresh `try`. Rebuild the marker plan from the
         // declaration parameters so emission names the handler that is actually written.
-        crate::jvm::reified_operations::record_catch_markers(&mut ir);
+        crate::jvm::reified_operations::record_catch_markers(&mut ir, &pass_facts.lambda_methods);
         let mut emit_opts =
             shipping_emit_options(stem, module_name, self.class_major, self.cp.clone())
                 .with_jvm_default(self.jvm_default)
