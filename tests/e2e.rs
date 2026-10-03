@@ -2058,8 +2058,6 @@ mod suspend_default_param_e2e;
 mod suspend_e2e;
 #[path = "suspend_fun_interface_e2e.rs"]
 mod suspend_fun_interface_e2e;
-#[path = "suspend_unit_receiver_e2e.rs"]
-mod suspend_unit_receiver_e2e;
 #[path = "suspend_in_try_body_hoist_e2e.rs"]
 mod suspend_in_try_body_hoist_e2e;
 #[path = "suspend_inline_collection_spill_e2e.rs"]
@@ -2120,6 +2118,8 @@ mod suspend_try_catch_shapes_e2e;
 mod suspend_try_finally_body_e2e;
 #[path = "suspend_try_finally_e2e.rs"]
 mod suspend_try_finally_e2e;
+#[path = "suspend_unit_receiver_e2e.rs"]
+mod suspend_unit_receiver_e2e;
 #[path = "suspend_unit_tail_conditional_e2e.rs"]
 mod suspend_unit_tail_conditional_e2e;
 #[path = "suspend_value_class_mangle_e2e.rs"]
