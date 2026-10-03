@@ -969,8 +969,12 @@ pub(super) fn runtime_member(
     owner: DeclarationOwner,
     name: &str,
     params: &[Ty],
+    compiler_intrinsic: Option<crate::libraries::CompilerIntrinsic>,
     semantic_role: Option<crate::libraries::SemanticCallRole>,
 ) -> Option<&'static str> {
+    if compiler_intrinsic == Some(crate::libraries::CompilerIntrinsic::NullableAnyToString) {
+        return params.is_empty().then_some("kt_to_string");
+    }
     if let Some(role) = semantic_role {
         return match (role, params) {
             (crate::libraries::SemanticCallRole::KotlinAnyToString, []) => Some("kt_to_string"),
@@ -1125,7 +1129,13 @@ mod tests {
     #[test]
     fn string_plus_has_no_name_based_runtime_fallback() {
         assert_eq!(
-            runtime_member(member("java/lang/String"), "plus", &[Ty::String], None),
+            runtime_member(
+                member("java/lang/String"),
+                "plus",
+                &[Ty::String],
+                None,
+                None
+            ),
             None,
             "String.plus is admitted only by its CompilerIntrinsic identity"
         );
@@ -1135,7 +1145,7 @@ mod tests {
     fn semantic_roles_admit_any_members_without_name_fallbacks() {
         let any = Ty::nullable(Ty::obj("kotlin/Any"));
         assert_eq!(
-            runtime_member(member("kotlin/String"), "plus", &[any], None),
+            runtime_member(member("kotlin/String"), "plus", &[any], None, None),
             None
         );
         assert_eq!(
@@ -1143,7 +1153,18 @@ mod tests {
                 member("kotlin/Int"),
                 "physicalNameDoesNotMatter",
                 &[],
+                None,
                 Some(SemanticCallRole::KotlinAnyToString)
+            ),
+            Some("kt_to_string")
+        );
+        assert_eq!(
+            runtime_member(
+                member("kotlin/Int"),
+                "physicalNameDoesNotMatter",
+                &[],
+                Some(CompilerIntrinsic::NullableAnyToString),
+                None,
             ),
             Some("kt_to_string")
         );
@@ -1152,21 +1173,22 @@ mod tests {
                 member("kotlin/Any"),
                 "physicalNameDoesNotMatter",
                 &[],
+                None,
                 Some(SemanticCallRole::KotlinAnyHashCode)
             ),
             Some("kt_hash_code")
         );
         assert_eq!(
-            runtime_member(member("kotlin/Any"), "hashCode", &[], None),
+            runtime_member(member("kotlin/Any"), "hashCode", &[], None, None),
             None,
             "a coincidental spelling has no semantic role"
         );
         assert_eq!(
-            runtime_member(member("kotlin/Any"), "equals", &[any], None),
+            runtime_member(member("kotlin/Any"), "equals", &[any], None, None),
             Some("kt_equals")
         );
         assert_eq!(
-            runtime_member(member("kotlin/String"), "repeat", &[Ty::Int], None),
+            runtime_member(member("kotlin/String"), "repeat", &[Ty::Int], None, None),
             None,
             "an unimplemented member must decline"
         );
@@ -1254,6 +1276,7 @@ mod tests {
                 "append",
                 &[Ty::array(Ty::String)],
                 None,
+                None,
             ),
             None
         );
@@ -1262,6 +1285,7 @@ mod tests {
                 member("kotlin/text/StringBuilder"),
                 "append",
                 &[Ty::String],
+                None,
                 None,
             ),
             Some("kt_string_builder_append")

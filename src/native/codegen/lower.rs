@@ -2259,6 +2259,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                             owner,
                             &name,
                             params,
+                            realization.compiler_intrinsic,
                             realization.semantic_role,
                         ) else {
                             return Err(format!(
