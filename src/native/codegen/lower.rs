@@ -1987,15 +1987,19 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         {
                             return self.float_predicate(predicate, receiver);
                         }
-                        // The member a SOURCE FORM is spelled as, asked by name instead:
+                        // The exact declaration a SOURCE FORM names, called through a reference:
                         // `(IntArray::get)(a, i)` names the declaration `a[i]` names, and
                         // `Boolean::not` the one `!b` does. The frontend supplies an operation for
                         // the form it recognizes and an ordinary dependency call for the call, and
-                        // the declaration is the same either way — so the operation is too, rather
-                        // than a member of a type the runtime has no methods for.
-                        if let Some(realized) =
-                            self.primitive_member(owner, &name, receiver, args, *ret)
-                        {
+                        // the provider intrinsic proves the declaration is the same either way, so
+                        // the operation is too rather than a member of a type the runtime has no
+                        // methods for.
+                        if let Some(realized) = self.primitive_member(
+                            realization.compiler_intrinsic,
+                            receiver,
+                            args,
+                            *ret,
+                        ) {
                             return realized;
                         }
                         // The unsigned integers: a value class the erasure made look like the
@@ -2251,9 +2255,12 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                             };
                             return self.convert(produced, Some(any()), *ret);
                         }
-                        let Some(symbol) =
-                            super::super::intrinsics::runtime_member(owner, &name, params)
-                        else {
+                        let Some(symbol) = super::super::intrinsics::runtime_member(
+                            owner,
+                            &name,
+                            params,
+                            realization.semantic_role,
+                        ) else {
                             return Err(format!(
                                 "the member `{}.{name}`",
                                 realization.physical_owner.render().replace('/', ".")
@@ -2270,6 +2277,22 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         self.runtime_call(symbol, &signature, *ret, &arguments)
                     }
                     None => {
+                        if let Some(
+                            operation @ (crate::libraries::CompilerIntrinsic::Print
+                            | crate::libraries::CompilerIntrinsic::Println),
+                        ) = realization.compiler_intrinsic
+                        {
+                            let Some(symbol) =
+                                super::super::intrinsics::console_intrinsic(operation, params)
+                            else {
+                                return Err(format!("a malformed `{operation:?}` call"));
+                            };
+                            let arguments = self.arguments(args, params)?;
+                            if self.terminated {
+                                return Ok(None);
+                            }
+                            return self.runtime_call(&symbol, params, *ret, &arguments);
+                        }
                         // `kotlin.test`'s assertions. Their operands cross as REFERENCES rather
                         // than at their own widths: `assertEquals` is generic, so a call with
                         // `Int` arguments arrives typed `Int`, and the comparison Kotlin makes is
