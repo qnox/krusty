@@ -42,7 +42,6 @@ inline/callableReferenceOfLocalFun.kt
 inlineSizeReduction/lastBreak.kt
 innerNested/nestedInPackage.kt
 ir/privateSignatures/privateLeakThroughInline.kt
-multiDecl/nameBasedDestructuringUnderscoreWithRenaming.kt
 multiplatform/k2/defaultArguments/bothInExpectAndActual.kt
 multiplatform/k2/defaultArguments/bothInExpectAndActual2.kt
 multiplatform/k2/kt66970.kt

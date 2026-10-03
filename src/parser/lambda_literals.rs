@@ -123,7 +123,7 @@ impl Parser<'_> {
         type LambdaDestructure = (
             String,
             Vec<DestructureEntry>,
-            Vec<Option<String>>,
+            Vec<Option<DestructureProperty>>,
             Vec<Option<TypeRef>>,
             Span,
         );
@@ -138,7 +138,7 @@ impl Parser<'_> {
                     let sp = self.tok().span;
                     self.bump();
                     let mut entries = Vec::new();
-                    let mut source_props: Vec<Option<String>> = Vec::new();
+                    let mut source_props: Vec<Option<DestructureProperty>> = Vec::new();
                     let mut entry_types: Vec<Option<TypeRef>> = Vec::new();
                     loop {
                         // Full form (`{ (val a, val b) -> … }`): each component carries its own
@@ -153,21 +153,14 @@ impl Parser<'_> {
                             && self.text() == "_"
                             && !self.escaped_ident();
                         let n = self.ident_or_error("variable name");
+                        let name_span = self.declaration_name_span;
                         let mut entry_type = self.eat(TokenKind::Colon).then(|| self.parse_type());
                         // By-name entry (`(a = prop) ->`) or short-form (`(a, b) ->` binds by own name).
-                        let source = if self.name_based_destructuring && self.eat(TokenKind::Eq) {
-                            let src = self.ident_or_error("property name");
-                            if self.eat(TokenKind::Colon) {
-                                entry_type = Some(self.parse_type());
-                            }
-                            Some(src)
-                        } else if self.short_form_destructuring || had_kw {
-                            Some(n.clone())
-                        } else {
-                            None
-                        };
+                        let implicit = self.short_form_destructuring || had_kw;
+                        let source = self.destructure_property(&n, implicit, &mut entry_type);
                         entries.push(DestructureEntry {
                             name: n,
+                            name_span,
                             mutable: is_var,
                             ignored,
                         });
@@ -206,9 +199,11 @@ impl Parser<'_> {
                             && self.text() == "_"
                             && !self.escaped_ident();
                         let n = self.ident_or_error("variable name");
+                        let name_span = self.declaration_name_span;
                         let entry_type = self.eat(TokenKind::Colon).then(|| self.parse_type());
                         entries.push(DestructureEntry {
                             name: n,
+                            name_span,
                             mutable: is_var,
                             ignored,
                         });

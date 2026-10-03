@@ -14,8 +14,16 @@ impl BodyFirChecker<'_> {
         let initializer = self.expression(initializer_source)?;
         let mut checked = Vec::with_capacity(entries.len());
         for (index, entry) in entries.iter().enumerate() {
-            if entry.ignored {
-                checked.push(FirDestructureEntry::Ignored { origin });
+            if entry.ignored
+                && self
+                    .info
+                    .resolved_destructure_component(statement, index)
+                    .is_none()
+            {
+                checked.push(FirDestructureEntry::Ignored {
+                    origin,
+                    component: None,
+                });
                 continue;
             }
             let name = &entry.name;
@@ -50,6 +58,13 @@ impl BodyFirChecker<'_> {
                 ty: component_ty,
                 kind: component_kind,
             });
+            if entry.ignored {
+                checked.push(FirDestructureEntry::Ignored {
+                    origin,
+                    component: Some(component),
+                });
+                continue;
+            }
             let binding_ty = self
                 .file
                 .destructuring

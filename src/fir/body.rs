@@ -1638,8 +1638,9 @@ pub enum FirStatementKind {
         initializer: Option<FirExprId>,
         conversion: Option<FirConversion>,
     },
-    /// One initializer evaluation followed by the checker-selected component calls. An underscore
-    /// entry has neither a target nor a component expression and therefore performs no call.
+    /// One initializer evaluation followed by the checker-selected component calls. A positional
+    /// underscore has neither a target nor a component expression. A name-based underscore still
+    /// carries the property read it must evaluate before discarding the value.
     Destructure {
         initializer: FirExprId,
         entries: Box<[FirDestructureEntry]>,
@@ -1687,6 +1688,9 @@ pub enum FirStatementKind {
 pub enum FirDestructureEntry {
     Ignored {
         origin: OriginId,
+        /// The property read a name-based `_ = prop` must evaluate. `None` for a positional `_`,
+        /// which performs no `componentN` call.
+        component: Option<FirExprId>,
     },
     Binding {
         origin: OriginId,

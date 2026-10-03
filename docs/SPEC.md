@@ -3802,7 +3802,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   module, so a declaration after the destructure stays visible in that file and in every other file.
   A `var` destructured component captured and written by a closure is boxed
   into a `Ref` exactly like a plain captured `var` local (`var [a,b]=A(); val f={a=3}; f()` sees `a==3`).
-  Tests: `multiDecl/*` box corpus (+96 gate), `tests/name_based_destructuring_e2e.rs`.
+  A positional `_` still performs no `componentN` call. The parser records an explicit
+  `name = property` rename separately from an implicit `(name)` / `(val name)` entry. Only the
+  explicit form `_ = prop` — `(val _ = prop)`, a `for` header, and a lambda parameter — reads
+  `prop` and discards the value, so the getter's side effects run. An implicit name-based `_`
+  is `underscore in name-based destructuring without renaming is forbidden.` and reads no
+  property. Tests: `multiDecl/*` box corpus (+96 gate),
+  `tests/name_based_destructuring_e2e.rs`.
 
 - **JPS (`.idea/`) project model.** For IntelliJ-native projects without a Gradle, Maven, or BSP model,
   the LSP statically reads `.idea/modules.xml`, every listed `*.iml`, `.idea/libraries/*.xml`, and

@@ -120,7 +120,11 @@ impl BodyLowering<'_> {
                             }
                             statements.push(variable);
                         }
-                        crate::fir::FirDestructureEntry::Ignored { .. } => {}
+                        crate::fir::FirDestructureEntry::Ignored { component, .. } => {
+                            if let Some(component) = component {
+                                statements.push(self.expression(component)?);
+                            }
+                        }
                     }
                 }
                 self.ir.add_expr(IrExpr::Block {
