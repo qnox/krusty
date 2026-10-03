@@ -194,8 +194,8 @@ use metadata_policy::{
     synthetic_class_xi, SYNTHETIC_LOCAL, SYNTHETIC_PROTECTED, SYNTHETIC_PUBLIC,
 };
 use method_defaults::{
-    body_has_reified_markers, emit_default_stub,
-    emit_facade_default_stub, static_default_stub_marker, static_default_stub_params,
+    body_has_reified_markers, emit_default_stub, emit_facade_default_stub,
+    static_default_stub_marker, static_default_stub_params,
 };
 pub use must_inline_lambdas::mark_must_inline_lambdas;
 use must_inline_lambdas::splice_called_impls;
