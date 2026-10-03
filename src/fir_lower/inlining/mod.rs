@@ -647,6 +647,10 @@ impl BodyLowering<'_> {
         // Reserving first left a hole in the local numbering and a pair of unreachable arena nodes
         // behind every successful tail promotion, which shifts every later local identity.
         let mut returns: Vec<(ExprId, Option<ExprId>)> = Vec::new();
+        // Copies whose `GetValue` of an inline parameter was replaced by that parameter's lambda.
+        // A capture temporary initialized from one of these is the lambda, even though the
+        // invocation still reads the temporary.
+        let mut substituted_inline_lambdas = HashSet::new();
 
         // Clone order, not map order: rewriting the copies allocates locals and records returns,
         // and both orders reach the emitted code.
@@ -707,6 +711,7 @@ impl BodyLowering<'_> {
             if let IrExpr::GetValue(parameter) = self.ir.expr(source) {
                 if let Some(Some(lambda)) = inline_lambdas.get(*parameter as usize) {
                     self.ir.exprs[copy as usize] = self.ir.expr(*lambda).clone();
+                    substituted_inline_lambdas.insert(copy);
                     self.ir.unmark_inline_copy(copy);
                     self.ir.binding_read_stability.remove(&copy);
                     if let Some(ty) = self.ir.logical_types.get(lambda).copied() {
@@ -783,6 +788,10 @@ impl BodyLowering<'_> {
         // only invoked; the carrier is then not evaluated.
         let converted_unit_results =
             self.expose_inline_lambdas_behind_function_value_conversions(&copies);
+        // `run { x(i) }` copies the inline lambda into an unnamed temporary and invokes that
+        // temporary. Retarget the invocation while the substituted lambda is still the
+        // temporary's initializer, before the direct-lambda splice below.
+        self.expose_inline_lambdas_behind_capture_copies(&copies, &substituted_inline_lambdas);
 
         let inline_invocations = copies
             .iter()
