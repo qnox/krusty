@@ -7276,7 +7276,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `::a_nested_class_reaches_the_outer_class_private_member`,
   `::a_private_member_of_an_unrelated_class_stays_inaccessible`,
   `::property_inferred_from_generic_companion_method`, box `classes/kt504.kt`.
-- **A private function called from a non-private `inline` function is reached through `access$<name>`.**
+- **A public or protected `inline` function cannot call a non-public-API function.** The reference
+  is rejected where it is resolved: `public-API inline function cannot access non-public-API function.`
+  A non-public-API `inline` callee uses the transitive wording, because publishing it would publish
+  its body too. An `internal` or `private` inline function may call a private function. Test:
+  `tests/private_inline_access_e2e.rs`.
+- **A private function called from an `internal` `inline` function is reached through `access$<name>`.**
   The inline function's own method calls the public accessor, and a same-module caller that expands
   the function into another class file calls that same accessor. Naming the private method from the
   caller's class is an `IllegalAccessError`. A file facade forwards with `access$bar()` /

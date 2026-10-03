@@ -7,7 +7,7 @@
 //! exact-type (no implicit numeric widening); integer literals default to `Int`; `+` is string
 //! concat if either side is `String`; `if` with both branches needs a common type.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Write};
 
 use crate::ast::*;
@@ -36226,6 +36226,8 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         fn_closure_reassigned: Vec::new(),
         expr_depth: 0,
         allow_lambda_mutation: false,
+        public_api_inline_depth: 0,
+        public_inline_access_calls: HashSet::new(),
         argument_lambda_inlining: HashMap::new(),
         symbolic_signature_inference: false,
         postponed_call_constraints: Vec::new(),
@@ -38942,6 +38944,12 @@ struct Checker<'a> {
     /// (`forEach`), where a mutable capture is fine because the lambda body is inlined into the caller
     /// (no closure). Suppresses the mutable-capture rejection for that one lambda.
     allow_lambda_mutation: bool,
+    /// How many public or protected `inline` functions are being checked. A call to a
+    /// non-public-API function inside one is rejected. An `internal` or `private` inline body is
+    /// not this boundary.
+    public_api_inline_depth: u32,
+    /// Calls already reported for that rule. Inference may check one call twice.
+    public_inline_access_calls: HashSet<ExprId>,
     /// Per lambda argument, whether the selected parameter inlines it into the caller's frame: the
     /// callee is inline and the parameter is neither `crossinline` nor `noinline`. A lambda absent
     /// here was taken by no selected parameter, so its body runs in a frame of its own. Recorded where an argument
@@ -45594,6 +45602,44 @@ impl<'a> Checker<'a> {
             self.resolved_source_calls.insert(call, source_key);
         }
     }
+    fn enter_public_api_inline(&mut self, function: &FunDecl) -> bool {
+        let entered = function.is_inline() && function.visibility.is_public_api();
+        if entered {
+            self.public_api_inline_depth += 1;
+        }
+        entered
+    }
+
+    fn leave_public_api_inline(&mut self, entered: bool) {
+        if entered {
+            self.public_api_inline_depth -= 1;
+        }
+    }
+
+    /// A public or protected `inline` function publishes its body into every caller. A
+    /// non-public-API callee is rejected at the reference. An inline callee names the transitive
+    /// form, because its own body would be published too.
+    fn reject_non_public_api_from_public_inline(
+        &mut self,
+        call: ExprId,
+        visibility: Visibility,
+        inline: InlineKind,
+    ) {
+        if self.public_api_inline_depth == 0 || visibility.is_public_api() {
+            return;
+        }
+        if !self.public_inline_access_calls.insert(call) {
+            return;
+        }
+        let message = if inline.can_inline() {
+            "public-API inline function cannot access non-public-API inline function as it could transitively access non-public-API declarations."
+        } else {
+            "public-API inline function cannot access non-public-API function."
+        };
+        self.diags
+            .error(self.call_callee_name_span(call), message.to_string());
+    }
+
     fn mark_top_level_call(
         &mut self,
         call: ExprId,
@@ -45664,6 +45710,11 @@ impl<'a> Checker<'a> {
             intersection_bindings,
             ..
         } = selected;
+        self.reject_non_public_api_from_public_inline(
+            call,
+            selected.visibility,
+            selected.flags.inline,
+        );
         let mut ret = selected.callable.ret;
         let expectations = self.source_generic_argument_expectations(
             scope,
@@ -51934,6 +51985,7 @@ impl<'a> Checker<'a> {
     }
 
     fn check_fun(&mut self, scope: &CheckerScope<'_>, f: &FunDecl, source_decl: Option<DeclId>) {
+        let public_api_inline = self.enter_public_api_inline(f);
         let enclosing_return_frame = self.lambda_returns.enter_function(Some(f.name.clone()));
         let suppression_depth = self.check_function_annotation_applications(scope, f);
         self.check_infix_declaration(f, false);
@@ -52270,6 +52322,7 @@ impl<'a> Checker<'a> {
         }
         self.this_extension_receiver = prev_extension_receiver;
         self.allow_lambda_mutation = prev_allow;
+        self.leave_public_api_inline(public_api_inline);
         self.leave_block_body(block);
         self.lambda_returns.leave_function(enclosing_return_frame);
         self.retire_type_parameter_owners(&owned_type_parameters);
@@ -56397,6 +56450,7 @@ impl<'a> Checker<'a> {
         source_member: Option<crate::libraries::SourceMember>,
         stable_declaration: Option<crate::fir::DeclarationId>,
     ) {
+        let public_api_inline = self.enter_public_api_inline(f);
         let selected_default_method = source_member
             .is_some_and(|member| self.selected_signature_default_source_member(member));
         let default_owned_method = self.signature_defaults_only
@@ -56752,6 +56806,7 @@ impl<'a> Checker<'a> {
             self.this_labels.pop();
         }
         self.this_extension_receiver = dispatch_extension_receiver;
+        self.leave_public_api_inline(public_api_inline);
         self.lambda_returns.leave_function(enclosing_return_frame);
         self.retire_type_parameter_owners(&owned_type_parameters);
         self.active_statement_suppressions
@@ -68469,6 +68524,11 @@ impl<'a> Checker<'a> {
             }
             return Some(Ty::Error);
         }
+        self.reject_non_public_api_from_public_inline(
+            call,
+            selected.member.visibility,
+            selected.member.inline,
+        );
         // A direct function parameter contextually CHECKS a postponed lambda body. Apply the
         // receiver builder's current lower approximation to that function shape so the selected
         // commit rechecks the body with the same concrete `it` type used by the provisional member

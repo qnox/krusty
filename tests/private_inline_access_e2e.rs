@@ -62,3 +62,33 @@ fn a_private_call_inside_an_inline_function_uses_access() {
     assert_eq!(result, common::kotlinc_box_files_result(&SOURCES, "F2Kt"));
     assert_eq!(result, "OK");
 }
+
+/// A public `inline` function is a public API boundary. Calling a private function from it is
+/// rejected at the reference; the backend does not publish an accessor for that program.
+#[test]
+fn a_public_inline_function_cannot_call_a_non_public_function() {
+    const SOURCE: &str = "inline fun foo(): String = bar()\n\
+\n\
+private fun bar(): String = \"11\"\n\
+\n\
+class C {\n\
+\x20   inline fun fi(): String = bi()\n\
+\n\
+\x20   private fun bi(): String = \"22\"\n\
+}\n\
+\n\
+private fun dex(): String = \"33\"\n\
+\n\
+class CC {\n\
+\x20   inline fun fx(): String = dex()\n\
+}\n\
+\n\
+inline fun outer(): String = inner()\n\
+\n\
+private inline fun inner(): String = bar()\n";
+    let result = common::compiler_diagnostics(&[("f1.kt", SOURCE)], &[]);
+    common::expect_identical_rejection(
+        &result,
+        "a public inline function calling a non-public function",
+    );
+}
