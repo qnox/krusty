@@ -1,4 +1,4 @@
-use super::{Checker, CheckerScope, ExprLowering, ImplicitReceiver, ResolvedEnumEntry};
+use super::{Checker, CheckerScope, ExprLowering, ResolvedEnumEntry};
 use crate::ast::ExprId;
 use crate::types::{Ty, TypeName};
 
@@ -67,23 +67,18 @@ impl Checker<'_> {
         is_entry.then_some((owner, declared_name))
     }
 
-    /// Unqualified `entries` once an enum's own instance members have missed.
+    /// The synthetic classifier property on the owner the scope tower already selected.
     ///
-    /// `+PrioritizedEnumEntries` places the synthetic `EnumEntries` property ahead of that enum's
-    /// companion and every lexically enclosing classifier. A constructor property, an own property,
-    /// or an inherited interface property is an instance member and is selected on the receiver
-    /// before this rung. `-PrioritizedEnumEntries` leaves the synthetic property after those outer
-    /// scopes, so this returns nothing and the existing tower stands.
-    pub(super) fn prioritized_unqualified_enum_entries(
+    /// The prioritized rung carries that owner. `name` is only the lookup spelling;
+    /// [`crate::libraries::ImplicitClassifierProperty`] decides the result.
+    pub(super) fn prioritized_classifier_property(
         &mut self,
         expression: ExprId,
         name: &str,
         owner: TypeName,
     ) -> Option<Ty> {
-        if name != "entries" || !self.file.prioritized_enum_entries {
-            return None;
-        }
         let (owner, property) = self.classifier_property_for_owner(owner, name)?;
+        let crate::libraries::ImplicitClassifierProperty::EnumEntries = property.operation;
         let ty = property.ty;
         self.expr_lowers.insert(
             expression,
@@ -93,24 +88,6 @@ impl Checker<'_> {
             },
         );
         Some(ty)
-    }
-
-    /// The synthetic property for a class-receiver rung that did not declare `entries`.
-    pub(super) fn prioritized_enum_entries_after_class_receiver(
-        &mut self,
-        expression: ExprId,
-        name: &str,
-        receiver: &ImplicitReceiver,
-    ) -> Option<Ty> {
-        if !receiver.class_receiver {
-            return None;
-        }
-        let owner = receiver
-            .declared_ty
-            .non_null()
-            .kotlin_class_internal()
-            .or_else(|| receiver.ty.non_null().kotlin_class_internal())?;
-        self.prioritized_unqualified_enum_entries(expression, name, owner)
     }
 
     pub(super) fn star_imported_enum_entry(

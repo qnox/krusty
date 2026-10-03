@@ -43,6 +43,7 @@ impl Checker<'_> {
     ) -> PropertyWriteSelection {
         for rung in self.implicit_rungs(scope) {
             match rung {
+                implicit_rungs::ImplicitRung::PrioritizedClassifierProperties(_) => {}
                 implicit_rungs::ImplicitRung::Receiver(receiver) => {
                     if let Some(property) = self.property_write_on_receiver(scope, receiver, name) {
                         return PropertyWriteSelection::Implicit(Box::new(property));

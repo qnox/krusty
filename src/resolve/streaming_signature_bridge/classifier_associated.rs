@@ -131,6 +131,7 @@ impl ProductionSignatureSemantics<'_> {
             |receiver| receiver.non_null().obj_internal(),
             |receiver| receiver.non_null().obj_internal(),
             |classifier| self.classifier_companion(classifier),
+            self.prioritized_enum_entries(scope),
         )
     }
 

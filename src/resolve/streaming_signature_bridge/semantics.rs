@@ -1,6 +1,7 @@
 //! Resolver-backed evaluation of compact signature expressions.
 
 use super::*;
+use crate::resolve::implicit_rungs::ImplicitRung;
 
 mod cast_narrowing;
 mod constructor_expectations;
@@ -1426,12 +1427,15 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         }
         for rung in self.implicit_rungs(scope) {
             let receiver = match rung {
-                crate::resolve::implicit_rungs::ImplicitRung::StaticScope(classifier) => {
+                ImplicitRung::PrioritizedClassifierProperties(owner) => {
                     if let Some(result) =
-                        self.prioritized_unqualified_enum_entries_ty(scope, classifier, spelling)
+                        self.selected_implicit_classifier_property(scope, owner, spelling)
                     {
                         return crate::fir::ResolvedTy::new(result).map_err(|_| Self::failure());
                     }
+                    continue;
+                }
+                crate::resolve::implicit_rungs::ImplicitRung::StaticScope(classifier) => {
                     if let Some(result) =
                         self.select_static_scope_property(scope, classifier, spelling, demand)?
                     {
@@ -1522,13 +1526,6 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     }
                 }
                 return crate::fir::ResolvedTy::new(result).map_err(|_| Self::failure());
-            }
-            if let Some(owner) = receiver.non_null().obj_internal() {
-                if let Some(result) =
-                    self.prioritized_unqualified_enum_entries_ty(scope, owner, spelling)
-                {
-                    return crate::fir::ResolvedTy::new(result).map_err(|_| Self::failure());
-                }
             }
         }
         for classifier in self.lexical_class_names(scope) {
@@ -1906,6 +1903,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             .is_some_and(|file| file.explicit_context_arguments);
         for rung in self.implicit_rungs(scope) {
             let receiver = match rung {
+                ImplicitRung::PrioritizedClassifierProperties(_) => continue,
                 crate::resolve::implicit_rungs::ImplicitRung::StaticScope(classifier) => {
                     if let super::classifier_associated::AssociatedSignatureCall::Selected(result) =
                         self.select_static_scope_call(
@@ -3155,6 +3153,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         // associated declaration of an open static scope.
         for rung in self.implicit_rungs(scope) {
             let receiver = match rung {
+                ImplicitRung::PrioritizedClassifierProperties(_) => continue,
                 crate::resolve::implicit_rungs::ImplicitRung::StaticScope(classifier) => {
                     if let Some(selected) = self.select_static_scope_reference(
                         scope,
@@ -3951,6 +3950,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 .implicit_rungs(scope)
                 .into_iter()
                 .map(|rung| match rung {
+                    ImplicitRung::PrioritizedClassifierProperties(_) => None,
                     crate::resolve::implicit_rungs::ImplicitRung::Receiver(receiver) => {
                         property_on_receiver(receiver).map(Some)
                     }
