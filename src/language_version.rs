@@ -24,10 +24,10 @@ impl LanguageVersion {
     pub const V2_5: Self = Self::new(2, 5);
     pub const V2_6: Self = Self::new(2, 6);
 
-    /// Source/API levels accepted by every supported compiler in the 2.4 line. `2.5` is
-    /// experimental. kotlinc 2.4.20 adds `2.6`; callers must use [`Self::supported_for`] rather
-    /// than treating this common subset as the complete domain of every release.
-    const SUPPORTED_THROUGH_2_4_10: [Self; 6] = [
+    /// Source/API levels recorded for the concrete 2.4.0 and 2.4.10 compiler releases. `2.5` is
+    /// experimental. Keep this keyed by exact compiler versions: a future manifest entry must add
+    /// its own observed domain instead of inheriting one through a version range.
+    const SUPPORTED_FOR_2_4_0_AND_2_4_10: [Self; 6] = [
         Self::V2_0,
         Self::V2_1,
         Self::V2_2,
@@ -35,7 +35,7 @@ impl LanguageVersion {
         Self::V2_4,
         Self::V2_5,
     ];
-    const SUPPORTED_FROM_2_4_20: [Self; 7] = [
+    const SUPPORTED_FOR_2_4_20: [Self; 7] = [
         Self::V2_0,
         Self::V2_1,
         Self::V2_2,
@@ -69,10 +69,12 @@ impl LanguageVersion {
 
     /// The language/API option domain of one concrete kotlinc release.
     pub fn supported_for(compiler: KotlinVersion) -> &'static [Self] {
-        if compiler >= KotlinVersion::V2_4_20 {
-            &Self::SUPPORTED_FROM_2_4_20
+        if compiler == KotlinVersion::V2_4_0 || compiler == KotlinVersion::V2_4_10 {
+            &Self::SUPPORTED_FOR_2_4_0_AND_2_4_10
+        } else if compiler == KotlinVersion::V2_4_20 {
+            &Self::SUPPORTED_FOR_2_4_20
         } else {
-            &Self::SUPPORTED_THROUGH_2_4_10
+            &[]
         }
     }
 
@@ -165,6 +167,11 @@ mod tests {
         assert_eq!(
             LanguageVersion::parse_supported_for("2.6", KotlinVersion::V2_4_10),
             None
+        );
+        assert_eq!(
+            LanguageVersion::supported_for(KotlinVersion::new(2, 4, 30)),
+            [],
+            "an unrecorded compiler release must not inherit a nearby release's domain"
         );
     }
 
