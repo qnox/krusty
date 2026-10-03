@@ -169,6 +169,29 @@ pub(super) fn routes_through_accessor(
         && ir.method_visibility(function).is_private()
 }
 
+/// Whether `root` is the body of a non-private `inline` function. Copies of that body run in
+/// other classes, so a private call inside it must already name the public accessor.
+pub(super) fn non_private_inline_body(ir: &IrFile, root: crate::ir::ExprId) -> bool {
+    ir.functions.iter().enumerate().any(|(index, function)| {
+        let function_id = index as u32;
+        function.body == Some(root)
+            && ir.inline_fns.contains(&function_id)
+            && !ir.method_visibility(function_id).is_private()
+    })
+}
+
+/// A non-private `inline` function exports a same-owner private call. A lifted local function
+/// keeps its own name: this boundary is for a source-declared private function.
+pub(super) fn inline_exports_private_call(
+    ir: &IrFile,
+    export_private: bool,
+    function: u32,
+) -> bool {
+    export_private
+        && ir.method_visibility(function).is_private()
+        && !ir.lifted_functions.contains_key(&function)
+}
+
 /// The constant naming static method `name` of `owner`: an interface's through an
 /// `InterfaceMethodref`, as `invokestatic` requires.
 pub(super) fn static_methodref(
@@ -217,7 +240,14 @@ pub(super) fn plan(
         };
         let mut uses = Vec::new();
         for &root in &context.roots {
-            walk.collect(context.owner, root, 0, &HashMap::new(), &mut uses);
+            walk.collect(
+                context.owner,
+                root,
+                0,
+                &HashMap::new(),
+                non_private_inline_body(ir, root),
+                &mut uses,
+            );
         }
         uses.extend(synthesized_carrier_uses(&walk, env, class));
         carriers.insert(class.fq_name, uses);
@@ -256,7 +286,14 @@ pub(super) fn plan(
             }
             None => {
                 for &root in &context.roots {
-                    walk.collect(context.owner, root, 0, &carriers, &mut uses);
+                    walk.collect(
+                        context.owner,
+                        root,
+                        0,
+                        &carriers,
+                        non_private_inline_body(ir, root),
+                        &mut uses,
+                    );
                 }
             }
         }
@@ -478,13 +515,16 @@ impl Walk<'_> {
 impl Walk<'_> {
     /// Record, in evaluation order, each use under `root` that code of `context` makes of another
     /// class's private static declaration. A use without a source line takes its parent's; the
-    /// construction of a carrier in `carriers` stands for that carrier's own uses.
+    /// construction of a carrier in `carriers` stands for that carrier's own uses. `export_private`
+    /// is set when `root` is a non-private `inline` function: that body is copied into other
+    /// classes, so its private calls need accessors even when `context` is their owner.
     fn collect(
         &self,
         context: StaticOwner,
         root: crate::ir::ExprId,
         line: u32,
         carriers: &HashMap<TypeName, Vec<Use>>,
+        export_private: bool,
         uses: &mut Vec<Use>,
     ) {
         let ir = self.ir;
@@ -525,6 +565,7 @@ impl Walk<'_> {
             let needed = match accessor {
                 StaticAccessor::Function(function) => {
                     routes_through_accessor(ir, self.helper_access, context == owner, function)
+                        || inline_exports_private_call(ir, export_private, function)
                 }
                 StaticAccessor::Getter(_)
                 | StaticAccessor::Setter(_)

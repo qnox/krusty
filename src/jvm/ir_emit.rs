@@ -5505,6 +5505,10 @@ fn emit_method_inner_with_holder(
     let param_tys = jvm_function_params(ir, fid);
     let ret = jvm_declared_ty(&env.override_results.physical_result(ir, fid));
     let mut e = Emitter::new(ir, cw, env, static_owner, owner, facade, ret, [body]);
+    // The bytecode splicer copies this method. A non-private inline function therefore calls
+    // public accessors for its private callees, so every copy is legal in another class.
+    e.export_private_calls =
+        ir.inline_fns.contains(&fid) && !ir.method_visibility(fid).is_private();
     // kotlinc's transformer keeps a suspend body's own local names: they name the spills.
     let transformed = env.emit_time_machines.transformed(fid);
     // Suspend lowering does not preserve source-local expression IDs.
@@ -6460,6 +6464,9 @@ struct Emitter<'a> {
     /// The exact source class whose code this emitter is writing. A generated holder has no
     /// source-static ownership; it must route every private static access through the owner.
     static_owner: Option<StaticOwner>,
+    /// This method is a non-private `inline` function. Private calls in it name `access$`
+    /// accessors, because the splicer copies these instructions into other classes.
+    export_private_calls: bool,
     /// Interface companion `$$INSTANCE` self-reads for this class, fixed from `static_owner`.
     self_companion: Option<TypeName>,
     /// Checked classifier declarations: which kind of classifier an operand's type names.
@@ -6610,6 +6617,7 @@ impl<'a> Emitter<'a> {
             self_companion: singleton_instance_load::self_companion(ir, static_owner),
             intrinsic_probe_continuations: env.intrinsic_probe_continuations,
             static_owner,
+            export_private_calls: false,
             classifiers: env.signature_symbols,
             dispatch_classifiers: env.dispatch_classifiers.clone(),
             owner: owner.to_string(),
@@ -8638,21 +8646,29 @@ impl<'a> Emitter<'a> {
                     stub_params.push(Ty::obj("java/lang/Object"));
                     let aw: i32 = stub_params.iter().map(|t| slot_words(*t) as i32).sum();
                     let stub_desc = method_descriptor(&stub_params, ret);
-                    let stub_name = format!("{name}$default");
+                    let plain_stub = format!("{name}$default");
                     // The `$default` stub of an INTERFACE method is a STATIC interface method —
                     // referenced via an `InterfaceMethodref` constant (a plain `Methodref` is an
                     // `IncompatibleClassChangeError`), still invoked with `invokestatic`. Under
                     // `enable`/`no-compatibility` kotlinc puts that stub on the interface and call
                     // sites use it; under `disable` the interface holds nothing executable and the
                     // stub exists only on `<Iface>$DefaultImpls`, so a call site aimed at the
-                    // interface would link to a method that was never emitted.
+                    // interface would link to a method that was never emitted. The inline
+                    // `access$` bridge is published on the owner next to its `$default` stub, so
+                    // the holder path keeps the stub name.
                     let holder;
-                    let (stub_owner, stub_on_interface) =
+                    let (stub_owner, stub_on_interface, stub_name) =
                         if is_iface && self.jvm_default == JvmDefaultMode::Disable {
                             holder = format!("{owner}$DefaultImpls");
-                            (&holder, false)
+                            (&holder, false, plain_stub)
                         } else {
-                            (&owner, is_iface)
+                            let stub_name = method_defaults::default_call_name(
+                                self.ir,
+                                self.export_private_calls,
+                                fid,
+                                &plain_stub,
+                            );
+                            (&owner, is_iface, stub_name)
                         };
                     let m = if stub_on_interface {
                         self.cw
@@ -8732,7 +8748,7 @@ impl<'a> Emitter<'a> {
                     // `InterfaceMethodref`), so it never dispatches to a same-named override. Under
                     // `disable` the body moved to the holder, and an `invokespecial` naming the
                     // interface from another class is not even verifiable.
-                    if self.owner != owner
+                    if (self.owner != owner || self.export_private_calls)
                         && self
                             .run
                             .private_member_access_bridges
@@ -8816,9 +8832,16 @@ impl<'a> Emitter<'a> {
                         param_tys.iter().map(|ty| slot_words(*ty) as i32).sum();
                     let descriptor = method_descriptor(&param_tys, ret);
                     let owner = owner.render();
-                    let method =
-                        self.cw
-                            .methodref(&owner, &format!("{}$default", f.name), &descriptor);
+                    let method = self.cw.methodref(
+                        &owner,
+                        &method_defaults::default_call_name(
+                            self.ir,
+                            self.export_private_calls,
+                            *function,
+                            &format!("{}$default", f.name),
+                        ),
+                        &descriptor,
+                    );
                     self.mark_call_start(e, code);
                     code.invokestatic(method, argument_words, physical_call_result_words(ret));
                 }
@@ -8828,7 +8851,12 @@ impl<'a> Emitter<'a> {
                     let f = &self.ir.functions[*fid as usize];
                     let param_tys = static_default_stub_params(self.ir, *fid);
                     let ret = jvm_declared_ty(&f.ret);
-                    let name = format!("{}$default", f.name);
+                    let name = method_defaults::default_call_name(
+                        self.ir,
+                        self.export_private_calls,
+                        *fid,
+                        &format!("{}$default", f.name),
+                    );
                     let args = args.clone();
                     if let Err(mismatch) =
                         self.emit_source_default_call_operands(e, &args, &param_tys, code)
@@ -8973,6 +9001,14 @@ impl<'a> Emitter<'a> {
                         *module_target,
                     );
                     let (facade, name) = (facade.render(), name.clone());
+                    // A private function is reachable from this file only because a non-private
+                    // inline function called it. The caller's class file uses the public accessor
+                    // the declaring file published; naming the private method is illegal.
+                    let name = if access_bridges::private_module_callable(self.ir, *module_target) {
+                        format!("access${name}")
+                    } else {
+                        name
+                    };
                     let args = args.clone();
                     if let Err(mismatch) =
                         self.emit_call_descriptor_operands(e, 0, &args, &param_tys, code)
@@ -9123,7 +9159,7 @@ impl<'a> Emitter<'a> {
                     descriptor,
                     params,
                     interface,
-                    module_target: _,
+                    module_target,
                     target: _,
                 } => {
                     let recv = dispatch_receiver.expect("virtual call needs a receiver");
@@ -9177,24 +9213,34 @@ impl<'a> Emitter<'a> {
                         }
                         let aw: i32 = ptys.iter().map(|t| slot_words(*t) as i32).sum();
                         self.mark_call_start(e, code);
+                        let call = access_bridges::SelectedMemberCall {
+                            expression: e,
+                            owner_identity,
+                            owner: &owner,
+                            name: &name,
+                            descriptor: &descriptor,
+                            parameters: &ptys,
+                            result: ret,
+                            interface_owner: interface,
+                            argument_words: aw,
+                            protected: bridge.as_ref(),
+                            export_private_calls: self.export_private_calls,
+                        };
+                        // The private member is not a function of this file, so it has no bridge
+                        // id here. The declaring class still published `access$<name>(Owner)`.
+                        if access_bridges::private_module_callable(self.ir, *module_target) {
+                            access_bridges::emit_private_member_extension_call(
+                                self.cw, code, &call,
+                            );
+                            return;
+                        }
                         access_bridges::emit_selected_member_call(
                             self.ir,
                             self.run,
                             self.static_owner,
                             self.cw,
                             code,
-                            &access_bridges::SelectedMemberCall {
-                                expression: e,
-                                owner_identity,
-                                owner: &owner,
-                                name: &name,
-                                descriptor: &descriptor,
-                                parameters: &ptys,
-                                result: ret,
-                                interface_owner: interface,
-                                argument_words: aw,
-                                protected: bridge.as_ref(),
-                            },
+                            &call,
                         );
                         return;
                     }

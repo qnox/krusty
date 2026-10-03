@@ -169,6 +169,19 @@ pub(super) fn emit_default_stub(
             .cw
             .set_method_lines(&stub_name, &stub_desc, &[(0, line)]);
     }
+    drop(emitter);
+    emit_published_default_accessor(
+        ir,
+        fid,
+        cw,
+        PublishedDefaultAccessor {
+            owner,
+            stub_name: &stub_name,
+            parameters: &default_stub_params(ir, fid, owner_ty),
+            result: ret,
+            is_interface,
+        },
+    );
 }
 
 /// Physical parameters of an instance method's `$default` synthetic.
@@ -517,6 +530,175 @@ pub(super) fn emit_facade_default_stub(
         emitter
             .cw
             .set_method_lines(&format!("{method_name}$default"), &descriptor, &[(0, line)]);
+    }
+    drop(emitter);
+    emit_published_default_accessor(
+        ir,
+        fid,
+        cw,
+        PublishedDefaultAccessor {
+            owner: facade,
+            stub_name: &format!("{method_name}$default"),
+            parameters: &stub_params,
+            result: ret,
+            is_interface: static_owner.is_interface(ir),
+        },
+    );
+}
+
+/// The JVM name of a call to `bridge_name` (`foo$default`). A non-private inline body publishes
+/// `access$` plus that selected bridge; every other caller keeps the bridge name and descriptor.
+pub(super) fn default_call_name(
+    ir: &IrFile,
+    export_private: bool,
+    function: u32,
+    bridge_name: &str,
+) -> String {
+    if super::static_accessors::inline_exports_private_call(ir, export_private, function) {
+        format!("access${bridge_name}")
+    } else {
+        bridge_name.to_owned()
+    }
+}
+
+/// Owner and descriptor of a `$default` bridge that a non-private inline function publishes.
+struct PublishedDefaultAccessor<'a> {
+    owner: &'a str,
+    stub_name: &'a str,
+    parameters: &'a [Ty],
+    result: Ty,
+    is_interface: bool,
+}
+
+/// `access$foo$default` forwards to the selected `foo$default` bridge with that bridge's
+/// descriptor, masks, marker, and receiver. A copied inline body must not invent `access$foo`.
+fn emit_published_default_accessor(
+    ir: &IrFile,
+    fid: u32,
+    cw: &mut ClassWriter,
+    access: PublishedDefaultAccessor<'_>,
+) {
+    if !private_default_published_by_inline(ir, fid) {
+        return;
+    }
+    let descriptor = method_descriptor(access.parameters, access.result);
+    let name = format!("access${}", access.stub_name);
+    if cw.declares_method(&name, &descriptor) {
+        return;
+    }
+    cw.reserve_method_name(&name);
+    cw.reserve_descriptor(&descriptor);
+    let words: u16 = access.parameters.iter().map(|ty| slot_words(*ty)).sum();
+    let mut code = CodeBuilder::new(words);
+    let mut slot = 0u16;
+    for &ty in access.parameters {
+        load(ty, slot, &mut code);
+        slot += slot_words(ty);
+    }
+    let method = if access.is_interface {
+        cw.interface_methodref(access.owner, access.stub_name, &descriptor)
+    } else {
+        cw.methodref(access.owner, access.stub_name, &descriptor)
+    };
+    code.invokestatic(method, i32::from(words), slot_words(access.result) as i32);
+    emit_return(access.result, &mut code);
+    code.ensure_locals(words);
+    code.link();
+    let flags = if access.is_interface { 0x1009 } else { 0x1019 };
+    cw.add_method(flags, &name, &descriptor, &code);
+    if let Some(&line) = ir
+        .fn_sig_lines
+        .get(&fid)
+        .or_else(|| ir.fn_decl_lines.get(&fid))
+    {
+        cw.set_method_lines(&name, &descriptor, &[(0, line)]);
+    }
+}
+
+/// Whether a non-private `inline` function, or a private `inline` function it expands, calls
+/// `target`'s default-argument bridge. The accessor exists only for that publication.
+fn private_default_published_by_inline(ir: &IrFile, target: u32) -> bool {
+    if !ir.method_visibility(target).is_private() || ir.lifted_functions.contains_key(&target) {
+        return false;
+    }
+    let mut pending = ir
+        .functions
+        .iter()
+        .enumerate()
+        .filter_map(|(index, _)| {
+            let function = index as u32;
+            (ir.inline_fns.contains(&function) && !ir.method_visibility(function).is_private())
+                .then_some(function)
+        })
+        .collect::<Vec<_>>();
+    let mut seen = HashSet::new();
+    while let Some(function) = pending.pop() {
+        if !seen.insert(function) {
+            continue;
+        }
+        let Some(body) = ir.functions[function as usize].body else {
+            continue;
+        };
+        let mut expressions = vec![body];
+        while let Some(expression) = expressions.pop() {
+            if let Some(callee) = default_or_inline_callee(ir, expression) {
+                if callee == target && calls_default_bridge(ir, expression, target) {
+                    return true;
+                }
+                if ir.inline_fns.contains(&callee) {
+                    pending.push(callee);
+                }
+            }
+            crate::ir::for_each_child(&ir.exprs, expression, &mut |child| expressions.push(child));
+        }
+    }
+    false
+}
+
+/// The local function a call names, when this expression is a direct call.
+fn default_or_inline_callee(ir: &IrFile, expression: crate::ir::ExprId) -> Option<u32> {
+    match ir.expr(expression) {
+        IrExpr::Call { callee, .. } => match callee {
+            Callee::Local(function)
+            | Callee::LocalDefault(function)
+            | Callee::LocalWithDefaults { function, .. }
+            | Callee::ClassStatic { function, .. }
+            | Callee::ClassStaticDefault { function, .. }
+            | Callee::ClassStaticWithDefaults { function, .. } => Some(*function),
+            _ => None,
+        },
+        IrExpr::MethodCall { class, index, .. } => ir
+            .classes
+            .get(*class as usize)
+            .and_then(|class| class.methods.get(*index as usize))
+            .copied(),
+        _ => None,
+    }
+}
+
+fn calls_default_bridge(ir: &IrFile, expression: crate::ir::ExprId, target: u32) -> bool {
+    match ir.expr(expression) {
+        IrExpr::Call {
+            callee: Callee::LocalDefault(function) | Callee::LocalWithDefaults { function, .. },
+            ..
+        }
+        | IrExpr::Call {
+            callee:
+                Callee::ClassStaticDefault { function, .. }
+                | Callee::ClassStaticWithDefaults { function, .. },
+            ..
+        } => *function == target,
+        IrExpr::MethodCall {
+            class, index, args, ..
+        } => {
+            args.iter().any(Option::is_none)
+                && ir
+                    .classes
+                    .get(*class as usize)
+                    .and_then(|class| class.methods.get(*index as usize))
+                    .is_some_and(|function| *function == target)
+        }
+        _ => false,
     }
 }
 
