@@ -1378,6 +1378,10 @@ pub(super) fn build_class_metadata_with_facts(
             local_classifiers: &local_classifiers,
             enum_entry_bodies: &super::super::local_classifiers::enum_entry_bodies(ir),
             is_enum: c.is_enum,
+            // kotlinc's `LanguageFeature.AnnotationsInMetadata` (since language level 2.4): an
+            // older source-language level keeps the HAS_ANNOTATIONS flags but writes no records.
+            // The physical metadata stamp is deliberately not consulted here.
+            annotations_in_metadata: opts.annotations_in_metadata,
         },
     );
     // d1 is the protobuf payload as one `char` per byte (the constant pool writes it as modified-UTF-8).

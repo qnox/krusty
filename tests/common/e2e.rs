@@ -17,7 +17,34 @@ pub fn compile_in_process_files_metadata_version(
     jdk_modules: Option<&std::path::Path>,
     metadata_version: Option<[i32; 3]>,
 ) -> Option<Vec<(String, Vec<u8>)>> {
-    common::source_set_compile::compile(sources, cp_jars, jdk_modules, None, metadata_version)
+    common::source_set_compile::compile(
+        sources,
+        cp_jars,
+        jdk_modules,
+        None,
+        metadata_version,
+        &krusty::language_settings::LanguageSettings::default(),
+    )
+}
+
+/// Compile with finalized standard language/API settings and an independently selected internal
+/// metadata stamp. Keeping the inputs separate lets tests prove that source-language features do
+/// not get reconstructed from an output-format version.
+pub fn compile_in_process_files_language_settings(
+    sources: &[(&str, &str)],
+    cp_jars: &[PathBuf],
+    jdk_modules: Option<&std::path::Path>,
+    language_settings: &krusty::language_settings::LanguageSettings,
+    metadata_version: Option<[i32; 3]>,
+) -> Option<Vec<(String, Vec<u8>)>> {
+    common::source_set_compile::compile(
+        sources,
+        cp_jars,
+        jdk_modules,
+        None,
+        metadata_version,
+        language_settings,
+    )
 }
 
 /// A positive front-end coverage test upgraded to true e2e: the source must be checker-clean, the

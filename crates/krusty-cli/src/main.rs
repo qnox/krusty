@@ -231,6 +231,7 @@ pub fn compile(opts: &cli::Options) -> Result<usize, String> {
         .with_lambda_modes(opts.lambda_modes)
         .with_param_assertions(!opts.no_param_assertions)
         .with_call_assertions(!opts.no_call_assertions)
+        .with_annotations_in_metadata(opts.language_settings.features.has("AnnotationsInMetadata"))
         .with_metadata_version(Some(metadata_version));
     let outputs =
         krusty::compiler::emit_analyzed(analysis, &stems, &backend, &opts.module_name, &mut diags);

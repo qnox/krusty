@@ -682,6 +682,9 @@ pub struct EmitOptions {
     /// the `META-INF/<module>.kotlin_module` header. `None` keeps kotlinc's no-flag stamp, the
     /// compiler's default language version [`DEFAULT_METADATA_VERSION`].
     pub metadata_version: Option<[i32; 3]>,
+    /// Whether the finalized source-language feature set enables declaration annotation records in
+    /// Kotlin metadata. Kept separate from `metadata_version`: the latter is only an output stamp.
+    pub annotations_in_metadata: bool,
 }
 
 /// The `mv` krusty writes without `-language-version`: kotlinc's default-language-version stamp.
@@ -696,6 +699,12 @@ impl EmitOptions {
     /// Select the `-language-version` metadata stamp, keeping every other field as configured.
     pub fn with_metadata_version(mut self, version: Option<[i32; 3]>) -> Self {
         self.metadata_version = version;
+        self
+    }
+
+    /// Select declaration-annotation record emission from source-language settings.
+    pub fn with_annotations_in_metadata(mut self, enabled: bool) -> Self {
+        self.annotations_in_metadata = enabled;
         self
     }
 
@@ -732,6 +741,7 @@ impl Default for EmitOptions {
             inner_class_resolver: None,
             value_classes: std::rc::Rc::default(),
             metadata_version: None,
+            annotations_in_metadata: true,
         }
     }
 }
