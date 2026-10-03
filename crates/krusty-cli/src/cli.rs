@@ -7,10 +7,11 @@
 
 use std::path::PathBuf;
 
-use krusty::features::LangFeatures;
 use krusty::jvm::compilation_inputs::JvmCompilationInputInventory;
 use krusty::jvm::ir_emit::{JvmDefaultMode, LambdaMode, LambdaModes};
 use krusty::kotlin_version::KotlinVersion;
+use krusty::language_settings::LanguageSettings;
+use krusty::language_version::LanguageVersion;
 use krusty::plugins::cli::PluginConfig;
 use krusty::plugins::registry::{Activation, NativePlugins, PluginRegistry};
 
@@ -26,8 +27,8 @@ pub struct Options {
     pub sources: Vec<String>,
     /// Module name → `<module>.kotlin_module` (kotlinc `-module-name`, default `main`).
     pub module_name: String,
-    /// Language features enabled via `-XXLanguage:+Foo` / `-X<feature>` (drop-in `kotlinc` flags).
-    pub features: LangFeatures,
+    /// Standard per-compilation language/API versions and their finalized feature baseline.
+    pub language_settings: LanguageSettings,
     /// Options accepted for compatibility but not acted on (reported once).
     pub ignored: Vec<String>,
     /// Flags kotlinc itself accepts but warns about ("flag is not supported by this version of the
@@ -88,7 +89,7 @@ impl Default for Options {
             friend_paths: Vec::new(),
             sources: Vec::new(),
             module_name: "main".to_string(),
-            features: LangFeatures::new(),
+            language_settings: LanguageSettings::default(),
             ignored: Vec::new(),
             unsupported_flag_warnings: Vec::new(),
             errors: Vec::new(),
@@ -128,7 +129,6 @@ pub fn jvm_target_to_major(v: &str) -> Option<u16> {
 
 /// kotlinc flags that take a following value but which krusty ignores (accept + drop the value).
 const IGNORED_WITH_VALUE: &[&str] = &[
-    "-api-version",
     "-kotlin-home",
     "-Xexplicit-api",
     "-opt-in",
@@ -166,37 +166,14 @@ fn apply_jvm_default(
     }
 }
 
-/// Stable levels a metadata stamp may name. kotlinc 2.4.20 also accepts experimental 2.5 and 2.6;
-/// the stamp contract stops at 2.4, the language this compiler implements.
-const METADATA_STAMP_LEVELS: [(i32, i32); 5] = [(2, 0), (2, 1), (2, 2), (2, 3), (2, 4)];
-
-/// The only `-language-version` this compiler implements. Other levels are not a stamp switch.
-const IMPLEMENTED_LANGUAGE_LEVEL: [i32; 3] = [2, 4, 0];
-
 fn supported_stamp_levels() -> String {
-    METADATA_STAMP_LEVELS
-        .iter()
-        .map(|(major, minor)| format!("{major}.{minor}"))
-        .collect::<Vec<_>>()
-        .join(", ")
+    LanguageVersion::supported_text()
 }
 
 /// Parse a `major.minor` level on the shared stamp contract. Anything else — a patch segment,
 /// a sign, or a level outside 2.0 through 2.4 — is unknown.
 fn parse_metadata_level(value: &str) -> Option<[i32; 3]> {
-    let (major, minor) = value.split_once('.')?;
-    if minor.contains('.') {
-        return None;
-    }
-    let segment = |text: &str| -> Option<i32> {
-        (text.bytes().all(|byte| byte.is_ascii_digit()) && !text.is_empty())
-            .then(|| text.parse().ok())
-            .flatten()
-    };
-    let level = [segment(major)?, segment(minor)?, 0];
-    METADATA_STAMP_LEVELS
-        .contains(&(level[0], level[1]))
-        .then_some(level)
+    LanguageVersion::parse_supported(value).map(LanguageVersion::metadata_version)
 }
 
 /// Split a classpath string on the platform separator (`:` on Unix).
@@ -228,6 +205,9 @@ fn collect_sources(path: &str, out: &mut Vec<String>, ignored: &mut Vec<String>)
 /// Parse argv (already skipping the program name). `@file` argfiles are expanded inline.
 pub fn parse(argv: impl IntoIterator<Item = String>) -> Options {
     let mut opts = Options::default();
+    let mut language_version = LanguageVersion::default();
+    let mut api_version = None;
+    let mut language_feature_arguments = Vec::new();
     let mut raw: Vec<String> = Vec::new();
     for a in argv {
         if let Some(file) = a.strip_prefix('@') {
@@ -259,23 +239,32 @@ pub fn parse(argv: impl IntoIterator<Item = String>) -> Options {
                     opts.module_name = v;
                 }
             }
-            // Public `-language-version` selects language semantics. This compiler implements 2.4
-            // only, so every other level is rejected rather than compiled under 2.4 rules with a
-            // different artifact stamp. The stamp itself is the internal `-Xmetadata-version`.
+            // Public `-language-version` selects the source semantics. The feature baseline is
+            // rebuilt after all arguments have been read so explicit `-XXLanguage` overrides stay
+            // ordered independently of where this option appears.
             "-language-version" => match it.next() {
-                Some(v) => match parse_metadata_level(&v) {
-                    Some(IMPLEMENTED_LANGUAGE_LEVEL) => {}
-                    Some(_) => opts.errors.push(format!(
-                        "krusty does not support -language-version={v}; only 2.4 is implemented"
-                    )),
+                Some(v) => match LanguageVersion::parse_supported(&v) {
+                    Some(version) => language_version = version,
                     None => opts.errors.push(format!(
                         "unknown language version: {v}\nSupported language versions: {}",
-                        supported_stamp_levels()
+                        LanguageVersion::supported_text()
                     )),
                 },
                 None => opts
                     .errors
                     .push("missing value for -language-version".to_string()),
+            },
+            "-api-version" => match it.next() {
+                Some(v) => match LanguageVersion::parse_supported(&v) {
+                    Some(version) => api_version = Some(version),
+                    None => opts.errors.push(format!(
+                        "unknown API version: {v}\nSupported API versions: {}",
+                        LanguageVersion::supported_text()
+                    )),
+                },
+                None => opts
+                    .errors
+                    .push("missing value for -api-version".to_string()),
             },
             "-Xmetadata-version" => match it.next() {
                 Some(v) => match parse_metadata_level(&v) {
@@ -401,7 +390,9 @@ pub fn parse(argv: impl IntoIterator<Item = String>) -> Options {
             flag if IGNORED_FLAGS.contains(&flag) => opts.ignored.push(flag.to_string()),
             // Language-feature flags (`-XXLanguage:+Foo,-Bar`, `-Xname-based-destructuring=…`) — a
             // drop-in honors the same toggles kotlinc does so flag-gated syntax compiles.
-            flag if opts.features.apply_cli_arg(flag) => {}
+            flag if opts.language_settings.features.apply_cli_arg(flag) => {
+                language_feature_arguments.push(flag.to_string());
+            }
             // Unknown option: ignore it (don't mistake it for a source file). kotlinc's `-X...` and
             // `-P...` advanced flags land here.
             flag if flag.starts_with('-') => opts.ignored.push(flag.to_string()),
@@ -411,6 +402,10 @@ pub fn parse(argv: impl IntoIterator<Item = String>) -> Options {
     }
     opts.plugins.finish();
     opts.errors.append(&mut opts.plugins.errors);
+    match LanguageSettings::new(language_version, api_version, &language_feature_arguments) {
+        Ok(settings) => opts.language_settings = settings,
+        Err(error) => opts.errors.push(error),
+    }
     opts
 }
 
@@ -635,7 +630,8 @@ Common options (kotlinc-compatible):
   -module-name <name>   name of the generated <name>.kotlin_module (default: main)
   -include-runtime      accepted (no-op: krusty does not bundle the stdlib)
   -jvm-target <v>        class-file version to emit (1.8→v52, 9→v53, …, 25→v69; default v52)
-  -language-version <v>  language semantics to compile (only 2.4 is implemented)
+  -language-version <v>  source semantics to compile (2.0–2.4; default 2.4)
+  -api-version <v>       Kotlin API surface available to source (defaults to language version)
   -Xmetadata-version <v> internal artifact stamp for @kotlin.Metadata and the
                          .kotlin_module header (2.0–2.4; does not change semantics)
   -version              print version and exit
@@ -717,6 +713,7 @@ mod tests {
             parsed.ignored
         );
         assert!(parsed
+            .language_settings
             .features
             .has("DataClassCopyRespectsConstructorVisibility"));
         assert_eq!(parsed.sources, vec!["x.kt".to_string()]);
@@ -729,7 +726,7 @@ mod tests {
         let parsed = parse_args(&["-Xcontext-parameters", "x.kt"]);
         assert!(parsed.ignored.is_empty(), "{:?}", parsed.ignored);
         assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
-        assert!(parsed.features.has("ContextParameters"));
+        assert!(parsed.language_settings.features.has("ContextParameters"));
         assert_eq!(parsed.sources, vec!["x.kt".to_string()]);
     }
 
@@ -737,11 +734,17 @@ mod tests {
     /// as it is for kotlinc, and must still be modeled so it never lands in `ignored`.
     #[test]
     fn explicit_backing_fields_flag_is_modeled_not_ignored() {
-        assert!(parse_args(&["x.kt"]).features.has("ExplicitBackingFields"));
+        assert!(parse_args(&["x.kt"])
+            .language_settings
+            .features
+            .has("ExplicitBackingFields"));
         let parsed = parse_args(&["-Xexplicit-backing-fields", "x.kt"]);
         assert!(parsed.ignored.is_empty(), "{:?}", parsed.ignored);
         assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
-        assert!(parsed.features.has("ExplicitBackingFields"));
+        assert!(parsed
+            .language_settings
+            .features
+            .has("ExplicitBackingFields"));
         assert_eq!(parsed.sources, vec!["x.kt".to_string()]);
     }
 
@@ -750,8 +753,14 @@ mod tests {
         let parsed = parse_args(&["-Xname-based-destructuring=complete", "x.kt"]);
         assert!(parsed.ignored.is_empty(), "{:?}", parsed.ignored);
         assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
-        assert!(parsed.features.has("NameBasedDestructuring"));
-        assert!(parsed.features.has("EnableNameBasedDestructuringShortForm"));
+        assert!(parsed
+            .language_settings
+            .features
+            .has("NameBasedDestructuring"));
+        assert!(parsed
+            .language_settings
+            .features
+            .has("EnableNameBasedDestructuringShortForm"));
         assert_eq!(parsed.sources, vec!["x.kt".to_string()]);
     }
 
@@ -943,7 +952,7 @@ mod tests {
     }
 
     #[test]
-    fn ignores_unsupported_with_and_without_value() {
+    fn accepts_standard_api_version_and_ignores_unrelated_unsupported_options() {
         let o = parse_args(&[
             "-include-runtime",
             "-api-version",
@@ -951,30 +960,68 @@ mod tests {
             "-Xsomething",
             "f.kt",
         ]);
-        // -api-version consumed its value (2.0), not treated as a source.
         assert_eq!(o.sources, vec!["f.kt".to_string()]);
+        assert_eq!(o.language_settings.api_version, LanguageVersion::V2_0);
         assert!(o.ignored.contains(&"-include-runtime".to_string()));
-        assert!(o.ignored.contains(&"-api-version".to_string()));
         assert!(o.ignored.contains(&"-Xsomething".to_string()));
     }
 
-    /// Public `-language-version` accepts only the implemented level, 2.4, and does not select a
-    /// stamp. `-Xmetadata-version` is the internal stamp and accepts the shared 2.0–2.4 contract.
+    /// Public `-language-version` selects source semantics. `-Xmetadata-version` remains an
+    /// independent internal emission override on the same bounded 2.0–2.4 version domain.
     #[test]
-    fn language_version_rejects_unimplemented_levels_and_the_stamp_is_internal() {
+    fn language_version_selects_semantics_and_the_stamp_override_stays_internal() {
         let current = parse_args(&["-language-version", "2.4", "f.kt"]);
         assert!(current.errors.is_empty(), "{:?}", current.errors);
+        assert_eq!(
+            current.language_settings.language_version,
+            LanguageVersion::V2_4
+        );
+        assert_eq!(current.language_settings.api_version, LanguageVersion::V2_4);
         assert_eq!(current.metadata_version, None);
         assert_eq!(current.sources, vec!["f.kt".to_string()]);
 
         let older = parse_args(&["-language-version", "2.2", "f.kt"]);
-        assert_eq!(older.metadata_version, None);
+        assert!(older.errors.is_empty(), "{:?}", older.errors);
         assert_eq!(
-            older.errors,
-            [
-                "krusty does not support -language-version=2.2; only 2.4 is implemented"
-                    .to_string()
-            ]
+            older.language_settings.language_version,
+            LanguageVersion::V2_2
+        );
+        assert_eq!(older.language_settings.api_version, LanguageVersion::V2_2);
+        assert_eq!(older.metadata_version, None);
+        assert!(older.language_settings.features.has("WhenGuards"));
+        assert!(!older.language_settings.features.has("ContextParameters"));
+
+        let explicitly_enabled = parse_args(&[
+            "-XXLanguage:+ContextParameters",
+            "-language-version",
+            "2.2",
+            "f.kt",
+        ]);
+        assert!(
+            explicitly_enabled.errors.is_empty(),
+            "{:?}",
+            explicitly_enabled.errors
+        );
+        assert_eq!(
+            explicitly_enabled.language_settings.language_version,
+            LanguageVersion::V2_2
+        );
+        assert!(explicitly_enabled
+            .language_settings
+            .features
+            .has("ContextParameters"));
+
+        let older_api = parse_args(&["-language-version", "2.4", "-api-version", "2.2", "f.kt"]);
+        assert!(older_api.errors.is_empty(), "{:?}", older_api.errors);
+        assert_eq!(
+            older_api.language_settings.api_version,
+            LanguageVersion::V2_2
+        );
+
+        let newer_api = parse_args(&["-language-version", "2.2", "-api-version", "2.4", "f.kt"]);
+        assert_eq!(
+            newer_api.errors,
+            ["-api-version (2.4) cannot be greater than -language-version (2.2).".to_owned()]
         );
 
         let stamp = parse_args(&["-Xmetadata-version", "2.2", "f.kt"]);

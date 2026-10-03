@@ -209,14 +209,18 @@ pub fn compile(opts: &cli::Options) -> Result<usize, String> {
     let analysis = krusty::frontend::analyze_source_set_streaming_with_module(
         &source_inputs,
         platform,
-        &opts.features,
+        &opts.language_settings.features,
         &opts.module_name,
         &mut diags,
     );
 
     // A `-jvm-target` sets the emitted class-file version (kotlinc's `jvmToolchain(25)` ⇒ v69).
-    // Absent, the backend keeps krusty's v52 default. `-language-version X.Y` stamps the
-    // `@kotlin.Metadata` `mv` and `.kotlin_module` header `[X, Y, 0]`, as kotlinc does.
+    // Absent, the backend keeps krusty's v52 default. The selected source-language level stamps
+    // `@kotlin.Metadata` and `.kotlin_module`, as kotlinc does; the internal metadata override is
+    // kept separate for controlled emission comparisons.
+    let metadata_version = opts
+        .metadata_version
+        .unwrap_or_else(|| opts.language_settings.language_version.metadata_version());
     let backend = krusty::jvm::JvmBackend::new(cp)
         .with_class_major(opts.jvm_target_major)
         .with_jvm_default(opts.jvm_default)
@@ -224,7 +228,7 @@ pub fn compile(opts: &cli::Options) -> Result<usize, String> {
         .with_lambda_modes(opts.lambda_modes)
         .with_param_assertions(!opts.no_param_assertions)
         .with_call_assertions(!opts.no_call_assertions)
-        .with_metadata_version(opts.metadata_version);
+        .with_metadata_version(Some(metadata_version));
     let outputs =
         krusty::compiler::emit_analyzed(analysis, &stems, &backend, &opts.module_name, &mut diags);
 

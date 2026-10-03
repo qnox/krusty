@@ -320,15 +320,11 @@ private fun compilerArguments(task: KotlinJvmCompile): List<String> {
     fun reject(condition: Boolean, name: String) {
         if (condition) throw GradleException("krusty does not support compilerOptions.$name")
     }
-    // Fail-closed: any value other than "true" (case-insensitive) leaves the bridge off.
-    val bridgeLanguageVersion = task.project.providers.gradleProperty(BRIDGE_LANGUAGE_VERSION_PROPERTY)
-        .orNull
-        ?.equals("true", ignoreCase = true) == true
     val languageVersion = options.languageVersion.orNull?.let {
-        if (bridgeLanguageVersion) it.version else supportedKotlinLevel("languageVersion", it.version)
+        supportedLanguageVersion(it.version)
     }
     val apiVersion = options.apiVersion.orNull?.let {
-        if (bridgeLanguageVersion) it.version else supportedKotlinLevel("apiVersion", it.version)
+        supportedApiVersion(it.version)
     }
     reject(options.progressiveMode.getOrElse(false), "progressiveMode")
     reject(options.extraWarnings.getOrElse(false), "extraWarnings")
@@ -355,37 +351,8 @@ private fun compilerArguments(task: KotlinJvmCompile): List<String> {
             )
         }
     }
-    // Under the bridge the requested language version is not a semantics input: krusty compiles
-    // with 2.4 semantics and stamps the requested level as the artifact metadata version instead
-    // of forwarding `-language-version`/`-api-version`. languageVersion is the source of truth
-    // for the stamp; apiVersion alone adds no override.
-    if (bridgeLanguageVersion && languageVersion != null && languageVersion != "2.4") {
-        if (languageVersion !in METADATA_STAMP_LEVELS) {
-            throw GradleException(
-                "krusty does not support $BRIDGE_LANGUAGE_VERSION_PROPERTY with " +
-                    "compilerOptions.languageVersion=$languageVersion; " +
-                    "supported metadata versions: ${METADATA_STAMP_LEVELS.joinToString()}",
-            )
-        }
-        freeArguments.firstOrNull { it.startsWith("-Xmetadata-version=") }?.let { free ->
-            throw GradleException(
-                "compilerOptions.languageVersion=$languageVersion (bridged) and freeCompilerArg '$free' both select the metadata stamp; configure exactly one",
-            )
-        }
-        arguments.add("-Xmetadata-version=$languageVersion")
-        task.logger.warn(
-            "$BRIDGE_LANGUAGE_VERSION_PROPERTY: {} requests languageVersion {}; " +
-                "krusty compiles with 2.4 semantics and stamps metadata version {}",
-            task.path,
-            languageVersion,
-            languageVersion,
-        )
-    } else {
-        languageVersion?.let { arguments.addPair("-language-version", it) }
-    }
-    apiVersion?.let {
-        if (!bridgeLanguageVersion || it == "2.4") arguments.addPair("-api-version", it)
-    }
+    languageVersion?.let { arguments.addPair("-language-version", it) }
+    apiVersion?.let { arguments.addPair("-api-version", it) }
     structuredOptIns.forEach { marker ->
         arguments.add("-opt-in=$marker")
     }
@@ -421,11 +388,6 @@ private val JVM_DEFAULT_LEGACY_MODES = setOf("all", "all-compatibility", "disabl
 // The stamp contract of the CLI's `-Xmetadata-version` (METADATA_STAMP_LEVELS in krusty-cli):
 // an artifact stamp, not a language-semantics switch.
 private val METADATA_STAMP_LEVELS = setOf("2.0", "2.1", "2.2", "2.3", "2.4")
-
-// Opt-in bridge for builds that pin an older compilerOptions.languageVersion in Gradle (the
-// Kotlin repository requests 2.2): krusty still compiles with 2.4 semantics and stamps the
-// requested level as the artifact metadata version.
-private const val BRIDGE_LANGUAGE_VERSION_PROPERTY = "krusty.bridgeLanguageVersion"
 
 private fun isFreeJvmDefault(argument: String): Boolean =
     argument == "-jvm-default" || argument == "-Xjvm-default" ||
@@ -504,13 +466,23 @@ private fun reservedFreeArgument(argument: String): String? {
     }
 }
 
-// `-language-version` selects source semantics, and the compiler implements 2.4 only. `-api-version`
-// remains a compatibility input, but an older level would likewise promise an API boundary the
-// compiler does not enforce. Reject both mismatches instead of compiling them under 2.4 rules.
-private fun supportedKotlinLevel(name: String, version: String): String {
-    if (version != "2.4") {
+// The standard language and API versions are semantic compiler inputs and are forwarded unchanged.
+// The compiler owns their relationship and declaration-availability checks.
+private fun supportedLanguageVersion(version: String): String {
+    if (version !in METADATA_STAMP_LEVELS) {
         throw GradleException(
-            "krusty does not support compilerOptions.$name=$version; only 2.4 is supported",
+            "krusty does not support compilerOptions.languageVersion=$version; " +
+                "supported language versions: ${METADATA_STAMP_LEVELS.joinToString()}",
+        )
+    }
+    return version
+}
+
+private fun supportedApiVersion(version: String): String {
+    if (version !in METADATA_STAMP_LEVELS) {
+        throw GradleException(
+            "krusty does not support compilerOptions.apiVersion=$version; " +
+                "supported API versions: ${METADATA_STAMP_LEVELS.joinToString()}",
         )
     }
     return version

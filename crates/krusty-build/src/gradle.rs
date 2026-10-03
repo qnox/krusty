@@ -850,11 +850,11 @@ mod tests {
                 ),
                 (
                     "old-language-version",
-                    "krusty does not support compilerOptions.languageVersion=2.2; only 2.4 is supported",
+                    "krusty does not support compilerOptions.languageVersion=1.9; supported language versions: 2.0, 2.1, 2.2, 2.3, 2.4",
                 ),
                 (
                     "old-api-version",
-                    "krusty does not support compilerOptions.apiVersion=2.0; only 2.4 is supported",
+                    "krusty does not support compilerOptions.apiVersion=1.9; supported API versions: 2.0, 2.1, 2.2, 2.3, 2.4",
                 ),
                 (
                     "progressive-free-argument",
@@ -923,206 +923,41 @@ mod tests {
                 assert!(!log.exists(), "{case} must fail before execing krusty");
             }
 
-            // The opt-in bridge treats a requested language level as the artifact stamp, not as
-            // semantics: the compile runs with 2.4 semantics and no `-language-version` is
-            // forwarded; the requested level becomes `-Xmetadata-version`.
-            let _ = std::fs::remove_file(&log);
-            let bridged_output = build()
-                .property("krusty.negative", "bridge-language-version")
-                .property("krusty.bridgeLanguageVersion", "true")
-                .tasks([":core:util.runtime:compileKotlin"])
-                .run_output()
-                .unwrap_or_else(|error| panic!("bridge language version: {error}"));
-            let warning_line = "krusty.bridgeLanguageVersion: :core:util.runtime:compileKotlin requests languageVersion 2.2; krusty compiles with 2.4 semantics and stamps metadata version 2.2";
-            assert_eq!(
-                bridged_output
-                    .lines()
-                    .filter(|line| line.trim() == warning_line)
-                    .count(),
-                1,
-                "{bridged_output}",
-            );
-            let bridged_run = single_invocation(&log);
-            let bridged_stamps = metadata_stamps(&bridged_run);
-            assert_eq!(bridged_stamps.len(), 1, "{bridged_run:?}");
-            assert_eq!(
-                bridged_stamps[0], "-Xmetadata-version=2.2",
-                "{bridged_run:?}"
-            );
-            assert!(
-                bridged_run
-                    .iter()
-                    .all(|argument| argument != "-language-version"),
-                "{bridged_run:?}",
-            );
-            assert!(
-                bridged_run
-                    .iter()
-                    .all(|argument| argument != "-api-version"),
-                "{bridged_run:?}",
-            );
-
-            // A freeCompilerArgs stamp and the bridged language version would both select the
-            // metadata stamp; the CLI's silent last-wins must never be reached.
-            let _ = std::fs::remove_file(&log);
-            let result = build()
-                .property("krusty.negative", "bridge-metadata-version-conflict")
-                .property("krusty.bridgeLanguageVersion", "true")
-                .tasks([":core:util.runtime:compileKotlin"])
-                .run();
-            let error = match result {
-                Ok(()) => panic!("bridge metadata stamp conflict succeeded"),
-                Err(error) => error,
-            };
-            let rendered = error.to_string();
-            let expected_line = "> compilerOptions.languageVersion=2.2 (bridged) and freeCompilerArg '-Xmetadata-version=2.3' both select the metadata stamp; configure exactly one";
-            assert_eq!(
-                rendered
-                    .lines()
-                    .filter(|line| line.trim() == expected_line)
-                    .count(),
-                1,
-                "{rendered}",
-            );
-            assert!(
-                !log.exists(),
-                "stamp conflict must fail before execing krusty"
-            );
-
-            // languageVersion is the stamp's source of truth: with apiVersion unset the same
-            // stamp is appended and no `-api-version` appears. The compiler arguments are
-            // identical to the run above, so a source edit is what forces re-execution.
+            // The standard Gradle languageVersion reaches the compiler unchanged. No krusty-only
+            // property and no metadata-only substitution is part of the contract.
             let _ = std::fs::remove_file(&log);
             std::fs::write(
                 &runtime_source,
-                "package org.jetbrains.kotlin.util\nfun runtimeMarker() = \"runtime\"\nfun bridgeLvOnly() = 1\n",
+                "package org.jetbrains.kotlin.util\nfun runtimeMarker() = \"runtime\"\nfun languageLevel22() = 1\n",
             )
-            .expect("edit runtime for languageVersion-only bridge");
+            .expect("edit runtime for languageVersion 2.2");
             build()
-                .property("krusty.negative", "bridge-language-version-no-api")
-                .property("krusty.bridgeLanguageVersion", "true")
+                .property("krusty.negative", "language-version-2-2")
                 .tasks([":core:util.runtime:compileKotlin"])
                 .run()
-                .unwrap_or_else(|error| panic!("bridge languageVersion only: {error}"));
-            let lv_only_run = single_invocation(&log);
-            let lv_only_stamps = metadata_stamps(&lv_only_run);
-            assert_eq!(lv_only_stamps.len(), 1, "{lv_only_run:?}");
+                .unwrap_or_else(|error| panic!("languageVersion 2.2: {error}"));
+            let language_2_2_run = single_invocation(&log);
             assert_eq!(
-                lv_only_stamps[0], "-Xmetadata-version=2.2",
-                "{lv_only_run:?}"
-            );
-            assert!(
-                lv_only_run
-                    .iter()
-                    .all(|argument| argument != "-language-version"),
-                "{lv_only_run:?}",
-            );
-            assert!(
-                lv_only_run
-                    .iter()
-                    .all(|argument| argument != "-api-version"),
-                "{lv_only_run:?}",
-            );
-
-            // apiVersion alone adds no stamp override: the non-2.4 apiVersion is dropped and no
-            // `-Xmetadata-version` is appended.
-            let _ = std::fs::remove_file(&log);
-            std::fs::write(
-                &runtime_source,
-                "package org.jetbrains.kotlin.util\nfun runtimeMarker() = \"runtime\"\nfun bridgeAvOnly() = 1\n",
-            )
-            .expect("edit runtime for apiVersion-only bridge");
-            build()
-                .property("krusty.negative", "bridge-api-version-only")
-                .property("krusty.bridgeLanguageVersion", "true")
-                .tasks([":core:util.runtime:compileKotlin"])
-                .run()
-                .unwrap_or_else(|error| panic!("bridge apiVersion only: {error}"));
-            let av_only_run = single_invocation(&log);
-            assert!(metadata_stamps(&av_only_run).is_empty(), "{av_only_run:?}");
-            assert!(
-                av_only_run
-                    .iter()
-                    .all(|argument| argument != "-language-version"),
-                "{av_only_run:?}",
-            );
-            assert!(
-                av_only_run
-                    .iter()
-                    .all(|argument| argument != "-api-version"),
-                "{av_only_run:?}",
-            );
-
-            // A requested 2.4 keeps the existing behavior with the property set:
-            // `-language-version 2.4` is forwarded and no stamp is appended.
-            let _ = std::fs::remove_file(&log);
-            std::fs::write(
-                &runtime_source,
-                "package org.jetbrains.kotlin.util\nfun runtimeMarker() = \"runtime\"\nfun bridgeCurrent() = 1\n",
-            )
-            .expect("edit runtime for 2.4 bridge");
-            build()
-                .property("krusty.bridgeLanguageVersion", "true")
-                .tasks([":core:util.runtime:compileKotlin"])
-                .run()
-                .unwrap_or_else(|error| panic!("bridge with 2.4: {error}"));
-            let current_run = single_invocation(&log);
-            assert!(
-                has_pair(&current_run, "-language-version", "2.4"),
-                "{current_run:?}",
-            );
-            assert!(
-                has_pair(&current_run, "-api-version", "2.4"),
-                "{current_run:?}",
-            );
-            assert!(metadata_stamps(&current_run).is_empty(), "{current_run:?}");
-
-            let _ = std::fs::remove_file(&log);
-            let result = build()
-                .property("krusty.negative", "bridge-old-language-version")
-                .property("krusty.bridgeLanguageVersion", "true")
-                .tasks([":core:util.runtime:compileKotlin"])
-                .run();
-            let error = match result {
-                Ok(()) => panic!("bridge with languageVersion 1.9 succeeded"),
-                Err(error) => error,
-            };
-            let rendered = error.to_string();
-            let expected_line = "> krusty does not support krusty.bridgeLanguageVersion with compilerOptions.languageVersion=1.9; supported metadata versions: 2.0, 2.1, 2.2, 2.3, 2.4";
-            assert_eq!(
-                rendered
-                    .lines()
-                    .filter(|line| line.trim() == expected_line)
+                language_2_2_run
+                    .windows(2)
+                    .filter(|pair| pair == &["-language-version", "2.2"])
                     .count(),
                 1,
-                "{rendered}",
+                "{language_2_2_run:?}",
             );
-            assert!(!log.exists(), "bridge 1.9 must fail before execing krusty");
-
-            // Fail-closed: any value other than "true" keeps the un-bridged rejection.
-            let _ = std::fs::remove_file(&log);
-            let result = build()
-                .property("krusty.negative", "bridge-language-version")
-                .property("krusty.bridgeLanguageVersion", "false")
-                .tasks([":core:util.runtime:compileKotlin"])
-                .run();
-            let error = match result {
-                Ok(()) => panic!("bridge=false with languageVersion 2.2 succeeded"),
-                Err(error) => error,
-            };
-            let rendered = error.to_string();
-            let expected_line = "> krusty does not support compilerOptions.languageVersion=2.2; only 2.4 is supported";
             assert_eq!(
-                rendered
-                    .lines()
-                    .filter(|line| line.trim() == expected_line)
+                language_2_2_run
+                    .windows(2)
+                    .filter(|pair| pair == &["-api-version", "2.2"])
                     .count(),
                 1,
-                "{rendered}",
+                "{language_2_2_run:?}",
             );
             assert!(
-                !log.exists(),
-                "bridge=false must fail before execing krusty"
+                language_2_2_run
+                    .iter()
+                    .all(|argument| !argument.starts_with("-Xmetadata-version")),
+                "{language_2_2_run:?}",
             );
         }
 
@@ -1243,13 +1078,6 @@ mod tests {
         let runs = invocations(&text);
         assert_eq!(runs.len(), 1, "{text}");
         runs.into_iter().next().expect("single invocation")
-    }
-
-    fn metadata_stamps(args: &[String]) -> Vec<&str> {
-        args.iter()
-            .map(String::as_str)
-            .filter(|argument| argument.starts_with("-Xmetadata-version"))
-            .collect()
     }
 
     fn invocations(text: &str) -> Vec<Vec<String>> {
@@ -1433,21 +1261,9 @@ tasks.withType<KotlinJvmCompile>().configureEach {
         jvmTarget.set(JvmTarget.JVM_17)
         moduleName.set("kotlin-util-runtime")
         when (krustyNegative) {
-            "bridge-language-version" -> {
+            "language-version-2-2" -> {
                 languageVersion.set(KotlinVersion.KOTLIN_2_2)
                 apiVersion.set(KotlinVersion.KOTLIN_2_2)
-            }
-            "bridge-language-version-no-api" -> languageVersion.set(KotlinVersion.KOTLIN_2_2)
-            "bridge-api-version-only" -> apiVersion.set(KotlinVersion.KOTLIN_2_2)
-            "bridge-metadata-version-conflict" -> {
-                languageVersion.set(KotlinVersion.KOTLIN_2_2)
-                freeCompilerArgs.add("-Xmetadata-version=2.3")
-            }
-            "bridge-old-language-version" -> {
-                // The KOTLIN_1_9 enum constant is an error-level deprecation in KGP 2.4; the
-                // string form still reaches the plugin as "1.9".
-                languageVersion.set(KotlinVersion.fromVersion("1.9"))
-                apiVersion.set(KotlinVersion.fromVersion("1.9"))
             }
             else -> {
                 languageVersion.set(KotlinVersion.KOTLIN_2_4)
@@ -1578,8 +1394,8 @@ tasks.withType<KotlinJvmCompile>().configureEach {
             "plugin-free-argument" -> freeCompilerArgs.add("-Xplugin=forbidden.jar")
             "jvm-default-conflict" -> freeCompilerArgs.add("-jvm-default=disable")
             "jvm-default-bad-mode" -> freeCompilerArgs.add("-jvm-default=sideways")
-            "old-language-version" -> languageVersion.set(KotlinVersion.KOTLIN_2_2)
-            "old-api-version" -> apiVersion.set(KotlinVersion.KOTLIN_2_0)
+            "old-language-version" -> languageVersion.set(KotlinVersion.fromVersion("1.9"))
+            "old-api-version" -> apiVersion.set(KotlinVersion.fromVersion("1.9"))
             "progressive-free-argument" -> freeCompilerArgs.add("-progressive")
             "jspecify-free-argument" -> freeCompilerArgs.add("-Xjspecify-annotations=strict")
             "jdk-release-free-argument" -> freeCompilerArgs.add("-Xjdk-release=8")

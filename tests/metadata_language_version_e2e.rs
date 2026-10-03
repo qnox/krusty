@@ -1,8 +1,8 @@
-//! `-Xmetadata-version X.Y` stamps every emitted `@kotlin.Metadata` `mv` and the
-//! `META-INF/<module>.kotlin_module` version header with `[X, Y, 0]`. The public
-//! `-language-version` flag does not: only 2.4 is implemented, and it leaves the default stamp.
-//! The reference kotlinc's no-flag stamp is `[2, 4, 0]`; its `-language-version 2.2` stamp is the
-//! value the internal input is compared against.
+//! `-Xmetadata-version X.Y` independently overrides every emitted `@kotlin.Metadata` `mv` and the
+//! `META-INF/<module>.kotlin_module` version header with `[X, Y, 0]`. The standard public
+//! `-language-version` selects that same default stamp through the CLI; these tests isolate the
+//! backend-only override. The reference kotlinc's no-flag stamp is `[2, 4, 0]`, and its
+//! `-language-version 2.2` stamp is the value the internal override is compared against.
 
 use super::common;
 

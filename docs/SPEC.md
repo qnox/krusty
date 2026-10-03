@@ -10136,23 +10136,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `multiplatform/k2/expectStatic.kt`.) Classes compiled with this experimental feature match
   kotlinc's except the `@Metadata` pre-release flag kotlinc sets (`xi` 50 against 48).
 
-- **`-language-version` is the implemented language, and the artifact stamp is separate.**
-  kotlinc's `-language-version` both gates language semantics and selects the version written into
-  `@kotlin.Metadata` and the `.kotlin_module` header. krusty implements 2.4 only, so a public
-  `-language-version` other than 2.4 is rejected; 2.4 leaves the default stamp `[2, 4, 0]`. The
-  internal `-Xmetadata-version X.Y` writes `mv=[X, Y, 0]` and the same version into the module
-  header without claiming those language semantics. The accepted levels are the one contract
-  2.0, 2.1, 2.2, 2.3, and 2.4; a patch segment, a sign, or any other pair (including kotlinc's
-  experimental 2.5) is an unknown version. `-api-version` stays an accepted-and-ignored
-  compatibility flag. The Gradle plugin exposes the split as an opt-in: with
-  `-Pkrusty.bridgeLanguageVersion=true`, a requested `compilerOptions.languageVersion` other than
-  2.4 is not rejected and not forwarded — krusty compiles with 2.4 semantics and the requested
-  level (2.0–2.4, validated) is appended as `-Xmetadata-version`, with `languageVersion` the sole
-  source of the stamp (`apiVersion` alone adds no override; a requested 2.4 keeps the existing
-  `-language-version 2.4` behavior).
+- **Language and API versions are standard compiler settings, not a Gradle bridge.**
+  `-language-version` selects the source-language feature baseline and the default version written
+  into `@kotlin.Metadata` and the `.kotlin_module` header. `-api-version` defaults to that language
+  version and may not be newer; it selects declaration availability independently of syntax. The
+  settings are per compilation rather than process-global, because workers and language servers may
+  analyze modules at different levels in one process. Gradle forwards
+  `compilerOptions.languageVersion` and `compilerOptions.apiVersion` unchanged, with no krusty-only
+  property. The internal `-Xmetadata-version X.Y` remains a separate artifact-stamp override and
+  does not change source semantics. Stable supported levels are 2.0,
+  2.1, 2.2, 2.3, and 2.4; malformed, signed, patch, and unsupported levels are rejected.
   (`tests/metadata_language_version_e2e.rs` compares class, facade,
   `$DefaultImpls`, suspend-lambda, and regenerated-inline-object stamps with kotlinc's
-  `-language-version 2.2` output; `language_version_rejects_unimplemented_levels_and_the_stamp_is_internal`
+  `-language-version 2.2` output; `language_version_selects_semantics_and_the_stamp_override_stays_internal`
   in `crates/krusty-cli/src/cli.rs`; `language_version_stamps_the_header` in
   `src/metadata/module.rs`.)
 
