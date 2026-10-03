@@ -138,10 +138,11 @@ impl Emitter<'_> {
         code: &mut CodeBuilder,
     ) {
         let interface = jvm_function_interface(arity);
+        let interface_identity = crate::types::type_name(&interface);
         let realized = ir_ty_to_jvm(&self.value_ty(func));
         let already_interface = matches!(
             realized.non_null(),
-            Ty::Obj(name, _) if name.matches(&interface)
+            Ty::Obj(name, _) if name == interface_identity
         );
         if !already_interface {
             code.checkcast(self.cw.class_ref(&interface));
