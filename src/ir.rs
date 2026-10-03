@@ -1684,6 +1684,10 @@ pub struct IrFile {
     /// semantic parameter type, so a backend can realize its holder ABI without reselecting a
     /// constructor or inferring capture storage from an erased descriptor.
     pub shared_super_capture_parameters: std::collections::HashMap<(ClassId, u32), Ty>,
+    /// The same holder edge for a secondary `super(…)` that lowering prefixed with superclass
+    /// captures. Keyed by `(subclass, secondary index, selected-super-parameter)`.
+    pub(crate) shared_secondary_super_capture_parameters:
+        std::collections::HashMap<(ClassId, u32, u32), Ty>,
     /// Exact semantic closure identity for every local/anonymous-class capture field. Transitive
     /// superclass forwarding consumes this coordinate instead of matching synthetic field names.
     pub(crate) class_capture_identities:

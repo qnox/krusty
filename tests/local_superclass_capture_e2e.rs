@@ -366,6 +366,155 @@ fn same_spelled_lambda_receivers_do_not_cross_on_the_enclosing_instance() {
     );
 }
 
+/// A local subclass with only secondary constructors forwards the superclass capture prefix on
+/// each `super(…)`. `this(…)` keeps the subclass's own prefix.
+#[test]
+fn a_local_subclass_secondary_constructor_forwards_superclass_captures() {
+    // secondaryConstructors/localClasses.kt: both classes are local and have only secondary
+    // constructors. A's `super(x1, x2)` must pass B's captures ahead of the written ints, and the
+    // init blocks still run before each constructor body.
+    agrees_with_kotlinc(
+        "LocalSecondaryConstructors",
+        r##"
+open class C(val grandParentProp: String)
+fun box(): String {
+    var sideEffects: String = ""
+    var parentSideEffects: String = ""
+    val justForUsageInClosure = 7
+    val justForUsageInParentClosure = "parentCaptured"
+
+    abstract class B : C {
+        val parentProp: String
+        init {
+            sideEffects += "minus-one#"
+            parentSideEffects += "1"
+        }
+        protected constructor(arg: Int): super(justForUsageInParentClosure) {
+            parentProp = (arg).toString()
+            sideEffects += "0.5#"
+            parentSideEffects += "#" + justForUsageInParentClosure
+        }
+        protected constructor(arg1: Int, arg2: Int): super(justForUsageInParentClosure) {
+            parentProp = (arg1 + arg2).toString()
+            sideEffects += "0.7#"
+            parentSideEffects += "#3"
+        }
+        init {
+            sideEffects += "zero#"
+            parentSideEffects += "#4"
+        }
+    }
+
+    class A : B {
+        var prop: String = ""
+        init {
+            sideEffects += prop + "first"
+        }
+
+        constructor(x1: Int, x2: Int): super(x1, x2) {
+            prop = x1.toString()
+            sideEffects += "#third"
+        }
+
+        init {
+            sideEffects += prop + "#second"
+        }
+
+        constructor(x: Int): super(justForUsageInClosure + x) {
+            prop += "${x}#int"
+            sideEffects += "#fourth"
+        }
+
+        constructor(): this(justForUsageInClosure) {
+            sideEffects += "#fifth"
+        }
+
+        override fun toString() = "$prop#$parentProp#$grandParentProp"
+    }
+
+    val a1 = A(5, 10).toString()
+    if (a1 != "5#15#parentCaptured") return "fail1: $a1"
+    if (sideEffects != "minus-one#zero#0.7#first#second#third") return "fail2: ${sideEffects}"
+    if (parentSideEffects != "1#4#3") return "fail3: ${parentSideEffects}"
+
+    sideEffects = ""
+    parentSideEffects = ""
+    val a2 = A(123).toString()
+    if (a2 != "123#int#130#parentCaptured") return "fail1: $a2"
+    if (sideEffects != "minus-one#zero#0.5#first#second#fourth") return "fail4: ${sideEffects}"
+    if (parentSideEffects != "1#4#parentCaptured") return "fail5: ${parentSideEffects}"
+
+    sideEffects = ""
+    parentSideEffects = ""
+    val a3 = A().toString()
+    if (a3 != "7#int#14#parentCaptured") return "fail6: $a3"
+    if (sideEffects != "minus-one#zero#0.5#first#second#fourth#fifth") return "fail7: ${sideEffects}"
+    if (parentSideEffects != "1#4#parentCaptured") return "fail8: ${parentSideEffects}"
+
+    return "OK"
+}
+"##,
+    );
+}
+
+/// The secondary `super(n)` descriptor carries the superclass capture prefix, in capture order,
+/// ahead of the written `Int`. The observation is each local class's `<init>` access and JVM
+/// descriptor, not a value's `toString` and not the generic Signature attribute.
+#[test]
+fn a_secondary_super_call_keeps_the_capture_prefix_in_its_descriptor() {
+    let source = "fun box(): String {\n\
+         \x20   val kept = \"K\"\n\
+         \x20   var changed = \"C\"\n\
+         \x20   abstract class Base {\n\
+         \x20       constructor(n: Int) { changed = n.toString() }\n\
+         \x20       fun read(): String = kept + changed\n\
+         \x20   }\n\
+         \x20   class Child : Base {\n\
+         \x20       constructor(n: Int): super(n)\n\
+         \x20   }\n\
+         \x20   val child = Child(2)\n\
+         \x20   return if (child.read() == \"K2\") \"OK\" else child.read()\n\
+         }\n";
+    let classes = common::classes_against_kotlinc_module(&[("CapturePrefix.kt", source)]);
+    let constructors = |suffix: &str| {
+        let name = classes
+            .reference
+            .keys()
+            .find(|name| name.ends_with(suffix))
+            .cloned()
+            .unwrap_or_else(|| {
+                panic!(
+                    "kotlinc wrote no {suffix}: {:?}",
+                    classes.reference.keys().collect::<Vec<_>>()
+                )
+            });
+        let descriptors = |bytes: &[u8]| {
+            common::member_table(bytes)
+                .into_iter()
+                .filter_map(|member| {
+                    let method = member.strip_prefix("method ")?;
+                    let (access, rest) = method.split_once(' ')?;
+                    let (name_desc, _) = rest.split_once(' ')?;
+                    name_desc
+                        .starts_with("<init>")
+                        .then(|| format!("{access} {name_desc}"))
+                })
+                .collect::<Vec<_>>()
+        };
+        let reference = descriptors(&classes.reference[&name]);
+        let krusty_bytes = classes
+            .krusty
+            .get(&name)
+            .unwrap_or_else(|| panic!("krusty wrote no {name}"));
+        let krusty = descriptors(krusty_bytes);
+        (name, reference, krusty)
+    };
+    let (base, reference, krusty) = constructors("$Base");
+    assert_eq!(krusty, reference, "{base} constructors");
+    let (child, reference, krusty) = constructors("$Child");
+    assert_eq!(krusty, reference, "{child} constructors");
+}
+
 /// Anonymous-object capture discovery uses the same resolved superclass edge. The object body does
 /// not mention `result`; it carries that value solely because its local superclass requires it.
 #[test]

@@ -94,6 +94,17 @@ pub(super) fn lower_class_capture_slots(ir: &mut IrFile) {
     for (&(class, parameter), &element) in &ir.shared_super_capture_parameters {
         ir.classes[class as usize].super_ctor_params[parameter as usize] = holder_ty(&element);
     }
+    for (&(class, secondary, parameter), &element) in &ir.shared_secondary_super_capture_parameters
+    {
+        let crate::ir::CtorDelegateTarget::Super { target_params, .. } =
+            &mut ir.classes[class as usize].secondary_ctors[secondary as usize].delegate
+        else {
+            unreachable!(
+                "secondary superclass capture ({class}, {secondary}, {parameter}) is not a super delegation"
+            );
+        };
+        target_params[parameter as usize] = holder_ty(&element);
+    }
 
     let class_names = physical
         .iter()
