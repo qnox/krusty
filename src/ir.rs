@@ -2307,6 +2307,11 @@ pub struct IrFile {
     /// identically in the JVM descriptor. Only concrete declared receivers are recorded (a `Var` receiver
     /// is `None` at the source and never inserted).
     pub ext_call_source_receiver: std::collections::HashMap<u32, Ty>,
+    /// JVM call expression → exact physical realization inherited through its checked override
+    /// target. A JVM planning pass selects this from provider-published candidates and stable
+    /// function/property override identities; emission never scans source/member spellings.
+    pub(crate) jvm_overridden_call_realizations:
+        std::collections::HashMap<ExprId, crate::libraries::OverriddenCallRealization>,
     /// Exact provider-selected language-member roles retained on their call expressions. This is
     /// declaration identity data, not a spelling-based backend lookup.
     pub semantic_call_roles: std::collections::HashMap<ExprId, crate::types::SemanticCallRole>,

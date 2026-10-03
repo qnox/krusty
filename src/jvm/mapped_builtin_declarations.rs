@@ -125,6 +125,61 @@ pub(super) fn realization_for_declaration(
         .map(|realization| (realization.physical_owner, realization.physical_name))
 }
 
+/// Target-policy realizations attached to one exact provider declaration, as kotlinc's
+/// `getOverriddenBuiltinWithDifferentJvmName`
+/// (core/descriptors.jvm/src/org/jetbrains/kotlin/load/java/specialBuiltinMembers.kt:88-102)
+/// pre-filters them: only the source name itself (`removeAt`, `size`, `entries`). kotlinc's
+/// accessor alternative (`propertyIfAccessor.name in SPECIAL_SHORT_NAMES`) matches a getter
+/// spelling only when the callee is a known property accessor; here property reads already arrive
+/// under the Kotlin source name (classpath reads included), so a bare `getSize` denotes a plain
+/// function — a Java bean getter or a user `fun getSize()` — which kotlinc never retargets. A
+/// SETTER spelling never matches either: every special property is read-only, so an overriding
+/// `var`'s setter overrides nothing and keeps `setSize`.
+///
+/// A function row is signature-keyed
+/// (SpecialGenericSignatures.NAME_AND_SIGNATURE_TO_JVM_REPRESENTATION_NAME_MAP), but the key is
+/// the OVERRIDDEN BUILTIN's signature, so the call's descriptor must agree on the PARAMETERS while
+/// its return may be the override's own covariant narrowing — kotlinc still retargets
+/// (`S.removeAt(I)Ljava/lang/String;` → `S.remove(I)Ljava/lang/Object;` + `checkcast`) because the
+/// chain, not the spelling, decides. A property row checks the FqName
+/// (ClassicBuiltinSpecialProperties.hasBuiltinSpecialPropertyFqName,
+/// core/descriptors.jvm/.../ClassicBuiltinSpecialProperties.kt:25-38), whose implementation also
+/// requires `valueParameters.isEmpty()`: a covariant override still retargets and takes the
+/// builtin's descriptor, but a same-named `fun entries(x: Int)` is no accessor and never matches.
+pub(super) fn overridden_call_realizations_for_declaration(
+    source_name: &str,
+    descriptor: &str,
+    kind: MappedBuiltinMemberKind,
+) -> Vec<crate::libraries::OverriddenCallRealization> {
+    special_realizations()
+        .iter()
+        .filter(|realization| realization.source_name == source_name)
+        .filter(|realization| realization.kind == kind)
+        .filter(|realization| {
+            let parameters = descriptor_parameters(descriptor);
+            match realization.kind {
+                MappedBuiltinMemberKind::Property => parameters == "()",
+                MappedBuiltinMemberKind::Function => {
+                    descriptor_parameters(realization.descriptor) == parameters
+                }
+            }
+        })
+        .map(|realization| crate::libraries::OverriddenCallRealization {
+            declaration_owner: realization.declaration_owner,
+            physical_name: realization.physical_name.to_string(),
+            descriptor: realization.descriptor.to_string(),
+        })
+        .collect()
+}
+
+/// The `(…)` parameter half of a JVM method descriptor, including both parens.
+fn descriptor_parameters(descriptor: &str) -> &str {
+    match descriptor.find(')') {
+        Some(close) => &descriptor[..=close],
+        None => descriptor,
+    }
+}
+
 /// Physical spelling for an already-resolved mapped-builtin call. The owner may be either the
 /// Kotlin declaration identity or its exact JVM realization; the descriptor disambiguates overloads.
 pub(super) fn physical_name_for_call(

@@ -7677,13 +7677,7 @@ impl<'a> Emitter<'a> {
             };
             if let Some(mut access) = access {
                 self.retarget_explicit_backing_read(&operation, &mut access);
-                return self.emit_realized_property_read(
-                    operation.expression,
-                    operation.receiver,
-                    access,
-                    operation.ty,
-                    code,
-                );
+                return self.emit_realized_property_read(&operation, access, code);
             }
         }
         crate::trace_compiler!(
@@ -7699,13 +7693,7 @@ impl<'a> Emitter<'a> {
             .get(&operation.expression)
             .and_then(|accessor| self.bodies.external_property_access(*accessor))
         {
-            return self.emit_realized_property_read(
-                operation.expression,
-                operation.receiver,
-                access,
-                operation.ty,
-                code,
-            );
+            return self.emit_realized_property_read(&operation, access, code);
         }
         // A source declaration from this compilation supplies the invocation shape; a checker-selected
         // spelling refines only its otherwise-conventional accessor name.
@@ -7716,13 +7704,7 @@ impl<'a> Emitter<'a> {
             operation.interface,
         ) {
             self.retarget_explicit_backing_read(&operation, &mut access);
-            return self.emit_realized_property_read(
-                operation.expression,
-                operation.receiver,
-                access,
-                operation.ty,
-                code,
-            );
+            return self.emit_realized_property_read(&operation, access, code);
         }
         // A loaded classfile supplies the authoritative JVM realization, including static value-class
         // accessors. The selected spelling intentionally carries no duplicate invocation shape.
@@ -7730,13 +7712,7 @@ impl<'a> Emitter<'a> {
             .bodies
             .property_read_access(operation.owner, operation.name)
         {
-            return self.emit_realized_property_read(
-                operation.expression,
-                operation.receiver,
-                access,
-                operation.ty,
-                code,
-            );
+            return self.emit_realized_property_read(&operation, access, code);
         }
         let access = PropertyAccess::Accessor {
             owner: operation.owner,
@@ -7764,13 +7740,7 @@ impl<'a> Emitter<'a> {
                 || self.bodies.owner_is_interface_name(operation.owner),
             static_receiver: None,
         };
-        self.emit_realized_property_read(
-            operation.expression,
-            operation.receiver,
-            access,
-            operation.ty,
-            code,
-        )
+        self.emit_realized_property_read(&operation, access, code)
     }
 
     /// Realize `IrExpr::PropertyWrite` — the write analogue of [`Self::emit_property_read`], and the same

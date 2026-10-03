@@ -165,7 +165,7 @@ fn receiver_owner(
 
 /// Whether `class` has `ancestor` among its transitive supertypes, a mapped Kotlin builtin
 /// standing for the JVM class it maps to (`kotlin/Any` for `java/lang/Object`).
-fn inherits(
+pub(super) fn inherits(
     classifiers: &CheckedDispatchClassifiers<'_>,
     class: TypeName,
     ancestor: TypeName,
@@ -176,9 +176,30 @@ fn inherits(
         if !seen.insert(current) {
             continue;
         }
-        let fact = classifiers
-            .classifier(current)
-            .ok_or(MissingClassifier(current))?;
+        // A mapped Kotlin builtin's JVM class (`java/util/Collection`) can be absent from a
+        // JDK-free classpath: its checked facts live under the Kotlin metadata name, and the
+        // twins' supertypes correspond modulo the same mapping, so they stand in for the walk.
+        let fact = match classifiers.classifier(current) {
+            Some(fact) => fact,
+            None => {
+                if let Some(twin) =
+                    crate::jvm::jvm_class_map::jvm_to_kotlin_builtin_metadata_name(current)
+                {
+                    if seen.contains(&twin) {
+                        continue;
+                    }
+                    match classifiers.classifier(twin) {
+                        Some(fact) => {
+                            seen.insert(twin);
+                            fact
+                        }
+                        None => return Err(MissingClassifier(current)),
+                    }
+                } else {
+                    return Err(MissingClassifier(current));
+                }
+            }
+        };
         if fact
             .supertypes
             .iter()
@@ -246,6 +267,45 @@ mod tests {
         assert_eq!(
             call_owner(&classifiers, declared, false, Some(receiver)),
             Err(MissingClassifier(intermediate))
+        );
+    }
+
+    #[test]
+    fn inherits_uses_kotlin_metadata_twin_when_jvm_builtin_facts_are_absent() {
+        let receiver = crate::types::type_name("review/UserCollection");
+        let jvm_collection = crate::types::type_name("java/util/Collection");
+        let kotlin_collection = crate::types::type_name("kotlin/collections/Collection");
+        let kotlin_iterable = crate::types::type_name("kotlin/collections/Iterable");
+        let kotlin_any = crate::types::type_name("kotlin/Any");
+
+        let mut facts = Facts::default();
+        facts.0.insert(receiver, class(&[jvm_collection]));
+        facts.0.insert(kotlin_collection, class(&[kotlin_iterable]));
+        facts.0.insert(kotlin_iterable, class(&[]));
+        let ir = crate::ir::IrFile::default();
+        let classifiers = CheckedDispatchClassifiers::new(&ir, &facts);
+
+        assert_eq!(inherits(&classifiers, receiver, jvm_collection), Ok(true));
+        assert_eq!(inherits(&classifiers, receiver, kotlin_any), Ok(false));
+    }
+
+    #[test]
+    fn inherits_still_fails_closed_without_jvm_class_or_twin_facts() {
+        let receiver = crate::types::type_name("review/UserCollection");
+        let jvm_collection = crate::types::type_name("java/util/Collection");
+
+        let mut facts = Facts::default();
+        facts.0.insert(receiver, class(&[jvm_collection]));
+        let ir = crate::ir::IrFile::default();
+        let classifiers = CheckedDispatchClassifiers::new(&ir, &facts);
+
+        assert_eq!(
+            inherits(
+                &classifiers,
+                receiver,
+                crate::types::type_name("java/util/List")
+            ),
+            Err(MissingClassifier(jvm_collection))
         );
     }
 

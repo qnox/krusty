@@ -608,6 +608,22 @@ impl super::Emitter<'_> {
                     else {
                         return;
                     };
+                    let (name, desc, result_narrow) = self
+                        .ir
+                        .jvm_overridden_call_realizations
+                        .get(&e)
+                        .map_or_else(
+                            || (name, desc.clone(), None),
+                            |realization| {
+                                let narrow = (realization.descriptor != desc && ret.is_reference())
+                                    .then(|| crate::jvm::names::instanceof_internal_name(ret));
+                                (
+                                    realization.physical_name.clone(),
+                                    realization.descriptor.clone(),
+                                    narrow,
+                                )
+                            },
+                        );
                     if is_iface {
                         // Dispatch through an interface — `invokeinterface I.m`.
                         let m = self.cw.interface_methodref(&owner, &name, &desc);
@@ -617,6 +633,10 @@ impl super::Emitter<'_> {
                         let m = self.cw.methodref(&owner, &name, &desc);
                         self.mark_call_start(e, code);
                         code.invokevirtual(m, aw, physical_call_result_words(ret));
+                    }
+                    if let Some(internal) = result_narrow {
+                        let class = self.cw.class_ref(&internal);
+                        code.checkcast(class);
                     }
                 }
             }
@@ -1000,10 +1020,10 @@ impl super::Emitter<'_> {
                         ) else {
                             return;
                         };
-                        let name = name.clone();
+                        let mut name = name.clone();
                         let ptys = jvm_tys(param_tys);
                         let ret = self.physical_call_result(e, jvm_declared_ty(ret_ty));
-                        let descriptor = method_descriptor(&ptys, ret);
+                        let mut descriptor = method_descriptor(&ptys, ret);
                         let mut ops = vec![recv];
                         ops.extend(args.iter().copied());
                         // The receiver is already of the class the call names; only the arguments
@@ -1014,6 +1034,27 @@ impl super::Emitter<'_> {
                             .borrow()
                             .get(&e)
                             .cloned();
+                        let ordinary_virtual = access_bridges::select_member_invocation(
+                            self.ir,
+                            self.run,
+                            self.static_owner,
+                            e,
+                            owner_identity,
+                            bridge.is_some(),
+                            self.export_private_calls,
+                        ) == access_bridges::MemberInvocation::Virtual;
+                        let result_narrow = ordinary_virtual
+                            .then(|| self.ir.jvm_overridden_call_realizations.get(&e))
+                            .flatten()
+                            .map(|realization| {
+                                let narrow = (realization.descriptor != descriptor
+                                    && ret.is_reference())
+                                .then(|| crate::jvm::names::instanceof_internal_name(ret));
+                                name = realization.physical_name.clone();
+                                descriptor = realization.descriptor.clone();
+                                narrow
+                            })
+                            .flatten();
                         let call_parameters = bridge.as_ref().map_or(ptys.as_slice(), |bridge| {
                             bridge.bridge_parameters.as_slice()
                         });
@@ -1062,14 +1103,32 @@ impl super::Emitter<'_> {
                             code,
                             &call,
                         );
+                        if let Some(internal) = result_narrow {
+                            let class = self.cw.class_ref(&internal);
+                            code.checkcast(class);
+                        }
                         return;
                     }
                     let owner_identity = *owner;
-                    let (owner, name, descriptor) = (
+                    let (owner, mut name, mut descriptor) = (
                         owner_identity.render(),
                         name.clone(),
                         self.physical_call_descriptor(e, descriptor),
                     );
+                    let declared_descriptor = descriptor.clone();
+                    let protected_bridge = self
+                        .run
+                        .protected_member_access_bridges
+                        .borrow()
+                        .get(&e)
+                        .cloned();
+                    if protected_bridge.is_none() {
+                        if let Some(realization) = self.ir.jvm_overridden_call_realizations.get(&e)
+                        {
+                            name = realization.physical_name.clone();
+                            descriptor = realization.descriptor.clone();
+                        }
+                    }
                     let args = args.clone();
                     if self.emit_primitive_inc_dec_virtual(
                         &owner,
@@ -1145,12 +1204,6 @@ impl super::Emitter<'_> {
                     }
                     let physical_params = parse_descriptor_params(&descriptor)
                         .expect("virtual call descriptor must be valid");
-                    let protected_bridge = self
-                        .run
-                        .protected_member_access_bridges
-                        .borrow()
-                        .get(&e)
-                        .cloned();
                     let call_parameters = protected_bridge
                         .as_ref()
                         .map_or(physical_params.as_slice(), |bridge| {
@@ -1213,6 +1266,16 @@ impl super::Emitter<'_> {
                         let m = self.cw.methodref(&owner, jvm_name, &descriptor);
                         self.mark_call_start(e, code);
                         code.invokevirtual(m, aw, slot_words(ret) as i32);
+                    }
+                    let widened_ret = ty_from_descriptor_ret(&descriptor);
+                    let declared_ret = ty_from_descriptor_ret(&declared_descriptor);
+                    if declared_ret != widened_ret
+                        && declared_ret.is_reference()
+                        && !crate::jvm::ir_emit::declaration_types::jvm_is_erased_top(widened_ret)
+                    {
+                        let internal = crate::jvm::names::instanceof_internal_name(declared_ret);
+                        let class = self.cw.class_ref(&internal);
+                        code.checkcast(class);
                     }
                 }
                 Callee::Special {

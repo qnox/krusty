@@ -1988,6 +1988,12 @@ impl Classpath {
         if stored.callable.nonvirtual_realization.is_none() {
             stored.callable.nonvirtual_realization = callable.nonvirtual_realization.clone();
         }
+        if stored.callable.overridden_call_realizations.is_empty()
+            && !callable.overridden_call_realizations.is_empty()
+        {
+            stored.callable.overridden_call_realizations =
+                callable.overridden_call_realizations.clone();
+        }
         if !stored.callable.inline.can_inline() && callable.inline.can_inline() {
             stored.callable.inline = callable.inline;
         }

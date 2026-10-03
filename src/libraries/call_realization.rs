@@ -11,6 +11,18 @@ pub struct NonvirtualCallRealization {
     pub descriptor: String,
 }
 
+/// Target realization inherited by an overriding virtual call from one exact declaration.
+///
+/// A declaration provider publishes these candidates while its semantic declaration and target
+/// policy are still joined. Later target passes select one through stable override identities;
+/// source/member spellings never become lookup input again.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OverriddenCallRealization {
+    pub declaration_owner: TypeName,
+    pub physical_name: String,
+    pub descriptor: String,
+}
+
 #[derive(Clone, Debug)]
 pub struct DefaultCallRealization {
     /// Exact platform invocation identity selected by the provider. Consumers must not reconstruct
@@ -85,6 +97,7 @@ impl LibraryCallable {
             singleton_dispatch: None,
             default_realization: None,
             nonvirtual_realization: None,
+            overridden_call_realizations: Box::new([]),
             declared_ret: None,
             overridden_results: Box::new([]),
         }
