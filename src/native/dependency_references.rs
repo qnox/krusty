@@ -205,7 +205,7 @@ fn build(ir: &mut IrFile, plan: Plan) -> IrCallableReference {
         dispatch_receiver: None,
         param_checks: Vec::new(),
     });
-    ir.private_methods.insert(adapter);
+    ir.set_method_visibility(adapter, crate::types::Visibility::Private);
     ir.lambda_own_params_from.insert(adapter, own_start);
     IrCallableReference {
         target: IrCallableReferenceTarget::External { declaration },
@@ -467,7 +467,7 @@ fn build_property(ir: &mut IrFile, plan: PropertyPlan) -> DependencyProperty {
         dispatch_receiver: None,
         param_checks: Vec::new(),
     });
-    ir.private_methods.insert(read);
+    ir.set_method_visibility(read, crate::types::Visibility::Private);
     let written = setter.map(|setter| {
         let operand = receiver.map(|_| ir.add_expr(IrExpr::GetValue(0)));
         let value = ir.add_expr(IrExpr::GetValue(leading as u32));
@@ -495,7 +495,7 @@ fn build_property(ir: &mut IrFile, plan: PropertyPlan) -> DependencyProperty {
             dispatch_receiver: None,
             param_checks: Vec::new(),
         });
-        ir.private_methods.insert(function);
+        ir.set_method_visibility(function, crate::types::Visibility::Private);
         function
     });
     DependencyProperty {
