@@ -821,7 +821,8 @@ impl IrFile {
                 });
             }
         }
-        for (&(class, secondary, parameter), _) in &self.shared_secondary_super_capture_parameters {
+        for &(class, secondary, parameter) in self.shared_secondary_super_capture_parameters.keys()
+        {
             let delegates_super = self
                 .classes
                 .get(class as usize)

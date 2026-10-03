@@ -122,11 +122,11 @@ fn varargs_access(ir: &IrFile, fid: u32) -> u16 {
 /// Whether `fid` is the implementation selected for a class-realized closure. This consumes the
 /// explicit IR edge from a lambda to its implementation; generated method spelling is never used as
 /// identity, and mixed `-Xlambdas`/`-Xsam-conversions` modes select only the matching closure kind.
-pub(super) fn class_realized_lambda_method<'a>(
-    ir: &'a IrFile,
+pub(super) fn class_realized_lambda_method(
+    ir: &IrFile,
     fid: u32,
     modes: LambdaModes,
-) -> Option<&'a str> {
+) -> Option<&str> {
     let runtime_reified = ir.runtime_reified_lambda_implementations.contains(&fid);
     ir.exprs.iter().find_map(|expression| {
         let IrExpr::Lambda {
