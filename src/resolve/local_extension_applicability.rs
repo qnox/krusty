@@ -241,7 +241,6 @@ impl Checker<'_> {
                     let candidate = &unique[index];
                     super::callable_reference_selection::AdaptedReferenceSpecificity {
                         parameters: &candidate.adaptation_parameters,
-                        ret: candidate.ret,
                         plan: &candidate
                             .adaptation
                             .as_ref()
@@ -253,12 +252,10 @@ impl Checker<'_> {
                 .collect::<Vec<_>>();
             super::callable_reference_selection::maximal_adapted_references(
                 &specificity,
-                |left_params, left_ret, right_params, right_ret| {
-                    self.callable_ref_shape_at_least_as_specific(
+                |left_params, right_params| {
+                    self.callable_ref_parameter_shape_at_least_as_specific(
                         left_params,
-                        left_ret,
                         right_params,
-                        right_ret,
                     )
                 },
             )

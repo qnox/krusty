@@ -377,6 +377,30 @@ fun box(): String {
 }
 
 #[test]
+fn adapted_reference_specificity_does_not_compare_raw_return_types() {
+    expect_box_same_as_kotlinc(
+        r#"
+class OwnedAdaptationToken
+
+fun interface OwnedSuspendAction {
+    suspend fun run()
+}
+
+fun consumeOwnedAction(action: OwnedSuspendAction) {}
+
+fun ownedChoice() {}
+suspend fun ownedChoice(token: OwnedAdaptationToken = OwnedAdaptationToken()): Int = 0
+
+fun box(): String {
+    consumeOwnedAction(::ownedChoice)
+    return "OK"
+}
+"#,
+        "CallableReferenceAdaptedParameterSpecificity",
+    );
+}
+
+#[test]
 fn a_defaulted_constructor_beats_an_equally_specific_vararg() {
     expect_box_same_as_kotlinc(
         r#"

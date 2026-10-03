@@ -20,18 +20,19 @@ pub enum AdaptedRefArgument {
 /// parameter types are actually exposed by the expected callable shape.
 pub(super) struct AdaptedReferenceSpecificity<'a> {
     pub(super) parameters: &'a [Ty],
-    pub(super) ret: Ty,
     pub(super) plan: &'a [AdaptedRefArgument],
     pub(super) is_vararg: bool,
 }
 
 /// Select the undominated adapted declarations, independently of where a provider found them.
-/// Passed parameters decide ordinary specificity. When all remaining passed shapes are mutually
-/// specific, Kotlin prefers a non-vararg declaration and then the declaration with fewer slots
-/// (equivalently, fewer omitted defaults for one expected shape).
+/// Passed parameters decide ordinary specificity. Return compatibility belongs to applicability;
+/// Kotlin's callable-reference conflict signature contains the adapted value-parameter types, not
+/// the declaration's raw result. When all remaining passed shapes are mutually specific, Kotlin
+/// prefers a non-vararg declaration and then the declaration with fewer slots (equivalently, fewer
+/// omitted defaults for one expected shape).
 pub(super) fn maximal_adapted_references(
     candidates: &[AdaptedReferenceSpecificity<'_>],
-    mut shape_at_least_as_specific: impl FnMut(&[Ty], Ty, &[Ty], Ty) -> bool,
+    mut shape_at_least_as_specific: impl FnMut(&[Ty], &[Ty]) -> bool,
 ) -> Vec<usize> {
     let shapes = candidates
         .iter()
@@ -40,35 +41,20 @@ pub(super) fn maximal_adapted_references(
     let mut maximal = candidates
         .iter()
         .enumerate()
-        .filter_map(|(index, current)| {
-            let dominated = candidates.iter().enumerate().any(|(other_index, other)| {
+        .filter_map(|(index, _)| {
+            let dominated = candidates.iter().enumerate().any(|(other_index, _)| {
                 index != other_index
-                    && shape_at_least_as_specific(
-                        &shapes[other_index],
-                        other.ret,
-                        &shapes[index],
-                        current.ret,
-                    )
-                    && !shape_at_least_as_specific(
-                        &shapes[index],
-                        current.ret,
-                        &shapes[other_index],
-                        other.ret,
-                    )
+                    && shape_at_least_as_specific(&shapes[other_index], &shapes[index])
+                    && !shape_at_least_as_specific(&shapes[index], &shapes[other_index])
             });
             (!dominated).then_some(index)
         })
         .collect::<Vec<_>>();
     if maximal.len() <= 1
         || !maximal.iter().all(|&left| {
-            maximal.iter().all(|&right| {
-                shape_at_least_as_specific(
-                    &shapes[left],
-                    candidates[left].ret,
-                    &shapes[right],
-                    candidates[right].ret,
-                )
-            })
+            maximal
+                .iter()
+                .all(|&right| shape_at_least_as_specific(&shapes[left], &shapes[right]))
         })
     {
         return maximal;
@@ -717,7 +703,7 @@ fn select_adapted_bound_instance_candidate(
     overloads: &[FunctionInfo],
     expected: &'static crate::types::FnSig,
     mut is_assignable: impl FnMut(Ty, Ty) -> bool,
-    shape_at_least_as_specific: impl FnMut(&[Ty], Ty, &[Ty], Ty) -> bool,
+    shape_at_least_as_specific: impl FnMut(&[Ty], &[Ty]) -> bool,
 ) -> Option<(FunctionInfo, Vec<AdaptedRefArgument>, Vec<Ty>)> {
     let mut candidates = overloads
         .iter()
@@ -777,7 +763,6 @@ fn select_adapted_bound_instance_candidate(
         .iter()
         .map(|(candidate, plan, _)| AdaptedReferenceSpecificity {
             parameters: &candidate.callable.params,
-            ret: candidate.callable.ret,
             plan,
             is_vararg: candidate.call_sig.vararg_index.is_some(),
         })
@@ -800,7 +785,7 @@ pub(super) fn select_adapted_instance_candidate(
     unbound_receiver: Option<Ty>,
     expected: &'static crate::types::FnSig,
     mut is_assignable: impl FnMut(Ty, Ty) -> bool,
-    shape_at_least_as_specific: impl FnMut(&[Ty], Ty, &[Ty], Ty) -> bool,
+    shape_at_least_as_specific: impl FnMut(&[Ty], &[Ty]) -> bool,
 ) -> Option<(FunctionInfo, Vec<AdaptedRefArgument>, Vec<Ty>)> {
     let method = match unbound_receiver {
         Some(receiver) => {

@@ -88,7 +88,6 @@ impl Checker<'_> {
             .map(
                 |candidate| callable_reference_selection::AdaptedReferenceSpecificity {
                     parameters: &candidate.1,
-                    ret: candidate.2,
                     plan: &candidate.3,
                     is_vararg: candidate.5,
                 },
@@ -96,13 +95,8 @@ impl Checker<'_> {
             .collect::<Vec<_>>();
         let maximal = callable_reference_selection::maximal_adapted_references(
             &specificity,
-            |left_params, left_ret, right_params, right_ret| {
-                self.callable_ref_shape_at_least_as_specific(
-                    left_params,
-                    left_ret,
-                    right_params,
-                    right_ret,
-                )
+            |left_params, right_params| {
+                self.callable_ref_parameter_shape_at_least_as_specific(left_params, right_params)
             },
         );
         if let [selected] = maximal.as_slice() {

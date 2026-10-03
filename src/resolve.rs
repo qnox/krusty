@@ -40130,6 +40130,21 @@ impl<'a> Checker<'a> {
             && crate::assignable::is_subtype(&context, self, left_ret, right_ret)
     }
 
+    fn callable_ref_parameter_shape_at_least_as_specific(
+        &self,
+        left_params: &[Ty],
+        right_params: &[Ty],
+    ) -> bool {
+        if left_params.len() != right_params.len() {
+            return false;
+        }
+        let context = crate::assignable::TyCtx::new();
+        left_params
+            .iter()
+            .zip(right_params)
+            .all(|(left, right)| crate::assignable::is_subtype(&context, self, *left, *right))
+    }
+
     /// Apply an expected callable shape to one generic declaration before reference adaptation.
     /// The declaration origin and binding mode are irrelevant here: member, extension, and top-level
     /// candidates all carry the same `FunctionInfo`/`GenericSig` structure. An extension additionally
@@ -40295,7 +40310,6 @@ impl<'a> Checker<'a> {
             .map(|(function, parameters, plan, _)| {
                 callable_reference_selection::AdaptedReferenceSpecificity {
                     parameters,
-                    ret: function.callable.ret,
                     plan,
                     is_vararg: function.call_sig.vararg_index.is_some(),
                 }
@@ -40303,13 +40317,8 @@ impl<'a> Checker<'a> {
             .collect::<Vec<_>>();
         let maximal = callable_reference_selection::maximal_adapted_references(
             &specificity,
-            |left_params, left_ret, right_params, right_ret| {
-                self.callable_ref_shape_at_least_as_specific(
-                    left_params,
-                    left_ret,
-                    right_params,
-                    right_ret,
-                )
+            |left_params, right_params| {
+                self.callable_ref_parameter_shape_at_least_as_specific(left_params, right_params)
             },
         );
         match maximal.as_slice() {
@@ -41340,12 +41349,10 @@ impl<'a> Checker<'a> {
                 None,
                 expected,
                 |actual, target| self.receiver_is_assignable(actual, target),
-                |left_params, left_ret, right_params, right_ret| {
-                    self.callable_ref_shape_at_least_as_specific(
+                |left_params, right_params| {
+                    self.callable_ref_parameter_shape_at_least_as_specific(
                         left_params,
-                        left_ret,
                         right_params,
-                        right_ret,
                     )
                 },
             )
@@ -41710,7 +41717,6 @@ impl<'a> Checker<'a> {
             .map(
                 |candidate| callable_reference_selection::AdaptedReferenceSpecificity {
                     parameters: &candidate.0.callable.params,
-                    ret: candidate.0.callable.ret,
                     plan: &candidate.6,
                     is_vararg: candidate.0.call_sig.vararg_index.is_some(),
                 },
@@ -41718,13 +41724,8 @@ impl<'a> Checker<'a> {
             .collect::<Vec<_>>();
         let maximal = callable_reference_selection::maximal_adapted_references(
             &specificity,
-            |left_params, left_ret, right_params, right_ret| {
-                self.callable_ref_shape_at_least_as_specific(
-                    left_params,
-                    left_ret,
-                    right_params,
-                    right_ret,
-                )
+            |left_params, right_params| {
+                self.callable_ref_parameter_shape_at_least_as_specific(left_params, right_params)
             },
         );
         let [selected_index] = maximal.as_slice() else {
@@ -43813,12 +43814,10 @@ impl<'a> Checker<'a> {
                 None,
                 expected,
                 |actual, target| self.receiver_is_assignable(actual, target),
-                |left_params, left_ret, right_params, right_ret| {
-                    self.callable_ref_shape_at_least_as_specific(
+                |left_params, right_params| {
+                    self.callable_ref_parameter_shape_at_least_as_specific(
                         left_params,
-                        left_ret,
                         right_params,
-                        right_ret,
                     )
                 },
             )?;
@@ -65562,7 +65561,6 @@ impl<'a> Checker<'a> {
                     .map(|(constructor, plan)| {
                         callable_reference_selection::AdaptedReferenceSpecificity {
                             parameters: &constructor.params,
-                            ret: constructor.ret,
                             plan,
                             is_vararg: constructor.call_sig.vararg_index.is_some(),
                         }
@@ -65570,12 +65568,10 @@ impl<'a> Checker<'a> {
                     .collect::<Vec<_>>();
                 let maximal = callable_reference_selection::maximal_adapted_references(
                     &specificity,
-                    |left_params, left_ret, right_params, right_ret| {
-                        self.callable_ref_shape_at_least_as_specific(
+                    |left_params, right_params| {
+                        self.callable_ref_parameter_shape_at_least_as_specific(
                             left_params,
-                            left_ret,
                             right_params,
-                            right_ret,
                         )
                     },
                 );
@@ -65952,12 +65948,10 @@ impl<'a> Checker<'a> {
                             None,
                             expected,
                             |actual, target| self.receiver_is_assignable(actual, target),
-                            |left_params, left_ret, right_params, right_ret| {
-                                self.callable_ref_shape_at_least_as_specific(
+                            |left_params, right_params| {
+                                self.callable_ref_parameter_shape_at_least_as_specific(
                                     left_params,
-                                    left_ret,
                                     right_params,
-                                    right_ret,
                                 )
                             },
                         )
@@ -66268,12 +66262,10 @@ impl<'a> Checker<'a> {
                         Some(receiver_ty),
                         expected,
                         |actual, target| self.receiver_is_assignable(actual, target),
-                        |left_params, left_ret, right_params, right_ret| {
-                            self.callable_ref_shape_at_least_as_specific(
+                        |left_params, right_params| {
+                            self.callable_ref_parameter_shape_at_least_as_specific(
                                 left_params,
-                                left_ret,
                                 right_params,
-                                right_ret,
                             )
                         },
                     )
