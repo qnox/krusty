@@ -20,16 +20,25 @@ use crate::types::{stored_value_ty, ty_subst_keep_unbound, Ty};
 
 use super::BodyLowering;
 
+mod escaping_anonymous;
 mod escaping_lambda;
 mod property_accessors;
 
 #[cfg(test)]
 mod escaping_reified_lambda;
+#[cfg(test)]
+mod escaping_reified_object;
 
 pub(super) fn splice_inline_property_accessors(
     ir: &mut crate::ir::IrFile,
 ) -> Result<(), super::FirFileLoweringFailure> {
     property_accessors::splice_inline_property_accessors(ir)
+}
+
+pub(super) fn publish_reified_anonymous_accessors(
+    ir: &mut crate::ir::IrFile,
+) -> Result<(), super::FirFileLoweringFailure> {
+    escaping_anonymous::publish_accessors(ir).map_err(super::FirFileLoweringFailure::Body)
 }
 
 /// Specialize one expression copied across an inline boundary. A local delegated-property access
@@ -244,6 +253,7 @@ impl BodyLowering<'_> {
         operands: &[Option<ExprId>],
         inline_lambdas: &[Option<ExprId>],
         substitutions: &[FirTypeSubstitution],
+        malformed_anonymous: &mut Option<super::FirLoweringFailure>,
     ) -> Option<ExprId> {
         let template = self.ir.functions.get(function as usize)?.body?;
         let close_line = self.ir.fn_close_lines.get(&function).copied();
@@ -743,6 +753,28 @@ impl BodyLowering<'_> {
             target,
             &callee,
         );
+        // An anonymous object's methods are not children of the inlined template. Cloning only the
+        // `new` reuses the declaration class, whose reified parameter is erased.
+        if let Err(failure) = escaping_anonymous::specialize(
+            self.ir,
+            escaping_copies
+                .iter()
+                .filter(|(source, _)| !protected.contains(source))
+                .map(|(_, copy)| *copy),
+            &bindings,
+            &reified_bindings,
+            &escaping_anonymous::CallSite {
+                caller_declaration,
+                caller: self.expansion_enclosure,
+                caller_is_default: self.in_default_argument,
+                caller_source_name: &caller_source_name,
+                inline_callee: target,
+                inline_callee_source_name: &callee,
+            },
+        ) {
+            *malformed_anonymous = Some(failure);
+            return None;
+        }
 
         let inline_invocations = copies
             .iter()
@@ -822,18 +854,7 @@ impl BodyLowering<'_> {
             let exit = self.ir.add_expr(IrExpr::Break {
                 label: Some(label.clone()),
             });
-            self.ir.exprs[copy as usize] = if let (Some(slot), Some(value)) = (result_slot, value) {
-                let assign = self.ir.add_expr(IrExpr::SetValue { var: slot, value });
-                IrExpr::Block {
-                    stmts: vec![assign, exit],
-                    value: None,
-                }
-            } else {
-                IrExpr::Block {
-                    stmts: vec![exit],
-                    value: None,
-                }
-            };
+            self.ir.exprs[copy as usize] = inline_return_exit(self.ir, result_slot, value, exit);
         }
 
         let mut statements = operand_declarations;
@@ -1672,6 +1693,28 @@ fn specialize_checked_operation(
         | IrCheckedOperation::BackingFieldRead { .. }
         | IrCheckedOperation::BackingFieldWrite { .. } => {}
     }
+}
+
+/// The block that replaces one cloned `return` inside an expansion's exit loop.
+///
+/// A non-`Unit` result is stored and read after the loop. A `Unit` result has no slot, but
+/// `return expr` still evaluates `expr`: the call in `return f2(y)` is that expression.
+fn inline_return_exit(
+    ir: &mut crate::ir::IrFile,
+    result_slot: Option<u32>,
+    value: Option<ExprId>,
+    exit: ExprId,
+) -> IrExpr {
+    let mut stmts = Vec::new();
+    if let Some(value) = value {
+        if let Some(slot) = result_slot {
+            stmts.push(ir.add_expr(IrExpr::SetValue { var: slot, value }));
+        } else {
+            stmts.push(value);
+        }
+    }
+    stmts.push(exit);
+    IrExpr::Block { stmts, value: None }
 }
 
 /// Rewrite `root` to PRODUCE the value of its sole rewritten return, or leave it exactly as it was.

@@ -4660,9 +4660,26 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   identities in reified declarations and the exact recorded lambda-method domain, including after
   a lambda node becomes a class value. Closure realization preserves implementation identities
   and their owned nested/helper methods across that boundary; an anonymous object's ordinary
-  generic members are not in this domain merely because they use the same semantic parameter.
-  The enum-bound anonymous delegate negative control executes its erased cast without a marker
+  generic members are not in this lambda domain merely because they use the same semantic parameter.
+  The enum-bound anonymous delegate's call-site copy executes its cast without a reification marker
   (`erased_anonymous_delegate_member_is_not_a_reified_closure_method`).
+  Those members are still reified operations of the anonymous class. The declaration class keeps
+  the marker, and the inline method calls `needClassReification` before constructing it. That
+  guard is the declaration class recorded when the copy is made; emission does not walk the
+  class's bodies again. A same-module inline call copies the class and substitutes the call's
+  reified arguments, so the copy executes the specialized operation with no marker.   Source
+  property overrides leave their accessor functions empty. Accessor functions are materialized
+  after the copy, once property layouts exist; the same clone map then records those functions
+  on the copy. The copy fills its overrides from the recorded layout through that map, and
+  publishes a copied member-extension property under the copied classifier. Copied members keep
+  the declaration's erased signatures, and the call site invokes that erased constructor.
+  Reified operations inside the copied accessor bodies use the call-site argument.
+  A missing accessor mapping fails the lowering; the construction is not left on the declaration
+  class. The copy joins the caller's `{owner}${caller}$$inlined${callee}$N` sequence, shared
+  with a specialized lambda of the same expansion. Mentioning only an ordinary type parameter
+  does not copy the class.
+  Tests: `fir_lower::inlining::escaping_reified_object`, `tests/reified_anonymous_object_e2e.rs`,
+  boxes `reified/capture.kt` and `reified/innerObject.kt`.
   A singleton closure whose owned methods retain typed reified operations emits
   `needClassReification()` before creating its instance; a concrete specialized copy does not.
   Common lowering records the nearest source lambda identity and containing checked inline
@@ -5031,6 +5048,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   differing type other than `Object` takes a `checkcast`, so `val g: Greeter = Ann()` stores and
   frames a `Greeter` while `val g: Any = Ann()` frames an `Ann`. An assignment stores the value as
   emitted (`tests/unboxing_coercion_e2e.rs`).
+- **An inline function's anonymous-object result is its declared supertype.** A private
+  non-inline function may return the synthetic anonymous classifier, so `t.unused` sees a member
+  declared only on that object. An inline function, private or not, does not: each call site
+  copies the class, and the result the caller names is the single declared supertype (`I` for
+  `object : I`), or `Any` when none is written. `arrayOf` of two such calls is therefore an
+  array of that supertype, and the copied class is not cast back to the declaration class.
+  Tests: `tests/reified_anonymous_object_e2e.rs`, box
+  `reified/kt39256_privateInlineWithAnonymousObject.kt`.
 - **A hoisted anonymous object retains its construction site's lexical classifier scope.** The parser
   stores an anonymous object's class as a file-level synthetic declaration, but its member signatures,
   supertype arguments, superclass constructor arguments, and inferred member returns may still name a
@@ -11813,7 +11838,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   and is the one that fails if the allocation moves back ahead of the proof — and
   `tests/inline_tail_expansion_shape_e2e.rs`, which reads the lowered IR: a sole tail return expands
   with no exit loop, an early return keeps one, a non-tail `Unit` return keeps one, and a `Unit` tail
-  return is compiled and RUN to show its returned expression is evaluated exactly once.
+  return is compiled and RUN to show its returned expression is evaluated exactly once. A non-tail
+  `return expr` in that `Unit` loop still evaluates `expr` before the labelled break. There is no
+  result local, so the expression is a statement; dropping it deletes a nested inline call
+  (`return f2(y)` / `return f2(z)`). The same exit is used when an inline property accessor's body
+  has more than one return. Test: `a_non_tail_unit_return_evaluates_its_expression`. Corpus:
+  `codegen/box/inlineSizeReduction/lastBreak.kt`.
 
 - **An uninitialized type-parameter local keeps that parameter's erased slot when inlined.**
   `var result: R` with no initializer records that declaration fact in common IR while its semantic

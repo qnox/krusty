@@ -14,7 +14,8 @@ use crate::types::{stored_value_ty, ty_subst_keep_unbound, Ty};
 
 use super::super::{FirFileLoweringFailure, InlineAccessorFailure as InlineFail};
 use super::{
-    mark_subtree, produce_sole_tail_return, rebase_values, specialize_inline_copy, value_indices,
+    inline_return_exit, mark_subtree, produce_sole_tail_return, rebase_values,
+    specialize_inline_copy, value_indices,
 };
 
 /// Splice `inline` property accessors at the uses the checker recorded.
@@ -352,18 +353,7 @@ fn finish_accessor_expansion(
         let exit = ir.add_expr(IrExpr::Break {
             label: Some(label.clone()),
         });
-        ir.exprs[copy as usize] = if let (Some(slot), Some(value)) = (result_slot, value) {
-            let assign = ir.add_expr(IrExpr::SetValue { var: slot, value });
-            IrExpr::Block {
-                stmts: vec![assign, exit],
-                value: None,
-            }
-        } else {
-            IrExpr::Block {
-                stmts: vec![exit],
-                value: None,
-            }
-        };
+        ir.exprs[copy as usize] = inline_return_exit(ir, result_slot, value, exit);
     }
     let mut statements = Vec::new();
     if let Some(slot) = result_slot {

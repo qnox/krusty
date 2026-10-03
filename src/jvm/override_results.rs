@@ -120,6 +120,18 @@ impl OverrideResults {
     }
 }
 
+/// Source classes, enum-entry subclasses, and anonymous classes copied for a reified inline call.
+/// A copied class is not a source declaration, but it carries the declaration's override edges
+/// retargeted at its specialized methods, and those methods need the same bridges.
+pub(super) fn realizes_overrides(ir: &IrFile, class: usize) -> bool {
+    let declaration = &ir.classes[class];
+    declaration.is_source_declared
+        || declaration.enum_entry_of.is_some()
+        || ir
+            .specialized_anonymous_classes
+            .contains_key(&u32::try_from(class).expect("class index"))
+}
+
 /// Choose the wrapper as the JVM result of every override whose primitive result replaces a
 /// non-primitive one. Common IR is read, never changed.
 pub(super) fn box_primitive_override_results(
@@ -136,7 +148,7 @@ pub(super) fn box_primitive_override_results(
     }
     for (class, declaration) in ir.classes.iter().enumerate() {
         // The classes whose override edges the bridge pass reads; see `derive_bridges`.
-        if !declaration.is_source_declared && declaration.enum_entry_of.is_none() {
+        if !realizes_overrides(ir, class) {
             continue;
         }
         let owner = declaration.fq_name;
