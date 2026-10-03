@@ -268,3 +268,126 @@ pub(super) fn unrealized(ir: &IrFile, lambda: u32) -> String {
         ir.functions[lambda as usize].name
     )
 }
+
+/// Whether `LambdaMetafactory` can adapt `instantiated` to the erased SAM method `sam`.
+///
+/// Each instantiated parameter and the instantiated result must be a subtype of the corresponding
+/// SAM slot. A lambda whose own parameter erased to `Object` (an intersection, or a contravariant
+/// `in` argument) while the fun-interface method erased to its bound (`T : Top` → `Top`) is not
+/// that subtype: the bootstrap throws `LambdaConversionException` before the call runs. Those
+/// conversions are classes, which implement the erased slot and cast into the implementation.
+pub(super) fn indy_specialization_links(sam: &str, instantiated: &str) -> bool {
+    let Some((sam_params, sam_ret)) = crate::jvm::names::parse_method_descriptor(sam) else {
+        return false;
+    };
+    let Some((inst_params, inst_ret)) = crate::jvm::names::parse_method_descriptor(instantiated)
+    else {
+        return false;
+    };
+    sam_params.len() == inst_params.len()
+        && sam_params
+            .iter()
+            .zip(inst_params)
+            .all(|(slot, specialized)| !erased_top_against_bound(specialized, slot))
+        && !erased_top_against_bound(inst_ret, sam_ret)
+}
+
+/// `Object`/`Any` is not a subtype of a more specific reference. That is the mismatch
+/// `LambdaMetafactory` reports as "class java.lang.Object is not a subtype of …".
+fn erased_top_against_bound(specialized: &str, sam_slot: &str) -> bool {
+    is_erased_top(specialized) && descriptor_is_reference(sam_slot) && !is_erased_top(sam_slot)
+}
+
+fn is_erased_top(descriptor: &str) -> bool {
+    descriptor == "Ljava/lang/Object;" || descriptor == "Lkotlin/Any;"
+}
+
+/// Whether this SAM conversion's instantiated signature is not a subtype of the erased interface
+/// method, so the closure must be a class (and its implementation must be visible to that class).
+pub(super) fn bounded_erasure_needs_class(
+    ir: &IrFile,
+    impl_fn: u32,
+    target: &crate::ir::IrSamTarget,
+    captures: usize,
+) -> bool {
+    let impl_params = super::declaration_types::jvm_function_params(ir, impl_fn);
+    if impl_params.len() < captures {
+        return false;
+    }
+    let lam_tys = &impl_params[captures..];
+    let impl_ret =
+        crate::jvm::method_descriptors::jvm_declared_ty(&ir.functions[impl_fn as usize].ret);
+    let (sam_parameters, sam_result) = ir
+        .lambda_sam_jvm_signature
+        .get(&impl_fn)
+        .map(|(parameters, result)| (parameters.as_slice(), *result))
+        .unwrap_or((
+            target.declared_parameters.as_slice(),
+            target.declared_result,
+        ));
+    let mut sam_parameters = crate::jvm::method_descriptors::jvm_tys(sam_parameters);
+    let sam_result = if target.suspend {
+        sam_parameters.push(Ty::obj("kotlin/coroutines/Continuation"));
+        Ty::obj("java/lang/Object")
+    } else if target.overrides_non_primitive_result {
+        crate::jvm::method_descriptors::jvm_declared_ty(&Ty::nullable(sam_result))
+    } else {
+        crate::jvm::method_descriptors::jvm_declared_ty(&sam_result)
+    };
+    let sam_desc = crate::jvm::names::method_descriptor(&sam_parameters, sam_result);
+    let Some((sam_params, sam_ret)) = crate::jvm::names::parse_method_descriptor(&sam_desc) else {
+        return false;
+    };
+    if sam_params.len() != lam_tys.len() {
+        return false;
+    }
+    let params: String = lam_tys
+        .iter()
+        .zip(sam_params)
+        .map(|(&logical, physical)| {
+            if super::descriptor_is_reference(physical) {
+                super::boxed_descriptor(logical)
+            } else {
+                crate::jvm::names::type_descriptor(logical)
+            }
+        })
+        .collect();
+    let ret = if sam_ret == "V" {
+        "V".to_string()
+    } else if super::descriptor_is_reference(sam_ret) {
+        super::boxed_descriptor(impl_ret)
+    } else {
+        crate::jvm::names::type_descriptor(impl_ret)
+    };
+    !indy_specialization_links(&sam_desc, &format!("({params}){ret}"))
+}
+
+#[cfg(test)]
+mod specialization_tests {
+    use super::indy_specialization_links;
+
+    #[test]
+    fn object_parameter_does_not_link_against_a_bounded_sam_slot() {
+        assert!(!indy_specialization_links(
+            "(LTop;)V",
+            "(Ljava/lang/Object;)V"
+        ));
+        assert!(!indy_specialization_links(
+            "(LTop;)LCommon;",
+            "(Ljava/lang/Object;)Ljava/lang/Object;"
+        ));
+    }
+
+    #[test]
+    fn a_more_specific_parameter_still_links() {
+        assert!(indy_specialization_links(
+            "(Ljava/lang/Object;Ljava/lang/Object;)I",
+            "(Ljava/lang/Integer;Ljava/lang/Integer;)I"
+        ));
+        assert!(indy_specialization_links("(LTop;)V", "(LTop;)V"));
+        assert!(indy_specialization_links(
+            "(Ljava/lang/String;)V",
+            "(Ljava/lang/String;)V"
+        ));
+    }
+}

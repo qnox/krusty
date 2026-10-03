@@ -9607,6 +9607,19 @@ impl<'a> Emitter<'a> {
                 {
                     lambda_mode = LambdaMode::Class;
                 }
+                // A bounded fun-interface slot cannot be bootstrapped when the lambda parameter
+                // erased to `Object`. Decide that here, before access flags are read, so the
+                // implementation is package-visible to the class that calls it.
+                if sam.as_ref().is_some_and(|target| {
+                    lambda_class::bounded_erasure_needs_class(
+                        self.ir,
+                        *impl_fn,
+                        target,
+                        captures.len(),
+                    )
+                }) {
+                    lambda_mode = LambdaMode::Class;
+                }
                 if lambda_mode == LambdaMode::Indy {
                     if self.ir.jvm_unrealized_lambda_classes.contains(impl_fn) {
                         // The class is discarded; a placeholder keeps its frames computable.
@@ -10590,7 +10603,7 @@ Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodType;Ljava/lang/invoke/Meth
 Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/CallSite;";
 
 /// The boxed (wrapper) descriptor for a `Ty` — primitives map to their wrapper, references unchanged.
-fn boxed_descriptor(t: Ty) -> String {
+pub(super) fn boxed_descriptor(t: Ty) -> String {
     if t.non_null().is_unsigned() {
         let owner = t
             .non_null()
