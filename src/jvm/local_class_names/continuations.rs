@@ -81,12 +81,10 @@ pub(crate) fn continuation_ordinal(ir: &IrFile, fid: u32) -> usize {
 
 /// Whether `fid` is the forwarding method of a callable-reference SAM adapter.
 ///
-/// That adapter is always a class, and a synthetic implementation whose name has no `$lambda$`
-/// index is written as `{owner}${function}$1` — ordinal 1 of the continuation sequence.
+/// That adapter is always a class and occupies ordinal 1 of the implementation function's
+/// generated-class sequence. The exact `impl_fn` edge and checked `function_adapter` role identify
+/// it; the function's generated spelling is not semantic input.
 fn sam_adapter_class_occupies_first_ordinal(ir: &IrFile, fid: u32) -> bool {
-    if ir.functions[fid as usize].name.contains("$lambda$") {
-        return false;
-    }
     ir.exprs.iter().any(|expression| {
         matches!(
             expression,
