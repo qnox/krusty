@@ -292,9 +292,7 @@ const ANNOTATED_CLASSES: &[&str] = &["app/Annotated", "app/AnnKt", "app/Kind", "
 /// `d1`, and the default-language half proves the gate does not leak into the 2.4 output.
 #[test]
 fn language_version_2_2_omits_annotation_records_like_kotlinc() {
-    let Some(dir) = common::scratch_dir() else {
-        return;
-    };
+    let dir = common::scratch_dir().expect("allocate metadata-language fixture");
     let src_path = dir.join("Ann.kt");
     std::fs::write(&src_path, ANNOTATED_SRC).unwrap();
 
@@ -307,9 +305,7 @@ fn language_version_2_2_omits_annotation_records_like_kotlinc() {
         "2.2".to_string(),
         src_path.to_string_lossy().into_owned(),
     ];
-    let Some((code, stderr)) = common::kotlinc_compile(&args) else {
-        return;
-    };
+    let (code, stderr) = common::kotlinc_compile(&args).expect("reference kotlinc is provisioned");
     assert_eq!(code, 0, "kotlinc failed: {stderr}");
 
     let language_2_2 = krusty::language_settings::LanguageSettings::new(
@@ -352,9 +348,8 @@ fn language_version_2_2_omits_annotation_records_like_kotlinc() {
         default_out.to_string_lossy().into_owned(),
         src_path.to_string_lossy().into_owned(),
     ];
-    let Some((code, stderr)) = common::kotlinc_compile(&default_args) else {
-        return;
-    };
+    let (code, stderr) =
+        common::kotlinc_compile(&default_args).expect("reference kotlinc is provisioned");
     assert_eq!(code, 0, "kotlinc (default stamp) failed: {stderr}");
 
     let default = common::compile_in_process_files_metadata_version(
