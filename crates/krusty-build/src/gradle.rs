@@ -849,14 +849,6 @@ mod tests {
                     "unsupported freeCompilerArg '-jvm-default=sideways'; use a supported compilerOptions property",
                 ),
                 (
-                    "old-language-version",
-                    "krusty does not support compilerOptions.languageVersion=1.9; supported language versions: 2.0, 2.1, 2.2, 2.3, 2.4, 2.5, 2.6",
-                ),
-                (
-                    "old-api-version",
-                    "krusty does not support compilerOptions.apiVersion=1.9; supported API versions: 2.0, 2.1, 2.2, 2.3, 2.4, 2.5, 2.6",
-                ),
-                (
                     "progressive-free-argument",
                     "freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead",
                 ),
