@@ -1239,11 +1239,19 @@ pub(super) fn specialize_typed_expression(
         | IrExpr::NewArray {
             array_type: type_operand,
             ..
-        }
-        | IrExpr::Try {
-            result: type_operand,
-            ..
         } => specialize_ty(type_operand, bindings),
+        IrExpr::Try {
+            result: type_operand,
+            catches,
+            ..
+        } => {
+            specialize_ty(type_operand, bindings);
+            // The semantic type is the only catch fact. A reified parameter stays a parameter
+            // until this substitution; emission derives the JVM class from whatever `ty` is then.
+            for catch in catches {
+                specialize_ty(&mut catch.ty, runtime);
+            }
+        }
         IrExpr::New {
             ctor_params: Some(parameters),
             ..

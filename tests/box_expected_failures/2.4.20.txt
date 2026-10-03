@@ -84,7 +84,6 @@ reflection/typeOf/nonReifiedTypeParameters/recursiveBoundWithoutInline.kt
 reflection/typeOf/reifiedAsNestedArgument.kt
 reflection/typeOf/typeAliasedType.kt
 reified/capture.kt
-reified/catchParameter/tryCatchReifiedType.kt
 reified/innerObject.kt
 sam/constructors/sameWrapperClass.kt
 typeErasure/funWithReifiedTypeParameterContextParameterAndExtensionReceiverInsideClass.kt

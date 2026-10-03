@@ -327,7 +327,12 @@ fn validate_expr(expression: &IrExpr) -> Result<(), UndeterminedIrType> {
         IrExpr::Vararg { array_type, .. } | IrExpr::NewArray { array_type, .. } => {
             reject("array type", *array_type)
         }
-        IrExpr::Try { result, .. } => reject("try result", *result),
+        IrExpr::Try {
+            result, catches, ..
+        } => {
+            reject("try result", *result)?;
+            reject_all("catch type", catches.iter().map(|catch| catch.ty))
+        }
         IrExpr::Const(_)
         | IrExpr::BottomValue { .. }
         | IrExpr::ClassConst { .. }
@@ -1025,6 +1030,33 @@ mod tests {
                 class,
                 secondary: 0,
                 parameter: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_an_undetermined_catch_type() {
+        let mut ir = IrFile::default();
+        let body = ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+        ir.exprs.push(IrExpr::Try {
+            body,
+            catches: vec![crate::ir::IrCatch::generated(
+                0,
+                crate::types::type_name("java/lang/Throwable"),
+                body,
+            )],
+            finally: None,
+            result: Ty::Unit,
+        });
+        if let IrExpr::Try { catches, .. } = ir.exprs.last_mut().unwrap() {
+            catches[0].ty = Ty::Error;
+        }
+
+        assert_eq!(
+            ir.validate_determined_types(),
+            Err(UndeterminedIrType {
+                location: "catch type",
+                ty: Ty::Error,
             })
         );
     }
