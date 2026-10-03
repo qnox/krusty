@@ -269,7 +269,14 @@ pub(super) fn finalize_local_superclass_captures(
             }
             (secondary.params.len(), secondary.prefix_params.clone())
         };
-        if ir.classes[class].super_args.len() != callee_source_len {
+        // A class with only secondary constructors keeps the primary `super_args` empty (or sized
+        // for a different target). Each of its own `super(…)` delegations is short by the same
+        // prefix and has to be filled on its own; skipping the class here left those calls as the
+        // source arguments alone (`NoSuchMethodError` on the capture-prefixed `<init>`).
+        let apply_primary = ir.classes[class].super_args.len() == callee_source_len;
+        let secondary_supers =
+            short_secondary_super_delegations(ir, class, parent, prefix, prefix_count)?;
+        if !apply_primary && secondary_supers.is_empty() {
             continue;
         }
         let wanted = (0..prefix)
@@ -339,19 +346,105 @@ pub(super) fn finalize_local_superclass_captures(
             })
             .collect();
         let parameters: Vec<crate::types::Ty> = wanted.into_iter().map(|(_, ty)| ty).collect();
-        for (parameter, element) in shared_parameters {
-            assert!(
-                ir.shared_super_capture_parameters
-                    .insert((class as u32, parameter), element)
-                    .is_none(),
-                "one shared capture owns one selected superclass parameter"
-            );
+        if apply_primary {
+            for &(parameter, element) in &shared_parameters {
+                assert!(
+                    ir.shared_super_capture_parameters
+                        .insert((class as u32, parameter), element)
+                        .is_none(),
+                    "one shared capture owns one selected superclass parameter"
+                );
+            }
+            let declaration = &mut ir.classes[class];
+            declaration.super_args.splice(0..0, arguments.clone());
+            declaration
+                .super_ctor_params
+                .splice(0..0, parameters.clone());
         }
-        let declaration = &mut ir.classes[class];
-        declaration.super_args.splice(0..0, arguments);
-        declaration.super_ctor_params.splice(0..0, parameters);
+        for index in secondary_supers {
+            let secondary =
+                u32::try_from(index).map_err(|_| FirFileLoweringFailure::ValueIdentityOverflow)?;
+            for &(parameter, element) in &shared_parameters {
+                assert!(
+                    ir.shared_secondary_super_capture_parameters
+                        .insert((class as u32, secondary, parameter), element)
+                        .is_none(),
+                    "one shared capture owns one selected superclass parameter"
+                );
+            }
+            let constructor = &mut ir.classes[class].secondary_ctors[index];
+            if let crate::ir::CtorDelegateTarget::Super { target_params, .. } =
+                &mut constructor.delegate
+            {
+                target_params.splice(0..0, parameters.iter().copied());
+            }
+            ir.classes[class].secondary_ctors[index]
+                .delegate_args
+                .splice(0..0, arguments.iter().copied());
+        }
     }
     Ok(())
+}
+
+/// Secondary `super(…)` delegations of `class` that reach `parent` and are short by exactly its
+/// capture prefix. A `this(…)` delegation is the class's own constructor and is not filled here.
+fn short_secondary_super_delegations(
+    ir: &IrFile,
+    class: usize,
+    parent: u32,
+    prefix: usize,
+    prefix_count: u32,
+) -> Result<Vec<usize>, FirFileLoweringFailure> {
+    let parent_name = ir.classes[parent as usize].fq_name;
+    let mut matched = Vec::new();
+    for (index, constructor) in ir.classes[class].secondary_ctors.iter().enumerate() {
+        let crate::ir::CtorDelegateTarget::Super { owner, target, .. } = &constructor.delegate
+        else {
+            continue;
+        };
+        if *owner != parent_name {
+            continue;
+        }
+        let source_len = if target.primary() {
+            let parent_args = &ir.classes[parent as usize].ctor_args;
+            let actual = u32::try_from(parent_args.len())
+                .map_err(|_| FirFileLoweringFailure::ValueIdentityOverflow)?;
+            parent_args.len().checked_sub(prefix).ok_or(
+                FirFileLoweringFailure::InvalidSuperclassCapturePrefix {
+                    class: parent,
+                    expected: prefix_count,
+                    actual,
+                },
+            )?
+        } else {
+            let secondary = target
+                .ordinal
+                .checked_sub(1)
+                .and_then(|index| {
+                    ir.classes[parent as usize]
+                        .secondary_ctors
+                        .get(index as usize)
+                })
+                .ok_or(FirFileLoweringFailure::InvalidSuperclassConstructorTarget {
+                    class: parent,
+                    target: *target,
+                })?;
+            if secondary.prefix_params.len() != prefix {
+                let actual = u32::try_from(secondary.prefix_params.len())
+                    .map_err(|_| FirFileLoweringFailure::ValueIdentityOverflow)?;
+                return Err(FirFileLoweringFailure::InvalidSuperclassCapturePrefix {
+                    class: parent,
+                    expected: prefix_count,
+                    actual,
+                });
+            }
+            secondary.params.len()
+        };
+        if constructor.delegate_args.len() == source_len {
+            matched.push(index);
+        }
+    }
+    Ok(matched)
 }
 
 pub(super) fn finalize_constructors(

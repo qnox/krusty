@@ -8053,7 +8053,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     with the captures, while the checker records only the parameters written in source, so
     `class B : A()` — `A` capturing, with `constructor() : this("O")` — was calling `A.<init>()`,
     which does not exist (`NoSuchMethodError`). The prefix is prepended to that secondary call
-    the same way it is prepended to a primary `super(…)`.
+    the same way it is prepended to a primary `super(…)`. A local subclass with no primary
+    constructor makes the call from its own secondary constructor (`constructor(x, y): super(x, y)`).
+    Each of those `super(…)` delegations that is short by exactly the superclass prefix is filled
+    the same way. A `this(…)` delegation is not a superclass call; it keeps forwarding the
+    subclass's own prefix. A recorded secondary capture that does not name a `super(…)` parameter
+    is invalid IR and is rejected before a backend can skip it.
 
   The same lexical value captured twice is ONE capture. A class that captures `x` for its own body
   and is then found to need `x` for a declaration it reaches carries one field, not two — the second
@@ -8088,7 +8093,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `codegen/box/localClass/localHierarchy.kt`,
   `codegen/box/innerNested/superConstructorCall/{localExtendsLocalWithClosure,localWithClosureExtendsLocalWithClosure}.kt`,
   `codegen/box/localClasses/innerOfLocalCaptureExtensionReceiver.kt` and
-  `codegen/box/secondaryConstructors/callFromLocalSubClass.kt`.
+  `codegen/box/secondaryConstructors/callFromLocalSubClass.kt`,
+  `codegen/box/secondaryConstructors/localClasses.kt`.
 
 - **A collection literal's `operator fun of` dispatches on the companion, not on nothing.**
   `val list: MyList = ["O", "K"]` selects `MyList.Companion.of`, which is an ordinary MEMBER of
