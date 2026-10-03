@@ -148,29 +148,6 @@ fn inline_lambda_conversion(ir: &crate::ir::IrFile, expression: ExprId) -> Optio
     Some((receiver, reference.declaration_result))
 }
 
-fn invoke_can_splice_lambda(ir: &crate::ir::IrFile, invocation: ExprId, lambda: ExprId) -> bool {
-    let IrExpr::InvokeFunction { args, .. } = ir.expr(invocation) else {
-        return false;
-    };
-    let IrExpr::Lambda {
-        impl_fn,
-        arity,
-        captures,
-        inline_body: Some(_),
-        ..
-    } = ir.expr(lambda)
-    else {
-        return false;
-    };
-    let suspend = ir.suspend_funs.contains(impl_fn);
-    if args.len() + usize::from(suspend) != *arity as usize {
-        return false;
-    }
-    ir.functions
-        .get(*impl_fn as usize)
-        .is_some_and(|function| function.params.len() == captures.len() + args.len())
-}
-
 fn spliceable_invocations(
     ir: &crate::ir::IrFile,
     copies: &[(ExprId, ExprId)],
@@ -187,7 +164,7 @@ fn spliceable_invocations(
         let Some(carrier) = converted.get(slot) else {
             continue;
         };
-        if !invoke_can_splice_lambda(ir, copy, carrier.lambda) {
+        if !super::lambda_invocation_is_spliceable(ir, copy, carrier.lambda) {
             continue;
         }
         invocations.push(SpliceableInvoke {
@@ -205,32 +182,34 @@ fn blocked_slots(
     converted: &HashMap<u32, ConvertedCarrier>,
     spliceable: &[SpliceableInvoke],
 ) -> HashSet<u32> {
-    let spliceable_funcs = spliceable
+    let spliceable_edges = spliceable
         .iter()
-        .map(|invoke| invoke.func)
+        .map(|invoke| (invoke.func, invoke.invocation))
         .collect::<HashSet<_>>();
+    let mut parents = HashMap::<ExprId, Vec<ExprId>>::new();
+    for &(_, parent) in copies {
+        crate::ir::for_each_child(&ir.exprs, parent, &mut |child| {
+            parents.entry(child).or_default().push(parent);
+        });
+    }
     let mut blocked = HashSet::new();
     for &(_, copy) in copies {
-        let slot = match ir.expr(copy) {
-            IrExpr::GetValue(slot) | IrExpr::SetValue { var: slot, .. } => *slot,
+        let (slot, read) = match ir.expr(copy) {
+            IrExpr::GetValue(slot) => (*slot, true),
+            IrExpr::SetValue { var: slot, .. } => (*slot, false),
             _ => continue,
         };
-        if !converted.contains_key(&slot) || spliceable_funcs.contains(&copy) {
+        if !converted.contains_key(&slot) {
             continue;
         }
-        blocked.insert(slot);
-    }
-    for (&slot, carrier) in converted {
-        let quoted = copies.iter().any(|&(_, copy)| {
-            matches!(
-                ir.expr(copy),
-                IrExpr::Block {
-                    value: Some(value),
-                    ..
-                } if *value == carrier.variable
-            )
-        });
-        if quoted {
+        let only_spliceable_invocations = read
+            && parents.get(&copy).is_some_and(|uses| {
+                !uses.is_empty()
+                    && uses
+                        .iter()
+                        .all(|parent| spliceable_edges.contains(&(copy, *parent)))
+            });
+        if !only_spliceable_invocations {
             blocked.insert(slot);
         }
     }
@@ -239,7 +218,11 @@ fn blocked_slots(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use crate::ir::{IrCallableReferenceTarget, IrConst, IrExpr};
+
+    use super::{blocked_slots, ConvertedCarrier, SpliceableInvoke};
 
     fn function_body(ir: &crate::ir::IrFile, name: &str) -> crate::ir::ExprId {
         ir.functions
@@ -279,6 +262,47 @@ mod tests {
 
     fn lower(source: &str, stem: &str) -> crate::ir::IrFile {
         crate::fir_lower::tests::lower_single_source(source, stem)
+    }
+
+    #[test]
+    fn a_shared_function_read_is_blocked_when_another_parent_keeps_it_live() {
+        let mut ir = crate::ir::IrFile::default();
+        let variable = ir.add_expr(IrExpr::Variable {
+            index: 7,
+            ty: crate::types::Ty::fun(Vec::new(), crate::types::Ty::String),
+            init: None,
+            named: false,
+        });
+        let read = ir.add_expr(IrExpr::GetValue(7));
+        let invocation = ir.add_expr(IrExpr::InvokeFunction {
+            func: read,
+            args: Vec::new(),
+            params: Vec::new(),
+            ret: crate::types::Ty::String,
+        });
+        let root = ir.add_expr(IrExpr::Block {
+            stmts: vec![variable, invocation],
+            value: Some(read),
+        });
+        let converted = HashMap::from([(
+            7,
+            ConvertedCarrier {
+                variable,
+                lambda: 0,
+                result: crate::types::Ty::String,
+            },
+        )]);
+        let spliceable = [SpliceableInvoke {
+            invocation,
+            func: read,
+            slot: 7,
+        }];
+        let copies = (0..=root).map(|id| (id, id)).collect::<Vec<_>>();
+
+        assert_eq!(
+            blocked_slots(&ir, &copies, &converted, &spliceable),
+            std::collections::HashSet::from([7])
+        );
     }
 
     #[test]
