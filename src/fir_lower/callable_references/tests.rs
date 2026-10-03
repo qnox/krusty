@@ -629,23 +629,42 @@ fn a_local_reference_coerces_only_a_substituted_argument() {
         "LocalGenericReferenceCoercion",
     );
 
+    let declared = Ty::obj("kotlin/Any");
     let coercions = ir
         .exprs
         .iter()
-        .filter(|expression| {
-            matches!(
-                expression,
+        .filter_map(|expression| match expression {
+            IrExpr::TypeOp {
+                op: IrTypeOp::ImplicitCoercion,
+                arg,
+                type_operand,
+            } if *type_operand == declared => Some(*arg),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        coercions.len(),
+        1,
+        "only the erased type-parameter argument is coerced; ops={:?} functions={:?}",
+        ir.exprs
+            .iter()
+            .filter_map(|expression| match expression {
                 IrExpr::TypeOp {
                     op: IrTypeOp::ImplicitCoercion,
-                    type_operand: Ty::TyParam(_, _),
+                    type_operand,
                     ..
-                }
-            )
-        })
-        .count();
-    assert_eq!(
-        coercions, 1,
-        "only the type-parameter argument of the substituted local reference is coerced"
+                } => Some(*type_operand),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        ir.functions
+            .iter()
+            .map(|function| (function.name.as_str(), function.params.clone()))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        matches!(ir.expr(coercions[0]), IrExpr::GetValue(_)),
+        "the coerced value is the reference parameter"
     );
 }
 
