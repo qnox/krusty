@@ -1145,6 +1145,84 @@ fn inner_subclass_keeps_the_extension_receiver_its_superclass_constructor_needs(
     );
 }
 
+#[test]
+fn inner_subclass_keeps_a_non_nearest_receiver_its_superclass_needs() {
+    let source = "class CaptureToken(val text: String)\n\
+                  class Scope\n\
+                  fun CaptureToken.bar(): CaptureToken {\n\
+                      open class Local {\n\
+                          fun result() = this@bar\n\
+                      }\n\
+                      val block: Scope.() -> CaptureToken = {\n\
+                          class Outer {\n\
+                              inner class Inner : Local() {\n\
+                                  fun outer() = this@Outer\n\
+                              }\n\
+                          }\n\
+                          Outer().Inner().result()\n\
+                      }\n\
+                      return Scope().block()\n\
+                  }\n";
+    let (outer, _) = checked_function_body(source, "bar");
+    let FirExprKind::Block { statements, .. } = &outer
+        .expr(root_expression(&outer))
+        .expect("extension body block")
+        .kind
+    else {
+        panic!("extension function must retain its checked block")
+    };
+    let local = statements
+        .iter()
+        .filter_map(|statement| outer.statement(*statement))
+        .find_map(|statement| match &statement.kind {
+            FirStatementKind::LocalDeclaration { captures, .. } => Some(captures.as_ref()),
+            _ => None,
+        })
+        .expect("Local is declared in bar");
+    let [local] = local else {
+        panic!("Local has exactly one capture, the extension receiver: {local:?}")
+    };
+    let lambda = (0..outer.expression_count())
+        .find_map(
+            |raw| match &outer.expr(FirExprId::from_raw(raw as u32))?.kind {
+                FirExprKind::Lambda { body, .. } => Some(body),
+                _ => None,
+            },
+        )
+        .expect("Outer is declared in the receiver lambda");
+    let enclosing = (0..lambda.statement_count())
+        .find_map(
+            |raw| match &lambda.statement(FirStatementId::from_raw(raw as u32))?.kind {
+                FirStatementKind::LocalDeclaration { captures, .. } => Some(captures.as_ref()),
+                _ => None,
+            },
+        )
+        .expect("Outer publishes its captures from the lambda");
+    let [enclosing] = enclosing else {
+        panic!(
+            "Outer keeps only the non-nearest receiver its inner subclass forwards: {enclosing:?}"
+        )
+    };
+    assert!(
+        capture_token_extension_receiver(local) && capture_token_extension_receiver(enclosing),
+        "both fields carry this@bar, not the unused lambda receiver: local={local:?} outer={enclosing:?}"
+    );
+    assert!(
+        matches!(
+            enclosing.source,
+            FirLocalClassCaptureSource::ImplicitReceiver {
+                current: false,
+                depth: 1
+            } | FirLocalClassCaptureSource::CapturedImplicitReceiver { .. }
+        ),
+        "at Outer the lambda receiver is nearer than this@bar: {enclosing:?}"
+    );
+    assert_eq!(
+        enclosing.capture_identity, local.capture_identity,
+        "Outer forwards Local's exact receiver identity"
+    );
+}
+
 fn capture_token_extension_receiver(capture: &FirLocalClassCapture) -> bool {
     capture.ty.get() == Ty::obj("CaptureToken")
         && matches!(

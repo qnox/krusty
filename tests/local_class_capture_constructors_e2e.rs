@@ -565,6 +565,80 @@ fn inner_subclass_reads_the_extension_receiver_from_its_enclosing_local_class() 
     common::expect_box_same_as_kotlinc(INNER_SUPER_RECEIVER, "InnerSuperReceiver");
 }
 
+/// `Outer` is declared in a receiver lambda, so `Scope` is nearer than `this@bar`. `Local` still
+/// captures `this@bar`, and `Inner` reads that field from `Outer` rather than capturing `Scope`.
+const NON_NEAREST_SUPER_RECEIVER: &str = r#"
+class CaptureToken(val text: String)
+class Scope
+
+fun CaptureToken.bar(): CaptureToken {
+    open class Local {
+        fun result() = this@bar
+    }
+    val block: Scope.() -> CaptureToken = {
+        class Outer {
+            inner class Inner : Local() {
+                fun outer() = this@Outer
+            }
+        }
+        Outer().Inner().result()
+    }
+    return Scope().block()
+}
+
+fun box() = CaptureToken("OK").bar().text
+"#;
+
+#[test]
+fn inner_subclass_forwards_a_non_nearest_extension_receiver_like_kotlinc() {
+    let classes = [
+        "MainKt$bar$Local",
+        "MainKt$bar$block$1$Outer",
+        "MainKt$bar$block$1$Outer$Inner",
+    ];
+    for class in classes {
+        let pair =
+            common::ModuleClassPair::compile(&[("Main.kt", NON_NEAREST_SUPER_RECEIVER)], class);
+        let capture_abi = |bytes: &[u8]| {
+            let parsed = krusty::jvm::classreader::parse_class(bytes)
+                .unwrap_or_else(|error| panic!("parse {class}: {error:?}"));
+            let fields = parsed
+                .fields
+                .into_iter()
+                .map(|field| {
+                    (
+                        field.name,
+                        field.descriptor,
+                        field.access,
+                        field.signature,
+                        field.nullability,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let constructors = parsed
+                .methods
+                .into_iter()
+                .filter(|method| method.name == "<init>")
+                .map(|method| {
+                    (
+                        method.descriptor,
+                        method.access,
+                        method.signature,
+                        method.parameter_nullability,
+                    )
+                })
+                .collect::<Vec<_>>();
+            (fields, constructors)
+        };
+        assert_eq!(
+            capture_abi(&pair.krusty),
+            capture_abi(&pair.kotlinc),
+            "{class}: capture fields and constructor ABI differ from kotlinc"
+        );
+    }
+    common::expect_box_same_as_kotlinc(NON_NEAREST_SUPER_RECEIVER, "NonNearestSuperReceiver");
+}
+
 const POSTPONED_MEMBER_CAPTURES: &str = r#"
 class CaptureToken(val text: String)
 class CaptureSink<T> {

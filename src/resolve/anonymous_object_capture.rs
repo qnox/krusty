@@ -430,7 +430,7 @@ impl Checker<'_> {
         established: LocalClassCaptureInventory,
     ) {
         let mut used_receivers = Vec::new();
-        for observed in receiver_candidates {
+        for observed in &receiver_candidates {
             let Some(first_use) = observed
                 .uses_before
                 .iter()
@@ -449,12 +449,17 @@ impl Checker<'_> {
                 continue;
             };
             used_receivers.push((first_use, observed.capture.source));
-            merge_local_receiver_capture(captures, bindings, observed.capture);
+            merge_local_receiver_capture(captures, bindings, observed.capture.clone());
         }
         // An inner class is not entered as its own local-class statement, so it never publishes
         // captures of its own. Its super call reads a superclass receiver from the enclosing
         // local class. Keep that receiver here even when this class's body never mentions it.
-        self.retain_receivers_read_by_nested_inner_superclasses(declaration, captures);
+        self.retain_receivers_read_by_nested_inner_superclasses(
+            declaration,
+            captures,
+            bindings,
+            &receiver_candidates,
+        );
         // Provisional visits publish only proven selections, but cannot mark their types final.
         let provisional = self.postponed_argument_depth != 0
             || captures.iter().any(|capture| {
@@ -525,10 +530,17 @@ impl Checker<'_> {
     /// capture from that instance by closure identity, so this class has to keep the same receiver
     /// the superclass captured. A further-nested inner class reads its own enclosing class, not this
     /// one, and a non-inner subclass carries the receiver on its own constructor.
+    ///
+    /// The initial inventory records only the nearest receiver. A superclass can capture a further
+    /// rung (`this@bar` while this class is declared in a `Scope.() ->` lambda). That closure
+    /// identity is already in this declaration's receiver tower; publish that tower entry before
+    /// forwarding it. The superclass coordinate is not reused: a nearer lambda receiver shifts it.
     fn retain_receivers_read_by_nested_inner_superclasses(
         &self,
         declaration: DeclId,
-        captures: &mut [AnonymousObjectCapture],
+        captures: &mut Vec<AnonymousObjectCapture>,
+        bindings: &mut Vec<Option<u32>>,
+        candidates: &[ObservedReceiverCapture],
     ) {
         let crate::ast::Decl::Class(class) = self.file.decl(declaration) else {
             return;
@@ -589,6 +601,19 @@ impl Checker<'_> {
             }));
         }
         for (receiver, dependency) in required {
+            if !captures
+                .iter()
+                .any(|local| local.receiver_capture == Some(receiver))
+            {
+                let published = candidates
+                    .iter()
+                    .find(|candidate| candidate.capture.receiver_capture == Some(receiver))
+                    .expect(
+                        "an enclosing local class's receiver tower contains the identity its \
+                         inner subclass forwards",
+                    );
+                merge_local_receiver_capture(captures, bindings, published.capture.clone());
+            }
             let local = captures
                 .iter_mut()
                 .find(|local| local.receiver_capture == Some(receiver))

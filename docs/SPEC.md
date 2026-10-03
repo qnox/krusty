@@ -1550,6 +1550,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   receiver even though its own body never mentions it. The superclass field and enclosing-class
   field must carry the same recorded receiver identity; their relative receiver-tower coordinates
   are not interchangeable and are never used as a fallback join.
+  The enclosing class publishes that identity from its own receiver tower when the superclass
+  captured a rung that is not the nearest receiver at the enclosing declaration. `class Outer`
+  declared inside `Scope.() -> ...`, whose `inner class Inner : Local()` needs `this@bar`, keeps
+  `this@bar` at the shifted coordinate and does not keep the unused `Scope` receiver. The
+  superclass's own coordinate is not copied onto `Outer`.
   A postponed generic receiver-lambda check is a provisional constraint probe, not a completed
   closure inventory. All candidate receivers are temporarily visible during the body check, but
   only proven selections enter the declaration's capture ledger. Local methods are checked once;
@@ -1573,6 +1578,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (the KT-61929 nested-init shape with test-owned callables).
   Tests: `local_class_does_not_capture_an_unused_extension_receiver`,
   `inner_subclass_keeps_the_extension_receiver_its_superclass_constructor_needs`,
+  `inner_subclass_keeps_a_non_nearest_receiver_its_superclass_needs`,
+  `tests/local_class_capture_constructors_e2e.rs::inner_subclass_forwards_a_non_nearest_extension_receiver_like_kotlinc`,
   `tests/local_class_capture_constructors_e2e.rs::an_unused_extension_receiver_is_not_a_constructor_reference_parameter`
   (runtime and the exact constructor/`invoke` shape, plus a local class that does read the
   receiver),
