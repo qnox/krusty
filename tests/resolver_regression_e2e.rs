@@ -58,17 +58,16 @@ fn reference_errors(output: &str) -> Vec<ObservedDiagnostic> {
         .collect()
 }
 
-fn assert_recorded_reference_ledger(output: &str) {
-    let observed = reference_errors(output)
-        .into_iter()
-        .map(|diagnostic| {
-            format!(
-                "{}:{}:{}: {}",
-                diagnostic.file, diagnostic.line, diagnostic.column, diagnostic.message
-            )
-        })
-        .collect::<Vec<_>>();
-    assert!(!observed.is_empty(), "kotlinc's complete ordered ledger");
+/// Reject one fixture exactly as the selected kotlinc does. The reference stderr is replayed from
+/// the binary GHA recording for a published compiler version, so removing the old checked-in text
+/// ledger must not weaken this to a non-empty/rejection-only assertion.
+fn assert_rejection_same_as_kotlinc(stem: &str, source: &str) {
+    let file = format!("{stem}.kt");
+    let result = common::compiler_diagnostics(
+        &[(file.as_str(), source)],
+        std::slice::from_ref(&common::stdlib_jar()),
+    );
+    common::expect_identical_rejection(&result, stem);
 }
 
 /// Strict stdlib/JDK run: missing tooling or a rejected source panics with diagnostics, so callers
@@ -1198,13 +1197,7 @@ class Duo<A, B>
 fun <T> build(transform: (T) -> String): Duo<T, T> = TODO()
 fun <U : Marker> outer(): Duo<U, U?> = build { it.mark() }
 "#;
-    let (code, diagnostics) = common::kotlinc_source_result("RepeatedContextResult", source);
-    assert_ne!(code, 0, "kotlinc accepted the conflicting fixture");
-    assert_recorded_reference_ledger(&diagnostics);
-    assert_eq!(
-        common::front_end_diagnostics_with_stdlib(source),
-        vec!["cannot infer type for type parameter 'T'. Specify it explicitly."]
-    );
+    assert_rejection_same_as_kotlinc("RepeatedContextResult", source);
 }
 
 #[test]
@@ -1216,13 +1209,7 @@ class Duo<A, B>
 fun <T> build(transform: (T) -> String): Duo<T, T> = TODO()
 fun <U : Marker> outer(): Duo<U, String> = build { it.mark() }
 "#;
-    let (code, diagnostics) = common::kotlinc_source_result("MixedContextResult", source);
-    assert_ne!(code, 0, "kotlinc accepted the conflicting fixture");
-    assert_recorded_reference_ledger(&diagnostics);
-    assert_eq!(
-        common::front_end_diagnostics_with_stdlib(source),
-        vec!["cannot infer type for type parameter 'T'. Specify it explicitly."]
-    );
+    assert_rejection_same_as_kotlinc("MixedContextResult", source);
 }
 
 #[test]
@@ -1233,13 +1220,7 @@ interface Marker { fun mark(): String }
 fun <T> build(transform: (T) -> String): List<T> = TODO()
 fun <T : Marker> outer(): List<T?> = build { it.mark() }
 "#;
-    let (code, diagnostics) = common::kotlinc_source_result("NullableNestedContext", source);
-    assert_ne!(code, 0, "kotlinc accepted the invalid fixture");
-    assert_recorded_reference_ledger(&diagnostics);
-    assert_eq!(
-        common::front_end_diagnostics_with_stdlib(source),
-        vec!["only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'T?'."]
-    );
+    assert_rejection_same_as_kotlinc("NullableNestedContext", source);
 }
 
 #[test]
