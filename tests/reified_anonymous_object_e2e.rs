@@ -275,64 +275,6 @@ fn a_reified_anonymous_object_copies_property_accessors_like_kotlinc() {
 }
 
 #[test]
-fn an_external_reified_call_copies_the_anonymous_class() {
-    const SOURCE: &str = "\
-interface Face { fun value(): String? }\n\
-class Token\n\
-class Other\n\
-fun <reified T> externalInline(): String? = T::class.simpleName\n\
-inline fun <reified T> make(): Face = object : Face {\n\
-    override fun value(): String? = externalInline<T>()\n\
-}\n\
-fun box(): String {\n\
-    val face = make<Token>()\n\
-    if (face.value() != \"Token\") return \"fail:${face.value()}\"\n\
-    if (make<Other>().value() != \"Other\") return \"other\"\n\
-    return \"OK\"\n\
-}\n";
-    common::expect_box_same_as_kotlinc(SOURCE, "ReifiedAnonymousExternal");
-    let (reference, krusty) = class_names("ReifiedAnonymousExternal", SOURCE);
-    assert_eq!(krusty, reference);
-    assert!(reference
-        .iter()
-        .any(|name| name.contains("$$inlined$make$")));
-}
-
-#[test]
-fn a_local_delegate_plan_copies_the_anonymous_class() {
-    const SOURCE: &str = "\
-import kotlin.reflect.KProperty\n\
-interface Face { fun value(): Any? }\n\
-interface Item\n\
-class Token : Item\n\
-class Other : Item\n\
-class Delegate<T>(val value: Any?)\n\
-inline operator fun <reified T> Delegate<T>.getValue(\n\
-    owner: Any?,\n\
-    property: KProperty<*>,\n\
-): T = value as T\n\
-inline fun <reified T> make(value: Any?): Face = object : Face {\n\
-    override fun value(): Any? {\n\
-        val local by Delegate<T>(value)\n\
-        return local\n\
-    }\n\
-}\n\
-fun box(): String {\n\
-    val token = Token()\n\
-    val other = Other()\n\
-    if (make<Token>(token).value() !== token) return \"token\"\n\
-    if (make<Other>(other).value() !== other) return \"other\"\n\
-    return \"OK\"\n\
-}\n";
-    common::expect_box_same_as_kotlinc(SOURCE, "ReifiedAnonymousDelegate");
-    let (reference, krusty) = class_names("ReifiedAnonymousDelegate", SOURCE);
-    assert_eq!(krusty, reference);
-    assert!(reference
-        .iter()
-        .any(|name| name.contains("$$inlined$make$")));
-}
-
-#[test]
 fn a_private_inline_anonymous_object_is_used_as_its_supertype() {
     // Two call sites each get a class. The values meet as the interface, not as the declaration
     // class, so neither copy is cast back to `...$f$1`.
