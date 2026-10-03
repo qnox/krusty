@@ -12,6 +12,12 @@ use std::collections::HashSet;
 /// return `Object`; any pre-CPS result boxing is removed because the concrete suspend method already
 /// crosses the continuation boundary in boxed form.
 ///
+/// A value-class member is matched by its function identity as well as by name. Its static
+/// replacement is `name-impl` over the carrier, and the interface entry (and any bridge that still
+/// points at that function) lists only the declared parameters. The name/arity key counts the
+/// carrier, so it never names the entry. A bridge already realized in CPS form — `SuspendFunctionN`'s
+/// `invoke` — already carries the completion parameter and is left as it is.
+///
 /// Runs once [`super::lower_suspend`] has given the concrete suspend methods their CPS signatures.
 pub(crate) fn finalize_suspend_bridges(
     ir: &mut IrFile,
@@ -19,7 +25,8 @@ pub(crate) fn finalize_suspend_bridges(
 ) {
     let continuation = continuation_ty();
     let object = object_ty();
-    let suspend_targets = method_keys(ir, |fid| ir.suspend_funs.contains(&fid));
+    let suspend_functions: HashSet<u32> = ir.suspend_funs.iter().copied().collect();
+    let suspend_targets = method_keys(ir, |fid| suspend_functions.contains(&fid));
     let boxed_suspend_targets = method_keys(ir, |fid| {
         matches!(
             ir.value_class_suspend_returns.get(&fid),
@@ -31,11 +38,15 @@ pub(crate) fn finalize_suspend_bridges(
         for (ordinal, bridge) in class.bridges.iter_mut().enumerate() {
             let ordinal = u32::try_from(ordinal).expect("bridge ordinals fit u32");
             let target = bridge.target_name.as_deref().unwrap_or(&bridge.name);
-            if !suspend_targets.contains(&(
+            let named_target = suspend_targets.contains(&(
                 class.fq_name,
                 target.to_string(),
                 bridge.concrete_params.len(),
-            )) {
+            ));
+            let targets_suspend_member = bridge.target_function.is_some_and(|function| {
+                suspend_functions.contains(&function) && !bridge_adopts_continuation(bridge)
+            });
+            if !named_target && !targets_suspend_member {
                 continue;
             }
             bridge.erased_params.push(continuation);
@@ -50,7 +61,12 @@ pub(crate) fn finalize_suspend_bridges(
                 target.to_string(),
                 bridge.concrete_params.len().saturating_sub(1),
             );
-            let target_returns_boxed = boxed_suspend_targets.contains(&target_key);
+            let target_returns_boxed = bridge.target_function.is_some_and(|function| {
+                matches!(
+                    ir.value_class_suspend_returns.get(&function),
+                    Some(crate::ir::IrValueClassSuspendResult::Boxed { .. })
+                )
+            }) || boxed_suspend_targets.contains(&target_key);
             if adaptations.boxes_result(owner, ordinal)
                 && bridge.concrete_ret.is_reference()
                 && !target_returns_boxed
@@ -76,6 +92,16 @@ pub(crate) fn finalize_suspend_bridges(
             );
         }
     }
+}
+
+/// Whether `bridge` was already built over the CPS completion parameter.
+fn bridge_adopts_continuation(bridge: &crate::ir::Bridge) -> bool {
+    bridge.parameters.iter().any(|parameter| {
+        matches!(
+            parameter.identity,
+            crate::fir::ResolvedParameterIdentity::SuspendCompletion
+        )
+    })
 }
 
 /// The class methods `selected` answers for, by owner, name and declared arity (without the
