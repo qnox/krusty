@@ -4518,7 +4518,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   semantic identity. Emission catches the parameter's bound (`Throwable`) and writes
   `Intrinsics.reifiedOperationMarker(7, "E")` as the handler's first instructions, ahead of the
   store of the exception. The bytecode inliner reads that marker and requires exactly one typed
-  exception-table entry for the handler label that precedes it. A concrete argument replaces that
+  exception-table entry for its handler. The nearest preceding label is that handler, except when
+  it is only a line-number label followed by its line node: the label before that one is the
+  handler. A concrete argument replaces that
   entry with the argument's class and erases the marker; a forwarded parameter (`inline fun
   <reified T> forward()` calling `eval<T>()`) renames the marker and leaves the erasure for the
   outer caller. A missing or ambiguous handler is left unchanged. A catch-all is not that entry.

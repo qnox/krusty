@@ -210,8 +210,10 @@ fn erase_marker(node: &mut MethodNode, marker: &Marker) {
     }
 }
 
-/// A mode-7 marker names the handler whose label sits immediately before it. Line nodes between
-/// that label and the marker are the catch clause's source line, not another instruction.
+/// A mode-7 marker names one typed handler. The nearest preceding label is that handler when the
+/// catch line is marked on it. kotlinc also emits a separate line-number label between the handler
+/// and the marker (`handler`, `line`, `LineNumber`, marker); that label is not a handler, and the
+/// label before it is.
 fn catch_repoint(
     node: &MethodNode,
     operation: usize,
@@ -259,16 +261,43 @@ fn retarget_catch(node: &mut MethodNode, operation: usize, class: &str) -> Resul
 }
 
 fn handler_label_before(node: &MethodNode, at: usize) -> Option<LabelId> {
-    let mut index = at;
+    let nearest = previous_label(node, at)?;
+    if typed_handler(node, nearest.label) {
+        return Some(nearest.label);
+    }
+    // kotlinc's `ReifiedTypeInliner.processCatch`: a line-number label immediately followed by
+    // its `LineNumber` is not the handler. The label before it is.
+    let next_is_line = matches!(node.nodes.get(nearest.index + 1), Some(Node::Line { .. }));
+    if !next_is_line {
+        return None;
+    }
+    let fallback = previous_label(node, nearest.index)?;
+    typed_handler(node, fallback.label).then_some(fallback.label)
+}
+
+struct PrecedingLabel {
+    index: usize,
+    label: LabelId,
+}
+
+fn previous_label(node: &MethodNode, before: usize) -> Option<PrecedingLabel> {
+    let mut index = before;
     while index > 0 {
         index -= 1;
-        match &node.nodes[index] {
-            Node::Line { .. } => continue,
-            Node::Label(label) => return Some(*label),
-            _ => return None,
+        if let Node::Label(label) = &node.nodes[index] {
+            return Some(PrecedingLabel {
+                index,
+                label: *label,
+            });
         }
     }
     None
+}
+
+fn typed_handler(node: &MethodNode, label: LabelId) -> bool {
+    node.try_catch_blocks
+        .iter()
+        .any(|block| block.handler == label && block.catch_type.is_some())
 }
 
 fn forwarded_marker_name(name: &str, nullable: bool, argument: &str) -> String {
@@ -716,6 +745,43 @@ mod tests {
             Some("java/lang/Throwable")
         );
         assert_eq!(node.try_catch_blocks[1].catch_type, None);
+    }
+
+    #[test]
+    fn a_line_number_label_before_the_marker_still_repoints_the_handler() {
+        let mut node = MethodNode::new(0x0009, "eval", "()V");
+        let handler = node.new_label();
+        let line_label = node.new_label();
+        let start = node.new_label();
+        let end = node.new_label();
+        node.nodes.push(Node::Label(handler));
+        node.nodes.push(Node::Label(line_label));
+        node.nodes.push(Node::Line {
+            line: 4,
+            start: line_label,
+        });
+        node.nodes.extend(marker("E", CATCH_MARKER));
+        node.nodes.push(Node::Insn(Insn::Var { op: 0x3a, slot: 1 }));
+        node.try_catch_blocks = vec![TryCatchBlock {
+            start,
+            end,
+            handler,
+            catch_type: Some("java/lang/Throwable".to_owned()),
+        }];
+
+        specialize(&mut node, &child_failure()).expect("specializes");
+
+        assert_eq!(
+            node.try_catch_blocks[0].catch_type.as_deref(),
+            Some("ChildFailure")
+        );
+        assert!(node.nodes[3..6]
+            .iter()
+            .all(|node| matches!(node, Node::Insn(Insn::Op(0x00)))));
+        assert!(matches!(
+            &node.nodes[6],
+            Node::Insn(Insn::Var { op: 0x3a, slot: 1 })
+        ));
     }
 
     #[test]
