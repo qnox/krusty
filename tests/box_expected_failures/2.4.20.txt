@@ -28,7 +28,6 @@ coroutines/nonLocalReturnFromInlineLambdaDeep.kt
 coroutines/suspendFunctionAsCoroutine/superCallInterface.kt
 coroutines/suspendFunctionMethodReference.kt
 coroutines/tailCallOptimizations/crossinline.kt
-enum/enumEntriesCompatibilityCheckPrioritized.kt
 extensionFunctions/kt475.kt
 fullValueClasses/basicSyntax.kt
 fullValueClasses/construction.kt

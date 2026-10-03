@@ -1128,6 +1128,21 @@ impl ProductionSignatureSemantics<'_> {
             .is_none_or(|file| file.prioritized_enum_entries)
     }
 
+    /// Unqualified `entries` on an enum receiver once that receiver's own members have missed.
+    /// `+PrioritizedEnumEntries` selects the synthetic property before companion members and outer
+    /// classifiers. The disabled feature leaves this empty so the existing tower stands.
+    fn prioritized_unqualified_enum_entries_ty(
+        &self,
+        scope: crate::fir::SignatureScope,
+        owner: crate::types::TypeName,
+        spelling: &str,
+    ) -> Option<Ty> {
+        if spelling != "entries" || !self.prioritized_enum_entries(scope) {
+            return None;
+        }
+        self.selected_implicit_classifier_property(scope, owner, spelling)
+    }
+
     /// Synthetic `entries` on an enum qualifier. `Enum.Companion.entries` is a different qualifier
     /// and stays the companion member; this only matches the enum classifier itself.
     fn prioritized_enum_entries_on_qualifier(

@@ -1428,6 +1428,11 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             let receiver = match rung {
                 crate::resolve::implicit_rungs::ImplicitRung::StaticScope(classifier) => {
                     if let Some(result) =
+                        self.prioritized_unqualified_enum_entries_ty(scope, classifier, spelling)
+                    {
+                        return crate::fir::ResolvedTy::new(result).map_err(|_| Self::failure());
+                    }
+                    if let Some(result) =
                         self.select_static_scope_property(scope, classifier, spelling, demand)?
                     {
                         return Ok(result);
@@ -1517,6 +1522,13 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     }
                 }
                 return crate::fir::ResolvedTy::new(result).map_err(|_| Self::failure());
+            }
+            if let Some(owner) = receiver.non_null().obj_internal() {
+                if let Some(result) =
+                    self.prioritized_unqualified_enum_entries_ty(scope, owner, spelling)
+                {
+                    return crate::fir::ResolvedTy::new(result).map_err(|_| Self::failure());
+                }
             }
         }
         for classifier in self.lexical_class_names(scope) {
