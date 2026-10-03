@@ -54,6 +54,12 @@ impl LanguageVersion {
         Self { major, minor }
     }
 
+    /// A `major.minor` level, including historical levels outside the selected compiler's option
+    /// domain. `@SinceKotlin("1.4")` is such a level: it is a declaration fact, not a CLI value.
+    pub(crate) fn from_major_minor_text(text: &str) -> Option<Self> {
+        Self::parse(text)
+    }
+
     fn parse(text: &str) -> Option<Self> {
         let (major, minor) = text.split_once('.')?;
         if minor.contains('.')

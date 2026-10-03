@@ -203,8 +203,10 @@ pub fn compile(opts: &cli::Options) -> Result<usize, String> {
     ));
     // Construction is fallible: a corrupt selected dependency remains a terminal frontend
     // diagnostic and never becomes a queryable provider with an empty symbol index.
-    let platform = krusty::frontend::PlatformProvider::from(JvmLibraries::new(cp.clone()))
-        .with_native_plugins(plugins.native);
+    let libraries = JvmLibraries::new(cp.clone())
+        .map(|libraries| libraries.with_api_version(opts.language_settings.api_version));
+    let platform =
+        krusty::frontend::PlatformProvider::from(libraries).with_native_plugins(plugins.native);
     let source_inputs = opts
         .sources
         .iter()

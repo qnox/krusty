@@ -169,6 +169,9 @@ pub struct Options {
     /// `mv` and as the `.kotlin_module` header version (`[X, Y, 0]`). This does not select language
     /// semantics. `None` keeps the default stamp, the implemented language version.
     pub metadata_version: Option<[i32; 3]>,
+    /// `-Xsuppress-version-warnings`: omit the deprecated and experimental language/API warnings.
+    /// Redundant feature arguments stay reported.
+    pub suppress_version_warnings: bool,
 }
 
 impl Default for Options {
@@ -200,6 +203,7 @@ impl Default for Options {
             no_param_assertions: false,
             no_call_assertions: false,
             plugins: PluginConfig::default(),
+            suppress_version_warnings: false,
         }
     }
 }
@@ -268,8 +272,15 @@ fn parse_metadata_level(value: &str) -> Option<[i32; 3]> {
     LanguageVersion::parse_supported_metadata_stamp(value).map(LanguageVersion::metadata_version)
 }
 
-fn settings_warnings(settings: &LanguageSettings, feature_arguments: &[String]) -> Vec<CliWarning> {
+fn settings_warnings(
+    settings: &LanguageSettings,
+    feature_arguments: &[String],
+    suppress_version_warnings: bool,
+) -> Vec<CliWarning> {
     let mut warnings = Vec::new();
+    if suppress_version_warnings {
+        return redundant_feature_warnings(settings, feature_arguments);
+    }
     if settings.language_version >= LanguageVersion::V2_2
         && settings.api_version <= LanguageVersion::V2_1
     {
@@ -298,6 +309,15 @@ fn settings_warnings(settings: &LanguageSettings, feature_arguments: &[String]) 
         }),
         _ => {}
     }
+    warnings.extend(redundant_feature_warnings(settings, feature_arguments));
+    warnings
+}
+
+fn redundant_feature_warnings(
+    settings: &LanguageSettings,
+    feature_arguments: &[String],
+) -> Vec<CliWarning> {
+    let mut warnings = Vec::new();
     let mut applied = krusty::features::LangFeatures::for_versions(
         settings.language_version,
         settings.api_version,
@@ -504,6 +524,10 @@ pub fn parse(argv: impl IntoIterator<Item = String>) -> Options {
             // accept, warn, change nothing. Deliberately scoped to this one flag; other `-Xwasm-*`
             // flags keep falling through to `ignored` until each is measured.
             flag @ "-Xwasm-kclass-fqn" => opts.unsupported_flag_warnings.push(flag.to_string()),
+            // kotlinc's `-X` help: suppress warnings about outdated, inconsistent, or experimental
+            // language or API versions. A warning that is not queued cannot be promoted by
+            // `-Xwarning-level` either.
+            "-Xsuppress-version-warnings" => opts.suppress_version_warnings = true,
             flag if flag.starts_with("-Xkotlin-reference-version=") => {
                 let value = flag
                     .strip_prefix("-Xkotlin-reference-version=")
@@ -576,7 +600,11 @@ pub fn parse(argv: impl IntoIterator<Item = String>) -> Options {
     };
     match LanguageSettings::new(language_version, api_version, &language_feature_arguments) {
         Ok(settings) => {
-            opts.warnings = settings_warnings(&settings, &language_feature_arguments);
+            opts.warnings = settings_warnings(
+                &settings,
+                &language_feature_arguments,
+                opts.suppress_version_warnings,
+            );
             opts.language_settings = settings;
         }
         Err(error) => opts.errors.push(error),
@@ -1320,6 +1348,49 @@ mod tests {
                     message: "language version 2.5 is experimental, there are no backwards compatibility guarantees for new language and library features. Use the stable version 2.4 instead.".to_owned(),
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn suppress_version_warnings_drops_only_version_status_warnings() {
+        let suppressed = parse_args(&[
+            "-language-version",
+            "2.0",
+            "-api-version",
+            "2.0",
+            "-Xsuppress-version-warnings",
+            "f.kt",
+        ]);
+        assert!(suppressed.errors.is_empty(), "{:?}", suppressed.errors);
+        assert!(suppressed.ignored.is_empty(), "{:?}", suppressed.ignored);
+        assert!(suppressed.warnings.is_empty(), "{:?}", suppressed.warnings);
+
+        let experimental = parse_args(&[
+            "-language-version",
+            "2.6",
+            "-Xsuppress-version-warnings",
+            "-Xkotlin-reference-version=2.4.20",
+            "f.kt",
+        ]);
+        assert!(
+            experimental.warnings.is_empty(),
+            "{:?}",
+            experimental.warnings
+        );
+
+        let redundant = parse_args(&[
+            "-language-version",
+            "2.4",
+            "-Xsuppress-version-warnings",
+            "-Xcontext-parameters",
+            "f.kt",
+        ]);
+        assert_eq!(
+            redundant.warnings,
+            [CliWarning {
+                name: WarningName::RedundantCliArg,
+                message: "The argument '-Xcontext-parameters' is redundant for the current language version 2.4.".to_string(),
+            }]
         );
     }
 

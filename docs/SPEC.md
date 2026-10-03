@@ -10205,7 +10205,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   into `@kotlin.Metadata` and the `.kotlin_module` header. `-api-version` defaults to that language
   version and may not be newer; it selects declaration availability independently of syntax. The
   settings are per compilation rather than process-global, because workers and language servers may
-  analyze modules at different levels in one process. Gradle forwards
+  analyze modules at different levels in one process. A classpath function whose metadata carries
+  `@SinceKotlin` newer than `-api-version` is omitted before overload selection, so the call is an
+  unresolved reference with no receiver type (`IntArray.isSorted` and a dependency `fun` marked
+  `@SinceKotlin("2.4")` at API 2.0; both resolve at API 2.4;
+  `tests/api_version_availability_e2e.rs`). Gradle forwards
   `compilerOptions.languageVersion` and `compilerOptions.apiVersion` unchanged, with no krusty-only
   property. With no explicit setting, the stable language/API default is the selected kotlinc
   release's default. The accepted option domain also follows that concrete release: 2.4.0 and
@@ -10222,7 +10226,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **`-Xwarning-level=<NAME>:<SEVERITY>` configures a typed diagnostic identity.** The accepted
   severities are kotlinc's exact, case-sensitive `error`, `warning`, and `disabled` spellings.
   Krusty rejects unknown diagnostic names, malformed severities, and repeated configuration of one
-  name; it never retains an opaque warning name as an ignored option. The registry contains only
+  name; it never retains an opaque warning name as an ignored option. `-Xsuppress-version-warnings`
+  drops the deprecated and experimental language/API warnings before that policy is applied, and
+  leaves `REDUNDANT_CLI_ARG` in place
+  (`suppress_version_warnings_drops_only_version_status_warnings` in
+  `crates/krusty-cli/src/cli.rs`). The registry contains only
   diagnostics the compiler can actually emit: deprecated and experimental language-version
   warnings and `REDUNDANT_CLI_ARG`. Language-feature arguments are replayed from the selected
   language/API baseline; an argument that makes no semantic change emits `REDUNDANT_CLI_ARG` with
