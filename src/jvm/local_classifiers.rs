@@ -31,29 +31,71 @@ pub(super) fn is_local(ir: &IrFile, class: &IrClass) -> bool {
 /// continue after them whether or not anything references them (`class Outer<E> { class Nested<E> }`
 /// gives the nested `E` id 1).
 pub(super) fn enclosing_type_parameters(ir: &IrFile, class: &IrClass) -> Vec<String> {
+    // Only a source member classifier is serialized under enclosing class serializers. A local,
+    // anonymous, lambda, callable-reference, continuation, or other generated class may have a
+    // physically nested JVM name, but that name is not a Kotlin declaration-owner edge and must
+    // not reserve metadata parameter ids.
+    if !class.is_source_declared || is_local(ir, class) {
+        return Vec::new();
+    }
     let mut owners = class.fq_name_id().existing_nested_owners();
     owners.reverse(); // recorded deepest-first; ids count from the outermost class
     owners
         .into_iter()
         .flat_map(|owner| {
-            // A same-file nested class's owner always has a class signature; a miss here silently
-            // shifts every reserved id after it.
-            let signature = ir.class_signature_name(owner);
-            debug_assert!(
-                signature.is_some(),
-                "nested class owner has no class signature"
-            );
+            let Some(owner_class) = ir
+                .class_id_by_name(owner)
+                .map(|id| &ir.classes[id as usize])
+            else {
+                return Vec::new();
+            };
+            if owner_class.type_params.is_empty() {
+                // Nongeneric declarations legitimately have no `IrGenericSig` entry and reserve
+                // no ids. Treating that absence as malformed made every ordinary nested class
+                // panic during metadata emission.
+                return Vec::new();
+            }
+            let signature = ir
+                .class_signature_name(owner)
+                .expect("a generic source classifier has a class signature");
             signature
-                .map(|signature| {
-                    signature
-                        .type_params
-                        .iter()
-                        .map(|parameter| parameter.semantic_name.clone())
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default()
+                .type_params
+                .iter()
+                .map(|parameter| parameter.semantic_name.clone())
+                .collect::<Vec<_>>()
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn executable_and_generated_classes_do_not_infer_metadata_owners_from_their_jvm_names() {
+        let ir = IrFile::default();
+
+        let generated = IrClass::synthetic(crate::types::type_name("fixture/FileKt$lambda$1"));
+        assert!(enclosing_type_parameters(&ir, &generated).is_empty());
+
+        let mut local = IrClass::synthetic(crate::types::type_name("fixture/FileKt$body$Local"));
+        local.is_source_declared = true;
+        local.is_local_class = true;
+        assert!(enclosing_type_parameters(&ir, &local).is_empty());
+    }
+
+    #[test]
+    fn a_nongeneric_source_owner_reserves_no_metadata_parameter_ids() {
+        let outer = crate::types::type_name("fixture/Outer");
+        let nested = crate::types::type_name_nested_child(outer, "Nested");
+        let mut ir = IrFile::default();
+        let mut outer_class = IrClass::synthetic(outer);
+        outer_class.is_source_declared = true;
+        ir.add_class(outer_class);
+        let mut nested_class = IrClass::synthetic(nested);
+        nested_class.is_source_declared = true;
+        assert!(enclosing_type_parameters(&ir, &nested_class).is_empty());
+    }
 }
 
 /// How `class`'s `@Metadata` numbers the type parameters it captures. kotlinc serializes a class
