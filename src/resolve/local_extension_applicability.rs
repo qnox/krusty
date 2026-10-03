@@ -24,6 +24,7 @@ use super::{Checker, CheckerScope, Signature};
 pub(super) struct LocalExtensionReferenceCandidate {
     pub(super) statement: StmtId,
     pub(super) signature: Signature,
+    receiver_rank: u32,
     pub(super) parameters: Vec<Ty>,
     pub(super) ret: Ty,
     pub(super) adaptation: Option<(Vec<AdaptedRefArgument>, bool)>,
@@ -133,6 +134,14 @@ impl Checker<'_> {
             expected,
             leading_receiver_in_expected,
         );
+        let Some(nearest_receiver) = candidates
+            .iter()
+            .map(|candidate| candidate.receiver_rank)
+            .min()
+        else {
+            return LocalExtensionReferenceSelection::None;
+        };
+        candidates.retain(|candidate| candidate.receiver_rank == nearest_receiver);
         let Some(best_cost) = candidates
             .iter()
             .map(|candidate| {
@@ -150,13 +159,15 @@ impl Checker<'_> {
             }) == best_cost
         });
 
-        // A repeated normalized fact is one candidate; distinct declarations with distinct
-        // semantic shapes remain overloads. This is the same duplicate boundary used for
-        // provider-neutral adapted references.
+        // A repeated normalized fact for the same declaration is one candidate. Distinct local
+        // declarations remain overloads even when adaptation erases their visible difference;
+        // their specialized declared receiver and source parameter shape own that identity.
         let mut unique = Vec::<LocalExtensionReferenceCandidate>::new();
         for candidate in candidates {
             if unique.iter().any(|existing| {
-                existing.parameters == candidate.parameters
+                existing.statement == candidate.statement
+                    && existing.signature.source_receiver == candidate.signature.source_receiver
+                    && existing.signature.params == candidate.signature.params
                     && existing.ret == candidate.ret
                     && existing.signature.is_suspend() == candidate.signature.is_suspend()
             }) {
@@ -207,17 +218,21 @@ impl Checker<'_> {
         expected: Option<&FnSig>,
         leading_receiver_in_expected: bool,
     ) -> Vec<LocalExtensionReferenceCandidate> {
+        let source = self.fed_source();
+        let receiver_mro = crate::symbol_resolver::ReceiverMro::new(&source, receiver);
         for overloads in self.lookup_local_fun_overload_rungs(scope, name) {
             let candidates = overloads
                 .into_iter()
                 .filter_map(|(statement, declared)| {
                     let signature = applicable_local_extension_signature(
-                        &self.fed_source(),
+                        &source,
                         &declared,
                         receiver,
                         |actual, bound| self.generic_bound_admits(actual, bound),
                         |actual, expected| self.receiver_is_assignable(actual, expected),
                     )?;
+                    let declared_receiver = signature.source_receiver?;
+                    let receiver_rank = receiver_mro.rank(&source, declared_receiver)?;
                     let (value_parameters, ret) = match expected {
                         Some(expected) => {
                             let expected_values = if leading_receiver_in_expected {
@@ -278,6 +293,7 @@ impl Checker<'_> {
                     Some(LocalExtensionReferenceCandidate {
                         statement,
                         signature,
+                        receiver_rank,
                         parameters,
                         ret,
                         adaptation: adaptation.flatten(),

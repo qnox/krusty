@@ -4,7 +4,8 @@
 //! extension property. The classifiers here are repository-owned and invariant.
 
 use super::common::{
-    expect_box_run_against_kotlinc, expect_box_run_against_ref, expect_box_same_as_kotlinc,
+    compiler_diagnostics, expect_box_run_against_kotlinc, expect_box_run_against_ref,
+    expect_box_same_as_kotlinc, expect_identical_rejection,
 };
 
 #[test]
@@ -223,6 +224,27 @@ fun box(): String {
 }
 
 #[test]
+fn bound_and_unbound_references_choose_the_nearest_declared_receiver() {
+    expect_box_same_as_kotlinc(
+        r#"
+open class ReceiverBase
+class ReceiverDerived : ReceiverBase()
+
+fun box(): String {
+    fun ReceiverBase.pick(): String = "base"
+    fun ReceiverDerived.pick(): String = "derived"
+
+    val value = ReceiverDerived()
+    val bound: () -> String = value::pick
+    val unbound: (ReceiverDerived) -> String = ReceiverDerived::pick
+    return if (bound() == "derived" && unbound(value) == "derived") "OK" else "fail"
+}
+"#,
+        "LocalExtensionReferenceReceiverRank",
+    );
+}
+
+#[test]
 fn a_bound_reference_selects_the_cheapest_local_extension_adaptation() {
     expect_box_same_as_kotlinc(
         r#"
@@ -240,6 +262,23 @@ fun box(): String {
 "#,
         "BoundLocalExtensionAdaptationCost",
     );
+}
+
+#[test]
+fn equal_cost_unrelated_local_extension_shapes_are_ambiguous() {
+    const SOURCE: &str = r#"class AmbiguousReceiver
+class FirstInput
+class SecondInput
+
+fun probe(receiver: AmbiguousReceiver) {
+    fun AmbiguousReceiver.choose(value: FirstInput = FirstInput()): String = "first"
+    fun AmbiguousReceiver.choose(value: SecondInput = SecondInput()): String = "second"
+    val selected: () -> String = receiver::choose
+}
+"#;
+
+    let result = compiler_diagnostics(&[("LocalExtensionReferenceAmbiguity.kt", SOURCE)], &[]);
+    expect_identical_rejection(&result, "equal-cost local-extension reference ambiguity");
 }
 
 const LIB: &str = r#"
