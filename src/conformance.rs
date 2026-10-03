@@ -313,6 +313,7 @@ pub fn needs_unmodeled_compiler_flag(src: &str) -> bool {
             .iter()
             .any(|marker| src.contains(marker))
         || needs_unmodeled_jvm_default_mode(src)
+        || needs_unmodeled_sam_conversion_mode(src)
 }
 
 /// `// JVM_DEFAULT_MODE:` — the `-jvm-default` strategy a test pins, as the compiler models it.
@@ -325,6 +326,38 @@ pub fn jvm_default_mode(src: &str) -> crate::jvm::ir_emit::JvmDefaultMode {
         })
         .next_back()
         .unwrap_or_default()
+}
+
+/// `// SAM_CONVERSIONS:` — the `-Xsam-conversions` strategy a test pins. Absent, the test runs
+/// under kotlinc's own default (`indy`). The corpus writes the value in uppercase.
+pub fn sam_conversion_mode(src: &str) -> crate::jvm::ir_emit::LambdaMode {
+    src.lines()
+        .filter_map(|line| line.trim().strip_prefix("// SAM_CONVERSIONS:"))
+        .filter_map(|mode| match mode.split_whitespace().next() {
+            Some(value) if value.eq_ignore_ascii_case("class") => {
+                Some(crate::jvm::ir_emit::LambdaMode::Class)
+            }
+            Some(value) if value.eq_ignore_ascii_case("indy") => {
+                Some(crate::jvm::ir_emit::LambdaMode::Indy)
+            }
+            _ => None,
+        })
+        .next_back()
+        .unwrap_or_default()
+}
+
+/// `// SAM_CONVERSIONS:` values krusty does not model. `class` and `indy` are emitted; a missing
+/// or unknown value is unsupported.
+pub fn needs_unmodeled_sam_conversion_mode(src: &str) -> bool {
+    src.lines()
+        .filter_map(|line| line.trim().strip_prefix("// SAM_CONVERSIONS:"))
+        .any(|mode| {
+            !matches!(
+                mode.split_whitespace().next(),
+                Some(value)
+                    if value.eq_ignore_ascii_case("class") || value.eq_ignore_ascii_case("indy")
+            )
+        })
 }
 
 /// `// JVM_DEFAULT_MODE:` values krusty does not model. All three kotlinc strategies are emitted and
@@ -1076,6 +1109,26 @@ mod tests {
             );
             assert_eq!(jvm_default_mode(&src), expected);
         }
+    }
+
+    #[test]
+    fn sam_conversion_class_mode_is_modelled() {
+        let src = "// SAM_CONVERSIONS: CLASS\nfun box() = \"OK\"";
+        assert!(!needs_unmodeled_compiler_flag(src));
+        assert_eq!(
+            sam_conversion_mode(src),
+            crate::jvm::ir_emit::LambdaMode::Class
+        );
+        assert_eq!(
+            sam_conversion_mode("fun box() = \"OK\""),
+            crate::jvm::ir_emit::LambdaMode::Indy
+        );
+        assert!(needs_unmodeled_compiler_flag(
+            "// SAM_CONVERSIONS:\nfun box() = \"OK\""
+        ));
+        assert!(needs_unmodeled_compiler_flag(
+            "// SAM_CONVERSIONS: sideways\nfun box() = \"OK\""
+        ));
     }
 
     #[test]
