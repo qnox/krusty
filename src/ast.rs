@@ -1729,6 +1729,10 @@ pub struct File {
     /// checker type a *bare-value* lambda (`val f = { x: Int -> x*2 }`) from its own declared types
     /// when no expected function type drives them.
     pub lambda_param_types: std::collections::HashMap<u32, Vec<Option<TypeRef>>>,
+    /// Source spans of lambda value parameters, keyed by the lambda expression and parallel to
+    /// `Expr::Lambda::params`. Diagnostics for an expectation-free lambda belong to the written
+    /// parameter, not to the whole literal.
+    pub lambda_param_spans: std::collections::HashMap<u32, Vec<Span>>,
     /// How each parameter of a lambda literal was written, keyed by the lambda's `ExprId` and
     /// parallel to its `params`. Recorded only for a lambda with an `_` or a destructuring
     /// parameter; every other lambda's parameters are all [`LambdaParameterRole::Named`].
@@ -1944,6 +1948,7 @@ impl File {
         self.local_class_nested = Default::default();
         self.hoisted_classifier_source_names = Default::default();
         self.lambda_param_types = Default::default();
+        self.lambda_param_spans = Default::default();
         self.lambda_parameter_roles = Default::default();
         self.lambda_explicit_arrows = Default::default();
         self.anon_fun_lambdas = Default::default();

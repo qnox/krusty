@@ -8,14 +8,13 @@ use super::common;
 const EAGER: &str = "// LANGUAGE: +EagerLambdaAnalysis\n";
 
 /// Require krusty to report exactly kotlinc's errors for `source`, entry for entry, as recorded
-/// per Kotlin version, and answer whether kotlinc accepted it.
+/// for the selected compiler and answer whether kotlinc accepted it.
 fn accepted_like_kotlinc(source: &str) -> bool {
     let sources = [("Main.kt", source)];
-    let expected = common::recorded(|| {
-        common::reference_error_ledger(&sources, &common::language_directives::kotlinc_args(source))
-    });
+    let reference_args = common::language_directives::kotlinc_args(source);
+    let expected = common::reference_error_ledger(&sources, &reference_args);
     assert_eq!(
-        common::krusty_error_ledger(&sources),
+        common::krusty_error_ledger_with_args(&sources, &reference_args),
         expected,
         "krusty's ledger against kotlinc {}",
         krusty::kotlin_version::target()

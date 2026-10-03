@@ -1,8 +1,8 @@
-//! `-Xmetadata-version X.Y` stamps every emitted `@kotlin.Metadata` `mv` and the
-//! `META-INF/<module>.kotlin_module` version header with `[X, Y, 0]`. The public
-//! `-language-version` flag does not: only 2.4 is implemented, and it leaves the default stamp.
-//! The reference kotlinc's no-flag stamp is `[2, 4, 0]`; its `-language-version 2.2` stamp is the
-//! value the internal input is compared against.
+//! `-Xmetadata-version X.Y` independently overrides every emitted `@kotlin.Metadata` `mv` and the
+//! `META-INF/<module>.kotlin_module` version header with `[X, Y, 0]`. The standard public
+//! `-language-version` selects that same default stamp through the CLI; these tests isolate the
+//! backend-only override. The reference kotlinc's no-flag stamp is `[2, 4, 0]`, and its
+//! `-language-version 2.2` stamp is the value the internal override is compared against.
 
 use super::common;
 
@@ -256,4 +256,135 @@ fn regenerated_inline_object_takes_the_caller_metadata_stamp() {
         "the regenerated object stamps the caller's metadata version"
     );
     assert_eq!(metadata_mv(actual_bytes).as_deref(), Some(&[2, 2, 0][..]));
+}
+
+/// Every annotation use site a `@Metadata` payload records: class, primary constructor, constructor
+/// value parameter, member function and its parameter, property (via its `$annotations` marker),
+/// enum entry, and a top-level function with an annotated parameter. The constructor's `val`
+/// property stays UNANNOTATED: kotlinc's LV-dependent default target (KT-73255) adds a PROPERTY
+/// target to `@Mark val x` at 2.4 (a `getX$annotations` synthetic appears in its d2), which krusty
+/// does not implement — its plain `@Mark val x` matches kotlinc's param-only 2.2 behavior only.
+const ANNOTATED_SRC: &str = "package app\n\
+    \n\
+    annotation class Mark\n\
+    \n\
+    @Mark\n\
+    class Annotated @Mark constructor(@Mark n: Int, val x: Int) {\n\
+    \x20   @Mark\n\
+    \x20   fun method(@Mark p: Int): Int = p\n\
+    \n\
+    \x20   @Mark\n\
+    \x20   val prop: Int = 1\n\
+    }\n\
+    \n\
+    enum class Kind { @Mark A, B }\n\
+    \n\
+    @Mark\n\
+    fun topLevel(@Mark p: Int): Int = p\n";
+
+const ANNOTATED_CLASSES: &[&str] = &["app/Annotated", "app/AnnKt", "app/Kind", "app/Mark"];
+
+/// kotlinc's `LanguageFeature.AnnotationsInMetadata` (since 2.4) gates the annotation RECORDS in
+/// `@Metadata`, not the flags: under `-language-version 2.2` the records and their `d2` strings
+/// vanish while every `HAS_ANNOTATIONS` bit stays set (measured on kotlinc 2.4.20 — the property
+/// keeps its `syntheticMethod` pointer and flags `8711`, only `Property.annotation` goes). Both
+/// stamps are byte-compared against kotlinc: at 2.2 a dropped flag bit or a kept record would change
+/// `d1`, and the default-language half proves the gate does not leak into the 2.4 output.
+#[test]
+fn language_version_2_2_omits_annotation_records_like_kotlinc() {
+    let dir = common::scratch_dir().expect("allocate metadata-language fixture");
+    let src_path = dir.join("Ann.kt");
+    std::fs::write(&src_path, ANNOTATED_SRC).unwrap();
+
+    let out = dir.join("ref");
+    std::fs::create_dir_all(&out).unwrap();
+    let args = vec![
+        "-d".to_string(),
+        out.to_string_lossy().into_owned(),
+        "-language-version".to_string(),
+        "2.2".to_string(),
+        src_path.to_string_lossy().into_owned(),
+    ];
+    let (code, stderr) = common::kotlinc_compile(&args).expect("reference kotlinc is provisioned");
+    assert_eq!(code, 0, "kotlinc failed: {stderr}");
+
+    let language_2_2 = krusty::language_settings::LanguageSettings::new(
+        krusty::language_version::LanguageVersion::V2_2,
+        None,
+        &[],
+    )
+    .expect("2.2 language settings");
+    let gated = common::compile_in_process_files_language_settings(
+        &[("Ann.kt", ANNOTATED_SRC)],
+        &[common::stdlib_jar()],
+        None,
+        &language_2_2,
+        Some([2, 2, 0]),
+    )
+    .expect("krusty compiles the annotated fixture");
+    assert_metadata_bytes_match(&out, &gated, "under language level 2.2");
+
+    // Source semantics own the feature gate. An internal output-stamp override must not re-enable
+    // 2.4 annotation records for a 2.2 compilation.
+    let old_language_new_stamp = common::compile_in_process_files_language_settings(
+        &[("Ann.kt", ANNOTATED_SRC)],
+        &[common::stdlib_jar()],
+        None,
+        &language_2_2,
+        Some([2, 4, 0]),
+    )
+    .expect("krusty compiles the 2.2 fixture with an independent 2.4 stamp");
+    assert_metadata_bytes_match(
+        &out,
+        &old_language_new_stamp,
+        "at language 2.2 with an internal 2.4 metadata stamp",
+    );
+
+    // The default 2.4 language configuration keeps the records: the gate must not leak into it.
+    let default_out = dir.join("ref-default");
+    std::fs::create_dir_all(&default_out).unwrap();
+    let default_args = vec![
+        "-d".to_string(),
+        default_out.to_string_lossy().into_owned(),
+        src_path.to_string_lossy().into_owned(),
+    ];
+    let (code, stderr) =
+        common::kotlinc_compile(&default_args).expect("reference kotlinc is provisioned");
+    assert_eq!(code, 0, "kotlinc (default stamp) failed: {stderr}");
+
+    let default = common::compile_in_process_files_metadata_version(
+        &[("Ann.kt", ANNOTATED_SRC)],
+        &[common::stdlib_jar()],
+        None,
+        None,
+    )
+    .expect("krusty compiles the annotated fixture at the default stamp");
+    assert_metadata_bytes_match(&default_out, &default, "at the default stamp");
+}
+
+/// Byte-compare `d2` and `d1` of every fixture class against kotlinc's classes in `reference_out`.
+fn assert_metadata_bytes_match(
+    reference_out: &std::path::Path,
+    actual: &[(String, Vec<u8>)],
+    context: &str,
+) {
+    for class in ANNOTATED_CLASSES {
+        let reference = std::fs::read(reference_out.join(format!("{class}.class")))
+            .unwrap_or_else(|_| panic!("kotlinc did not emit {class}"));
+        let (_, actual_bytes) = actual
+            .iter()
+            .find(|(name, _)| name == class)
+            .unwrap_or_else(|| panic!("krusty did not emit {class}"));
+        let (reference_d1, reference_d2) =
+            super::common_core::kotlin_metadata::raw_kotlin_metadata(&reference)
+                .unwrap_or_else(|| panic!("{class}: kotlinc's class carries no @Metadata"));
+        let (actual_d1, actual_d2) =
+            super::common_core::kotlin_metadata::raw_kotlin_metadata(actual_bytes)
+                .unwrap_or_else(|| panic!("{class}: krusty's class carries no @Metadata"));
+        assert_eq!(
+            actual_d2, reference_d2,
+            "{class}: d2 string table {context}"
+        );
+        assert_eq!(actual_d1, reference_d1, "{class}: d1 protobuf {context}");
+    }
 }

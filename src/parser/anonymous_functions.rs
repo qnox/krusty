@@ -33,10 +33,14 @@ impl Parser<'_> {
             .into_iter()
             .map(|parameter| Some(parameter.ty))
             .collect();
+        // Context parameters were parsed before this expression and are always explicitly typed;
+        // only value-parameter spans can own expectation-free inference diagnostics here.
+        let mut param_spans = vec![start; params.len()];
         // A context parameter's anonymity is its context kind; the roles describe value parameters.
         let mut roles = vec![LambdaParameterRole::Named; params.len()];
         self.skip_newlines();
         while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
+            let parameter_span = self.tok().span;
             // `_` marks an unused parameter; keep the name so the arity is preserved.
             roles.push(
                 if self.at(TokenKind::Ident) && self.text() == "_" && !self.escaped_ident() {
@@ -52,6 +56,7 @@ impl Parser<'_> {
                 None
             };
             params.push(name);
+            param_spans.push(parameter_span);
             param_types.push(ty);
             self.skip_newlines();
             if !self.eat(TokenKind::Comma) {
@@ -87,6 +92,9 @@ impl Parser<'_> {
             .add_expr(Expr::Lambda { params, body }, Span::new(start.lo, end.hi));
         if param_types.iter().any(|t| t.is_some()) {
             self.file.lambda_param_types.insert(lam.0, param_types);
+        }
+        if !param_spans.is_empty() {
+            self.file.lambda_param_spans.insert(lam.0, param_spans);
         }
         if roles.iter().any(|role| *role != LambdaParameterRole::Named) {
             self.file.lambda_parameter_roles.insert(lam.0, roles);

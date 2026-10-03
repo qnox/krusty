@@ -1,5 +1,6 @@
 //! Descriptor-aligned Kotlin callable facts published as one provider-owned record.
 
+use crate::language_version::LanguageVersion;
 use crate::libraries::{CallSig, ReturnInfo};
 use crate::types::{Ty, TypeName, Visibility};
 
@@ -51,6 +52,9 @@ pub struct MetadataCallFacts {
     /// `@Deprecated(level = HIDDEN)` on the selected declaration: binary-compatibility-only,
     /// never an overload-resolution candidate (kotlinc removes it from the candidate set).
     pub deprecated_hidden: bool,
+    /// `@SinceKotlin` on the selected declaration. Newer than the compilation API level means the
+    /// callable is not a candidate.
+    pub since_kotlin: Option<LanguageVersion>,
     /// Per DESCRIPTOR parameter position, the VALUE CLASS `@Metadata` declares there when the JVM
     /// descriptor carries its erased underlying (`timeout: kotlin.time.Duration` ↔ `J`).
     ///
@@ -90,6 +94,7 @@ impl MetadataCallFacts {
             contract: None,
             context_count: 0,
             deprecated_hidden: false,
+            since_kotlin: None,
             value_class_params: Vec::new(),
             value_class_ret: None,
         }
