@@ -11,7 +11,6 @@
 //! including a boxed `Int?` — is an `i64` pointer, exactly the `KRef` the runtime traces.
 
 use std::collections::HashMap;
-use std::rc::Rc;
 
 mod arithmetic;
 mod boxed;
@@ -37,7 +36,6 @@ use cranelift_object::{ObjectBuilder, ObjectModule};
 use crate::ir::{
     Callee, IrBinOp, IrCheckedOperation, IrConst, IrExpr, IrFile, IrIntrinsic, IrTypeOp,
 };
-use crate::libraries::SemanticPlatform;
 use crate::types::Ty;
 
 use super::super::symbols::Symbols;
@@ -153,6 +151,8 @@ fn isa_for(target: NativeTarget) -> Result<cranelift_codegen::isa::OwnedTargetIs
 /// pass that made them owns them for the whole lowering.
 pub struct FileInput<'a> {
     pub ir: &'a IrFile,
+    /// Provider-normalized facts for exactly the dependency identities this checked file names.
+    pub callables: &'a crate::backend::CheckedBackendCallables,
     /// Every symbol the prebuilt runtime defines, which the program's own names must avoid. Read
     /// once per build by the backend rather than once per file.
     pub runtime_symbols: &'a std::collections::HashSet<String>,
@@ -160,13 +160,13 @@ pub struct FileInput<'a> {
 
 pub fn lower_file(
     input: FileInput<'_>,
-    provider: &Rc<dyn SemanticPlatform>,
     target: NativeTarget,
     stem: &str,
     entry: Entry,
 ) -> Result<Lowered, Unsupported> {
     let FileInput {
         ir,
+        callables,
         runtime_symbols,
     } = input;
     // A class of this file — its layout, its descriptor, its members — is not this generator's
@@ -190,7 +190,7 @@ pub fn lower_file(
 
     let mut lowering = FileLowering {
         ir,
-        provider,
+        callables,
         module: &mut module,
         symbols: super::super::symbols::symbols(ir, runtime_symbols.clone()),
         functions: Vec::new(),
@@ -243,7 +243,7 @@ pub fn lower_file(
 
 struct FileLowering<'a> {
     ir: &'a IrFile,
-    provider: &'a Rc<dyn SemanticPlatform>,
+    callables: &'a crate::backend::CheckedBackendCallables,
     module: &'a mut ObjectModule,
     /// Symbols of this file's functions.
     symbols: Symbols,
@@ -1389,8 +1389,8 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     /// `Checked(ExternalPropertyRead)`, so the backlog lumped eighteen unrelated properties —
     /// `Double.Companion.MAX_VALUE`, `System.out`, `UIntArray.indices` — under one row and could
     /// not be worked from, which is exactly what `describe`'s own comment warns against. The
-    /// provider knows the owner and the name, so they are stated the way a declining CALL already
-    /// states its callee.
+    /// frozen selected-declaration facts know the owner and the name, so they are stated the way a
+    /// declining CALL already states its callee.
     fn describe_declined(&self, node: &IrExpr) -> String {
         let named = match node {
             IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead { target, .. }) => self
@@ -1403,20 +1403,20 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         };
         match named {
             Some((access, name)) => format!("a {access} of the property `{name}`"),
-            // A target the provider cannot name is a different gap from an unimplemented
-            // property, so it keeps the shape-only phrasing rather than borrowing a name it does
-            // not have.
+            // A target absent from the checked file's frozen facts is a different gap from an
+            // unimplemented property, so it keeps the shape-only phrasing rather than borrowing a
+            // name it does not have.
             None => describe(node),
         }
     }
 
-    /// `owner.name` for a dependency property, as the provider records them.
+    /// `owner.name` for a dependency property, from the frozen selected-declaration facts.
     fn external_property_name(&self, target: crate::fir::ExternalPropertyId) -> Option<String> {
-        let property = self.file.provider.external_property(target)?;
-        let getter = self.file.provider.external_callable(property.getter)?;
+        let property = self.file.callables.property(target)?;
+        let getter = self.file.callables.callable(property.getter)?;
         Some(format!(
             "{}.{}",
-            getter.callable.owner.render(),
+            getter.physical_owner.render(),
             property.name
         ))
     }
@@ -1883,10 +1883,10 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 ret,
                 ..
             } => {
-                let Some(realization) = self.file.provider.external_callable(*target) else {
+                let Some(realization) = self.file.callables.callable(*target) else {
                     return Err("an unresolvable dependency call".to_string());
                 };
-                let owner = realization.callable.owner.render();
+                let owner = realization.physical_owner.render();
                 // The Kotlin name the declaration PUBLISHES, not the spelling it is realized under.
                 // A physical name is an emit handle: a JVM realization may RENAME a member, and
                 // where the signature mentions a value class kotlinc appends a hash of the erasure
@@ -1894,10 +1894,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 // from the spelling, and neither has to be: the contract carries the Kotlin name
                 // beside it. Where it does not, the member declines rather than being guessed at.
                 let name = realization
-                    .callable
                     .reflection_name
                     .clone()
-                    .unwrap_or_else(|| realization.callable.name.clone());
+                    .unwrap_or_else(|| realization.name.clone());
                 match dispatch_receiver {
                     // A member: the receiver is the runtime function's first argument, and
                     // everything crosses as a reference.
@@ -1926,7 +1925,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         // signed number sharing its bits, so every member where that difference
                         // shows is answered on purpose rather than by the signed instruction.
                         if let Some(realized) = self.unsigned_member(
-                            realization.callable.owner,
+                            realization.physical_owner,
                             &name,
                             params,
                             *ret,

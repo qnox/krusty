@@ -197,7 +197,7 @@ fn native_box_outcome(src: &str, stem: &str, target: krusty::native::NativeTarge
         .collect::<Vec<_>>();
     let classpath = super::cached_classpath(&jars, Some(&jdk_modules()));
     let platform = Box::new(
-        krusty::jvm::jvm_libraries::JvmLibraries::new(classpath.clone())
+        krusty::jvm::jvm_libraries::JvmLibraries::new(classpath)
             .expect("JVM provider initialization"),
     );
     let inputs = vec![SourceInput::kotlin(src).with_file_stem(stem)];
@@ -211,13 +211,6 @@ fn native_box_outcome(src: &str, stem: &str, target: krusty::native::NativeTarge
     if let Some(refusal) = diags.diags.first() {
         return NativeBox::Declined(format!("the frontend refused it: {}", refusal.msg));
     }
-    // The backend asks the PROVIDER what it realized an identity as, not a classpath. This is a
-    // second view over the very same `Rc<Classpath>` the frontend's provider wrapped: the interned
-    // identity tables live in the classpath, so both views answer from one set of records.
-    let provider: std::rc::Rc<dyn krusty::libraries::SemanticPlatform> = std::rc::Rc::new(
-        krusty::jvm::jvm_libraries::JvmLibraries::new(classpath)
-            .expect("JVM provider initialization"),
-    );
     // A conformance case answers through `box`; a program without one starts at Kotlin's `main`,
     // which is how a test pins what the backend does with that entry.
     let entry = if src.contains("fun box(") {
@@ -225,7 +218,7 @@ fn native_box_outcome(src: &str, stem: &str, target: krusty::native::NativeTarge
     } else {
         Entry::Main
     };
-    let backend = CraneliftBackend::new(provider, target).with_entry(entry);
+    let backend = CraneliftBackend::new(target).with_entry(entry);
     let artifacts = krusty::compiler::emit_analyzed(analysis, &stems, &backend, stem, &mut diags);
     if let Some(decline) = diags
         .diags

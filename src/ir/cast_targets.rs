@@ -21,11 +21,7 @@ impl IrFile {
         let arguments = |arguments: &mut dyn Iterator<Item = Ty>| {
             let rendered: Vec<String> = arguments
                 .map(|argument| {
-                    self.rendered_cast_target(
-                        argument,
-                        top_level_owner,
-                        qualify_root_classifier,
-                    )
+                    self.rendered_cast_target(argument, top_level_owner, qualify_root_classifier)
                 })
                 .collect();
             if rendered.is_empty() {
@@ -49,11 +45,9 @@ impl IrFile {
                 "{}?",
                 self.rendered_cast_target(*inner, top_level_owner, qualify_root_classifier)
             ),
-            Ty::PlatformNullable(inner) => self.rendered_cast_target(
-                *inner,
-                top_level_owner,
-                qualify_root_classifier,
-            ),
+            Ty::PlatformNullable(inner) => {
+                self.rendered_cast_target(*inner, top_level_owner, qualify_root_classifier)
+            }
             Ty::InProjection(inner) => format!(
                 "in {}",
                 self.rendered_cast_target(*inner, top_level_owner, qualify_root_classifier)
@@ -70,11 +64,7 @@ impl IrFile {
             Ty::Intersection(parts) => parts
                 .iter()
                 .map(|part| {
-                    self.rendered_cast_target(
-                        *part,
-                        top_level_owner,
-                        qualify_root_classifier,
-                    )
+                    self.rendered_cast_target(*part, top_level_owner, qualify_root_classifier)
                 })
                 .collect::<Vec<_>>()
                 .join(" & "),

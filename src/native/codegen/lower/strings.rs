@@ -21,13 +21,13 @@ impl BodyLowering<'_, '_, '_> {
     /// same position the member table already takes for `CharSequence.get`, and for the same
     /// reason.
     pub(super) fn is_text_length(&self, target: crate::fir::ExternalPropertyId) -> bool {
-        let Some(property) = self.file.provider.external_property(target) else {
+        let Some(property) = self.file.callables.property(target) else {
             return false;
         };
-        let Some(getter) = self.file.provider.external_callable(property.getter) else {
+        let Some(getter) = self.file.callables.callable(property.getter) else {
             return false;
         };
-        super::super::super::intrinsics::is_text_length(getter.callable.owner, &property.name)
+        super::super::super::intrinsics::is_text_length(getter.physical_owner, &property.name)
     }
 
     pub(super) fn text_length(&mut self, receiver: u32) -> Result<Option<Value>, Unsupported> {

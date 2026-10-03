@@ -646,9 +646,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         &self,
         target: crate::fir::ExternalPropertyId,
     ) -> Option<&'static str> {
-        let property = self.file.provider.external_property(target)?;
-        let getter = self.file.provider.external_callable(property.getter)?;
-        super::super::super::intrinsics::throwable_field(getter.callable.owner, &property.name)
+        let property = self.file.callables.property(target)?;
+        let getter = self.file.callables.callable(property.getter)?;
+        super::super::super::intrinsics::throwable_field(getter.physical_owner, &property.name)
     }
 
     /// `e.message` and `e.cause` — the two fields a `Throwable` carries, read by the runtime

@@ -19,11 +19,8 @@
 
 mod lower;
 
-use std::rc::Rc;
-
 use crate::backend::{Artifact, Backend, CheckedIrFile};
 use crate::diag::DiagSink;
-use crate::libraries::SemanticPlatform;
 
 use super::target::NativeTarget;
 
@@ -47,18 +44,13 @@ pub enum Entry {
 }
 
 pub struct CraneliftBackend {
-    /// The symbol provider, as a provider and not as one target's. Only *signatures* come from
-    /// it, plus the realization of an identity it assigned — see `super::intrinsics` for the
-    /// spellings a JVM-backed one leaks and where they are normalized.
-    provider: Rc<dyn SemanticPlatform>,
     target: NativeTarget,
     entry: Entry,
 }
 
 impl CraneliftBackend {
-    pub fn new(provider: Rc<dyn SemanticPlatform>, target: NativeTarget) -> Self {
+    pub fn new(target: NativeTarget) -> Self {
         Self {
-            provider,
             target,
             entry: Entry::Main,
         }
@@ -109,9 +101,9 @@ impl Backend for CraneliftBackend {
         let lowered = match lower::lower_file(
             lower::FileInput {
                 ir: &file.ir,
+                callables: &file.callables,
                 runtime_symbols,
             },
-            &self.provider,
             self.target,
             &stem,
             self.entry,

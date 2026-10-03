@@ -58,7 +58,7 @@ fn compile(sources: &[(&str, &str)], target: NativeTarget) -> (Vec<Artifact>, Ve
     let jar = krusty::toolchain::stdlib_jar().expect("checked by the caller");
     let classpath = std::rc::Rc::new(Classpath::new(vec![jar]));
     let platform = Box::new(
-        krusty::jvm::jvm_libraries::JvmLibraries::new(classpath.clone())
+        krusty::jvm::jvm_libraries::JvmLibraries::new(classpath)
             .expect("JVM provider initialization"),
     );
     let inputs = sources
@@ -77,11 +77,7 @@ fn compile(sources: &[(&str, &str)], target: NativeTarget) -> (Vec<Artifact>, Ve
     let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
         &inputs, platform, &features, &mut diags,
     );
-    let provider: std::rc::Rc<dyn krusty::libraries::SemanticPlatform> = std::rc::Rc::new(
-        krusty::jvm::jvm_libraries::JvmLibraries::new(classpath)
-            .expect("JVM provider initialization"),
-    );
-    let backend = CraneliftBackend::new(provider, target);
+    let backend = CraneliftBackend::new(target);
     let artifacts = krusty::compiler::emit_analyzed(analysis, &stems, &backend, "main", &mut diags);
     (artifacts, diags.diags.into_iter().map(|d| d.msg).collect())
 }
