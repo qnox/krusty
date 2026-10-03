@@ -43747,7 +43747,15 @@ impl<'a> Checker<'a> {
         // enclosing expression's own type check. Returning that provisional type lets the existing
         // initializer/return/assignment boundary emit its context-specific mismatch without
         // committing a selected call or inventing that diagnostic here.
-        let inferred = crate::symbol_resolver::ty_subst_keep_unbound(signature.ret, &bindings);
+        // A projection is a constraint on a classifier argument, not a value type. Materialize the
+        // provisional result through the same position-aware specialization as a selected call:
+        // `List<*>` constraining `T` makes `fun <T> ...: List<T>` read as `List<Any?>`, not as the
+        // non-denotable recovery type `List<*>`.
+        let inferred = crate::symbol_resolver::specialize_signature_output_type(
+            &self.fed_source(),
+            signature.ret,
+            &bindings,
+        );
         Some(
             candidate
                 .ret
