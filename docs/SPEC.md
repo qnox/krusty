@@ -1580,6 +1580,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `inner_subclass_keeps_the_extension_receiver_its_superclass_constructor_needs`,
   `inner_subclass_keeps_a_non_nearest_receiver_its_superclass_needs`,
   `tests/local_class_capture_constructors_e2e.rs::inner_subclass_forwards_a_non_nearest_extension_receiver_like_kotlinc`,
+  `tests/local_class_scope_e2e.rs::a_local_class_reads_a_grandparent_receiver_like_kotlinc`,
   `tests/local_class_capture_constructors_e2e.rs::an_unused_extension_receiver_is_not_a_constructor_reference_parameter`
   (runtime and the exact constructor/`invoke` shape, plus a local class that does read the
   receiver),
