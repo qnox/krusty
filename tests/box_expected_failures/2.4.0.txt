@@ -61,7 +61,6 @@ reflection/typeOf/localClass.kt
 reflection/typeOf/reifiedAsNestedArgument.kt
 reflection/typeOf/typeAliasedType.kt
 reified/capture.kt
-reified/catchParameter/tryCatchReifiedType.kt
 reified/innerObject.kt
 reified/reifiedTypeArgumentWithIntersectionTypeAsTypeArgument.kt
 sam/constructors/sameWrapperClass.kt

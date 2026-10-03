@@ -375,7 +375,7 @@ fn expression(expression: &mut IrExpr, names: &HashMap<TypeName, TypeName>) {
         } => {
             *result = ty(*result, names);
             for catch in catches {
-                name(&mut catch.exc_internal, names);
+                catch.ty = ty(catch.ty, names);
             }
         }
         _ => {}

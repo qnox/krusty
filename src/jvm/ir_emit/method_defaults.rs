@@ -369,7 +369,11 @@ pub(super) fn body_has_reified_markers(ir: &IrFile, expression: crate::ir::ExprI
     if matches!(
         ir.expr(expression),
         IrExpr::ReifiedClassMarker { .. } | IrExpr::ReifiedTypeOp { .. }
-    ) {
+    ) || ir
+        .reified_catch_markers
+        .get(&expression)
+        .is_some_and(|markers| markers.iter().any(Option::is_some))
+    {
         return true;
     }
     let mut found = false;
@@ -513,5 +517,38 @@ pub(super) fn emit_facade_default_stub(
         emitter
             .cw
             .set_method_lines(&format!("{method_name}$default"), &descriptor, &[(0, line)]);
+    }
+}
+
+#[cfg(test)]
+mod catch_marker_tests {
+    use super::body_has_reified_markers;
+    use crate::ir::{IrExpr, IrFile};
+    use crate::types::{type_name, Ty};
+
+    #[test]
+    fn a_recorded_reified_catch_marks_its_try() {
+        let mut ir = IrFile::default();
+        let handler = ir.add_expr(IrExpr::UnitInstance);
+        let thrown = ir.add_expr(IrExpr::UnitInstance);
+        let expression = ir.add_expr(IrExpr::Try {
+            body: thrown,
+            catches: vec![crate::ir::IrCatch::generated(
+                0,
+                type_name("kotlin/Throwable"),
+                handler,
+            )],
+            finally: None,
+            result: Ty::Unit,
+        });
+        assert!(!body_has_reified_markers(&ir, expression));
+        ir.reified_catch_markers
+            .insert(expression, vec![Some("E".to_owned())]);
+        assert!(body_has_reified_markers(&ir, expression));
+        let wrapper = ir.add_expr(IrExpr::Block {
+            stmts: vec![expression],
+            value: None,
+        });
+        assert!(body_has_reified_markers(&ir, wrapper));
     }
 }

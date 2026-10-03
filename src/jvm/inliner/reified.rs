@@ -1,6 +1,6 @@
 //! Reified marker specialization over the symbolic method tree.
 
-use crate::jvm::method_node::{Constant, Insn, MethodNode, Node};
+use crate::jvm::method_node::{Constant, Insn, LabelId, MethodNode, Node};
 use crate::jvm::reified_arguments::{ReifiedArgument, ReifiedArguments};
 use crate::jvm::type_of::{TypeOfInsn, TYPE_OF_MARKER};
 
@@ -11,6 +11,9 @@ use crate::ir::TypeCheckRole;
 const INVOKESTATIC: u8 = 0xb8;
 const INTRINSICS: &str = "kotlin/jvm/internal/Intrinsics";
 const MARKER_DESCRIPTOR: &str = "(ILjava/lang/String;)V";
+/// `ReifiedTypeInliner` mode for `catch (e: T)`. The marker is the handler's first instructions;
+/// the exception table still names the parameter's erasure until a concrete argument replaces it.
+const CATCH_MARKER: i32 = 7;
 
 enum Repoint {
     Class {
@@ -29,6 +32,8 @@ enum Repoint {
         placeholder: usize,
         argument: String,
     },
+    /// A concrete `catch (e: T)`: rewrite every agreeing typed entry of this handler to `class`.
+    Catch { class: String },
 }
 
 struct Marker {
@@ -90,6 +95,10 @@ pub(super) fn specialize(
             } => {
                 node.nodes[*name_instruction] =
                     Node::Insn(Insn::Ldc(Constant::String(name.clone().into())));
+            }
+            Repoint::Catch { class } => {
+                retarget_catch(node, marker.operation, class)?;
+                erase_marker(node, marker);
             }
             Repoint::TypeOf {
                 placeholder,
@@ -158,6 +167,8 @@ fn plan(node: &MethodNode, arguments: &ReifiedArguments) -> Result<Vec<Marker>, 
                 placeholder,
                 argument: argument.to_owned(),
             }
+        } else if mode == CATCH_MARKER {
+            catch_repoint(node, operation, name_instruction, argument, arguments)?
         } else {
             let target = (call + 1..node.nodes.len())
                 .find(|&at| is_type_bearing(node.nodes.get(at)))
@@ -178,14 +189,7 @@ fn plan(node: &MethodNode, arguments: &ReifiedArguments) -> Result<Vec<Marker>, 
                 },
                 Some(ReifiedArgument::Forwarded { name, nullable }) => Repoint::Forwarded {
                     name_instruction,
-                    name: format!(
-                        "{name}{}",
-                        if *nullable || argument.ends_with('?') {
-                            "?"
-                        } else {
-                            ""
-                        }
-                    ),
+                    name: forwarded_marker_name(name, *nullable, argument),
                 },
                 None => return Err(InlineError::MissingReifiedArgument(argument.to_owned())),
             }
@@ -204,6 +208,125 @@ fn erase_marker(node: &mut MethodNode, marker: &Marker) {
     for at in [marker.operation, marker.name, marker.call] {
         node.nodes[at] = Node::Insn(Insn::Op(0x00));
     }
+}
+
+/// A mode-7 marker names one handler. The nearest preceding label is that handler when it owns
+/// typed exception entries. kotlinc also emits a separate line-number label between the handler
+/// and the marker (`handler`, `line`, `LineNumber`, marker); that label is not a handler, and the
+/// label before it is. Every typed entry of the handler is the catch when they name the same class.
+fn catch_repoint(
+    node: &MethodNode,
+    operation: usize,
+    name_instruction: usize,
+    argument: &str,
+    arguments: &ReifiedArguments,
+) -> Result<Repoint, InlineError> {
+    let handler =
+        handler_label_before(node, operation).ok_or(InlineError::MalformedReifiedMarker)?;
+    agreeing_typed_catches(node, handler)?;
+    match arguments.classes.get(argument.trim_end_matches('?')) {
+        Some(ReifiedArgument::Class { internal, .. }) => Ok(Repoint::Catch {
+            class: internal.clone(),
+        }),
+        Some(ReifiedArgument::Forwarded { name, nullable }) => Ok(Repoint::Forwarded {
+            name_instruction,
+            name: forwarded_marker_name(name, *nullable, argument),
+        }),
+        None => Err(InlineError::MissingReifiedArgument(argument.to_owned())),
+    }
+}
+
+fn typed_handler_entries(node: &MethodNode, handler: LabelId) -> Vec<usize> {
+    node.try_catch_blocks
+        .iter()
+        .enumerate()
+        .filter(|(_, block)| block.handler == handler && block.catch_type.is_some())
+        .map(|(index, _)| index)
+        .collect()
+}
+
+/// Typed entries of `handler`, when every one of them names the same class. A catch-all on the
+/// same label is not one of them. Zero entries, or two entries whose classes differ, are not a
+/// catch this marker can name.
+fn agreeing_typed_catches(node: &MethodNode, handler: LabelId) -> Result<Vec<usize>, InlineError> {
+    let entries = typed_handler_entries(node, handler);
+    let Some(&first) = entries.first() else {
+        return Err(InlineError::MalformedReifiedMarker);
+    };
+    let expected = node.try_catch_blocks[first].catch_type.clone();
+    if entries
+        .iter()
+        .any(|&index| node.try_catch_blocks[index].catch_type != expected)
+    {
+        return Err(InlineError::MalformedReifiedMarker);
+    }
+    Ok(entries)
+}
+
+fn retarget_catch(node: &mut MethodNode, operation: usize, class: &str) -> Result<(), InlineError> {
+    let handler =
+        handler_label_before(node, operation).ok_or(InlineError::MalformedReifiedMarker)?;
+    for index in agreeing_typed_catches(node, handler)? {
+        node.try_catch_blocks[index].catch_type = Some(class.to_owned());
+    }
+    Ok(())
+}
+
+/// The handler label kotlinc's `ReifiedTypeInliner.processCatch` selects.
+///
+/// The nearest preceding label is the handler when it owns a typed exception entry. A line-number
+/// label followed only by matching line metadata is not: the label before that one is. Executable
+/// instructions and line metadata naming another label fail closed instead of broadening the search.
+fn handler_label_before(node: &MethodNode, at: usize) -> Option<LabelId> {
+    let nearest = preceding_debug_label(node, at)?;
+    if !typed_handler_entries(node, nearest.label).is_empty() {
+        return Some(nearest.label);
+    }
+    if !nearest.has_line {
+        return None;
+    }
+    let preceding = preceding_debug_label(node, nearest.index)?;
+    (!typed_handler_entries(node, preceding.label).is_empty()).then_some(preceding.label)
+}
+
+struct PrecedingLabel {
+    index: usize,
+    label: LabelId,
+    has_line: bool,
+}
+
+/// The label immediately preceding `before`, separated only by line metadata that names that same
+/// label. This recognizes debug layout without skipping an executable instruction.
+fn preceding_debug_label(node: &MethodNode, before: usize) -> Option<PrecedingLabel> {
+    let mut index = before;
+    let mut line_starts = Vec::new();
+    while index > 0 {
+        index -= 1;
+        match &node.nodes[index] {
+            Node::Line { start, .. } => line_starts.push(*start),
+            Node::Label(label) => {
+                if line_starts.iter().any(|start| start != label) {
+                    return None;
+                }
+                return Some(PrecedingLabel {
+                    index,
+                    label: *label,
+                    has_line: !line_starts.is_empty(),
+                });
+            }
+            Node::Insn(_) => return None,
+        }
+    }
+    None
+}
+
+fn forwarded_marker_name(name: &str, nullable: bool, argument: &str) -> String {
+    let suffix = if nullable || argument.ends_with('?') {
+        "?"
+    } else {
+        ""
+    };
+    format!("{name}{suffix}")
 }
 
 fn pushed_int(node: Option<&Node>) -> Option<i32> {
@@ -336,6 +459,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
+    use crate::jvm::method_node::TryCatchBlock;
 
     fn marker(argument: &str, mode: i32) -> Vec<Node> {
         vec![
@@ -536,5 +660,292 @@ mod tests {
             Err(InlineError::MalformedReifiedMarker),
         );
         assert_eq!(node, original);
+    }
+
+    fn child_failure() -> ReifiedArguments {
+        ReifiedArguments {
+            classes: HashMap::from([(
+                "E".to_owned(),
+                ReifiedArgument::Class {
+                    internal: "ChildFailure".to_owned(),
+                    nullable: false,
+                    intrinsic: None,
+                    rendered: String::new(),
+                },
+            )]),
+            ..Default::default()
+        }
+    }
+
+    fn catch_handler(argument: &str) -> MethodNode {
+        let mut node = MethodNode::new(0x0009, "eval", "()V");
+        let handler = node.new_label();
+        let other = node.new_label();
+        let start = node.new_label();
+        let end = node.new_label();
+        node.nodes.push(Node::Label(handler));
+        node.nodes.push(Node::Line {
+            line: 4,
+            start: handler,
+        });
+        node.nodes.extend(marker(argument, CATCH_MARKER));
+        node.nodes.push(Node::Insn(Insn::Var { op: 0x3a, slot: 1 }));
+        node.try_catch_blocks = vec![
+            TryCatchBlock {
+                start,
+                end,
+                handler,
+                catch_type: Some("java/lang/Throwable".to_owned()),
+            },
+            TryCatchBlock {
+                start,
+                end,
+                handler,
+                catch_type: None,
+            },
+            TryCatchBlock {
+                start,
+                end,
+                handler: other,
+                catch_type: Some("java/lang/Throwable".to_owned()),
+            },
+        ];
+        node
+    }
+
+    #[test]
+    fn a_concrete_catch_argument_repoints_the_exception_table_and_erases_the_marker() {
+        let mut node = catch_handler("E");
+        specialize(&mut node, &child_failure()).expect("specializes");
+
+        assert_eq!(
+            node.try_catch_blocks[0].catch_type.as_deref(),
+            Some("ChildFailure")
+        );
+        assert_eq!(node.try_catch_blocks[1].catch_type, None);
+        assert_eq!(
+            node.try_catch_blocks[2].catch_type.as_deref(),
+            Some("java/lang/Throwable")
+        );
+        assert!(node.nodes[2..5]
+            .iter()
+            .all(|node| matches!(node, Node::Insn(Insn::Op(0x00)))));
+        assert!(matches!(
+            &node.nodes[5],
+            Node::Insn(Insn::Var { op: 0x3a, slot: 1 })
+        ));
+    }
+
+    #[test]
+    fn a_forwarded_catch_renames_the_marker_and_keeps_the_erasure() {
+        let mut node = catch_handler("E");
+        let arguments = ReifiedArguments {
+            classes: HashMap::from([(
+                "E".to_owned(),
+                ReifiedArgument::Forwarded {
+                    name: "T".to_owned(),
+                    nullable: false,
+                },
+            )]),
+            ..Default::default()
+        };
+
+        specialize(&mut node, &arguments).expect("forwards");
+
+        assert!(matches!(
+            &node.nodes[3],
+            Node::Insn(Insn::Ldc(Constant::String(name))) if name.as_str() == Some("T")
+        ));
+        assert!(matches!(
+            &node.nodes[4],
+            Node::Insn(Insn::Method { name, .. }) if name == "reifiedOperationMarker"
+        ));
+        assert_eq!(
+            node.try_catch_blocks[0].catch_type.as_deref(),
+            Some("java/lang/Throwable")
+        );
+        assert_eq!(node.try_catch_blocks[1].catch_type, None);
+    }
+
+    #[test]
+    fn a_line_number_label_before_the_marker_still_repoints_the_handler() {
+        let mut node = MethodNode::new(0x0009, "eval", "()V");
+        let handler = node.new_label();
+        let line_label = node.new_label();
+        let start = node.new_label();
+        let end = node.new_label();
+        node.nodes.push(Node::Label(handler));
+        node.nodes.push(Node::Label(line_label));
+        node.nodes.push(Node::Line {
+            line: 4,
+            start: line_label,
+        });
+        node.nodes.extend(marker("E", CATCH_MARKER));
+        node.nodes.push(Node::Insn(Insn::Var { op: 0x3a, slot: 1 }));
+        node.try_catch_blocks = vec![TryCatchBlock {
+            start,
+            end,
+            handler,
+            catch_type: Some("java/lang/Throwable".to_owned()),
+        }];
+
+        specialize(&mut node, &child_failure()).expect("specializes");
+
+        assert_eq!(
+            node.try_catch_blocks[0].catch_type.as_deref(),
+            Some("ChildFailure")
+        );
+        assert!(node.nodes[3..6]
+            .iter()
+            .all(|node| matches!(node, Node::Insn(Insn::Op(0x00)))));
+        assert!(matches!(
+            &node.nodes[6],
+            Node::Insn(Insn::Var { op: 0x3a, slot: 1 })
+        ));
+    }
+
+    #[test]
+    fn an_ambiguous_catch_handler_is_rejected_unchanged() {
+        let mut node = catch_handler("E");
+        let mut second = node.try_catch_blocks[0].clone();
+        second.catch_type = Some("java/lang/Exception".to_owned());
+        node.try_catch_blocks.insert(1, second);
+        let original = node.clone();
+
+        assert_eq!(
+            specialize(&mut node, &child_failure()),
+            Err(InlineError::MalformedReifiedMarker),
+        );
+        assert_eq!(node, original);
+    }
+
+    #[test]
+    fn executable_code_between_the_handler_metadata_and_marker_is_rejected_unchanged() {
+        let mut node = catch_handler("E");
+        node.nodes.insert(2, Node::Insn(Insn::Op(0x00)));
+        let original = node.clone();
+
+        assert_eq!(
+            specialize(&mut node, &child_failure()),
+            Err(InlineError::MalformedReifiedMarker),
+        );
+        assert_eq!(node, original);
+    }
+
+    #[test]
+    fn a_line_node_naming_the_handler_does_not_belong_to_a_separate_line_label() {
+        let mut node = catch_handler("E");
+        let line_label = node.new_label();
+        node.nodes.insert(1, Node::Label(line_label));
+        let original = node.clone();
+
+        assert_eq!(
+            specialize(&mut node, &child_failure()),
+            Err(InlineError::MalformedReifiedMarker),
+        );
+        assert_eq!(node, original);
+    }
+
+    #[test]
+    fn an_unmarked_label_between_the_handler_and_marker_is_rejected_unchanged() {
+        let mut node = catch_handler("E");
+        let unrelated = node.new_label();
+        node.nodes.insert(2, Node::Label(unrelated));
+        let original = node.clone();
+
+        assert_eq!(
+            specialize(&mut node, &child_failure()),
+            Err(InlineError::MalformedReifiedMarker),
+        );
+        assert_eq!(node, original);
+    }
+
+    #[test]
+    fn a_catch_marker_without_its_handler_is_rejected_unchanged() {
+        let mut node = MethodNode::new(0x0009, "eval", "()V");
+        node.nodes = marker("E", CATCH_MARKER);
+        node.nodes.push(Node::Insn(Insn::Var { op: 0x3a, slot: 1 }));
+        let original = node.clone();
+
+        assert_eq!(
+            specialize(&mut node, &child_failure()),
+            Err(InlineError::MalformedReifiedMarker),
+        );
+        assert_eq!(node, original);
+    }
+
+    #[test]
+    fn a_split_handler_retargets_every_agreeing_range_and_leaves_the_catch_all() {
+        let mut node = catch_handler("E");
+        let mut second = node.try_catch_blocks[0].clone();
+        second.start = node.new_label();
+        second.end = node.new_label();
+        node.try_catch_blocks.insert(1, second);
+
+        specialize(&mut node, &child_failure()).expect("specializes");
+
+        assert_eq!(
+            node.try_catch_blocks[0].catch_type.as_deref(),
+            Some("ChildFailure")
+        );
+        assert_eq!(
+            node.try_catch_blocks[1].catch_type.as_deref(),
+            Some("ChildFailure")
+        );
+        assert_eq!(node.try_catch_blocks[2].catch_type, None);
+        assert_eq!(
+            node.try_catch_blocks[3].catch_type.as_deref(),
+            Some("java/lang/Throwable")
+        );
+    }
+
+    #[test]
+    fn a_line_label_before_the_marker_still_names_the_handler() {
+        let mut node = MethodNode::new(0x0009, "eval", "()V");
+        let handler = node.new_label();
+        let line_label = node.new_label();
+        let start = node.new_label();
+        let end = node.new_label();
+        let later = node.new_label();
+        node.nodes.push(Node::Label(handler));
+        node.nodes.push(Node::Label(line_label));
+        node.nodes.push(Node::Line {
+            line: 4,
+            start: line_label,
+        });
+        node.nodes.extend(marker("E", CATCH_MARKER));
+        node.nodes.push(Node::Insn(Insn::Var { op: 0x3a, slot: 1 }));
+        node.try_catch_blocks = vec![
+            TryCatchBlock {
+                start,
+                end,
+                handler,
+                catch_type: Some("java/lang/Throwable".to_owned()),
+            },
+            TryCatchBlock {
+                start: later,
+                end,
+                handler,
+                catch_type: Some("java/lang/Throwable".to_owned()),
+            },
+            TryCatchBlock {
+                start,
+                end,
+                handler,
+                catch_type: None,
+            },
+        ];
+
+        specialize(&mut node, &child_failure()).expect("specializes");
+
+        assert_eq!(
+            node.try_catch_blocks[0].catch_type.as_deref(),
+            Some("ChildFailure")
+        );
+        assert_eq!(
+            node.try_catch_blocks[1].catch_type.as_deref(),
+            Some("ChildFailure")
+        );
+        assert_eq!(node.try_catch_blocks[2].catch_type, None);
     }
 }
