@@ -33,7 +33,14 @@ impl Checker<'_> {
         let (statement, signature) = self.lookup_local_fun(scope, name)?;
         self.mark_local_function_ref(expression, statement, false);
         let (params, ret) = Self::local_function_reference_shape(&signature, None);
-        Some(Ty::fun(params, ret))
+        // No expected function type still keeps the declaration's suspend kind. Dropping it
+        // types `::suspendLocal` as `() -> R`, so the carrier implements `Function0` and its
+        // erased `invoke` loads a continuation that is not a parameter.
+        Some(if signature.is_suspend() {
+            Ty::fun_suspend(params, ret)
+        } else {
+            Ty::fun(params, ret)
+        })
     }
 
     fn select_adapted_receiverless_local_reference(

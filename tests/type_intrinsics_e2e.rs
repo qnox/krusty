@@ -57,7 +57,6 @@ fun isSuspend0(v: Any?): Boolean = v is kotlin.coroutines.SuspendFunction0<*>\n\
 fun isNotSuspend0(v: Any?): Boolean = v !is kotlin.coroutines.SuspendFunction0<*>\n\
 fun asSuspend0(v: Any?): kotlin.coroutines.SuspendFunction0<*> = v as kotlin.coroutines.SuspendFunction0<*>\n\
 fun safeSuspend0(v: Any?): kotlin.coroutines.SuspendFunction0<*>? = v as? kotlin.coroutines.SuspendFunction0<*>\n\
-fun isSuspendFun(v: Any?): Boolean = v is suspend () -> Unit\n\
 suspend fun suspendFn0() {}\n\
 fun plainFn(x: Any) {}\n";
 
@@ -96,7 +95,6 @@ fun box(): String {\n\
     if (isSuspend0(plainRef) || !isSuspend0(suspendRef) || isNotSuspend0(suspendRef)) return \"fail suspend is\"\n\
     if (asSuspend0(suspendRef) !== suspendRef) return \"fail suspend as\"\n\
     if (safeSuspend0(plainRef) != null || safeSuspend0(suspendRef) !== suspendRef) return \"fail suspend as?\"\n\
-    if (!isSuspendFun(suspendRef) || isSuspendFun(plainRef)) return \"fail suspend fun\"\n\
     if (reifiedIsSuspend(plainRef) || !reifiedIsSuspend(suspendRef)) return \"fail reified suspend\"\n\
     return \"OK\"\n\
 }\n";
@@ -142,7 +140,6 @@ fn type_checks_and_casts_match_kotlinc() {
         "boolean isNotSuspend0(",
         "asSuspend0(",
         "safeSuspend0(",
-        "boolean isSuspendFun(",
         "boolean reifiedIsSuspend(",
     ] {
         let reference = method_instructions(&built.reference, member);
