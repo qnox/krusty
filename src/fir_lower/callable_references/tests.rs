@@ -619,11 +619,11 @@ fn a_local_reference_coerces_only_a_substituted_argument() {
         r#"
             fun substituted(): (Boolean) -> Unit {
                 fun <F> localFunction(flag: F) {}
-                ::localFunction
+                return ::localFunction
             }
             fun identical(): (Boolean) -> Unit {
                 fun localFunction(flag: Boolean) {}
-                ::localFunction
+                return ::localFunction
             }
         "#,
         "LocalGenericReferenceCoercion",
