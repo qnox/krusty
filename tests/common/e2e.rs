@@ -233,7 +233,7 @@ fn compiler_diagnostics_with_args(
 }
 
 /// Every error kotlinc reports for named sources, as `file:line:column: message` in emission
-/// order: the shape recorded per Kotlin version by [`common::recorded`].
+/// order. The kotlinc invocation cache keys this observation by the exact compiler and arguments.
 pub fn reference_error_ledger(sources: &[(&str, &str)], extra_args: &[String]) -> Vec<String> {
     let work = common::scratch_dir().expect("cannot allocate reference-compiler fixture");
     let source_paths = write_fixture_sources(&work, sources);
@@ -242,15 +242,14 @@ pub fn reference_error_ledger(sources: &[(&str, &str)], extra_args: &[String]) -
     render_errors(&stderr)
 }
 
-/// Require krusty to report exactly kotlinc's errors for a single `Main.kt`, as recorded per Kotlin
-/// version for the running test, and require kotlinc to accept `source`: the ledger is empty.
+/// Require krusty to report exactly kotlinc's errors for a single `Main.kt` and require kotlinc to
+/// accept `source`: the ledger is empty.
 pub fn assert_accepted_like_kotlinc(source: &str) {
     let sources = [("Main.kt", source)];
-    let expected = super::recorded_support::recorded(|| {
-        reference_error_ledger(&sources, &common::language_directives::kotlinc_args(source))
-    });
+    let reference_args = common::language_directives::kotlinc_args(source);
+    let expected = reference_error_ledger(&sources, &reference_args);
     assert_eq!(
-        krusty_error_ledger(&sources),
+        krusty_error_ledger_with_args(&sources, &reference_args),
         expected,
         "krusty's ledger against kotlinc {}",
         krusty::kotlin_version::target()
@@ -262,14 +261,19 @@ pub fn assert_accepted_like_kotlinc(source: &str) {
     );
 }
 
-/// [`reference_error_ledger`] for krusty's CLI.
-pub fn krusty_error_ledger(sources: &[(&str, &str)]) -> Vec<String> {
+/// Krusty's error ledger with the standard language/API settings from the reference invocation.
+/// Language-feature directives remain source-owned; only standard version inputs are forwarded.
+pub fn krusty_error_ledger_with_args(
+    sources: &[(&str, &str)],
+    reference_args: &[String],
+) -> Vec<String> {
     let work = common::scratch_dir().expect("cannot allocate compiler-diagnostic fixture");
     let source_paths = write_fixture_sources(&work, sources);
     let output = Command::new(common::krusty_binary())
         .arg("-d")
         .arg(work.join("krusty-out"))
         .arg("-no-reflect")
+        .args(standard_version_args(reference_args))
         .args(&source_paths)
         .output()
         .expect("run krusty diagnostic fixture");
@@ -277,15 +281,14 @@ pub fn krusty_error_ledger(sources: &[(&str, &str)]) -> Vec<String> {
     render_errors(&String::from_utf8_lossy(&output.stderr))
 }
 
-/// Assert krusty's CLI reports exactly kotlinc's error ledger for `sources`, as recorded for the
-/// running test under the reference version. `reference_args` go to kotlinc only (krusty reads the
-/// equivalent `// LANGUAGE:` directives from the sources).
+/// Assert krusty's CLI reports exactly kotlinc's error ledger for `sources`. The binary invocation
+/// cache includes the exact compiler and effective language/API arguments. Standard version
+/// settings go to both compilers; Krusty reads other language-feature directives from the sources.
 pub fn assert_errors_match_kotlinc(sources: &[(&str, &str)], reference_args: &[String]) {
-    let expected =
-        super::recorded_support::recorded(|| reference_error_ledger(sources, reference_args));
+    let expected = reference_error_ledger(sources, reference_args);
     assert!(!expected.is_empty(), "kotlinc reported no error");
     assert_eq!(
-        krusty_error_ledger(sources),
+        krusty_error_ledger_with_args(sources, reference_args),
         expected,
         "krusty's ledger against kotlinc {}",
         krusty::kotlin_version::target()
@@ -303,14 +306,18 @@ pub fn reference_error_blocks(sources: &[(&str, &str)], extra_args: &[String]) -
     error_blocks(&stderr, true)
 }
 
-/// [`reference_error_blocks`] for krusty's CLI.
-pub fn krusty_error_blocks(sources: &[(&str, &str)]) -> Vec<String> {
+/// Krusty's error blocks with the standard language/API settings from the reference invocation.
+pub fn krusty_error_blocks_with_args(
+    sources: &[(&str, &str)],
+    reference_args: &[String],
+) -> Vec<String> {
     let work = common::scratch_dir().expect("cannot allocate compiler-diagnostic fixture");
     let source_paths = write_fixture_sources(&work, sources);
     let output = Command::new(common::krusty_binary())
         .arg("-d")
         .arg(work.join("krusty-out"))
         .arg("-no-reflect")
+        .args(standard_version_args(reference_args))
         .args(&source_paths)
         .output()
         .expect("run krusty diagnostic fixture");
@@ -319,17 +326,37 @@ pub fn krusty_error_blocks(sources: &[(&str, &str)]) -> Vec<String> {
 }
 
 /// Assert krusty's CLI reports exactly kotlinc's errors for `sources`, complete multi-line
-/// messages included, as recorded for the running test under the reference version.
+/// messages included.
 pub fn assert_error_blocks_match_kotlinc(sources: &[(&str, &str)], reference_args: &[String]) {
-    let expected =
-        super::recorded_support::recorded(|| reference_error_blocks(sources, reference_args));
+    let expected = reference_error_blocks(sources, reference_args);
     assert!(!expected.is_empty(), "kotlinc reported no error");
     assert_eq!(
-        krusty_error_blocks(sources),
+        krusty_error_blocks_with_args(sources, reference_args),
         expected,
         "krusty's complete errors against kotlinc {}",
         krusty::kotlin_version::target()
     );
+}
+
+/// Extract the standard version options from a kotlinc argument list. Other reference-only flags
+/// stay out of the Krusty process; source `// LANGUAGE:` directives already supply their equivalent.
+fn standard_version_args(arguments: &[String]) -> Vec<String> {
+    let mut selected = Vec::new();
+    let mut index = 0;
+    while index < arguments.len() {
+        match arguments[index].as_str() {
+            "-language-version" | "-api-version" => {
+                let value = arguments
+                    .get(index + 1)
+                    .unwrap_or_else(|| panic!("{} has no value", arguments[index]));
+                selected.push(arguments[index].clone());
+                selected.push(value.clone());
+                index += 2;
+            }
+            _ => index += 1,
+        }
+    }
+    selected
 }
 
 fn error_blocks(stderr: &str, excerpted: bool) -> Vec<String> {
@@ -366,9 +393,9 @@ fn error_blocks(stderr: &str, excerpted: bool) -> Vec<String> {
 }
 
 /// Assert the frontend reports exactly the messages kotlinc reports for `source` compiled against
-/// the stdlib, as recorded for the running test under the reference version.
+/// the stdlib.
 pub fn assert_messages_match_kotlinc(source: &str) {
-    let expected = super::recorded_support::recorded(|| reference_error_messages("Main", source));
+    let expected = reference_error_messages("Main", source);
     assert!(!expected.is_empty(), "kotlinc reported no error");
     assert_eq!(
         front_end_diagnostics_with_stdlib(source),

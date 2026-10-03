@@ -33,7 +33,7 @@ fn headers(messages: Vec<String>) -> Vec<String> {
 /// version: 2.4.20 names the non-null receiver type, `Nothing` for a `null` receiver).
 fn assert_unresolved(src: &str, name: &str) {
     let d = diags(src);
-    let expected = common::recorded(|| common::reference_error_messages("Main", src));
+    let expected = common::reference_error_messages("Main", src);
     assert!(
         !expected.is_empty(),
         "kotlinc must reject `{name}` in {src:?}"
@@ -58,15 +58,15 @@ fn assert_inapplicable(label: &str, src: &str) {
 }
 
 fn assert_rejected_as_kotlinc(label: &str, src: &str) {
-    let expected = common::recorded_named(label, || common::reference_error_messages("Main", src));
+    let expected = common::reference_error_messages("Main", src);
     assert!(
         !expected.is_empty(),
-        "kotlinc must reject the inapplicable call in {src:?}"
+        "{label}: kotlinc must reject the inapplicable call in {src:?}"
     );
     assert_eq!(
         diags(src),
         expected,
-        "complete ordered diagnostics for {src:?}"
+        "{label}: complete ordered diagnostics for {src:?}"
     );
 }
 
@@ -186,7 +186,7 @@ fn user_string_extension_outranks_the_classpath_less_table() {
 #[test]
 fn classpath_less_string_overload_mismatch_is_not_called_unresolved() {
     const SOURCE: &str = "fun f(s: String?): Any? = s?.substring(9, 9, 9)\n";
-    let expected = common::recorded(|| common::reference_error_messages("Main", SOURCE));
+    let expected = common::reference_error_messages("Main", SOURCE);
     assert!(!expected.is_empty(), "kotlinc must reject the invalid call");
     assert_eq!(
         headers(common::front_end_diagnostics(SOURCE, &[], None)),

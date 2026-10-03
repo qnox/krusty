@@ -235,9 +235,9 @@ diagnostics are listed in source order, and so are one file's body diagnostics: 
 by position, not in the order the checker visits a class's constructors, property initializers,
 accessors and `init` blocks (`conversion_carriers_take_kotlincs_names` before 2.4.20). Tests
 follow the same target:
-differential tests compare against whichever kotlinc the run provisions, and a test that pins what
-kotlinc says reads it from a values file recorded per version from kotlinc itself
-(`tests/recorded/`, `tests/common/recorded.rs`), never from a hand-written branch. Tests:
+differential tests compare against whichever kotlinc the run provisions. Its exact-version binary
+invocation cache records the exit status and diagnostics, so tests never infer another compiler
+version's wording and never need hand-written version branches. Tests:
 `tests/diagnostic_wording_versions_e2e.rs`, `expect_declaration_body_e2e`,
 `safe_call_unresolved_member_e2e`, `inferred_signature_commits_a_classifier_root_over_a_same_named_package`,
 plus `kotlin_version` unit tests and `the_reference_version_flag_accepts_only_supported_releases`.
