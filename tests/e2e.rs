@@ -109,6 +109,8 @@ mod bounded_type_param_e2e;
 mod box_harness_skip_semantics_e2e;
 #[path = "box_lists_guard_e2e.rs"]
 mod box_lists_guard_e2e;
+#[path = "box_runtime_reflect_e2e.rs"]
+mod box_runtime_reflect_e2e;
 #[path = "boxed_array_construction_e2e.rs"]
 mod boxed_array_construction_e2e;
 #[path = "boxed_override_results_e2e.rs"]
