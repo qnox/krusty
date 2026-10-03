@@ -325,6 +325,10 @@ fun box(): String {
     return if (values == "PTDPTABPTDPTAB") "OK" else "fail:$values"
 }
 "#;
+    assert_eq!(
+        expect_box_run_with_stdlib(source, "LocalContextExtensionReferenceAlignment"),
+        "OK"
+    );
     let (code, diagnostics) = kotlinc_source_result_with_args(
         "LocalContextExtensionReferenceAlignment",
         source,
@@ -333,10 +337,6 @@ fun box(): String {
     assert_ne!(
         code, 0,
         "kotlinc 2.4.20 started compiling this reference: {diagnostics}"
-    );
-    assert_eq!(
-        expect_box_run_with_stdlib(source, "LocalContextExtensionReferenceAlignment"),
-        "OK"
     );
 }
 
