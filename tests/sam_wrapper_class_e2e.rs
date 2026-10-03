@@ -383,3 +383,39 @@ fn non_suspend_view_keeps_its_function_arity_under_a_suspend_sam() {
     );
     let _ = std::fs::remove_dir_all(work);
 }
+
+/// `Susp(::ok)` where both the reference and the fun interface are suspend. The adapter must
+/// pass the interface method's continuation into the reference; calling it as `Function0` throws.
+#[test]
+fn suspend_callable_reference_passes_the_sam_continuation() {
+    let src = "import kotlin.coroutines.Continuation\n\
+        import kotlin.coroutines.EmptyCoroutineContext\n\
+        import kotlin.coroutines.startCoroutine\n\
+        \n\
+        fun interface Susp {\n\
+        \x20   suspend fun run(): String\n\
+        }\n\
+        fun interface Echo {\n\
+        \x20   suspend fun run(value: String): String\n\
+        }\n\
+        \n\
+        fun <T> awaitFixture(c: suspend () -> T): T {\n\
+        \x20   var res: T? = null\n\
+        \x20   c.startCoroutine(Continuation(EmptyCoroutineContext) {\n\
+        \x20       res = it.getOrThrow()\n\
+        \x20   })\n\
+        \x20   return res!!\n\
+        }\n\
+        \n\
+        suspend fun ok(): String = \"OK\"\n\
+        suspend fun id(value: String): String = value\n\
+        \n\
+        fun box(): String {\n\
+        \x20   val plain: suspend () -> String = ::ok\n\
+        \x20   val sam = Susp(::ok)\n\
+        \x20   val echoed = Echo(::id)\n\
+        \x20   val result = awaitFixture { plain() + sam.run() + echoed.run(\"K\") }\n\
+        \x20   return if (result == \"OKOKK\") \"OK\" else \"FAIL: $result\"\n\
+        }\n";
+    common::expect_box_same_as_kotlinc(src, "SuspendSamCallableReference");
+}

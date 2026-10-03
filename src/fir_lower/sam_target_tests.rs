@@ -103,3 +103,50 @@ fn a_function_type_invoke_target_survives_lowering() {
         (FirSamMethod::FunctionTypeInvoke, false)
     );
 }
+
+#[test]
+fn a_suspend_function_value_adapter_marks_its_forwarding_invoke_as_a_suspension() {
+    let ir = lower_single_source(
+        "fun interface Awaiter { suspend fun fetch(value: String): String }\n\
+         suspend fun echoFixture(value: String): String = value\n\
+         fun adapted(): Awaiter = Awaiter(::echoFixture)\n",
+        "SuspendSam",
+    );
+
+    let adapters = ir
+        .exprs
+        .iter()
+        .filter_map(|expression| match expression {
+            IrExpr::Lambda {
+                impl_fn,
+                sam: Some(target),
+                ..
+            } if target.function_adapter => Some((*impl_fn, target)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [(implementation, target)] = adapters.as_slice() else {
+        panic!("one suspend function-value SAM adapter, found {adapters:?}")
+    };
+    assert!(target.suspend && target.source_suspend);
+    assert!(ir.suspend_funs.contains(implementation));
+
+    let Some(body) = ir.functions[*implementation as usize].body else {
+        panic!("SAM adapter has no body")
+    };
+    let IrExpr::Block { stmts, value: None } = ir.expr(body) else {
+        panic!("SAM adapter body is not a block")
+    };
+    let [ret] = stmts.as_slice() else {
+        panic!("SAM adapter body has unexpected statements: {stmts:?}")
+    };
+    let IrExpr::Return(Some(invoke)) = ir.expr(*ret) else {
+        panic!("SAM adapter does not directly return its forwarding invocation")
+    };
+    assert_eq!(ir.suspend_calls.get(invoke), Some(&Ty::String));
+    assert!(matches!(
+        ir.expr(*invoke),
+        IrExpr::InvokeFunction { args, params, ret, .. }
+            if args.len() == 1 && params.as_slice() == [Ty::String] && *ret == Ty::String
+    ));
+}
