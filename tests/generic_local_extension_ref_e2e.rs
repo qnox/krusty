@@ -141,6 +141,81 @@ fun box(): String {
     );
 }
 
+#[test]
+fn receiver_qualified_local_extensions_adapt_for_function_and_sam_expectations() {
+    expect_box_same_as_kotlinc(
+        r#"
+class Counter(val seed: Int)
+
+fun interface BoundZero { fun dispatch(): Int }
+fun interface BoundPair { fun dispatch(first: Int, second: Int): Int }
+fun interface UnboundZero { fun dispatch(counter: Counter): Int }
+fun interface UnboundPair { fun dispatch(counter: Counter, first: Int, second: Int): Int }
+
+fun consumeBoundFunction(action: () -> Int): Int = action()
+fun consumeBoundPairFunction(action: (Int, Int) -> Int): Int = action(3, 4)
+fun consumeUnboundFunction(action: (Counter) -> Int, counter: Counter): Int = action(counter)
+fun consumeUnboundPairFunction(action: (Counter, Int, Int) -> Int, counter: Counter): Int =
+    action(counter, 3, 4)
+fun consumeBoundZero(action: BoundZero): Int = action.dispatch()
+fun consumeBoundPair(action: BoundPair): Int = action.dispatch(3, 4)
+fun consumeUnboundZero(action: UnboundZero, counter: Counter): Int = action.dispatch(counter)
+fun consumeUnboundPair(action: UnboundPair, counter: Counter): Int =
+    action.dispatch(counter, 3, 4)
+
+fun box(): String {
+    fun Counter.accumulate(first: Int = 5, vararg remaining: Int): Int =
+        seed + first + if (remaining.size == 0) 0 else remaining[0]
+
+    val counter = Counter(10)
+    val boundDefault: () -> Int = counter::accumulate
+    val boundVararg: (Int, Int) -> Int = counter::accumulate
+    val unboundDefault: (Counter) -> Int = Counter::accumulate
+    val unboundVararg: (Counter, Int, Int) -> Int = Counter::accumulate
+
+    val values =
+        boundDefault() + boundVararg(3, 4) +
+        unboundDefault(counter) + unboundVararg(counter, 3, 4) +
+        consumeBoundFunction(counter::accumulate) + consumeBoundPairFunction(counter::accumulate) +
+        consumeUnboundFunction(Counter::accumulate, counter) +
+        consumeUnboundPairFunction(Counter::accumulate, counter) +
+        consumeBoundZero(counter::accumulate) + consumeBoundPair(counter::accumulate) +
+        consumeUnboundZero(Counter::accumulate, counter) +
+        consumeUnboundPair(Counter::accumulate, counter)
+    return if (values == 192) "OK" else "fail:$values"
+}
+"#,
+        "LocalExtensionReferenceExpectedShapes",
+    );
+}
+
+#[test]
+fn callable_references_continue_to_an_applicable_outer_extension_rung() {
+    expect_box_same_as_kotlinc(
+        r#"
+class OuterReceiver
+class InnerReceiver
+
+fun box(): String {
+    fun OuterReceiver.choose(): String = "outer"
+
+    fun nested(): String {
+        fun InnerReceiver.choose(): String = "inner"
+
+        val value = OuterReceiver()
+        val direct = value.choose()
+        val bound: () -> String = value::choose
+        val unbound: (OuterReceiver) -> String = OuterReceiver::choose
+        return direct + bound() + unbound(value)
+    }
+
+    return if (nested() == "outerouterouter") "OK" else "fail"
+}
+"#,
+        "LocalExtensionReferenceLexicalRungs",
+    );
+}
+
 const LIB: &str = r#"
 package lib
 open class Base<T>

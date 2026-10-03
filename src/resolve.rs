@@ -60,6 +60,7 @@ mod call_diagnostics;
 mod call_result_constraint;
 mod call_result_templates;
 mod callable_reference_lhs;
+mod callable_reference_prefilter;
 mod callable_reference_selection;
 mod candidate_display;
 mod capture_analysis;
@@ -16632,20 +16633,13 @@ impl<'a> Checker<'a> {
                         let Ty::Fun(expected_function) = expected.non_null() else {
                             unreachable!("guarded function expectation")
                         };
-                        match self.classifier_callable_reference_adapts_to(
+                        match self.receiver_qualified_callable_reference_adapts_to(
                             scope,
                             *receiver,
                             name,
                             expected_function,
                         ) {
                             Some(true) => Some(2),
-                            // An outer callable's own inference variables are not concrete
-                            // reference inputs yet. A classifier-qualified reference may be the
-                            // evidence that fixes them (`choose(Int::toString, ::generic)`). A
-                            // failed concrete compatibility probe is therefore inconclusive while
-                            // that function shape is still open; the selected outer candidate
-                            // resolves its references in source order and checks the completed
-                            // shape. Fully concrete expectations remain an applicability verdict.
                             Some(false) if expected.mentions_ty_param() => Some(0),
                             Some(false) => None,
                             None => Some(0),
@@ -41254,24 +41248,9 @@ impl<'a> Checker<'a> {
         };
 
         if let Some(receiver) = receiver {
-            if let Some(result) =
-                self.classifier_callable_reference_adapts_to(scope, *receiver, name, expected)
-            {
-                return result;
-            }
-            // A bound VALUE reference needs the same adaptation planning as the authoritative
-            // selected-reference pass. Its natural reflective type may still expose parameters
-            // that a default or vararg adapter omits (`c::f`, where `f(x = default)`, under a
-            // zero-argument SAM). The expectation-free probe has already typed the receiver; use
-            // that semantic value type to test the declaration plan without mutating the reference.
-            let receiver_ty = self.expr_types[receiver.0 as usize];
-            if receiver_ty != Ty::Error {
-                let candidates = self.callable_ref_candidates(receiver_ty, name);
-                return self
-                    .select_bound_callable_ref(&candidates, Some(Ty::Fun(expected)))
-                    .is_some();
-            }
-            return false;
+            return self
+                .receiver_qualified_callable_reference_adapts_to(scope, *receiver, name, expected)
+                .unwrap_or(false);
         }
 
         if let Some(overloads) = self.lookup_local_fun_overloads(scope, name) {
@@ -41431,7 +41410,9 @@ impl<'a> Checker<'a> {
             && candidates.overloads.is_empty()
             && candidates.extension_property.is_none()
         {
-            return None;
+            return self
+                .local_extension_reference_adapts_to(scope, name, receiver_ty, expected, true)
+                .then_some(true);
         }
 
         if candidates.property.as_ref().is_some_and(|property| {
@@ -41471,18 +41452,19 @@ impl<'a> Checker<'a> {
             return Some(true);
         }
         Some(
-            candidates
-                .extension_property
-                .as_ref()
-                .is_some_and(|property| {
-                    self.callable_ref_is_compatible(
-                        std::slice::from_ref(&receiver_ty),
-                        property.prop_ty,
-                        false,
-                        expected,
-                        true,
-                    )
-                }),
+            self.local_extension_reference_adapts_to(scope, name, receiver_ty, expected, true)
+                || candidates
+                    .extension_property
+                    .as_ref()
+                    .is_some_and(|property| {
+                        self.callable_ref_is_compatible(
+                            std::slice::from_ref(&receiver_ty),
+                            property.prop_ty,
+                            false,
+                            expected,
+                            true,
+                        )
+                    }),
         )
     }
 

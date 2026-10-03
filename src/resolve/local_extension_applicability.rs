@@ -67,6 +67,25 @@ pub(super) fn applicable_local_extension_signature(
 }
 
 impl Checker<'_> {
+    pub(super) fn local_extension_reference_adapts_to(
+        &self,
+        scope: &CheckerScope<'_>,
+        name: &str,
+        receiver: Ty,
+        expected: &FnSig,
+        leading_receiver_in_expected: bool,
+    ) -> bool {
+        self.local_extension_reference_candidates(
+            scope,
+            name,
+            receiver,
+            Some(expected),
+            leading_receiver_in_expected,
+        )
+        .len()
+            == 1
+    }
+
     /// Local extensions applicable to `receiver::name` or `Receiver::name`.
     ///
     /// `leading_receiver_in_expected` is the unbound `Receiver::name` shape: the expected callable's
@@ -80,85 +99,88 @@ impl Checker<'_> {
         expected: Option<&FnSig>,
         leading_receiver_in_expected: bool,
     ) -> Vec<LocalExtensionReferenceCandidate> {
-        let Some(overloads) = self.lookup_local_fun_overloads(scope, name) else {
-            return Vec::new();
-        };
-        overloads
-            .into_iter()
-            .filter_map(|(statement, declared)| {
-                let signature = applicable_local_extension_signature(
-                    &self.fed_source(),
-                    &declared,
-                    receiver,
-                    |actual, bound| self.generic_bound_admits(actual, bound),
-                    |actual, expected| self.receiver_is_assignable(actual, expected),
-                )?;
-                let (value_parameters, ret) = match expected {
-                    Some(expected) => {
+        for overloads in self.lookup_local_fun_overload_rungs(scope, name) {
+            let candidates = overloads
+                .into_iter()
+                .filter_map(|(statement, declared)| {
+                    let signature = applicable_local_extension_signature(
+                        &self.fed_source(),
+                        &declared,
+                        receiver,
+                        |actual, bound| self.generic_bound_admits(actual, bound),
+                        |actual, expected| self.receiver_is_assignable(actual, expected),
+                    )?;
+                    let (value_parameters, ret) = match expected {
+                        Some(expected) => {
+                            let expected_values = if leading_receiver_in_expected {
+                                let (_, values) = expected.params.split_first()?;
+                                values
+                            } else {
+                                expected.params.as_slice()
+                            };
+                            self.contextual_local_function_reference_shape(
+                                &declared,
+                                Some(receiver),
+                                expected_values,
+                                expected.ret,
+                            )?
+                        }
+                        None => (signature.params.clone(), signature.ret),
+                    };
+                    let parameters = if leading_receiver_in_expected {
+                        let mut parameters = vec![receiver];
+                        parameters.extend(value_parameters.iter().copied());
+                        parameters
+                    } else {
+                        value_parameters.clone()
+                    };
+                    let adaptation = expected.map(|expected| {
                         let expected_values = if leading_receiver_in_expected {
-                            let (_, values) = expected.params.split_first()?;
+                            let (expected_receiver, values) = expected.params.split_first()?;
+                            if !self.receiver_is_assignable(*expected_receiver, receiver) {
+                                return None;
+                            }
                             values
                         } else {
                             expected.params.as_slice()
                         };
-                        self.contextual_local_function_reference_shape(
-                            &declared,
-                            Some(receiver),
-                            expected_values,
-                            expected.ret,
-                        )?
-                    }
-                    None => (signature.params.clone(), signature.ret),
-                };
-                let parameters = if leading_receiver_in_expected {
-                    let mut parameters = vec![receiver];
-                    parameters.extend(value_parameters.iter().copied());
-                    parameters
-                } else {
-                    value_parameters.clone()
-                };
-                let adaptation = expected.map(|expected| {
-                    let expected_values = if leading_receiver_in_expected {
-                        let (expected_receiver, values) = expected.params.split_first()?;
-                        if !self.receiver_is_assignable(*expected_receiver, receiver) {
+                        if (declared.is_suspend() && !expected.suspend)
+                            || (expected.ret != Ty::Unit
+                                && !self.receiver_is_assignable(ret, expected.ret))
+                        {
                             return None;
                         }
-                        values
-                    } else {
-                        expected.params.as_slice()
-                    };
-                    if (declared.is_suspend() && !expected.suspend)
-                        || (expected.ret != Ty::Unit
-                            && !self.receiver_is_assignable(ret, expected.ret))
-                    {
+                        let call_sig = crate::libraries::CallSig {
+                            param_defaults: declared.param_defaults.clone(),
+                            required: declared.required,
+                            vararg: declared.vararg(),
+                            vararg_index: declared.vararg_index,
+                            ..crate::libraries::CallSig::default()
+                        };
+                        let plan = self.callable_ref_parameter_plan(
+                            &value_parameters,
+                            &call_sig,
+                            expected_values,
+                        )?;
+                        Some((plan, expected.suspend && !declared.is_suspend()))
+                    });
+                    if matches!(adaptation, Some(None)) {
                         return None;
                     }
-                    let call_sig = crate::libraries::CallSig {
-                        param_defaults: declared.param_defaults.clone(),
-                        required: declared.required,
-                        vararg: declared.vararg(),
-                        vararg_index: declared.vararg_index,
-                        ..crate::libraries::CallSig::default()
-                    };
-                    let plan = self.callable_ref_parameter_plan(
-                        &value_parameters,
-                        &call_sig,
-                        expected_values,
-                    )?;
-                    Some((plan, expected.suspend && !declared.is_suspend()))
-                });
-                if matches!(adaptation, Some(None)) {
-                    return None;
-                }
-                Some(LocalExtensionReferenceCandidate {
-                    statement,
-                    signature,
-                    parameters,
-                    ret,
-                    adaptation: adaptation.flatten(),
+                    Some(LocalExtensionReferenceCandidate {
+                        statement,
+                        signature,
+                        parameters,
+                        ret,
+                        adaptation: adaptation.flatten(),
+                    })
                 })
-            })
-            .collect()
+                .collect::<Vec<_>>();
+            if !candidates.is_empty() {
+                return candidates;
+            }
+        }
+        Vec::new()
     }
 }
 
