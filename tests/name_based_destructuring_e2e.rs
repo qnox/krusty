@@ -144,36 +144,117 @@ fn name_based_lambda_shortform() {
     assert_eq!(run_stdlib(SRC).expect("name-based lambda"), "OK");
 }
 
-#[test]
-fn name_based_underscore_still_reads_the_renamed_property() {
-    common::expect_box_same_as_kotlinc(
-        r#"
-// LANGUAGE: +NameBasedDestructuring, +EnableNameBasedDestructuringShortForm
+const NAME_BASED: &str =
+    "// LANGUAGE: +NameBasedDestructuring, +EnableNameBasedDestructuringShortForm\n";
 
+fn name_based_flags() -> Vec<String> {
+    vec![
+        "-XXLanguage:+NameBasedDestructuring".to_string(),
+        "-XXLanguage:+EnableNameBasedDestructuringShortForm".to_string(),
+    ]
+}
+
+fn holder() -> &'static str {
+    r#"
 object O {
     var counter = 0
-
     val first: Int
         get() = counter++
 }
 
-fun box(): String {
-    val (_ = first) = O
-    (val _ = first) = O
-
-    for ((_ = first) in arrayOf(O)) {}
-    for ((val _ = first) in arrayOf(O)) {}
-
-    fun foo(f: (O) -> Unit) = f(O)
-
-    foo { (_ = first) -> }
-    foo { (val _ = first) -> }
-
-    return if (O.counter == 6) "OK" else "FAIL: ${O.counter}"
+class Once(val value: O) {
+    operator fun iterator(): Cursor = Cursor(value)
 }
-"#,
-        "NameBasedUnderscore",
+
+class Cursor(val value: O) {
+    private var pending = true
+    operator fun hasNext(): Boolean = pending
+    operator fun next(): O {
+        pending = false
+        return value
+    }
+}
+"#
+}
+
+fn renamed_underscore(form: &str, stem: &str) {
+    let source = format!("{NAME_BASED}{}\nfun box(): String {{\n    {form}\n    return if (O.counter == 1) \"OK\" else \"FAIL: ${{O.counter}}\"\n}}\n", holder());
+    common::expect_box_same_as_kotlinc(&source, stem);
+}
+
+#[test]
+fn short_declaration_underscore_rename_reads_the_property() {
+    renamed_underscore("val (_ = first) = O", "ShortDeclUnderscore");
+}
+
+#[test]
+fn full_declaration_underscore_rename_reads_the_property() {
+    renamed_underscore("(val _ = first) = O", "FullDeclUnderscore");
+}
+
+#[test]
+fn short_loop_underscore_rename_reads_the_property() {
+    renamed_underscore("for ((_ = first) in Once(O)) {}", "ShortLoopUnderscore");
+}
+
+#[test]
+fn full_loop_underscore_rename_reads_the_property() {
+    renamed_underscore("for ((val _ = first) in Once(O)) {}", "FullLoopUnderscore");
+}
+
+#[test]
+fn short_lambda_underscore_rename_reads_the_property() {
+    renamed_underscore(
+        "val f: (O) -> Unit = { (_ = first) -> }; f(O)",
+        "ShortLambdaUnderscore",
     );
+}
+
+#[test]
+fn full_lambda_underscore_rename_reads_the_property() {
+    renamed_underscore(
+        "val f: (O) -> Unit = { (val _ = first) -> }; f(O)",
+        "FullLambdaUnderscore",
+    );
+}
+
+fn implicit_underscore(body: &str) {
+    let source = format!("{NAME_BASED}class P(val first: Int, val second: Int)\n{body}\n");
+    common::assert_errors_match_kotlinc(&[("Main.kt", &source)], &name_based_flags());
+}
+
+#[test]
+fn short_declaration_implicit_underscore_is_forbidden() {
+    implicit_underscore("fun box(p: P) { val (_) = p }");
+}
+
+#[test]
+fn full_declaration_implicit_underscore_is_forbidden() {
+    implicit_underscore("fun box(p: P) { (val _) = p }");
+}
+
+#[test]
+fn short_loop_implicit_underscore_is_forbidden() {
+    implicit_underscore(
+        "class Bag(private val item: P) {\n    operator fun iterator(): BagCursor = BagCursor(item)\n}\nclass BagCursor(val item: P) {\n    private var pending = true\n    operator fun hasNext(): Boolean = pending\n    operator fun next(): P { pending = false; return item }\n}\nfun box(b: Bag) { for ((_) in b) {} }",
+    );
+}
+
+#[test]
+fn full_loop_implicit_underscore_is_forbidden() {
+    implicit_underscore(
+        "class Bag(private val item: P) {\n    operator fun iterator(): BagCursor = BagCursor(item)\n}\nclass BagCursor(val item: P) {\n    private var pending = true\n    operator fun hasNext(): Boolean = pending\n    operator fun next(): P { pending = false; return item }\n}\nfun box(b: Bag) { for ((val _) in b) {} }",
+    );
+}
+
+#[test]
+fn short_lambda_implicit_underscore_is_forbidden() {
+    implicit_underscore("fun box(p: P) {\n    val f: (P) -> Unit = { (_) -> }\n    f(p)\n}");
+}
+
+#[test]
+fn full_lambda_implicit_underscore_is_forbidden() {
+    implicit_underscore("fun box(p: P) {\n    val f: (P) -> Unit = { (val _) -> }\n    f(p)\n}");
 }
 
 /// A `for` bracket pattern without the feature is one language-version error. The loop is still

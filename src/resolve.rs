@@ -85,6 +85,7 @@ pub(crate) mod declaration_index;
 pub(crate) mod delegated_properties;
 pub(crate) use delegated_properties::DelegateGetValueTarget;
 mod dependency_platform;
+mod destructuring;
 mod diagnostic_selection;
 mod eager_lambda_analysis;
 mod enum_entries;
@@ -24462,142 +24463,6 @@ impl<'a> Checker<'a> {
             }
             other => other.clone(),
         });
-    }
-
-    fn stmt_destructure(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        s: StmtId,
-        entries: Vec<crate::ast::DestructureEntry>,
-        init: ExprId,
-    ) {
-        let it = self.expr(scope, init);
-        let span = self.file.stmt_spans[s.0 as usize];
-        // Destructuring requires the initializer to be a known reference type whose class
-        // declares `component1..N` (e.g. a krusty `data class`). Anything else is rejected,
-        // never miscompiled.
-        let source_props = self.file.destructuring.source_properties.get(&s.0).cloned();
-        let entry_types = self.file.destructuring.entry_types.get(&s.0).cloned();
-        for (idx, entry) in entries.iter().enumerate() {
-            let named_property = source_props
-                .as_ref()
-                .and_then(|props| props.get(idx))
-                .and_then(Option::as_ref)
-                .is_some();
-            // A positional `_` skips that component: no binding and no `componentN` call. A
-            // name-based `_ = prop` still reads `prop`, so the getter runs, and then discards it.
-            if entry.ignored && !named_property {
-                continue;
-            }
-            let name = &entry.name;
-            let is_var = entry.mutable;
-            if !entry.ignored && self.declared_in_current_scope(scope, name) {
-                self.diags.error(
-                    span,
-                    format!("krusty: conflicting local declaration '{name}'"),
-                );
-            }
-            // NAME-BASED entry (`val (newName = sourceProp) = src`): bind to the receiver's
-            // `sourceProp` property (a member read), not `componentN`.
-            if let Some(prop) = source_props
-                .as_ref()
-                .and_then(|sp| sp.get(idx))
-                .and_then(|o| o.as_ref())
-            {
-                let property_receiver = self
-                    .flow_intersection_member_receiver(scope, init, prop)
-                    .or_else(|| self.type_parameter_member_receiver(scope, it, prop))
-                    .unwrap_or(it);
-                let target = self
-                    .select_property_member(property_receiver, prop)
-                    .map(ResolvedCall::Member)
-                    .map(Box::new);
-                match target {
-                    Some(target) => {
-                        let component = target.ret();
-                        let t = entry_types
-                            .as_ref()
-                            .and_then(|types| types.get(idx))
-                            .and_then(Option::as_ref)
-                            .map(|annotation| {
-                                let declared = self.type_ref_ty(scope, annotation);
-                                self.expect_assignable(
-                                    declared,
-                                    component,
-                                    annotation.span,
-                                    "destructuring initializer",
-                                );
-                                declared
-                            })
-                            .unwrap_or(component);
-                        self.resolved_destructure_components
-                            .insert((s, idx), target);
-                        if !entry.ignored {
-                            self.declare(scope, name, t, is_var);
-                        }
-                    }
-                    None => {
-                        self.diags.error(
-                            span,
-                            format!("krusty: unresolved property '{prop}' in destructuring"),
-                        );
-                        if !entry.ignored {
-                            self.declare(scope, name, Ty::Error, is_var);
-                        }
-                    }
-                }
-                continue;
-            }
-            let comp = format!("component{}", idx + 1);
-            let component_receiver = self
-                .flow_intersection_member_receiver(scope, init, &comp)
-                .or_else(|| self.type_parameter_member_receiver(scope, it, &comp))
-                .unwrap_or(it);
-            let target = match self.destructure_component_target(
-                scope,
-                s,
-                component_receiver,
-                &comp,
-                &[],
-                span,
-            ) {
-                Ok(target) => target,
-                Err(()) => {
-                    self.declare(scope, name, Ty::Error, is_var);
-                    continue;
-                }
-            };
-            match target {
-                Some(target) => {
-                    let component = target.ret();
-                    let t = entry_types
-                        .as_ref()
-                        .and_then(|types| types.get(idx))
-                        .and_then(Option::as_ref)
-                        .map(|annotation| {
-                            let declared = self.type_ref_ty(scope, annotation);
-                            self.expect_assignable(
-                                declared,
-                                component,
-                                annotation.span,
-                                "destructuring initializer",
-                            );
-                            declared
-                        })
-                        .unwrap_or(component);
-                    self.resolved_destructure_components
-                        .insert((s, idx), target);
-                    self.declare(scope, name, t, is_var);
-                }
-                None => {
-                    self.diags.error(
-                        span,
-                        format!("krusty: cannot destructure this type (no operator '{comp}')"),
-                    );
-                    self.declare(scope, name, Ty::Error, is_var);
-                }
-            }
-        }
     }
 
     fn stmt_inc_dec(
@@ -69235,30 +69100,6 @@ impl<'a> Checker<'a> {
             diagnostic_spans,
             &callables,
         )
-    }
-
-    fn destructure_component_target(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        statement: StmtId,
-        recv: Ty,
-        name: &str,
-        params: &[Ty],
-        span: Span,
-    ) -> Result<Option<DestructureComponentTarget>, ()> {
-        if !params.is_empty() {
-            return Ok(None);
-        }
-        Ok(self
-            .zero_arg_operator_call(
-                scope,
-                Some(IncDecSite::Statement(statement)),
-                recv,
-                name,
-                span,
-                Some(span),
-            )?
-            .map(Box::new))
     }
 
     fn member_extension_zero_arg_operator(

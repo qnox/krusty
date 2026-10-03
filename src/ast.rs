@@ -21,7 +21,7 @@ mod type_refs;
 pub(crate) use call_shape::explicit_call_receiver;
 pub use call_shape::{first_lambda_param_or_it, lambda_params_or_implicit};
 pub use constructors::{CtorDelegation, CtorDelegationCall, SecondaryCtor};
-pub use destructuring::DestructuringSyntax;
+pub use destructuring::{DestructureProperty, DestructuringSyntax};
 pub use operators::{BinOp, UnOp};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
@@ -488,11 +488,14 @@ pub enum LambdaParameterRole {
 }
 
 /// One destructuring binding. `ignored` is syntax, not a spelling test: a positional bare `_`
-/// skips that component, while backtick-escaped `` `_` `` declares an ordinary local. A name-based
-/// `_ = prop` is still ignored as a binding, and the checker reads `prop` before discarding it.
+/// skips that component, while backtick-escaped `` `_` `` declares an ordinary local. An explicit
+/// name-based `_ = prop` is still ignored as a binding; the checker reads `prop` and discards it.
+/// An implicit name-based `_` is the same syntax flag and is rejected, not read as a property.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DestructureEntry {
     pub name: String,
+    /// Span of the written name, including a bare `_`.
+    pub name_span: Span,
     pub mutable: bool,
     pub ignored: bool,
 }

@@ -5453,7 +5453,7 @@ fn function_flags(modifiers: &[String]) -> FdFlags {
 /// entry's optional by-name source property (parallel; `None` = positional `componentN`).
 type DestructureEntries = (
     Vec<DestructureEntry>,
-    Vec<Option<String>>,
+    Vec<Option<DestructureProperty>>,
     Vec<Option<TypeRef>>,
 );
 

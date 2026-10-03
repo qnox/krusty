@@ -25,7 +25,7 @@ impl Parser<'_> {
             self.bump();
             let mut entries = Vec::new();
             // Parallel by-name source properties (`for ((a = prop) in …)`); `None` for a positional entry.
-            let mut source_props: Vec<Option<String>> = Vec::new();
+            let mut source_props: Vec<Option<DestructureProperty>> = Vec::new();
             let mut entry_types: Vec<Option<TypeRef>> = Vec::new();
             loop {
                 // Full form (`for ([val a, val b] in …)`): each component carries its own
@@ -39,20 +39,14 @@ impl Parser<'_> {
                 let ignored =
                     self.at(TokenKind::Ident) && self.text() == "_" && !self.escaped_ident();
                 let n = self.ident_or_error("variable name");
+                let name_span = self.declaration_name_span;
                 let mut entry_type = self.eat(TokenKind::Colon).then(|| self.parse_type());
-                let source = if self.name_based_destructuring && self.eat(TokenKind::Eq) {
-                    let src = self.ident_or_error("property name");
-                    if self.eat(TokenKind::Colon) {
-                        entry_type = Some(self.parse_type());
-                    }
-                    Some(src)
-                } else if close == TokenKind::RParen && (self.short_form_destructuring || had_kw) {
-                    Some(n.clone())
-                } else {
-                    None
-                };
+                let implicit =
+                    close == TokenKind::RParen && (self.short_form_destructuring || had_kw);
+                let source = self.destructure_property(&n, implicit, &mut entry_type);
                 entries.push(DestructureEntry {
                     name: n,
+                    name_span,
                     mutable: is_var,
                     ignored,
                 });
