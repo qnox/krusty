@@ -131,6 +131,44 @@ fn an_inner_class_member_reads_an_enclosing_type_parameter_across_modules() {
     );
 }
 
+/// A `$` inside a top-level backticked classifier name is not another owner boundary. The
+/// classfile's `InnerClasses` row says that `Outer$Literal$Inner` belongs directly to
+/// `Outer$Literal`; the unrelated `Outer` declaration must not contribute an earlier parameter id.
+#[test]
+fn an_enclosing_type_parameter_follows_inner_classes_not_dollar_segments() {
+    const LIB: &str = "package lib\n\
+        \n\
+        interface Marker { fun text(): String }\n\
+        interface Decoy\n\
+        class Word(private val value: String) : Marker {\n\
+        \x20   override fun text(): String = value\n\
+        }\n\
+        class Outer<D : Decoy>\n\
+        class `Outer$Literal`<E : Marker> {\n\
+        \x20   inner class Inner(val value: E) {\n\
+        \x20       fun read(): E = value\n\
+        \x20   }\n\
+        }\n";
+    const MAIN: &str = "import lib.Marker\n\
+        import lib.`Outer$Literal`\n\
+        import lib.Word\n\
+        \n\
+        fun box(): String {\n\
+        \x20   val outer = `Outer$Literal`<Word>()\n\
+        \x20   val value: Marker = outer.Inner(Word(\"OK\")).read()\n\
+        \x20   return value.text()\n\
+        }\n";
+    assert_eq!(
+        common::expect_box_run_against("dollar_enclosing_tp", LIB, MAIN)
+            .expect("krusty-built library"),
+        "OK"
+    );
+    assert_eq!(
+        common::expect_box_run_against_kotlinc(LIB, MAIN).expect("kotlinc-built library"),
+        "OK"
+    );
+}
+
 /// Source spelling is not type-parameter identity. Applying `Inner<Int>` must not substitute its
 /// own `E` into the captured `Outer<String>.E`; the provider qualifies the captured parameter by
 /// its declaring classifier before publishing the member signature.

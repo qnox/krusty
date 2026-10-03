@@ -456,17 +456,30 @@ impl JvmLibraries {
     /// this provider boundary.
     fn enclosing_type_parameters(&self, internal: TypeName) -> Vec<(String, Vec<Ty>)> {
         let mut owners = Vec::new();
-        let mut owner = internal.nested_owner();
-        while let Some(name) = owner {
-            owners.push(name);
-            owner = name.nested_owner();
+        let mut nested = internal;
+        loop {
+            let Some(class) = self.cp.find_name(nested) else {
+                // Without one structural link the joint metadata id space is unknowable. Keep the
+                // decoded placeholders unresolved rather than shifting them onto a different owner.
+                return Vec::new();
+            };
+            let Some(owner) = class
+                .inner_class_self()
+                .and_then(|entry| entry.outer.as_deref())
+                .map(type_name)
+            else {
+                break;
+            };
+            owners.push(owner);
+            nested = owner;
         }
         owners.reverse();
         let mut collected = Vec::new();
         for owner in owners {
-            let Some(class) = self.cp.find_name(owner) else {
-                continue;
-            };
+            let class = self
+                .cp
+                .find_name(owner)
+                .expect("the structural enclosing-class walk validated every owner");
             let parameters = &class.meta.class_type_parameters;
             let identities = parameters
                 .type_params()
