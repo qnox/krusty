@@ -433,6 +433,46 @@ impl ProductionSignatureSemantics<'_> {
         );
         mutable
     }
+
+    pub(super) fn top_level_property_reference_type(
+        &self,
+        scope: crate::fir::SignatureScope,
+        property: &crate::libraries::PropertyInfo,
+        result: Ty,
+    ) -> Option<Ty> {
+        self.table.libraries.property_reference_type(
+            0,
+            self.reflective_property_is_mutable(
+                scope,
+                property.setter.is_some(),
+                property.setter_visibility,
+                property.owner,
+                None,
+            ),
+            &[result],
+        )
+    }
+
+    pub(super) fn member_property_reference_type(
+        &self,
+        scope: crate::fir::SignatureScope,
+        unbound: bool,
+        property: &crate::symbol_resolver::ResolvedPropertyRef,
+        receiver: Ty,
+        arguments: &[Ty],
+    ) -> Option<Ty> {
+        self.table.libraries.property_reference_type(
+            usize::from(unbound),
+            self.reflective_property_is_mutable(
+                scope,
+                property.setter.is_some(),
+                property.setter_visibility,
+                property.getter.owner,
+                Some(receiver),
+            ),
+            arguments,
+        )
+    }
 }
 
 struct SignatureMemberSite<'site, 'data> {
@@ -446,13 +486,12 @@ impl super::super::access_control::SourceMemberSite for SignatureMemberSite<'_, 
         false
     }
 
-    fn source_package(&self) -> crate::types::TypeName {
+    fn source_package(&self) -> Option<crate::types::TypeName> {
         self.semantics
             .headers
             .sources
             .get(self.scope.source)
             .map(|file| file.package)
-            .unwrap_or(crate::types::TypeName::ROOT)
     }
 
     fn module_owns(&self, owner: crate::types::TypeName) -> bool {

@@ -43859,13 +43859,7 @@ impl<'a> Checker<'a> {
             property.getter_visibility,
             property.setter_visibility,
         );
-        if property.setter.is_some()
-            && !self.receiver_member_accessible(
-                property.setter_visibility,
-                property.getter.owner,
-                receiver,
-            )
-        {
+        if !self.property_reference_exposes_setter(&property, receiver) {
             property.setter = None;
         }
         let property_ty = property.prop_ty;

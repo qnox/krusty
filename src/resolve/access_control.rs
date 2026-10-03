@@ -21,7 +21,9 @@ pub(super) fn module_declares_classifier(module: &dyn SymbolSource, classifier: 
 /// inference both call that operation; neither keeps a second copy of the rules.
 pub(super) trait SourceMemberSite {
     fn visibility_suppressed(&self) -> bool;
-    fn source_package(&self) -> TypeName;
+    /// The use site's source package. `None` means the authoritative source record is absent;
+    /// that is not the root package, and it does not grant package-private access.
+    fn source_package(&self) -> Option<TypeName>;
     fn module_owns(&self, owner: TypeName) -> bool;
     fn internal_friend(&self, owner: TypeName) -> bool;
     fn access_classes(&self) -> Vec<TypeName>;
@@ -48,7 +50,7 @@ pub(super) fn site_member_accessible(
     match vis {
         Visibility::Public => true,
         Visibility::Internal => site.module_owns(owner) || site.internal_friend(owner),
-        Visibility::PackagePrivate => site.source_package() == owner.namespace(),
+        Visibility::PackagePrivate => site.source_package() == Some(owner.namespace()),
         Visibility::Private | Visibility::Protected => {
             // Access is lexical, so the enclosing chain is walked, not the receiver chain: a
             // nested class has no outer receiver, yet it sits inside its outer class's body and
@@ -99,8 +101,8 @@ impl SourceMemberSite for Checker<'_> {
         self.visibility_access_suppressed()
     }
 
-    fn source_package(&self) -> TypeName {
-        self.source_package_name()
+    fn source_package(&self) -> Option<TypeName> {
+        Some(self.source_package_name())
     }
 
     fn module_owns(&self, owner: TypeName) -> bool {
@@ -151,6 +153,21 @@ impl<'a> Checker<'a> {
     ) -> bool {
         site_receiver_member_accessible(self, vis, owner, receiver)
     }
+
+    /// Whether a property reference at this receiver exposes its setter. An inaccessible setter,
+    /// including a protected setter whose receiver is not the accessing class, is absent.
+    pub(super) fn property_reference_exposes_setter(
+        &self,
+        property: &crate::symbol_resolver::ResolvedPropertyRef,
+        receiver: Ty,
+    ) -> bool {
+        property.setter.is_some()
+            && self.receiver_member_accessible(
+                property.setter_visibility,
+                property.getter.owner,
+                receiver,
+            )
+    }
 }
 
 #[cfg(test)]
@@ -178,5 +195,53 @@ mod tests {
                 .collect::<Vec<_>>(),
             Vec::<&str>::new()
         );
+    }
+
+    struct PackageSite(Option<crate::types::TypeName>);
+
+    impl super::SourceMemberSite for PackageSite {
+        fn visibility_suppressed(&self) -> bool {
+            false
+        }
+        fn source_package(&self) -> Option<crate::types::TypeName> {
+            self.0
+        }
+        fn module_owns(&self, _: crate::types::TypeName) -> bool {
+            false
+        }
+        fn internal_friend(&self, _: crate::types::TypeName) -> bool {
+            false
+        }
+        fn access_classes(&self) -> Vec<crate::types::TypeName> {
+            Vec::new()
+        }
+        fn protected_classes(&self) -> Vec<crate::types::TypeName> {
+            Vec::new()
+        }
+        fn companion_of(&self, _: crate::types::TypeName) -> Option<crate::types::TypeName> {
+            None
+        }
+        fn is_subtype(&self, _: crate::types::TypeName, _: crate::types::TypeName) -> bool {
+            false
+        }
+        fn receiver_assignable(&self, _: crate::types::Ty, _: crate::types::TypeName) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn a_missing_source_record_does_not_grant_root_package_access() {
+        let owner = crate::types::type_name("RootClass");
+        assert_eq!(owner.namespace(), crate::types::TypeName::ROOT);
+        assert!(!super::site_member_accessible(
+            &PackageSite(None),
+            crate::types::Visibility::PackagePrivate,
+            owner,
+        ));
+        assert!(super::site_member_accessible(
+            &PackageSite(Some(crate::types::TypeName::ROOT)),
+            crate::types::Visibility::PackagePrivate,
+            owner,
+        ));
     }
 }
