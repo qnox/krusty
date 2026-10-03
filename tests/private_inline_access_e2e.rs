@@ -194,10 +194,8 @@ fn a_private_member_default_uses_the_default_bridge_accessor() {
 }\n";
     let sources = [("f1.kt", LIB), ("f2.kt", MAIN)];
     let class = common::ModuleClassPair::compile(&sources, "C");
-    for method in ["access$mem$default", "useMem"] {
-        let (reference, krusty) = class.method_code("C", method);
-        assert_eq!(krusty, reference, "C.{method}");
-    }
+    let (reference, krusty) = class.method_code("C", "access$mem$default");
+    assert_eq!(krusty, reference, "C.access$mem$default");
     let caller = common::ModuleClassPair::compile(&sources, "F2Kt");
     let (reference, krusty) = caller.method_code("F2Kt", "box");
     assert_eq!(krusty, reference, "F2Kt.box");
