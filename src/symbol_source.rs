@@ -176,6 +176,12 @@ impl SymbolSource for CompositeSource<'_> {
         self.children.iter().any(|c| c.package_exists(parent, name))
     }
 
+    fn api_withheld_callable(&self, owner: TypeName, name: &str) -> bool {
+        self.children
+            .iter()
+            .any(|child| child.api_withheld_callable(owner, name))
+    }
+
     fn generated_serializer_singleton(&self, classifier: TypeName) -> Option<TypeName> {
         self.children
             .iter()
@@ -307,6 +313,10 @@ impl<'a> CachedCompositeSource<'a> {
 impl SymbolSource for CachedCompositeSource<'_> {
     fn package_exists(&self, parent: TypeName, name: &str) -> bool {
         self.source.package_exists(parent, name)
+    }
+
+    fn api_withheld_callable(&self, owner: TypeName, name: &str) -> bool {
+        self.source.api_withheld_callable(owner, name)
     }
 
     fn symbols(&self, namespace: SymbolNamespace, name: &str) -> std::rc::Rc<ResolvedSymbols> {
