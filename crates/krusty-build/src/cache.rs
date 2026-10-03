@@ -10,7 +10,7 @@
 //!
 //! | Field | Why the obvious key was wrong |
 //! |---|---|
-//! | [`CacheKeyInputs::sources`] | Source ORDER and BASENAMES reach the bytes. A package's facade-name list accumulates in file-streaming order (`JvmState::module_packages`), so reordering changes `.kotlin_module`; and the CLI derives class-naming stems from `file_stem(path)`. Hence an ordered list of `(path, content)`, not a sorted multiset of contents. |
+//! | [`CacheKeyInputs::sources`] | Source BASENAMES reach the bytes (the CLI derives class-naming stems from `file_stem(path)`), and no proof says order is unobservable everywhere, so the key is an ordered list of `(path, content)`, not a sorted multiset of contents. (`.kotlin_module` facade parts used to observe order; they are written sorted now.) |
 //! | [`CacheKeyInputs::classpath`] | Entry PATHS are semantically load-bearing, not just contents: `SerializationAbi::from_classpath` picks the `write$Self` versus `write$Self$<module>` mangling by parsing a jar's FILE NAME. Content hashes alone would collide across a rename. |
 //! | [`CacheKeyInputs::compiler_flags`] | `-module-name` reaches `@Metadata.classModuleName`, the `META-INF/<module>.kotlin_module` file name, and that same serialization mangle. |
 //! | [`CacheKeyInputs::friend_paths`] | Friendship is exact path-set membership (`src/jvm/classpath.rs`), so adding or removing an associate changes which `internal` declarations are visible — changing both acceptance and emission. |
@@ -354,10 +354,10 @@ mod tests {
         }
     }
 
-    /// Source ORDER is load-bearing: a package's facade-name list accumulates in file-streaming
-    /// order, so reordering sources changes `.kotlin_module` bytes. A key over a sorted multiset
-    /// would collide these two builds. Pinned by
-    /// `tests/emission_determinism_e2e.rs::module_facade_order_follows_source_order_but_classes_do_not`.
+    /// Source order stays in the key even though `.kotlin_module` facade parts are now written
+    /// sorted: basenames still reach the bytes through facade class names, and no proof says order
+    /// is unobservable in every output. A key over a sorted multiset would be one assumption away
+    /// from a stale-artifact collision, so the conservative ordered key stays.
     #[test]
     fn reordering_sources_changes_the_key() {
         let forward = baseline();
@@ -366,7 +366,7 @@ mod tests {
         assert_ne!(
             forward.key(),
             reversed.key(),
-            "source order reaches .kotlin_module, so it must reach the key"
+            "the key pins the ordered source list; output order-invariance is not proven"
         );
     }
 

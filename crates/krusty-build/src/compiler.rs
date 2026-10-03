@@ -10,12 +10,11 @@
 //! # Determinism
 //!
 //! Sources are compiled in one canonical order — sorted by path — and the SAME order is what
-//! [`KrustyCli::base_inputs`] puts in the cache key. That matters because source order is
-//! observable in emitted output: a package's facade-name list accumulates in file-streaming order,
-//! so two orders produce different `.kotlin_module` bytes
-//! (`tests/emission_determinism_e2e.rs::module_facade_order_follows_source_order_but_classes_do_not`).
-//! Picking an order and keying it is what makes the cache sound here; keying a sorted multiset of
-//! contents would not be.
+//! [`KrustyCli::base_inputs`] puts in the cache key. Source order is no longer observable in
+//! `.kotlin_module` (a package's facade parts are written sorted), but the CLI still derives
+//! class-naming stems from `file_stem(path)`, so a key over a sorted multiset of contents would
+//! collide two modules whose same-named files swap paths. Keying the ordered list stays
+//! conservative: it can force a needless rebuild, never serve a stale artifact.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

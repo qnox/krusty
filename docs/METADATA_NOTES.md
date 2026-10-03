@@ -65,6 +65,14 @@ the caller's version, exactly as kotlinc's `AnonymousObjectTransformer` does. Pi
 suspend-lambda, and regenerated-object `mv` values, plus the 20-byte module header, against kotlinc
 run with `-language-version 2.2`.
 
+## Module file — part ordering
+
+Within one package, the `.kotlin_module` part list is sorted by part name
+(kotlinc's `ModuleMapping.writePartsWithinPackage` sorts the internal names), not written in
+compilation order; packages themselves are ordered by name. Pinned byte-exact by
+`package_parts_are_sorted` in `src/metadata/module.rs`. Multifile facades and
+`@JvmPackageName` parts-outside-package are not modeled yet.
+
 ## Class metadata (kind=1) — `ProtoBuf.Class`
 Reverse-engineered from kotlinc for `class Point(val x: Int, var y: String)` (see
 `metadata/class_builder.rs`). `d1 = 00 <delimited StringTableTypes> <Class>`, k=1, mv=[1,9,0], xi=48.
