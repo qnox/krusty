@@ -131,13 +131,21 @@ fn a_suspend_function_value_adapter_marks_its_forwarding_invoke_as_a_suspension(
     assert!(target.suspend && target.source_suspend);
     assert!(ir.suspend_funs.contains(implementation));
 
-    let suspensions = ir.suspend_calls.iter().collect::<Vec<_>>();
-    let [(invoke, result)] = suspensions.as_slice() else {
-        panic!("one forwarding suspension, found {suspensions:?}")
+    let Some(body) = ir.functions[*implementation as usize].body else {
+        panic!("SAM adapter has no body")
     };
-    assert_eq!(**result, Ty::String);
+    let IrExpr::Block { stmts, value: None } = ir.expr(body) else {
+        panic!("SAM adapter body is not a block")
+    };
+    let [ret] = stmts.as_slice() else {
+        panic!("SAM adapter body has unexpected statements: {stmts:?}")
+    };
+    let IrExpr::Return(Some(invoke)) = ir.expr(*ret) else {
+        panic!("SAM adapter does not directly return its forwarding invocation")
+    };
+    assert_eq!(ir.suspend_calls.get(invoke), Some(&Ty::String));
     assert!(matches!(
-        ir.expr(**invoke),
+        ir.expr(*invoke),
         IrExpr::InvokeFunction { args, params, ret, .. }
             if args.len() == 1 && params.as_slice() == [Ty::String] && *ret == Ty::String
     ));
