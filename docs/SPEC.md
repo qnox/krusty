@@ -12089,6 +12089,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `mutable_property_ref_e2e::property_reference_get_reports_the_property_type`,
   `toplevel_property_ref_e2e::toplevel_property_refs_run`.
 
+- **`KProperty.getDelegate` follows the runtime classpath.** The stdlib method throws
+  `KotlinReflectionNotSupportedError` when `kotlin-reflect` is absent. With that jar on the
+  classpath, and after `kotlin.reflect.jvm.isAccessible` is set on the reference, the same call
+  returns the property delegate. A runner that always exposes `kotlin-reflect` changes the first
+  outcome into the second. Tests:
+  `box_runtime_reflect_e2e::get_delegate_without_reflect_reports_reflection_not_supported`,
+  `box_runtime_reflect_e2e::get_delegate_with_reflect_returns_the_delegate`.
+
 - **A property reference is mutable only where its setter is accessible.** `var foo` with
   `private set` is a `KMutableProperty` inside the declaring class, including `Bar::foo` written
   there, because that site can call the setter. The same reference from a subclass or from a
