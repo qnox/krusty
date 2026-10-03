@@ -3767,12 +3767,11 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     |actual, target| {
                         crate::assignable::is_subtype(&context, &oracle, actual, target)
                     },
-                    |left_params: &[Ty], left_ret, right_params: &[Ty], right_ret| {
+                    |left_params: &[Ty], right_params: &[Ty]| {
                         left_params.len() == right_params.len()
                             && left_params.iter().zip(right_params).all(|(left, right)| {
                                 crate::assignable::is_subtype(&context, &oracle, *left, *right)
                             })
-                            && crate::assignable::is_subtype(&context, &oracle, left_ret, right_ret)
                     },
                 );
             if let Some((selected, argument_mapping, _type_arguments)) = selected {

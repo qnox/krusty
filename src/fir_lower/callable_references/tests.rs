@@ -372,6 +372,35 @@ fn vararg_adapted_local_reference_packs_wrapper_parameters() {
 }
 
 #[test]
+fn extension_vararg_reference_packs_the_declaration_array() {
+    let ir = lower_single_source(
+        r#"
+            class Counter(val seed: Int)
+            fun outer(counter: Counter): (Int, Int) -> Int {
+                fun Counter.accumulate(first: Int = 5, vararg remaining: Int): Int =
+                    seed + first + remaining[0]
+                return counter::accumulate
+            }
+        "#,
+        "ExtensionVarargReference",
+    );
+
+    let packed = ir.exprs.iter().find_map(|expression| match expression {
+        IrExpr::Vararg {
+            array_type,
+            elements,
+            spreads,
+        } => Some((*array_type, elements.len(), spreads.clone())),
+        _ => None,
+    });
+    assert_eq!(
+        packed,
+        Some((Ty::obj("kotlin/IntArray"), 1, vec![false])),
+        "the packed value is the vararg parameter, after the extension receiver"
+    );
+}
+
+#[test]
 fn unbound_local_extension_reference_keeps_receiver_as_structural_parameter() {
     let ir = lower_single_source(
         r#"

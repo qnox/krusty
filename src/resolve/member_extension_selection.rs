@@ -98,6 +98,13 @@ pub(super) fn ordinary_dispatch_first(
     receivers
 }
 
+/// Kotlin overload specificity prefers a concrete receiver declaration over one whose receiver
+/// domain mentions a callable type parameter. Callers must apply this declaration-owned fact
+/// before comparing contextually instantiated callable shapes.
+pub(super) fn concrete_receiver_is_more_specific(left_generic: bool, right_generic: bool) -> bool {
+    !left_generic && right_generic
+}
+
 pub(super) fn maximal_member_extensions<T>(
     oracle: &dyn crate::assignable::TypeOracle,
     candidates: &[T],
@@ -130,7 +137,10 @@ pub(super) fn maximal_member_extensions<T>(
                 // their instantiated `Box<String>`/`Box<Any>` views as ordinary subtypes loses
                 // the declaration-level genericity that Kotlin's specificity rule uses.
                 if candidate.generic_receiver != other.generic_receiver {
-                    return candidate.generic_receiver && !other.generic_receiver;
+                    return concrete_receiver_is_more_specific(
+                        other.generic_receiver,
+                        candidate.generic_receiver,
+                    );
                 }
                 let other_is_subtype = crate::assignable::is_assignable(
                     &crate::assignable::TyCtx::new(),

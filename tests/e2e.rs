@@ -901,6 +901,8 @@ mod generic_hof_vc_binding_e2e;
 mod generic_inferred_primitive_return_e2e;
 #[path = "generic_inferred_return_e2e.rs"]
 mod generic_inferred_return_e2e;
+#[path = "generic_local_extension_ref_e2e.rs"]
+mod generic_local_extension_ref_e2e;
 #[path = "generic_member_extension_lambda_result_e2e.rs"]
 mod generic_member_extension_lambda_result_e2e;
 #[path = "generic_receiver_extension_lambda_shape_e2e.rs"]

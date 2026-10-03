@@ -15,6 +15,103 @@ pub enum AdaptedRefArgument {
     },
 }
 
+/// Declaration-owned facts used to rank callable-reference adaptations after applicability.
+/// `parameters` and `plan` use the same target-slot order; the plan identifies which declared
+/// parameter types are actually exposed by the expected callable shape.
+pub(super) struct AdaptedReferenceSpecificity<'a> {
+    pub(super) parameters: &'a [Ty],
+    pub(super) plan: &'a [AdaptedRefArgument],
+    pub(super) is_vararg: bool,
+}
+
+/// Select the undominated adapted declarations, independently of where a provider found them.
+/// Passed parameters decide ordinary specificity. Return compatibility belongs to applicability;
+/// Kotlin's callable-reference conflict signature contains the adapted value-parameter types, not
+/// the declaration's raw result. When all remaining passed shapes are mutually specific, Kotlin
+/// prefers a non-vararg declaration and then the declaration with fewer slots (equivalently, fewer
+/// omitted defaults for one expected shape).
+pub(super) fn maximal_adapted_references(
+    candidates: &[AdaptedReferenceSpecificity<'_>],
+    mut shape_at_least_as_specific: impl FnMut(&[Ty], &[Ty]) -> bool,
+) -> Vec<usize> {
+    let shapes = candidates
+        .iter()
+        .map(|candidate| adaptation_specificity_shape(candidate.parameters, candidate.plan))
+        .collect::<Vec<_>>();
+    let mut maximal = candidates
+        .iter()
+        .enumerate()
+        .filter_map(|(index, _)| {
+            let dominated = candidates.iter().enumerate().any(|(other_index, _)| {
+                index != other_index
+                    && shape_at_least_as_specific(&shapes[other_index], &shapes[index])
+                    && !shape_at_least_as_specific(&shapes[index], &shapes[other_index])
+            });
+            (!dominated).then_some(index)
+        })
+        .collect::<Vec<_>>();
+    if maximal.len() <= 1
+        || !maximal.iter().all(|&left| {
+            maximal
+                .iter()
+                .all(|&right| shape_at_least_as_specific(&shapes[left], &shapes[right]))
+        })
+    {
+        return maximal;
+    }
+    let non_vararg = maximal
+        .iter()
+        .copied()
+        .filter(|&index| !candidates[index].is_vararg)
+        .collect::<Vec<_>>();
+    if !non_vararg.is_empty() && non_vararg.len() < maximal.len() {
+        maximal = non_vararg;
+    }
+    let Some(minimum) = maximal
+        .iter()
+        .map(|&index| candidates[index].parameters.len())
+        .min()
+    else {
+        return maximal;
+    };
+    let shorter = maximal
+        .iter()
+        .copied()
+        .filter(|&index| candidates[index].parameters.len() == minimum)
+        .collect::<Vec<_>>();
+    if !shorter.is_empty() && shorter.len() < maximal.len() {
+        shorter
+    } else {
+        maximal
+    }
+}
+
+fn adaptation_specificity_shape(params: &[Ty], plan: &[AdaptedRefArgument]) -> Vec<Ty> {
+    let mut shape = Vec::new();
+    for (index, argument) in plan.iter().enumerate() {
+        let Some(&declared) = params.get(index) else {
+            continue;
+        };
+        match argument {
+            AdaptedRefArgument::Value(_) => shape.push(declared),
+            AdaptedRefArgument::Default => {}
+            AdaptedRefArgument::Vararg {
+                values,
+                whole_array: true,
+            } => {
+                if !values.is_empty() {
+                    shape.push(declared);
+                }
+            }
+            AdaptedRefArgument::Vararg { values, .. } => {
+                let element = declared.array_read_elem().unwrap_or(declared);
+                shape.extend(std::iter::repeat(element).take(values.len()));
+            }
+        }
+    }
+    shape
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum CallableRefSpecialization {
     Specialized,
@@ -598,7 +695,7 @@ pub(super) fn parameter_plan(
 /// Select an expected-shape instance reference from ordinary member candidates.
 ///
 /// Body checking and compact-signature evaluation must make the same adaptation, generic
-/// specialization, receiver-rank, cost, duplicate-fact, and specificity decision. Keeping that
+/// specialization, receiver-rank, duplicate-fact, and specificity decision. Keeping that
 /// decision here also lets signature evaluation try members before it demands any extension
 /// candidate whose own inferred signature may currently be under computation.
 fn select_adapted_bound_instance_candidate(
@@ -606,7 +703,7 @@ fn select_adapted_bound_instance_candidate(
     overloads: &[FunctionInfo],
     expected: &'static crate::types::FnSig,
     mut is_assignable: impl FnMut(Ty, Ty) -> bool,
-    mut shape_at_least_as_specific: impl FnMut(&[Ty], Ty, &[Ty], Ty) -> bool,
+    shape_at_least_as_specific: impl FnMut(&[Ty], &[Ty]) -> bool,
 ) -> Option<(FunctionInfo, Vec<AdaptedRefArgument>, Vec<Ty>)> {
     let mut candidates = overloads
         .iter()
@@ -641,8 +738,7 @@ fn select_adapted_bound_instance_candidate(
             ) {
                 return None;
             }
-            let cost = plan_cost(&plan);
-            Some((candidate, plan, cost, type_arguments))
+            Some((candidate, plan, type_arguments))
         })
         .collect::<Vec<_>>();
     let nearest = candidates
@@ -650,12 +746,9 @@ fn select_adapted_bound_instance_candidate(
         .map(|candidate| candidate.0.receiver_rank)
         .min()?;
     candidates.retain(|candidate| candidate.0.receiver_rank == nearest);
-    let best = candidates.iter().map(|candidate| candidate.2).min()?;
-    candidates.retain(|candidate| candidate.2 == best);
-
     // Providers may expose one inherited declaration through multiple hierarchy paths. Those are
     // duplicate facts; distinct semantic signatures remain overload candidates.
-    let mut unique = Vec::<(FunctionInfo, Vec<AdaptedRefArgument>, usize, Vec<Ty>)>::new();
+    let mut unique = Vec::<(FunctionInfo, Vec<AdaptedRefArgument>, Vec<Ty>)>::new();
     for candidate in candidates {
         if unique.iter().any(|existing| {
             existing.0.semantic_params() == candidate.0.semantic_params()
@@ -666,32 +759,19 @@ fn select_adapted_bound_instance_candidate(
         }
         unique.push(candidate);
     }
-    let maximal = unique
+    let specificity = unique
         .iter()
-        .enumerate()
-        .filter_map(|(index, current)| {
-            let dominated = unique.iter().enumerate().any(|(other_index, other)| {
-                index != other_index
-                    && shape_at_least_as_specific(
-                        &other.0.semantic_params(),
-                        other.0.callable.ret,
-                        &current.0.semantic_params(),
-                        current.0.callable.ret,
-                    )
-                    && !shape_at_least_as_specific(
-                        &current.0.semantic_params(),
-                        current.0.callable.ret,
-                        &other.0.semantic_params(),
-                        other.0.callable.ret,
-                    )
-            });
-            (!dominated).then_some(index)
+        .map(|(candidate, plan, _)| AdaptedReferenceSpecificity {
+            parameters: &candidate.callable.params,
+            plan,
+            is_vararg: candidate.call_sig.vararg_index.is_some(),
         })
         .collect::<Vec<_>>();
+    let maximal = maximal_adapted_references(&specificity, shape_at_least_as_specific);
     let [selected] = maximal.as_slice() else {
         return None;
     };
-    let (selected, plan, _, type_arguments) = unique.swap_remove(*selected);
+    let (selected, plan, type_arguments) = unique.swap_remove(*selected);
     Some((selected, plan, type_arguments))
 }
 
@@ -705,7 +785,7 @@ pub(super) fn select_adapted_instance_candidate(
     unbound_receiver: Option<Ty>,
     expected: &'static crate::types::FnSig,
     mut is_assignable: impl FnMut(Ty, Ty) -> bool,
-    shape_at_least_as_specific: impl FnMut(&[Ty], Ty, &[Ty], Ty) -> bool,
+    shape_at_least_as_specific: impl FnMut(&[Ty], &[Ty]) -> bool,
 ) -> Option<(FunctionInfo, Vec<AdaptedRefArgument>, Vec<Ty>)> {
     let method = match unbound_receiver {
         Some(receiver) => {
@@ -763,19 +843,6 @@ pub(super) fn realize_adapted_instance_shape(
         realize_expected_shape(expected, &natural_params, target_ret, &shape_plan),
         natural_params,
     )
-}
-
-pub(super) fn plan_cost(plan: &[AdaptedRefArgument]) -> usize {
-    plan.iter()
-        .map(|argument| match argument {
-            AdaptedRefArgument::Value(_) => 0,
-            AdaptedRefArgument::Vararg {
-                whole_array: true, ..
-            } => 1,
-            AdaptedRefArgument::Vararg { .. } => 10,
-            AdaptedRefArgument::Default => 100,
-        })
-        .sum()
 }
 
 pub(super) fn plan_is_identity_from(plan: &[AdaptedRefArgument], value_offset: usize) -> bool {

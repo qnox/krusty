@@ -10695,6 +10695,31 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   while an applicable local function wins without mixing priorities. The chosen semantic callable is
   recorded for lowering; overload selection never changes or retries the qualifier.
 
+- **A generic local extension is applicable to a callable reference once its receiver unifies.**
+  `Items<T>::foo` and `value::foo` compare a local `fun <T> Items<T>.foo()` with that receiver after
+  substituting the local function's own type parameters through the federated symbol hierarchy,
+  including a dependency's `Derived : Base<String>`. An expectation-free reference exposes that
+  specialized shape, so `Base<String>::pick` is not left with an unbound `T`. Formal bounds use
+  the shared bound-admission contract; a `<T : Marker>` extension is not a candidate for a
+  non-`Marker` argument, and the same-named property remains. A bound `counter::accumulate` or
+  unbound `Counter::accumulate` reference adapts that declaration's defaults and vararg to the
+  expected function or SAM shape. The packed value is the declaration's vararg array — the
+  parameter after the extension receiver — so a preceding value parameter is not the array. On one
+  lexical rung the nearest declared receiver wins, a concrete receiver domain beats a generic one,
+  and then the most specific applicable overload wins: passed parameter types are compared,
+  an equally specific non-vararg beats a vararg, and a shorter declaration beats a longer one.
+  `choose(value: Int = 1)` therefore beats `choose(vararg values: Int)` for `() -> Int` and
+  `(Int) -> Int`, while `(Int, Int) -> Int` still selects the vararg. A context-parameter
+  local extension keeps that receiver after the context parameters in the reference
+  (`context(Prefix) (Target) -> String` for an unbound `Target::join`). kotlinc 2.4.20 does not
+  compile a callable reference to a context-parameter function, so that runtime order is checked
+  on krusty and the rejection is checked against kotlinc. Two single-parameter
+  defaults such as `choose(value: Any = ...)` and `choose(value: Int = ...)` stay ambiguous for
+  `() -> Int` and do not fall through to a non-local candidate. The local function is visible only
+  from its declaration onward; an earlier reference still binds the property. Tests:
+  `tests/generic_local_extension_ref_e2e.rs`. Corpus:
+  `codegen/box/callableReference/property/extensionPropertyReferenceWithTypeParameter.kt`.
+
 - **Fully-qualified SOURCE class names (`pkg1.Cls`) in type position.** A dotted type name whose path
   matches a class declared in the same module (a sibling file's package, no `import` needed — as
   kotlinc accepts) resolves to that source class, shadowing any classpath type of the same path. The
