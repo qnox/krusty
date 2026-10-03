@@ -999,14 +999,16 @@ impl BodyLowering<'_> {
                 reflective,
             } => {
                 let lowered = self.checked_function_invoke_reference(
-                    *callee,
-                    target_parameters,
-                    *target_result,
-                    *target_suspend,
-                    reference_parameters,
-                    *reference_result,
-                    *suspend,
-                    *reflective,
+                    super::function_references::CheckedFunctionInvokeReference {
+                        callee: *callee,
+                        target_parameters,
+                        target_result: *target_result,
+                        target_suspend: *target_suspend,
+                        reference_parameters,
+                        reference_result: *reference_result,
+                        suspend: *suspend,
+                        reflective: *reflective,
+                    },
                 )?;
                 if *reflective {
                     // The carrier class takes the source reference's name. The forwarding adapter

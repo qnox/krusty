@@ -8,6 +8,17 @@ use crate::types::Ty;
 
 use super::{BodyLowering, FirLoweringFailure};
 
+pub(super) struct CheckedFunctionInvokeReference<'a> {
+    pub(super) callee: crate::fir::FirExprId,
+    pub(super) target_parameters: &'a [crate::fir::ResolvedTy],
+    pub(super) target_result: crate::fir::ResolvedTy,
+    pub(super) target_suspend: bool,
+    pub(super) reference_parameters: &'a [crate::fir::ResolvedTy],
+    pub(super) reference_result: crate::fir::ResolvedTy,
+    pub(super) suspend: bool,
+    pub(super) reflective: bool,
+}
+
 impl BodyLowering<'_> {
     pub(super) fn checked_extension_function_binding(
         &mut self,
@@ -112,18 +123,20 @@ impl BodyLowering<'_> {
         }))
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn checked_function_invoke_reference(
         &mut self,
-        callee: crate::fir::FirExprId,
-        target_parameters: &[crate::fir::ResolvedTy],
-        target_result: crate::fir::ResolvedTy,
-        target_suspend: bool,
-        reference_parameters: &[crate::fir::ResolvedTy],
-        reference_result: crate::fir::ResolvedTy,
-        suspend: bool,
-        reflective: bool,
+        reference: CheckedFunctionInvokeReference<'_>,
     ) -> Result<crate::ir::ExprId, FirLoweringFailure> {
+        let CheckedFunctionInvokeReference {
+            callee,
+            target_parameters,
+            target_result,
+            target_suspend,
+            reference_parameters,
+            reference_result,
+            suspend,
+            reflective,
+        } = reference;
         if target_parameters.len() != reference_parameters.len() || (target_suspend && !suspend) {
             return Err(FirLoweringFailure::MissingExpression(callee));
         }
