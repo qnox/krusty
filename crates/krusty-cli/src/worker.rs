@@ -218,6 +218,20 @@ pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
                 "--opt_in" => unit
                     .inert
                     .extend(values.into_iter().map(|value| format!("--opt_in {value}"))),
+                // Preserve warning policy as the standard kotlinc spelling. The batch parser owns
+                // the diagnostic-name registry and duplicate checks, so the worker does not grow
+                // a second, drifting copy.
+                "--x_warning_level" => {
+                    if values.is_empty() {
+                        return Err(Refusal::Malformed(
+                            "--x_warning_level requires at least one NAME:SEVERITY value"
+                                .to_string(),
+                        ));
+                    }
+                    for value in values {
+                        unit.kotlinc_args.push(format!("-Xwarning-level={value}"));
+                    }
+                }
                 "--x_xlanguage" => {
                     if values.is_empty() {
                         return Err(Refusal::Malformed(
@@ -362,6 +376,10 @@ pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
                         // fleet.util.codepoints) is safe to build. Inert here for Bazel to print;
                         // deliberately NOT generalized to other `-Xwasm-*` flags.
                         "-Xwasm-kclass-fqn" => unit.inert.push(value),
+                        // The common CLI parser validates the typed diagnostic identity and applies
+                        // its severity. Keeping the argument here also lets duplicate spellings from
+                        // the two worker surfaces be rejected in one place.
+                        _ if value.starts_with("-Xwarning-level=") => unit.kotlinc_args.push(value),
                         _ => unit.kotlinc_args.push(value),
                     }
                 }
@@ -974,6 +992,85 @@ mod tests {
             unit.kotlinc_args.is_empty(),
             "the flag changes nothing, so nothing is forwarded: {:?}",
             unit.kotlinc_args
+        );
+    }
+
+    /// Both worker spellings normalize to the standard CLI option. Validation and policy
+    /// application then happen through the same typed diagnostic registry as a batch invocation.
+    #[test]
+    fn warning_level_is_forwarded_to_the_typed_cli_policy() {
+        let unit = translate(&args(&[
+            "--kotlinc-arg",
+            "-Xwarning-level=REDUNDANT_CLI_ARG:disabled",
+            "--srcs",
+            "A.kt",
+            "--out",
+            "o.jar",
+        ]))
+        .expect("a valid warning level must translate");
+        assert!(unit.inert.is_empty(), "{:?}", unit.inert);
+        assert_eq!(
+            unit.kotlinc_args,
+            vec!["-Xwarning-level=REDUNDANT_CLI_ARG:disabled".to_string()]
+        );
+
+        let unit = translate(&args(&[
+            "--x_warning_level",
+            "REDUNDANT_CLI_ARG:disabled",
+            "DEPRECATED_LANGUAGE_VERSION:error",
+            "--srcs",
+            "A.kt",
+            "--out",
+            "o.jar",
+        ]))
+        .expect("the worker's own warning-level flag must translate");
+        assert_eq!(
+            unit.kotlinc_args,
+            vec![
+                "-Xwarning-level=REDUNDANT_CLI_ARG:disabled".to_string(),
+                "-Xwarning-level=DEPRECATED_LANGUAGE_VERSION:error".to_string(),
+            ]
+        );
+        assert!(unit.inert.is_empty(), "{:?}", unit.inert);
+
+        for arguments in [
+            args(&[
+                "--kotlinc-arg",
+                "-Xwarning-level=REDUNDANT_CLI_ARG:loud",
+                "--srcs",
+                "A.kt",
+                "--out",
+                "o.jar",
+            ]),
+            args(&[
+                "--x_warning_level",
+                "REDUNDANT_CLI_ARG",
+                "--srcs",
+                "A.kt",
+                "--out",
+                "o.jar",
+            ]),
+        ] {
+            let refusal = translate(&arguments).unwrap_err();
+            assert!(
+                matches!(refusal, Refusal::Unsupported(_)),
+                "{arguments:?}: {refusal:?}"
+            );
+        }
+
+        let refusal = translate(&args(&[
+            "--x_warning_level",
+            "--srcs",
+            "A.kt",
+            "--out",
+            "o.jar",
+        ]))
+        .unwrap_err();
+        assert_eq!(
+            refusal,
+            Refusal::Malformed(
+                "--x_warning_level requires at least one NAME:SEVERITY value".to_string()
+            )
         );
     }
 

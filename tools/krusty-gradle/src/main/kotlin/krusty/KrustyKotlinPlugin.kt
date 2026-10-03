@@ -325,8 +325,9 @@ private fun compilerArguments(task: KotlinJvmCompile): List<String> {
     reject(options.progressiveMode.getOrElse(false), "progressiveMode")
     reject(options.extraWarnings.getOrElse(false), "extraWarnings")
     reject(options.suppressWarnings.getOrElse(false), "suppressWarnings")
-    // The CLI currently accepts warning-policy switches without changing diagnostic severity.
-    // Reject them at the Gradle boundary instead of reporting a successful but weaker compile.
+    // `-Werror` is not yet modeled, so its structured equivalent stays rejected. Named
+    // `-Xwarning-level` policy is forwarded to the compiler, whose diagnostic registry is the
+    // authoritative place to validate names and apply severities.
     reject(options.allWarningsAsErrors.getOrElse(false), "allWarningsAsErrors")
     reject(options.verbose.getOrElse(false), "verbose")
     reject(task.multiPlatformEnabled.getOrElse(false), "multiPlatformEnabled")
@@ -419,10 +420,14 @@ private fun validateFreeArguments(input: List<String>): ArrayList<String> {
             // Several -opt-in arguments are legal (the Kotlin build applies one per opt-in); only an
             // exact repeat is a duplicate, so the key is the argument itself.
             argument.startsWith("-opt-in=") && argument.substringAfter('=').isNotEmpty() -> argument
-            argument == "-Werror" || argument.startsWith("-Xwarning-level=") ->
+            argument == "-Werror" ->
                 throw GradleException(
                     "krusty does not support warning policy freeCompilerArg '$argument'",
                 )
+            // The compiler owns the typed diagnostic registry and severity validation. Several
+            // entries are legal (one per diagnostic), so only an exact repeated argument shares a
+            // key at this transport boundary.
+            argument.startsWith("-Xwarning-level=") -> argument
             argument.startsWith("-Xlambdas=") && argument.substringAfter('=') in setOf("indy", "class") -> "-Xlambdas"
             argument.startsWith("-Xsam-conversions=") && argument.substringAfter('=') in setOf("indy", "class") -> "-Xsam-conversions"
             argument == "-Xname-based-destructuring" -> "-Xname-based-destructuring"

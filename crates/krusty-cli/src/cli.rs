@@ -5,6 +5,7 @@
 //! An explicit option that selects an output shape krusty cannot emit is instead a fatal error: it
 //! must never compile successfully under a different shape.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use krusty::jvm::compilation_inputs::JvmCompilationInputInventory;
@@ -14,6 +15,91 @@ use krusty::language_settings::LanguageSettings;
 use krusty::language_version::LanguageVersion;
 use krusty::plugins::cli::PluginConfig;
 use krusty::plugins::registry::{Activation, NativePlugins, PluginRegistry};
+
+/// Stable diagnostic names exposed through kotlinc's `-Xwarning-level` contract. A name enters
+/// this registry only when krusty can emit that diagnostic; accepting any other spelling would
+/// promise a policy the compiler cannot apply.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum WarningName {
+    DeprecatedLanguageVersion,
+    ExperimentalLanguageVersion,
+    RedundantCliArg,
+}
+
+impl WarningName {
+    fn parse(name: &str) -> Option<Self> {
+        Some(match name {
+            "DEPRECATED_LANGUAGE_VERSION" => Self::DeprecatedLanguageVersion,
+            "EXPERIMENTAL_LANGUAGE_VERSION" => Self::ExperimentalLanguageVersion,
+            "REDUNDANT_CLI_ARG" => Self::RedundantCliArg,
+            _ => return None,
+        })
+    }
+}
+
+/// The three severities accepted by kotlinc's warning-level option.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WarningLevel {
+    Error,
+    Warning,
+    Disabled,
+}
+
+impl WarningLevel {
+    fn parse(level: &str) -> Option<Self> {
+        Some(match level {
+            "error" => Self::Error,
+            "warning" => Self::Warning,
+            "disabled" => Self::Disabled,
+            _ => return None,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct WarningPolicy {
+    configured: BTreeMap<WarningName, WarningLevel>,
+}
+
+impl WarningPolicy {
+    fn configure(&mut self, value: &str) -> Result<(), String> {
+        let Some((name, severity)) = value.split_once(':') else {
+            return Err(format!(
+                "invalid value '{value}' for -Xwarning-level: expected <NAME>:<error|warning|disabled>"
+            ));
+        };
+        let Some(name) = WarningName::parse(name) else {
+            let name = value.split_once(':').map_or(value, |(name, _)| name);
+            return Err(format!("warning with name \"{name}\" does not exist"));
+        };
+        let Some(severity) = WarningLevel::parse(severity) else {
+            return Err(format!(
+                "invalid severity '{severity}' in -Xwarning-level={value}; supported severities: error, warning, disabled"
+            ));
+        };
+        if self.configured.contains_key(&name) {
+            let name = value.split_once(':').map_or(value, |(name, _)| name);
+            return Err(format!(
+                "warning with name \"{name}\" has already been configured"
+            ));
+        }
+        self.configured.insert(name, severity);
+        Ok(())
+    }
+
+    pub fn level(&self, name: WarningName) -> WarningLevel {
+        self.configured
+            .get(&name)
+            .copied()
+            .unwrap_or(WarningLevel::Warning)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CliWarning {
+    pub name: WarningName,
+    pub message: String,
+}
 
 pub struct Options {
     /// Output directory or `.jar` (kotlinc `-d`).
@@ -36,9 +122,10 @@ pub struct Options {
     /// part of kotlinc's accepted surface: the driver prints kotlinc's warning and compilation is
     /// unchanged. Currently only `-Xwasm-kclass-fqn` — see the match arm for the measured contract.
     pub unsupported_flag_warnings: Vec<String>,
-    /// Standard language/API compatibility warnings emitted by kotlinc for deprecated or
-    /// experimental public levels.
-    pub version_warnings: Vec<String>,
+    /// Named CLI warnings and their configured severity. These are evaluated before compilation;
+    /// an `error` level fails the invocation and `disabled` removes the diagnostic entirely.
+    pub warning_policy: WarningPolicy,
+    pub warnings: Vec<CliWarning>,
     /// Invalid or explicitly requested-but-unemittable options. The driver reports these and exits
     /// before compilation rather than silently producing a different artifact.
     pub errors: Vec<String>,
@@ -95,7 +182,8 @@ impl Default for Options {
             language_settings: LanguageSettings::default(),
             ignored: Vec::new(),
             unsupported_flag_warnings: Vec::new(),
-            version_warnings: Vec::new(),
+            warning_policy: WarningPolicy::default(),
+            warnings: Vec::new(),
             errors: Vec::new(),
             print_version: false,
             print_help: false,
@@ -180,26 +268,56 @@ fn parse_metadata_level(value: &str) -> Option<[i32; 3]> {
     LanguageVersion::parse_supported_metadata_stamp(value).map(LanguageVersion::metadata_version)
 }
 
-fn version_warnings(settings: &LanguageSettings) -> Vec<String> {
+fn settings_warnings(settings: &LanguageSettings, feature_arguments: &[String]) -> Vec<CliWarning> {
     let mut warnings = Vec::new();
     if settings.language_version >= LanguageVersion::V2_2
         && settings.api_version <= LanguageVersion::V2_1
     {
-        warnings.push(format!(
-            "API version {} is deprecated and its support will be removed in a future version of Kotlin. Update the version to 2.2.",
-            settings.api_version
-        ));
+        warnings.push(CliWarning {
+            name: WarningName::DeprecatedLanguageVersion,
+            message: format!(
+                "API version {} is deprecated and its support will be removed in a future version of Kotlin. Update the version to 2.2.",
+                settings.api_version
+            ),
+        });
     }
     match settings.language_version {
-        LanguageVersion::V2_0 | LanguageVersion::V2_1 => warnings.push(format!(
-            "language version {} is deprecated and its support will be removed in a future version of Kotlin. Update the version to 2.2.",
-            settings.language_version
-        )),
-        LanguageVersion::V2_5 | LanguageVersion::V2_6 => warnings.push(format!(
-            "language version {} is experimental, there are no backwards compatibility guarantees for new language and library features. Use the stable version 2.4 instead.",
-            settings.language_version
-        )),
+        LanguageVersion::V2_0 | LanguageVersion::V2_1 => warnings.push(CliWarning {
+            name: WarningName::DeprecatedLanguageVersion,
+            message: format!(
+                "language version {} is deprecated and its support will be removed in a future version of Kotlin. Update the version to 2.2.",
+                settings.language_version
+            ),
+        }),
+        LanguageVersion::V2_5 | LanguageVersion::V2_6 => warnings.push(CliWarning {
+            name: WarningName::ExperimentalLanguageVersion,
+            message: format!(
+                "language version {} is experimental, there are no backwards compatibility guarantees for new language and library features. Use the stable version 2.4 instead.",
+                settings.language_version
+            ),
+        }),
         _ => {}
+    }
+    let mut applied = krusty::features::LangFeatures::for_versions(
+        settings.language_version,
+        settings.api_version,
+    );
+    for argument in feature_arguments {
+        let before = applied.clone();
+        let recognized = applied.apply_cli_arg(argument);
+        debug_assert!(
+            recognized,
+            "the parser retained only language feature arguments"
+        );
+        if applied == before {
+            warnings.push(CliWarning {
+                name: WarningName::RedundantCliArg,
+                message: format!(
+                    "The argument '{argument}' is redundant for the current language version {}.",
+                    settings.language_version
+                ),
+            });
+        }
     }
     warnings
 }
@@ -294,6 +412,15 @@ pub fn parse(argv: impl IntoIterator<Item = String>) -> Options {
                     .errors
                     .push("missing value for -Xmetadata-version".to_string()),
             },
+            // `-Xwarning-level=<NAME>:<SEVERITY>` configures one exact diagnostic identity. Like
+            // kotlinc, reject an unknown or repeated name; retaining an opaque spelling as an
+            // ignored option would claim a warning policy the compiler never applies.
+            flag if flag.starts_with("-Xwarning-level=") => {
+                let value = flag.strip_prefix("-Xwarning-level=").unwrap_or_default();
+                if let Err(error) = opts.warning_policy.configure(value) {
+                    opts.errors.push(error);
+                }
+            }
             "-jdk-home" => {
                 if let Some(v) = it.next() {
                     opts.jdk_home = Some(PathBuf::from(v));
@@ -449,7 +576,7 @@ pub fn parse(argv: impl IntoIterator<Item = String>) -> Options {
     };
     match LanguageSettings::new(language_version, api_version, &language_feature_arguments) {
         Ok(settings) => {
-            opts.version_warnings = version_warnings(&settings);
+            opts.warnings = settings_warnings(&settings, &language_feature_arguments);
             opts.language_settings = settings;
         }
         Err(error) => opts.errors.push(error),
@@ -1082,7 +1209,7 @@ mod tests {
             assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
             assert_eq!(parsed.language_settings.language_version, experimental);
             assert_eq!(parsed.language_settings.api_version, experimental);
-            assert_eq!(parsed.version_warnings.len(), 1);
+            assert_eq!(parsed.warnings.len(), 1);
         }
 
         let supported = "2.0 (deprecated), 2.1 (deprecated), 2.2, 2.3, 2.4, 2.5 (experimental), 2.6 (experimental)";
@@ -1168,8 +1295,11 @@ mod tests {
     #[test]
     fn version_status_warnings_match_kotlinc() {
         assert_eq!(
-            parse_args(&["-language-version", "2.0", "f.kt"]).version_warnings,
-            ["language version 2.0 is deprecated and its support will be removed in a future version of Kotlin. Update the version to 2.2.".to_owned()]
+            parse_args(&["-language-version", "2.0", "f.kt"]).warnings,
+            [CliWarning {
+                name: WarningName::DeprecatedLanguageVersion,
+                message: "language version 2.0 is deprecated and its support will be removed in a future version of Kotlin. Update the version to 2.2.".to_owned(),
+            }]
         );
         assert_eq!(
             parse_args(&[
@@ -1179,11 +1309,115 @@ mod tests {
                 "2.0",
                 "f.kt",
             ])
-            .version_warnings,
+            .warnings,
             [
-                "API version 2.0 is deprecated and its support will be removed in a future version of Kotlin. Update the version to 2.2.".to_owned(),
-                "language version 2.5 is experimental, there are no backwards compatibility guarantees for new language and library features. Use the stable version 2.4 instead.".to_owned(),
+                CliWarning {
+                    name: WarningName::DeprecatedLanguageVersion,
+                    message: "API version 2.0 is deprecated and its support will be removed in a future version of Kotlin. Update the version to 2.2.".to_owned(),
+                },
+                CliWarning {
+                    name: WarningName::ExperimentalLanguageVersion,
+                    message: "language version 2.5 is experimental, there are no backwards compatibility guarantees for new language and library features. Use the stable version 2.4 instead.".to_owned(),
+                },
             ]
+        );
+    }
+
+    /// Warning policy is keyed by stable diagnostic identity. Unknown and repeated names are
+    /// rejected instead of being retained as inert strings that the compiler cannot honor.
+    #[test]
+    fn warning_level_configures_named_diagnostics() {
+        for (severity, expected) in [
+            ("error", WarningLevel::Error),
+            ("warning", WarningLevel::Warning),
+            ("disabled", WarningLevel::Disabled),
+        ] {
+            let flag = format!("-Xwarning-level=REDUNDANT_CLI_ARG:{severity}");
+            let parsed = parse_args(&[&flag, "f.kt"]);
+            assert!(parsed.errors.is_empty(), "{flag}: {:?}", parsed.errors);
+            assert!(parsed.ignored.is_empty(), "{flag}: {:?}", parsed.ignored);
+            assert_eq!(
+                parsed.warning_policy.level(WarningName::RedundantCliArg),
+                expected,
+                "{flag}"
+            );
+            assert_eq!(parsed.sources, vec!["f.kt".to_string()]);
+        }
+
+        let parsed = parse_args(&[
+            "-Xwarning-level=NO_SUCH_DIAGNOSTIC:error",
+            "-Xwarning-level=REDUNDANT_CLI_ARG:disabled",
+            "f.kt",
+        ]);
+        assert_eq!(
+            parsed.errors,
+            ["warning with name \"NO_SUCH_DIAGNOSTIC\" does not exist".to_string()]
+        );
+        assert_eq!(
+            parsed.warning_policy.level(WarningName::RedundantCliArg),
+            WarningLevel::Disabled
+        );
+
+        for (bad, severity) in [
+            ("-Xwarning-level=REDUNDANT_CLI_ARG:loud", "loud"),
+            // kotlinc's spellings are case-sensitive.
+            ("-Xwarning-level=REDUNDANT_CLI_ARG:DISABLED", "DISABLED"),
+            ("-Xwarning-level=REDUNDANT_CLI_ARG:Warning", "Warning"),
+            ("-Xwarning-level=REDUNDANT_CLI_ARG:", ""),
+        ] {
+            let parsed = parse_args(&[bad, "f.kt"]);
+            assert_eq!(
+                parsed.errors,
+                [format!(
+                    "invalid severity '{severity}' in -Xwarning-level=REDUNDANT_CLI_ARG:{severity}; \
+                     supported severities: error, warning, disabled"
+                )],
+                "{bad}"
+            );
+            assert!(parsed.ignored.is_empty(), "{bad}: {:?}", parsed.ignored);
+        }
+
+        let parsed = parse_args(&["-Xwarning-level=REDUNDANT_CLI_ARG", "f.kt"]);
+        assert_eq!(
+            parsed.errors,
+            [
+                "invalid value 'REDUNDANT_CLI_ARG' for -Xwarning-level: expected \
+             <NAME>:<error|warning|disabled>"
+                    .to_string()
+            ]
+        );
+        let parsed = parse_args(&["-Xwarning-level=:disabled", "f.kt"]);
+        assert_eq!(
+            parsed.errors,
+            ["warning with name \"\" does not exist".to_string()]
+        );
+
+        let parsed = parse_args(&[
+            "-Xwarning-level=REDUNDANT_CLI_ARG:error",
+            "-Xwarning-level=REDUNDANT_CLI_ARG:disabled",
+            "f.kt",
+        ]);
+        assert_eq!(
+            parsed.errors,
+            ["warning with name \"REDUNDANT_CLI_ARG\" has already been configured".to_string()]
+        );
+        assert_eq!(
+            parsed.warning_policy.level(WarningName::RedundantCliArg),
+            WarningLevel::Error,
+            "a rejected duplicate must not mutate the first configuration"
+        );
+    }
+
+    #[test]
+    fn redundant_language_feature_argument_has_a_named_warning() {
+        let parsed = parse_args(&["-language-version", "2.4", "-Xcontext-parameters", "f.kt"]);
+        assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+        assert_eq!(
+            parsed.warnings,
+            [CliWarning {
+                name: WarningName::RedundantCliArg,
+                message: "The argument '-Xcontext-parameters' is redundant for the current language version 2.4.".to_string(),
+            }]
         );
     }
 

@@ -873,10 +873,6 @@ mod tests {
                     "krusty does not support warning policy freeCompilerArg '-Werror'",
                 ),
                 (
-                    "warning-level",
-                    "krusty does not support warning policy freeCompilerArg '-Xwarning-level=REDUNDANT_CLI_ARG:disabled'",
-                ),
-                (
                     "empty-opt-in",
                     "compilerOptions.optIn contains an empty marker",
                 ),
@@ -915,6 +911,36 @@ mod tests {
                 assert!(!log.exists(), "{case} must fail before execing krusty");
             }
 
+            // Gradle transports named warning policy without duplicating the compiler's registry.
+            // Malformed policy therefore reaches krusty and is rejected by the same parser as a
+            // direct CLI or Bazel-worker invocation.
+            for (case, argument) in [
+                (
+                    "warning-level-bad-severity",
+                    "-Xwarning-level=REDUNDANT_CLI_ARG:loud",
+                ),
+                (
+                    "warning-level-missing-colon",
+                    "-Xwarning-level=REDUNDANT_CLI_ARG",
+                ),
+            ] {
+                let _ = std::fs::remove_file(&log);
+                let result = build()
+                    .property("krusty.negative", case)
+                    .tasks([":compiler:util:compileKotlin"])
+                    .run();
+                assert!(result.is_err(), "negative case {case} succeeded");
+                let invocation = single_invocation(&log);
+                assert_eq!(
+                    invocation
+                        .iter()
+                        .filter(|actual| actual.as_str() == argument)
+                        .count(),
+                    1,
+                    "{case}: {invocation:?}",
+                );
+            }
+
             // Gradle forwards standard version values without duplicating kotlinc's
             // release-specific version table in the plugin. The shared compiler settings boundary
             // rejects values unavailable in the selected 2.4.10 compiler after seeing the exact
@@ -939,6 +965,26 @@ mod tests {
                     "{case}: {invocation:?}",
                 );
             }
+
+            // A well-formed named policy is forwarded to and applied by the compiler. Disabling a
+            // warning does not change classfile bytes, so this compile succeeds normally.
+            let _ = std::fs::remove_file(&log);
+            build()
+                .property("krusty.negative", "warning-level")
+                .tasks([":compiler:util:compileKotlin"])
+                .run()
+                .unwrap_or_else(|error| panic!("warning-level forwarding: {error}"));
+            let forwarded = single_invocation(&log);
+            assert_eq!(
+                forwarded
+                    .iter()
+                    .filter(|argument| {
+                        argument.as_str() == "-Xwarning-level=REDUNDANT_CLI_ARG:disabled"
+                    })
+                    .count(),
+                1,
+                "{forwarded:?}"
+            );
 
             // The standard Gradle languageVersion reaches the compiler unchanged. No krusty-only
             // property and no metadata-only substitution is part of the contract.
@@ -1419,6 +1465,8 @@ tasks.withType<KotlinJvmCompile>().configureEach {
             "duplicate-inert-flag" -> freeCompilerArgs.add("-Xskip-prerelease-check")
             "free-werror" -> freeCompilerArgs.add("-Werror")
             "warning-level" -> freeCompilerArgs.add("-Xwarning-level=REDUNDANT_CLI_ARG:disabled")
+            "warning-level-bad-severity" -> freeCompilerArgs.add("-Xwarning-level=REDUNDANT_CLI_ARG:loud")
+            "warning-level-missing-colon" -> freeCompilerArgs.add("-Xwarning-level=REDUNDANT_CLI_ARG")
             "opt-in-overlap" -> freeCompilerArgs.add("-opt-in=krusty.fixture.ExperimentalFirstApi")
         }
     }
