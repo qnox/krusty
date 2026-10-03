@@ -717,7 +717,7 @@ fn select_adapted_bound_instance_candidate(
     overloads: &[FunctionInfo],
     expected: &'static crate::types::FnSig,
     mut is_assignable: impl FnMut(Ty, Ty) -> bool,
-    mut shape_at_least_as_specific: impl FnMut(&[Ty], Ty, &[Ty], Ty) -> bool,
+    shape_at_least_as_specific: impl FnMut(&[Ty], Ty, &[Ty], Ty) -> bool,
 ) -> Option<(FunctionInfo, Vec<AdaptedRefArgument>, Vec<Ty>)> {
     let mut candidates = overloads
         .iter()

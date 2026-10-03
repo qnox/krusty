@@ -234,7 +234,7 @@ impl Checker<'_> {
                 (!dominated).then_some(index)
             })
             .collect::<Vec<_>>();
-        let maximal = if expected.is_some() {
+        let maximal: Vec<usize> = if expected.is_some() {
             let specificity = receiver_maximal
                 .iter()
                 .map(|&index| {
