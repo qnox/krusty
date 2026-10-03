@@ -30,7 +30,7 @@ fun box(): String {\n\
 
 #[test]
 fn a_generic_local_function_reference_boxes_a_primitive_argument() {
-    common::expect_box_ok_with_stdlib(
+    common::expect_box_same_as_kotlinc(
         r#"
 fun box(): String {
     var status = "FAIL"
@@ -48,7 +48,7 @@ fun box(): String {
 
 #[test]
 fn a_generic_local_extension_reference_boxes_a_primitive_argument() {
-    common::expect_box_ok_with_stdlib(
+    common::expect_box_same_as_kotlinc(
         r#"
 fun box(): String {
     var status = "FAIL"
@@ -66,7 +66,7 @@ fun box(): String {
 
 #[test]
 fn a_generic_local_vararg_reference_boxes_a_primitive_element() {
-    common::expect_box_ok_with_stdlib(
+    common::expect_box_same_as_kotlinc(
         r#"
 fun box(): String {
     var status = "FAIL"
