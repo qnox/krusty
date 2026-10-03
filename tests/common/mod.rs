@@ -20,7 +20,10 @@ pub mod source_set_compile;
 // conformance binary compiles this module too and uses none of them, exactly as it uses none of
 // the JVM-only helpers below.
 #[allow(unused_imports)]
-pub use native_backend::{expect_native_box, expect_native_decline, expect_native_exit};
+pub use native_backend::{
+    expect_native_box, expect_native_decline, expect_native_exit, native_sys_header,
+    write_native_runtime_headers,
+};
 pub use source_set_compile::compile_in_process_files;
 
 pub(crate) use kotlin_metadata::raw_kotlin_metadata;

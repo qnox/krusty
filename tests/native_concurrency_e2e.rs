@@ -166,7 +166,7 @@ fn the_runtime_starts_no_threads() {
     // links this runtime is single-threaded by construction, not by convention. This reads the
     // syscall header rather than trusting a comment, so adding `clone` without revisiting the
     // memory-model question fails here first.
-    let syscalls = krusty::native::runtime::SYS_HEADER;
+    let syscalls = common::native_sys_header();
     for forbidden in ["SYS_CLONE", "clone", "futex", "pthread"] {
         assert!(
             !syscalls.contains(forbidden),

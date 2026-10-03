@@ -78,13 +78,7 @@ fn host() -> Option<NativeTarget> {
 /// optimizer is free to keep in a register the conservative scanner then finds.
 fn compile_c(scratch: &Path, source: &str) -> Vec<u8> {
     let compiler = c_compiler().expect("checked by `available`");
-    std::fs::write(
-        scratch.join("krusty_sys.h"),
-        krusty::native::runtime::SYS_HEADER,
-    )
-    .expect("write header");
-    std::fs::write(scratch.join("krusty_rt.h"), krusty::native::runtime::HEADER)
-        .expect("write header");
+    common::write_native_runtime_headers(scratch).expect("write runtime headers");
     let program = scratch.join("gc_test.c");
     std::fs::write(&program, source).expect("write program");
     let object = scratch.join("gc_test.o");

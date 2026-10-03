@@ -9,6 +9,20 @@
 
 use super::{jdk_modules, run_freshly_written};
 
+const NATIVE_SYS_HEADER: &str = include_str!("../../src/native/runtime/krusty_sys.h");
+const NATIVE_RUNTIME_HEADER: &str = include_str!("../../src/native/runtime/krusty_rt.h");
+
+/// The runtime's syscall surface, for tests that pin the native concurrency contract.
+pub fn native_sys_header() -> &'static str {
+    NATIVE_SYS_HEADER
+}
+
+/// Materialize the two public runtime headers beside a C integration-test driver.
+pub fn write_native_runtime_headers(directory: &std::path::Path) -> std::io::Result<()> {
+    std::fs::write(directory.join("krusty_sys.h"), NATIVE_SYS_HEADER)?;
+    std::fs::write(directory.join("krusty_rt.h"), NATIVE_RUNTIME_HEADER)
+}
+
 /// The prefix every native decline carries, so a decline can be told from a wrong answer.
 const NATIVE_DECLINE: &str = "krusty: the native backend does not support ";
 
