@@ -401,6 +401,27 @@ fun box(): String {
 }
 
 #[test]
+fn expectation_free_local_extension_specificity_does_not_compare_return_types() {
+    expect_box_same_as_kotlinc(
+        r#"
+class OwnedReferenceReceiver
+
+fun box(): String {
+    fun OwnedReferenceReceiver.select(value: Any): String = "general"
+    fun OwnedReferenceReceiver.select(value: String): Any = "specific"
+
+    val receiver = OwnedReferenceReceiver()
+    val bound = receiver::select
+    val unbound = OwnedReferenceReceiver::select
+    val actual = "${bound("value")}:${unbound(receiver, "value")}"
+    return if (actual == "specific:specific") "OK" else actual
+}
+"#,
+        "ExpectationFreeLocalExtensionParameterSpecificity",
+    );
+}
+
+#[test]
 fn a_defaulted_constructor_beats_an_equally_specific_vararg() {
     expect_box_same_as_kotlinc(
         r#"

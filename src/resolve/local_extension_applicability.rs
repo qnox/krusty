@@ -273,16 +273,12 @@ impl Checker<'_> {
                             return false;
                         }
                         let other = &unique[other_index];
-                        self.callable_ref_shape_at_least_as_specific(
+                        self.callable_ref_parameter_shape_at_least_as_specific(
                             &other.parameters,
-                            other.ret,
                             &current.parameters,
-                            current.ret,
-                        ) && !self.callable_ref_shape_at_least_as_specific(
+                        ) && !self.callable_ref_parameter_shape_at_least_as_specific(
                             &current.parameters,
-                            current.ret,
                             &other.parameters,
-                            other.ret,
                         )
                     })
                 })

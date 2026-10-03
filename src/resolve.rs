@@ -40112,24 +40112,6 @@ impl<'a> Checker<'a> {
         )
     }
 
-    fn callable_ref_shape_at_least_as_specific(
-        &self,
-        left_params: &[Ty],
-        left_ret: Ty,
-        right_params: &[Ty],
-        right_ret: Ty,
-    ) -> bool {
-        if left_params.len() != right_params.len() {
-            return false;
-        }
-        let context = crate::assignable::TyCtx::new();
-        left_params
-            .iter()
-            .zip(right_params)
-            .all(|(left, right)| crate::assignable::is_subtype(&context, self, *left, *right))
-            && crate::assignable::is_subtype(&context, self, left_ret, right_ret)
-    }
-
     fn callable_ref_parameter_shape_at_least_as_specific(
         &self,
         left_params: &[Ty],
