@@ -62,7 +62,6 @@ reflection/typeOf/typeAliasedType.kt
 reified/capture.kt
 reified/innerObject.kt
 reified/reifiedTypeArgumentWithIntersectionTypeAsTypeArgument.kt
-sam/constructors/sameWrapperClass.kt
 typeErasure/funWithReifiedTypeParameterContextParameterAndExtensionReceiverInsideClass.kt
 unsignedTypes/implicitIntegerCoercionNamedArg.kt
 unsignedTypes/signedToUnsignedConversions.kt

@@ -8873,7 +8873,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   its constructor checks and stores `f` in `private final synthetic function: FunctionN`; its method
   is typed as `B` declares it (mangled for value classes) and calls `function.invoke`; and
   `getFunctionDelegate`, `equals` and `hashCode` make two wrappers of one function equal. The
-  conversion is `new` of the wrapper cast to `B`. A Java interface keeps the `invokedynamic`
+  conversion is `new` of the wrapper cast to `B`. An explicit cast of that conversion is the only
+  `checkcast`. A Java interface keeps the `invokedynamic`
   conversion under the default `-Xsam-conversions=indy`. Under `-Xsam-conversions=class`, a
   function value converted to a Java interface uses one shared
   `<FileFacade>$sam$<interface FQ name, dots as underscores>$0` that implements only that

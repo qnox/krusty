@@ -97,33 +97,65 @@ pub(super) fn realize(
                     function_arity,
                 )
             });
-        let construction = ir.add_expr(IrExpr::New {
-            internal: wrapper,
-            args: vec![value],
-            ctor_params: None,
-            ctor_desc: None,
-            external_target: None,
-            defaults: Box::new([]),
-            default_prefix_count: 0,
-        });
+        let enclosed_by_cast = conversion_is_cast_operand(ir, node);
+        let construction = wrapper_construction(wrapper, value);
+        // An explicit cast of the conversion is the only checkcast kotlinc emits. Otherwise the
+        // construction is cast to the interface it converts to.
+        let construction = if enclosed_by_cast {
+            ir.exprs[node as usize] = construction;
+            ir.logical_types
+                .insert(node, Ty::obj_name(target.classifier));
+            node
+        } else {
+            let construction = ir.add_expr(construction);
+            ir.logical_types.insert(construction, Ty::obj_name(wrapper));
+            ir.exprs[node as usize] = IrExpr::TypeOp {
+                op: crate::ir::IrTypeOp::Cast,
+                arg: construction,
+                type_operand: Ty::obj_name(target.classifier),
+            };
+            ir.logical_types
+                .insert(node, Ty::obj_name(target.classifier));
+            construction
+        };
         if target.nullable {
             // The wrapper constructor null-checks `function`. A nullable conversion must not call
             // it when the value is null; emission branches around this exact construction.
             realizations.nullable_constructions.insert(construction);
         }
-        ir.logical_types.insert(construction, Ty::obj_name(wrapper));
-        // kotlinc casts the construction to the interface it converts to.
-        ir.exprs[node as usize] = IrExpr::TypeOp {
-            op: crate::ir::IrTypeOp::Cast,
-            arg: construction,
-            type_operand: Ty::obj_name(target.classifier),
-        };
-        ir.logical_types
-            .insert(node, Ty::obj_name(target.classifier));
         // kotlinc gives the construction no line of its own: the line starts at the wrapped value.
         ir.expr_source_lines.remove(&node);
     }
     realizations
+}
+
+fn wrapper_construction(wrapper: TypeName, value: ExprId) -> IrExpr {
+    IrExpr::New {
+        internal: wrapper,
+        args: vec![value],
+        ctor_params: None,
+        ctor_desc: None,
+        external_target: None,
+        defaults: Box::new([]),
+        default_prefix_count: 0,
+    }
+}
+
+/// The conversion node is the operand of an explicit cast, so that cast is the checkcast.
+///
+/// `as Object` lowers as `CastNonNull` because `Object` is non-null. Both operations are the
+/// source cast; a compiler-inserted cast to the interface would be a second `checkcast`.
+fn conversion_is_cast_operand(ir: &IrFile, node: ExprId) -> bool {
+    ir.exprs.iter().any(|expression| {
+        matches!(
+            expression,
+            IrExpr::TypeOp {
+                op: crate::ir::IrTypeOp::Cast | crate::ir::IrTypeOp::CastNonNull,
+                arg,
+                ..
+            } if *arg == node
+        )
+    })
 }
 
 /// Whether `target` converts an existing function value into the file's shared wrapper.
