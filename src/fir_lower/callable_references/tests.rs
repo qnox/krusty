@@ -1497,13 +1497,18 @@ fn fun_interface_constructor_reference_returns_a_checked_sam_delegate() {
     );
     assert!(ir.exprs.iter().any(|expression| matches!(
         expression,
-        IrExpr::Lambda {
-            impl_fn,
-            arity: 1,
-            captures,
-            sam: None,
-            ..
-        } if *impl_fn == constructor && captures.is_empty()
+        IrExpr::CallableReference(reference)
+            if reference.adapter == constructor
+                && reference.captures.is_empty()
+                && reference.bound_receiver.is_none()
+                && reference.adaptation.is_none()
+                && matches!(
+                    reference.target,
+                    crate::ir::IrCallableReferenceTarget::Classifier {
+                        classifier,
+                        operation: crate::ir::IrClassifierCallable::SamConstructor,
+                    } if classifier.matches("Action")
+                )
     )));
     assert!(ir.exprs.iter().any(|expression| matches!(
         expression,

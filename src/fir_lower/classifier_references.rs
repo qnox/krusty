@@ -394,10 +394,16 @@ impl BodyLowering<'_> {
         let (classifier, parameters, result) =
             (callable.classifier, callable.parameters, callable.result);
         let failed = || FirLoweringFailure::UnsupportedClassifierCallableReference(classifier);
-        // An adapted reflective reference needs a reflected signature distinct from its adapter,
-        // which this carrier does not represent. A plain function-typed use stays a lambda.
+        // An adapted reflective enum `valueOf` needs a reflected signature distinct from its
+        // adapter, which this carrier does not represent. A plain function-typed enum `valueOf`
+        // stays a lambda. A fun-interface constructor is a reference for both uses: equality
+        // compares the interface `Class`, including when the expected type is a function type.
         let reflective_enum_value_of =
             reflective && matches!(callable.operation, FirClassifierCallable::EnumValueOf);
+        let sam_constructor = matches!(
+            callable.operation,
+            FirClassifierCallable::SamConstructor { .. }
+        );
         if reflective_enum_value_of && adaptation.is_some() {
             return Err(failed());
         }
@@ -471,6 +477,16 @@ impl BodyLowering<'_> {
             return Ok(self.structural_classifier_reference(
                 classifier,
                 crate::ir::IrClassifierCallable::EnumValueOf,
+                function,
+                reference_ty,
+                parameters.iter().map(|parameter| parameter.get()).collect(),
+                result.get(),
+            ));
+        }
+        if sam_constructor {
+            return Ok(self.structural_classifier_reference(
+                classifier,
+                crate::ir::IrClassifierCallable::SamConstructor,
                 function,
                 reference_ty,
                 parameters.iter().map(|parameter| parameter.get()).collect(),
