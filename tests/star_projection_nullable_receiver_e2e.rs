@@ -94,8 +94,9 @@ fn nullable_formals_respect_use_site_projection_direction() {
 }
 
 /// Control: a NON-nullable formal `Iterable<T>` with `T : Any` genuinely does not accept `List<*>`.
-/// kotlinc rejects it, and so must krusty — with exactly this one diagnostic, so the fix cannot make
-/// every star fit a non-null bound.
+/// Kotlinc reports both the enclosing return mismatch and the rejected receiver candidate, and so
+/// must krusty; the exact comparison also prevents the fix from making every star fit a non-null
+/// bound.
 #[test]
 fn a_star_projection_still_fails_a_non_nullable_formal_receiver() {
     let result = common::compiler_diagnostics(
