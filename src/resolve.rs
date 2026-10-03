@@ -60,6 +60,7 @@ mod call_diagnostics;
 mod call_result_constraint;
 mod call_result_templates;
 mod callable_reference_lhs;
+mod callable_reference_prefilter;
 mod callable_reference_selection;
 mod candidate_display;
 mod capture_analysis;
@@ -114,8 +115,10 @@ use lambda_call_shapes::UntypedLambdaCall;
 mod lambda_expectation;
 mod lambda_returns;
 mod lexical_bindings;
+mod local_callable_reference_selection;
 mod local_capture_dependencies;
 mod local_class_scope;
+mod local_extension_applicability;
 mod local_method_dependencies;
 mod loop_flow;
 mod member_extension_selection;
@@ -2639,71 +2642,6 @@ fn local_function_candidate_score(
         arg_tys,
         argument_fits,
     )
-}
-
-/// Apply a local extension's own generic receiver bindings to its call-site signature. The
-/// declaration remains generic; only the selected call shape is specialized (`A<R>` on `A<Int>`
-/// yields `R := Int`).
-fn specialize_local_extension_signature(
-    source: &dyn SymbolSource,
-    signature: &Signature,
-    receiver: Ty,
-) -> Signature {
-    let Some(generic) = signature
-        .generic_sig
-        .as_ref()
-        .filter(|generic| generic.receiver.is_some())
-    else {
-        return signature.clone();
-    };
-    let mut bindings = crate::symbol_resolver::GSigBinds::new();
-    crate::symbol_resolver::unify_ty(
-        generic.receiver.expect("filtered generic receiver"),
-        receiver,
-        &mut bindings,
-    );
-    let mut selected = signature.clone();
-    selected.params = generic
-        .params
-        .iter()
-        .map(|parameter| {
-            crate::symbol_resolver::instantiate_slot(
-                source,
-                Some(generic),
-                *parameter,
-                &bindings,
-                crate::symbol_resolver::TypePosition::In,
-                crate::symbol_resolver::UnboundSpecialization::Preserve,
-            )
-        })
-        .collect();
-    selected.ret = crate::symbol_resolver::instantiate_slot(
-        source,
-        Some(generic),
-        generic.ret,
-        &bindings,
-        crate::symbol_resolver::TypePosition::Out,
-        crate::symbol_resolver::UnboundSpecialization::Preserve,
-    );
-    selected.source_receiver = generic.receiver.map(|declared| {
-        crate::symbol_resolver::instantiate_slot(
-            source,
-            Some(generic),
-            declared,
-            &bindings,
-            crate::symbol_resolver::TypePosition::Invariant,
-            crate::symbol_resolver::UnboundSpecialization::Preserve,
-        )
-    });
-    selected.lambda_param_types = selected
-        .params
-        .iter()
-        .map(|parameter| match parameter {
-            Ty::Fun(function) => function.params.clone(),
-            _ => Vec::new(),
-        })
-        .collect();
-    selected
 }
 
 /// Simple type name → JVM internal name, split into a SHARED read-only base (the library/classpath
@@ -16696,20 +16634,13 @@ impl<'a> Checker<'a> {
                         let Ty::Fun(expected_function) = expected.non_null() else {
                             unreachable!("guarded function expectation")
                         };
-                        match self.classifier_callable_reference_adapts_to(
+                        match self.receiver_qualified_callable_reference_adapts_to(
                             scope,
                             *receiver,
                             name,
                             expected_function,
                         ) {
                             Some(true) => Some(2),
-                            // An outer callable's own inference variables are not concrete
-                            // reference inputs yet. A classifier-qualified reference may be the
-                            // evidence that fixes them (`choose(Int::toString, ::generic)`). A
-                            // failed concrete compatibility probe is therefore inconclusive while
-                            // that function shape is still open; the selected outer candidate
-                            // resolves its references in source order and checks the completed
-                            // shape. Fully concrete expectations remain an applicability verdict.
                             Some(false) if expected.mentions_ty_param() => Some(0),
                             Some(false) => None,
                             None => Some(0),
@@ -40181,12 +40112,10 @@ impl<'a> Checker<'a> {
         )
     }
 
-    fn callable_ref_shape_at_least_as_specific(
+    fn callable_ref_parameter_shape_at_least_as_specific(
         &self,
         left_params: &[Ty],
-        left_ret: Ty,
         right_params: &[Ty],
-        right_ret: Ty,
     ) -> bool {
         if left_params.len() != right_params.len() {
             return false;
@@ -40196,7 +40125,6 @@ impl<'a> Checker<'a> {
             .iter()
             .zip(right_params)
             .all(|(left, right)| crate::assignable::is_subtype(&context, self, *left, *right))
-            && crate::assignable::is_subtype(&context, self, left_ret, right_ret)
     }
 
     /// Apply an expected callable shape to one generic declaration before reference adaptation.
@@ -40333,12 +40261,11 @@ impl<'a> Checker<'a> {
                         .map(AdaptedRefArgument::Value)
                         .collect(),
                 };
-                let cost = Self::adapted_ref_plan_cost(&plan);
                 // Overload specificity is a property of the DECLARATIONS. The expected/adapted
                 // function shape is intentionally absent here: every compatible overload adapts to
                 // that same shape, so comparing it would turn `C::pick` for `(C, Int) -> Unit` into
                 // a false tie between `pick(Int)` and `pick(Any)`.
-                Some((function, reference_params, plan, cost, type_arguments))
+                Some((function, reference_params, plan, type_arguments))
             })
             .collect::<Vec<_>>();
         if candidates.is_empty() {
@@ -40356,45 +40283,31 @@ impl<'a> Checker<'a> {
             .map(|(function, ..)| function.receiver_rank)
             .min()
             .expect("nonempty candidates");
-        let mut candidates = candidates
+        let candidates = candidates
             .into_iter()
             .filter(|(function, ..)| function.receiver_rank == nearest)
             .collect::<Vec<_>>();
-        let best_cost = candidates
+        let specificity = candidates
             .iter()
-            .map(|candidate| candidate.3)
-            .min()
-            .expect("nonempty nearest extension candidates");
-        candidates.retain(|candidate| candidate.3 == best_cost);
-        let maximal = candidates
-            .iter()
-            .enumerate()
-            .filter_map(|(index, (current, current_params, ..))| {
-                let dominated = candidates.iter().enumerate().any(
-                    |(other_index, (other, other_params, ..))| {
-                        index != other_index
-                            && self.callable_ref_shape_at_least_as_specific(
-                                other_params,
-                                other.callable.ret,
-                                current_params,
-                                current.callable.ret,
-                            )
-                            && !self.callable_ref_shape_at_least_as_specific(
-                                current_params,
-                                current.callable.ret,
-                                other_params,
-                                other.callable.ret,
-                            )
-                    },
-                );
-                (!dominated).then_some(index)
+            .map(|(function, parameters, plan, _)| {
+                callable_reference_selection::AdaptedReferenceSpecificity {
+                    parameters,
+                    plan,
+                    is_vararg: function.call_sig.vararg_index.is_some(),
+                }
             })
             .collect::<Vec<_>>();
+        let maximal = callable_reference_selection::maximal_adapted_references(
+            &specificity,
+            |left_params, right_params| {
+                self.callable_ref_parameter_shape_at_least_as_specific(left_params, right_params)
+            },
+        );
         match maximal.as_slice() {
             [selected] => ExtensionRefSelection::Selected(Box::new((
                 candidates[*selected].0.clone(),
                 candidates[*selected].2.clone(),
-                candidates[*selected].4.clone(),
+                candidates[*selected].3.clone(),
             ))),
             _ => ExtensionRefSelection::Ambiguous(
                 maximal
@@ -41318,24 +41231,9 @@ impl<'a> Checker<'a> {
         };
 
         if let Some(receiver) = receiver {
-            if let Some(result) =
-                self.classifier_callable_reference_adapts_to(scope, *receiver, name, expected)
-            {
-                return result;
-            }
-            // A bound VALUE reference needs the same adaptation planning as the authoritative
-            // selected-reference pass. Its natural reflective type may still expose parameters
-            // that a default or vararg adapter omits (`c::f`, where `f(x = default)`, under a
-            // zero-argument SAM). The expectation-free probe has already typed the receiver; use
-            // that semantic value type to test the declaration plan without mutating the reference.
-            let receiver_ty = self.expr_types[receiver.0 as usize];
-            if receiver_ty != Ty::Error {
-                let candidates = self.callable_ref_candidates(receiver_ty, name);
-                return self
-                    .select_bound_callable_ref(&candidates, Some(Ty::Fun(expected)))
-                    .is_some();
-            }
-            return false;
+            return self
+                .receiver_qualified_callable_reference_adapts_to(scope, *receiver, name, expected)
+                .unwrap_or(false);
         }
 
         if let Some(overloads) = self.lookup_local_fun_overloads(scope, name) {
@@ -41433,12 +41331,10 @@ impl<'a> Checker<'a> {
                 None,
                 expected,
                 |actual, target| self.receiver_is_assignable(actual, target),
-                |left_params, left_ret, right_params, right_ret| {
-                    self.callable_ref_shape_at_least_as_specific(
+                |left_params, right_params| {
+                    self.callable_ref_parameter_shape_at_least_as_specific(
                         left_params,
-                        left_ret,
                         right_params,
-                        right_ret,
                     )
                 },
             )
@@ -41495,7 +41391,9 @@ impl<'a> Checker<'a> {
             && candidates.overloads.is_empty()
             && candidates.extension_property.is_none()
         {
-            return None;
+            return self
+                .local_extension_reference_adapts_to(scope, name, receiver_ty, expected, true)
+                .then_some(true);
         }
 
         if candidates.property.as_ref().is_some_and(|property| {
@@ -41535,23 +41433,20 @@ impl<'a> Checker<'a> {
             return Some(true);
         }
         Some(
-            candidates
-                .extension_property
-                .as_ref()
-                .is_some_and(|property| {
-                    self.callable_ref_is_compatible(
-                        std::slice::from_ref(&receiver_ty),
-                        property.prop_ty,
-                        false,
-                        expected,
-                        true,
-                    )
-                }),
+            self.local_extension_reference_adapts_to(scope, name, receiver_ty, expected, true)
+                || candidates
+                    .extension_property
+                    .as_ref()
+                    .is_some_and(|property| {
+                        self.callable_ref_is_compatible(
+                            std::slice::from_ref(&receiver_ty),
+                            property.prop_ty,
+                            false,
+                            expected,
+                            true,
+                        )
+                    }),
         )
-    }
-
-    fn adapted_ref_plan_cost(plan: &[AdaptedRefArgument]) -> usize {
-        callable_reference_selection::plan_cost(plan)
     }
 
     fn adapted_ref_plan_is_identity(plan: &[AdaptedRefArgument]) -> bool {
@@ -41729,23 +41624,20 @@ impl<'a> Checker<'a> {
                 let argument_mapping = (!direct_prefix
                     && vararg_collect.is_none()
                     && !legacy_trailing_omission)
-                    .then_some(plan);
+                    .then(|| plan.clone());
                 let needs_adapter = supplied != declared
                     || vararg_collect.is_some()
                     || argument_mapping.is_some()
                     || function.callable.suspend != expected.suspend
                     || (expected.ret == Ty::Unit && function.callable.ret != Ty::Unit);
-                let adaptation_cost = usize::from(argument_mapping.is_some()) * 100
-                    + usize::from(vararg_collect.is_some()) * 10
-                    + declared.saturating_sub(supplied);
                 Some((
                     function,
                     adapted_expected,
                     needs_adapter,
                     vararg_collect,
                     argument_mapping,
-                    adaptation_cost,
                     type_arguments,
+                    plan,
                 ))
             })
             .collect::<Vec<_>>();
@@ -41802,31 +41694,22 @@ impl<'a> Checker<'a> {
                 return Some(Ty::Error);
             }
         }
-        let best_cost = candidates.iter().map(|candidate| candidate.5).min()?;
-        let maximal = candidates
+        let specificity = candidates
             .iter()
-            .enumerate()
-            .filter(|(_, candidate)| candidate.5 == best_cost)
-            .filter_map(|(index, current)| {
-                let dominated = candidates.iter().enumerate().any(|(other_index, other)| {
-                    index != other_index
-                        && other.5 == best_cost
-                        && self.callable_ref_shape_at_least_as_specific(
-                            &other.0.semantic_params(),
-                            other.0.callable.ret,
-                            &current.0.semantic_params(),
-                            current.0.callable.ret,
-                        )
-                        && !self.callable_ref_shape_at_least_as_specific(
-                            &current.0.semantic_params(),
-                            current.0.callable.ret,
-                            &other.0.semantic_params(),
-                            other.0.callable.ret,
-                        )
-                });
-                (!dominated).then_some(index)
-            })
+            .map(
+                |candidate| callable_reference_selection::AdaptedReferenceSpecificity {
+                    parameters: &candidate.0.callable.params,
+                    plan: &candidate.6,
+                    is_vararg: candidate.0.call_sig.vararg_index.is_some(),
+                },
+            )
             .collect::<Vec<_>>();
+        let maximal = callable_reference_selection::maximal_adapted_references(
+            &specificity,
+            |left_params, right_params| {
+                self.callable_ref_parameter_shape_at_least_as_specific(left_params, right_params)
+            },
+        );
         let [selected_index] = maximal.as_slice() else {
             if maximal.is_empty() {
                 return None;
@@ -41849,8 +41732,8 @@ impl<'a> Checker<'a> {
             needs_adapter,
             vararg_collect,
             argument_mapping,
-            _,
             type_arguments,
+            _,
         ) = &candidates[*selected_index];
         if !type_arguments.is_empty() {
             self.resolved_call_type_args.insert(
@@ -43913,12 +43796,10 @@ impl<'a> Checker<'a> {
                 None,
                 expected,
                 |actual, target| self.receiver_is_assignable(actual, target),
-                |left_params, left_ret, right_params, right_ret| {
-                    self.callable_ref_shape_at_least_as_specific(
+                |left_params, right_params| {
+                    self.callable_ref_parameter_shape_at_least_as_specific(
                         left_params,
-                        left_ret,
                         right_params,
-                        right_ret,
                     )
                 },
             )?;
@@ -65643,8 +65524,9 @@ impl<'a> Checker<'a> {
                 )?;
                 Self::adapted_ref_plan_is_identity(&plan).then_some((constructor, None))
             });
-            direct.or_else(|| {
-                let mut candidates = classifier
+            let mut ambiguous = Vec::new();
+            let selected = direct.or_else(|| {
+                let candidates = classifier
                     .constructors
                     .iter()
                     .filter_map(|constructor| {
@@ -65653,17 +65535,53 @@ impl<'a> Checker<'a> {
                             &constructor.call_sig,
                             parameters,
                         )?;
-                        let cost = Self::adapted_ref_plan_cost(&plan);
-                        Some((constructor.clone(), plan, cost))
+                        Some((constructor.clone(), plan))
                     })
                     .collect::<Vec<_>>();
-                let best = candidates.iter().map(|candidate| candidate.2).min()?;
-                candidates.retain(|candidate| candidate.2 == best);
-                match candidates.as_slice() {
-                    [(constructor, plan, _)] => Some((constructor.clone(), Some(plan.clone()))),
-                    _ => None,
+                let specificity = candidates
+                    .iter()
+                    .map(|(constructor, plan)| {
+                        callable_reference_selection::AdaptedReferenceSpecificity {
+                            parameters: &constructor.params,
+                            plan,
+                            is_vararg: constructor.call_sig.vararg_index.is_some(),
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let maximal = callable_reference_selection::maximal_adapted_references(
+                    &specificity,
+                    |left_params, right_params| {
+                        self.callable_ref_parameter_shape_at_least_as_specific(
+                            left_params,
+                            right_params,
+                        )
+                    },
+                );
+                let [selected] = maximal.as_slice() else {
+                    ambiguous.extend(maximal.into_iter().map(|index| candidates[index].0.clone()));
+                    return None;
+                };
+                let (constructor, plan) = &candidates[*selected];
+                Some((constructor.clone(), Some(plan.clone())))
+            });
+            if !ambiguous.is_empty() {
+                let name = match self.file.expr(expression) {
+                    Expr::CallableRef { name, .. } => name.as_str(),
+                    _ => "constructor",
+                };
+                let mut message = "overload resolution ambiguity between candidates:".to_string();
+                for candidate in ambiguous {
+                    let mut displayed = candidate.clone();
+                    displayed.ret = target;
+                    let display = Self::library_member_candidate_display("constructor", &displayed);
+                    message.push('\n');
+                    message.push_str(display.strip_prefix("fun ").unwrap_or(&display));
                 }
-            })
+                self.diags
+                    .error(self.member_name_span(expression, name), message);
+                return Some(Ty::Error);
+            }
+            selected
         } else {
             let mut constructors = classifier.constructors.iter();
             let selected = constructors.next().cloned();
@@ -65998,10 +65916,7 @@ impl<'a> Checker<'a> {
             } else {
                 receiver_ty
             };
-            let expected_function = match expected {
-                Some(Ty::Fun(function)) => Some(function),
-                _ => None,
-            };
+            let expected_function = local_extension_applicability::function_expectation(expected);
             let classifier_reference = if nullable_receiver {
                 None
             } else if let Some(expected) = expected_function {
@@ -66015,12 +65930,10 @@ impl<'a> Checker<'a> {
                             None,
                             expected,
                             |actual, target| self.receiver_is_assignable(actual, target),
-                            |left_params, left_ret, right_params, right_ret| {
-                                self.callable_ref_shape_at_least_as_specific(
+                            |left_params, right_params| {
+                                self.callable_ref_parameter_shape_at_least_as_specific(
                                     left_params,
-                                    left_ret,
                                     right_params,
-                                    right_ret,
                                 )
                             },
                         )
@@ -66184,107 +66097,47 @@ impl<'a> Checker<'a> {
             // it does in a bound `value::name` reference. Its receiver is the leading function parameter;
             // the local declaration's `Signature` remains the sole callable shape and lowering receives
             // the already-selected local declaration id.
-            if let Some(overloads) = self.lookup_local_fun_overloads(scope, name) {
-                let expected_function = match expected {
-                    Some(Ty::Fun(function)) => Some(function),
-                    _ => None,
-                };
-                let candidates = overloads
-                    .into_iter()
-                    .filter(|(_, signature)| {
-                        signature.source_receiver.is_some_and(|declared| {
-                            self.receiver_is_assignable(extension_receiver_ty, declared)
-                        })
-                    })
-                    .filter_map(|(statement, signature)| {
-                        let (value_parameters, ret) = match expected_function {
-                            Some(expected) => {
-                                let (_, expected_values) = expected.params.split_first()?;
-                                self.contextual_local_function_reference_shape(
-                                    &signature,
-                                    Some(extension_receiver_ty),
-                                    expected_values,
-                                    expected.ret,
-                                )?
-                            }
-                            None => Self::local_function_reference_shape(
-                                &signature,
-                                Some(extension_receiver_ty),
-                            ),
-                        };
-                        let mut parameters = vec![extension_receiver_ty];
-                        parameters.extend(value_parameters.iter().copied());
-                        let adaptation = expected_function.map(|expected| {
-                            let expected_receiver = *expected.params.first()?;
-                            if !self
-                                .receiver_is_assignable(expected_receiver, extension_receiver_ty)
-                                || (signature.is_suspend() && !expected.suspend)
-                                || (expected.ret != Ty::Unit
-                                    && !self.receiver_is_assignable(ret, expected.ret))
-                            {
-                                return None;
-                            }
-                            let call_sig = crate::libraries::CallSig {
-                                param_defaults: signature.param_defaults.clone(),
-                                required: signature.required,
-                                vararg: signature.vararg(),
-                                vararg_index: signature.vararg_index,
-                                ..crate::libraries::CallSig::default()
-                            };
-                            let plan = self.callable_ref_parameter_plan(
-                                &value_parameters,
-                                &call_sig,
-                                &expected.params[1..],
-                            )?;
-                            Some((plan, expected.suspend && !signature.is_suspend()))
-                        });
-                        if matches!(adaptation, Some(None)) {
-                            return None;
-                        }
-                        Some((statement, signature, parameters, ret, adaptation.flatten()))
-                    })
-                    .collect::<Vec<_>>();
-                if let [(statement, signature, parameters, ret, adaptation)] = candidates.as_slice()
-                {
-                    if let Some((plan, suspend_conversion)) = adaptation {
-                        if Self::adapted_ref_plan_is_identity(plan) && !suspend_conversion {
-                            self.mark_local_function_ref(expression, *statement, false);
-                        } else {
-                            self.expr_lowers.insert(
-                                expression,
-                                ExprLowering::AdaptedLocalFunctionRef {
-                                    stmt_id: *statement,
-                                    bound_receiver: false,
-                                    argument_mapping: plan.clone(),
-                                    signature: Ty::Fun(
-                                        expected_function.expect("adapted reference"),
-                                    ),
-                                    suspend_conversion: *suspend_conversion,
-                                },
-                            );
-                        }
+            let candidate = match self.selected_local_extension_reference(
+                expression,
+                scope,
+                name,
+                extension_receiver_ty,
+                expected_function,
+                true,
+            ) {
+                Ok(candidate) => candidate,
+                Err(error) => return Some(error),
+            };
+            if let Some(candidate) = candidate {
+                if let Some((plan, suspend_conversion)) = &candidate.adaptation {
+                    if Self::adapted_ref_plan_is_identity(plan) && !suspend_conversion {
+                        self.mark_local_function_ref(expression, candidate.statement, false);
                     } else {
-                        self.mark_local_function_ref(expression, *statement, false);
+                        self.expr_lowers.insert(
+                            expression,
+                            ExprLowering::AdaptedLocalFunctionRef {
+                                stmt_id: candidate.statement,
+                                bound_receiver: false,
+                                argument_mapping: plan.clone(),
+                                signature: Ty::Fun(expected_function.expect("adapted reference")),
+                                suspend_conversion: *suspend_conversion,
+                            },
+                        );
                     }
-                    let ty = expected_function.map_or_else(
-                        || {
-                            if signature.is_suspend() {
-                                Ty::fun_suspend(parameters.clone(), *ret)
-                            } else {
-                                Ty::fun(parameters.clone(), *ret)
-                            }
-                        },
-                        Ty::Fun,
-                    );
-                    return Some(ty);
+                } else {
+                    self.mark_local_function_ref(expression, candidate.statement, false);
                 }
-                if candidates.len() > 1 {
-                    self.diags.error(
-                        self.member_name_span(expression, name),
-                        format!("overload resolution ambiguity for callable reference '{name}'"),
-                    );
-                    return Some(Ty::Error);
-                }
+                let ty = expected_function.map_or_else(
+                    || {
+                        if candidate.signature.is_suspend() {
+                            Ty::fun_suspend(candidate.parameters.clone(), candidate.ret)
+                        } else {
+                            Ty::fun(candidate.parameters.clone(), candidate.ret)
+                        }
+                    },
+                    Ty::Fun,
+                );
+                return Some(ty);
             }
             match self.nested_constructor_reference(
                 scope,
@@ -66391,12 +66244,10 @@ impl<'a> Checker<'a> {
                         Some(receiver_ty),
                         expected,
                         |actual, target| self.receiver_is_assignable(actual, target),
-                        |left_params, left_ret, right_params, right_ret| {
-                            self.callable_ref_shape_at_least_as_specific(
+                        |left_params, right_params| {
+                            self.callable_ref_parameter_shape_at_least_as_specific(
                                 left_params,
-                                left_ret,
                                 right_params,
-                                right_ret,
                             )
                         },
                     )
@@ -66603,99 +66454,12 @@ impl<'a> Checker<'a> {
             }
             // A top-level reference without an expected type requires a unique overload.
             if receiver.is_none() {
-                // Local function reference `::localFun` (shadows a same-named top-level fn). Map the
-                // ref to the local fun's decl — the SAME map a local-fun CALL uses — so lowering can
-                // find the lifted static method and prepend its captures.
-                if let Some(Ty::Fun(expected)) = expected {
-                    if let Some(overloads) = self.lookup_local_fun_overloads(scope, &name) {
-                        let local_functions = overloads
-                            .into_iter()
-                            .filter(|(_, signature)| signature.source_receiver.is_none())
-                            .collect::<Vec<_>>();
-                        if !local_functions.is_empty() {
-                            let mut candidates = local_functions
-                                .iter()
-                                .filter_map(|(statement, signature)| {
-                                    if signature.is_suspend() && !expected.suspend {
-                                        return None;
-                                    }
-                                    let (params, ret) = self
-                                        .contextual_local_function_reference_shape(
-                                            signature,
-                                            None,
-                                            &expected.params,
-                                            expected.ret,
-                                        )?;
-                                    let call_sig = crate::libraries::CallSig {
-                                        param_defaults: signature.param_defaults.clone(),
-                                        required: signature.required,
-                                        vararg: signature.vararg(),
-                                        vararg_index: signature.vararg_index,
-                                        ..crate::libraries::CallSig::default()
-                                    };
-                                    let plan = self.callable_ref_parameter_plan(
-                                        &params,
-                                        &call_sig,
-                                        &expected.params,
-                                    )?;
-                                    if !self.callable_ref_is_compatible(
-                                        &expected.params,
-                                        ret,
-                                        signature.is_suspend(),
-                                        expected,
-                                        true,
-                                    ) {
-                                        return None;
-                                    }
-                                    let cost = Self::adapted_ref_plan_cost(&plan);
-                                    Some((
-                                        *statement,
-                                        plan,
-                                        cost,
-                                        expected.suspend && !signature.is_suspend(),
-                                    ))
-                                })
-                                .collect::<Vec<_>>();
-                            if let Some(best) = candidates.iter().map(|candidate| candidate.2).min()
-                            {
-                                candidates.retain(|candidate| candidate.2 == best);
-                            }
-                            if let [(statement, plan, _, suspend_conversion)] =
-                                candidates.as_slice()
-                            {
-                                let identity = Self::adapted_ref_plan_is_identity(plan);
-                                if identity && !suspend_conversion {
-                                    self.mark_local_function_ref(e, *statement, false);
-                                } else {
-                                    self.expr_lowers.insert(
-                                        e,
-                                        ExprLowering::AdaptedLocalFunctionRef {
-                                            stmt_id: *statement,
-                                            bound_receiver: false,
-                                            argument_mapping: plan.clone(),
-                                            signature: Ty::Fun(expected),
-                                            suspend_conversion: *suspend_conversion,
-                                        },
-                                    );
-                                }
-                                return self.set(e, Ty::Fun(expected));
-                            }
-                            self.diags.error(
-                                self.member_name_span(e, &name),
-                                if candidates.is_empty() {
-                                    format!("none of the local function candidates for '{name}' is applicable")
-                                } else {
-                                    format!("overload resolution ambiguity for callable reference '{name}'")
-                                },
-                            );
-                            return self.set(e, Ty::Error);
-                        }
-                    }
-                }
-                if let Some((stmt_id, sig)) = self.lookup_local_fun(scope, &name) {
-                    self.mark_local_function_ref(e, stmt_id, false);
-                    let (params, ret) = Self::local_function_reference_shape(&sig, None);
-                    return self.set(e, Ty::fun(params, ret));
+                // A lexical local shadows the same-named top-level family. Selection records the
+                // lifted declaration here; lowering only consumes that stable decision.
+                if let Some(ty) =
+                    self.select_receiverless_local_reference(scope, e, &name, expected)
+                {
+                    return self.set(e, ty);
                 }
                 // The static scopes open here name associated declarations without a receiver.
                 for rung in self.implicit_rungs(scope) {
@@ -67098,10 +66862,8 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
-                let expected_function = match expected {
-                    Some(Ty::Fun(function)) => Some(function),
-                    _ => None,
-                };
+                let expected_function =
+                    local_extension_applicability::function_expectation(expected);
                 let extension_receiver =
                     self.expression_function_type(scope, r, rty).unwrap_or(rty);
                 let extension_candidates = if extension_receiver == rty {
@@ -67111,88 +66873,49 @@ impl<'a> Checker<'a> {
                 } else {
                     self.callable_ref_candidates(extension_receiver, &name)
                 };
-                if let Some(overloads) = self.lookup_local_fun_overloads(scope, &name) {
-                    let candidates = overloads
-                        .into_iter()
-                        .filter(|(_, signature)| {
-                            signature.source_receiver.is_some_and(|declared| {
-                                self.receiver_is_assignable(extension_receiver, declared)
-                            })
-                        })
-                        .filter_map(|(statement, signature)| {
-                            let (params, ret) = match expected_function {
-                                Some(expected) => self.contextual_local_function_reference_shape(
-                                    &signature,
-                                    Some(extension_receiver),
-                                    &expected.params,
-                                    expected.ret,
-                                )?,
-                                None => Self::local_function_reference_shape(
-                                    &signature,
-                                    Some(extension_receiver),
-                                ),
-                            };
-                            let adaptation = expected_function.map(|expected| {
-                                if (signature.is_suspend() && !expected.suspend)
-                                    || (expected.ret != Ty::Unit
-                                        && !self.receiver_is_assignable(ret, expected.ret))
-                                {
-                                    return None;
-                                }
-                                let call_sig = crate::libraries::CallSig {
-                                    param_defaults: signature.param_defaults.clone(),
-                                    required: signature.required,
-                                    vararg: signature.vararg(),
-                                    vararg_index: signature.vararg_index,
-                                    ..crate::libraries::CallSig::default()
-                                };
-                                let plan = self.callable_ref_parameter_plan(
-                                    &params,
-                                    &call_sig,
-                                    &expected.params,
-                                )?;
-                                Some((plan, expected.suspend && !signature.is_suspend()))
-                            });
-                            if matches!(adaptation, Some(None)) {
-                                return None;
-                            }
-                            Some((statement, signature, params, ret, adaptation.flatten()))
-                        })
-                        .collect::<Vec<_>>();
-                    if let [(statement, signature, params, ret, adaptation)] = candidates.as_slice()
-                    {
-                        if let Some((plan, suspend_conversion)) = adaptation {
-                            if Self::adapted_ref_plan_is_identity(plan) && !suspend_conversion {
-                                self.mark_local_function_ref(e, *statement, true);
-                            } else {
-                                self.expr_lowers.insert(
-                                    e,
-                                    ExprLowering::AdaptedLocalFunctionRef {
-                                        stmt_id: *statement,
-                                        bound_receiver: true,
-                                        argument_mapping: plan.clone(),
-                                        signature: Ty::Fun(
-                                            expected_function.expect("adapted reference"),
-                                        ),
-                                        suspend_conversion: *suspend_conversion,
-                                    },
-                                );
-                            }
+                let candidate = match self.selected_local_extension_reference(
+                    e,
+                    scope,
+                    &name,
+                    extension_receiver,
+                    expected_function,
+                    false,
+                ) {
+                    Ok(candidate) => candidate,
+                    Err(error) => return self.set(e, error),
+                };
+                if let Some(candidate) = candidate {
+                    if let Some((plan, suspend_conversion)) = &candidate.adaptation {
+                        if Self::adapted_ref_plan_is_identity(plan) && !suspend_conversion {
+                            self.mark_local_function_ref(e, candidate.statement, true);
                         } else {
-                            self.mark_local_function_ref(e, *statement, true);
+                            self.expr_lowers.insert(
+                                e,
+                                ExprLowering::AdaptedLocalFunctionRef {
+                                    stmt_id: candidate.statement,
+                                    bound_receiver: true,
+                                    argument_mapping: plan.clone(),
+                                    signature: Ty::Fun(
+                                        expected_function.expect("adapted reference"),
+                                    ),
+                                    suspend_conversion: *suspend_conversion,
+                                },
+                            );
                         }
-                        let ty = expected_function.map_or_else(
-                            || {
-                                if signature.is_suspend() {
-                                    Ty::fun_suspend(params.clone(), *ret)
-                                } else {
-                                    Ty::fun(params.clone(), *ret)
-                                }
-                            },
-                            Ty::Fun,
-                        );
-                        return self.set(e, ty);
+                    } else {
+                        self.mark_local_function_ref(e, candidate.statement, true);
                     }
+                    let ty = expected_function.map_or_else(
+                        || {
+                            if candidate.signature.is_suspend() {
+                                Ty::fun_suspend(candidate.parameters.clone(), candidate.ret)
+                            } else {
+                                Ty::fun(candidate.parameters.clone(), candidate.ret)
+                            }
+                        },
+                        Ty::Fun,
+                    );
+                    return self.set(e, ty);
                 }
                 let extension_selection = self.select_extension_callable_ref(
                     &extension_candidates,
@@ -68094,14 +67817,17 @@ impl<'a> Checker<'a> {
             let Stmt::LocalFun(_) = self.file.stmt(statement) else {
                 continue;
             };
-            let signature =
-                specialize_local_extension_signature(&self.module, &callable.signature, receiver);
-            let Some(expected_receiver) = signature.source_receiver else {
+            let Some(signature) =
+                local_extension_applicability::applicable_local_extension_signature(
+                    &self.fed_source(),
+                    &callable.signature,
+                    receiver,
+                    |actual, bound| self.generic_bound_admits(actual, bound),
+                    |actual, expected| self.receiver_is_assignable(actual, expected),
+                )
+            else {
                 continue;
             };
-            if !self.receiver_is_assignable(receiver, expected_receiver) {
-                continue;
-            }
             let context_count = signature.context_count.min(signature.params.len());
             let Some(context_args) =
                 self.select_context_arguments(scope, &signature.params[..context_count])
