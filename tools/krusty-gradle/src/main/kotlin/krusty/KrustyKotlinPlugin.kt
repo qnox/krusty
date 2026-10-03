@@ -384,6 +384,11 @@ private val NAME_DESTRUCTURING_MODES = setOf("only-syntax", "name-mismatch", "co
 
 private val JVM_DEFAULT_MODES = setOf("enable", "no-compatibility", "disable")
 private val JVM_DEFAULT_LEGACY_MODES = setOf("all", "all-compatibility", "disable")
+
+// The stamp contract of the CLI's `-Xmetadata-version` (METADATA_STAMP_LEVELS in krusty-cli):
+// an artifact stamp, not a language-semantics switch.
+private val METADATA_STAMP_LEVELS = setOf("2.0", "2.1", "2.2", "2.3", "2.4")
+
 private fun isFreeJvmDefault(argument: String): Boolean =
     argument == "-jvm-default" || argument == "-Xjvm-default" ||
         argument.startsWith("-jvm-default=") || argument.startsWith("-Xjvm-default=")
@@ -419,6 +424,14 @@ private fun validateFreeArguments(input: List<String>): ArrayList<String> {
                 argument.substringAfter('=') in JVM_DEFAULT_MODES -> "-jvm-default"
             argument.startsWith("-Xjvm-default=") &&
                 argument.substringAfter('=') in JVM_DEFAULT_LEGACY_MODES -> "-jvm-default"
+            argument == "-Xmetadata-version" -> throw GradleException(
+                "freeCompilerArg '$argument' needs the '=' form: $argument=<major.minor>",
+            )
+            argument.startsWith("-Xmetadata-version=") &&
+                argument.substringAfter('=') in METADATA_STAMP_LEVELS -> "-Xmetadata-version"
+            argument.startsWith("-Xmetadata-version=") -> throw GradleException(
+                "unsupported freeCompilerArg '$argument'; supported metadata versions: ${METADATA_STAMP_LEVELS.joinToString()}",
+            )
             // Several -opt-in arguments are legal (the Kotlin build applies one per opt-in); only an
             // exact repeat is a duplicate, so the key is the argument itself.
             argument.startsWith("-opt-in=") && argument.substringAfter('=').isNotEmpty() -> argument

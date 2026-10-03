@@ -515,6 +515,7 @@ mod tests {
                 util_classpath.as_str(),
                 "-Xconsistent-data-class-copy-visibility",
                 "-Xskip-prerelease-check",
+                "-Xmetadata-version=2.2",
                 "-language-version",
                 "2.4",
                 "-api-version",
@@ -546,6 +547,7 @@ mod tests {
                 friend_argument.as_str(),
                 "-Xconsistent-data-class-copy-visibility",
                 "-Xskip-prerelease-check",
+                "-Xmetadata-version=2.2",
                 "-language-version",
                 "2.4",
                 "-api-version",
@@ -847,6 +849,18 @@ mod tests {
                 (
                     "jvm-default-bad-mode",
                     "unsupported freeCompilerArg '-jvm-default=sideways'; use a supported compilerOptions property",
+                ),
+                (
+                    "bare-metadata-version",
+                    "freeCompilerArg '-Xmetadata-version' needs the '=' form: -Xmetadata-version=<major.minor>",
+                ),
+                (
+                    "bad-metadata-version",
+                    "unsupported freeCompilerArg '-Xmetadata-version=2.5'; supported metadata versions: 2.0, 2.1, 2.2, 2.3, 2.4",
+                ),
+                (
+                    "empty-metadata-version",
+                    "unsupported freeCompilerArg '-Xmetadata-version='; supported metadata versions: 2.0, 2.1, 2.2, 2.3, 2.4",
                 ),
                 (
                     "old-language-version",
@@ -1331,6 +1345,7 @@ tasks.withType<KotlinJvmCompile>().configureEach {
         )
         freeCompilerArgs.add("-Xconsistent-data-class-copy-visibility")
         freeCompilerArgs.add("-Xskip-prerelease-check")
+        freeCompilerArgs.add("-Xmetadata-version=2.2")
         when (krustyNegative) {
             "structured-option" -> progressiveMode.set(true)
             "all-warnings-as-errors" -> allWarningsAsErrors.set(true)
@@ -1342,6 +1357,9 @@ tasks.withType<KotlinJvmCompile>().configureEach {
             "plugin-free-argument" -> freeCompilerArgs.add("-Xplugin=forbidden.jar")
             "jvm-default-conflict" -> freeCompilerArgs.add("-jvm-default=disable")
             "jvm-default-bad-mode" -> freeCompilerArgs.add("-jvm-default=sideways")
+            "bare-metadata-version" -> freeCompilerArgs.add("-Xmetadata-version")
+            "bad-metadata-version" -> freeCompilerArgs.add("-Xmetadata-version=2.5")
+            "empty-metadata-version" -> freeCompilerArgs.add("-Xmetadata-version=")
             "old-language-version" -> languageVersion.set(KotlinVersion.KOTLIN_2_2)
             "old-api-version" -> apiVersion.set(KotlinVersion.KOTLIN_2_0)
             "progressive-free-argument" -> freeCompilerArgs.add("-progressive")

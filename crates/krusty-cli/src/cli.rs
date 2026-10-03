@@ -289,6 +289,18 @@ pub fn parse(argv: impl IntoIterator<Item = String>) -> Options {
                     .errors
                     .push("missing value for -Xmetadata-version".to_string()),
             },
+            // The `=` form is how a Gradle freeCompilerArg arrives (kotlinc's `-X…` flags take
+            // their values with `=`); the value contract is the same as the space form.
+            flag if flag.starts_with("-Xmetadata-version=") => {
+                let value = flag.strip_prefix("-Xmetadata-version=").unwrap_or_default();
+                match parse_metadata_level(value) {
+                    Some(version) => opts.metadata_version = Some(version),
+                    None => opts.errors.push(format!(
+                        "unknown metadata version: {value}\nSupported metadata versions: {}",
+                        supported_stamp_levels()
+                    )),
+                }
+            }
             "-jdk-home" => {
                 if let Some(v) = it.next() {
                     opts.jdk_home = Some(PathBuf::from(v));
@@ -637,7 +649,8 @@ Common options (kotlinc-compatible):
   -jvm-target <v>        class-file version to emit (1.8→v52, 9→v53, …, 25→v69; default v52)
   -language-version <v>  language semantics to compile (only 2.4 is implemented)
   -Xmetadata-version <v> internal artifact stamp for @kotlin.Metadata and the
-                         .kotlin_module header (2.0–2.4; does not change semantics)
+                         .kotlin_module header (2.0–2.4; does not change semantics);
+                         the -Xmetadata-version=<v> spelling is accepted as well
   -version              print version and exit
   -jvm-default <mode>   interface default-method strategy: enable | no-compatibility
                         (legacy -Xjvm-default=all | all-compatibility)
@@ -982,9 +995,15 @@ mod tests {
         assert!(stamp.errors.is_empty(), "{:?}", stamp.errors);
         assert!(stamp.ignored.is_empty(), "{:?}", stamp.ignored);
 
+        // The `=` form is how a Gradle freeCompilerArg arrives; it selects the same stamp.
+        let stamp = parse_args(&["-Xmetadata-version=2.2", "f.kt"]);
+        assert_eq!(stamp.metadata_version, Some([2, 2, 0]));
+        assert!(stamp.errors.is_empty(), "{:?}", stamp.errors);
+        assert!(stamp.ignored.is_empty(), "{:?}", stamp.ignored);
+
         let supported = "2.0, 2.1, 2.2, 2.3, 2.4";
         for bad in [
-            "banana", "2", "2.4.0", "2.x", "-2.2", "+2.2", "0.0", "2.5", "999.1",
+            "banana", "2", "2.4.0", "2.x", "-2.2", "+2.2", "0.0", "2.5", "999.1", "",
         ] {
             let language = parse_args(&["-language-version", bad, "f.kt"]);
             assert_eq!(
@@ -1002,6 +1021,21 @@ mod tests {
                     "unknown metadata version: {bad}\nSupported metadata versions: {supported}"
                 )],
                 "{bad:?}"
+            );
+            let equals_form = format!("-Xmetadata-version={bad}");
+            let metadata = parse_args(&[equals_form.as_str(), "f.kt"]);
+            assert_eq!(metadata.metadata_version, None, "{bad:?}");
+            assert_eq!(
+                metadata.errors,
+                [format!(
+                    "unknown metadata version: {bad}\nSupported metadata versions: {supported}"
+                )],
+                "{bad:?}"
+            );
+            assert!(
+                metadata.ignored.is_empty(),
+                "{bad:?}: {:?}",
+                metadata.ignored
             );
         }
 

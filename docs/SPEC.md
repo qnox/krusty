@@ -10113,7 +10113,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   kotlinc's `-language-version` both gates language semantics and selects the version written into
   `@kotlin.Metadata` and the `.kotlin_module` header. krusty implements 2.4 only, so a public
   `-language-version` other than 2.4 is rejected; 2.4 leaves the default stamp `[2, 4, 0]`. The
-  internal `-Xmetadata-version X.Y` writes `mv=[X, Y, 0]` and the same version into the module
+  internal `-Xmetadata-version X.Y` (also `-Xmetadata-version=X.Y`, the Gradle freeCompilerArg
+  form) writes `mv=[X, Y, 0]` and the same version into the module
   header without claiming those language semantics. The accepted levels are the one contract
   2.0, 2.1, 2.2, 2.3, and 2.4; a patch segment, a sign, or any other pair (including kotlinc's
   experimental 2.5) is an unknown version. `-api-version` stays an accepted-and-ignored

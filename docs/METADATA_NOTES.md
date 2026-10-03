@@ -55,7 +55,8 @@ The "extra leading `00`" is the **`UTF8_MODE_MARKER`** (`BitEncoding`): the d1 p
 Every emitted `@Metadata` carries `mv` (metadata version) and the `.kotlin_module` header carries
 the same version as its first ints after the format marker. The public `-language-version` flag
 selects language semantics and accepts only 2.4, the language krusty implements; it does not change
-the stamp. The internal `-Xmetadata-version X.Y` writes `[X, Y, 0]` for a level on the shared
+the stamp. The internal `-Xmetadata-version X.Y` (also `-Xmetadata-version=X.Y`, the form a Gradle
+freeCompilerArg arrives in) writes `[X, Y, 0]` for a level on the shared
 contract 2.0–2.4. Without that input the stamp is `[2, 4, 0]`
 (`EmitOptions::DEFAULT_METADATA_VERSION`), matching the reference toolchain's no-flag output. One
 value threads from `crates/krusty-cli` through `JvmBackend::with_metadata_version` into
