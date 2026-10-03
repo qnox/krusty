@@ -194,3 +194,103 @@ fun read(Mode: Holder) = Mode.entries\n\
 fun box(): String = read(Holder(\"OK\"))\n";
     common::expect_box_same_as_kotlinc(SRC, "enum_entries_shadowed_parameter_root");
 }
+
+#[test]
+fn prioritized_unqualified_entries_inside_an_enum_beats_an_outer_property() {
+    // `enumEntriesCompatibilityCheckPrioritized.kt`: bare `entries` inside the nested enum is the
+    // synthetic property. A companion member, a nested object, a constructor property, an own
+    // property, and an inherited interface property of that spelling keep their declarations.
+    const SRC: &str = "\
+// LANGUAGE: +PrioritizedEnumEntries\n\
+enum class E0 {\n\
+    A1;\n\
+    companion object { val entries = \"OK\" }\n\
+}\n\
+object Shadowing {\n\
+    val entries = \"OK\"\n\
+    enum class E0 {\n\
+        E;\n\
+        fun test() = entries\n\
+    }\n\
+}\n\
+enum class E01 {\n\
+    ;\n\
+    object entries { override fun toString() = \"OK\" }\n\
+}\n\
+enum class E02(val entries: String) {\n\
+    E(\"OK\");\n\
+    fun test() = entries\n\
+}\n\
+var e03Res: String? = null\n\
+enum class E03 {\n\
+    E(\"OK\");\n\
+    constructor(entries: String) { e03Res = entries }\n\
+}\n\
+enum class E04 {\n\
+    E;\n\
+    val entries = \"OK\"\n\
+    fun test() = entries\n\
+}\n\
+interface I05 { val entries: String get() = \"OK\" }\n\
+enum class E05 : I05 {\n\
+    E;\n\
+    fun test() = entries\n\
+}\n\
+fun box(): String {\n\
+    if (E0.entries.first().toString() != \"A1\") return \"companion\"\n\
+    if (Shadowing.E0.E.test().first().toString() != \"E\") return \"shadow\"\n\
+    if (E01.entries.toString() != \"OK\") return \"nested\"\n\
+    if (E02.E.test() != \"OK\") return \"ctor-property\"\n\
+    E03.E\n\
+    if (e03Res != \"OK\") return \"ctor-param\"\n\
+    if (E04.E.entries != \"OK\") return \"own-qualified\"\n\
+    if (E04.E.test() != \"OK\") return \"own\"\n\
+    if (E05.E.test() != \"OK\") return \"interface\"\n\
+    return \"OK\"\n\
+}\n";
+    common::expect_box_same_as_kotlinc(SRC, "enum_entries_unqualified_prioritized");
+}
+
+#[test]
+fn legacy_unqualified_entries_inside_an_enum_keeps_the_outer_property() {
+    const SRC: &str = "\
+// LANGUAGE: -PrioritizedEnumEntries\n\
+enum class E0 {\n\
+    A;\n\
+    companion object { val entries = \"OK\" }\n\
+}\n\
+object Shadowing {\n\
+    val entries = \"OK\"\n\
+    enum class E0 {\n\
+        E;\n\
+        fun test() = entries\n\
+    }\n\
+}\n\
+fun box(): String {\n\
+    if (E0.entries != \"OK\") return \"companion\"\n\
+    if (Shadowing.E0.E.test() != \"OK\") return \"shadow\"\n\
+    return \"OK\"\n\
+}\n";
+    common::expect_box_same_as_kotlinc(SRC, "enum_entries_unqualified_legacy");
+}
+
+#[test]
+fn prioritized_unqualified_entries_write_does_not_fall_through_to_an_outer_var() {
+    const SRC: &str = "\
+// LANGUAGE: +PrioritizedEnumEntries\n\
+object Holder {\n\
+    var entries: Any = \"outer\"\n\
+    enum class Choice {\n\
+        One;\n\
+        fun overwrite() { entries = \"changed\" }\n\
+    }\n\
+}\n";
+    let result = common::compiler_diagnostics(&[("Write.kt", SRC)], &[common::stdlib_jar()]);
+    assert_eq!(result.reference_code, 1, "{}", result.reference_stderr);
+    assert_eq!(
+        common::compiler_errors(&result.krusty_stderr),
+        common::compiler_errors(&result.reference_stderr),
+        "a read-only property on the nearest tower rung must terminate write lookup"
+    );
+    assert_eq!(result.krusty_code, 1, "{}", result.krusty_stderr);
+}
