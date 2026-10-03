@@ -801,6 +801,15 @@ fn read_exact_deadline(fd: i32, buf: &mut [u8], deadline: Instant) -> std::io::R
     Ok(())
 }
 
+/// One thread's JVM runners. `kotlin-reflect` is a separate process: a property reference's
+/// `getDelegate()` calls `getReflected()`, which loads `kotlin-reflect` whenever that jar is
+/// visible and then enforces reflection accessibility. Tests that do not say `// WITH_REFLECT`
+/// must not see the jar, or `::p.getDelegate()` stops throwing `KotlinReflectionNotSupportedError`.
+struct ThreadRunners {
+    plain: Option<BoxRunner>,
+    reflect: Option<BoxRunner>,
+}
+
 /// A persistent JVM subprocess that accepts class bytes and runs box().
 struct BoxRunner {
     _child: Child,
@@ -1190,27 +1199,33 @@ fn kotlin_codegen_box_conformance() {
     // compile time and on the JVM at runtime. No bespoke env var.
     eprintln!("box setup: locate Kotlin runtime jars");
     let stdlib_jar = common::stdlib_jar();
-    // Runtime classpath: every candidate stdlib-family jar (kotlin-stdlib, kotlin-test, reflect,
-    // stdlib-jdk8, coroutines, annotations). The per-thread JVM has a fixed classpath, and extra
-    // jars are harmless to tests that don't use them; the *compile* classpath stays directive-exact.
-    let stdlib = {
-        let mut paths: Vec<String> = Vec::new();
-        for p in [
-            Some(stdlib_jar.clone()),
-            common::kotlin_test_jar(),
-            common::dist_jar("kotlin-reflect.jar")
-                .or_else(|| common::find_jar("kotlin-reflect-", &["sources"])),
-            common::find_jar("kotlin-stdlib-jdk8", &[]),
-            common::find_jar("kotlinx-coroutines-core", &["jdk8"]),
-            common::find_jar("annotations-", &[]),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            paths.push(p.to_string_lossy().into_owned());
+    // Runtime classpath. kotlin-stdlib, kotlin-test, stdlib-jdk8, coroutines, and annotations stay
+    // on every runner. kotlin-reflect does not: `PropertyReference.getDelegate` upgrades to the
+    // reflection implementation as soon as that jar is visible. `// WITH_REFLECT` tests get a
+    // second per-thread JVM whose classpath is this one plus kotlin-reflect. The compile classpath
+    // stays directive-exact either way.
+    let reflect_jar = common::dist_jar("kotlin-reflect.jar")
+        .or_else(|| common::find_jar("kotlin-reflect-", &["sources"]));
+    let mut plain_jars = Vec::new();
+    let mut reflect_jars = Vec::new();
+    let mut add_runtime_jar = |jar: Option<PathBuf>, plain: bool| {
+        let Some(jar) = jar else {
+            return;
+        };
+        let text = jar.to_string_lossy().into_owned();
+        if plain {
+            plain_jars.push(text.clone());
         }
-        paths.join(":")
+        reflect_jars.push(text);
     };
+    add_runtime_jar(Some(stdlib_jar.clone()), true);
+    add_runtime_jar(common::kotlin_test_jar(), true);
+    add_runtime_jar(reflect_jar, false);
+    add_runtime_jar(common::find_jar("kotlin-stdlib-jdk8", &[]), true);
+    add_runtime_jar(common::find_jar("kotlinx-coroutines-core", &["jdk8"]), true);
+    add_runtime_jar(common::find_jar("annotations-", &[]), true);
+    let runtime_classpath = plain_jars.join(":");
+    let reflect_runtime_classpath = reflect_jars.join(":");
     eprintln!("box setup: Kotlin runtime jars ready");
     let limit: usize = env("KRUSTY_BOX_LIMIT")
         .and_then(|v| v.parse().ok())
@@ -1260,7 +1275,14 @@ fn kotlin_codegen_box_conformance() {
     let pool = pb.build().unwrap();
     let n_threads = pool.current_num_threads();
     eprintln!("box setup: compiler pool ready ({n_threads} workers)");
-    let runners: Vec<Mutex<Option<BoxRunner>>> = (0..n_threads).map(|_| Mutex::new(None)).collect();
+    let runners: Vec<Mutex<ThreadRunners>> = (0..n_threads)
+        .map(|_| {
+            Mutex::new(ThreadRunners {
+                plain: None,
+                reflect: None,
+            })
+        })
+        .collect();
     let completed = Arc::new(AtomicUsize::new(0));
     let recent_failures: Arc<Mutex<Vec<(PathBuf, String)>>> = Arc::new(Mutex::new(Vec::new()));
     let active: Arc<Vec<Mutex<Option<ActiveBoxCase>>>> =
@@ -1436,19 +1458,30 @@ fn kotlin_codegen_box_conformance() {
                         return (file.clone(), TestResult::Pass);
                     }
 
-                    // Execute in the per-thread persistent JVM.
+                    // Execute in the per-thread persistent JVM. Reflection tests use the runner
+                    // that can see kotlin-reflect; every other test uses the runner that cannot.
+                    let wants_reflect = krusty::conformance::extra_libs(&src).reflect;
+                    let classpath = if wants_reflect {
+                        &reflect_runtime_classpath
+                    } else {
+                        &runtime_classpath
+                    };
                     let mut guard = runners[tid].lock().unwrap();
-                    if guard.is_none() {
-                        *guard = Some(BoxRunner::new(&java, &runner_cp_str, &stdlib));
+                    let slot = if wants_reflect {
+                        &mut guard.reflect
+                    } else {
+                        &mut guard.plain
+                    };
+                    if slot.is_none() {
+                        *slot = Some(BoxRunner::new(&java, &runner_cp_str, classpath));
                     }
-                    let runner = guard.as_mut().unwrap();
                     let t1 = std::time::Instant::now();
                     mark_box_case_phase(&active, tid, file, "jvm");
-                    let result = match runner.run(&classes, &box_class) {
+                    let result = match slot.as_mut().unwrap().run(&classes, &box_class) {
                         Some(r) => r,
                         None => {
                             // BoxRunner died (JVM crash/OOM); restart it for the next test.
-                            *guard = None;
+                            *slot = None;
                             "ERROR:BoxRunnerCrash".to_string()
                         }
                     };
