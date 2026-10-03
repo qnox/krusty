@@ -83,5 +83,3 @@ reified/capture.kt
 reified/innerObject.kt
 sam/constructors/sameWrapperClass.kt
 typeErasure/funWithReifiedTypeParameterContextParameterAndExtensionReceiverInsideClass.kt
-unsignedTypes/implicitIntegerCoercionNamedArg.kt
-unsignedTypes/signedToUnsignedConversions.kt
