@@ -233,8 +233,8 @@ fn collect_sources(path: &str, out: &mut Vec<String>, ignored: &mut Vec<String>)
 /// Parse argv (already skipping the program name). `@file` argfiles are expanded inline.
 pub fn parse(argv: impl IntoIterator<Item = String>) -> Options {
     let mut opts = Options::default();
-    let mut language_version = LanguageVersion::default();
-    let mut api_version = None;
+    let mut language_version_text = None;
+    let mut api_version_text = None;
     let mut language_feature_arguments = Vec::new();
     let mut raw: Vec<String> = Vec::new();
     for a in argv {
@@ -271,25 +271,13 @@ pub fn parse(argv: impl IntoIterator<Item = String>) -> Options {
             // rebuilt after all arguments have been read so explicit `-XXLanguage` overrides stay
             // ordered independently of where this option appears.
             "-language-version" => match it.next() {
-                Some(v) => match LanguageVersion::parse_supported(&v) {
-                    Some(version) => language_version = version,
-                    None => opts.errors.push(format!(
-                        "unknown language version: {v}\nSupported language versions: {}",
-                        LanguageVersion::supported_text()
-                    )),
-                },
+                Some(v) => language_version_text = Some(v),
                 None => opts
                     .errors
                     .push("missing value for -language-version".to_string()),
             },
             "-api-version" => match it.next() {
-                Some(v) => match LanguageVersion::parse_supported(&v) {
-                    Some(version) => api_version = Some(version),
-                    None => opts.errors.push(format!(
-                        "unknown API version: {v}\nSupported API versions: {}",
-                        LanguageVersion::supported_text()
-                    )),
-                },
+                Some(v) => api_version_text = Some(v),
                 None => opts
                     .errors
                     .push("missing value for -api-version".to_string()),
@@ -430,6 +418,35 @@ pub fn parse(argv: impl IntoIterator<Item = String>) -> Options {
     }
     opts.plugins.finish();
     opts.errors.append(&mut opts.plugins.errors);
+    let reference_version = opts.kotlin_reference_version.unwrap_or_else(|| {
+        krusty::kotlin_version::configured_target().unwrap_or_else(|_| KotlinVersion::newest())
+    });
+    let language_version = match language_version_text {
+        Some(text) => match LanguageVersion::parse_supported_for(&text, reference_version) {
+            Some(version) => version,
+            None => {
+                opts.errors.push(format!(
+                    "unknown language version: {text}\nSupported language versions: {}",
+                    LanguageVersion::supported_text_for(reference_version)
+                ));
+                LanguageVersion::default_for(reference_version)
+            }
+        },
+        None => LanguageVersion::default_for(reference_version),
+    };
+    let api_version = match api_version_text {
+        Some(text) => match LanguageVersion::parse_supported_for(&text, reference_version) {
+            Some(version) => Some(version),
+            None => {
+                opts.errors.push(format!(
+                    "unknown API version: {text}\nSupported API versions: {}",
+                    LanguageVersion::supported_text_for(reference_version)
+                ));
+                None
+            }
+        },
+        None => None,
+    };
     match LanguageSettings::new(language_version, api_version, &language_feature_arguments) {
         Ok(settings) => {
             opts.version_warnings = version_warnings(&settings);
@@ -661,7 +678,7 @@ Common options (kotlinc-compatible):
   -module-name <name>   name of the generated <name>.kotlin_module (default: main)
   -include-runtime      accepted (no-op: krusty does not bundle the stdlib)
   -jvm-target <v>        class-file version to emit (1.8→v52, 9→v53, …, 25→v69; default v52)
-  -language-version <v>  source semantics to compile (2.0–2.6; default stable 2.4)
+  -language-version <v>  source semantics to compile (accepted/default level follows kotlinc release)
   -api-version <v>       Kotlin API surface available to source (defaults to language version)
   -Xmetadata-version <v> internal artifact stamp for @kotlin.Metadata and the
                          .kotlin_module header (2.0–2.4; does not change semantics)
@@ -1104,6 +1121,47 @@ mod tests {
         assert_eq!(
             metadata.errors,
             ["unknown metadata version: 2.5\nSupported metadata versions: 2.0, 2.1, 2.2, 2.3, 2.4".to_owned()]
+        );
+    }
+
+    #[test]
+    fn accepted_levels_and_no_option_default_follow_the_selected_kotlinc_release() {
+        let no_option = parse_args(&["-Xkotlin-reference-version=2.4.10", "f.kt"]);
+        assert!(no_option.errors.is_empty(), "{:?}", no_option.errors);
+        assert_eq!(
+            no_option.language_settings.language_version,
+            LanguageVersion::V2_4
+        );
+        assert_eq!(
+            no_option.language_settings.api_version,
+            LanguageVersion::V2_4
+        );
+
+        let older_release = parse_args(&[
+            "-Xkotlin-reference-version=2.4.10",
+            "-language-version",
+            "2.6",
+            "f.kt",
+        ]);
+        assert_eq!(
+            older_release.errors,
+            ["unknown language version: 2.6\nSupported language versions: 2.0 (deprecated), 2.1 (deprecated), 2.2, 2.3, 2.4, 2.5 (experimental)".to_owned()]
+        );
+
+        let current_release = parse_args(&[
+            "-Xkotlin-reference-version=2.4.20",
+            "-language-version",
+            "2.6",
+            "f.kt",
+        ]);
+        assert!(
+            current_release.errors.is_empty(),
+            "{:?}",
+            current_release.errors
+        );
+        assert_eq!(
+            current_release.language_settings.language_version,
+            LanguageVersion::V2_6
         );
     }
 

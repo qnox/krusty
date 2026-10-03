@@ -6,6 +6,8 @@
 
 use std::fmt;
 
+use crate::kotlin_version::KotlinVersion;
+
 /// A stable Kotlin source-language level, written as `major.minor` on the command line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LanguageVersion {
@@ -22,9 +24,18 @@ impl LanguageVersion {
     pub const V2_5: Self = Self::new(2, 5);
     pub const V2_6: Self = Self::new(2, 6);
 
-    /// Every source/API level accepted by kotlinc 2.4.20. The final two levels are experimental;
-    /// they still belong to the public standard option domain rather than a krusty-only switch.
-    pub const SUPPORTED: [Self; 7] = [
+    /// Source/API levels accepted by every supported compiler in the 2.4 line. `2.5` is
+    /// experimental. kotlinc 2.4.20 adds `2.6`; callers must use [`Self::supported_for`] rather
+    /// than treating this common subset as the complete domain of every release.
+    const SUPPORTED_THROUGH_2_4_10: [Self; 6] = [
+        Self::V2_0,
+        Self::V2_1,
+        Self::V2_2,
+        Self::V2_3,
+        Self::V2_4,
+        Self::V2_5,
+    ];
+    const SUPPORTED_FROM_2_4_20: [Self; 7] = [
         Self::V2_0,
         Self::V2_1,
         Self::V2_2,
@@ -43,8 +54,7 @@ impl LanguageVersion {
         Self { major, minor }
     }
 
-    /// Parse one of the stable levels supported by the selected 2.4 compiler line.
-    pub fn parse_supported(text: &str) -> Option<Self> {
+    fn parse(text: &str) -> Option<Self> {
         let (major, minor) = text.split_once('.')?;
         if minor.contains('.')
             || major.is_empty()
@@ -54,12 +64,27 @@ impl LanguageVersion {
         {
             return None;
         }
-        let version = Self::new(major.parse().ok()?, minor.parse().ok()?);
-        Self::SUPPORTED.contains(&version).then_some(version)
+        Some(Self::new(major.parse().ok()?, minor.parse().ok()?))
     }
 
-    pub fn supported_text() -> String {
-        Self::SUPPORTED
+    /// The language/API option domain of one concrete kotlinc release.
+    pub fn supported_for(compiler: KotlinVersion) -> &'static [Self] {
+        if compiler >= KotlinVersion::V2_4_20 {
+            &Self::SUPPORTED_FROM_2_4_20
+        } else {
+            &Self::SUPPORTED_THROUGH_2_4_10
+        }
+    }
+
+    pub fn parse_supported_for(text: &str, compiler: KotlinVersion) -> Option<Self> {
+        let version = Self::parse(text)?;
+        Self::supported_for(compiler)
+            .contains(&version)
+            .then_some(version)
+    }
+
+    pub fn supported_text_for(compiler: KotlinVersion) -> String {
+        Self::supported_for(compiler)
             .iter()
             .map(|version| match *version {
                 Self::V2_0 | Self::V2_1 => format!("{version} (deprecated)"),
@@ -71,7 +96,7 @@ impl LanguageVersion {
     }
 
     pub fn parse_supported_metadata_stamp(text: &str) -> Option<Self> {
-        let version = Self::parse_supported(text)?;
+        let version = Self::parse(text)?;
         Self::SUPPORTED_METADATA_STAMPS
             .contains(&version)
             .then_some(version)
@@ -89,11 +114,16 @@ impl LanguageVersion {
     pub const fn metadata_version(self) -> [i32; 3] {
         [self.major as i32, self.minor as i32, 0]
     }
+
+    /// The standard no-option language/API default of a selected compiler release.
+    pub const fn default_for(compiler: KotlinVersion) -> Self {
+        Self::new(compiler.major, compiler.minor)
+    }
 }
 
 impl Default for LanguageVersion {
     fn default() -> Self {
-        Self::V2_4
+        Self::default_for(KotlinVersion::V2_4_20)
     }
 }
 
@@ -108,21 +138,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_only_the_supported_stable_levels() {
-        for version in LanguageVersion::SUPPORTED {
+    fn parses_only_the_levels_supported_by_the_selected_compiler() {
+        for &version in LanguageVersion::supported_for(KotlinVersion::V2_4_20) {
             assert_eq!(
-                LanguageVersion::parse_supported(&version.to_string()),
+                LanguageVersion::parse_supported_for(&version.to_string(), KotlinVersion::V2_4_20,),
                 Some(version)
             );
         }
         for value in [
             "", "2", "2.4.0", "+2.2", "-2.2", "2.x", "1.9", "2.7", "999.1",
         ] {
-            assert_eq!(LanguageVersion::parse_supported(value), None, "{value:?}");
+            assert_eq!(
+                LanguageVersion::parse_supported_for(value, KotlinVersion::V2_4_20),
+                None,
+                "{value:?}"
+            );
         }
         assert_eq!(
-            LanguageVersion::supported_text(),
+            LanguageVersion::supported_text_for(KotlinVersion::V2_4_20),
             "2.0 (deprecated), 2.1 (deprecated), 2.2, 2.3, 2.4, 2.5 (experimental), 2.6 (experimental)"
+        );
+        assert_eq!(
+            LanguageVersion::supported_text_for(KotlinVersion::V2_4_10),
+            "2.0 (deprecated), 2.1 (deprecated), 2.2, 2.3, 2.4, 2.5 (experimental)"
+        );
+        assert_eq!(
+            LanguageVersion::parse_supported_for("2.6", KotlinVersion::V2_4_10),
+            None
         );
     }
 
@@ -143,5 +185,9 @@ mod tests {
     fn language_level_maps_to_the_kotlin_metadata_version() {
         assert_eq!(LanguageVersion::V2_2.metadata_version(), [2, 2, 0]);
         assert_eq!(LanguageVersion::default(), LanguageVersion::V2_4);
+        assert_eq!(
+            LanguageVersion::default_for(KotlinVersion::V2_4_0),
+            LanguageVersion::V2_4
+        );
     }
 }

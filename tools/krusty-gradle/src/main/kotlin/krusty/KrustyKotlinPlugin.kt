@@ -320,12 +320,8 @@ private fun compilerArguments(task: KotlinJvmCompile): List<String> {
     fun reject(condition: Boolean, name: String) {
         if (condition) throw GradleException("krusty does not support compilerOptions.$name")
     }
-    val languageVersion = options.languageVersion.orNull?.let {
-        supportedLanguageVersion(it.version)
-    }
-    val apiVersion = options.apiVersion.orNull?.let {
-        supportedApiVersion(it.version)
-    }
+    val languageVersion = options.languageVersion.orNull?.version
+    val apiVersion = options.apiVersion.orNull?.version
     reject(options.progressiveMode.getOrElse(false), "progressiveMode")
     reject(options.extraWarnings.getOrElse(false), "extraWarnings")
     reject(options.suppressWarnings.getOrElse(false), "suppressWarnings")
@@ -388,7 +384,6 @@ private val JVM_DEFAULT_LEGACY_MODES = setOf("all", "all-compatibility", "disabl
 // The stamp contract of the CLI's `-Xmetadata-version` (METADATA_STAMP_LEVELS in krusty-cli):
 // an artifact stamp, not a language-semantics switch.
 private val METADATA_STAMP_LEVELS = setOf("2.0", "2.1", "2.2", "2.3", "2.4")
-private val LANGUAGE_API_LEVELS = setOf("2.0", "2.1", "2.2", "2.3", "2.4", "2.5", "2.6")
 
 private fun isFreeJvmDefault(argument: String): Boolean =
     argument == "-jvm-default" || argument == "-Xjvm-default" ||
@@ -465,28 +460,6 @@ private fun reservedFreeArgument(argument: String): String? {
         isOption("-Xplugin", "-P") -> "compiler plugin configuration"
         else -> null
     }
-}
-
-// The standard language and API versions are semantic compiler inputs and are forwarded unchanged.
-// The compiler owns their relationship and declaration-availability checks.
-private fun supportedLanguageVersion(version: String): String {
-    if (version !in LANGUAGE_API_LEVELS) {
-        throw GradleException(
-            "krusty does not support compilerOptions.languageVersion=$version; " +
-                "supported language versions: ${LANGUAGE_API_LEVELS.joinToString()}",
-        )
-    }
-    return version
-}
-
-private fun supportedApiVersion(version: String): String {
-    if (version !in LANGUAGE_API_LEVELS) {
-        throw GradleException(
-            "krusty does not support compilerOptions.apiVersion=$version; " +
-                "supported API versions: ${LANGUAGE_API_LEVELS.joinToString()}",
-        )
-    }
-    return version
 }
 
 private fun supportedKotlinPluginVersion(version: String): String = when (version) {

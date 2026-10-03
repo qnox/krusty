@@ -10143,9 +10143,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   settings are per compilation rather than process-global, because workers and language servers may
   analyze modules at different levels in one process. Gradle forwards
   `compilerOptions.languageVersion` and `compilerOptions.apiVersion` unchanged, with no krusty-only
-  property. The internal `-Xmetadata-version X.Y` remains a separate artifact-stamp override and
-  does not change source semantics. Stable supported levels are 2.0,
-  2.1, 2.2, 2.3, and 2.4; malformed, signed, patch, and unsupported levels are rejected.
+  property. With no explicit setting, the stable language/API default is the selected kotlinc
+  release's default. The accepted option domain also follows that concrete release: 2.4.0 and
+  2.4.10 accept 2.0 through experimental 2.5, while 2.4.20 additionally accepts experimental 2.6;
+  2.0 and 2.1 are deprecated. The internal `-Xmetadata-version X.Y` remains a separate
+  artifact-stamp override and does not change source semantics. Malformed, signed, patch, and
+  release-unsupported levels are rejected.
   (`tests/metadata_language_version_e2e.rs` compares class, facade,
   `$DefaultImpls`, suspend-lambda, and regenerated-inline-object stamps with kotlinc's
   `-language-version 2.2` output; `language_version_selects_semantics_and_the_stamp_override_stays_internal`

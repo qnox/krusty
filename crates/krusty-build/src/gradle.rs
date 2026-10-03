@@ -923,6 +923,31 @@ mod tests {
                 assert!(!log.exists(), "{case} must fail before execing krusty");
             }
 
+            // Gradle forwards standard version values without duplicating kotlinc's
+            // release-specific version table in the plugin. The shared compiler settings boundary
+            // rejects values unavailable in the selected 2.4.10 compiler after seeing the exact
+            // standard argument.
+            for (case, option) in [
+                ("old-language-version", "-language-version"),
+                ("old-api-version", "-api-version"),
+            ] {
+                let _ = std::fs::remove_file(&log);
+                let result = build()
+                    .property("krusty.negative", case)
+                    .tasks([":compiler:util:compileKotlin"])
+                    .run();
+                assert!(result.is_err(), "negative case {case} succeeded");
+                let invocation = single_invocation(&log);
+                assert_eq!(
+                    invocation
+                        .windows(2)
+                        .filter(|pair| pair == &[option, "1.9"])
+                        .count(),
+                    1,
+                    "{case}: {invocation:?}",
+                );
+            }
+
             // The standard Gradle languageVersion reaches the compiler unchanged. No krusty-only
             // property and no metadata-only substitution is part of the contract.
             let _ = std::fs::remove_file(&log);
