@@ -127,21 +127,32 @@ fun box(): String {\n\
         .collect::<Vec<_>>();
     let output = work.join("out");
     std::fs::create_dir_all(&output).expect("create kotlinc output");
-    let mut args = source_paths
-        .iter()
-        .map(|path| path.display().to_string())
-        .collect::<Vec<_>>();
-    args.extend([
-        "-d".to_string(),
-        output.display().to_string(),
-        "-Xallow-kotlin-package".to_string(),
-        "-XXLanguage:+ImplicitSignedToUnsignedIntegerConversion".to_string(),
-    ]);
-    let (code, diagnostics) =
-        common::kotlinc_compile(&args).expect("reference compiler unavailable");
-    assert_eq!(
-        code, 0,
-        "kotlinc rejected signed-to-unsigned coercion: {diagnostics}"
+    // This feature is test-only. The pooled compiler latches
+    // `kotlinc.test.allow.testonly.language.features` the first time it parses
+    // `-XXLanguage`, so the reference compile is a fresh kotlinc that sees the property
+    // at startup.
+    let compiler = common::kotlin_compiler_jar().expect("reference compiler unavailable");
+    let kotlinc = compiler
+        .parent()
+        .and_then(|lib| lib.parent())
+        .expect("kotlinc distribution layout")
+        .join("bin/kotlinc");
+    let mut command = std::process::Command::new(kotlinc);
+    command
+        .env("JAVA_HOME", common::java_home())
+        .arg("-Dkotlinc.test.allow.testonly.language.features=true")
+        .arg("-Xallow-kotlin-package")
+        .arg("-XXLanguage:+ImplicitSignedToUnsignedIntegerConversion")
+        .arg("-d")
+        .arg(&output);
+    for path in &source_paths {
+        command.arg(path);
+    }
+    let compiled = command.output().expect("run reference kotlinc");
+    assert!(
+        compiled.status.success(),
+        "kotlinc rejected signed-to-unsigned coercion: {}",
+        String::from_utf8_lossy(&compiled.stderr)
     );
     let reference = common::run_box(
         &[],
