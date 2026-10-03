@@ -51,7 +51,15 @@ fun reifiedSafeWritable(v: Any?): MutableIterator<*>? = safely<MutableIterator<*
 fun reifiedAsToken(v: Any?): Token = casts<Token>(v)\n\
 fun reifiedAsTokenOrNull(v: Any?): Token? = casts<Token?>(v)\n\
 fun reifiedSafeToken(v: Any?): Token? = safely<Token>(v)\n\
-fun reifiedIsUnary(v: Any?): Boolean = checks<(Int) -> Int>(v)\n";
+fun reifiedIsUnary(v: Any?): Boolean = checks<(Int) -> Int>(v)\n\
+fun reifiedIsSuspend(v: Any?): Boolean = checks<suspend () -> Unit>(v)\n\
+fun isSuspend0(v: Any?): Boolean = v is kotlin.coroutines.SuspendFunction0<*>\n\
+fun isNotSuspend0(v: Any?): Boolean = v !is kotlin.coroutines.SuspendFunction0<*>\n\
+fun asSuspend0(v: Any?): kotlin.coroutines.SuspendFunction0<*> = v as kotlin.coroutines.SuspendFunction0<*>\n\
+fun safeSuspend0(v: Any?): kotlin.coroutines.SuspendFunction0<*>? = v as? kotlin.coroutines.SuspendFunction0<*>\n\
+fun isSuspendFun(v: Any?): Boolean = v is suspend () -> Unit\n\
+suspend fun suspendFn0() {}\n\
+fun plainFn(x: Any) {}\n";
 
 const BOX: &str = "fun castFails(v: Any?): Boolean {\n\
     try { asWritable(v) } catch (e: ClassCastException) { return true }\n\
@@ -83,6 +91,13 @@ fun box(): String {\n\
     if (!reifiedNullFails() || reifiedAsTokenOrNull(null) != null) return \"fail reified null\"\n\
     if (reifiedSafeToken(\"x\") != null) return \"fail reified token as?\"\n\
     if (!reifiedIsUnary(unary) || reifiedIsUnary(binary)) return \"fail reified function\"\n\
+    val plainRef: Any = ::plainFn\n\
+    val suspendRef: Any = ::suspendFn0\n\
+    if (isSuspend0(plainRef) || !isSuspend0(suspendRef) || isNotSuspend0(suspendRef)) return \"fail suspend is\"\n\
+    if (asSuspend0(suspendRef) !== suspendRef) return \"fail suspend as\"\n\
+    if (safeSuspend0(plainRef) != null || safeSuspend0(suspendRef) !== suspendRef) return \"fail suspend as?\"\n\
+    if (!isSuspendFun(suspendRef) || isSuspendFun(plainRef)) return \"fail suspend fun\"\n\
+    if (reifiedIsSuspend(plainRef) || !reifiedIsSuspend(suspendRef)) return \"fail reified suspend\"\n\
     return \"OK\"\n\
 }\n";
 
@@ -123,6 +138,12 @@ fn type_checks_and_casts_match_kotlinc() {
         "Token reifiedAsTokenOrNull(",
         "Token reifiedSafeToken(",
         "boolean reifiedIsUnary(",
+        "boolean isSuspend0(",
+        "boolean isNotSuspend0(",
+        "asSuspend0(",
+        "safeSuspend0(",
+        "boolean isSuspendFun(",
+        "boolean reifiedIsSuspend(",
     ] {
         let reference = method_instructions(&built.reference, member);
         assert!(!reference.is_empty(), "kotlinc: {member} not found");

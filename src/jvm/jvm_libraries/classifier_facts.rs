@@ -387,7 +387,7 @@ mod tests {
             roles,
             [
                 Some(crate::types::ClassifierRole::FunctionOfArity(2)),
-                None,
+                Some(crate::types::ClassifierRole::SuspendFunctionOfArity(2)),
                 None,
                 collection(crate::types::CollectionKind::List, true),
                 collection(crate::types::CollectionKind::List, false),

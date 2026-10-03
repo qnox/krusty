@@ -33,4 +33,7 @@ pub enum ClassifierRole {
     MappedCollection(MappedCollection),
     /// A non-suspend, non-reflective `FunctionN` classifier of this arity.
     FunctionOfArity(u8),
+    /// A non-reflective `SuspendFunctionN`. The number is the JVM function arity: the value
+    /// parameters plus the continuation (`SuspendFunction0` is 1).
+    SuspendFunctionOfArity(u8),
 }

@@ -17,6 +17,9 @@ pub enum TypeCheckRole {
     MutableCollection(CollectionKind),
     /// A non-suspend function type of this arity (receiver and context parameters included).
     FunctionOfArity(u8),
+    /// A non-reflective suspend function type. The number is the JVM arity: value parameters
+    /// plus the continuation.
+    SuspendFunctionOfArity(u8),
 }
 
 impl IrFile {
@@ -61,7 +64,7 @@ impl IrFile {
     pub fn mapped_collection(&self, classifier: TypeName) -> Option<MappedCollection> {
         match self.classifier_role(classifier)? {
             ClassifierRole::MappedCollection(collection) => Some(collection),
-            ClassifierRole::FunctionOfArity(_) => None,
+            ClassifierRole::FunctionOfArity(_) | ClassifierRole::SuspendFunctionOfArity(_) => None,
         }
     }
 
@@ -75,13 +78,24 @@ impl IrFile {
                 ClassifierRole::FunctionOfArity(arity) => {
                     Some(TypeCheckRole::FunctionOfArity(arity))
                 }
+                ClassifierRole::SuspendFunctionOfArity(arity) => {
+                    Some(TypeCheckRole::SuspendFunctionOfArity(arity))
+                }
             },
-            Ty::Fun(signature) if !signature.suspend => u8::try_from(signature.params.len())
-                .ok()
-                .map(TypeCheckRole::FunctionOfArity),
+            Ty::Fun(signature) => function_check_arity(signature.params.len(), signature.suspend),
             _ => None,
         }
     }
+}
+
+/// JVM arity of a function type: value parameters, plus the continuation when it suspends.
+fn function_check_arity(value_params: usize, suspend: bool) -> Option<TypeCheckRole> {
+    let arity = u8::try_from(value_params + usize::from(suspend)).ok()?;
+    Some(if suspend {
+        TypeCheckRole::SuspendFunctionOfArity(arity)
+    } else {
+        TypeCheckRole::FunctionOfArity(arity)
+    })
 }
 
 #[cfg(test)]
@@ -115,6 +129,8 @@ mod tests {
                 }))
             } else if classifier == type_name("test/roles/Binary") {
                 Some(ClassifierRole::FunctionOfArity(2))
+            } else if classifier == type_name("test/roles/Suspended") {
+                Some(ClassifierRole::SuspendFunctionOfArity(1))
             } else {
                 None
             }
@@ -138,21 +154,34 @@ mod tests {
         let editable = test_of(&mut ir, "test/roles/Editable");
         let readable = test_of(&mut ir, "test/roles/Readable");
         let binary = test_of(&mut ir, "test/roles/Binary");
+        let suspended = test_of(&mut ir, "test/roles/Suspended");
         let mutable_list = test_of(&mut ir, "kotlin/collections/MutableList");
         let function = test_of(&mut ir, "kotlin/Function2");
         ir.publish_classifier_roles(&PublishedRoles);
 
-        let roles = [editable, readable, binary, mutable_list, function]
-            .map(|target| ir.type_check_role(Ty::nullable(target)));
+        let roles = [
+            editable,
+            readable,
+            binary,
+            suspended,
+            mutable_list,
+            function,
+        ]
+        .map(|target| ir.type_check_role(Ty::nullable(target)));
         assert_eq!(
             roles,
             [
                 Some(TypeCheckRole::MutableCollection(CollectionKind::List)),
                 None,
                 Some(TypeCheckRole::FunctionOfArity(2)),
+                Some(TypeCheckRole::SuspendFunctionOfArity(1)),
                 None,
                 None,
             ]
+        );
+        assert_eq!(
+            ir.mapped_collection(type_name("test/roles/Suspended")),
+            None
         );
         assert_eq!(
             ir.mapped_collection(type_name("test/roles/Readable")),
@@ -194,6 +223,9 @@ mod tests {
             ir.type_check_role(function(false)),
             Some(TypeCheckRole::FunctionOfArity(2))
         );
-        assert_eq!(ir.type_check_role(function(true)), None);
+        assert_eq!(
+            ir.type_check_role(function(true)),
+            Some(TypeCheckRole::SuspendFunctionOfArity(3))
+        );
     }
 }

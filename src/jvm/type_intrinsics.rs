@@ -15,6 +15,9 @@ const TYPE_INTRINSICS: &str = "kotlin/jvm/internal/TypeIntrinsics";
 
 const MAPPED_MARKER: &str = "kotlin/jvm/internal/markers/KMappedMarker";
 
+/// The marker interface a suspend function value implements. `SuspendFunctionN` is not a class.
+pub(crate) const SUSPEND_FUNCTION_MARKER: &str = "kotlin/coroutines/jvm/internal/SuspendFunction";
+
 /// kotlinc's `KOTLIN_MARKER_INTERFACES`: the marker interface a class implementing a Kotlin
 /// collection classifier also implements, which is what the `TypeIntrinsics` checks read at run
 /// time. A read-only face is a `KMappedMarker`; a mutable one is its own `KMutableX`.
@@ -76,43 +79,72 @@ impl IntrinsicCall {
     }
 }
 
-/// `TypeIntrinsics.instanceOf`: the call that replaces `instanceof`, leaving an `int` 0/1.
-pub(crate) fn instance_check(role: TypeCheckRole) -> IntrinsicCall {
+/// An instance test that is not a single `instanceof`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum InstanceCheck {
+    /// One `TypeIntrinsics` call, leaving an `int` 0/1.
+    Call(IntrinsicCall),
+    /// `instanceof SuspendFunction`, and `isFunctionOfArity` only when that marker matches.
+    /// The number is the JVM arity.
+    SuspendFunction { arity: u8 },
+}
+
+/// `TypeIntrinsics.instanceOf`: the check that replaces `instanceof`, leaving an `int` 0/1.
+pub(crate) fn instance_check(role: TypeCheckRole) -> InstanceCheck {
     match role {
-        TypeCheckRole::MutableCollection(kind) => IntrinsicCall {
+        TypeCheckRole::MutableCollection(kind) => InstanceCheck::Call(IntrinsicCall {
             arity: None,
             name: format!("isMutable{}", suffix(kind)),
             descriptor: "(Ljava/lang/Object;)Z".to_owned(),
-        },
-        TypeCheckRole::FunctionOfArity(arity) => IntrinsicCall {
-            arity: Some(arity),
-            name: "isFunctionOfArity".to_owned(),
-            descriptor: "(Ljava/lang/Object;I)Z".to_owned(),
-        },
+        }),
+        TypeCheckRole::FunctionOfArity(arity) => InstanceCheck::Call(function_arity_check(arity)),
+        TypeCheckRole::SuspendFunctionOfArity(arity) => InstanceCheck::SuspendFunction { arity },
     }
 }
 
-/// `TypeIntrinsics.checkcast` for a non-safe cast: the call made before the `checkcast`, and
-/// whether that `checkcast` is still written (a mutable collection's `asMutableX` already
-/// returns the JVM interface).
-pub(crate) fn cast(role: TypeCheckRole) -> (IntrinsicCall, bool) {
+/// `TypeIntrinsics.isFunctionOfArity(x, arity)`.
+pub(crate) fn function_arity_check(arity: u8) -> IntrinsicCall {
+    IntrinsicCall {
+        arity: Some(arity),
+        name: "isFunctionOfArity".to_owned(),
+        descriptor: "(Ljava/lang/Object;I)Z".to_owned(),
+    }
+}
+
+/// `TypeIntrinsics.checkcast` for a non-safe cast.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum CastCheck {
+    /// The call made before the `checkcast`, and whether that `checkcast` is still written (a
+    /// mutable collection's `asMutableX` already returns the JVM interface).
+    Call {
+        call: IntrinsicCall,
+        checkcast: bool,
+    },
+    /// `as SuspendFunctionN` is a plain `checkcast` to `Function{arity}`. The marker test belongs
+    /// to `is` and `as?`; kotlinc does not call `beforeCheckcastToFunctionOfArity` here.
+    SuspendFunction { arity: u8 },
+}
+
+/// `TypeIntrinsics.checkcast` for a non-safe cast.
+pub(crate) fn cast(role: TypeCheckRole) -> CastCheck {
     match role {
-        TypeCheckRole::MutableCollection(kind) => (
-            IntrinsicCall {
+        TypeCheckRole::MutableCollection(kind) => CastCheck::Call {
+            call: IntrinsicCall {
                 arity: None,
                 name: format!("asMutable{}", suffix(kind)),
                 descriptor: format!("(Ljava/lang/Object;)L{};", jvm_interface(kind)),
             },
-            false,
-        ),
-        TypeCheckRole::FunctionOfArity(arity) => (
-            IntrinsicCall {
+            checkcast: false,
+        },
+        TypeCheckRole::FunctionOfArity(arity) => CastCheck::Call {
+            call: IntrinsicCall {
                 arity: Some(arity),
                 name: "beforeCheckcastToFunctionOfArity".to_owned(),
                 descriptor: "(Ljava/lang/Object;I)Ljava/lang/Object;".to_owned(),
             },
-            true,
-        ),
+            checkcast: true,
+        },
+        TypeCheckRole::SuspendFunctionOfArity(arity) => CastCheck::SuspendFunction { arity },
     }
 }
 
@@ -139,20 +171,42 @@ mod tests {
     #[test]
     fn calls_follow_kotlinc_type_intrinsics() {
         let list = TypeCheckRole::MutableCollection(CollectionKind::List);
-        assert_eq!(instance_check(list).name, "isMutableList");
+        assert_eq!(
+            instance_check(list),
+            InstanceCheck::Call(IntrinsicCall {
+                arity: None,
+                name: "isMutableList".to_owned(),
+                descriptor: "(Ljava/lang/Object;)Z".to_owned(),
+            })
+        );
         assert_eq!(
             cast(list),
-            (
-                IntrinsicCall {
+            CastCheck::Call {
+                call: IntrinsicCall {
                     arity: None,
                     name: "asMutableList".to_owned(),
                     descriptor: "(Ljava/lang/Object;)Ljava/util/List;".to_owned(),
                 },
-                false
-            )
+                checkcast: false,
+            }
         );
         let function = TypeCheckRole::FunctionOfArity(1);
-        assert_eq!(instance_check(function).arity, Some(1));
-        assert!(cast(function).1);
+        assert_eq!(
+            instance_check(function),
+            InstanceCheck::Call(function_arity_check(1))
+        );
+        assert!(matches!(
+            cast(function),
+            CastCheck::Call {
+                checkcast: true,
+                ..
+            }
+        ));
+        let suspend = TypeCheckRole::SuspendFunctionOfArity(1);
+        assert_eq!(
+            instance_check(suspend),
+            InstanceCheck::SuspendFunction { arity: 1 }
+        );
+        assert_eq!(cast(suspend), CastCheck::SuspendFunction { arity: 1 });
     }
 }

@@ -9344,7 +9344,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `TypeIntrinsics.isMutableList(x)` (likewise `Iterator`, `Iterable`, `Collection`, `ListIterator`,
   `Set`, `Map`, `MapEntry`), `x as MutableList<*>` calls `asMutableList`, and `x is (Int) -> Int` and
   `x is Function1<*, *>` call `isFunctionOfArity(x, 1)`, while `x as (Int) -> Int` calls
-  `beforeCheckcastToFunctionOfArity(x, 1)` before its `checkcast`. The narrowing on an `as?`'s
+  `beforeCheckcastToFunctionOfArity(x, 1)` before its `checkcast`. A suspend function is not a
+  class either: `SuspendFunctionN` and `suspend (P1, …) -> R` erase to `Function{N+1}`, and
+  `x is SuspendFunction0<*>` (likewise `x is suspend () -> R`, and a reified `x is T` once `T` is
+  that type) is `instanceof kotlin/coroutines/jvm/internal/SuspendFunction` conjoined with
+  `isFunctionOfArity(x, N+1)`. `x as SuspendFunctionN` is only the `checkcast` to `Function{N+1}`;
+  the marker test stays on `is` and on `as?`. The narrowing on an `as?`'s
   successful branch is a plain `checkcast` (kotlinc's implicit cast), since its `is` already asked.
   These checks read the marker interfaces kotlinc adds to every class or interface with a direct
   Kotlin collection supertype: `KMappedMarker` for read-only faces (once) and `KMutableX` for each
@@ -9353,7 +9358,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the inliner, which also, like kotlinc's `ReifiedTypeInliner`, throws
   `NullPointerException("null cannot be cast to non-null type <type>")` for a non-null `as` (a
   root-package class is spelled `<root>.Token` there) and tests an `as?` before its `checkcast`.
-  (`tests/type_intrinsics_e2e.rs`.)
+  (`tests/type_intrinsics_e2e.rs`,
+  `jvm::inliner::reified::tests::a_suspend_function_argument_tests_the_marker_and_the_jvm_arity`.)
 - **Native `Double`/`Float` `toString`, `%` and `mod` answer what the JVM answers.** The native
   runtime (`src/native/runtime/krusty_fp.c`) renders a floating-point value as the SHORTEST decimal
   that reads back as it, in Java's layout (plain for 10^-3 <= |x| < 10^7, `d.dddEn` outside,

@@ -565,6 +565,67 @@ mod tests {
     }
 
     #[test]
+    fn a_suspend_function_argument_tests_the_marker_and_the_jvm_arity() {
+        let mut node = MethodNode::new(0x0008, "isT", "(Ljava/lang/Object;)Z");
+        node.nodes = marker("T", 3);
+        node.nodes.push(Node::Insn(Insn::Type {
+            op: 0xc1,
+            class: "kotlin/jvm/functions/Function1".into(),
+        }));
+        let arguments = ReifiedArguments {
+            classes: HashMap::from([(
+                "T".to_owned(),
+                ReifiedArgument::Class {
+                    internal: "kotlin/jvm/functions/Function1".to_owned(),
+                    nullable: false,
+                    intrinsic: Some(crate::ir::TypeCheckRole::SuspendFunctionOfArity(1)),
+                    rendered: String::new(),
+                },
+            )]),
+            ..Default::default()
+        };
+
+        specialize(&mut node, &arguments).expect("specializes");
+
+        let mut fresh = MethodNode::new(0x0008, "isT", "(Ljava/lang/Object;)Z");
+        let fail = fresh.new_label();
+        let end = fresh.new_label();
+        let nop = Node::Insn(Insn::Op(0x00));
+        assert_eq!(
+            node.nodes,
+            vec![
+                nop.clone(),
+                nop.clone(),
+                nop,
+                Node::Insn(Insn::Op(0x59)),
+                Node::Insn(Insn::Type {
+                    op: 0xc1,
+                    class: "kotlin/coroutines/jvm/internal/SuspendFunction".into(),
+                }),
+                Node::Insn(Insn::Jump {
+                    op: 0x99,
+                    target: fail,
+                }),
+                Node::Insn(Insn::Op(0x04)),
+                Node::Insn(method(
+                    0xb8,
+                    "kotlin/jvm/internal/TypeIntrinsics",
+                    "isFunctionOfArity",
+                    "(Ljava/lang/Object;I)Z",
+                )),
+                Node::Insn(Insn::Jump {
+                    op: 0xa7,
+                    target: end,
+                }),
+                Node::Label(fail),
+                Node::Insn(Insn::Op(0x57)),
+                Node::Insn(Insn::Op(0x03)),
+                Node::Label(end),
+            ]
+        );
+    }
+
+    #[test]
     fn a_marker_call_makes_a_reified_body() {
         let mut node = MethodNode::new(0x0008, "t", "()V");
         assert!(!has_reified_markers(&node));
