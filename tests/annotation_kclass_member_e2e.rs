@@ -5,6 +5,8 @@
 
 use std::collections::BTreeMap;
 
+use super::common;
+
 fn member_abi(bytes: &[u8]) -> BTreeMap<String, (String, Option<String>)> {
     krusty::jvm::classreader::parse_class(bytes)
         .expect("parse annotation class")
