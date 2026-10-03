@@ -399,7 +399,7 @@ fn suspend_callable_reference_passes_the_sam_continuation() {
         \x20   suspend fun run(value: String): String\n\
         }\n\
         \n\
-        fun <T> runBlocking(c: suspend () -> T): T {\n\
+        fun <T> awaitFixture(c: suspend () -> T): T {\n\
         \x20   var res: T? = null\n\
         \x20   c.startCoroutine(Continuation(EmptyCoroutineContext) {\n\
         \x20       res = it.getOrThrow()\n\
@@ -414,7 +414,7 @@ fn suspend_callable_reference_passes_the_sam_continuation() {
         \x20   val plain: suspend () -> String = ::ok\n\
         \x20   val sam = Susp(::ok)\n\
         \x20   val echoed = Echo(::id)\n\
-        \x20   val result = runBlocking { plain() + sam.run() + echoed.run(\"K\") }\n\
+        \x20   val result = awaitFixture { plain() + sam.run() + echoed.run(\"K\") }\n\
         \x20   return if (result == \"OKOKK\") \"OK\" else \"FAIL: $result\"\n\
         }\n";
     common::expect_box_same_as_kotlinc(src, "SuspendSamCallableReference");

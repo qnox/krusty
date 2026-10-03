@@ -103,3 +103,42 @@ fn a_function_type_invoke_target_survives_lowering() {
         (FirSamMethod::FunctionTypeInvoke, false)
     );
 }
+
+#[test]
+fn a_suspend_function_value_adapter_marks_its_forwarding_invoke_as_a_suspension() {
+    let ir = lower_single_source(
+        "fun interface Awaiter { suspend fun fetch(value: String): String }\n\
+         suspend fun echoFixture(value: String): String = value\n\
+         fun adapted(): Awaiter = Awaiter(::echoFixture)\n",
+        "SuspendSam",
+    );
+
+    let adapters = ir
+        .exprs
+        .iter()
+        .filter_map(|expression| match expression {
+            IrExpr::Lambda {
+                impl_fn,
+                sam: Some(target),
+                ..
+            } if target.wraps_function_value => Some((*impl_fn, target)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [(implementation, target)] = adapters.as_slice() else {
+        panic!("one suspend function-value SAM adapter, found {adapters:?}")
+    };
+    assert!(target.suspend && target.source_suspend);
+    assert!(ir.suspend_funs.contains(implementation));
+
+    let suspensions = ir.suspend_calls.iter().collect::<Vec<_>>();
+    let [(invoke, result)] = suspensions.as_slice() else {
+        panic!("one forwarding suspension, found {suspensions:?}")
+    };
+    assert_eq!(**result, Ty::String);
+    assert!(matches!(
+        ir.expr(**invoke),
+        IrExpr::InvokeFunction { args, params, ret, .. }
+            if args.len() == 1 && params.as_slice() == [Ty::String] && *ret == Ty::String
+    ));
+}
