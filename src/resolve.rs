@@ -101,6 +101,7 @@ mod function_value_conversions;
 mod generic_call_bindings;
 mod if_expression;
 mod implicit_rungs;
+mod inline_access;
 mod inner_constructor_calls;
 use inner_constructor_calls::BoundInnerConstruction;
 mod inspection_analysis;
@@ -45602,69 +45603,6 @@ impl<'a> Checker<'a> {
             self.resolved_source_calls.insert(call, source_key);
         }
     }
-    /// Public or protected visibility, or `@PublishedApi` on an `internal` declaration. The
-    /// annotation is the resolved classifier identity already stored on the candidate, never the
-    /// source spelling.
-    fn is_public_api_for_inline_access(visibility: Visibility, annotations: &[TypeName]) -> bool {
-        visibility.is_public_api()
-            || annotations
-                .iter()
-                .any(|annotation| annotation.matches("kotlin/PublishedApi"))
-    }
-
-    fn declaration_is_public_api_inline(
-        &self,
-        scope: &CheckerScope<'_>,
-        function: &FunDecl,
-    ) -> bool {
-        let annotations = function
-            .annotations
-            .iter()
-            .filter_map(|annotation| self.annotation_identity_in_scope(scope, annotation))
-            .collect::<Vec<_>>();
-        function.is_inline()
-            && Self::is_public_api_for_inline_access(function.visibility, &annotations)
-    }
-
-    fn enter_public_api_inline(&mut self, scope: &CheckerScope<'_>, function: &FunDecl) -> bool {
-        let entered = self.declaration_is_public_api_inline(scope, function);
-        if entered {
-            self.public_api_inline_depth += 1;
-        }
-        entered
-    }
-
-    fn leave_public_api_inline(&mut self, entered: bool) {
-        if entered {
-            self.public_api_inline_depth -= 1;
-        }
-    }
-
-    /// A public-API `inline` function publishes its body into every caller. A non-public-API
-    /// callee is rejected at the reference. `@PublishedApi internal` is public API for this
-    /// check. An inline callee names the transitive form, because its own body would be
-    /// published too.
-    fn reject_non_public_api_from_public_inline(
-        &mut self,
-        call: ExprId,
-        callee_is_public_api: bool,
-        inline: InlineKind,
-    ) {
-        if self.public_api_inline_depth == 0 || callee_is_public_api {
-            return;
-        }
-        if !self.public_inline_access_calls.insert(call) {
-            return;
-        }
-        let message = if inline.can_inline() {
-            "public-API inline function cannot access non-public-API inline function as it could transitively access non-public-API declarations."
-        } else {
-            "public-API inline function cannot access non-public-API function."
-        };
-        self.diags
-            .error(self.call_callee_name_span(call), message.to_string());
-    }
-
     fn mark_top_level_call(
         &mut self,
         call: ExprId,
