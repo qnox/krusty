@@ -170,6 +170,39 @@ fn apply_jvm_default(
     }
 }
 
+/// Severities kotlinc accepts for `-Xwarning-level=<NAME>:<SEVERITY>` (its `WarningLevel` enum):
+/// exact spellings, case-sensitive.
+const WARNING_LEVEL_SEVERITIES: [&str; 3] = ["error", "warning", "disabled"];
+
+/// Validate the SHAPE of a `-Xwarning-level=` value: a colon, a non-empty warning name, and a
+/// severity from kotlinc's closed set. kotlinc validates the name against its diagnostic registry
+/// at argument processing — an unknown name is an error (`warning with name "X" does not exist`),
+/// and so is an empty one, so rejecting the empty name here is parity. Accepting an UNKNOWN name
+/// is instead a deliberate loosening over kotlinc (krusty compiles green where kotlinc exits 1):
+/// krusty's diagnostic registry does not share kotlinc's factory names, and matching kotlinc's
+/// check would require hardcoding its diagnostic names. That does accept a
+/// `-Xwarning-level=TYPO:error` the real compiler would refuse — a promise this compiler cannot
+/// check — but the severity mapping is wired to nothing, so the honest contract ends at the shape.
+pub(crate) fn validate_warning_level(value: &str) -> Result<(), String> {
+    let Some((name, severity)) = value.split_once(':') else {
+        return Err(format!(
+            "invalid value '{value}' for -Xwarning-level: expected <NAME>:<error|warning|disabled>"
+        ));
+    };
+    if name.is_empty() {
+        return Err(format!(
+            "invalid value '{value}' for -Xwarning-level: the warning name must not be empty"
+        ));
+    }
+    if !WARNING_LEVEL_SEVERITIES.contains(&severity) {
+        return Err(format!(
+            "invalid severity '{severity}' in -Xwarning-level={value}; \
+             supported severities: error, warning, disabled"
+        ));
+    }
+    Ok(())
+}
+
 fn supported_stamp_levels() -> String {
     LanguageVersion::supported_metadata_stamps_text()
 }
@@ -294,6 +327,21 @@ pub fn parse(argv: impl IntoIterator<Item = String>) -> Options {
                     .errors
                     .push("missing value for -Xmetadata-version".to_string()),
             },
+            // `-Xwarning-level=<NAME>:<SEVERITY>` re-maps a warning's severity: it changes what
+            // kotlinc REPORTS, never what it emits. krusty's diagnostic registry does not share
+            // kotlinc's factory names, so the severity mapping is not wired to anything — a
+            // well-formed value is recorded as an ignored compatibility option (like every
+            // kotlinc `-X…` flag it takes its value with `=` only; the space form would swallow
+            // the next source file). A malformed value is an error rather than a silently kept
+            // promise: the shape (colon, non-empty name, kotlinc's severity set) is all that can
+            // be validated without sharing the diagnostic registry.
+            flag if flag.starts_with("-Xwarning-level=") => {
+                let value = flag.strip_prefix("-Xwarning-level=").unwrap_or_default();
+                match validate_warning_level(value) {
+                    Ok(()) => opts.ignored.push(flag.to_string()),
+                    Err(error) => opts.errors.push(error),
+                }
+            }
             "-jdk-home" => {
                 if let Some(v) = it.next() {
                     opts.jdk_home = Some(PathBuf::from(v));
@@ -1183,6 +1231,76 @@ mod tests {
             [
                 "API version 2.0 is deprecated and its support will be removed in a future version of Kotlin. Update the version to 2.2.".to_owned(),
                 "language version 2.5 is experimental, there are no backwards compatibility guarantees for new language and library features. Use the stable version 2.4 instead.".to_owned(),
+            ]
+        );
+    }
+
+    /// `-Xwarning-level=<NAME>:<SEVERITY>` re-maps what kotlinc REPORTS, never what it emits, so a
+    /// well-formed value is accepted and recorded as ignored; the severity mapping is not wired to
+    /// krusty diagnostics. The shape is validated exactly as far as krusty honestly can: kotlinc's
+    /// severity set (exact, case-sensitive), a colon, and a non-empty name. A malformed value is a
+    /// CLI error — silently recording it would leave a build believing a policy it does not have.
+    #[test]
+    fn warning_level_is_validated_and_recorded_as_ignored() {
+        for severity in WARNING_LEVEL_SEVERITIES {
+            let flag = format!("-Xwarning-level=REDUNDANT_CLI_ARG:{severity}");
+            let parsed = parse_args(&[&flag, "f.kt"]);
+            assert!(parsed.errors.is_empty(), "{flag}: {:?}", parsed.errors);
+            assert_eq!(parsed.ignored, vec![flag.clone()], "{flag}");
+            assert_eq!(parsed.sources, vec!["f.kt".to_string()]);
+        }
+        // kotlinc validates the name against its diagnostic registry at argument processing and
+        // errors on an unknown one; krusty deliberately loosens that check (its diagnostics do
+        // not share kotlinc's factory names), so an unknown name is accepted like a known one,
+        // and several distinct entries are legal.
+        let parsed = parse_args(&[
+            "-Xwarning-level=NO_SUCH_DIAGNOSTIC:error",
+            "-Xwarning-level=REDUNDANT_CLI_ARG:disabled",
+            "f.kt",
+        ]);
+        assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+        assert_eq!(
+            parsed.ignored,
+            vec![
+                "-Xwarning-level=NO_SUCH_DIAGNOSTIC:error".to_string(),
+                "-Xwarning-level=REDUNDANT_CLI_ARG:disabled".to_string(),
+            ]
+        );
+
+        for (bad, severity) in [
+            ("-Xwarning-level=REDUNDANT_CLI_ARG:loud", "loud"),
+            // kotlinc's spellings are case-sensitive.
+            ("-Xwarning-level=REDUNDANT_CLI_ARG:DISABLED", "DISABLED"),
+            ("-Xwarning-level=REDUNDANT_CLI_ARG:Warning", "Warning"),
+            ("-Xwarning-level=REDUNDANT_CLI_ARG:", ""),
+        ] {
+            let parsed = parse_args(&[bad, "f.kt"]);
+            assert_eq!(
+                parsed.errors,
+                [format!(
+                    "invalid severity '{severity}' in -Xwarning-level=REDUNDANT_CLI_ARG:{severity}; \
+                     supported severities: error, warning, disabled"
+                )],
+                "{bad}"
+            );
+            assert!(parsed.ignored.is_empty(), "{bad}: {:?}", parsed.ignored);
+        }
+
+        let parsed = parse_args(&["-Xwarning-level=REDUNDANT_CLI_ARG", "f.kt"]);
+        assert_eq!(
+            parsed.errors,
+            [
+                "invalid value 'REDUNDANT_CLI_ARG' for -Xwarning-level: expected \
+             <NAME>:<error|warning|disabled>"
+                    .to_string()
+            ]
+        );
+        let parsed = parse_args(&["-Xwarning-level=:disabled", "f.kt"]);
+        assert_eq!(
+            parsed.errors,
+            [
+                "invalid value ':disabled' for -Xwarning-level: the warning name must not be empty"
+                    .to_string()
             ]
         );
     }

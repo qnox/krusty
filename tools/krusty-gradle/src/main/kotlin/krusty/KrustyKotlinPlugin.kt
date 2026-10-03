@@ -325,8 +325,12 @@ private fun compilerArguments(task: KotlinJvmCompile): List<String> {
     reject(options.progressiveMode.getOrElse(false), "progressiveMode")
     reject(options.extraWarnings.getOrElse(false), "extraWarnings")
     reject(options.suppressWarnings.getOrElse(false), "suppressWarnings")
-    // The CLI currently accepts warning-policy switches without changing diagnostic severity.
-    // Reject them at the Gradle boundary instead of reporting a successful but weaker compile.
+    // Warning-policy switches the CLI accepts without wiring to its diagnostics. `-Werror` and
+    // `allWarningsAsErrors` decide whether the build FAILS on a warning, so they stay rejected at
+    // the Gradle boundary instead of reporting a successful but weaker compile.
+    // `-Xwarning-level=NAME:SEVERITY` freeCompilerArgs are different: validateFreeArguments
+    // validates their shape and forwards them as accepted-but-unwired compatibility args (warning
+    // policy never changes the emitted classfile bytes, so they cannot weaken a build's artifacts).
     reject(options.allWarningsAsErrors.getOrElse(false), "allWarningsAsErrors")
     reject(options.verbose.getOrElse(false), "verbose")
     reject(task.multiPlatformEnabled.getOrElse(false), "multiPlatformEnabled")
@@ -381,9 +385,38 @@ private val NAME_DESTRUCTURING_MODES = setOf("only-syntax", "name-mismatch", "co
 private val JVM_DEFAULT_MODES = setOf("enable", "no-compatibility", "disable")
 private val JVM_DEFAULT_LEGACY_MODES = setOf("all", "all-compatibility", "disable")
 
+// kotlinc's `-Xwarning-level=NAME:SEVERITY` severity set (its WarningLevel enum): exact spellings,
+// case-sensitive. Warning names are NOT validated: kotlinc checks each name against its diagnostic
+// registry at argument processing (an unknown or empty name is an error there), and krusty does not
+// share that registry — accepting an unknown name here is a deliberate loosening, not parity.
+private val WARNING_LEVEL_SEVERITIES = setOf("error", "warning", "disabled")
+
 private fun isFreeJvmDefault(argument: String): Boolean =
     argument == "-jvm-default" || argument == "-Xjvm-default" ||
         argument.startsWith("-jvm-default=") || argument.startsWith("-Xjvm-default=")
+
+// Validates the value shape of a `-Xwarning-level=NAME:SEVERITY` freeCompilerArg, mirroring the
+// CLI's own contract: a colon, a non-empty name, a severity from kotlinc's set.
+private fun validateWarningLevel(argument: String) {
+    val value = argument.removePrefix("-Xwarning-level=")
+    val colon = value.indexOf(':')
+    if (colon < 0) {
+        throw GradleException(
+            "unsupported freeCompilerArg '$argument'; expected -Xwarning-level=<NAME>:<error|warning|disabled>",
+        )
+    }
+    if (colon == 0) {
+        throw GradleException(
+            "unsupported freeCompilerArg '$argument'; the warning name must not be empty",
+        )
+    }
+    val severity = value.substring(colon + 1)
+    if (severity !in WARNING_LEVEL_SEVERITIES) {
+        throw GradleException(
+            "unsupported freeCompilerArg '$argument'; supported severities: ${WARNING_LEVEL_SEVERITIES.joinToString()}",
+        )
+    }
+}
 
 private fun validateStructuredOptIns(markers: List<String>): List<String> {
     val seen = HashSet<String>()
@@ -419,10 +452,18 @@ private fun validateFreeArguments(input: List<String>): ArrayList<String> {
             // Several -opt-in arguments are legal (the Kotlin build applies one per opt-in); only an
             // exact repeat is a duplicate, so the key is the argument itself.
             argument.startsWith("-opt-in=") && argument.substringAfter('=').isNotEmpty() -> argument
-            argument == "-Werror" || argument.startsWith("-Xwarning-level=") ->
+            argument == "-Werror" ->
                 throw GradleException(
                     "krusty does not support warning policy freeCompilerArg '$argument'",
                 )
+            // `-Xwarning-level=NAME:SEVERITY` is accepted-but-unwired compatibility: the CLI
+            // validates the same shape and records it as ignored. Several entries are legal in
+            // kotlinc (one per diagnostic), so the key is the full argument — an exact repeat is a
+            // duplicate, distinct names are not.
+            argument.startsWith("-Xwarning-level=") -> {
+                validateWarningLevel(argument)
+                argument
+            }
             argument.startsWith("-Xlambdas=") && argument.substringAfter('=') in setOf("indy", "class") -> "-Xlambdas"
             argument.startsWith("-Xsam-conversions=") && argument.substringAfter('=') in setOf("indy", "class") -> "-Xsam-conversions"
             argument == "-Xname-based-destructuring" -> "-Xname-based-destructuring"

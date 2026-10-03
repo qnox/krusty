@@ -873,8 +873,12 @@ mod tests {
                     "krusty does not support warning policy freeCompilerArg '-Werror'",
                 ),
                 (
-                    "warning-level",
-                    "krusty does not support warning policy freeCompilerArg '-Xwarning-level=REDUNDANT_CLI_ARG:disabled'",
+                    "warning-level-bad-severity",
+                    "unsupported freeCompilerArg '-Xwarning-level=REDUNDANT_CLI_ARG:loud'; supported severities: error, warning, disabled",
+                ),
+                (
+                    "warning-level-missing-colon",
+                    "unsupported freeCompilerArg '-Xwarning-level=REDUNDANT_CLI_ARG'; expected -Xwarning-level=<NAME>:<error|warning|disabled>",
                 ),
                 (
                     "empty-opt-in",
@@ -939,6 +943,27 @@ mod tests {
                     "{case}: {invocation:?}",
                 );
             }
+
+            // A well-formed `-Xwarning-level=NAME:SEVERITY` freeCompilerArg is forwarded as an
+            // accepted-but-unwired compatibility arg: warning policy never changes the emitted
+            // bytes, so the compile runs and the recorded invocation carries the argument.
+            let _ = std::fs::remove_file(&log);
+            build()
+                .property("krusty.negative", "warning-level")
+                .tasks([":compiler:util:compileKotlin"])
+                .run()
+                .unwrap_or_else(|error| panic!("warning-level forwarding: {error}"));
+            let forwarded = single_invocation(&log);
+            assert_eq!(
+                forwarded
+                    .iter()
+                    .filter(|argument| {
+                        argument.as_str() == "-Xwarning-level=REDUNDANT_CLI_ARG:disabled"
+                    })
+                    .count(),
+                1,
+                "{forwarded:?}"
+            );
 
             // The standard Gradle languageVersion reaches the compiler unchanged. No krusty-only
             // property and no metadata-only substitution is part of the contract.
@@ -1419,6 +1444,8 @@ tasks.withType<KotlinJvmCompile>().configureEach {
             "duplicate-inert-flag" -> freeCompilerArgs.add("-Xskip-prerelease-check")
             "free-werror" -> freeCompilerArgs.add("-Werror")
             "warning-level" -> freeCompilerArgs.add("-Xwarning-level=REDUNDANT_CLI_ARG:disabled")
+            "warning-level-bad-severity" -> freeCompilerArgs.add("-Xwarning-level=REDUNDANT_CLI_ARG:loud")
+            "warning-level-missing-colon" -> freeCompilerArgs.add("-Xwarning-level=REDUNDANT_CLI_ARG")
             "opt-in-overlap" -> freeCompilerArgs.add("-opt-in=krusty.fixture.ExperimentalFirstApi")
         }
     }

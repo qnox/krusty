@@ -10155,6 +10155,28 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   in `crates/krusty-cli/src/cli.rs`; `language_version_stamps_the_header` in
   `src/metadata/module.rs`.)
 
+- **`-Xwarning-level=<NAME>:<SEVERITY>` is an accepted-but-unwired compatibility option.** kotlinc
+  re-maps the named warning's severity (`error`, `warning`, `disabled` — the exact, case-sensitive
+  spellings of its `WarningLevel` enum); warning policy never changes the emitted class files, so
+  krusty validates the shape — a colon, a non-empty name, a severity in kotlinc's set — and records
+  the option as ignored. A malformed value is a CLI error, as kotlinc's is. The severity mapping is
+  NOT wired to krusty diagnostics, and the warning name is not validated against kotlinc's
+  diagnostic registry, which krusty's diagnostics do not share. Known divergences, all measured
+  against kotlinc 2.4.20: kotlinc validates the name at argument processing and errors on an
+  unknown one (`warning with name "X" does not exist`), while krusty deliberately accepts it —
+  a loosening, since krusty has no kotlinc-name registry and hardcoding one is not an option;
+  kotlinc rejects an empty name through the same lookup, so krusty's rejection there is parity;
+  kotlinc prohibits changing the severity of a diagnostic that is an error (`diagnostic "X" is an
+  error. Changing the severity of errors is prohibited`), which krusty accepts, the mapping being
+  unwired anyway; and kotlinc rejects a name configured twice, while krusty records each
+  occurrence. The Bazel worker reports both spellings (`--x_warning_level` values and a
+  forwarded `--kotlinc-arg -Xwarning-level=…`) as inert after the same shape validation, and the
+  Gradle plugin forwards well-formed `-Xwarning-level=` freeCompilerArgs while `-Werror` and
+  `allWarningsAsErrors` stay rejected there.
+  (`warning_level_is_validated_and_recorded_as_ignored` in `crates/krusty-cli/src/cli.rs`;
+  `warning_level_is_accepted_as_inert` in `crates/krusty-cli/src/worker.rs`;
+  `kotlin_compiler_slice_compiles_through_krusty` in `crates/krusty-build/src/gradle.rs`.)
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.

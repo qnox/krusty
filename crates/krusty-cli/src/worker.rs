@@ -218,6 +218,20 @@ pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
                 "--opt_in" => unit
                     .inert
                     .extend(values.into_iter().map(|value| format!("--opt_in {value}"))),
+                // Warning policy changes what the compiler REPORTS, never what it emits, so each
+                // entry is inert — validated against the same shape the CLI accepts (a colon, a
+                // non-empty name, kotlinc's severity set) rather than trusted unseen.
+                "--x_warning_level" => {
+                    if values.is_empty() {
+                        unit.inert.push(flag.to_string());
+                    }
+                    for value in values {
+                        if let Err(error) = crate::cli::validate_warning_level(&value) {
+                            return Err(Refusal::Unsupported(error));
+                        }
+                        unit.inert.push(format!("--x_warning_level {value}"));
+                    }
+                }
                 "--x_xlanguage" => {
                     if values.is_empty() {
                         return Err(Refusal::Malformed(
@@ -362,6 +376,17 @@ pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
                         // fleet.util.codepoints) is safe to build. Inert here for Bazel to print;
                         // deliberately NOT generalized to other `-Xwasm-*` flags.
                         "-Xwasm-kclass-fqn" => unit.inert.push(value),
+                        // Warning policy only: the CLI accepts this spelling as an ignored
+                        // compatibility option, so the worker reports it inert the same way —
+                        // validated like the CLI's own parse, since a malformed value would
+                        // otherwise report a successful compile kotlinc would reject.
+                        _ if value.starts_with("-Xwarning-level=") => {
+                            let level = value.strip_prefix("-Xwarning-level=").unwrap_or_default();
+                            match crate::cli::validate_warning_level(level) {
+                                Ok(()) => unit.inert.push(value),
+                                Err(error) => return Err(Refusal::Unsupported(error)),
+                            }
+                        }
                         _ => unit.kotlinc_args.push(value),
                     }
                 }
@@ -975,6 +1000,75 @@ mod tests {
             "the flag changes nothing, so nothing is forwarded: {:?}",
             unit.kotlinc_args
         );
+    }
+
+    /// A `-Xwarning-level` forwarded through `kotlinc_opts`, and the worker's own
+    /// `--x_warning_level` list flag, are warning policy only: they change what the compiler
+    /// reports, never what it emits, so both are recorded as inert. A malformed value is refused,
+    /// as the CLI's own parse would reject it.
+    #[test]
+    fn warning_level_is_accepted_as_inert() {
+        let unit = translate(&args(&[
+            "--kotlinc-arg",
+            "-Xwarning-level=REDUNDANT_CLI_ARG:disabled",
+            "--srcs",
+            "A.kt",
+            "--out",
+            "o.jar",
+        ]))
+        .expect("a valid warning level must translate");
+        assert_eq!(
+            unit.inert,
+            vec!["-Xwarning-level=REDUNDANT_CLI_ARG:disabled".to_string()]
+        );
+        assert!(
+            unit.kotlinc_args.is_empty(),
+            "the flag changes nothing, so nothing is forwarded: {:?}",
+            unit.kotlinc_args
+        );
+
+        let unit = translate(&args(&[
+            "--x_warning_level",
+            "REDUNDANT_CLI_ARG:disabled",
+            "DEPRECATION:error",
+            "--srcs",
+            "A.kt",
+            "--out",
+            "o.jar",
+        ]))
+        .expect("the worker's own warning-level flag must translate");
+        assert_eq!(
+            unit.inert,
+            vec![
+                "--x_warning_level REDUNDANT_CLI_ARG:disabled".to_string(),
+                "--x_warning_level DEPRECATION:error".to_string(),
+            ]
+        );
+
+        for arguments in [
+            args(&[
+                "--kotlinc-arg",
+                "-Xwarning-level=REDUNDANT_CLI_ARG:loud",
+                "--srcs",
+                "A.kt",
+                "--out",
+                "o.jar",
+            ]),
+            args(&[
+                "--x_warning_level",
+                "REDUNDANT_CLI_ARG",
+                "--srcs",
+                "A.kt",
+                "--out",
+                "o.jar",
+            ]),
+        ] {
+            let refusal = translate(&arguments).unwrap_err();
+            assert!(
+                matches!(refusal, Refusal::Unsupported(_)),
+                "{arguments:?}: {refusal:?}"
+            );
+        }
     }
 
     /// A target-provided compiler flag is safe only when the CLI actually models it. Accepting an
