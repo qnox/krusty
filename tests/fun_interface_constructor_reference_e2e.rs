@@ -50,6 +50,9 @@ fn class_bytes(dir: &Path) -> Vec<(String, Vec<u8>)> {
 fn carrier_abis(classes: &[(String, Vec<u8>)]) -> Vec<CarrierAbi> {
     let mut carriers = Vec::new();
     for (name, bytes) in classes {
+        if !bytes.starts_with(&[0xCA, 0xFE, 0xBA, 0xBE]) {
+            continue;
+        }
         let info = krusty::jvm::classreader::parse_class(bytes)
             .unwrap_or_else(|error| panic!("parse {name}: {error:?}"));
         let Some(superclass) = info.super_class else {
