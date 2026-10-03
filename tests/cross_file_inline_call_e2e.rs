@@ -778,3 +778,36 @@ fn reified_inline_member_with_an_omitted_default_is_spliced() {
         "cross_file_reified_inline_member_default",
     );
 }
+
+/// An anonymous object declared in an `inline` function is constructed by the copied `new` at
+/// each call site. Callers in another package reach that constructor, so it is public while the
+/// class stays in the function's package.
+#[test]
+fn an_inline_anonymous_object_is_constructed_from_another_package() {
+    const O: &str = "package test.o\n\
+                     import test.I\n\
+                     inline fun run(): String {\n\
+                     \x20   return object : I { override fun run() = \"O\" }.run()\n\
+                     }\n";
+    const K: &str = "package test.k\n\
+                     import test.I\n\
+                     inline fun run(): String {\n\
+                     \x20   return object : I { override fun run() = \"K\" }.run()\n\
+                     }\n";
+    const CALL: &str = "package test\n\
+                        fun ok() = test.o.run() + test.k.run()\n";
+    const MAIN: &str = "package test\n\
+                        interface I { fun run(): String }\n\
+                        fun box(): String {\n\
+                        \x20   if (ok() != \"OK\") return \"fail\"\n\
+                        \x20   return test.o.run() + test.k.run()\n\
+                        }\n";
+    let sources = [("1.kt", O), ("2.kt", K), ("3.kt", CALL), ("main.kt", MAIN)];
+    let compiled = common::compile_and_run_files_with_stdlib(&sources)
+        .expect("inline anonymous objects constructed from another package");
+    assert_eq!(
+        compiled,
+        common::kotlinc_box_files_result(&sources, "test.MainKt")
+    );
+    assert_eq!(compiled, "OK");
+}

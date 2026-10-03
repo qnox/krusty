@@ -181,7 +181,10 @@ pub(super) fn secondary_constructor_varargs(constructor: &crate::ir::IrSecondary
 /// (instances are created via `constructor-impl`/`box-impl`, never `new`); a class whose primary
 /// constructor takes a value-class-typed parameter is private (kotlinc routes construction through a
 /// synthetic `(…args, DefaultConstructorMarker)` accessor); a SEALED class's is private too, since
-/// subclasses construct through that public synthetic accessor. A `vararg` last parameter adds
+/// subclasses construct through that public synthetic accessor. An anonymous object's constructor is
+/// package-private, except one declared in an `inline` function: inlining copies its `new` into
+/// every call site, including a caller in another package, so that constructor is public. A
+/// continuation class's constructor is package-private. A `vararg` last parameter adds
 /// `ACC_VARARGS`.
 pub(super) fn primary_constructor_access(
     ir: &IrFile,
@@ -189,7 +192,9 @@ pub(super) fn primary_constructor_access(
     is_continuation: bool,
     value_param_ctor: bool,
 ) -> u16 {
-    let access = if is_continuation || class.is_anonymous_object {
+    let access = if class.is_anonymous_object && anonymous_object_in_inline_function(ir, class) {
+        ACC_PUBLIC
+    } else if is_continuation || class.is_anonymous_object {
         // A continuation class's ctor is package-private (constructed only by its own file);
         // kotlinc gives an ANONYMOUS class's ctor the same access (flags 0x0000). This remains
         // true when a capture has value-class type: the enclosing class directly constructs the
@@ -211,4 +216,14 @@ pub(super) fn primary_constructor_access(
         }
     };
     access | primary_constructor_varargs(class)
+}
+
+/// An anonymous object declared directly in an `inline` function. Inlining copies its `new` into
+/// each call site, which may live in another package, so the constructor has to be public. The
+/// class itself stays in the function's package.
+fn anonymous_object_in_inline_function(ir: &IrFile, class: &crate::ir::IrClass) -> bool {
+    let Some(crate::ir::IrEnclosure::Function(function)) = class.enclosure.as_ref() else {
+        return false;
+    };
+    ir.inline_fns.contains(function)
 }
