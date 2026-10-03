@@ -336,8 +336,14 @@ private fun compilerArguments(task: KotlinJvmCompile): List<String> {
     reject(task.multiPlatformEnabled.getOrElse(false), "multiPlatformEnabled")
     reject(task.useModuleDetection.getOrElse(false), "useModuleDetection")
 
+    val structuredOptIns = validateStructuredOptIns(options.optIn.getOrElse(emptyList()))
     val freeArguments = options.freeCompilerArgs.getOrElse(emptyList())
     val arguments = validateFreeArguments(freeArguments)
+    structuredOptIns.firstOrNull { marker -> "-opt-in=$marker" in freeArguments }?.let { marker ->
+        throw GradleException(
+            "compilerOptions.optIn and freeCompilerArg '-opt-in=$marker' both request marker '$marker'; configure exactly one",
+        )
+    }
     freeArguments.firstOrNull(::isFreeJvmDefault)?.let { free ->
         if (options.jvmDefault.orNull != null) {
             throw GradleException(
@@ -347,8 +353,8 @@ private fun compilerArguments(task: KotlinJvmCompile): List<String> {
     }
     languageVersion?.let { arguments.addPair("-language-version", it) }
     apiVersion?.let { arguments.addPair("-api-version", it) }
-    options.optIn.getOrElse(emptyList()).takeIf(List<String>::isNotEmpty)?.let {
-        arguments.add(it.joinToString(",", prefix = "-opt-in="))
+    structuredOptIns.forEach { marker ->
+        arguments.add("-opt-in=$marker")
     }
     options.moduleName.orNull?.takeIf(String::isNotEmpty)?.let {
         arguments.addPair("-module-name", it)
@@ -381,6 +387,19 @@ private val JVM_DEFAULT_LEGACY_MODES = setOf("all", "all-compatibility", "disabl
 private fun isFreeJvmDefault(argument: String): Boolean =
     argument == "-jvm-default" || argument == "-Xjvm-default" ||
         argument.startsWith("-jvm-default=") || argument.startsWith("-Xjvm-default=")
+
+private fun validateStructuredOptIns(markers: List<String>): List<String> {
+    val seen = HashSet<String>()
+    for (marker in markers) {
+        if (marker.isBlank()) {
+            throw GradleException("compilerOptions.optIn contains an empty marker")
+        }
+        if (!seen.add(marker)) {
+            throw GradleException("compilerOptions.optIn contains duplicate marker '$marker'")
+        }
+    }
+    return markers
+}
 
 private fun validateFreeArguments(input: List<String>): ArrayList<String> {
     val result = ArrayList<String>()

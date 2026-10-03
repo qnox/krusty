@@ -519,7 +519,8 @@ mod tests {
                 "2.4",
                 "-api-version",
                 "2.4",
-                "-opt-in=kotlin.ExperimentalStdlibApi",
+                "-opt-in=krusty.fixture.ExperimentalFirstApi",
+                "-opt-in=krusty.fixture.ExperimentalSecondApi",
                 "-module-name",
                 "kotlin-compiler-util",
                 "-jvm-target",
@@ -549,7 +550,8 @@ mod tests {
                 "2.4",
                 "-api-version",
                 "2.4",
-                "-opt-in=kotlin.ExperimentalStdlibApi",
+                "-opt-in=krusty.fixture.ExperimentalFirstApi",
+                "-opt-in=krusty.fixture.ExperimentalSecondApi",
                 "-module-name",
                 "kotlin-compiler-util",
                 "-jvm-target",
@@ -881,6 +883,18 @@ mod tests {
                 (
                     "warning-level",
                     "krusty does not support warning policy freeCompilerArg '-Xwarning-level=REDUNDANT_CLI_ARG:disabled'",
+                ),
+                (
+                    "empty-opt-in",
+                    "compilerOptions.optIn contains an empty marker",
+                ),
+                (
+                    "duplicate-opt-in",
+                    "compilerOptions.optIn contains duplicate marker 'krusty.fixture.ExperimentalFirstApi'",
+                ),
+                (
+                    "opt-in-overlap",
+                    "compilerOptions.optIn and freeCompilerArg '-opt-in=krusty.fixture.ExperimentalFirstApi' both request marker 'krusty.fixture.ExperimentalFirstApi'; configure exactly one",
                 ),
                 (
                     "jvm-target",
@@ -1302,7 +1316,19 @@ tasks.withType<KotlinJvmCompile>().configureEach {
         apiVersion.set(KotlinVersion.KOTLIN_2_4)
         jvmDefault.set(JvmDefaultMode.NO_COMPATIBILITY)
         javaParameters.set(true)
-        optIn.set(listOf("kotlin.ExperimentalStdlibApi"))
+        optIn.set(
+            when (krustyNegative) {
+                "empty-opt-in" -> listOf("krusty.fixture.ExperimentalFirstApi", "")
+                "duplicate-opt-in" -> listOf(
+                    "krusty.fixture.ExperimentalFirstApi",
+                    "krusty.fixture.ExperimentalFirstApi",
+                )
+                else -> listOf(
+                    "krusty.fixture.ExperimentalFirstApi",
+                    "krusty.fixture.ExperimentalSecondApi",
+                )
+            },
+        )
         freeCompilerArgs.add("-Xconsistent-data-class-copy-visibility")
         freeCompilerArgs.add("-Xskip-prerelease-check")
         when (krustyNegative) {
@@ -1324,6 +1350,7 @@ tasks.withType<KotlinJvmCompile>().configureEach {
             "duplicate-inert-flag" -> freeCompilerArgs.add("-Xskip-prerelease-check")
             "free-werror" -> freeCompilerArgs.add("-Werror")
             "warning-level" -> freeCompilerArgs.add("-Xwarning-level=REDUNDANT_CLI_ARG:disabled")
+            "opt-in-overlap" -> freeCompilerArgs.add("-opt-in=krusty.fixture.ExperimentalFirstApi")
         }
     }
 }
