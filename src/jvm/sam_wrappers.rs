@@ -1,13 +1,15 @@
-//! The class kotlinc writes for a function value converted to a Kotlin fun interface.
+//! The class kotlinc writes for a function value converted to a functional interface.
 //!
-//! A lambda literal converted to a fun interface is an `invokedynamic` of `LambdaMetafactory`, and
-//! so is any function value converted to a Java interface. A function value that already exists
-//! (a variable, a parameter, a call result) converted to a Kotlin fun interface is instead wrapped
-//! in a class kotlinc generates once per file and interface (`SingleAbstractMethodLowering`):
+//! A lambda literal converted to a fun interface is an `invokedynamic` of `LambdaMetafactory`. A
+//! function value that already exists (a variable, a parameter, a call result) converted to a
+//! Kotlin fun interface is instead wrapped in a class kotlinc generates once per file and
+//! interface (`SingleAbstractMethodLowering`):
 //! `<FileFacade>$sam$<interface FQ name, dots as underscores>$0`, `final synthetic`, implementing
 //! the interface and `FunctionAdapter`. Its one field holds the function value; its single method,
 //! typed as the interface declares it, calls the value's `invoke`; and `equals`/`hashCode` compare
-//! the wrapped values, so two wrappers of one function are equal.
+//! the wrapped values, so two wrappers of one function are equal. A function value converted to a
+//! Java interface uses that same shared class only under `-Xsam-conversions=class`, and then
+//! implements only the Java interface.
 //!
 //! Checked lowering marks such a conversion on its SAM target and captures the value as the
 //! conversion's lambda. This pass replaces each such lambda with a construction of the file's
@@ -34,8 +36,13 @@ impl SamWrapperRealizations {
 }
 
 /// Wrap every function value converted to a Kotlin fun interface in the file's wrapper class for
-/// that interface.
-pub(super) fn realize(ir: &mut IrFile, facade: &str) -> SamWrapperRealizations {
+/// that interface. `class_java_sam` is `-Xsam-conversions=class`: a function value converted to a
+/// Java interface then uses the same shared class, without `FunctionAdapter`.
+pub(super) fn realize(
+    ir: &mut IrFile,
+    facade: &str,
+    class_java_sam: bool,
+) -> SamWrapperRealizations {
     let mut realizations = SamWrapperRealizations::default();
     let owners = expression_functions(ir);
     let mut sites = ir
@@ -52,7 +59,7 @@ pub(super) fn realize(ir: &mut IrFile, facade: &str) -> SamWrapperRealizations {
             else {
                 return None;
             };
-            if !wraps(target) {
+            if !wraps(target, class_java_sam) {
                 return None;
             }
             let [value] = captures.as_slice() else {
@@ -90,41 +97,74 @@ pub(super) fn realize(ir: &mut IrFile, facade: &str) -> SamWrapperRealizations {
                     function_arity,
                 )
             });
-        let construction = ir.add_expr(IrExpr::New {
-            internal: wrapper,
-            args: vec![value],
-            ctor_params: None,
-            ctor_desc: None,
-            external_target: None,
-            defaults: Box::new([]),
-            default_prefix_count: 0,
-        });
+        let enclosed_by_cast = conversion_is_cast_operand(ir, node);
+        let construction = wrapper_construction(wrapper, value);
+        // An explicit cast of the conversion is the only checkcast kotlinc emits. Otherwise the
+        // construction is cast to the interface it converts to.
+        let construction = if enclosed_by_cast {
+            ir.exprs[node as usize] = construction;
+            ir.logical_types
+                .insert(node, Ty::obj_name(target.classifier));
+            node
+        } else {
+            let construction = ir.add_expr(construction);
+            ir.logical_types.insert(construction, Ty::obj_name(wrapper));
+            ir.exprs[node as usize] = IrExpr::TypeOp {
+                op: crate::ir::IrTypeOp::Cast,
+                arg: construction,
+                type_operand: Ty::obj_name(target.classifier),
+            };
+            ir.logical_types
+                .insert(node, Ty::obj_name(target.classifier));
+            construction
+        };
         if target.nullable {
             // The wrapper constructor null-checks `function`. A nullable conversion must not call
             // it when the value is null; emission branches around this exact construction.
             realizations.nullable_constructions.insert(construction);
         }
-        ir.logical_types.insert(construction, Ty::obj_name(wrapper));
-        // kotlinc casts the construction to the interface it converts to.
-        ir.exprs[node as usize] = IrExpr::TypeOp {
-            op: crate::ir::IrTypeOp::Cast,
-            arg: construction,
-            type_operand: Ty::obj_name(target.classifier),
-        };
-        ir.logical_types
-            .insert(node, Ty::obj_name(target.classifier));
         // kotlinc gives the construction no line of its own: the line starts at the wrapped value.
         ir.expr_source_lines.remove(&node);
     }
     realizations
 }
 
-/// Whether `target` converts an existing function value to a Kotlin fun interface. Every checked
-/// conversion of this semantic shape uses the wrapper path; representation details such as suspend,
-/// context parameters, bridge results, arity, or enclosing inline declarations do not select a
-/// different realization.
-fn wraps(target: &IrSamTarget) -> bool {
-    target.wraps_function_value && target.kotlin_interface
+fn wrapper_construction(wrapper: TypeName, value: ExprId) -> IrExpr {
+    IrExpr::New {
+        internal: wrapper,
+        args: vec![value],
+        ctor_params: None,
+        ctor_desc: None,
+        external_target: None,
+        defaults: Box::new([]),
+        default_prefix_count: 0,
+    }
+}
+
+/// The conversion node is the operand of an explicit cast, so that cast is the checkcast.
+///
+/// `as Object` lowers as `CastNonNull` because `Object` is non-null. Both operations are the
+/// source cast; a compiler-inserted cast to the interface would be a second `checkcast`.
+fn conversion_is_cast_operand(ir: &IrFile, node: ExprId) -> bool {
+    ir.exprs.iter().any(|expression| {
+        matches!(
+            expression,
+            IrExpr::TypeOp {
+                op: crate::ir::IrTypeOp::Cast | crate::ir::IrTypeOp::CastNonNull,
+                arg,
+                ..
+            } if *arg == node
+        )
+    })
+}
+
+/// Whether `target` converts an existing function value into the file's shared wrapper.
+///
+/// A Kotlin fun interface always does. A Java interface does only under
+/// `-Xsam-conversions=class`. Representation details such as suspend, context parameters, bridge
+/// results, arity, or enclosing inline declarations do not select a different realization.
+fn wraps(target: &IrSamTarget, class_java_sam: bool) -> bool {
+    target.wraps_function_value && (target.kotlin_interface || class_java_sam)
 }
 
 /// The exact function whose body each reachable expression belongs to. This identity selects the
@@ -220,10 +260,13 @@ fn declare_wrapper(
     class.decl_start_line = source_line;
     class.superclass = crate::types::type_name("java/lang/Object");
     class.enclosure = Some(crate::ir::IrEnclosure::File);
+    let function_adapter = target.kotlin_interface;
     class.interfaces.push_name(target.classifier);
-    class.interfaces.push_name(crate::types::type_name(
-        "kotlin/jvm/internal/FunctionAdapter",
-    ));
+    if function_adapter {
+        class.interfaces.push_name(crate::types::type_name(
+            "kotlin/jvm/internal/FunctionAdapter",
+        ));
+    }
     class
         .fields
         .push(IrField::new("function".to_string(), function_type).with_is_final(true));
@@ -295,6 +338,7 @@ fn declare_wrapper(
         boxes_primitive_result,
         suspend_arity: (!suspend_adapted && target.suspend).then_some(arity),
         public_inline,
+        function_adapter,
     });
     name
 }

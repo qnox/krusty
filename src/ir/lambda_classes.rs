@@ -68,4 +68,7 @@ pub struct IrSamWrapperClass {
     pub suspend_arity: Option<u8>,
     /// An inline declaration exposes this generated class to its inlined call sites.
     pub public_inline: bool,
+    /// A Kotlin fun interface also implements `FunctionAdapter` so two wrappers of one function
+    /// compare equal. A Java interface under `-Xsam-conversions=class` implements only itself.
+    pub function_adapter: bool,
 }

@@ -1,10 +1,11 @@
 //! The class kotlinc writes for function values converted to one fun interface (see
 //! `crate::jvm::sam_wrappers`).
 //!
-//! `final synthetic class X implements I, FunctionAdapter`, in kotlinc's member order: the
-//! constructor, which checks and stores the function value; the interface method; and the
-//! `FunctionAdapter` contract, `getFunctionDelegate`, `equals` and `hashCode`, which compare the
-//! wrapped values.
+//! `final synthetic class X implements I` and, for a Kotlin fun interface, `FunctionAdapter`.
+//! Member order is kotlinc's: the constructor, which checks and stores the function value; the
+//! interface method; and, when the class implements `FunctionAdapter`, `getFunctionDelegate`,
+//! `equals` and `hashCode`, which compare the wrapped values. A Java interface under
+//! `-Xsam-conversions=class` stops after the interface method.
 
 use super::*;
 
@@ -42,7 +43,9 @@ pub(super) fn emit_sam_wrapper_class(
     }
     env.inner_classes.register(&mut cw);
     cw.add_interface(&interface);
-    cw.add_interface(FUNCTION_ADAPTER);
+    if wrapper.function_adapter {
+        cw.add_interface(FUNCTION_ADAPTER);
+    }
 
     // `<init>(FunctionN)`: check the value, then `Object()`, then store it.
     // kotlinc's writer interns a method's name, descriptor, signature and annotations before its
@@ -112,6 +115,17 @@ pub(super) fn emit_sam_wrapper_class(
         env,
     );
 
+    if wrapper.function_adapter {
+        emit_function_adapter(&mut cw, &class, &interface, function);
+    }
+
+    bridge_emission::emit_bridges(ir, c, &mut cw, env);
+
+    finish_local_synthetic_class(cw, env)
+}
+
+/// `FunctionAdapter` members a Kotlin fun-interface wrapper adds after its own method.
+fn emit_function_adapter(cw: &mut ClassWriter, class: &str, interface: &str, function: u16) {
     let this = [("this".to_string(), format!("L{class};"), 0u16)];
     // `getFunctionDelegate()`: the wrapped value.
     for constant in [
@@ -144,7 +158,7 @@ pub(super) fn emit_sam_wrapper_class(
         &[],
     );
 
-    emit_equals(&mut cw, &class, &interface);
+    emit_equals(cw, class, interface);
 
     // `hashCode()`: the wrapped value's.
     cw.seed_utf8("hashCode");
@@ -165,10 +179,6 @@ pub(super) fn emit_sam_wrapper_class(
     cw.reserve_method_lvt(&this);
     cw.add_method(0x0011, "hashCode", "()I", &code);
     cw.set_method_debug("hashCode", "()I", None, &this);
-
-    bridge_emission::emit_bridges(ir, c, &mut cw, env);
-
-    finish_local_synthetic_class(cw, env)
 }
 
 /// Generic signatures kotlinc puts on a suspend wrapper's function field and constructor. The

@@ -303,7 +303,8 @@ fn compile_source(
         &inputs, platform, &features, &mut diags,
     );
     let backend = krusty::jvm::JvmBackend::new(cp)
-        .with_jvm_default(krusty::conformance::jvm_default_mode(src));
+        .with_jvm_default(krusty::conformance::jvm_default_mode(src))
+        .with_lambda_modes(box_lambda_modes([src]));
     let outputs = krusty::compiler::emit_analyzed(analysis, &stems, &backend, "main", &mut diags);
     T_EMIT.fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
@@ -315,6 +316,20 @@ fn compile_source(
         })
         .collect::<Vec<_>>();
     (!diags.has_errors() && !classes.is_empty()).then_some(classes)
+}
+
+/// `-Xsam-conversions` for a box file. `// SAM_CONVERSIONS: CLASS` selects the shared Java wrapper;
+/// anything else keeps kotlinc's default `indy`. Lambda literals stay on `-Xlambdas=indy`.
+fn box_lambda_modes<'a>(
+    sources: impl IntoIterator<Item = &'a str>,
+) -> krusty::jvm::ir_emit::LambdaModes {
+    let mut modes = krusty::jvm::ir_emit::LambdaModes::default();
+    modes.sam_conversions = sources
+        .into_iter()
+        .map(krusty::conformance::sam_conversion_mode)
+        .find(|mode| *mode != krusty::jvm::ir_emit::LambdaMode::Indy)
+        .unwrap_or_default();
+    modes
 }
 
 /// The `helpers` package source the Kotlin test infra injects into every `// WITH_COROUTINES` box test
@@ -560,7 +575,11 @@ fn compile_blocks_mixed(
         .map(|(_, source)| krusty::conformance::jvm_default_mode(source))
         .find(|mode| *mode != krusty::jvm::ir_emit::JvmDefaultMode::default())
         .unwrap_or_default();
-    let backend = krusty::jvm::JvmBackend::new(cp).with_jvm_default(jvm_default);
+    let backend = krusty::jvm::JvmBackend::new(cp)
+        .with_jvm_default(jvm_default)
+        .with_lambda_modes(box_lambda_modes(
+            blocks.iter().map(|(_, source)| source.as_str()),
+        ));
     let outputs = krusty::compiler::emit_analyzed(analysis, &stems, &backend, "main", &mut diags);
     let classes = outputs
         .into_iter()
