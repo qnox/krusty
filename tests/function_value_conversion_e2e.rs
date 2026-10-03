@@ -41,17 +41,16 @@ fn assert_conversion_matches_kotlinc(
     common::expect_box_same_as_kotlinc(source, &format!("{stem}Run"));
 }
 
-/// Require krusty to report exactly kotlinc's errors for `source`, entry for entry, as recorded per
-/// Kotlin version, and answer whether kotlinc accepted it. kotlinc 2.4.0 and 2.4.10 know
+/// Require krusty to report exactly kotlinc's errors for `source`, entry for entry, and answer
+/// whether kotlinc accepted it. kotlinc 2.4.0 and 2.4.10 know
 /// `UnitConversionsOnArbitraryExpressions` but convert no arbitrary value (KT-84393), so the same
 /// program is rejected there and compiled from 2.4.20 on.
 fn accepted_like_kotlinc(source: &str) -> bool {
     let sources = [("Main.kt", source)];
-    let expected = common::recorded(|| {
-        common::reference_error_ledger(&sources, &common::language_directives::kotlinc_args(source))
-    });
+    let reference_args = common::language_directives::kotlinc_args(source);
+    let expected = common::reference_error_ledger(&sources, &reference_args);
     assert_eq!(
-        common::krusty_error_ledger(&sources),
+        common::krusty_error_ledger_with_args(&sources, &reference_args),
         expected,
         "krusty's ledger against kotlinc {}",
         krusty::kotlin_version::target()
@@ -426,9 +425,7 @@ fn kotlinc_backend_outcome(stem: &str, source: &str) -> Vec<String> {
 fn an_already_suspend_value_unit_converts_to_a_suspend_parameter() {
     let source = format!("{UNIT_CONVERSIONS}{SUSPEND_UNIT_SOURCE}");
     let accepted = accepted_like_kotlinc(&source);
-    let backend = common::recorded_named("kotlinc backend", || {
-        kotlinc_backend_outcome("SuspendUnitValue", &source)
-    });
+    let backend = kotlinc_backend_outcome("SuspendUnitValue", &source);
     if !accepted {
         assert_eq!(backend, ["exit code 1"], "kotlinc rejects the argument");
         return;

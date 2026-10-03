@@ -6484,6 +6484,25 @@ mod tests {
     }
 
     #[test]
+    fn projected_output_preserves_the_captures_readable_bound() {
+        let any = Ty::obj("kotlin/Any");
+        let nullable_any = Ty::nullable(any);
+        // The readable capture propagates through a covariant classifier argument. Using an
+        // unknown classifier here would correctly default its declaration-site variance to
+        // invariant and preserve `Producer<*>`, testing a different rule.
+        let output = Ty::obj_args("fixtures/Producer", &[Ty::ty_param("R", any)]);
+
+        assert_eq!(
+            specialize_signature_output_type(
+                &VarianceSource,
+                output,
+                &GSigBinds::from([("R".to_string(), Ty::star_projection(nullable_any),)]),
+            ),
+            Ty::obj_args("fixtures/Producer", &[nullable_any])
+        );
+    }
+
+    #[test]
     fn inferred_generic_binding_joins_null_with_the_non_null_element_type() {
         let parameter = Ty::ty_param("T", Ty::obj("kotlin/Any"));
         let mut inferred = GSigBinds::new();

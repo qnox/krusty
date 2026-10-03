@@ -316,7 +316,9 @@ pub(crate) fn has_hidden_deprecated_member(
         let Some(classifier) = source.classifier(internal) else {
             continue;
         };
-        if classifier.hidden_deprecated_callables.contains(name) {
+        if classifier.hidden_deprecated_callables.contains(name)
+            || source.api_withheld_callable(internal, name)
+        {
             return true;
         }
         queue.extend(direct_supertypes_from_classifier(&classifier, current));

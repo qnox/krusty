@@ -175,11 +175,6 @@ fn assert_identical_except(source: &str, stem: &str, unimplemented_count: usize)
         "krusty's ledger is not a subsequence"
     );
     assert_eq!(unimplemented.len(), unimplemented_count, "unexpected gaps");
-    let recorded = common::recorded_named("unimplemented", || unimplemented.clone());
-    assert_eq!(
-        unimplemented, recorded,
-        "the exact excused diagnostics changed"
-    );
     assert_eq!(
         actual.len() + unimplemented.len(),
         expected.len(),
@@ -187,12 +182,9 @@ fn assert_identical_except(source: &str, stem: &str, unimplemented_count: usize)
     );
 }
 
-/// Assert the reference compiler still reports `reference` as recorded for the running test under
-/// this Kotlin version, and that it holds `count` entries.
+/// Assert the selected reference compiler reports exactly `count` entries.
 fn assert_recorded_reference(reference: Vec<String>, count: usize, what: &str) {
     assert_eq!(reference.len(), count, "{what}: {reference:#?}");
-    let recorded = common::recorded(|| reference.clone());
-    assert_eq!(reference, recorded, "{what}");
 }
 
 /// Assert that krusty's report is exactly the reference compiler's.

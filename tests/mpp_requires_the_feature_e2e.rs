@@ -39,19 +39,19 @@ fn compile(source: &str, multiplatform: bool) -> (bool, String) {
 }
 
 /// kotlinc's error ledger for `source` as a multiplatform `Main.kt` with `extra` arguments, in
-/// emission order, recorded per Kotlin version for the running test.
+/// emission order, replayed from the exact-version binary invocation cache when available.
 fn kotlinc_ledger(source: &str, extra: &[&str]) -> Vec<String> {
-    common::recorded(|| {
-        let dir = common::scratch_dir().expect("scratch dir");
-        let src = dir.join("Main.kt");
-        std::fs::write(&src, source).unwrap();
-        let mut args = vec![
-            "-Xmulti-platform".to_string(),
-            "-d".to_string(),
-            dir.join("kotlinc-out").to_string_lossy().into_owned(),
-        ];
-        args.extend(extra.iter().map(ToString::to_string));
-        args.push(src.to_string_lossy().into_owned());
+    let dir = common::scratch_dir().expect("scratch dir");
+    let src = dir.join("Main.kt");
+    std::fs::write(&src, source).unwrap();
+    let mut args = vec![
+        "-Xmulti-platform".to_string(),
+        "-d".to_string(),
+        dir.join("kotlinc-out").to_string_lossy().into_owned(),
+    ];
+    args.extend(extra.iter().map(ToString::to_string));
+    args.push(src.to_string_lossy().into_owned());
+    common::byte_dump::with_recorded_diagnostics(|| {
         let (_, stderr) = common::kotlinc_compile(&args).expect("reference kotlinc");
         common::reported(&stderr)
             .iter()

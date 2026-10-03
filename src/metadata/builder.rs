@@ -410,6 +410,7 @@ fn function_pb(
     f: &FnMeta,
     requirements: &mut VersionRequirementTable,
     param_assertions: bool,
+    annotations_in_metadata: bool,
 ) -> Pb {
     let mut p = Pb::new();
     // Function.flags = 9 — emitted only when non-default (`6` = public final is the proto default).
@@ -503,8 +504,9 @@ fn function_pb(
         let mut vp = Pb::new();
         let annotations = f.param_annotations.get(i).map(Vec::as_slice).unwrap_or(&[]);
         // ValueParameter.flags = 1 (before name, matching kotlinc's field order): what the
-        // parameter declared, plus bit 0 = HAS_ANNOTATIONS when the `annotation` records below are
-        // written.
+        // parameter declared, plus bit 0 = HAS_ANNOTATIONS when it carries annotations — the bit
+        // stays set when the source feature is disabled; the `annotation` records are gated
+        // separately.
         let flags = f
             .param_modifiers
             .get(i)
@@ -559,7 +561,12 @@ fn function_pb(
                 vp.field_message(4, &et); // ValueParameter.vararg_element_type = 4
             }
         }
-        crate::metadata::class_builder::append_param_annotations(st, &mut vp, annotations);
+        crate::metadata::class_builder::append_param_annotations(
+            st,
+            &mut vp,
+            annotations,
+            annotations_in_metadata,
+        );
         if i < f.context_count {
             // Leading context parameters → Function.context_parameter = 13 (filled implicitly
             // by callers), NOT the positional value_parameter list.
@@ -583,9 +590,13 @@ fn function_pb(
         .flatten();
     // Applied annotations (Function.annotation = 12): `Annotation.id` (field 1) referencing the class
     // through the string table's DESC_TO_CLASS_ID form, exactly as kotlinc records e.g.
-    // `@LowPriorityInOverloadResolution`.
-    for annotation in &f.annotations {
-        p.repeated_message(12, &annotation_pb(st, annotation));
+    // `@LowPriorityInOverloadResolution`. kotlinc's `LanguageFeature.AnnotationsInMetadata` (since
+    // language level 2.4) gates the records, not the flags: an older source-language configuration
+    // keeps the `HAS_ANNOTATIONS` bit above and writes nothing here.
+    if annotations_in_metadata {
+        for annotation in &f.annotations {
+            p.repeated_message(12, &annotation_pb(st, annotation));
+        }
     }
     // Function.version_requirement = 31: an index into the package's requirement table.
     if needs_inline_parameter_null_check(flags, f.has_function_typed_parameter, param_assertions) {
@@ -978,6 +989,7 @@ pub fn build_package(
         (module_name, locals),
         param_assertions,
         None,
+        true,
     )
 }
 
@@ -988,6 +1000,10 @@ pub(crate) fn build_package_with_intersection_approximation(
     (module_name, locals): (Option<&str>, &[LocalPropertyMeta]),
     param_assertions: bool,
     intersection_approximation: Option<&dyn Fn(Ty) -> Option<Ty>>,
+    // kotlinc's `LanguageFeature.AnnotationsInMetadata` (since 2.4): `false` keeps every
+    // `HAS_ANNOTATIONS` flag bit but writes no annotation records. Selected from the finalized
+    // source-language feature set.
+    annotations_in_metadata: bool,
 ) -> (Vec<u8>, Vec<String>) {
     let mut st = StringTable::with_intersection_approximation(intersection_approximation);
     let mut requirements = VersionRequirementTable::default();
@@ -1033,6 +1049,7 @@ pub(crate) fn build_package_with_intersection_approximation(
                     &funcs[index],
                     &mut requirements,
                     param_assertions,
+                    annotations_in_metadata,
                 ))
             }
             Kind::Property => prop_pbs[index] = Some(property_pb(&mut st, &props[index])),

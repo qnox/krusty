@@ -18,8 +18,6 @@ pub(crate) use common_core::server_pool::Pool as ServerPool;
 mod e2e_support;
 #[path = "common/inner_class_rows.rs"]
 mod inner_class_rows_support;
-#[path = "common/recorded.rs"]
-mod recorded_support;
 
 mod common {
     pub use super::bytecode_comparison_support::*;
@@ -28,7 +26,6 @@ mod common {
     pub use super::inner_class_rows_support::{
         assert_same_inner_classes, compile_with_kotlinc, compile_with_kotlinc_for_target,
     };
-    pub use super::recorded_support::{recorded, recorded_line, recorded_named};
 }
 
 #[path = "abstract_instantiation_check_e2e.rs"]
@@ -73,6 +70,8 @@ mod anon_object_outer_this_e2e;
 mod anonymous_capture_discovery_e2e;
 #[path = "anonymous_function_e2e.rs"]
 mod anonymous_function_e2e;
+#[path = "api_version_availability_e2e.rs"]
+mod api_version_availability_e2e;
 #[path = "apt_host_e2e.rs"]
 mod apt_host_e2e;
 #[path = "arity_error_coverage_e2e.rs"]

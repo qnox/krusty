@@ -218,6 +218,20 @@ pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
                 "--opt_in" => unit
                     .inert
                     .extend(values.into_iter().map(|value| format!("--opt_in {value}"))),
+                // Preserve warning policy as the standard kotlinc spelling. The batch parser owns
+                // the diagnostic-name registry and duplicate checks, so the worker does not grow
+                // a second, drifting copy.
+                "--x_warning_level" => {
+                    if values.is_empty() {
+                        return Err(Refusal::Malformed(
+                            "--x_warning_level requires at least one NAME:SEVERITY value"
+                                .to_string(),
+                        ));
+                    }
+                    for value in values {
+                        unit.kotlinc_args.push(format!("-Xwarning-level={value}"));
+                    }
+                }
                 "--x_xlanguage" => {
                     if values.is_empty() {
                         return Err(Refusal::Malformed(
@@ -282,14 +296,16 @@ pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
                 unit.kotlinc_args.push(value_of(index, flag)?);
                 index += 2;
             }
-            "--api_version" | "--language_version" => {
+            "--api_version" => {
                 let value = value_of(index, flag)?;
-                if value != "2.4" {
-                    return Err(Refusal::Unsupported(format!("{flag} {value}")));
-                }
-                // This compiler implements the current 2.4 language/API surface directly; it has
-                // no alternate-version mode to select. State the accepted no-op in the response.
-                unit.inert.push(format!("{flag} {value}"));
+                unit.kotlinc_args.push("-api-version".to_owned());
+                unit.kotlinc_args.push(value);
+                index += 2;
+            }
+            "--language_version" => {
+                let value = value_of(index, flag)?;
+                unit.kotlinc_args.push("-language-version".to_owned());
+                unit.kotlinc_args.push(value);
                 index += 2;
             }
             // The four options this worker exists to honor. Each selects an artifact SHAPE, so a
@@ -360,6 +376,10 @@ pub fn translate(arguments: &[String]) -> Result<WorkUnit, Refusal> {
                         // fleet.util.codepoints) is safe to build. Inert here for Bazel to print;
                         // deliberately NOT generalized to other `-Xwasm-*` flags.
                         "-Xwasm-kclass-fqn" => unit.inert.push(value),
+                        // The common CLI parser validates the typed diagnostic identity and applies
+                        // its severity. Keeping the argument here also lets duplicate spellings from
+                        // the two worker surfaces be rejected in one place.
+                        _ if value.starts_with("-Xwarning-level=") => unit.kotlinc_args.push(value),
                         _ => unit.kotlinc_args.push(value),
                     }
                 }
@@ -670,8 +690,22 @@ mod tests {
         assert_eq!(unit.classpath, vec![PathBuf::from("lib/dep.jar")]);
         let parsed = crate::cli::parse(unit.kotlinc_args.clone());
         assert_eq!(parsed.jvm_default, JvmDefaultMode::NoCompatibility);
+        assert_eq!(
+            parsed.language_settings.language_version,
+            krusty::language_version::LanguageVersion::V2_4
+        );
+        assert_eq!(
+            parsed.language_settings.api_version,
+            krusty::language_version::LanguageVersion::V2_4
+        );
         assert!(!parsed.no_param_assertions);
-        for expected in ["-jvm-target", "25"] {
+        for expected in [
+            "-jvm-target",
+            "25",
+            "-api-version",
+            "2.4",
+            "-language-version",
+        ] {
             assert!(
                 unit.kotlinc_args.iter().any(|a| a == expected),
                 "{expected} missing from {:?}",
@@ -679,14 +713,47 @@ mod tests {
             );
         }
         for inert in [
-            "--api_version 2.4",
-            "--language_version 2.4",
             "--progressive",
             "--warn off",
             "--x_xlanguage +AllowEagerSupertypeAccessibilityChecks",
         ] {
             assert!(unit.inert.iter().any(|value| value == inert), "{inert}");
         }
+    }
+
+    #[test]
+    fn standard_language_and_api_versions_are_forwarded_to_the_shared_cli() {
+        let unit = translate(&args(&[
+            "--language_version",
+            "2.2",
+            "--api_version",
+            "2.2",
+            "--srcs",
+            "A.kt",
+            "--out",
+            "out.jar",
+        ]))
+        .expect("standard version settings translate");
+        assert!(unit.inert.is_empty(), "{:?}", unit.inert);
+        assert_eq!(unit.sources, vec![PathBuf::from("A.kt")]);
+        assert_eq!(unit.output_jar, PathBuf::from("out.jar"));
+        // Sources and the output jar stay on the work unit. `kotlinc_args` is only the flags the
+        // shared CLI parses; appending the source here would make the worker refuse the request
+        // as an unexpected positional value.
+        assert_eq!(
+            unit.kotlinc_args,
+            args(&["-language-version", "2.2", "-api-version", "2.2"])
+        );
+        let parsed = crate::cli::parse(unit.kotlinc_args);
+        assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+        assert_eq!(
+            parsed.language_settings.language_version,
+            krusty::language_version::LanguageVersion::V2_2
+        );
+        assert_eq!(
+            parsed.language_settings.api_version,
+            krusty::language_version::LanguageVersion::V2_2
+        );
     }
 
     /// `-Xjvm-default=all` is what the project builds with, and the worker spells it
@@ -928,6 +995,85 @@ mod tests {
         );
     }
 
+    /// Both worker spellings normalize to the standard CLI option. Validation and policy
+    /// application then happen through the same typed diagnostic registry as a batch invocation.
+    #[test]
+    fn warning_level_is_forwarded_to_the_typed_cli_policy() {
+        let unit = translate(&args(&[
+            "--kotlinc-arg",
+            "-Xwarning-level=REDUNDANT_CLI_ARG:disabled",
+            "--srcs",
+            "A.kt",
+            "--out",
+            "o.jar",
+        ]))
+        .expect("a valid warning level must translate");
+        assert!(unit.inert.is_empty(), "{:?}", unit.inert);
+        assert_eq!(
+            unit.kotlinc_args,
+            vec!["-Xwarning-level=REDUNDANT_CLI_ARG:disabled".to_string()]
+        );
+
+        let unit = translate(&args(&[
+            "--x_warning_level",
+            "REDUNDANT_CLI_ARG:disabled",
+            "DEPRECATED_LANGUAGE_VERSION:error",
+            "--srcs",
+            "A.kt",
+            "--out",
+            "o.jar",
+        ]))
+        .expect("the worker's own warning-level flag must translate");
+        assert_eq!(
+            unit.kotlinc_args,
+            vec![
+                "-Xwarning-level=REDUNDANT_CLI_ARG:disabled".to_string(),
+                "-Xwarning-level=DEPRECATED_LANGUAGE_VERSION:error".to_string(),
+            ]
+        );
+        assert!(unit.inert.is_empty(), "{:?}", unit.inert);
+
+        for arguments in [
+            args(&[
+                "--kotlinc-arg",
+                "-Xwarning-level=REDUNDANT_CLI_ARG:loud",
+                "--srcs",
+                "A.kt",
+                "--out",
+                "o.jar",
+            ]),
+            args(&[
+                "--x_warning_level",
+                "REDUNDANT_CLI_ARG",
+                "--srcs",
+                "A.kt",
+                "--out",
+                "o.jar",
+            ]),
+        ] {
+            let refusal = translate(&arguments).unwrap_err();
+            assert!(
+                matches!(refusal, Refusal::Unsupported(_)),
+                "{arguments:?}: {refusal:?}"
+            );
+        }
+
+        let refusal = translate(&args(&[
+            "--x_warning_level",
+            "--srcs",
+            "A.kt",
+            "--out",
+            "o.jar",
+        ]))
+        .unwrap_err();
+        assert_eq!(
+            refusal,
+            Refusal::Malformed(
+                "--x_warning_level requires at least one NAME:SEVERITY value".to_string()
+            )
+        );
+    }
+
     /// A target-provided compiler flag is safe only when the CLI actually models it. Accepting an
     /// arbitrary `-X...` here lets the CLI's compatibility parser ignore a potentially
     /// output-changing option while the worker reports success.
@@ -982,6 +1128,7 @@ mod tests {
         let parsed = crate::cli::parse(unit.kotlinc_args);
         assert!(parsed.ignored.is_empty(), "{:?}", parsed.ignored);
         assert!(parsed
+            .language_settings
             .features
             .has("DataClassCopyRespectsConstructorVisibility"));
     }
@@ -998,7 +1145,10 @@ mod tests {
         .expect("explicit backing fields must be accepted");
         let parsed = crate::cli::parse(unit.kotlinc_args);
         assert!(parsed.ignored.is_empty(), "{:?}", parsed.ignored);
-        assert!(parsed.features.has("ExplicitBackingFields"));
+        assert!(parsed
+            .language_settings
+            .features
+            .has("ExplicitBackingFields"));
     }
 
     #[test]
@@ -1013,7 +1163,7 @@ mod tests {
         .expect("context parameters must be accepted");
         let parsed = crate::cli::parse(unit.kotlinc_args);
         assert!(parsed.ignored.is_empty(), "{:?}", parsed.ignored);
-        assert!(parsed.features.has("ContextParameters"));
+        assert!(parsed.language_settings.features.has("ContextParameters"));
     }
 
     #[test]
@@ -1029,8 +1179,14 @@ mod tests {
         .expect("name-based destructuring must be accepted");
         let parsed = crate::cli::parse(unit.kotlinc_args);
         assert!(parsed.ignored.is_empty(), "{:?}", parsed.ignored);
-        assert!(parsed.features.has("NameBasedDestructuring"));
-        assert!(parsed.features.has("EnableNameBasedDestructuringShortForm"));
+        assert!(parsed
+            .language_settings
+            .features
+            .has("NameBasedDestructuring"));
+        assert!(parsed
+            .language_settings
+            .features
+            .has("EnableNameBasedDestructuringShortForm"));
     }
 
     #[test]
@@ -1046,8 +1202,8 @@ mod tests {
         ]))
         .expect("modeled language features");
         let parsed = crate::cli::parse(unit.kotlinc_args);
-        assert!(parsed.features.has("WhenGuards"));
-        assert!(!parsed.features.has("ContextParameters"));
+        assert!(parsed.language_settings.features.has("WhenGuards"));
+        assert!(!parsed.language_settings.features.has("ContextParameters"));
     }
 
     #[test]

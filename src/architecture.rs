@@ -173,6 +173,8 @@ mod tests {
     fn compiler_cli_uses_only_public_compiler_layers() {
         // `plugins` is the compiler-plugin surface, in budget as `features` is: the CLI reads
         // kotlinc's `-Xplugin`/`-P` switches and resolves them against the extension registry.
+        // `language_version` and `language_settings` are the public language and API version
+        // surface, the same kind of boundary as `kotlin_version`.
         assert_allowed_external_crate_modules_in_tree(
             "crates/krusty-cli/src",
             &[
@@ -182,6 +184,8 @@ mod tests {
                 "frontend",
                 "jvm",
                 "kotlin_version",
+                "language_settings",
+                "language_version",
                 "plugins",
                 "source",
             ],
@@ -263,6 +267,9 @@ mod tests {
             // annotation-implementation nullability) is a per-release fact, not a JVM concept.
             "kotlin_version",
             "kt_string",
+            // A dependency provider filters declarations carrying `@SinceKotlin` against the
+            // compilation's selected API version before publishing normalized candidates.
+            "language_version",
             "libraries",
             // The role of a lifted callable (lambda, local function, or local delegated-property
             // accessor) is a source fact. JVM naming reads it; it carries no class-file spelling.
@@ -642,6 +649,8 @@ mod tests {
                 "jvm",
                 "klib",
                 "kotlin_version",
+                "language_settings",
+                "language_version",
                 "lexer",
                 "libraries",
                 "metadata",

@@ -357,6 +357,10 @@ pub struct JvmBackend {
     /// `-language-version X.Y`: the `@kotlin.Metadata` `mv` and `.kotlin_module` header version to
     /// stamp; `None` keeps the default ([`crate::jvm::ir_emit::DEFAULT_METADATA_VERSION`]).
     metadata_version: Option<[i32; 3]>,
+    /// Whether the source-language configuration enables kotlinc's
+    /// `LanguageFeature.AnnotationsInMetadata`. This is deliberately independent of the physical
+    /// metadata stamp: an internal stamp override must not change source-language semantics.
+    annotations_in_metadata: bool,
 }
 
 impl JvmBackend {
@@ -370,6 +374,7 @@ impl JvmBackend {
             param_assertions: true,
             call_assertions: true,
             metadata_version: None,
+            annotations_in_metadata: true,
         }
     }
 
@@ -377,6 +382,13 @@ impl JvmBackend {
     /// header with `[X, Y, 0]`; `None` keeps kotlinc's no-flag stamp.
     pub fn with_metadata_version(mut self, version: Option<[i32; 3]>) -> JvmBackend {
         self.metadata_version = version;
+        self
+    }
+
+    /// Select declaration-annotation record emission from the finalized source-language feature
+    /// set. Metadata versioning is an output representation choice and does not select this gate.
+    pub fn with_annotations_in_metadata(mut self, enabled: bool) -> JvmBackend {
+        self.annotations_in_metadata = enabled;
         self
     }
 
@@ -465,6 +477,9 @@ pub fn shipping_emit_options(
         // `-language-version` is a per-invocation option; the backend applies it with
         // `EmitOptions::with_metadata_version`. The default keeps kotlinc's no-flag stamp.
         metadata_version: None,
+        // The shipping default language level is 2.4, where this feature is enabled. A configured
+        // compiler invocation overrides it through `EmitOptions::with_annotations_in_metadata`.
+        annotations_in_metadata: true,
     }
 }
 
@@ -806,6 +821,7 @@ impl JvmBackend {
             &classifiers,
             self.metadata_version
                 .unwrap_or(crate::jvm::ir_emit::DEFAULT_METADATA_VERSION),
+            self.annotations_in_metadata,
         );
         let has_facade_members = metadata.is_some();
         let inner_class_resolver =
@@ -864,6 +880,7 @@ impl JvmBackend {
                 .with_lambda_modes(self.lambda_modes)
                 .with_param_assertions(self.param_assertions)
                 .with_metadata_version(self.metadata_version)
+                .with_annotations_in_metadata(self.annotations_in_metadata)
                 .with_java_parameters(self.java_parameters);
         emit_opts.inner_class_resolver = Some(inner_class_resolver);
         let run = crate::jvm::ir_emit::EmitRun::default();
@@ -1158,6 +1175,7 @@ pub fn facade_package_metadata_from_ir(
     param_assertions: bool,
     symbols: &dyn crate::backend::BackendClassifierSource,
     metadata_version: [i32; 3],
+    annotations_in_metadata: bool,
 ) -> Option<crate::jvm::ir_emit::KotlinMetadata> {
     let functions = ir
         .package_functions
@@ -1407,6 +1425,7 @@ pub fn facade_package_metadata_from_ir(
         param_assertions,
         Some(&approximate),
         metadata_version,
+        annotations_in_metadata,
     )
 }
 
@@ -1467,6 +1486,7 @@ fn build_facade_metadata(
     param_assertions: bool,
     intersection_approximation: Option<&dyn Fn(crate::types::Ty) -> Option<crate::types::Ty>>,
     metadata_version: [i32; 3],
+    annotations_in_metadata: bool,
 ) -> Option<crate::jvm::ir_emit::KotlinMetadata> {
     (!functions.is_empty() || !properties.is_empty() || !aliases.is_empty()).then(|| {
         let (d1_bytes, d2) =
@@ -1477,6 +1497,7 @@ fn build_facade_metadata(
                 ((module_name != "main").then_some(module_name), locals),
                 param_assertions,
                 intersection_approximation,
+                annotations_in_metadata,
             );
         crate::jvm::ir_emit::KotlinMetadata {
             k: 2,
@@ -1717,6 +1738,7 @@ mod tests {
             true,
             &NoClassifierFacts,
             [2, 4, 0],
+            true,
         )
         .expect("a package property requires facade metadata");
         let decoded = crate::jvm::metadata::decode_metadata(

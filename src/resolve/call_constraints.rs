@@ -14,6 +14,7 @@ pub(super) struct CallConstraints<'a> {
 impl CallConstraints<'_> {
     pub(super) fn bindings(
         self,
+        source: &dyn crate::symbol_source::SymbolSource,
         signature: &crate::libraries::GenericSig,
     ) -> crate::symbol_resolver::GSigBinds {
         let mut bindings = crate::symbol_resolver::seeded_gsig_binds(signature, self.type_args);
@@ -22,7 +23,15 @@ impl CallConstraints<'_> {
         }
         let mut seeded = crate::symbol_resolver::GSigBinds::new();
         if let Some(declared) = signature.receiver {
-            crate::symbol_resolver::unify_ty(declared, self.receiver, &mut seeded);
+            // An extension receiver is matched through the applied supertype graph. `List<*>`
+            // therefore constrains the `T` in `Iterable<T>` to its readable projection, exactly as
+            // ordinary overload selection does; structural `unify_ty` cannot see that edge.
+            crate::symbol_resolver::unify_ty_from_symbols(
+                source,
+                declared,
+                self.receiver,
+                &mut seeded,
+            );
         }
         if let Some(expected) = self.expected {
             crate::symbol_resolver::unify_ty(signature.ret, expected, &mut seeded);

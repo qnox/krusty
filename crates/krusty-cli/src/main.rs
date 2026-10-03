@@ -147,6 +147,21 @@ fn compile_work_unit(unit: krusty_cli::worker::WorkUnit) -> Result<(), String> {
 /// instead of terminating: a worker that exits on a broken source takes the whole build's worker
 /// process down with it.
 pub fn compile(opts: &cli::Options) -> Result<usize, String> {
+    let mut promoted = String::new();
+    for warning in &opts.warnings {
+        match opts.warning_policy.level(warning.name) {
+            cli::WarningLevel::Warning => eprintln!("warning: {}", warning.message),
+            cli::WarningLevel::Error => {
+                promoted.push_str("error: ");
+                promoted.push_str(&warning.message);
+                promoted.push('\n');
+            }
+            cli::WarningLevel::Disabled => {}
+        }
+    }
+    if !promoted.is_empty() {
+        return Err(promoted);
+    }
     let version = match opts.kotlin_reference_version {
         Some(version) => version,
         None => krusty::kotlin_version::configured_target()
@@ -188,8 +203,10 @@ pub fn compile(opts: &cli::Options) -> Result<usize, String> {
     ));
     // Construction is fallible: a corrupt selected dependency remains a terminal frontend
     // diagnostic and never becomes a queryable provider with an empty symbol index.
-    let platform = krusty::frontend::PlatformProvider::from(JvmLibraries::new(cp.clone()))
-        .with_native_plugins(plugins.native);
+    let libraries = JvmLibraries::new(cp.clone())
+        .map(|libraries| libraries.with_api_version(opts.language_settings.api_version));
+    let platform =
+        krusty::frontend::PlatformProvider::from(libraries).with_native_plugins(plugins.native);
     let source_inputs = opts
         .sources
         .iter()
@@ -209,14 +226,18 @@ pub fn compile(opts: &cli::Options) -> Result<usize, String> {
     let analysis = krusty::frontend::analyze_source_set_streaming_with_module(
         &source_inputs,
         platform,
-        &opts.features,
+        &opts.language_settings.features,
         &opts.module_name,
         &mut diags,
     );
 
     // A `-jvm-target` sets the emitted class-file version (kotlinc's `jvmToolchain(25)` ⇒ v69).
-    // Absent, the backend keeps krusty's v52 default. `-language-version X.Y` stamps the
-    // `@kotlin.Metadata` `mv` and `.kotlin_module` header `[X, Y, 0]`, as kotlinc does.
+    // Absent, the backend keeps krusty's v52 default. The selected source-language level stamps
+    // `@kotlin.Metadata` and `.kotlin_module`, as kotlinc does; the internal metadata override is
+    // kept separate for controlled emission comparisons.
+    let metadata_version = opts
+        .metadata_version
+        .unwrap_or_else(|| opts.language_settings.language_version.metadata_version());
     let backend = krusty::jvm::JvmBackend::new(cp)
         .with_class_major(opts.jvm_target_major)
         .with_jvm_default(opts.jvm_default)
@@ -224,7 +245,8 @@ pub fn compile(opts: &cli::Options) -> Result<usize, String> {
         .with_lambda_modes(opts.lambda_modes)
         .with_param_assertions(!opts.no_param_assertions)
         .with_call_assertions(!opts.no_call_assertions)
-        .with_metadata_version(opts.metadata_version);
+        .with_annotations_in_metadata(opts.language_settings.features.has("AnnotationsInMetadata"))
+        .with_metadata_version(Some(metadata_version));
     let outputs =
         krusty::compiler::emit_analyzed(analysis, &stems, &backend, &opts.module_name, &mut diags);
 

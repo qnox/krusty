@@ -6,8 +6,7 @@
 //! krusty used to ACCEPT, and then compiled to a cast that failed at run time on both backends
 //! (`codegen/box/casts/kt83324.kt`, `codegen/box/objectExpression/expr3.kt`).
 //!
-//! Every rejection below is kotlinc's own answer, recorded per Kotlin version (see
-//! `tests/common/recorded.rs`), not a reading of the rule.
+//! Every rejection below is the selected kotlinc's own answer, not a reading of the rule.
 //!
 //! The narrowing the loop's own CONDITION proves is the one that must survive, and does: the
 //! condition is re-evaluated on every iteration, so it holds on entry to each of them.
@@ -21,10 +20,10 @@
 
 use super::common;
 
-/// krusty rejects `src` with exactly the messages kotlinc reports, recorded per Kotlin version.
+/// krusty rejects `src` with exactly the messages the selected kotlinc reports.
 fn rejects(src: &str, context: &str) {
     let diagnostics = common::front_end_diagnostics(src, &[], None);
-    let expected = common::recorded(|| common::reference_error_messages("Main", src));
+    let expected = common::reference_error_messages("Main", src);
     assert!(!expected.is_empty(), "{context}: kotlinc must reject");
     assert_eq!(diagnostics, expected, "{context}: exact diagnostics");
 }
@@ -35,7 +34,7 @@ fn rejects(src: &str, context: &str) {
 /// rejection and kotlinc's text up to the receiver clause are pinned.
 fn rejects_naming_the_declared_receiver(src: &str, context: &str) {
     let diagnostics = common::front_end_diagnostics(src, &[], None);
-    let expected = common::recorded(|| common::reference_error_messages("Main", src));
+    let expected = common::reference_error_messages("Main", src);
     assert_eq!(
         expected.len(),
         1,

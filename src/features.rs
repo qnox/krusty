@@ -4,6 +4,8 @@
 
 use std::collections::HashSet;
 
+use crate::language_version::LanguageVersion;
+
 /// The set of enabled language features (by their kotlinc `LanguageFeature` name, e.g.
 /// `NameBasedDestructuring`).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -13,10 +15,24 @@ pub struct LangFeatures {
 
 impl Default for LangFeatures {
     fn default() -> Self {
+        Self::for_language_version(LanguageVersion::default())
+    }
+}
+
+impl LangFeatures {
+    /// The stable feature baseline for one public Kotlin source-language level.
+    pub fn for_language_version(language_version: LanguageVersion) -> Self {
+        Self::for_versions(language_version, language_version)
+    }
+
+    /// The stable feature baseline for one language/API pair. The current observed features are
+    /// language-gated; keeping the API input here prevents future API-gated feature defaults from
+    /// bypassing the shared settings boundary.
+    pub fn for_versions(language_version: LanguageVersion, _api_version: LanguageVersion) -> Self {
         let mut enabled = HashSet::new();
         for &(name, since) in OBSERVED_FEATURES {
             if let Some(since) = since {
-                if language_level_enables(since) {
+                if language_level_enables(language_version, since) {
                     enabled.insert(name.to_string());
                 }
             }
@@ -25,10 +41,6 @@ impl Default for LangFeatures {
     }
 }
 
-/// Krusty's language level is kotlinc 2.4.20's default. A feature whose `sinceVersion` is at
-/// most this level is on; one with no `sinceVersion`, or a later one, stays opt-in.
-const LANGUAGE_LEVEL: (u16, u16) = (2, 4);
-
 /// Features the frontend observes, paired with kotlinc's `sinceVersion`. `None` means kotlinc
 /// has not assigned one, so the feature stays off until a flag or directive enables it.
 const OBSERVED_FEATURES: &[(&str, Option<(u16, u16)>)] = &[
@@ -36,6 +48,7 @@ const OBSERVED_FEATURES: &[(&str, Option<(u16, u16)>)] = &[
         "AllowAccessToProtectedFieldFromSuperCompanion",
         Some((2, 1)),
     ),
+    ("AnnotationsInMetadata", Some((2, 4))),
     ("BareArrayClassLiteral", Some((1, 4))),
     ("ContextParameters", Some((2, 4))),
     ("ContextReceivers", None),
@@ -55,8 +68,9 @@ const OBSERVED_FEATURES: &[(&str, Option<(u16, u16)>)] = &[
     ("WhenGuards", Some((2, 2))),
 ];
 
-fn language_level_enables(since: (u16, u16)) -> bool {
-    since.0 < LANGUAGE_LEVEL.0 || (since.0 == LANGUAGE_LEVEL.0 && since.1 <= LANGUAGE_LEVEL.1)
+fn language_level_enables(language_version: LanguageVersion, since: (u16, u16)) -> bool {
+    since.0 < language_version.major
+        || (since.0 == language_version.major && since.1 <= language_version.minor)
 }
 
 impl LangFeatures {
@@ -248,6 +262,37 @@ mod tests {
         ] {
             assert!(!features.has(name), "{name} stays opt-in");
         }
+    }
+
+    #[test]
+    fn an_older_language_level_enables_only_features_stable_by_that_level() {
+        let features = LangFeatures::for_language_version(LanguageVersion::V2_2);
+        for name in [
+            "AllowAccessToProtectedFieldFromSuperCompanion",
+            "BareArrayClassLiteral",
+            "EnumEntries",
+            "MultiDollarInterpolation",
+            "PrioritizedEnumEntries",
+            "WhenGuards",
+        ] {
+            assert!(features.has(name), "{name} is stable by 2.2");
+        }
+        for name in [
+            "ContextParameters",
+            "ExplicitBackingFields",
+            "ExplicitContextArguments",
+            "NameBasedDestructuring",
+        ] {
+            assert!(!features.has(name), "{name} is not stable in 2.2");
+        }
+    }
+
+    #[test]
+    fn experimental_language_levels_enable_their_standard_feature_baseline() {
+        let features = LangFeatures::for_language_version(LanguageVersion::V2_5);
+        assert!(features.has("ExplicitContextArguments"));
+        assert!(features.has("NameBasedDestructuring"));
+        assert!(features.has("ContextParameters"));
     }
 
     #[test]

@@ -70,6 +70,8 @@ impl Checker<'_> {
         });
         if qualifier {
             crate::diagnostic_wording::unresolved_reference_on(name, None)
+        } else if self.omit_unshaped_any_receiver_type > 0 && receiver_ty == Ty::obj("kotlin/Any") {
+            crate::diagnostic_wording::unresolved_reference_on(name, None)
         } else {
             unresolved_member_message(
                 name,

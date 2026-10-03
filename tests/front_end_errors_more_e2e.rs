@@ -241,10 +241,12 @@ fn mixed_argument_diagnostics_are_shared_across_source_callables() {
         ),
     ];
     for (label, source) in cases {
-        let expected =
-            common::recorded_named(label, || common::reference_error_messages("Main", source));
-        assert!(!expected.is_empty(), "kotlinc must reject {source}");
-        assert_eq!(diags(source), expected, "{source}");
+        let expected = common::reference_error_messages("Main", source);
+        assert!(
+            !expected.is_empty(),
+            "{label}: kotlinc must reject {source}"
+        );
+        assert_eq!(diags(source), expected, "{label}: {source}");
     }
 }
 

@@ -1,6 +1,0 @@
-# kotlinc output recorded per Kotlin version by tests/common/recorded.rs. A version with
-# no value is recorded from its kotlinc on the next local run; KRUSTY_RECORD=1 re-records.
-
-[a_non_operator_invoke_overload_is_rejected]
-2.4.20:
-  NonOperatorInvoke.kt:7:1: 'operator' modifier is required on 'fun invoke(n: Int): String' defined in 'ValueClass'.

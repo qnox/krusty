@@ -1,5 +1,0 @@
-# kotlinc output recorded per Kotlin version by tests/common/recorded.rs. A version with
-# no value is recorded from its kotlinc on the next local run; KRUSTY_RECORD=1 re-records.
-
-[an_applied_typealias_lhs_is_a_type_even_for_an_object]
-2.4.0..2.4.20:

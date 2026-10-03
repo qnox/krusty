@@ -1,12 +1,11 @@
 //! Diagnostics whose wording or position differs between supported kotlinc releases. Each case's
-//! complete error ledger is recorded per Kotlin version in
-//! `tests/recorded/diagnostic_wording_versions_e2e.txt`
-//! from that version's kotlinc (see `tests/common/recorded.rs`), and krusty must report exactly
-//! the ledger recorded for the reference version under test (`KRUSTY_LANGUAGE_VERSION`), so
+//! complete error ledger is replayed from that version's binary kotlinc invocation cache, and
+//! krusty must report exactly the ledger for the reference version under test
+//! (`KRUSTY_LANGUAGE_VERSION`), so
 //! `just test-all` checks every release's spelling.
 //!
-//! The spellings krusty emits live in `krusty::diagnostic_wording`; these tests read the recorded
-//! kotlinc output rather than that table, so a wrong table row fails here.
+//! The spellings krusty emits live in `krusty::diagnostic_wording`; these tests read kotlinc's
+//! output rather than that table, so a wrong table row fails here.
 
 use super::common;
 

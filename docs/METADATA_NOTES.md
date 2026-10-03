@@ -54,13 +54,13 @@ The "extra leading `00`" is the **`UTF8_MODE_MARKER`** (`BitEncoding`): the d1 p
 
 Every emitted `@Metadata` carries `mv` (metadata version) and the `.kotlin_module` header carries
 the same version as its first ints after the format marker. The public `-language-version` flag
-selects language semantics and accepts only 2.4, the language krusty implements; it does not change
-the stamp. The internal `-Xmetadata-version X.Y` writes `[X, Y, 0]` for a level on the shared
-contract 2.0–2.4. Without that input the stamp is `[2, 4, 0]`
-(`EmitOptions::DEFAULT_METADATA_VERSION`), matching the reference toolchain's no-flag output. One
-value threads from `crates/krusty-cli` through `JvmBackend::with_metadata_version` into
-`EmitOptions::metadata_version`; regenerated anonymous-object metadata at inline call sites stamps
-the caller's version, exactly as kotlinc's `AnonymousObjectTransformer` does. Pinned by
+selects language semantics and, without an override, the `[X, Y, 0]` stamp for that language level.
+With no public version option, both semantics and stamp use the selected kotlinc release's stable
+default. The internal `-Xmetadata-version X.Y` can override only the artifact stamp on the bounded
+2.0–2.4 contract; it never changes source semantics or API availability. One value threads from `crates/krusty-cli`
+through `JvmBackend::with_metadata_version` into `EmitOptions::metadata_version`; regenerated
+anonymous-object metadata at inline call sites stamps the caller's version, exactly as kotlinc's
+`AnonymousObjectTransformer` does. Pinned by
 `tests/metadata_language_version_e2e.rs`, which diffs class, facade, `$DefaultImpls`,
 suspend-lambda, and regenerated-object `mv` values, plus the 20-byte module header, against kotlinc
 run with `-language-version 2.2`.
@@ -130,6 +130,16 @@ Reverse-engineered from kotlinc for `class Point(val x: Int, var y: String)` (se
   `08 07 | 12 06 …value parameter… | 1a 02 08 06 (Constructor.annotation, d2[6] = "Lp/Mark;") |
   a2 06 04 …constructorSignature…`, with `Lp/Mark;` interned between `"(I)V"` and `"getX"`. A
   secondary ctor never hits this — its 22 is already explicit, so 22 → 23 is a plain OR.
+- The annotation RECORDS are controlled by `LanguageFeature.AnnotationsInMetadata`, stable since
+  language version 2.4. With an older source-language level (for example `-language-version 2.2`),
+  kotlinc 2.4.20 writes no `Class`/`Constructor`/`Property`/`Function`/`ValueParameter`/`EnumEntry`
+  annotation record and interns no annotation string, but still sets every `hasAnnotations` flag
+  bit and still records a property's `JvmPropertySignature.syntheticMethod` (the
+  `getX$annotations()V` marker exists in the class file regardless). krusty gates only the record
+  appends on the finalized feature setting (`ClassTail::annotations_in_metadata`, plus the facade
+  builder's matching parameter); flags and the marker pointer are computed exactly as at 2.4. The
+  internal metadata-stamp override is independent and cannot enable or disable this source feature.
+  Test: `tests/metadata_language_version_e2e.rs`.
 - A PROPERTY-targeted annotation has no class-file declaration to sit on: kotlinc emits a synthetic
   `getX$annotations()V` method (`ACC_PUBLIC|ACC_STATIC|ACC_SYNTHETIC` + a `Deprecated` attribute)
   carrying the annotation attribute, names it from `JvmPropertySignature.syntheticMethod` (f2), and

@@ -221,14 +221,7 @@ fn full_lambda_underscore_rename_reads_the_property() {
 fn implicit_underscore(body: &str) {
     let source = format!("{NAME_BASED}class P(val first: Int, val second: Int)\n{body}\n");
     let sources = [("Main.kt", source.as_str())];
-    let expected = common::reference_error_ledger(&sources, &name_based_flags());
-    assert!(!expected.is_empty(), "kotlinc reported no error");
-    assert_eq!(
-        common::krusty_error_ledger(&sources),
-        expected,
-        "krusty's complete ledger against kotlinc {}",
-        krusty::kotlin_version::target()
-    );
+    common::assert_errors_match_kotlinc(&sources, &name_based_flags());
 }
 
 #[test]

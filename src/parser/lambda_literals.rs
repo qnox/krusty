@@ -116,6 +116,7 @@ impl Parser<'_> {
         // Parameter type annotations, parallel to `params` — kept (in a side-table) so a bare-value
         // lambda `{ x: Int -> … }` types its own parameters even without an expected function type.
         let mut param_types: Vec<Option<TypeRef>> = Vec::new();
+        let mut param_spans: Vec<Span> = Vec::new();
         // A destructured lambda parameter `{ (a, b) -> … }` binds ONE (synthetic) parameter, then
         // `val (a, b) = <synthetic>` is prepended to the body — reusing the `Stmt::Destructure`
         // machinery. Collected here, spliced after the body statements are parsed.
@@ -177,6 +178,7 @@ impl Parser<'_> {
                     // `(a, b): T ->` declares the destructured parameter's own type.
                     let synth = format!("$dstr{}", destructures.len());
                     ps.push(synth.clone());
+                    param_spans.push(sp);
                     param_types.push(self.eat(TokenKind::Colon).then(|| self.parse_type()));
                     roles.push(LambdaParameterRole::Destructured);
                     destructures.push((synth, entries, source_props, entry_types, sp));
@@ -218,18 +220,21 @@ impl Parser<'_> {
                     self.expect(TokenKind::RBracket, "']'");
                     let synth = format!("$dstr{}", destructures.len());
                     ps.push(synth.clone());
+                    param_spans.push(sp);
                     param_types.push(self.eat(TokenKind::Colon).then(|| self.parse_type()));
                     roles.push(LambdaParameterRole::Destructured);
                     // The `[a, b]` bracket form is positional (`componentN`), never by-name.
                     let source_props = vec![None; entries.len()];
                     destructures.push((synth, entries, source_props, entry_types, sp));
                 } else if self.at(TokenKind::Ident) {
+                    let parameter_span = self.tok().span;
                     roles.push(if self.text() == "_" && !self.escaped_ident() {
                         LambdaParameterRole::Unused
                     } else {
                         LambdaParameterRole::Named
                     });
                     ps.push(self.text().to_string());
+                    param_spans.push(parameter_span);
                     self.bump();
                     if self.at(TokenKind::Colon) {
                         self.bump();
@@ -297,6 +302,9 @@ impl Parser<'_> {
         }
         if param_types.iter().any(|t| t.is_some()) {
             self.file.lambda_param_types.insert(lam.0, param_types);
+        }
+        if !param_spans.is_empty() {
+            self.file.lambda_param_spans.insert(lam.0, param_spans);
         }
         if roles.iter().any(|role| *role != LambdaParameterRole::Named) {
             self.file.lambda_parameter_roles.insert(lam.0, roles);

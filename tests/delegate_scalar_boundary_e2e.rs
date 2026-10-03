@@ -1389,11 +1389,11 @@ fn an_inapplicable_member_extension_is_retained_in_the_delegate_diagnostic() {
 }
 
 /// kotlinc's complete ordered ledger for a `Holder` property delegated to a `Cell` whose member,
-/// member extension and top-level extension all reject it, recorded per Kotlin version. Kotlin
-/// 2.4.20 lists every rung's candidate, members first, and with several to blame star-projects the
-/// property reference; earlier releases named only the earliest rung.
+/// member extension and top-level extension all reject it. Kotlin 2.4.20 lists every rung's
+/// candidate, members first, and with several to blame star-projects the property reference;
+/// earlier releases named only the earliest rung.
 fn mixed_family_failure(source: &str, stem: &str) -> Vec<String> {
-    common::recorded(|| {
+    common::byte_dump::with_recorded_diagnostics(|| {
         let dir = common::scratch_dir().expect("scratch dir");
         kotlinc_error_ledger(
             source,

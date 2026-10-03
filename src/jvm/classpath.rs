@@ -2378,14 +2378,6 @@ impl Classpath {
         })
     }
 
-    /// The SOURCE value-parameter types of `internal.fn_name` from `@Metadata`, as `Ty`s — the signature
-    /// a CALL is matched against. `@Metadata` records only the source `value_parameter`s, so this DROPS
-    /// the synthetic params the JVM descriptor appends (a `suspend` Continuation, a `@Composable`
-    /// Composer/int) — the same role `strip_continuation_param` played for suspend, now generic. A
-    /// function-type param maps to semantic `Ty::Fun` so a lambda arg fits structurally; a type-parameter
-    /// param erases to `kotlin/Any` (accepts anything). `None` when the
-    /// class has no `@Metadata` entry for `fn_name` (a Java method, a synthetic) — the caller then keeps
-    /// the descriptor params unchanged.
     /// The descriptor-aligned source call facts for top-level/static `internal.fn_name`: kept source
     /// arity, named/default call shape, receiver-lambda annotations, materialization flags, and return
     /// metadata. Everything is projected from ONE `@Metadata` callable, so overloads cannot drift across
@@ -2459,6 +2451,7 @@ impl Classpath {
             contract: c.contract.clone(),
             context_count: c.context_count(),
             deprecated_hidden: c.deprecated_hidden(),
+            since_kotlin: c.since_kotlin(),
             value_class_params: value_class_param_types(
                 c,
                 desc_params,

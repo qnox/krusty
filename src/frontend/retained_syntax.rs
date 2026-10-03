@@ -977,6 +977,8 @@ pub(super) fn compact(file: &mut File) {
     file.call_type_args = remap_u32_map(std::mem::take(&mut file.call_type_args), &expressions);
     file.lambda_param_types =
         remap_u32_map(std::mem::take(&mut file.lambda_param_types), &expressions);
+    file.lambda_param_spans =
+        remap_u32_map(std::mem::take(&mut file.lambda_param_spans), &expressions);
     file.lambda_explicit_arrows = remap_u32_set(
         std::mem::take(&mut file.lambda_explicit_arrows),
         &expressions,

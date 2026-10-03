@@ -319,6 +319,10 @@ impl SymbolSource for DependencyPlatform {
         self.source().package_exists(parent, name) || self.platform.package_exists(parent, name)
     }
 
+    fn api_withheld_callable(&self, owner: TypeName, name: &str) -> bool {
+        self.platform.api_withheld_callable(owner, name)
+    }
+
     /// The compiled platform assigns every dependency identity this federation hands out.
     fn external_callable(
         &self,

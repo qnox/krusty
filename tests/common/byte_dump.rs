@@ -6,14 +6,12 @@
 //! dumps. A snapshot, dev, or beta build never does: that version string is not an immutable
 //! artifact.
 //!
-//! What is stored is an open version range, not a copy per compiler build. `2.4.20..` covers that
-//! release and every newer one until a later recording disagrees, so adding a Kotlin version does
-//! not rewrite the dumps. RC tags of one release share `2.4.20-RC..` and do not share the release
-//! range. The bytes live in one zlib archive under the class-dump cache
+//! Each recording belongs to one exact compiler version. Release and RC channels remain separate.
+//! The bytes live in one zlib archive under the class-dump cache
 //! (`KRUSTY_CLASS_DUMP_DIR`, or `target/cache/class-dumps`), not in the repository. Identical
 //! outputs are stored once inside it. A run keeps new dumps in memory and writes the archive
-//! once, when the process exits. A text index in
-//! that archive records the open range for each dump.
+//! once, when the process exits. A text index in that archive records the exact compiler version
+//! for each dump.
 //!
 //! `KRUSTY_RECORD=1` or `KRUSTY_RECORD_CLASS_DUMPS=1` ignores a stored dump and recompiles. A
 //! release or RC with no matching dump fails locally instead of compiling. CI compiles that
@@ -63,9 +61,8 @@ use krusty::kotlin_version::KotlinVersion;
 /// The published compiler identity, when this process's kotlinc is a release or an RC tag.
 ///
 /// `None` for a missing dist, a snapshot, a dev build, a beta, or any other non-release string.
-/// The value is `build.txt`'s first line, unchanged. Dump lookup then folds that identity into an
-/// open version range: a release build and `release-N` of the same version share one range, and
-/// RC tags of that version share a separate one.
+/// The value is `build.txt`'s first line, unchanged. A release build and `release-N` of the same
+/// version share one exact release slot, while RC tags of that version share a separate exact slot.
 pub fn published_compiler_id() -> Option<String> {
     static ID: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     ID.get_or_init(|| {
@@ -239,8 +236,8 @@ pub fn kotlinc_class_tree(
 
 /// A dump shared by every test that builds the same kotlinc library output.
 ///
-/// `None` when this compiler is not a release or RC, when recording is forced, or when no open
-/// range covers this compiler's version at `fingerprint`.
+/// `None` when this compiler is not a release or RC, when recording is forced, or when no exact
+/// compiler-version entry exists at `fingerprint`.
 pub fn load_shared_files(slot: &str, fingerprint: u128) -> Option<BTreeMap<String, Vec<u8>>> {
     if record_forced() {
         return None;
@@ -251,8 +248,7 @@ pub fn load_shared_files(slot: &str, fingerprint: u128) -> Option<BTreeMap<Strin
 
 /// Record `files` (relative path → bytes, including `META-INF` entries) for [`load_shared_files`].
 ///
-/// A no-op for a snapshot, dev, or beta compiler, and under read-only CI. A newer release covered
-/// by an open range whose bytes already match does not rewrite the archive.
+/// A no-op for a snapshot, dev, or beta compiler, and under read-only CI.
 pub fn store_shared_files(slot: &str, fingerprint: u128, files: &BTreeMap<String, Vec<u8>>) {
     let Some(compiler) = compiler_dump_version() else {
         return;
@@ -379,16 +375,9 @@ fn variant_component(variant: &str) -> String {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Span {
-    lo: KotlinVersion,
-    hi: Option<KotlinVersion>,
+struct RecordedEntry {
+    version: KotlinVersion,
     channel: Channel,
-    fingerprint: u128,
-    blob: u128,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Recorded {
     fingerprint: u128,
     blob: u128,
 }
@@ -403,16 +392,13 @@ fn load_files(
     let path = archive_path(root);
     let mut cache = dump_cache().lock().expect("class-dump cache");
     let archive = cached_archive(&path, &mut cache)?;
-    let spans = archive.modules.get(&sanitize(module))?.get(key)?;
-    let span = spans
-        .iter()
-        .filter(|span| {
-            span.channel == compiler.channel
-                && span.fingerprint == fingerprint
-                && span_contains(span, compiler.version)
-        })
-        .max_by_key(|span| span.lo)?;
-    let raw = archive.blob(span.blob)?.to_vec();
+    let entries = archive.modules.get(&sanitize(module))?.get(key)?;
+    let entry = entries.iter().find(|entry| {
+        entry.channel == compiler.channel
+            && entry.version == compiler.version
+            && entry.fingerprint == fingerprint
+    })?;
+    let raw = archive.blob(entry.blob)?.to_vec();
     drop(cache);
     decode_raw(&raw)
 }
@@ -434,7 +420,7 @@ fn store_files(
     reconcile(&path, &mut cache);
     let slot = cache.entry(path).or_insert_with(CacheSlot::empty);
     let module = sanitize(module);
-    // One test can record two fixtures under one key. Keep each fingerprint's spans; replacing
+    // One test can record two fixtures under one key. Keep each fingerprint's entries; replacing
     // the version slot would drop the earlier fixture and the next run would miss it.
     let (updated, unchanged) = {
         let current = slot
@@ -442,14 +428,27 @@ fn store_files(
             .modules
             .get(&module)
             .and_then(|entries| entries.get(key))
-            .map(Vec::as_slice)
-            .unwrap_or(&[]);
-        let (mine, rest): (Vec<Span>, Vec<Span>) = current
-            .iter()
-            .copied()
-            .partition(|span| span.channel == compiler.channel && span.fingerprint == fingerprint);
-        let mut updated = revised_spans(&mine, compiler, fingerprint, blob);
-        updated.extend(rest);
+            .cloned()
+            .unwrap_or_default();
+        let mut updated = current;
+        updated.retain(|entry| {
+            entry.channel != compiler.channel
+                || entry.version != compiler.version
+                || entry.fingerprint != fingerprint
+        });
+        updated.push(RecordedEntry {
+            version: compiler.version,
+            channel: compiler.channel,
+            fingerprint,
+            blob,
+        });
+        updated.sort_by_key(|entry| {
+            (
+                entry.channel == Channel::Rc,
+                entry.version,
+                entry.fingerprint,
+            )
+        });
         let unchanged = slot
             .archive
             .modules
@@ -482,78 +481,6 @@ fn store_files(
     ensure_flush_at_exit();
 }
 
-fn revised_spans(
-    current: &[Span],
-    compiler: DumpVersion,
-    fingerprint: u128,
-    blob: u128,
-) -> Vec<Span> {
-    let mut versions = KotlinVersion::supported();
-    if !versions.contains(&compiler.version) {
-        versions.push(compiler.version);
-        versions.sort();
-    }
-    let mut projected: Vec<Option<Recorded>> = versions
-        .iter()
-        .map(|version| {
-            current
-                .iter()
-                .find(|span| span.channel == compiler.channel && span_contains(span, *version))
-                .map(|span| Recorded {
-                    fingerprint: span.fingerprint,
-                    blob: span.blob,
-                })
-        })
-        .collect();
-    let position = versions
-        .iter()
-        .position(|version| *version == compiler.version)
-        .expect("the recorded version is in the version list");
-    projected[position] = Some(Recorded { fingerprint, blob });
-    let updated = merge_spans(&versions, &projected, compiler.channel);
-    current
-        .iter()
-        .copied()
-        .filter(|span| span.channel != compiler.channel)
-        .chain(updated)
-        .collect()
-}
-
-fn span_contains(span: &Span, version: KotlinVersion) -> bool {
-    span.lo <= version && span.hi.is_none_or(|hi| version <= hi)
-}
-
-fn merge_spans(
-    versions: &[KotlinVersion],
-    values: &[Option<Recorded>],
-    channel: Channel,
-) -> Vec<Span> {
-    let mut spans: Vec<Span> = Vec::new();
-    let mut previous: Option<Recorded> = None;
-    for (&version, value) in versions.iter().zip(values) {
-        match value {
-            Some(value) if previous == Some(*value) => {
-                spans.last_mut().expect("an open run").hi = Some(version);
-            }
-            Some(value) => spans.push(Span {
-                lo: version,
-                hi: Some(version),
-                channel,
-                fingerprint: value.fingerprint,
-                blob: value.blob,
-            }),
-            None => {}
-        }
-        previous = *value;
-    }
-    if let Some(last) = spans.last_mut() {
-        if last.hi == versions.last().copied() {
-            last.hi = None;
-        }
-    }
-    spans
-}
-
 /// One process-wide cache. The archive is decompressed once; later lookups copy one payload.
 /// Stores stay in memory until the process exits, which writes each pending archive once.
 fn dump_cache() -> &'static Mutex<HashMap<PathBuf, CacheSlot>> {
@@ -567,7 +494,7 @@ struct CacheSlot {
     stamp: Option<Stamp>,
     archive: Archive,
     /// Exact publications not yet written. Replaying operations, rather than copying a stale final
-    /// span vector, preserves versions concurrently published by another process.
+    /// entry vector, preserves versions concurrently published by another process.
     pending: Vec<PendingDump>,
 }
 
@@ -615,7 +542,7 @@ struct Stamp {
 }
 
 struct Archive {
-    modules: BTreeMap<String, BTreeMap<String, Vec<Span>>>,
+    modules: BTreeMap<String, BTreeMap<String, Vec<RecordedEntry>>>,
     /// Uncompressed archive. Blob ranges point into this buffer.
     body: Vec<u8>,
     blobs: BTreeMap<u128, std::ops::Range<usize>>,
@@ -653,9 +580,9 @@ impl Archive {
     fn retain_referenced(&self, blobs: &mut BTreeMap<u128, Vec<u8>>) {
         let mut referenced = std::collections::BTreeSet::new();
         for entries in self.modules.values() {
-            for spans in entries.values() {
-                for span in spans {
-                    referenced.insert(span.blob);
+            for recordings in entries.values() {
+                for recording in recordings {
+                    referenced.insert(recording.blob);
                 }
             }
         }
@@ -663,7 +590,7 @@ impl Archive {
     }
 
     fn from_parts(
-        modules: BTreeMap<String, BTreeMap<String, Vec<Span>>>,
+        modules: BTreeMap<String, BTreeMap<String, Vec<RecordedEntry>>>,
         blobs: BTreeMap<u128, Vec<u8>>,
     ) -> Self {
         Self::try_parse(serialize_archive(&modules, &blobs)).expect("serialized class-dump archive")
@@ -691,7 +618,7 @@ impl Archive {
             entries
                 .values()
                 .flatten()
-                .any(|span| !blobs.contains_key(&span.blob))
+                .any(|recording| !blobs.contains_key(&recording.blob))
         }) {
             return None;
         }
@@ -704,7 +631,7 @@ impl Archive {
 }
 
 fn serialize_archive(
-    modules: &BTreeMap<String, BTreeMap<String, Vec<Span>>>,
+    modules: &BTreeMap<String, BTreeMap<String, Vec<RecordedEntry>>>,
     blobs: &BTreeMap<u128, Vec<u8>>,
 ) -> Vec<u8> {
     let mut body = render_modules(modules).into_bytes();
@@ -718,19 +645,25 @@ fn serialize_archive(
     body
 }
 
-fn render_modules(modules: &BTreeMap<String, BTreeMap<String, Vec<Span>>>) -> String {
+fn render_modules(modules: &BTreeMap<String, BTreeMap<String, Vec<RecordedEntry>>>) -> String {
     let mut text = String::from(
-        "# kotlinc class dumps. An open range (2.4.20..) covers that release and every newer one.\n\
-         # RC tags share a separate range (2.4.20-RC..). A snapshot compiler never uses this file.\n",
+        "# kotlinc outputs keyed by exact compiler version. RC tags use a separate slot.\n\
+         # A snapshot compiler never uses this file.\n",
     );
     for (module, entries) in modules {
         text.push_str(&format!("\n[[{module}]]\n"));
-        for (key, spans) in entries {
+        for (key, recordings) in entries {
             text.push_str(&format!("[{key}]\n"));
-            let mut ordered = spans.clone();
-            ordered.sort_by_key(|span| (span.channel == Channel::Rc, span.lo));
-            for span in ordered {
-                text.push_str(&render_span(span));
+            let mut ordered = recordings.clone();
+            ordered.sort_by_key(|entry| {
+                (
+                    entry.channel == Channel::Rc,
+                    entry.version,
+                    entry.fingerprint,
+                )
+            });
+            for entry in ordered {
+                text.push_str(&render_entry(entry));
                 text.push('\n');
             }
         }
@@ -738,8 +671,8 @@ fn render_modules(modules: &BTreeMap<String, BTreeMap<String, Vec<Span>>>) -> St
     text
 }
 
-fn parse_modules(text: &str) -> Option<BTreeMap<String, BTreeMap<String, Vec<Span>>>> {
-    let mut modules: BTreeMap<String, BTreeMap<String, Vec<Span>>> = BTreeMap::new();
+fn parse_modules(text: &str) -> Option<BTreeMap<String, BTreeMap<String, Vec<RecordedEntry>>>> {
+    let mut modules: BTreeMap<String, BTreeMap<String, Vec<RecordedEntry>>> = BTreeMap::new();
     let mut module: Option<String> = None;
     let mut key: Option<String> = None;
     for line in text.lines() {
@@ -765,20 +698,19 @@ fn parse_modules(text: &str) -> Option<BTreeMap<String, BTreeMap<String, Vec<Spa
             continue;
         }
         let mut parts = line.split_whitespace();
-        let range = parts.next()?;
+        let version = parts.next()?;
         let fingerprint = parse_hex128(parts.next()?)?;
         let blob = parse_hex128(parts.next()?)?;
         if parts.next().is_some() {
             return None;
         }
-        let (channel, lo, hi) = parse_range(range)?;
-        let spans = module
+        let (channel, version) = parse_bound(version)?;
+        let recordings = module
             .as_ref()
             .zip(key.as_ref())
             .and_then(|(module, key)| modules.get_mut(module)?.get_mut(key))?;
-        spans.push(Span {
-            lo,
-            hi,
+        recordings.push(RecordedEntry {
+            version,
             channel,
             fingerprint,
             blob,
@@ -895,27 +827,40 @@ fn replay_pending(into: &mut Archive, from: &Archive, pending: &[PendingDump]) {
             continue;
         };
         blobs.insert(record.blob, raw.to_vec());
-        let current = into
+        let mut recordings = into
             .modules
             .get(&record.module)
             .and_then(|entries| entries.get(&record.key))
             .cloned()
             .unwrap_or_default();
-        let (mine, rest): (Vec<Span>, Vec<Span>) = current.into_iter().partition(|span| {
-            span.channel == record.compiler.channel && span.fingerprint == record.fingerprint
+        recordings.retain(|entry| {
+            entry.channel != record.compiler.channel
+                || entry.version != record.compiler.version
+                || entry.fingerprint != record.fingerprint
         });
-        let mut spans = revised_spans(&mine, record.compiler, record.fingerprint, record.blob);
-        spans.extend(rest);
+        recordings.push(RecordedEntry {
+            version: record.compiler.version,
+            channel: record.compiler.channel,
+            fingerprint: record.fingerprint,
+            blob: record.blob,
+        });
+        recordings.sort_by_key(|entry| {
+            (
+                entry.channel == Channel::Rc,
+                entry.version,
+                entry.fingerprint,
+            )
+        });
         into.modules
             .entry(record.module.clone())
             .or_default()
-            .insert(record.key.clone(), spans);
+            .insert(record.key.clone(), recordings);
     }
     let mut referenced = BTreeSet::new();
     for entries in into.modules.values() {
-        for spans in entries.values() {
-            for span in spans {
-                referenced.insert(span.blob);
+        for recordings in entries.values() {
+            for recording in recordings {
+                referenced.insert(recording.blob);
             }
         }
     }
@@ -1091,26 +1036,6 @@ fn read_bytes<'a>(raw: &'a [u8], offset: &mut usize, len: usize) -> Option<&'a [
     Some(bytes)
 }
 
-fn parse_range(token: &str) -> Option<(Channel, KotlinVersion, Option<KotlinVersion>)> {
-    let (lo, hi) = match token.split_once("..") {
-        Some((lo, "")) => (lo, None),
-        Some((lo, hi)) => (lo, Some(hi)),
-        None => (token, Some(token)),
-    };
-    let (channel, lo) = parse_bound(lo)?;
-    let hi = match hi {
-        None => None,
-        Some(hi) => {
-            let (hi_channel, hi) = parse_bound(hi)?;
-            if hi_channel != channel {
-                return None;
-            }
-            Some(hi)
-        }
-    };
-    Some((channel, lo, hi))
-}
-
 fn parse_bound(token: &str) -> Option<(Channel, KotlinVersion)> {
     match token.strip_suffix("-RC") {
         Some(version) => Some((Channel::Rc, KotlinVersion::parse(version)?)),
@@ -1122,17 +1047,16 @@ fn parse_hex128(text: &str) -> Option<u128> {
     u128::from_str_radix(text, 16).ok()
 }
 
-fn render_span(span: Span) -> String {
-    let bound = |version: KotlinVersion| match span.channel {
-        Channel::Release => version.to_string(),
-        Channel::Rc => format!("{version}-RC"),
+fn render_entry(entry: RecordedEntry) -> String {
+    let version = match entry.channel {
+        Channel::Release => entry.version.to_string(),
+        Channel::Rc => format!("{}-RC", entry.version),
     };
-    let range = match span.hi {
-        None => format!("{}..", bound(span.lo)),
-        Some(hi) if hi == span.lo => bound(span.lo),
-        Some(hi) => format!("{}..{}", bound(span.lo), bound(hi)),
-    };
-    format!("{range} {} {}", hex128(span.fingerprint), hex128(span.blob))
+    format!(
+        "{version} {} {}",
+        hex128(entry.fingerprint),
+        hex128(entry.blob)
+    )
 }
 
 fn hex128(value: u128) -> String {

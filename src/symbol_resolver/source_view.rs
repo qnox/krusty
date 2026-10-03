@@ -111,6 +111,13 @@ impl SymbolSource for ResolverSource<'_> {
         }
     }
 
+    fn api_withheld_callable(&self, owner: TypeName, name: &str) -> bool {
+        match self {
+            Self::Direct(source) => source.api_withheld_callable(owner, name),
+            Self::Memoized(source) => source.api_withheld_callable(owner, name),
+        }
+    }
+
     fn symbols(&self, namespace: SymbolNamespace, name: &str) -> std::rc::Rc<ResolvedSymbols> {
         match self {
             Self::Direct(source) => source.symbols(namespace, name),

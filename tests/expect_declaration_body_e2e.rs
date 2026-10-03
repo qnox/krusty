@@ -4,9 +4,8 @@
 //! as "no actual declaration", which sent a reader looking for a missing `actual` rather than at
 //! the body they had written.
 //!
-//! Every ledger below is kotlinc's own, recorded per Kotlin version in
-//! `tests/recorded/expect_declaration_body_e2e.txt` (see `tests/common/recorded.rs`). Its positions
-//! include three that a guess
+//! Every ledger below is kotlinc's own, replayed from the exact-version binary invocation cache.
+//! Its positions include three that a guess
 //! would have got wrong: a property INITIALIZER is reported under the initializer expression rather
 //! than at the property, an `init` block is reported at the `init` keyword rather than at its `{`,
 //! and a secondary constructor with a body inside an `expect class` is not reported at all.
@@ -84,8 +83,8 @@ fn ledger(report: &str, sources: &[(&str, &str)]) -> Vec<String> {
     entries
 }
 
-/// The reference compiler's ledger for the same sources, recorded per Kotlin version by the tests
-/// below, so every expectation is measured rather than typed.
+/// The selected reference compiler's ledger for the same sources, so every expectation is
+/// measured rather than typed.
 fn kotlinc_ledger(sources: &[(&str, &str)]) -> Vec<String> {
     kotlinc_ledger_with(sources, true)
 }
@@ -103,8 +102,9 @@ fn kotlinc_ledger_with(sources: &[(&str, &str)], multiplatform: bool) -> Vec<Str
         std::fs::write(&path, source).expect("write source");
         args.push(path.to_string_lossy().into_owned());
     }
-    let (code, stderr) =
-        common::kotlinc_compile(&args).expect("reference kotlinc unavailable under the harness");
+    let (code, stderr) = common::byte_dump::with_recorded_diagnostics(|| {
+        common::kotlinc_compile(&args).expect("reference kotlinc unavailable under the harness")
+    });
     assert_ne!(code, 0, "kotlinc must reject these sources:\n{stderr}");
     ledger(&stderr, sources)
 }
@@ -129,7 +129,7 @@ fn a_top_level_expect_declaration_may_not_implement_itself() {
     // initializer under the INITIALIZER, not at the property and not at the keyword; an accessor at
     // its own header. Complete and ordered, so an entry neither compiler writes fails here.
     let sources = [("Main.kt", SOURCE)];
-    let expected = common::recorded(|| kotlinc_ledger(&sources));
+    let expected = kotlinc_ledger(&sources);
     assert_eq!(
         ledger(&report, &sources),
         expected,
@@ -162,7 +162,7 @@ fn a_member_of_an_expect_classifier_may_not_implement_itself_either() {
     // the `{` its block expression starts on. The body-less member at line 10 and the classifiers
     // themselves are absent, which the complete ledger states rather than probing for.
     let sources = [("Main.kt", SOURCE)];
-    let expected = common::recorded(|| kotlinc_ledger(&sources));
+    let expected = kotlinc_ledger(&sources);
     assert_eq!(
         ledger(&report, &sources),
         expected,
@@ -188,7 +188,7 @@ fn a_nested_classifier_and_a_companion_are_headers_too() {
     let (ok, report) = compile(SOURCE, true);
     assert!(!ok, "the compile must fail:\n{report}");
     let sources = [("Main.kt", SOURCE)];
-    let expected = common::recorded(|| kotlinc_ledger(&sources));
+    let expected = kotlinc_ledger(&sources);
     assert_eq!(
         ledger(&report, &sources),
         expected,
@@ -220,7 +220,7 @@ fn an_expect_property_may_not_be_delegated() {
     let (ok, report) = compile(SOURCE, true);
     assert!(!ok, "the compile must fail:\n{report}");
     let sources = [("Main.kt", SOURCE)];
-    let expected = common::recorded(|| kotlinc_ledger(&sources));
+    let expected = kotlinc_ledger(&sources);
     assert_eq!(
         ledger(&report, &sources),
         expected,
@@ -238,7 +238,7 @@ fn a_lazy_delegate_on_an_expect_property_is_reported_too() {
     let (ok, report) = compile(SOURCE, true);
     assert!(!ok, "the compile must fail:\n{report}");
     let sources = [("Main.kt", SOURCE)];
-    let expected = common::recorded(|| kotlinc_ledger(&sources));
+    let expected = kotlinc_ledger(&sources);
     assert_eq!(
         ledger(&report, &sources),
         expected,
@@ -259,7 +259,7 @@ fn a_secondary_constructor_body_is_not_this_diagnostic() {
     let sources = [("Main.kt", SOURCE)];
     // The whole ledger, so "not this diagnostic" is a measured absence rather than one probe: the
     // only entry either compiler writes is the unmatched header, and it is the same entry.
-    let expected = common::recorded(|| kotlinc_ledger(&sources));
+    let expected = kotlinc_ledger(&sources);
     assert_eq!(
         ledger(&report, &sources),
         expected,
@@ -281,7 +281,7 @@ fn a_body_error_suppresses_the_unmatched_expect_report_everywhere() {
     // The whole ledger over BOTH files: the body error, and nothing for the clean unmatched header
     // in the other file. A probe for "has no actual declaration" could not tell that apart from a
     // report that named the wrong declaration.
-    let expected = common::recorded(|| kotlinc_ledger(&sources));
+    let expected = kotlinc_ledger(&sources);
     assert_eq!(
         ledger(&report, &sources),
         expected,
@@ -297,7 +297,7 @@ fn the_body_is_rejected_with_or_without_the_multiplatform_feature() {
     let (ok, report) = compile(SOURCE, false);
     assert!(!ok, "the compile must fail:\n{report}");
     let sources = [("Main.kt", SOURCE)];
-    let expected = common::recorded(|| kotlinc_ledger_with(&sources, false));
+    let expected = kotlinc_ledger_with(&sources, false);
     assert_eq!(
         expected.len(),
         2,
@@ -327,7 +327,7 @@ fn a_body_less_expect_is_untouched() {
     // A header declares nothing to reject, so the only entries are the unmatched-expect reports —
     // each at its own `expect` keyword. Stating all three says both halves at once: this check
     // costs an ordinary header nothing, and the report it does get is unaffected.
-    let expected = common::recorded(|| kotlinc_ledger(&sources));
+    let expected = kotlinc_ledger(&sources);
     assert_eq!(expected.len(), 3, "kotlinc's whole ledger: {expected:?}");
     assert_eq!(
         ledger(&report, &sources),

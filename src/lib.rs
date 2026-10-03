@@ -39,6 +39,8 @@ pub mod jvm;
 pub mod klib;
 pub mod kotlin_version;
 pub mod kt_string;
+pub mod language_settings;
+pub mod language_version;
 pub mod lexer;
 pub mod libraries;
 pub mod lifting_provenance;
