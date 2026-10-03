@@ -2132,6 +2132,8 @@ mod suspend_inline_statementless_block_e2e;
 mod suspend_interface_delegation_e2e;
 #[path = "suspend_interface_impl_e2e.rs"]
 mod suspend_interface_impl_e2e;
+#[path = "suspend_invoke_reference_e2e.rs"]
+mod suspend_invoke_reference_e2e;
 #[path = "suspend_lambda_class_e2e.rs"]
 mod suspend_lambda_class_e2e;
 #[path = "suspend_lambda_metadata_e2e.rs"]
@@ -2174,6 +2176,8 @@ mod suspend_try_catch_shapes_e2e;
 mod suspend_try_finally_body_e2e;
 #[path = "suspend_try_finally_e2e.rs"]
 mod suspend_try_finally_e2e;
+#[path = "suspend_unit_receiver_e2e.rs"]
+mod suspend_unit_receiver_e2e;
 #[path = "suspend_unit_tail_conditional_e2e.rs"]
 mod suspend_unit_tail_conditional_e2e;
 #[path = "suspend_value_class_mangle_e2e.rs"]

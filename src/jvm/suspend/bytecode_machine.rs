@@ -144,9 +144,9 @@ pub(super) fn route(
             v: 2,
             enclosing_class: owner,
             enclosing_method: method,
-            enclosing_descriptor: crate::jvm::names::method_descriptor(
+            enclosing_descriptor: crate::jvm::method_descriptors::ir_method_desc(
                 &method_params,
-                function.ret,
+                &function.ret,
             ),
             ..ContinuationMetadata::default()
         },
