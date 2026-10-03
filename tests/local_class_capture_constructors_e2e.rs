@@ -495,3 +495,26 @@ fn an_unused_extension_receiver_is_not_a_constructor_reference_parameter() {
     }
     common::expect_box_same_as_kotlinc(CONSTRUCTOR_REFERENCE, "LocalCtorRef");
 }
+
+/// `Inner` does not capture `this@bar` itself. `Outer` stores it, and `Inner`'s super call reads
+/// that field, so `Local`'s constructor still receives the extension receiver.
+const INNER_SUPER_RECEIVER: &str = r#"
+fun String.bar(): String {
+    open class Local {
+        fun result() = this@bar
+    }
+    class Outer {
+        inner class Inner : Local() {
+            fun outer() = this@Outer
+        }
+    }
+    return Outer().Inner().result()
+}
+
+fun box() = "OK".bar()
+"#;
+
+#[test]
+fn inner_subclass_reads_the_extension_receiver_from_its_enclosing_local_class() {
+    common::expect_box_same_as_kotlinc(INNER_SUPER_RECEIVER, "InnerSuperReceiver");
+}

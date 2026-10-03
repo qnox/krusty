@@ -1544,11 +1544,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   An extension receiver the local class never reads is not captured. Mentioning the extension's
   type parameter in a constructor parameter is not a read, so `class Local<LT>(val pt: FT)` inside
   `fun <FT> Rec<FT>.fn` has constructor `(LT, FT)`, and `::Local` passes those two values.
+  A subclass whose own constructor must forward that receiver keeps it, even when the subclass
+  body never reads it. An inner class does not take its own copy: `inner class Inner : Local()`
+  inside `class Outer` in `fun String.bar` reads `this@bar` from `Outer`, so `Outer` keeps the
+  receiver even though its own body never mentions it.
   Tests: `local_class_does_not_capture_an_unused_extension_receiver`,
+  `inner_subclass_keeps_the_extension_receiver_its_superclass_constructor_needs`,
   `tests/local_class_capture_constructors_e2e.rs::an_unused_extension_receiver_is_not_a_constructor_reference_parameter`
   (runtime and the exact constructor/`invoke` shape, plus a local class that does read the
-  receiver), and boxes `callableReference/genericLocalClassConstructorReference.kt` and
-  `callableReference/genericConstructorReference.kt`.
+  receiver),
+  `tests/local_class_capture_constructors_e2e.rs::inner_subclass_reads_the_extension_receiver_from_its_enclosing_local_class`,
+  and boxes `callableReference/genericLocalClassConstructorReference.kt`,
+  `callableReference/genericConstructorReference.kt`, and
+  `localClasses/innerOfLocalCaptureExtensionReceiver.kt`.
 - **Nullability is a first-class fact on `Ty`** (`Ty::Nullable(&Ty)`, `types.rs`), not faked as the
   boxed JVM wrapper. `Int?` is `Nullable(Int)` (a Kotlin-level type), and the boxing to a JVM reference
   (`Int?` → `Ljava/lang/Integer;`, `UInt?` → `Lkotlin/UInt;`, a nullable reference → its own descriptor)

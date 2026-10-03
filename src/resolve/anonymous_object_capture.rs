@@ -354,6 +354,10 @@ impl Checker<'_> {
         bindings: &mut Vec<Option<u32>>,
         used_receivers: Vec<(usize, AnonymousObjectCaptureSource)>,
     ) {
+        // An inner class is not entered as its own local-class statement, so it never publishes
+        // captures of its own. Its super call reads a superclass receiver from the enclosing
+        // local class. Keep that receiver here even when this class's body never mentions it.
+        self.retain_receivers_read_by_nested_inner_superclasses(declaration, captures);
         capture_field_order::order_receivers_by_first_use(
             captures,
             bindings,
@@ -371,13 +375,117 @@ impl Checker<'_> {
                 .insert(declaration, std::mem::take(bindings));
         }
     }
+
+    /// Keep an implicit receiver a direct inner subclass's superclass constructor still needs.
+    ///
+    /// The inner constructor's only prefix is the enclosing instance. Lowering reads the superclass
+    /// capture from that instance by closure identity, so this class has to keep the same receiver
+    /// the superclass captured. A further-nested inner class reads its own enclosing class, not this
+    /// one, and a non-inner subclass carries the receiver on its own constructor.
+    fn retain_receivers_read_by_nested_inner_superclasses(
+        &self,
+        declaration: DeclId,
+        captures: &mut [AnonymousObjectCapture],
+    ) {
+        let crate::ast::Decl::Class(class) = self.file.decl(declaration) else {
+            return;
+        };
+        let Some(enclosing) = self.active_classifier_internal(declaration, class) else {
+            return;
+        };
+        let Some(statement) = self
+            .file
+            .local_class_decls
+            .iter()
+            .find_map(|(statement, owner)| (*owner == declaration).then_some(*statement))
+        else {
+            return;
+        };
+        let Some(nested) = self.file.local_class_nested.get(&statement).cloned() else {
+            return;
+        };
+        let mut required = Vec::new();
+        for nested in nested {
+            let crate::ast::Decl::Class(nested_class) = self.file.decl(nested) else {
+                continue;
+            };
+            if nested_class.inner_of.is_none() {
+                continue;
+            }
+            let Some(nested_owner) = self.active_classifier_internal(nested, nested_class) else {
+                continue;
+            };
+            if nested_owner.nested_owner() != Some(enclosing) {
+                continue;
+            }
+            let Some(superclass) = self
+                .resolved_body_local_supertypes
+                .get(&nested_owner)
+                .and_then(|supertypes| supertypes.first())
+                .and_then(|supertype| supertype.kotlin_class_internal())
+            else {
+                continue;
+            };
+            let Some(superclass_captures) = self.discovered_captures_of(superclass) else {
+                continue;
+            };
+            required.extend(superclass_captures.iter().filter_map(|capture| {
+                matches!(
+                    capture.source,
+                    AnonymousObjectCaptureSource::ImplicitReceiver { .. }
+                )
+                .then_some((
+                    capture.source,
+                    capture.receiver_capture,
+                    capture.capture_dependency,
+                ))
+            }));
+        }
+        for (source, receiver_capture, dependency) in required {
+            let Some(local) = captures.iter_mut().find(|local| {
+                (local.receiver_capture.is_some() && local.receiver_capture == receiver_capture)
+                    || local.source == source
+            }) else {
+                continue;
+            };
+            if local.receiver_capture.is_none() {
+                local.receiver_capture = receiver_capture;
+            }
+            if local.capture_dependency.is_none() {
+                local.capture_dependency = dependency.or_else(|| {
+                    local
+                        .receiver_capture
+                        .map(crate::fir::ClassCaptureIdentity::Receiver)
+                });
+            }
+        }
+    }
+
+    fn discovered_captures_of(
+        &self,
+        owner: crate::types::TypeName,
+    ) -> Option<&Vec<AnonymousObjectCapture>> {
+        let declaration =
+            self.discovered_local_class_captures
+                .keys()
+                .copied()
+                .find(|declaration| {
+                    matches!(
+                        self.file.decl(*declaration),
+                        crate::ast::Decl::Class(class)
+                            if self.active_classifier_internal(*declaration, class) == Some(owner)
+                    )
+                })?;
+        self.discovered_local_class_captures.get(&declaration)
+    }
 }
 
 /// Drop an implicit receiver the local-class inventory held only so the body check could see it.
 ///
 /// A receiver whose use count increased stays, in the field the body check already numbered.
 /// One the body never read is not a constructor parameter: kotlinc omits it, and a constructor
-/// reference would otherwise take the receiver as its first value.
+/// reference would otherwise take the receiver as its first value. A receiver a superclass
+/// constructor still requires stays too: the subclass may never read it, but it must pass it on.
 pub(super) fn drop_unused_implicit_receivers(
     captures: &mut Vec<AnonymousObjectCapture>,
     bindings: &mut Vec<Option<u32>>,
@@ -389,7 +497,8 @@ pub(super) fn drop_unused_implicit_receivers(
         let unused_receiver = matches!(
             capture.source,
             AnonymousObjectCaptureSource::ImplicitReceiver { .. }
-        ) && !used.iter().any(|(_, source)| *source == capture.source);
+        ) && capture.capture_dependency.is_none()
+            && !used.iter().any(|(_, source)| *source == capture.source);
         if unused_receiver {
             continue;
         }

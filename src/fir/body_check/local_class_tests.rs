@@ -1055,6 +1055,57 @@ fn local_class_does_not_capture_an_unused_extension_receiver() {
 }
 
 #[test]
+fn inner_subclass_keeps_the_extension_receiver_its_superclass_constructor_needs() {
+    let source = "fun String.bar(): String {\n\
+                      open class Local {\n\
+                          fun result() = this@bar\n\
+                      }\n\
+                      class Outer {\n\
+                          inner class Inner : Local() {\n\
+                              fun outer() = this@Outer\n\
+                          }\n\
+                      }\n\
+                      return Outer().Inner().result()\n\
+                  }\n";
+    let (outer, _) = checked_function_body(source, "bar");
+    let FirExprKind::Block { statements, .. } = &outer
+        .expr(root_expression(&outer))
+        .expect("extension body block")
+        .kind
+    else {
+        panic!("extension function must retain its checked block")
+    };
+    let captures = statements
+        .iter()
+        .filter_map(|statement| outer.statement(*statement))
+        .filter_map(|statement| match &statement.kind {
+            FirStatementKind::LocalDeclaration { captures, .. } => Some(captures.as_ref()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        captures.len(),
+        2,
+        "Local and Outer are the function's local classes: {captures:?}"
+    );
+    assert!(
+        captures
+            .iter()
+            .all(|captures| captures.iter().any(string_extension_receiver)),
+        "Local reads this@bar, and Outer stores it for Inner's super call: {captures:?}"
+    );
+}
+
+fn string_extension_receiver(capture: &FirLocalClassCapture) -> bool {
+    capture.ty.get() == Ty::String
+        && matches!(
+            capture.source,
+            FirLocalClassCaptureSource::ImplicitReceiver { .. }
+                | FirLocalClassCaptureSource::CapturedImplicitReceiver { .. }
+        )
+}
+
+#[test]
 fn local_class_captures_both_extension_and_outer_dispatch_receivers() {
     let source = "class Outer(val suffix: String) {\n\
                       fun Receiver.call(): String {\n\
