@@ -2609,24 +2609,19 @@ struct KotlincServer {
 impl KotlincServer {
     /// `cp` is the driver's run classpath (just its `server_dir` — the driver is pure JDK and loads the
     /// compiler itself); `lib_dir` is passed as argv[0] so the driver builds its compiler `URLClassLoader`.
-    fn new(java: &str, cp: &str, lib_dir: &str) -> Option<Self> {
+    /// `jvm_properties` are `-D` arguments applied before the compiler class loads.
+    fn new(java: &str, cp: &str, lib_dir: &str, jvm_properties: &[String]) -> Option<Self> {
         let mut cmd = Command::new(java);
         // One persistent JVM that compiles in-process. 1 GB holds a single compile's working set (the leaky
         // global state is reset after each — see the driver), so it stays flat across compiles. Fast-startup
         // JIT/GC since each compile is short.
         cmd.args(jvm_gclog_args("kotlinc"));
-        cmd.args([
-            "-XX:TieredStopAtLevel=1",
-            "-XX:+UseSerialGC",
-            "-Xmx1g",
-            "-cp",
-            cp,
-            "KotlincServer",
-            lib_dir,
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+        cmd.args(["-XX:TieredStopAtLevel=1", "-XX:+UseSerialGC", "-Xmx1g"]);
+        cmd.args(jvm_properties);
+        cmd.args(["-cp", cp, "KotlincServer", lib_dir])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
         die_with_parent(&mut cmd);
         let mut child = spawn_owned(cmd).ok()?;
         let stdin = child.stdin.take()?;
@@ -2659,8 +2654,9 @@ impl KotlincServer {
     }
 }
 
-/// Per-classpath pools of persistent compiler servers. Callers claim a server, then compile
-/// outside the pool lock, so overlapping compiles use distinct JVMs up to [`server_pool_cap`].
+/// Pools of persistent compiler servers, one per classpath and JVM-property set. Callers claim a
+/// server, then compile outside the pool lock, so overlapping compiles use distinct JVMs up to
+/// [`server_pool_cap`].
 type KotlincPools = Mutex<HashMap<String, Arc<server_pool::Pool<KotlincServer>>>>;
 
 /// Compile with the reference compiler via the persistent server. `args` are ordinary `kotlinc` CLI
@@ -2671,7 +2667,9 @@ type KotlincPools = Mutex<HashMap<String, Arc<server_pool::Pool<KotlincServer>>>
 /// A release or RC replays class files, the exit code, and kotlinc's diagnostics from the
 /// recorded-byte cache, for a successful build and for a rejected one. A test missing from that
 /// archive fails locally. CI compiles it with kotlinc instead. Master stores that recording;
-/// a pull request leaves the restored archive unchanged.
+/// a pull request leaves the restored archive unchanged. A `-D` argument stays in the fingerprint.
+/// On a cache miss the live compiler applies it as a JVM system property, on a server that no
+/// other compile shares, and does not pass it through to the compiler.
 pub fn kotlinc_compile(args: &[String]) -> Option<(i32, String)> {
     if let Some(replayed) = byte_dump::replay_class_dump(args) {
         if replayed.code == 0 {
@@ -2700,27 +2698,62 @@ fn kotlinc_compile_live(args: &[String]) -> Option<(i32, String)> {
     // The driver is pure JDK and loads the compiler itself (from `lib_dir`), so its OWN classpath is just
     // its `server_dir`.
     let cp = server_dir.to_string_lossy().into_owned();
+    // `-D` stays in `args` for the invocation fingerprint. The compiler itself rejects it, and a
+    // test-only language feature latches from the JVM property the first time `-XXLanguage` is
+    // parsed, so the property is applied at process start on a server that no other compile shares.
+    let (jvm_properties, compiler_args) = kotlinc_jvm_properties(args);
+    let pool_key = kotlinc_server_key(&cp, &jvm_properties);
     let pool = {
         let pools = POOLS.get_or_init(|| Mutex::new(HashMap::new()));
         let mut pools = pools.lock().unwrap_or_else(|err| err.into_inner());
         pools
-            .entry(cp.clone())
+            .entry(pool_key)
             .or_insert_with(|| Arc::new(server_pool::Pool::new()))
             .clone()
     };
     pool.with_server(
         server_pool_cap(),
-        || KotlincServer::new(&java, &cp, &lib_dir),
-        |server| match server.try_compile(args) {
+        || KotlincServer::new(&java, &cp, &lib_dir, &jvm_properties),
+        |server| match server.try_compile(&compiler_args) {
             Ok(result) => Some(result),
             Err(_) => {
                 // Server JVM died — restart once and retry.
-                *server = KotlincServer::new(&java, &cp, &lib_dir)?;
-                server.try_compile(args).ok()
+                *server = KotlincServer::new(&java, &cp, &lib_dir, &jvm_properties)?;
+                server.try_compile(&compiler_args).ok()
             }
         },
     )
     .flatten()
+}
+
+/// Split `bin/kotlinc`'s `-D*` JVM system properties out of the compiler argument list.
+///
+/// `-destination` is the compiler's output-directory alias and stays a compiler argument.
+fn kotlinc_jvm_properties(args: &[String]) -> (Vec<String>, Vec<String>) {
+    let mut properties = Vec::new();
+    let mut compiler_args = Vec::new();
+    for arg in args {
+        if arg.starts_with("-D") && arg != "-destination" {
+            properties.push(arg.clone());
+        } else {
+            compiler_args.push(arg.clone());
+        }
+    }
+    (properties, compiler_args)
+}
+
+/// The default server is keyed by its classpath alone. A JVM property gets its own server, created
+/// only when a cache miss reaches the live compiler.
+fn kotlinc_server_key(classpath: &str, properties: &[String]) -> String {
+    if properties.is_empty() {
+        return classpath.to_string();
+    }
+    let mut key = String::from(classpath);
+    for property in properties {
+        key.push('\0');
+        key.push_str(property);
+    }
+    key
 }
 
 /// How many persistent compiler-server JVMs to pool per classpath. Scales with the host — a single

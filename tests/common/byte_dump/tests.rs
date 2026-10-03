@@ -468,6 +468,56 @@ fn a_partial_invocation_cache_yields_a_new_source_to_a_read_only_live_compile() 
 }
 
 #[test]
+fn a_jvm_property_is_part_of_the_invocation_fingerprint() {
+    let root = temp_root("jvm-prop");
+    let source = root.join("Lib.kt");
+    std::fs::write(&source, "fun box() = \"OK\"\n").unwrap();
+    let out = root.join("out").to_string_lossy().into_owned();
+    let source = source.to_string_lossy().into_owned();
+    let base = vec!["-d".to_string(), out, source];
+    let with_property =
+        std::iter::once("-Dkotlinc.test.allow.testonly.language.features=true".to_string())
+            .chain(base.iter().cloned())
+            .collect::<Vec<_>>();
+    let other_property = std::iter::once("-Dother=1".to_string())
+        .chain(base.iter().cloned())
+        .collect::<Vec<_>>();
+    let plain = parse_invocation(&base)
+        .expect("plain inputs")
+        .expect("plain invocation");
+    let enabled = parse_invocation(&with_property)
+        .expect("property inputs")
+        .expect("property invocation");
+    let other = parse_invocation(&other_property)
+        .expect("other inputs")
+        .expect("other invocation");
+    assert_ne!(plain.fingerprint, enabled.fingerprint);
+    assert_ne!(enabled.fingerprint, other.fingerprint);
+
+    let mut stored = BTreeMap::new();
+    stored.insert("MainKt.class".to_string(), b"class".to_vec());
+    attach_status(&mut stored, 0, "");
+    let release = version("2.4.20");
+    store_files(
+        &root,
+        INVOCATION_MODULE,
+        &hex128(enabled.fingerprint),
+        release,
+        enabled.fingerprint,
+        &stored,
+    );
+    let hit = replay_class_dump_with_policy(&with_property, &root, Some(release), false, false)
+        .expect("the property-bearing invocation replays");
+    assert_eq!(hit.code, 0);
+    assert_eq!(hit.files.get("MainKt.class").unwrap(), b"class");
+    assert!(
+        replay_class_dump_with_policy(&base, &root, Some(release), false, true).is_none(),
+        "without the property the archive entry is a miss"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn an_invocation_fingerprint_ignores_the_output_directory() {
     let root = temp_root("inv");
     let source = root.join("Lib.kt");
