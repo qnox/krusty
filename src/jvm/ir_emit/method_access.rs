@@ -132,14 +132,20 @@ pub(super) fn class_realized_lambda_method(
         let IrExpr::Lambda {
             impl_fn,
             arity,
+            captures,
             sam,
             ..
         } = expression
         else {
             return None;
         };
+        let bounded_erasure = sam.as_ref().is_some_and(|target| {
+            super::lambda_class::bounded_erasure_needs_class(ir, *impl_fn, target, captures.len())
+        });
         (*impl_fn == fid
-            && (runtime_reified || modes.for_lambda(sam.as_ref(), *arity) == LambdaMode::Class))
+            && (runtime_reified
+                || bounded_erasure
+                || modes.for_lambda(sam.as_ref(), *arity) == LambdaMode::Class))
             .then_some(
                 sam.as_ref()
                     .map_or("invoke", |target| target.method.as_str()),

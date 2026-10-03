@@ -12202,6 +12202,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   slot that must still box), corpus `inlineClasses/funInterface/{argumentResult,returnResult}.kt`,
   `inlineClasses/kt44141.kt`.
 
+- **A fun-interface conversion whose lambda parameter erased to `Object` is a class, not indy.**
+  `fun interface Consumer<T : Top> { fun accept(t: T) }` erases `accept` to `(Top)V`. A lambda
+  passed as `Consumer<in T>` after a `when` joins two holders (`GenericHolder<ConcreteType>` and
+  `GenericHolder<ConcreteType2>`) types its parameter as the intersection, and that intersection
+  erases to `Object`. `LambdaMetafactory` requires the instantiated parameter to be a subtype of the
+  SAM slot and rejects `Object` against `Top` (`LambdaConversionException` at the first call). The
+  same rejection applies to the result. The conversion is then the class strategy: the class
+  implements the erased `accept(Top)` and casts into the implementation, which is the shape kotlinc
+  uses for this specialization. A more specific instantiated parameter (`Integer` against `Object`,
+  or `Top` against `Top`) stays `invokedynamic`. Tests:
+  `sam_generic_lambda_param_e2e::contravariant_intersection_sam_runs`,
+  `sam_generic_lambda_param_e2e::unrelated_intersection_sam_runs`. Corpus
+  `funInterface/contravariantIntersectionTypeWithNonTrivialCommonSupertype.kt`,
+  `funInterface/contravariantIntersectionTypeWithNonTrivialCommonSupertype2.kt`.
+
 - **A nullable function value converted to a nullable fun interface stays null.** Adapting
   `(() -> Unit)?` to `KRunnable?` wraps only a non-null function. `null` remains `null`; wrapping it
   would produce a non-null SAM whose method throws. The checker records that on the conversion from

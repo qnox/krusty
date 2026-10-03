@@ -47,8 +47,6 @@ fullValueClasses/nonFinalThisInInitSideEffects.kt
 fullValueClasses/recursive.kt
 fullValueClasses/reservedNames.kt
 fullValueClasses/vararg.kt
-funInterface/contravariantIntersectionTypeWithNonTrivialCommonSupertype.kt
-funInterface/contravariantIntersectionTypeWithNonTrivialCommonSupertype2.kt
 funInterface/suspendFunInterfaceConversionCodegen.kt
 funInterface/suspendFunctionAndFunInterfaceSharedClassSplit.kt
 functions/functionNtoString.kt
