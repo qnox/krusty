@@ -1370,6 +1370,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 type_operand,
             } => self.type_operation(op, arg, type_operand),
             IrExpr::PrimitiveBinOp { op, lhs, rhs } => self.binary(op, lhs, rhs),
+            IrExpr::Equality { op, mode, lhs, rhs } => self.equality(op, mode, lhs, rhs),
             IrExpr::PrimitiveNeg { operand, ty } => self.negate(operand, ty),
             IrExpr::StringConcat(parts) => self.concat(&parts),
             IrExpr::BottomValue {
@@ -1758,6 +1759,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     self.type_of(*rhs).and_then(scalar_bound),
                 ),
             },
+            IrExpr::Equality { .. } => Ty::Boolean,
             IrExpr::Call { callee, .. } => match callee {
                 Callee::Local(function) => self.file.ir.functions[*function as usize].ret,
                 Callee::External { ret, .. } | Callee::Intrinsic { ret, .. } => *ret,
@@ -1956,7 +1958,10 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 ) {
                     return realized;
                 }
-                let owner = super::super::intrinsics::DeclarationOwner::callable(realization);
+                let owner = super::super::intrinsics::DeclarationOwner::callable(
+                    realization.physical_owner,
+                    realization.is_top_level(),
+                );
                 // The Kotlin name the declaration PUBLISHES, not the spelling it is realized under.
                 // A physical name is an emit handle: a JVM realization may RENAME a member, and
                 // where the signature mentions a value class kotlinc appends a hash of the erasure
@@ -2237,8 +2242,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                             owner,
                             &name,
                             params,
-                            realization.compiler_intrinsic,
-                            realization.semantic_role,
+                            compiler_intrinsics::runtime_member_role(realization),
                         ) else {
                             return Err(format!(
                                 "the member `{}.{name}`",
@@ -2256,10 +2260,8 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         self.runtime_call(symbol, &signature, *ret, &arguments)
                     }
                     None => {
-                        if let Some(
-                            operation @ (crate::libraries::CompilerIntrinsic::Print
-                            | crate::libraries::CompilerIntrinsic::Println),
-                        ) = realization.compiler_intrinsic
+                        if let Some(operation) =
+                            compiler_intrinsics::console_intrinsic(realization.compiler_intrinsic)
                         {
                             let Some(symbol) =
                                 super::super::intrinsics::console_intrinsic(operation, params)

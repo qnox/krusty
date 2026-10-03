@@ -22,14 +22,10 @@ pub(super) struct DeclarationOwner {
 }
 
 impl DeclarationOwner {
-    pub(super) fn callable(fact: &crate::backend::BackendCallableFact) -> Self {
+    pub(super) fn callable(physical: TypeName, top_level: bool) -> Self {
         Self {
-            physical: fact.physical_owner,
-            top_level: matches!(
-                fact.kind,
-                crate::libraries::ExternalCallableKind::TopLevel
-                    | crate::libraries::ExternalCallableKind::Extension
-            ),
+            physical,
+            top_level,
         }
     }
 
@@ -253,18 +249,19 @@ fn console_operand(ty: Ty) -> ConsoleOperand {
 /// The declaration provider has already distinguished stdlib `print`/`println` from unrelated
 /// callables with the same spelling. This function chooses only the native ABI suffix from the
 /// checked parameter representation.
-pub(super) fn console_intrinsic(
-    operation: crate::libraries::CompilerIntrinsic,
-    params: &[Ty],
-) -> Option<String> {
-    use crate::libraries::CompilerIntrinsic;
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ConsoleIntrinsic {
+    Print,
+    Println,
+}
+
+pub(super) fn console_intrinsic(operation: ConsoleIntrinsic, params: &[Ty]) -> Option<String> {
     let name = match operation {
-        CompilerIntrinsic::Print => "print",
-        CompilerIntrinsic::Println => "println",
-        _ => return None,
+        ConsoleIntrinsic::Print => "print",
+        ConsoleIntrinsic::Println => "println",
     };
     match (operation, params) {
-        (CompilerIntrinsic::Println, []) => Some("kt_println_unit".to_string()),
+        (ConsoleIntrinsic::Println, []) => Some("kt_println_unit".to_string()),
         (_, [argument]) => match console_operand(*argument) {
             ConsoleOperand::Scalar(suffix) => Some(format!("kt_{name}_{suffix}")),
             ConsoleOperand::Reference => Some(format!("kt_{name}_any")),
@@ -964,16 +961,12 @@ pub(super) fn runtime_member(
     owner: DeclarationOwner,
     name: &str,
     params: &[Ty],
-    compiler_intrinsic: Option<crate::libraries::CompilerIntrinsic>,
-    semantic_role: Option<crate::libraries::SemanticCallRole>,
+    selected_role: Option<RuntimeMemberRole>,
 ) -> Option<&'static str> {
-    if compiler_intrinsic == Some(crate::libraries::CompilerIntrinsic::NullableAnyToString) {
-        return params.is_empty().then_some("kt_to_string");
-    }
-    if let Some(role) = semantic_role {
+    if let Some(role) = selected_role {
         return match (role, params) {
-            (crate::libraries::SemanticCallRole::KotlinAnyToString, []) => Some("kt_to_string"),
-            (crate::libraries::SemanticCallRole::KotlinAnyHashCode, []) => Some("kt_hash_code"),
+            (RuntimeMemberRole::ToString, []) => Some("kt_to_string"),
+            (RuntimeMemberRole::HashCode, []) => Some("kt_hash_code"),
             _ => None,
         };
     }
@@ -1019,10 +1012,15 @@ pub(super) fn runtime_member(
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum RuntimeMemberRole {
+    ToString,
+    HashCode,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::libraries::{CompilerIntrinsic, SemanticCallRole};
 
     fn member(path: &str) -> DeclarationOwner {
         DeclarationOwner::classifier(crate::types::type_name(path))
@@ -1094,21 +1092,21 @@ mod tests {
     fn console_overloads_select_by_parameter_representation() {
         let any = Ty::nullable(Ty::obj("kotlin/Any"));
         assert_eq!(
-            console_intrinsic(CompilerIntrinsic::Println, &[any]).as_deref(),
+            console_intrinsic(ConsoleIntrinsic::Println, &[any]).as_deref(),
             Some("kt_println_any"),
             "a reference argument takes the Any? overload, as it does in Kotlin"
         );
         assert_eq!(
-            console_intrinsic(CompilerIntrinsic::Println, &[Ty::Int]).as_deref(),
+            console_intrinsic(ConsoleIntrinsic::Println, &[Ty::Int]).as_deref(),
             Some("kt_println_int"),
             "a scalar argument must not be boxed to reach the console"
         );
         assert_eq!(
-            console_intrinsic(CompilerIntrinsic::Print, &[Ty::Boolean]).as_deref(),
+            console_intrinsic(ConsoleIntrinsic::Print, &[Ty::Boolean]).as_deref(),
             Some("kt_print_boolean")
         );
         assert_eq!(
-            console_intrinsic(CompilerIntrinsic::Println, &[]).as_deref(),
+            console_intrinsic(ConsoleIntrinsic::Println, &[]).as_deref(),
             Some("kt_println_unit")
         );
     }
@@ -1124,13 +1122,7 @@ mod tests {
     #[test]
     fn string_plus_has_no_name_based_runtime_fallback() {
         assert_eq!(
-            runtime_member(
-                member("java/lang/String"),
-                "plus",
-                &[Ty::String],
-                None,
-                None
-            ),
+            runtime_member(member("java/lang/String"), "plus", &[Ty::String], None),
             None,
             "String.plus is admitted only by its CompilerIntrinsic identity"
         );
@@ -1174,7 +1166,7 @@ mod tests {
     fn semantic_roles_admit_any_members_without_name_fallbacks() {
         let any = Ty::nullable(Ty::obj("kotlin/Any"));
         assert_eq!(
-            runtime_member(member("kotlin/String"), "plus", &[any], None, None),
+            runtime_member(member("kotlin/String"), "plus", &[any], None),
             None
         );
         assert_eq!(
@@ -1182,8 +1174,7 @@ mod tests {
                 member("kotlin/Int"),
                 "physicalNameDoesNotMatter",
                 &[],
-                None,
-                Some(SemanticCallRole::KotlinAnyToString)
+                Some(RuntimeMemberRole::ToString)
             ),
             Some("kt_to_string")
         );
@@ -1192,8 +1183,7 @@ mod tests {
                 member("kotlin/Int"),
                 "physicalNameDoesNotMatter",
                 &[],
-                Some(CompilerIntrinsic::NullableAnyToString),
-                None,
+                Some(RuntimeMemberRole::ToString),
             ),
             Some("kt_to_string")
         );
@@ -1202,22 +1192,21 @@ mod tests {
                 member("kotlin/Any"),
                 "physicalNameDoesNotMatter",
                 &[],
-                None,
-                Some(SemanticCallRole::KotlinAnyHashCode)
+                Some(RuntimeMemberRole::HashCode)
             ),
             Some("kt_hash_code")
         );
         assert_eq!(
-            runtime_member(member("kotlin/Any"), "hashCode", &[], None, None),
+            runtime_member(member("kotlin/Any"), "hashCode", &[], None),
             None,
             "a coincidental spelling has no semantic role"
         );
         assert_eq!(
-            runtime_member(member("kotlin/Any"), "equals", &[any], None, None),
+            runtime_member(member("kotlin/Any"), "equals", &[any], None),
             Some("kt_equals")
         );
         assert_eq!(
-            runtime_member(member("kotlin/String"), "repeat", &[Ty::Int], None, None),
+            runtime_member(member("kotlin/String"), "repeat", &[Ty::Int], None),
             None,
             "an unimplemented member must decline"
         );
@@ -1228,11 +1217,11 @@ mod tests {
         // Kotlin's overload set has one per primitive, and so does the runtime: the value reaches
         // it unboxed, and `krusty_fp.c` decides what it looks like.
         assert_eq!(
-            console_intrinsic(CompilerIntrinsic::Println, &[Ty::Double]).as_deref(),
+            console_intrinsic(ConsoleIntrinsic::Println, &[Ty::Double]).as_deref(),
             Some("kt_println_double")
         );
         assert_eq!(
-            console_intrinsic(CompilerIntrinsic::Print, &[Ty::Float]).as_deref(),
+            console_intrinsic(ConsoleIntrinsic::Print, &[Ty::Float]).as_deref(),
             Some("kt_print_float")
         );
     }
@@ -1305,7 +1294,6 @@ mod tests {
                 "append",
                 &[Ty::array(Ty::String)],
                 None,
-                None,
             ),
             None
         );
@@ -1314,7 +1302,6 @@ mod tests {
                 member("kotlin/text/StringBuilder"),
                 "append",
                 &[Ty::String],
-                None,
                 None,
             ),
             Some("kt_string_builder_append")

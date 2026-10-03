@@ -77,11 +77,12 @@ impl Backend for CraneliftBackend {
 
     fn lower_ir_file(
         &self,
-        file: CheckedIrFile<'_>,
+        mut file: CheckedIrFile<'_>,
         state: &mut Self::State,
         diags: &mut DiagSink,
     ) -> Vec<Artifact> {
         let stem = file.stems[file.source.raw() as usize].clone();
+        crate::backend::counted_loops::realize(&mut file.ir, COUNTED_LOOPS);
         if state.runtime_symbols.is_none() {
             match super::linker::runtime_symbols(self.target) {
                 Ok(symbols) => state.runtime_symbols = Some(symbols),
@@ -138,3 +139,12 @@ impl Backend for CraneliftBackend {
         Vec::new()
     }
 }
+
+/// Native keeps the entry test at the top and carries unsigned counters in their own machine
+/// representation. The common backend-boundary realizer therefore needs no JVM-style inline-call
+/// provenance or Java loop shape.
+const COUNTED_LOOPS: crate::backend::counted_loops::CountedLoopPolicy =
+    crate::backend::counted_loops::CountedLoopPolicy {
+        style: crate::backend::counted_loops::CounterLoopStyle::PreTested,
+        inlining: crate::backend::counted_loops::HeaderInlining::None,
+    };

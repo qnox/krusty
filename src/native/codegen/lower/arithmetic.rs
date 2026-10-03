@@ -18,6 +18,85 @@
 use super::*;
 
 impl BodyLowering<'_, '_, '_> {
+    /// Source `==`/`!=`, realized from the semantic mode fixed by checking.
+    ///
+    /// Inlining may change an operand's physical carrier. That representation change must not
+    /// reclassify structural equality as primitive equality (or the reverse), so this entry point
+    /// dispatches only on the recorded mode. Generated `PrimitiveBinOp` comparisons continue
+    /// through [`Self::binary`], where their machine-level shape is intentional.
+    pub(super) fn equality(
+        &mut self,
+        op: IrBinOp,
+        mode: crate::ir::EqualityMode,
+        lhs: u32,
+        rhs: u32,
+    ) -> Result<Option<Value>, Unsupported> {
+        match mode {
+            crate::ir::EqualityMode::Structural => self.structural_equality(op, lhs, rhs),
+            crate::ir::EqualityMode::Ieee754 => {
+                let lhs_ty = self.type_of(lhs);
+                let rhs_ty = self.type_of(rhs);
+                self.ieee_equality(op, lhs, lhs_ty, rhs, rhs_ty)
+            }
+            crate::ir::EqualityMode::Primitive => self.primitive_equality(op, lhs, rhs),
+        }
+    }
+
+    fn structural_equality(
+        &mut self,
+        op: IrBinOp,
+        lhs: u32,
+        rhs: u32,
+    ) -> Result<Option<Value>, Unsupported> {
+        let against_null = matches!(self.file.ir.expr(lhs), IrExpr::Const(IrConst::Null))
+            || matches!(self.file.ir.expr(rhs), IrExpr::Const(IrConst::Null));
+        let left = self.reference(lhs)?;
+        let right = self.reference(rhs)?;
+        if self.terminated {
+            return Ok(None);
+        }
+        if against_null {
+            let condition = comparison(op, true).expect("equality");
+            return Ok(Some(self.builder.ins().icmp(condition, left, right)));
+        }
+        let equal = self
+            .runtime_call("kt_equals", &[any(), any()], Ty::Boolean, &[left, right])?
+            .expect("`kt_equals` returns a Boolean");
+        Ok(Some(if op == IrBinOp::Ne {
+            let one = self.builder.ins().iconst(types::I8, 1);
+            self.builder.ins().bxor(equal, one)
+        } else {
+            equal
+        }))
+    }
+
+    fn primitive_equality(
+        &mut self,
+        op: IrBinOp,
+        lhs: u32,
+        rhs: u32,
+    ) -> Result<Option<Value>, Unsupported> {
+        let lhs_ty = self.type_of(lhs);
+        let rhs_ty = self.type_of(rhs);
+        let Some(left) = self.expression(lhs)? else {
+            return Err("a `Unit` primitive-equality operand".to_string());
+        };
+        let Some(right) = self.expression(rhs)? else {
+            return Err("a `Unit` primitive-equality operand".to_string());
+        };
+        if self.terminated {
+            return Ok(None);
+        }
+        let (left, right, ty, signed) = self.unify(left, lhs_ty, right, rhs_ty)?;
+        Ok(Some(if ty.is_float() {
+            let condition = float_comparison(op).expect("primitive equality");
+            self.builder.ins().fcmp(condition, left, right)
+        } else {
+            let condition = comparison(op, signed).expect("primitive equality");
+            self.builder.ins().icmp(condition, left, right)
+        }))
+    }
+
     /// Convert a scalar between carriers, as Kotlin's `toInt()`/`toFloat()`/`toChar()` family and
     /// its widening conversions do: integers extend by the source's signedness or truncate;
     /// integer to float rounds; float to integer SATURATES with `NaN` to zero (`fcvt_to_sint_sat`

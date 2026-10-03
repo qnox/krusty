@@ -42,7 +42,7 @@ impl BodyLowering<'_, '_, '_> {
         let Some(getter) = self.file.callables.callable(property.getter) else {
             return false;
         };
-        getter.compiler_intrinsic == Some(crate::libraries::CompilerIntrinsic::StringLength)
+        getter.compiler_intrinsic == Some(crate::backend::BackendCompilerIntrinsic::StringLength)
             || super::super::super::intrinsics::is_non_string_text_length(
                 getter.physical_owner,
                 &property.name,
