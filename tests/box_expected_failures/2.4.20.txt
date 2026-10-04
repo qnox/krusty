@@ -8,7 +8,6 @@ compileKotlinAgainstKotlin/inlineClasses/privateCompanionObjectValInDifferentMod
 compileKotlinAgainstKotlin/inlineClasses/privateTopLevelValInDifferentModule.kt
 coroutines/functionReference_Function_SuspendFunction_casts.kt
 coroutines/tailCallOptimizations/crossinline.kt
-extensionFunctions/kt475.kt
 fullValueClasses/basicSyntax.kt
 fullValueClasses/construction.kt
 fullValueClasses/inapplicableTypes.kt
@@ -29,7 +28,6 @@ fullValueClasses/reservedNames.kt
 fullValueClasses/vararg.kt
 functions/functionNtoString.kt
 functions/functionNtoStringGeneric.kt
-innerNested/nestedInPackage.kt
 multiplatform/k2/defaultArguments/bothInExpectAndActual.kt
 multiplatform/k2/defaultArguments/bothInExpectAndActual2.kt
 multiplatform/k2/kt66970.kt
