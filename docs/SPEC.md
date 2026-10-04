@@ -3337,6 +3337,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   kotlinc's; runtime pins for `do`/`while`, catch parameters, inline calls after a block and the
   parked exception slot); the coroutine restore's same-value re-declaration keeping one slot is
   pinned by `tests/suspend_spill_slot_reuse_e2e.rs`.
+- **A constructor regenerates `Continuation(context) { … }` under `$special`.** The stdlib factory
+  is inline and its lambda is `crossinline`, so the anonymous continuation is copied into the
+  caller as `Owner$special$$inlined$Continuation$N`, `EnclosingMethod` is that constructor's
+  `<init>`, and `resumeWith` is the lambda body. Leaving the library class and a
+  `_init_$lambda$N` method drops the method (the lambda is inline-only) and the constructor fails
+  to link. The same site covers a secondary constructor. Test:
+  `tests/constructor_continuation_e2e.rs`; corpus
+  `coroutines/featureIntersection/callableReference/function/adapted.kt`.
 - **A local variable's slot is entered before its initializer**, as kotlinc's `visitVariable`
   enters it before visiting the initializer: every local and temporary the initializer declares
   sits above the variable and is free again for the statements after it
@@ -9361,7 +9369,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `TypeIntrinsics.isMutableList(x)` (likewise `Iterator`, `Iterable`, `Collection`, `ListIterator`,
   `Set`, `Map`, `MapEntry`), `x as MutableList<*>` calls `asMutableList`, and `x is (Int) -> Int` and
   `x is Function1<*, *>` call `isFunctionOfArity(x, 1)`, while `x as (Int) -> Int` calls
-  `beforeCheckcastToFunctionOfArity(x, 1)` before its `checkcast`. The narrowing on an `as?`'s
+  `beforeCheckcastToFunctionOfArity(x, 1)` before its `checkcast`. A suspend function is not a
+  class either: `SuspendFunctionN` and `suspend (P1, …) -> R` erase to `Function{N+1}`, and
+  `x is SuspendFunction0<*>` (and a reified `x is T` once `T` is `suspend () -> R`) is
+  `instanceof kotlin/coroutines/jvm/internal/SuspendFunction` conjoined with
+  `isFunctionOfArity(x, N+1)`. A source `is` of the function-type spelling itself stays rejected
+  as an erased type, the same way `is (Int) -> Int` is. `x as SuspendFunctionN` is only the
+  `checkcast` to `Function{N+1}`; the marker test stays on `is` and on `as?`. A reference to a
+  suspend function keeps that suspend function type even with no expected function type, including
+  a local `::suspendLocal`: its carrier implements `Function{N+1}` and
+  `kotlin/coroutines/jvm/internal/SuspendFunction`, and the erased `invoke` has the continuation
+  parameter. Class-file descriptors erase `SuspendFunctionN` to that same `Function{N+1}`;
+  metadata still names `SuspendFunctionN`. The narrowing on an `as?`'s
   successful branch is a plain `checkcast` (kotlinc's implicit cast), since its `is` already asked.
   These checks read the marker interfaces kotlinc adds to every class or interface with a direct
   Kotlin collection supertype: `KMappedMarker` for read-only faces (once) and `KMutableX` for each
@@ -9370,7 +9389,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the inliner, which also, like kotlinc's `ReifiedTypeInliner`, throws
   `NullPointerException("null cannot be cast to non-null type <type>")` for a non-null `as` (a
   root-package class is spelled `<root>.Token` there) and tests an `as?` before its `checkcast`.
-  (`tests/type_intrinsics_e2e.rs`.)
+  (`tests/type_intrinsics_e2e.rs`,
+  `jvm::inliner::reified::tests::a_suspend_function_argument_tests_the_marker_and_the_jvm_arity`,
+  `fir::body_check::local_function_tests::suspend_local_function_reference_keeps_its_suspend_function_type`.)
+  Corpus: `coroutines/featureIntersection/suspendFunctionIsAs.kt`.
 - **Native `Double`/`Float` `toString`, `%` and `mod` answer what the JVM answers.** The native
   runtime (`src/native/runtime/krusty_fp.c`) renders a floating-point value as the SHORTEST decimal
   that reads back as it, in Java's layout (plain for 10^-3 <= |x| < 10^7, `d.dddEn` outside,
@@ -10813,6 +10835,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/generic_local_extension_ref_e2e.rs`. Corpus:
   `codegen/box/callableReference/property/extensionPropertyReferenceWithTypeParameter.kt`.
 
+- **A local function reference passes each argument at the function's declared type.** The
+  reference's function type carries the substitution (`(Boolean) -> Unit` for
+  `fun <F> local(flag: F)`), while the lifted function is compiled once against `F`. The adapter
+  records an `ImplicitCoercion` from the substituted argument to that declared parameter, the same
+  boundary a direct local call already crosses. Identical types add nothing; a primitive
+  substituted for a type parameter is boxed by the backend when it emits the coercion, including
+  when the value becomes a generic vararg element. A bound extension receiver is already stored at
+  the declaration's receiver type, so only the value arguments are coerced here. Tests:
+  `a_local_reference_coerces_substituted_arguments_to_declared_slots`,
+  `tests/local_fun_ref_e2e.rs` (`a_generic_local_function_reference_boxes_a_primitive_argument`,
+  `a_generic_local_extension_reference_boxes_a_primitive_argument`,
+  `a_generic_local_vararg_reference_boxes_a_primitive_element`). Corpus:
+  `codegen/box/inline/callableReferenceOfLocalFun.kt`.
+
 - **Fully-qualified SOURCE class names (`pkg1.Cls`) in type position.** A dotted type name whose path
   matches a class declared in the same module (a sibling file's package, no `import` needed — as
   kotlinc accepts) resolves to that source class, shadowing any classpath type of the same path. The
@@ -11041,7 +11077,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   JVM backend consumes as published, and only a source declaration's parameters derive a descriptor.
   Declaration in the same file, a sibling file or a dependency (an interface default method, or the
   receiver-first `$DefaultImpls` static under `-jvm-default=disable`), reached through a class or an
-  interface (`super<I>.f()`), all run, and the override's instructions match kotlinc's.
+  interface (`super<I>.f()`), all run, and the override's instructions match kotlinc's. An override
+  that itself lives on an interface is taken by the same transformer: its machine is
+  `suspendHere$suspendImpl` and `super.suspendHere()` is `invokespecial` of the superinterface
+  default (`coroutines/suspendFunctionAsCoroutine/superCallInterface.kt`).
   Tests: `tests/suspend_super_calls_e2e.rs`, and
   `a_super_call_resumes_in_the_base_body_rather_than_the_override` in
   `tests/suspend_bytecode_transformer_e2e.rs`, which fails under virtual re-entry.
@@ -11764,6 +11803,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`tests/function_value_conversion_e2e.rs`,
   `src/frontend/tests.rs::settled_conversions_take_sequence_positions_and_number_per_callable`,
   `src/fir_lower/callable_references/tests.rs`; corpus `unitConversion/` and `suspendConversion/`.)
+
+- **An inline lambda copied into an unnamed temporary is still spliced.** An external inline
+  such as stdlib `run` evaluates a non-shared capture into an unnamed temporary and invokes
+  that temporary. When the capture is an inline lambda parameter, same-file expansion
+  substitutes the lambda into the temporary's initializer, but the invocation still reads the
+  temporary, so the direct-lambda splice never sees it. A non-local return makes that lambda
+  inline-only: the temporary's invocation then calls a method that is never emitted
+  (`NoSuchMethodError` on `box$lambda$N`). When every use of the temporary is an invocation
+  the lambda can be spliced into, those invocations are retargeted at the substituted lambda
+  and the temporary is not evaluated. A use that is not such an invocation keeps the
+  temporary, and a named binding of the parameter is left as a value (kotlinc rejects
+  `val y = x` for an inline parameter). A suspension inside the spliced body is a suspension
+  of the function the lambda was inlined into. (`tests/inline_capture_splice_e2e.rs`; corpus
+  `coroutines/nonLocalReturnFromInlineLambdaDeep.kt`.)
 
 - **`+EagerLambdaAnalysis`: a shared lambda argument discriminates overload candidates.** Ported from
   kotlinc FIR `EagerLambdaResolution` (`runEagerLambdaAnalysisAndFilterOutInapplicableCandidates`,

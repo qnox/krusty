@@ -8,7 +8,7 @@
 
 use crate::ir::TypeCheckRole;
 use crate::jvm::method_node::{Constant, Insn, MethodNode, Node};
-use crate::jvm::type_intrinsics::{self, IntrinsicCall};
+use crate::jvm::type_intrinsics::{self, CastCheck, InstanceCheck, IntrinsicCall};
 
 /// kotlinc's `ReifiedTypeInliner.OperationKind` values for the operations handled here.
 const AS: i32 = 1;
@@ -60,9 +60,7 @@ pub(super) fn expand(
     }
     match (mode, *op) {
         (IS, INSTANCEOF) if target.nullable => Some(nullable_instance_check(node, target)),
-        (IS, INSTANCEOF) => target
-            .intrinsic
-            .map(|intrinsic| intrinsic_call(&type_intrinsics::instance_check(intrinsic))),
+        (IS, INSTANCEOF) => Some(instance_check(node, target)),
         (AS, CHECKCAST) if !target.nullable || target.intrinsic.is_some() => {
             let mut nodes = Vec::new();
             if !target.nullable {
@@ -77,14 +75,48 @@ pub(super) fn expand(
 }
 
 /// `TypeIntrinsics.instanceOf`: the instance test, leaving an `int` 0/1.
-fn instance_check(target: &ReifiedTarget<'_>) -> Vec<Node> {
-    match target.intrinsic {
-        Some(intrinsic) => intrinsic_call(&type_intrinsics::instance_check(intrinsic)),
+fn instance_check(node: &mut MethodNode, target: &ReifiedTarget<'_>) -> Vec<Node> {
+    match target.intrinsic.map(type_intrinsics::instance_check) {
+        Some(InstanceCheck::Call(call)) => intrinsic_call(&call),
+        Some(InstanceCheck::SuspendFunction { arity }) => {
+            suspend_function_instance_check(node, arity)
+        }
         None => vec![Node::Insn(Insn::Type {
             op: INSTANCEOF,
             class: target.class.to_owned(),
         })],
     }
+}
+
+/// `dup; instanceof SuspendFunction; ifeq fail; isFunctionOfArity; goto end; fail: pop; iconst_0`.
+fn suspend_function_instance_check(node: &mut MethodNode, arity: u16) -> Vec<Node> {
+    let fail = node.new_label();
+    let end = node.new_label();
+    let mut nodes = vec![
+        Node::Insn(Insn::Op(DUP)),
+        Node::Insn(Insn::Type {
+            op: INSTANCEOF,
+            class: type_intrinsics::SUSPEND_FUNCTION_MARKER.to_owned(),
+        }),
+        Node::Insn(Insn::Jump {
+            op: IFEQ,
+            target: fail,
+        }),
+    ];
+    nodes.extend(intrinsic_call(&type_intrinsics::function_arity_check(
+        arity,
+    )));
+    nodes.extend([
+        Node::Insn(Insn::Jump {
+            op: GOTO,
+            target: end,
+        }),
+        Node::Label(fail),
+        Node::Insn(Insn::Op(POP)),
+        Node::Insn(Insn::Op(ICONST_0)),
+        Node::Label(end),
+    ]);
+    nodes
 }
 
 /// `TypeIntrinsics.checkcast` for a non-safe cast.
@@ -93,15 +125,21 @@ fn cast(target: &ReifiedTarget<'_>) -> Vec<Node> {
         op: CHECKCAST,
         class: target.class.to_owned(),
     });
-    match target.intrinsic {
-        Some(intrinsic) => {
-            let (call, keeps_checkcast) = type_intrinsics::cast(intrinsic);
+    match target.intrinsic.map(type_intrinsics::cast) {
+        Some(CastCheck::Call {
+            call,
+            checkcast: keeps_checkcast,
+        }) => {
             let mut nodes = intrinsic_call(&call);
             if keeps_checkcast {
                 nodes.push(checkcast);
             }
             nodes
         }
+        Some(CastCheck::SuspendFunction { arity }) => vec![Node::Insn(Insn::Type {
+            op: CHECKCAST,
+            class: crate::jvm::names::function_interface_internal_name(usize::from(arity)),
+        })],
         None => vec![checkcast],
     }
 }
@@ -118,7 +156,7 @@ fn nullable_instance_check(node: &mut MethodNode, target: &ReifiedTarget<'_>) ->
             target: null,
         }),
     ];
-    nodes.extend(instance_check(target));
+    nodes.extend(instance_check(node, target));
     nodes.extend([
         Node::Insn(Insn::Jump {
             op: GOTO,
@@ -166,7 +204,7 @@ fn null_check_for_non_safe_as(node: &mut MethodNode, rendered: &str) -> Vec<Node
 fn safe_cast(node: &mut MethodNode, target: &ReifiedTarget<'_>) -> Vec<Node> {
     let accepted = node.new_label();
     let mut nodes = vec![Node::Insn(Insn::Op(DUP))];
-    nodes.extend(instance_check(target));
+    nodes.extend(instance_check(node, target));
     nodes.extend([
         Node::Insn(Insn::Jump {
             op: IFNE,
@@ -198,9 +236,9 @@ fn intrinsic_call(call: &IntrinsicCall) -> Vec<Node> {
     nodes
 }
 
-fn push_arity(arity: u8) -> Insn {
+fn push_arity(arity: u16) -> Insn {
     match arity {
-        0..=5 => Insn::Op(ICONST_0 + arity),
+        0..=5 => Insn::Op(ICONST_0 + u8::try_from(arity).expect("small arity fits in u8")),
         6..=127 => Insn::Int {
             op: BIPUSH,
             operand: i32::from(arity),
@@ -220,6 +258,7 @@ const BIPUSH: u8 = 0x10;
 const SIPUSH: u8 = 0x11;
 const POP: u8 = 0x57;
 const DUP: u8 = 0x59;
+const IFEQ: u8 = 0x99;
 const IFNE: u8 = 0x9a;
 const GOTO: u8 = 0xa7;
 const ATHROW: u8 = 0xbf;

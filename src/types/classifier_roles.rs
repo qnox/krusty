@@ -33,4 +33,6 @@ pub enum ClassifierRole {
     MappedCollection(MappedCollection),
     /// A non-suspend, non-reflective `FunctionN` classifier of this arity.
     FunctionOfArity(u8),
+    /// A non-reflective `SuspendFunctionN` classifier of this source arity.
+    SuspendFunctionOfArity(u8),
 }

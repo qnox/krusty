@@ -10,10 +10,8 @@
 
 use crate::ir::{IrClass, IrFile};
 use crate::jvm::classfile::ClassWriter;
-use crate::jvm::type_intrinsics::collection_marker;
+use crate::jvm::type_intrinsics::{collection_marker, SUSPEND_FUNCTION_MARKER};
 use crate::types::Ty;
-
-const SUSPEND_FUNCTION_MARKER: &str = "kotlin/coroutines/jvm/internal/SuspendFunction";
 
 /// The markers in kotlinc's order: first appearance among the direct supertypes, each once.
 pub(super) fn marker_interfaces(ir: &IrFile, class: &IrClass) -> Vec<&'static str> {

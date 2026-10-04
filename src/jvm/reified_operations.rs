@@ -19,6 +19,9 @@ struct ReifiedParameter {
 }
 
 fn erased_classifier(ty: Ty) -> Option<TypeName> {
+    if let Some(function) = jvm_function_erasure(ty) {
+        return Some(crate::types::type_name(&function));
+    }
     let classifier = ty.non_null().obj_internal()?;
     Some(super::jvm_class_map::to_jvm_type_name(classifier))
 }
@@ -95,18 +98,36 @@ pub(super) fn splice_type_map(
 }
 
 /// The JVM class a reified argument's type-bearing instruction names: a function type's
-/// `FunctionN`, an array's descriptor, otherwise the stored classifier's mapped class.
+/// `FunctionN` (`Function{N+1}` when it suspends), an array's descriptor, otherwise the stored
+/// classifier's mapped class.
 fn reified_class_internal(ty: Ty) -> Option<String> {
-    let value = ty.non_null();
-    if let Ty::Fun(signature) = value {
-        return (!signature.suspend)
-            .then(|| super::names::function_interface_internal_name(signature.params.len()));
+    if let Some(function) = jvm_function_erasure(ty) {
+        return Some(function);
     }
+    let value = ty.non_null();
     if value.is_array() {
         return Some(super::names::instanceof_internal_name(value));
     }
     let internal = stored_value_ty(ty).kotlin_class_internal()?.render();
     Some(super::jvm_class_map::to_jvm_internal(&internal).to_owned())
+}
+
+/// JVM function interface a function type erases to. A suspend function counts its continuation,
+/// so `suspend () -> Unit` and `SuspendFunction0` are both `Function1`.
+fn jvm_function_erasure(ty: Ty) -> Option<String> {
+    let value = ty.non_null();
+    let (arity, suspend) = if let Ty::Fun(signature) = value {
+        (signature.params.len(), signature.suspend)
+    } else {
+        let function = super::function_classifiers::classifier(value.obj_internal()?)?;
+        if !function.is_suspend() || function.is_reflective() {
+            return None;
+        }
+        (function.arity(), true)
+    };
+    Some(super::names::function_interface_internal_name(
+        arity + usize::from(suspend),
+    ))
 }
 
 /// Everything a splice of the call `expression` needs to specialize its dependency's reified
