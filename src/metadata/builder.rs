@@ -367,9 +367,24 @@ fn annotation_value_pb(st: &mut StringTable<'_>, value: &crate::ir::AnnoValue) -
             }
             IrConst::Null => panic!("null is not a valid metadata annotation value"),
         },
-        AnnoValue::Class(internal) => {
+        AnnoValue::Class(ty) => {
+            let mut represented = *ty;
+            let mut dimensions = 0_u64;
+            while represented.obj_internal() == Some(crate::types::wk::array()) {
+                let element = represented
+                    .array_elem()
+                    .expect("kotlin.Array class literal retains its element type");
+                dimensions += 1;
+                represented = element;
+            }
+            let internal = represented
+                .kotlin_class_internal()
+                .expect("a checked class literal has a classifier");
             out.field_varint(1, 9);
-            out.field_varint(6, u64::from(st.class_id(*internal)));
+            out.field_varint(6, u64::from(st.class_id(internal)));
+            if dimensions != 0 {
+                out.field_varint(11, dimensions);
+            }
         }
         AnnoValue::Enum(internal, constant) => {
             out.field_varint(1, 10);

@@ -1262,7 +1262,7 @@ impl BodyLowering<'_> {
                 interface: classifier,
                 members,
                 defaults,
-                enclosing_class,
+                scopes: vec![enclosing_class],
             },
         );
         Some(())
@@ -1338,18 +1338,14 @@ impl BodyLowering<'_> {
                     defaults: Box::new([]),
                     default_prefix_count: 0,
                 });
-                let enclosing_class = self
-                    .body
-                    .lexical_class_owner()
-                    .and_then(|owner| self.index.classifier_header(owner))
-                    .map(|owner| owner.classifier);
                 self.ir.annotation_constructions.insert(
                     construction,
                     crate::ir::IrAnnotationConstruction {
                         interface: *classifier,
                         members: members.clone(),
                         defaults: vec![None; members.len()],
-                        enclosing_class,
+                        // Evaluated where the constructions omitting this element are.
+                        scopes: Vec::new(),
                     },
                 );
                 Some(construction)

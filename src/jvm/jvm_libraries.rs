@@ -2494,16 +2494,13 @@ impl JvmLibraries {
                 members,
                 companion,
                 constants: self.constants_for_class(internal_name, &ci),
-                sam_eligible: if is_mapped_builtin {
-                    // A Kotlin `actual typealias` to a Java SAM preserves constructor syntax. This
-                    // is distinct from Kotlin's mapped builtins (`List` -> `java.util.List`): those
-                    // have no alias declaration and must not become SAMs merely because their JVM
-                    // realization happens to be an interface. Both facts come from provider metadata.
-                    self.cp.type_alias_target_name(internal_name).is_some()
-                        && Self::sam_eligible_for_class(&ci)
-                } else {
-                    Self::sam_eligible_for_class(&ci)
-                },
+                // A Kotlin `actual typealias` to a Java SAM preserves constructor syntax. This is
+                // distinct from Kotlin's mapped builtins (`List` -> `java.util.List`): those have no
+                // alias declaration and must not become SAMs merely because their JVM realization
+                // happens to be an interface. Both facts come from provider metadata.
+                sam_eligible: (!is_mapped_builtin
+                    || self.cp.type_alias_target_name(internal_name).is_some())
+                    && Self::sam_eligible_for_class(&ci),
                 callable_signature,
                 callable_signatures,
                 companion_object,
@@ -2536,6 +2533,7 @@ impl JvmLibraries {
                 annotation_targets: (kind == crate::libraries::TypeKind::Annotation)
                     .then(|| classpath_annotation_targets(&ci)),
                 mapped_collection: None,
+                annotation_element_defaults: ci.annotation_element_defaults.clone(),
             })
         }
     }

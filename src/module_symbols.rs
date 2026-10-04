@@ -510,6 +510,7 @@ impl<'a> ModuleSymbols<'a> {
             retention: None,
             annotation_targets: None,
             mapped_collection: None,
+            annotation_element_defaults: Vec::new(),
         };
         debug_assert!(
             c.methods
