@@ -233,33 +233,7 @@ kotlinc VERSION=`just max-version`:
 # Provision the Kotlin/Native distribution whose stdlib KLIB supplies the real metadata format.
 # The extracted root is versioned and cached beside the JVM compiler distribution.
 kotlin-native VERSION=`just max-version`:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    ver="{{VERSION}}"
-    case "$(uname -s)-$(uname -m)" in
-      Linux-x86_64) host=linux-x86_64 ;;
-      Linux-aarch64|Linux-arm64) host=linux-aarch64 ;;
-      Darwin-x86_64) host=macos-x86_64 ;;
-      Darwin-arm64|Darwin-aarch64) host=macos-aarch64 ;;
-      *) echo "unsupported Kotlin/Native host: $(uname -s)-$(uname -m)" >&2; exit 1 ;;
-    esac
-    name="kotlin-native-prebuilt-${host}-${ver}"
-    parent="$PWD/target/cache/kotlin-native/$ver"
-    root="$parent/$name"
-    if [ -d "$root/klib/common/stdlib" ]; then echo "$root"; exit 0; fi
-    url="https://github.com/JetBrains/kotlin/releases/download/v${ver}/${name}.tar.gz"
-    tmp="$(mktemp -d)"
-    trap 'rm -rf "$tmp"' EXIT
-    echo "downloading kotlin-native ${ver} for ${host}…" >&2
-    curl -fsSL "$url" -o "$tmp/kotlin-native.tar.gz"
-    tar -xzf "$tmp/kotlin-native.tar.gz" -C "$tmp"
-    [ -d "$tmp/$name/klib/common/stdlib" ] || {
-      echo "downloaded Kotlin/Native archive has no common stdlib KLIB" >&2
-      exit 1
-    }
-    mkdir -p "$parent"
-    mv "$tmp/$name" "$root"
-    echo "$root"
+    @scripts/kotlin-native.sh "{{VERSION}}" "$PWD/target/cache/kotlin-native"
 
 # This lane is deliberately required: the integration test may be optional in an ordinary local
 # run, but this recipe provisions the distribution and turns absence or an undecodable fragment

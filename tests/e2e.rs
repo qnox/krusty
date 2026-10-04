@@ -1147,6 +1147,8 @@ mod klib_container_e2e;
 mod klib_semantic_e2e;
 #[path = "kotlin_fun_java_sam_param_e2e.rs"]
 mod kotlin_fun_java_sam_param_e2e;
+#[path = "kotlin_native_provisioning_e2e.rs"]
+mod kotlin_native_provisioning_e2e;
 #[path = "krusty_dep_dir_e2e.rs"]
 mod krusty_dep_dir_e2e;
 #[path = "krusty_roundtrip_class_metadata_e2e.rs"]
