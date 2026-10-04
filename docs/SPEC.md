@@ -3333,9 +3333,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   statements after the block take the same numbers again (`if (c) { val a } else { val b }; val z`
   puts all three in one slot). A `do` body's locals stay live through the condition, though the
   `LocalVariableTable` range of one the condition (or a counted loop's step) does not read ends at
-  the condition's label, as kotlinc's `endUnreferencedDoWhileLocals` ends it; the variables a lowered
-  iterator `withIndex()` loop binds stay in scope past its back edge, since kotlinc's lowered body is
-  a transparent block (`tests/for_in_with_index_e2e.rs`). A catch
+  the condition's label, as kotlinc's `endUnreferencedDoWhileLocals` ends it. That holds for a
+  written `do … while` and for the overflow-guarded counted loop (kotlinc's
+  `doWhileCounterLoopOrigin`), not for the guarded counted `do … while` that steps first: it keeps
+  the `for` loop's origin, so kotlinc emits its loop variable ahead of the loop labels and every
+  body local lives to the loop's end (`IrFile::for_loop_next_loops`;
+  `tests/lvt_parity_e2e.rs`). The variables a lowered iterator `withIndex()` loop binds stay in
+  scope past its back edge, since kotlinc's lowered body is a transparent block
+  (`tests/for_in_with_index_e2e.rs`). A catch
   parameter is left when its catch ends. A released backend temporary hands its slot back the
   same way (see the `try`/`finally` slots below); a variable left below an entry that is still live
   keeps the cursor. A `Nothing`-typed `try` (a body and catches that all
@@ -9314,9 +9319,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`destructuring.loops`), the selected callee must carry the provider's `WithIndex` role (the
   `kotlin.collections` extension on an array or an `Iterable`, the `kotlin.text` one on a
   `CharSequence`, the `kotlin.sequences` one on a `Sequence`), and each entry must read component 1
-  or `index` (the index) or component 2 or `value` (the element), selected on `IndexedValue`. The
+  or `index` (the index) or component 2 or `value` (the element). A name-based entry is matched by
+  the property its read selected, compared with `IndexedValue.index` and `IndexedValue.value` as
+  resolution selects them (`IterationPlans`), never by its spelling. The
   receiver is then iterated as `NestedHeaderInfoBuilderForWithIndex` orders it: a progression is
-  counted, an array or a `String` is indexed with its cached length, any other `CharSequence` is
+  counted, an array or a `String` is indexed with its cached length (a constant receiver is read
+  in place rather than stored, as kotlinc's `JvmOptimizationLowering` inlines a temporary `val`
+  holding a constant, in a plain loop too), any other `CharSequence` is
   indexed with `CharSequence.length` read before every iteration and `CharSequence.get` (both
   selected on `kotlin.CharSequence` in `src/resolve/for_loop_iteration.rs`, the receiver cast to
   `CharSequence` when typed as another class), and an `Iterable` or a `Sequence` is iterated through
@@ -9326,7 +9335,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   entries, then steps `index = index + 1` (never `iinc`, as kotlinc's step has no origin), then
   binds the first element entry (later ones copy it). The index is therefore stepped before the
   body, so `continue` cannot skip it. An element no entry reads is still read (`next()` keeps its
-  declared result, so no cast; `get` is popped). Not yet ported: unsigned arrays, and a counted
+  declared result, so no cast; `get` is popped). `Array<T>.size` receives `[Ljava/lang/Object;`,
+  so the JVM casts an array of arrays to it before `arraylength`, as kotlinc's coercion does.
+  Not yet ported: unsigned arrays (a plain loop over one is not lowered as kotlinc's either), a
+  `withIndex()` over `indices` (`IndicesHandler`), and a counted
   receiver whose element entry is a `var` or needs a conversion, which keep iterating
   `IndexedValue`s. (`tests/for_in_with_index_e2e.rs`.)
 

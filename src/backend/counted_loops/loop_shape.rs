@@ -142,9 +142,6 @@ impl Realizer<'_> {
                     post_test: true,
                     label: Some(label),
                 });
-                if with_index.is_none() {
-                    self.ir.for_loop_next_loops.insert(repeat);
-                }
                 self.guarded_unless_entered(&header, &variables, first_constant, repeat)
             }
         } else if java_like || self.style == CounterLoopStyle::PreTested {
@@ -169,9 +166,9 @@ impl Realizer<'_> {
                 post_test: true,
                 label: Some(label),
             });
-            if with_index.is_none() {
-                self.ir.for_loop_next_loops.insert(repeat);
-            }
+            // kotlinc keeps this loop's `FOR_LOOP_INNER_WHILE` origin (the overflow-guarded one
+            // above takes `doWhileCounterLoopOrigin`), so its body's locals outlive the condition.
+            self.ir.for_loop_next_loops.insert(repeat);
             self.guarded_unless_entered(&header, &variables, first_constant, repeat)
         };
         statements.push(loop_expression);

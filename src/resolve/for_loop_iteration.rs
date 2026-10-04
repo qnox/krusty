@@ -40,6 +40,17 @@ pub struct IterationPlans {
     /// `kotlin.CharSequence`'s own `length` and `get`, selected once a loop indexes a
     /// `CharSequence`.
     char_sequence: Option<CharSequenceIndexing>,
+    /// The `index` and `value` properties of `kotlin.collections.IndexedValue`, selected once a
+    /// loop destructures a `withIndex()` call.
+    indexed_value: Option<IndexedValueProperties>,
+}
+
+/// The properties a name-based destructuring entry of a `withIndex()` loop may read
+/// (`STDLIB_INDEXED_VALUE_GET_INDEX_NAME`, `STDLIB_INDEXED_VALUE_GET_VALUE_NAME`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct IndexedValueProperties {
+    pub index: ExternalPropertyId,
+    pub value: ExternalPropertyId,
 }
 
 /// The members kotlinc's `CharSequenceIterationHandler` indexes a `CharSequence` with: the
@@ -66,6 +77,11 @@ impl IterationPlans {
     pub fn char_sequence(&self) -> Option<&CharSequenceIndexing> {
         self.char_sequence.as_ref()
     }
+
+    /// The selected `IndexedValue.index` and `IndexedValue.value`.
+    pub fn indexed_value(&self) -> Option<IndexedValueProperties> {
+        self.indexed_value
+    }
 }
 
 impl super::TypeInfo {
@@ -79,6 +95,10 @@ impl super::TypeInfo {
 
     pub fn char_sequence_indexing(&self) -> Option<&CharSequenceIndexing> {
         self.iteration_plans.char_sequence()
+    }
+
+    pub fn indexed_value_properties(&self) -> Option<IndexedValueProperties> {
+        self.iteration_plans.indexed_value()
     }
 }
 
@@ -221,6 +241,7 @@ impl Checker<'_> {
             return;
         }
         let receiver_ty = call.receiver;
+        self.record_indexed_value_properties();
         let class = receiver_ty.obj_internal();
         if class == Some(wk::char_sequence()) {
             self.record_char_sequence_indexing(receiver_ty);
@@ -244,6 +265,29 @@ impl Checker<'_> {
             self.iterator_protocol_target(scope, None, receiver_ty, self.span(receiver), false)
         {
             self.iterator_protocols.insert(receiver, target);
+        }
+    }
+
+    /// Select `index` and `value` on `kotlin.collections.IndexedValue`, once per checked file, so a
+    /// name-based entry is matched by the property its read selected rather than by spelling.
+    fn record_indexed_value_properties(&mut self) {
+        if self.iteration_plans.indexed_value.is_some() {
+            return;
+        }
+        let indexed_value = Ty::obj_name(wk::indexed_value());
+        let resolver = self.resolver();
+        let property = |name| {
+            resolver
+                .select_member_property(indexed_value, name)?
+                .property?
+                .getter
+                .external_property_identity
+        };
+        if let (Some(index), Some(value)) = (
+            property(wk::INDEXED_VALUE_INDEX),
+            property(wk::INDEXED_VALUE_VALUE),
+        ) {
+            self.iteration_plans.indexed_value = Some(IndexedValueProperties { index, value });
         }
     }
 

@@ -42,7 +42,9 @@ fn arrays_use_their_counter_as_the_index() {
     assert_identical(
         "WithIndexArrays",
         "fun ints(xs: IntArray): Int { var s = 0; for ((i, v) in xs.withIndex()) s += i * v; return s }\n\
-         fun strings(xs: Array<String>): Int { var s = 0; for ((i, v) in xs.withIndex()) s += i + v.length; return s }\n",
+         fun strings(xs: Array<String>): Int { var s = 0; for ((i, v) in xs.withIndex()) s += i + v.length; return s }\n\
+         fun nested(xs: Array<Array<String>>): Int { var s = 0; for ((i, v) in xs.withIndex()) s += i + v.size; return s }\n\
+         fun size(xs: Array<Array<String>>): Int = xs.size\n",
     );
 }
 
@@ -52,6 +54,7 @@ fn char_sequences_use_their_counter_as_the_index() {
     assert_identical_cp(
         "WithIndexText",
         "fun string(text: String): Int { var s = 0; for ((i, c) in text.withIndex()) if (c == 'a') s += i; return s }\n\
+         fun constant(): Int { var s = 0; for ((i, c) in \"abca\".withIndex()) if (c == 'a') s += i; return s }\n\
          fun chars(text: CharSequence): Int { var s = 0; for ((i, c) in text.withIndex()) if (c == 'a') s += i; return s }\n\
          fun builder(text: StringBuilder): Int { var s = 0; for ((i, c) in text.withIndex()) if (c == 'a') s += i; return s }\n\
          fun <C : CharSequence> bounded(text: C): Int { var s = 0; for ((i, _) in text.withIndex()) s += i; return s }\n\
@@ -97,6 +100,33 @@ fn an_unused_component_is_not_bound() {
          fun arrayIndexOnly(xs: IntArray): Int { var s = 0; for ((i, _) in xs.withIndex()) s += i; return s }\n\
          fun arrayValueOnly(xs: IntArray): Int { var s = 0; for ((_, v) in xs.withIndex()) s += v; return s }\n\
          fun arrayNeither(xs: IntArray): Int { var s = 0; for ((_, _) in xs.withIndex()) s += 1; return s }\n",
+    );
+}
+
+/// A name-based entry reads the `IndexedValue` property it selects, whatever it is named and in
+/// whichever order the entries are written.
+#[test]
+fn name_based_entries_read_the_property_they_select() {
+    let src = "// LANGUAGE: +NameBasedDestructuring +EnableNameBasedDestructuringShortForm\n\
+               fun short(xs: Array<String>): Int { var s = 0; for ((index, value) in xs.withIndex()) s += index + value.length; return s }\n\
+               fun swapped(xs: Array<String>): Int { var s = 0; for ((value, index) in xs.withIndex()) s += index + value.length; return s }\n\
+               fun renamed(xs: List<String>): Int { var s = 0; for ((v = value, i = index) in xs.withIndex()) s += i + v.length; return s }\n\
+               fun crossed(n: Int): Int { var s = 0; for ((index = value, value = index) in (1..n).withIndex()) s += index * value; return s }\n";
+    let class = "WithIndexNamesKt";
+    let comparison = common::compare_with_kotlinc_plugin(
+        "WithIndexNames",
+        src,
+        class,
+        &[common::stdlib_jar()],
+        "1.8",
+        &common::language_directives::kotlinc_args(src),
+    )
+    .expect("the reference kotlinc is provisioned");
+    assert!(
+        comparison.krusty_bytes == comparison.reference_bytes,
+        "{class} differs from kotlinc:\nkrusty:\n{}\nkotlinc:\n{}",
+        comparison.krusty,
+        comparison.reference,
     );
 }
 

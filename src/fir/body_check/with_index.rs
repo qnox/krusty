@@ -177,19 +177,18 @@ impl BodyFirChecker<'_> {
         else {
             return None;
         };
+        let properties = self.info.indexed_value_properties()?;
+        let property = selected.member.external_property_identity?;
         crate::trace_compiler!(
             "resolve",
-            "withIndex component {position} reads {:?}.{}",
-            selected.member.owner,
-            selected.member.name,
+            "withIndex component {position} reads {property:?} of {properties:?}",
         );
-        if selected.member.owner != Some(crate::types::wk::indexed_value()) {
-            return None;
-        }
-        match selected.member.name.as_str() {
-            crate::types::wk::INDEXED_VALUE_INDEX => Some(FirIndexedValueComponent::Index),
-            crate::types::wk::INDEXED_VALUE_VALUE => Some(FirIndexedValueComponent::Value),
-            _ => None,
+        if property == properties.index {
+            Some(FirIndexedValueComponent::Index)
+        } else if property == properties.value {
+            Some(FirIndexedValueComponent::Value)
+        } else {
+            None
         }
     }
 

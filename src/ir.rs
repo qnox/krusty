@@ -1917,11 +1917,13 @@ pub struct IrFile {
     /// `ForLoopsLowering` rebuilt as a `while` is (an `IrComposite`): the declarations it opens with
     /// stay in scope until the loop ends.
     pub transparent_loop_bodies: std::collections::HashSet<ExprId>,
-    /// Post-test loops a counted `for` loop was realized as whose body opens with the loop
-    /// variable's initialization (kotlinc's `FOR_LOOP_NEXT` block heading a `FOR_LOOP_INNER_WHILE`
-    /// body). kotlinc's `visitDoWhileLoop` emits that initialization ahead of the loop's labels, so
-    /// the body's locals keep their ranges through the condition; any other post-test loop ends a
-    /// local the condition does not read at the condition (`endUnreferencedDoWhileLocals`).
+    /// Post-test loops a counted `for` loop was realized as that keep the `for` loop's origin, with
+    /// a body opening with the loop variable's initialization (kotlinc's `FOR_LOOP_NEXT` block
+    /// heading a `FOR_LOOP_INNER_WHILE` body: the guarded do-while that steps first). kotlinc's
+    /// `visitDoWhileLoop` emits that initialization ahead of the loop's labels, so the body's locals
+    /// keep their ranges through the condition. Any other post-test loop, a written one or the
+    /// overflow-guarded counted shape (`doWhileCounterLoopOrigin`), ends a local the condition does
+    /// not read at the condition (`endUnreferencedDoWhileLocals`).
     pub for_loop_next_loops: std::collections::HashSet<ExprId>,
     /// The casts the source wrote (`x as T`). Every other cast is compiler-inserted, kotlinc's
     /// `IMPLICIT_CAST` (an `as?`'s narrowing after its `is`, a carrier handed on as its function

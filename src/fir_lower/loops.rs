@@ -347,8 +347,12 @@ impl BodyLowering<'_> {
             matches!(self.ir.expr(iterable_value), IrExpr::GetValue(slot) if *slot == self.value_slot(value))
                 .then_some(self.value_slot(value))
         });
-        let (iterable_slot, iterable_declaration) = if let Some(slot) = stable_slot {
-            (slot, None)
+        // The receiver each read re-reads: a stable local, the constant itself (kotlinc's
+        // `JvmOptimizationLowering` inlines a temporary `val` holding a constant), or a temporary.
+        let (receiver_leaf, iterable_declaration) = if let Some(slot) = stable_slot {
+            (self.ir.add_expr(IrExpr::GetValue(slot)), None)
+        } else if matches!(self.ir.expr(iterable_value), IrExpr::Const(_)) {
+            (iterable_value, None)
         } else {
             let slot = self.allocate_temporary();
             let declaration = self.ir.add_expr(IrExpr::Variable {
@@ -357,7 +361,7 @@ impl BodyLowering<'_> {
                 init: Some(iterable_value),
                 named: false,
             });
-            (slot, Some(declaration))
+            (self.ir.add_expr(IrExpr::GetValue(slot)), Some(declaration))
         };
         // A `withIndex()` loop counts its index with this counter, which starts at 0 and steps by 1.
         let index_slot = match binding {
@@ -379,7 +383,7 @@ impl BodyLowering<'_> {
                     }
                     _ => (IrIntrinsic::ArraySize, IrIntrinsic::ArrayGet),
                 };
-                let receiver = self.ir.add_expr(IrExpr::GetValue(iterable_slot));
+                let receiver = self.ir.add_expr(self.ir.expr(receiver_leaf).clone());
                 let size = self.ir.add_expr(IrExpr::Call {
                     callee: Callee::Intrinsic {
                         operation: size_operation,
@@ -402,7 +406,7 @@ impl BodyLowering<'_> {
                     lhs: index_read,
                     rhs: size_read,
                 });
-                let receiver = self.ir.add_expr(IrExpr::GetValue(iterable_slot));
+                let receiver = self.ir.add_expr(self.ir.expr(receiver_leaf).clone());
                 let index_read = self.ir.add_expr(IrExpr::GetValue(index_slot));
                 let element = self.ir.add_expr(IrExpr::Call {
                     callee: Callee::Intrinsic {
@@ -416,7 +420,7 @@ impl BodyLowering<'_> {
             }
             FirBuiltinIterableKind::CharSequence(indexing) => {
                 let (condition, element) =
-                    self.char_sequence_indexing(indexing, iterable_slot, iterable_ty, index_slot)?;
+                    self.char_sequence_indexing(indexing, receiver_leaf, iterable_ty, index_slot)?;
                 (None, condition, element)
             }
         };
