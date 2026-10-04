@@ -192,3 +192,38 @@ fn warnings(output: &str) -> Vec<String> {
         })
         .collect()
 }
+
+#[test]
+fn suppressing_the_opt_in_diagnostic_accepts_the_use() {
+    let src = format!(
+        "@file:Suppress(\"OPT_IN_USAGE_ERROR\")\n{}",
+        source(
+            "@A fun a() = 1
+
+@Suppress(\"OPT_IN_USAGE_ERROR\")
+fun local() = a()
+
+fun use() = a()
+"
+        )
+    );
+    common::assert_accepted_like_kotlinc(&src);
+}
+
+#[test]
+fn contract_builders_are_checked_like_calls() {
+    let src = "@file:OptIn(kotlin.contracts.ExperimentalContracts::class)
+import kotlin.contracts.*
+
+fun runOnce(action: () -> Unit) {
+    contract { callsInPlace(action, InvocationKind.EXACTLY_ONCE) }
+    action()
+}
+
+fun nonNull(v: Any?): Boolean {
+    contract { returns(true) implies (v != null) }
+    return v != null
+}
+";
+    common::assert_accepted_like_kotlinc(src);
+}

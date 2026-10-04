@@ -593,8 +593,15 @@ impl Checker<'_> {
     fn report_opt_in_requirements(&mut self, span: Span, requirements: &[OptInRequirement]) {
         for requirement in requirements {
             let marker = kotlin_qualified_name(requirement.marker);
+            // kotlinc's factories: `OPT_IN_USAGE` warns and `OPT_IN_USAGE_ERROR` rejects.
+            let diagnostic = if requirement.warning {
+                "OPT_IN_USAGE"
+            } else {
+                "OPT_IN_USAGE_ERROR"
+            };
             if self.lexically_opted_in(requirement.marker)
                 || self.file.opted_in_markers.contains(&marker)
+                || self.suppresses_diagnostic(diagnostic)
             {
                 continue;
             }

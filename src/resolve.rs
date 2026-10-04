@@ -37331,7 +37331,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         }
     }
     if resolved_index.is_some() {
-        c.push_file_opt_ins(scope);
+        c.push_file_policies(scope);
     }
 
     // The streaming path already published contracts as stable, semantically resolved Pass-1

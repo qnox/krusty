@@ -116,13 +116,12 @@ impl Checker<'_> {
         depth
     }
 
-    /// Accept the opt-in markers a file annotation (`@file:OptIn(Marker::class)`) names for the
-    /// whole checking unit. Suppressions of file annotations reach a bounded unit through the
-    /// declaration facts published in Pass 1 instead.
-    pub(super) fn push_file_opt_ins(&mut self, scope: &CheckerScope<'_>) {
-        for policy in self.file.file_annotation_policies.clone() {
-            self.push_opt_in_policies(scope, &policy.annotation, &policy.class_literals);
-        }
+    /// Open the policies of the file annotations (`@file:OptIn(Marker::class)`,
+    /// `@file:Suppress("NAME")`) for the whole checking unit. A bounded unit reparses only its own
+    /// declaration, so these travel from the file prefix with the unit.
+    pub(super) fn push_file_policies(&mut self, scope: &CheckerScope<'_>) {
+        let policies = self.file.file_annotation_policies.clone();
+        self.push_use_site_policies(scope, &policies);
     }
 
     fn push_use_site_policies(
