@@ -51,6 +51,7 @@ pub(super) fn enclosing(
 pub(super) fn symbolic(
     index: &crate::fir::ResolvedModuleIndex,
     declaration: crate::fir::DeclarationId,
+    declaration_spelling: Option<&str>,
     declared_names: &[String],
     declared_bounds: &[(String, TypeRef)],
     table: &SymbolTable,
@@ -60,23 +61,19 @@ pub(super) fn symbolic(
     let enclosing = enclosing(index, declaration);
     // A classifier is in scope recursively in its own header. The complete declaration inventory
     // has already assigned its stable identity, but the module-wide spelling table deliberately
-    // does not give a nested classifier's simple name global meaning. The published declaration
-    // name is the lookup path (`GraphQlTester.Entity`); an F-bound is written with the simple
-    // source spelling (`Entity`) or that same path. Resolve either to this declaration, before the
+    // does not give a nested classifier's simple name global meaning. Bind the source spelling
+    // retained by this declaration's stub to its already-resolved classifier identity before the
     // ordinary import/package table, so `interface Entity<S : Entity<S>>` retains `Entity` rather
     // than being approximated to `Any`. This is the compact-header counterpart of the self binding
     // installed in the full signature collector's classifier-header scope.
     let self_classifier = index
         .classifier_header(declaration)
         .map(|header| header.classifier);
-    let self_path = self_classifier.and_then(|_| index.declaration_name(declaration));
-    let self_spelling = self_path.and_then(|path| path.rsplit('.').next());
     super::super::TParams::symbolic_from_decl_enclosing(
         declared_names,
         declared_bounds,
         &|name| {
-            if self_classifier.is_some() && (self_path == Some(name) || self_spelling == Some(name))
-            {
+            if self_classifier.is_some() && declaration_spelling == Some(name) {
                 self_classifier
             } else {
                 table.class_names.get(name)

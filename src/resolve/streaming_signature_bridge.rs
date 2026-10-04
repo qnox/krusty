@@ -5291,6 +5291,8 @@ pub(crate) fn finalized_streamed_signature_index(
         let symbolic = type_parameter_publication::symbolic(
             &index,
             stub.id,
+            stub.lookup_name
+                .and_then(|name| headers.lookup_names.get(name)),
             &declared_names,
             &declared_bounds,
             table,
