@@ -1049,6 +1049,8 @@ mod inner_class_declaration_order_e2e;
 mod inner_class_name_pool_order_e2e;
 #[path = "inner_class_outer_tparam_e2e.rs"]
 mod inner_class_outer_tparam_e2e;
+#[path = "inner_secondary_constructor_line_e2e.rs"]
+mod inner_secondary_constructor_line_e2e;
 #[path = "instant_builtin_serializer_e2e.rs"]
 mod instant_builtin_serializer_e2e;
 #[path = "integer_literal_branch_join_e2e.rs"]

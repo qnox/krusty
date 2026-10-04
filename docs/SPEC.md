@@ -12018,6 +12018,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   enclosing instance, selected by `IrCtorParameterProvenance` rather than by the field's name. Test:
   `tests/local_inner_enclosing_line_e2e.rs`.
 
+- **A secondary constructor's enclosing-instance store carries the constructor's line.** A
+  secondary constructor of an inner class that delegates to `super` stores `this$0` first, and
+  kotlinc gives that store the constructor's declaration line; the delegation's own line follows
+  (`constructor(x: Int) :⏎ super(⏎ x⏎ )` maps the store to the `constructor` line, then the
+  `super` line). krusty opened the table at the delegation, after the store. A captured value of a
+  local class is still stored without a line, and a constructor delegating to `this(…)` stores
+  nothing. The store is selected by `IrCtorParameterProvenance::EnclosingInstance`. Test:
+  `tests/inner_secondary_constructor_line_e2e.rs`.
+
 - **Backend temporaries are entered and left on the frame's stack, as kotlinc's `enterTemp` and
   `leaveTemp` move `FrameMapBase.currentSize`.** Leaving the newest entry, keyed or not, hands its
   slot back to whatever is entered next. `javap -c -p` of `ExpressionCodegen` in kotlinc 2.4.20's
