@@ -1640,6 +1640,9 @@ pub struct FirIteratorCall {
     /// protocol call is not specialized per site, so a substituted receiver (`Int` for `T?`)
     /// crosses into the declared type here.
     pub receiver_conversion: Option<FirConversion>,
+    /// The not-null check of an enhanced Java result the loop stores (`ArrayList.iterator()`, and
+    /// the `next()` of the iterator it returns), named by the protocol call.
+    pub result_check: Option<FirPlatformNarrowingId>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

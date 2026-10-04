@@ -116,6 +116,7 @@ pub(super) fn realize_call_result_boundaries(ir: &mut IrFile) {
     }
     fold_nullable_widenings(ir, &boundaries);
     fold_asserted_number_unbox(ir);
+    check_enhanced_result_before_unbox(ir);
 }
 
 /// An erased reference slot read as a primitive and then widened to that primitive's nullable type
@@ -204,5 +205,51 @@ fn fold_asserted_number_unbox(ir: &mut IrFile) {
         };
         *operand = produced;
         ir.declaration_result_coercions.remove(&inner);
+    }
+}
+
+/// A Java result enhanced to a not-null primitive (`ArrayList<Int>.get`, overriding
+/// `List<E>.get(): E`) is checked before it is unboxed. kotlinc's JVM type mapper keeps a type
+/// carrying `EnhancedNullability` at its wrapper, so the check sees the reference the call produced
+/// and the unbox through `java/lang/Number` follows it. Common lowering asserts the substituted
+/// primitive; this boundary moves the assertion under the coercion that unboxes the erased slot
+/// the call left (a scalar itself can never be null, so an assertion over it checks nothing).
+fn check_enhanced_result_before_unbox(ir: &mut IrFile) {
+    let moves = (0..ir.exprs.len())
+        .filter_map(|index| {
+            let IrExpr::NotNullAssert {
+                operand: coercion,
+                message: Some(_),
+            } = &ir.exprs[index]
+            else {
+                return None;
+            };
+            let coercion = *coercion;
+            let IrExpr::TypeOp {
+                op: IrTypeOp::ImplicitCoercion,
+                arg: produced,
+                type_operand: primitive,
+            } = &ir.exprs[coercion as usize]
+            else {
+                return None;
+            };
+            let physical =
+                crate::jvm::physical_type::ir_ty_to_jvm(ir.physical_types.get(produced)?);
+            (primitive.is_jvm_scalar() && physical.is_reference()).then_some((
+                index as ExprId,
+                coercion,
+                *produced,
+            ))
+        })
+        .collect::<Vec<_>>();
+    for (assertion, coercion, produced) in moves {
+        // The assertion's slot becomes the unboxing coercion, which now reads the checked value.
+        ir.exprs.swap(assertion as usize, coercion as usize);
+        if let IrExpr::TypeOp { arg, .. } = &mut ir.exprs[assertion as usize] {
+            *arg = coercion;
+        }
+        if let IrExpr::NotNullAssert { operand, .. } = &mut ir.exprs[coercion as usize] {
+            *operand = produced;
+        }
     }
 }

@@ -2270,6 +2270,36 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     there and guards at the caller's declared type instead (`collectionAssignGetMultiIndex.kt`). This
     is the same modeling gap as an inferred `val a = System.getenv("P")`, which krusty annotates
     `@Nullable` where kotlinc annotates nothing.
+- **A Java result an overridden Kotlin declaration fixes not-null is ENHANCED, and guarded like a
+  platform value.** kotlinc enhances a Java member's signature with the nullability of the declarations
+  it overrides (`FirSignatureEnhancement.enhanceReturnType`, qualifiers from
+  `AbstractSignatureParts.computeIndexedQualifiers` / `computeQualifiersForOverride`): a flexible result
+  (`T!`) overriding a result that is not marked nullable becomes the rigid `T` carrying
+  `EnhancedNullability`. `StringBuilder.toString()` (over `Any.toString(): String`) returns `String`,
+  `ArrayList<String>.get(0)` (over `List<E>.get(): E`) returns `String`, and `ArrayList.iterator()`
+  returns `MutableIterator<E>` whose `E` is enhanced too. `Fir2IrImplicitCastInserter.insertSpecialCast`
+  guards a value whose type is flexible OR enhanced wherever the expected type does not accept null,
+  so every position the platform entry above guards also guards an enhanced value. In addition, an
+  enhanced value is guarded where a declaration's type is INFERRED from it, because the declaration's
+  type drops the attribute: `val s = sb.toString()`, `fun f() = sb.toString()`, and the iterator and
+  element a `for` loop over a Java collection stores (`iterator(...)`, `next(...)`). A conditional keeps
+  the attribute, so a declared result still guards the branch that produced the value. A primitive
+  enhanced result (`ArrayList<Int>.get`) is checked on the reference the call produced, then unboxed
+  through `Number`.
+
+  The override relation is a fact of the member family, so the core hierarchy decides it
+  (`src/symbol_resolver/member_hierarchy/result_enhancement.rs`): the provider publishes only that a Java
+  result is flexible, and a family member whose result is not nullable and not flexible fixes it
+  not-null. A JDK method of a MAPPED builtin classifier (`java.lang.Throwable` for `kotlin.Throwable`,
+  `java.lang.annotation.Annotation`) is not a Java declaration in Kotlin's scope — kotlinc's
+  `JvmMappedScope` shows the builtin it overrides — so it takes that declaration's rigid result without
+  the attribute and is not guarded (`ClassCastException().toString()`). A `@NotNull` Java result is
+  enhanced on its own. Not yet modeled: the attribute travelling through generic inference
+  (`id(sb.toString())`, `sb.toString().also { }`) and through an inferred lambda result, the
+  message-less `checkNotNull` kotlinc puts on an inferred local initialized by an enhanced conditional,
+  type-argument enhancement outside a `for` loop, enhanced Java PROPERTY reads (`map.keys`), and
+  `NULLABLE` enhancement (`HashMap.get` stays `V!`).
+  Tests: `tests/enhanced_result_null_check_e2e.rs` (per-method differential vs kotlinc and a run).
 - `try { … } catch (e: E) { … }` (no `finally`): the body value (and each catch value) is stored into a
   result temp and loaded at the merge, like kotlinc. The protected region covers the body + result
   store; each catch is an exception-table handler whose StackMapTable frame has the caught exception on

@@ -128,6 +128,7 @@ mod operator_calls;
 use operator_calls::{range_operator, ResolvedInRangeComparison};
 mod overload_diagnostics;
 mod override_plans;
+mod platform_value_narrowing;
 mod plugin_class_checks;
 mod plugin_expression_annotations;
 mod plugin_expression_planning;
@@ -24291,6 +24292,9 @@ impl<'a> Checker<'a> {
             },
             None => it,
         };
+        if declared.is_none() {
+            self.narrow_enhanced_value(bind, init);
+        }
         crate::trace_compiler!(
             "resolve",
             "local declaration name={name} declared={declared:?} initializer={it:?} binding={bind:?}"
@@ -58484,31 +58488,6 @@ impl<'a> Checker<'a> {
             None => *arg_tys.get(slot)?,
         };
         Some((argument, ty))
-    }
-
-    /// Record that `e`'s PLATFORM type is committed to a declared non-null `expected` here.
-    ///
-    /// A Java value arrives as `T!`, which is usable as both `T` and `T?`; a declared non-null type
-    /// is where the source picks the non-null bound and every later consumer — Kotlin call sites that
-    /// skip null handling, Java nullness checkers reading `@NotNull`, krusty's own smart casts — is
-    /// entitled to rely on it. kotlinc guards exactly this transition (see
-    /// [`TypeInfo::platform_narrowings`]), unboxing into a primitive included; positions that keep
-    /// the flexibility (`T?`, another `T!`) are left alone.
-    ///
-    /// The expression's RECORDED type is read rather than a caller-supplied one: lowering consumes
-    /// the same `expr_types` entry, so a caller that has already narrowed the type for a diagnostic
-    /// cannot make the two disagree.
-    fn narrow_platform_value(&mut self, expected: Ty, e: ExprId, position: PlatformNarrowing) {
-        if !matches!(self.expr_types[e.0 as usize], Ty::PlatformNullable(_)) {
-            return;
-        }
-        if matches!(expected, Ty::PlatformNullable(_) | Ty::Error)
-            || expected.is_nullable()
-            || !(expected.is_reference() || expected.is_jvm_scalar())
-        {
-            return;
-        }
-        self.platform_narrowings.insert(e, position);
     }
 
     fn expect_assignable(&mut self, expected: Ty, actual: Ty, span: Span, ctx: &str) {

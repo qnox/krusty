@@ -11,6 +11,7 @@ mod dependency_registration;
 mod generic_signatures;
 mod inline_body_plan;
 mod inline_capability;
+mod java_nullability;
 mod mapped_builtin_member_status;
 mod parameter_plans;
 #[cfg(test)]
@@ -32,6 +33,9 @@ use generic_signatures::{
     suspend_return_from_gsig,
 };
 use inline_capability::{metadata_inline, property_accessor_inline};
+use java_nullability::{
+    java_result_enhancement, java_type_argument_nullability, java_type_nullability,
+};
 use mapped_builtin_member_status::{mapped_builtin_member_status, MappedBuiltinMemberStatus};
 
 use super::classpath::{
@@ -129,54 +133,6 @@ pub(crate) fn inherited_by_delegation(
 ) -> bool {
     !is_abstract
         && (!has_kotlin_metadata || annotations.contains(&crate::types::wk::platform_dependent()))
-}
-
-fn java_type_nullability(ty: Ty, nullability: Option<JavaNullability>) -> Ty {
-    if !ty.is_reference() {
-        return ty;
-    }
-    // With no type-use qualifier, Java's flexibility applies recursively: `String[]` exposes
-    // `Array<String!>!`, and `List<String>` exposes `List<String!>!`. Qualifying only the outer
-    // classifier incorrectly rejects `null` as an expanded Java `String...` element.
-    let ty = match ty.non_null() {
-        Ty::Obj(name, arguments) if !arguments.is_empty() => {
-            let arguments = arguments
-                .iter()
-                .map(|argument| java_type_argument_nullability(*argument))
-                .collect::<Vec<_>>();
-            // Retain the invariant lower bound of Java's flexible array projection. Common type
-            // semantics derives `Array<out T>` as the upper bound of the surrounding platform type.
-            Ty::obj_args_name(name, &arguments)
-        }
-        _ => ty,
-    };
-    // Java wrapper classes are Kotlin primitive types with Java's flexible/nullability qualifier.
-    // Keep the physical wrapper in the JVM descriptor; the semantic signature must be `Int!`, not
-    // `java.lang.Integer!`, so core type checking needs no representation-specific compatibility rule.
-    let ty = ty
-        .non_null()
-        .obj_internal()
-        .and_then(super::jvm_class_map::wrapper_to_kotlin_prim_name)
-        .map(super::classpath::kotlin_name_to_ty)
-        .unwrap_or(ty);
-    match nullability {
-        Some(JavaNullability::NotNull) => ty.non_null(),
-        Some(JavaNullability::Nullable) => Ty::nullable(ty),
-        None => Ty::platform_nullable(ty),
-    }
-}
-
-/// Apply Java's unqualified flexibility inside a generic argument without discarding its semantic
-/// wrapper. A declaration variable stays a variable whose bound is flexible; use-site variance stays
-/// a projection whose interior is flexible.
-fn java_type_argument_nullability(ty: Ty) -> Ty {
-    match ty {
-        Ty::TyParam(name, bound) => Ty::ty_param(name, java_type_nullability(*bound, None)),
-        Ty::InProjection(inner) => Ty::in_projection(java_type_argument_nullability(*inner)),
-        Ty::OutProjection(inner) => Ty::out_projection(java_type_argument_nullability(*inner)),
-        Ty::StarProjection(inner) => Ty::star_projection(java_type_argument_nullability(*inner)),
-        _ => java_type_nullability(ty, None),
-    }
 }
 
 /// JVM-only description of a classfile field used to realize an already-normalized Kotlin
@@ -1793,6 +1749,8 @@ impl JvmLibraries {
                 }
                 if let Some(java_nullable) = platform_nullable_params {
                     member.call_sig.platform_nullable_params = java_nullable;
+                    member.call_sig.result_enhancement =
+                        java_result_enhancement(internal_name, m.return_nullability);
                 }
                 if constructor_declaration.is_some() || (!has_kotlin_metadata && m.name == "<init>")
                 {

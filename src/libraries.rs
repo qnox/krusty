@@ -1085,11 +1085,39 @@ pub struct CallSig {
     pub inline_modifiers: Vec<InlineParameterModifier>,
     /// Per logical Java parameter, whether nullable arguments are accepted.
     pub platform_nullable_params: Vec<bool>,
+    /// Java signature enhancement of the declared result's nullability.
+    pub result_enhancement: ResultEnhancement,
     /// Minimum arguments a caller must supply (params beyond this have defaults). 0 by default.
     pub required: usize,
     /// True if a logical param is `vararg` (callers pack values into its array).
     pub vararg: bool,
     pub vararg_index: Option<usize>,
+}
+
+/// kotlinc's Java signature enhancement of a callable's result nullability (`FirSignatureEnhancement`
+/// with `computeQualifiersForOverride`).
+///
+/// A Java result with no nullability qualifier is flexible (`T!`). It becomes not-null when the
+/// declaration says so itself (`@NotNull`), or when a declaration it overrides fixes the result
+/// not-null: `StringBuilder.toString()` overrides `Any.toString(): String`. kotlinc marks such a
+/// result with its `EnhancedNullability` attribute; the value is typed not-null, but nothing has
+/// checked it, so committing it to a position whose declared type rejects `null` is guarded.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ResultEnhancement {
+    /// The declared result's nullability is the declaration's own.
+    #[default]
+    None,
+    /// A JDK method realizing a mapped Kotlin builtin classifier (`java.lang.Throwable` for
+    /// `kotlin.Throwable`). Kotlin's scope shows the builtin declaration such a method overrides,
+    /// so an override gives it that declaration's result, not an enhanced one.
+    MappedRealization,
+    /// A flexible Java result (`T!`): the result an override enhancement makes it, which is the
+    /// declared result without its head flexibility, specialized like the declared one.
+    Flexible(Ty),
+    /// [`Self::Flexible`] for a [`Self::MappedRealization`].
+    MappedFlexible(Ty),
+    /// The result is enhanced to not-null.
+    NotNull,
 }
 
 #[derive(Clone, Default, Debug, PartialEq, Eq)]
