@@ -195,7 +195,11 @@ pub(super) fn realize(
                 (
                     *operation,
                     owner,
-                    property_getter_candidates(ir, callables, *target),
+                    property_getter_candidates(
+                        ir,
+                        callables,
+                        crate::fir::ResolvedPropertyOverrideTarget::Module(*target),
+                    ),
                 )
             }
             _ => continue,
