@@ -1671,6 +1671,19 @@ impl JvmLibraries {
                 }
                 parameter_plans::member(&mut member, dispatch_parameter, continuation_parameter);
                 if let Some(declaration) = declaration {
+                    member.semantic_role =
+                        crate::libraries::builtin_declaration::semantic_call_role(
+                            crate::libraries::builtin_declaration::BuiltinMemberDeclaration {
+                                owner: internal_name,
+                                name: &member.name,
+                                params: &member.params,
+                                ret: member.ret,
+                                is_property: false,
+                                is_operator: declaration.is_operator(),
+                                is_infix: declaration.is_infix(),
+                                annotations: &member.annotations,
+                            },
+                        );
                     let facts = crate::libraries::builtin_declaration::BuiltinMemberDeclaration {
                         owner: internal_name,
                         name: &member.name,
@@ -3417,6 +3430,19 @@ impl JvmLibraries {
                     getter.owner_is_interface = ci.is_interface();
                     getter.is_abstract = mp.is_abstract;
                     getter.inline = property_accessor_inline(getter_public);
+                    getter.semantic_role =
+                        crate::libraries::builtin_declaration::semantic_call_role(
+                            crate::libraries::builtin_declaration::BuiltinMemberDeclaration {
+                                owner: cn,
+                                name: &mp.name,
+                                params: &semantic_context,
+                                ret: ty,
+                                is_property: true,
+                                is_operator: false,
+                                is_infix: false,
+                                annotations: &[],
+                            },
+                        );
                     if value_dispatch {
                         getter.member_realization = crate::libraries::MemberRealization::Direct {
                             pass_receiver: true,
@@ -3563,6 +3589,18 @@ impl JvmLibraries {
                     .or_else(|| getter_signature.as_ref().map(|signature| signature.ret))
                     .unwrap_or(ty);
                 getter.ret = ty;
+                getter.semantic_role = crate::libraries::builtin_declaration::semantic_call_role(
+                    crate::libraries::builtin_declaration::BuiltinMemberDeclaration {
+                        owner: cn,
+                        name: &mp.name,
+                        params: &semantic_context,
+                        ret: ty,
+                        is_property: true,
+                        is_operator: false,
+                        is_infix: false,
+                        annotations: &[],
+                    },
+                );
                 let setter = mp.setter.clone().and_then(|s| {
                     let (mut physical_params, physical_ret) = parse_method_desc(&s.desc)?;
                     if carrier_receiver {
