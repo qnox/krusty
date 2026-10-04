@@ -12013,6 +12013,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   so a jump the constant folder removes shares their output line instead of remaining as its own
   `nop`. Tests: `tests/comparison_jump_line_e2e.rs`, `tests/constant_conditions_e2e.rs`.
 
+- **A source Boolean constant in a condition marks its line on a `nop`** (kotlinc's `visitConst`,
+  which marks the line and emits a `nop` for every Boolean constant because the constant need not
+  be materialized). A constant condition is decided statically and emits no test of its own, so
+  `while (true)` keeps its header line, `do … while (false)` and `do … while (true)` keep their
+  bottom line, and a constant `when` branch condition keeps its line only through that `nop`; the
+  `nop` of a line with other instructions is removed like every redundant `nop`, which also leaves a
+  `do … while (true)` back edge on the condition's line, where it stops kotlinc's jump negation as
+  it does here. A constant the compiler generated has no source line and gets no `nop`. Test:
+  `tests/constant_loop_condition_line_e2e.rs`.
+
 - **A primitive iterator's `next()` calls its unboxed element operation** (kotlinc's
   `IteratorNext` intrinsic): a call of `next()` declared by a `kotlin.collections` primitive
   iterator (`IntIterator`, `LongIterator`, … `BooleanIterator`), in source or in a `for` loop over

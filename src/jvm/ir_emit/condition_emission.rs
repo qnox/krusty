@@ -52,6 +52,7 @@ impl Emitter<'_> {
         // emits NO branch — a spurious `ifeq end` to the method end leaves a branch target with no
         // stack-map frame. An always-taken branch becomes an unconditional `goto`.
         if let IrExpr::Const(IrConst::Boolean(b)) = *self.ir.expr(cond) {
+            self.mark_boolean_constant(cond, code);
             // Only emit the jump when the constant actually takes it. Final-bytecode analysis
             // discovers the target state from the emitted control-flow edge.
             if b == jump_when_true {

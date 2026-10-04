@@ -486,6 +486,8 @@ mod const_val_e2e;
 mod constant_conditions_e2e;
 #[path = "constant_evaluation_e2e.rs"]
 mod constant_evaluation_e2e;
+#[path = "constant_loop_condition_line_e2e.rs"]
+mod constant_loop_condition_line_e2e;
 #[path = "constant_pool_order_e2e.rs"]
 mod constant_pool_order_e2e;
 #[path = "construction_argument_labels_e2e.rs"]
