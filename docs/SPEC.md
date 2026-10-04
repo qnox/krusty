@@ -5763,6 +5763,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   before the method's code, each call's constants in instruction order, and its fields when the
   field table is written; its `hashCode` names `this` in its `LocalVariableTable`. Tests:
   `tests/annotation_instance_class_rows_e2e.rs`.
+- **A later file's annotation constructor call uses the declaration's closed defaults.** After
+  every file's default bodies are checked, an annotation constructor republishes the constants,
+  enum entries, class literals, arrays, and nested annotation instances those bodies folded. The
+  consuming file lowers that payload with the construction. A same-file call takes the declaring
+  file's lowered default bodies, which replace the compact payload for that file. Tests:
+  `tests/annotation_cross_file_defaults_e2e.rs`,
+  `annotations/instances/annotationInstancesEmptyDefaultLowered.kt`.
 - **A local class interns its `EnclosingMethod` refs before its `InnerClasses` rows.** kotlinc
   visits the `EnclosingMethod` refs before the `InnerClasses` rows, so the enclosing class and
   method come before the local class's own simple name in the pool. The serialized attribute order
@@ -13049,9 +13056,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   interface, rebuilds `KClass` with `Reflection.getOrCreateKotlinClass`, and compares those:
   `Int::class` and `Integer::class` are equal. `hashCode` hashes the stored `Class` through
   `Object.hashCode`, so those two instances hash differently. A Kotlin read of the member
-  invokes the `Class`-returning method and rebuilds the `KClass`. Metadata records the Kotlin
-  type `kotlin.reflect.KClass` and the JVM getter descriptor `()Ljava/lang/Class;`. Tests:
-  `tests/annotation_kclass_member_e2e.rs`,
+  invokes the `Class`-returning method and rebuilds the `KClass`, including a read from another
+  source file of the same module, where the declaring class is not in the file being emitted.
+  Metadata records the Kotlin type `kotlin.reflect.KClass` and the JVM getter descriptor
+  `()Ljava/lang/Class;`. Tests: `tests/annotation_kclass_member_e2e.rs`,
+  `tests/annotation_cross_file_defaults_e2e.rs`,
   `tests/annotation_emission_e2e.rs::an_instantiated_kclass_annotation_reads_its_member`.
 
 - **A missing context argument names its parameter, and a loop's `hasNext` belongs to its iterator.**

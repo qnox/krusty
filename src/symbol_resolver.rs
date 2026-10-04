@@ -1436,7 +1436,7 @@ fn default_literal_ty(value: &crate::libraries::DefaultValue) -> Option<Ty> {
         DefaultValue::Bool(_) => Ty::Boolean,
         DefaultValue::Char(_) => Ty::Char,
         DefaultValue::Str(_) => Ty::String,
-        DefaultValue::Null | DefaultValue::Object(_) => return None,
+        _ => return None,
     })
 }
 

@@ -430,6 +430,15 @@ impl Emitter<'_> {
         physical_arg: Ty,
         code: &mut CodeBuilder,
     ) {
+        let adapted = crate::jvm::annotation_kclass::adapt_read_kclass(
+            self.cw,
+            code,
+            type_operand,
+            physical_arg,
+        );
+        if adapted != physical_arg {
+            return;
+        }
         let target = ir_ty_to_jvm(&stored_value_ty(type_operand));
         crate::trace_compiler!(
             "value_classes",
