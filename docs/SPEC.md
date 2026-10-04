@@ -8505,6 +8505,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the class.
   Tests: `tests/serialization_class_serial_name_e2e.rs` (the JSON and every descriptor's
   `serialName` under both compilers, and the string constants each generated class loads).
+- **`element<T>()` takes T's serializer the way kotlinc's `serializer<T>()` intrinsic does.** The
+  intrinsic's fast path comes first: when T's companion (or T itself, as a `@Serializable object`)
+  declares the `serializer(KSerializer…)` accessor, it calls that accessor with an intrinsic
+  serializer per type argument — `JsonElement.Companion.serializer()`, never the
+  `JsonElementSerializer` its `@Serializable(with = …)` names, and `Twig.Companion.serializer()`
+  rather than `Twig$$serializer.INSTANCE`. Only a type without the accessor takes the general
+  lookup (a builtin, a constructed `ArrayListSerializer` over intrinsic operands); a nullable T
+  wraps the result in `.nullable`. A dependency's sealed class with an `object` custom serializer
+  used to leave the planned call unrealized, because the type appeared only as the operation's
+  type operand and so was never offered to the classifier-fact lookup; the module was refused as
+  "not yet supported". The accessor is the one the provider confirms on the companion its metadata
+  records. Known gap: a builtin serializer passed as an operand (`List<String?>`) still gets the
+  `checkcast KSerializer` the backend's reference coercion inserts; the intrinsic writes none.
+  Tests: `tests/descriptor_element_companion_serializer_e2e.rs` (a repository-owned dependency
+  class and `JsonElement`, each element's serializer row for row against the reference compiler
+  and the resulting descriptors under both), `tests/descriptor_element_specialization_e2e.rs`.
 - **A property's `@Serializable(with = X::class)` decodes through `X`, as it encodes through it.**
   `serialize` and `childSerializers` consult the property's explicit serializer ahead of its type;
   `deserialize` did not. A property whose type has no derivable serializer made the whole

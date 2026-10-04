@@ -166,6 +166,10 @@ pub struct PluginContext {
     /// serializer for what this file declares; for everything else only the declaration's facts
     /// say where the serializer is.
     external_serializers: std::collections::HashMap<TypeName, serialization::ExternalSerializer>,
+    /// Types this compilation does NOT declare whose companion carries the provider-confirmed
+    /// `serializer(KSerializer…)` accessor — the one kotlinc's `serializer<T>()` intrinsic calls.
+    companion_serializer_accessors:
+        std::collections::HashMap<TypeName, serialization::CompanionSerializerAccessor>,
     /// Serializer classes the ACTIVE runtime actually provides. A builtin mapping is only usable
     /// when the artifact on the classpath carries that class: `InstantSerializer` ships in newer
     /// kotlinx.serialization cores but not in supported older ones, and emitting a reference to a
@@ -180,6 +184,7 @@ impl Default for PluginContext {
             serial_info_annotations: std::collections::HashSet::new(),
             target_type_descriptor: no_target_type_descriptor,
             external_serializers: std::collections::HashMap::new(),
+            companion_serializer_accessors: std::collections::HashMap::new(),
             runtime_serializers: std::collections::HashSet::new(),
         }
     }
@@ -192,6 +197,7 @@ impl Clone for PluginContext {
             serial_info_annotations: self.serial_info_annotations.clone(),
             target_type_descriptor: self.target_type_descriptor,
             external_serializers: self.external_serializers.clone(),
+            companion_serializer_accessors: self.companion_serializer_accessors.clone(),
             runtime_serializers: self.runtime_serializers.clone(),
         }
     }
@@ -228,6 +234,15 @@ impl PluginContext {
         self
     }
 
+    /// Record the companion `serializer(…)` accessor of each external type that declares one.
+    pub(crate) fn with_companion_serializer_accessors(
+        mut self,
+        accessors: std::collections::HashMap<TypeName, serialization::CompanionSerializerAccessor>,
+    ) -> Self {
+        self.companion_serializer_accessors = accessors;
+        self
+    }
+
     /// Record which serializer classes the active runtime provides.
     pub(crate) fn with_runtime_serializers(
         mut self,
@@ -250,6 +265,14 @@ impl PluginContext {
         classifier: TypeName,
     ) -> Option<&serialization::ExternalSerializer> {
         self.external_serializers.get(&classifier)
+    }
+
+    /// The companion `serializer(…)` accessor of `classifier`, a type this file does not declare.
+    pub(crate) fn companion_serializer_accessor(
+        &self,
+        classifier: TypeName,
+    ) -> Option<&serialization::CompanionSerializerAccessor> {
+        self.companion_serializer_accessors.get(&classifier)
     }
 
     /// `ClassId`s carrying the exact resolved annotation identity.
@@ -511,9 +534,11 @@ pub fn run_enabled(
     }
     record_external_value_classes(ir, classifiers);
     let external = external_serializers(ir, classifiers);
+    let accessors = companion_serializer_accessors(ir, classifiers);
     let ctx = ctx
         .with_serial_info_annotations(serial_info_annotations(ir, classifiers))
         .with_external_serializers(external)
+        .with_companion_serializer_accessors(accessors)
         .with_runtime_serializers(runtime_serializers(classifiers));
     plugins.host(module_name).run(ir, &ctx);
 }
@@ -725,6 +750,35 @@ fn external_serializers(
         .collect()
 }
 
+/// The companion `serializer(KSerializer…)` accessor of each external candidate that declares one,
+/// as kotlinc's `getSerializerGetterFunction` finds it: on the classifier's companion, taking one
+/// `KSerializer` per type parameter of the classifier and returning one. The provider confirms the
+/// callable; neither the companion nor the method is inferred from a spelling.
+fn companion_serializer_accessors(
+    ir: &IrFile,
+    classifiers: &dyn crate::types::ClassifierFactSource,
+) -> std::collections::HashMap<TypeName, serialization::CompanionSerializerAccessor> {
+    external_classifier_candidates(ir)
+        .filter_map(|classifier| {
+            let declaration = classifiers.classifier_declaration(classifier)?;
+            let (field, companion) = declaration
+                .companion
+                .or_else(|| classifiers.serialization_companion(classifier))?;
+            let type_parameters = declaration.own_type_parameter_count;
+            classifiers
+                .has_serialization_serializer_accessor(companion, type_parameters)
+                .then_some((
+                    classifier,
+                    serialization::CompanionSerializerAccessor {
+                        field,
+                        companion,
+                        type_parameters,
+                    },
+                ))
+        })
+        .collect()
+}
+
 fn external_classifier_candidates(ir: &IrFile) -> impl Iterator<Item = TypeName> + '_ {
     let declared: std::collections::HashSet<TypeName> =
         ir.classes.iter().map(|class| class.fq_name_id()).collect();
@@ -748,6 +802,7 @@ fn external_classifier_candidates(ir: &IrFile) -> impl Iterator<Item = TypeName>
         let crate::ir::IrExpr::PluginPlaceholder {
             plugin: "serialization",
             data,
+            types,
             ..
         } = expression
         else {
@@ -758,6 +813,9 @@ fn external_classifier_candidates(ir: &IrFile) -> impl Iterator<Item = TypeName>
                 external.push(classifier);
             }
         }
+        // A planned operation's type operands are what it needs a serializer FOR: the frontend
+        // plans `element<JsonElement>("v")` with `JsonElement` here, and nowhere else names it.
+        candidates.extend(types.iter().copied());
     }
     while let Some(ty) = candidates.pop() {
         // A type argument carries its own element serializer (`List<Inner>` needs `Inner`'s).
@@ -1104,6 +1162,31 @@ mod tests {
                 "kotlinx/serialization/json/JsonElement"
             )),
             "a reified type argument must be a candidate: {candidates:?}"
+        );
+    }
+
+    /// The frontend plans `element<JsonElement>("v")` as a plugin operation whose TYPE operand is
+    /// the element type; no reified substitution and no name payload carries it. It, and the type
+    /// arguments inside it, must still reach the classifier-fact lookup.
+    #[test]
+    fn a_planned_operation_type_is_an_external_classifier_candidate() {
+        let mut ir = IrFile::default();
+        ir.add_expr(crate::ir::IrExpr::PluginPlaceholder {
+            plugin: "serialization",
+            kind: "descriptorElementDefaultBoth",
+            exprs: Vec::new(),
+            data: Vec::new(),
+            types: vec![Ty::obj_args(
+                "kotlin/collections/List",
+                &[Ty::obj("kotlinx/serialization/json/JsonElement")],
+            )],
+        });
+        let candidates: Vec<crate::types::TypeName> = external_classifier_candidates(&ir).collect();
+        assert!(
+            candidates.contains(&crate::types::type_name(
+                "kotlinx/serialization/json/JsonElement"
+            )),
+            "a planned operation's type operand must be a candidate: {candidates:?}"
         );
     }
 

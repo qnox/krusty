@@ -20,7 +20,7 @@ pub(super) mod element_serializer;
 mod enum_serializer;
 mod external_serializer;
 pub(crate) use external_serializer::generated_external_serializer;
-pub use external_serializer::ExternalSerializer;
+pub use external_serializer::{CompanionSerializerAccessor, ExternalSerializer};
 mod generated_classifier;
 mod generated_members;
 mod plugin_release;
@@ -329,6 +329,22 @@ fn generated_serializer_accessor(
                     ret: function.ret,
                 })
         })
+}
+
+/// Whether this file's `classifier` carries the accessor kotlinc's `serializer<T>()` intrinsic
+/// calls first: `serializer(…)` on its companion, or on itself as a `@Serializable object`.
+fn has_intrinsic_serializer_accessor(
+    ir: &IrFile,
+    classifier: crate::types::TypeName,
+    arity: usize,
+) -> bool {
+    generated_serializer_accessor(ir, classifier, arity).is_some_and(|accessor| {
+        matches!(
+            accessor.receiver,
+            GeneratedSerializerReceiver::Companion(_)
+                | GeneratedSerializerReceiver::SourceObject(_)
+        )
+    })
 }
 
 fn call_generated_serializer(

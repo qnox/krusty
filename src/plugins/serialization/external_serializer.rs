@@ -15,6 +15,20 @@ use crate::types::{
 
 use super::annotations::SERIAL_NAME_FQ;
 
+/// A provider-confirmed `serializer(KSerializer…)` accessor on the companion of a classifier this
+/// file does not declare: `field` is the classifier's static holding `companion`, and the accessor
+/// takes one serializer per each of the classifier's `type_parameters`.
+///
+/// This is what kotlinc's `serializer<T>()` intrinsic calls before anything else, whatever
+/// serializer the classifier's own `@Serializable(with = …)` names — so it is recorded beside, not
+/// instead of, the [`ExternalSerializer`] a property element uses.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompanionSerializerAccessor {
+    pub field: Box<str>,
+    pub companion: TypeName,
+    pub type_parameters: usize,
+}
+
 /// The serializer of a `@Serializable` classifier declared outside this file.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExternalSerializer {

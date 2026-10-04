@@ -607,6 +607,8 @@ mod dependency_override_signature_e2e;
 mod dependency_property_reference_name_e2e;
 #[path = "descriptor_arity_fails_closed_e2e.rs"]
 mod descriptor_arity_fails_closed_e2e;
+#[path = "descriptor_element_companion_serializer_e2e.rs"]
+mod descriptor_element_companion_serializer_e2e;
 #[path = "descriptor_element_specialization_e2e.rs"]
 mod descriptor_element_specialization_e2e;
 #[path = "descriptor_inner_classes_e2e.rs"]

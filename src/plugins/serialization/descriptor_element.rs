@@ -6,7 +6,8 @@ use crate::libraries::InlineKind;
 use crate::plugins::{FrontendSelectedCall, PluginContext, PluginExpressionPlan};
 use crate::types::{type_name, Ty};
 
-use super::{element_serializer_expr, KSERIALIZER_FQ};
+use super::element_serializer::intrinsic_serializer_expr;
+use super::KSERIALIZER_FQ;
 
 pub(super) const SERIAL_DESCRIPTORS_FQ: &str =
     "kotlinx/serialization/descriptors/SerialDescriptorsKt";
@@ -101,7 +102,9 @@ pub(super) fn specialize(
         (true, true, []) => (None, None),
         _ => return true,
     };
-    let Some(serializer) = element_serializer_expr(ir, ctx, element) else {
+    // `element<T>` obtains its serializer through kotlinc's `serializer<T>()` intrinsic, whose
+    // lookup differs from a property element's: it prefers T's companion accessor.
+    let Some(serializer) = intrinsic_serializer_expr(ir, ctx, element) else {
         return true;
     };
     let descriptor = ir.add_expr(IrExpr::Call {
