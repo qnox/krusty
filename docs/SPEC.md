@@ -2369,6 +2369,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   keeping the default bounds. This is the companion-object shape in
   `PerformanceCounter.getCallStack`. Test:
   `tests/contextual_lambda_expected_return_e2e.rs`.
+- **A local delegate initializer constrains the enclosing builder call even when the property is not the result.** `fun <T> buildConsumer(block: (Consumer<T>) -> Unit): T` used as
+  `buildConsumer { x -> val y by lazy { expectConsumerString(x); "OK" }; if (y.length != 2) throw ... }`
+  (KT-65262) infers `String`. The constraint is the initializer's `Consumer<T> <: Consumer<String>`.
+  Pass 1 owns that expression-bodied result. An `if` condition is not a dependency of the `if`
+  result, and a local is not itself a statement effect, so a `by` whose property is read only from
+  that condition — or not read at all — never evaluated the initializer and left `T` at `Any?`.
+  kotlinc's builder inference still collects the initializer constraint. An untyped local `by` is
+  therefore a block effect: signature evaluation walks it for the constraints it contributes, and a
+  failure there does not reject the enclosing result, the same way other statements behave. Tests:
+  `tests/delegate_initializer_constraint_e2e.rs`; box:
+  `inference/pcla/pclaRootIsTrySyntheticCallWithDelegate.kt`.
 - **Equally specific candidates: a non-parameterized callable wins.** kotlinc's last tie-break
   (spec 11.7) applied to the receiver-less SAM selection: `assertDoesNotThrow(Executable)` beside
   `<T> assertDoesNotThrow(ThrowingSupplier<T>)` (JUnit, imported as a static) both take a `{ … }`

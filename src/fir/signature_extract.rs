@@ -2346,11 +2346,19 @@ impl SignatureConstraintExtractor {
                                             by_origin: origin(*by_span),
                                         },
                                     );
-                                    self.graph.add_expr(SigExpr::Delegate {
+                                    let value = self.graph.add_expr(SigExpr::Delegate {
                                         delegate,
                                         scope,
                                         site,
-                                    })
+                                    });
+                                    // Builder inference collects constraints from this initializer
+                                    // even when the property is not the block result. An `if`
+                                    // condition is not a result dependency, so `val y by lazy {
+                                    // expect(x) }; if (y.length != 2) ...` would otherwise never
+                                    // evaluate the initializer (KT-65262). A failed effect does
+                                    // not fail the result, matching every other statement.
+                                    effects.push(value);
+                                    value
                                 }
                             };
                             self.lexical_values
