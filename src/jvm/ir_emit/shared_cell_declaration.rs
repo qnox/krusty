@@ -178,6 +178,7 @@ impl Emitter<'_> {
                         | Some(crate::ir::IrDebugLocalProvenance::InlineLambdaReceiver { .. })
                 ),
             table_position,
+            explicit_end: None,
         };
         // kotlinc lists an inline frame's marker ahead of the locals binding that frame's operands,
         // which are declared before it in the same block: the inlined body's own table puts its

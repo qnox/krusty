@@ -91,6 +91,51 @@ impl BodyLowering<'_> {
         }
     }
 
+    /// The receiver of `withIndex()` as the `Iterable` or `Sequence` whose `iterator()` the loop
+    /// calls (`DefaultIterableHandler`, `DefaultSequenceHandler`): an implicit cast when it is
+    /// typed as anything else.
+    pub(super) fn with_index_receiver(
+        &mut self,
+        value: ExprId,
+        value_ty: Ty,
+        iterator: &crate::fir::FirIteratorCall,
+    ) -> (ExprId, Ty) {
+        let crate::fir::FirCallTarget::External {
+            receiver: Some(receiver),
+            ..
+        } = &iterator.target
+        else {
+            return (value, value_ty);
+        };
+        let receiver = receiver.get();
+        if receiver == value_ty {
+            return (value, value_ty);
+        }
+        let cast = self.ir.add_expr(IrExpr::TypeOp {
+            op: crate::ir::IrTypeOp::Cast,
+            arg: value,
+            type_operand: receiver,
+        });
+        (cast, receiver)
+    }
+
+    /// `next()` read for its effect only: no element is declared, so the call keeps its declared
+    /// result instead of the element type a declaration would cast it to (`IterableLoopHeader`).
+    pub(super) fn undeclared_next(
+        next: &crate::fir::FirIteratorCall,
+    ) -> crate::fir::FirIteratorCall {
+        let mut next = next.clone();
+        if let crate::fir::FirCallTarget::External {
+            result,
+            declared_result: Some(declared),
+            ..
+        } = &mut next.target
+        {
+            *result = *declared;
+        }
+        next
+    }
+
     /// `var index = 0`, the index a loop counts on its own.
     pub(super) fn index_declaration(&mut self, with_index: &FirWithIndexLoop) -> ExprId {
         let zero = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));

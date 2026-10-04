@@ -464,7 +464,12 @@ impl BodyLowering<'_> {
             .ok_or(FirLoweringFailure::MissingExpression(iterable))?
             .ty
             .get();
-        let iterable_value = self.expression(iterable)?;
+        let mut iterable_value = self.expression(iterable)?;
+        let mut iterable_ty = iterable_ty;
+        if let LoopBinding::WithIndex(_) = binding {
+            (iterable_value, iterable_ty) =
+                self.with_index_receiver(iterable_value, iterable_ty, iterator);
+        }
         let iterator_value = self.iterator_call(iterator, iterable_value, iterable_ty)?;
         let iterator_slot = self.allocate_temporary();
         let iterator_declaration = self.ir.add_expr(IrExpr::Variable {
@@ -477,7 +482,14 @@ impl BodyLowering<'_> {
         let iterator_read = self.ir.add_expr(IrExpr::GetValue(iterator_slot));
         let condition = self.iterator_call(has_next, iterator_read, iterator_ty.get())?;
         let iterator_read = self.ir.add_expr(IrExpr::GetValue(iterator_slot));
-        let element = self.iterator_call(next, iterator_read, iterator_ty.get())?;
+        let element = match binding {
+            LoopBinding::WithIndex(with_index) if !with_index.reads_value() => self.iterator_call(
+                &Self::undeclared_next(next),
+                iterator_read,
+                iterator_ty.get(),
+            )?,
+            _ => self.iterator_call(next, iterator_read, iterator_ty.get())?,
+        };
         // A `withIndex()` loop declares its own index after the iterator.
         let index_declaration = match binding {
             LoopBinding::Variable(_) => None,
@@ -496,6 +508,11 @@ impl BodyLowering<'_> {
             post_test: false,
             label: Some(self.control_label(0, target)?),
         });
+        // kotlinc rebuilds only a `withIndex()` loop over an iterator, whose body then declares
+        // its variables in the loop's own scope.
+        if index_declaration.is_some() {
+            self.ir.transparent_loop_bodies.insert(loop_expression);
+        }
         let mut statements = vec![iterator_declaration];
         statements.extend(index_declaration);
         statements.push(loop_expression);

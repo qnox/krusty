@@ -23,6 +23,14 @@ pub struct FirWithIndexLoop {
     pub components: Box<[Option<FirIndexedValueComponent>]>,
 }
 
+impl FirWithIndexLoop {
+    /// Whether any entry reads the element.
+    pub fn reads_value(&self) -> bool {
+        self.components
+            .contains(&Some(FirIndexedValueComponent::Value))
+    }
+}
+
 /// A component of `kotlin.collections.IndexedValue`, selected by position (`component1`,
 /// `component2`) or by property (`index`, `value`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

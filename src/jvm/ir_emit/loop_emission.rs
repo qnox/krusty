@@ -53,7 +53,10 @@ impl Emitter<'_> {
         self.loop_stack
             .push((bottom, end, label.clone(), self.return_finalizers.len()));
         let enclosing_terminal_target = self.terminal_statement_target.replace(bottom);
-        let retained_body_scope = if post_test {
+        // A lowered `for` loop's body is a transparent scope (kotlinc's `IrComposite`): what it
+        // declares itself stays in scope until the loop ends.
+        let transparent_body = !post_test && self.ir.transparent_loop_bodies.contains(&expression);
+        let mut retained_body_scope = if post_test || transparent_body {
             match self.ir.expr(body).clone() {
                 // Kotlin's `do` body and bottom condition share one lexical scope. Keep the
                 // body's exact local-slot map alive until after the condition; closing the
@@ -80,6 +83,9 @@ impl Emitter<'_> {
         if bottom == cont {
             self.bind(cont, code);
         }
+        if post_test && retained_body_scope.is_some() {
+            self.end_unreferenced_do_while_locals([update, Some(cond)], code);
+        }
         // The update is part of the loop, so it keeps the `break`/`continue` scope active — the
         // non-overflowing counted loop puts its `if (i == end) break` here (before the increment)
         // so a `continue` lands on it too, instead of skipping straight to the wrapping `i++`.
@@ -100,7 +106,7 @@ impl Emitter<'_> {
                 debug_lines::mark_loop_control(loop_line, code);
             }
             let _ = self.emit_cond_branch(cond, start, true, code);
-            if let Some(saved) = retained_body_scope {
+            if let Some(saved) = retained_body_scope.take() {
                 self.close_scope_locals(code, false);
                 self.block_depth -= 1;
                 self.restore_slot_scope(saved);
@@ -110,5 +116,37 @@ impl Emitter<'_> {
         }
         self.loop_stack.pop();
         self.bind(end, code);
+        if let Some(saved) = retained_body_scope {
+            self.close_scope_locals(code, false);
+            self.block_depth -= 1;
+            self.restore_slot_scope(saved);
+        }
+    }
+
+    /// `endUnreferencedDoWhileLocals`: a local the `do…while` body declares may be undeclared when
+    /// a `continue` reaches the condition, so unless the condition reads it, its range ends where
+    /// the condition starts. The update is part of kotlinc's condition.
+    fn end_unreferenced_do_while_locals(
+        &mut self,
+        condition: [Option<ExprId>; 2],
+        code: &mut CodeBuilder,
+    ) {
+        let mut read = std::collections::HashSet::new();
+        let mut pending: Vec<ExprId> = condition.into_iter().flatten().collect();
+        while let Some(expression) = pending.pop() {
+            if let IrExpr::GetValue(value) = self.ir.expr(expression) {
+                if let Some(&(slot, _)) = self.slots.get(value) {
+                    read.insert(slot);
+                }
+            }
+            crate::ir::for_each_child(&self.ir.exprs, expression, &mut |child| pending.push(child));
+        }
+        let end = code.bytes.len().min(u16::MAX as usize) as u16;
+        let depth = self.block_depth;
+        for local in &mut self.open_locals {
+            if local.depth == depth && !read.contains(&local.slot) {
+                local.explicit_end.get_or_insert(end);
+            }
+        }
     }
 }

@@ -1913,6 +1913,10 @@ pub struct IrFile {
     /// source update has (kotlinc's `index = index + 1` in `WithIndexLoopHeader`). A target emits
     /// them as the plain arithmetic and store they are, never as a fused increment.
     pub plain_updates: std::collections::HashSet<ExprId>,
+    /// Pre-test loops whose body block is a transparent scope, as the body of a `for` loop kotlinc's
+    /// `ForLoopsLowering` rebuilt as a `while` is (an `IrComposite`): the declarations it opens with
+    /// stay in scope until the loop ends.
+    pub transparent_loop_bodies: std::collections::HashSet<ExprId>,
     /// The casts the source wrote (`x as T`). Every other cast is compiler-inserted, kotlinc's
     /// `IMPLICIT_CAST` (an `as?`'s narrowing after its `is`, a carrier handed on as its function
     /// type): the value is already known to be a `T`, so a backend narrows it with a plain cast
