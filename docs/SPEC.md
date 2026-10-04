@@ -8939,6 +8939,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   argument and calls the entry. krusty named the static function from the bridge
   (`compareTo-impl(I)I`), which does not exist. Tests: `tests/explicit_backing_field_e2e.rs`.
   Corpus: `properties/backingField/genericSupertypeWithValueClassExplicitBackingField`.
+- **A value class's suspend interface entry is the CPS method on the box.** The overriding member
+  is the static `build-impl(carrier, Continuation)Object`. The box implements the interface with
+  `build(Continuation)Object`: it reads the carrier and calls that static method, passing the
+  continuation through. The entry is recorded from the declared parameters, which omit both the
+  carrier and the continuation; suspend finalization recognizes it by the static member's function
+  identity and appends the continuation. A name-and-arity match cannot: the static member's arity
+  counts the carrier the entry does not take. Leaving the entry as `build()String` calls a
+  descriptor the static member no longer has, and the class fails to verify. Tests:
+  `tests/value_class_suspend_override_e2e.rs`. Corpus:
+  `coroutines/featureIntersection/overrideInInlineClass`.
 - **A function value converted to a Kotlin fun interface is wrapped in a class.** `B(f)` for a
   function value `f` (not a lambda literal or a callable reference) builds kotlinc's
   `<FileFacade>$sam$<B's FQ name, dots as underscores>$0`: one `final synthetic` class per file and
