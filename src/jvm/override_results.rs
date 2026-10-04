@@ -165,10 +165,20 @@ pub(super) fn box_primitive_override_results(
                 }
                 _ => false,
             };
+            // A big-arity function type is realized as `FunctionN`, whose single `invoke` takes
+            // the arguments packed in an array: kotlinc's vararg-bridge lowering detaches the
+            // override from the arity-specific `invoke`, so its declared result keeps the primitive.
+            let packed_function_invoke =
+                crate::libraries::function_classifiers::classifier(edge.overridden_owner)
+                    .is_some_and(|function| {
+                        !function.is_reflective()
+                            && crate::jvm::names::uses_function_n(function.arity())
+                    });
             if edge.implementation_owner == owner
                 && ir.classes[class].methods.contains(&function)
                 && is_kotlin_primitive(ir.functions[function as usize].ret)
                 && !ir.suspend_funs.contains(&function)
+                && !packed_function_invoke
                 && (edge.overrides_non_primitive_result() || dependency_boxed_result)
             {
                 results.boxed.insert(function);

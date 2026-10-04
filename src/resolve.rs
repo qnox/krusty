@@ -19286,7 +19286,7 @@ impl<'a> Checker<'a> {
                 // Resolve that shape once: both contextual argument typing and the selected `invoke`
                 // operation must consume the same semantic value.
                 let explicit_invoke_ty = (name == CALLABLE_INVOKE_OPERATOR)
-                    .then(|| self.expression_function_type(scope, receiver, rt))
+                    .then(|| self.invoke_function_view(scope, receiver, rt))
                     .flatten();
                 let receiver_function_argument_params = explicit_invoke_ty
                     .and_then(|ty| match ty {

@@ -7746,6 +7746,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   diagnostics name their owner with its written bounds and variance (`T (of fun <A, T : ((Int) ->
   A)?> f)`, `X (of class Box<out X, in Y : Number>)`). Tests: `tests/type_parameter_invoke_e2e.rs`,
   `tests/generic_argument_wildcards_e2e.rs`, `tests/tparam_bounded_by_tparam_e2e.rs`.
+- **A value of a class that implements a function type is invoked through its own member.** `f(x)`
+  and `f.invoke(x)` on `f: F` with `class F : (Token) -> Token` select `F`'s `invoke` member, and
+  kotlinc calls `F.invoke(LToken;)LToken;` directly; a generic `Same<T> : (T) -> T` calls
+  `Same.invoke(Object)Object`. The function supertype was taken as the value's function shape, so the
+  call went through `Function1.invoke`. Only a callable reference keeps its exact function shape
+  beside its nominal reflection type. Tests: `tests/function_subclass_invoke_e2e.rs`.
 - **A lambda argument to the invoke operator is CONTEXTUAL.** `b { it + 1 }` on a
   `class Box { operator fun invoke(f: (Int) -> Int) }` types `it` from the operator's parameter. The
   arguments were typed with no expectation, so `it` came out as the erased upper bound and the call
