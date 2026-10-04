@@ -9344,7 +9344,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `TypeIntrinsics.isMutableList(x)` (likewise `Iterator`, `Iterable`, `Collection`, `ListIterator`,
   `Set`, `Map`, `MapEntry`), `x as MutableList<*>` calls `asMutableList`, and `x is (Int) -> Int` and
   `x is Function1<*, *>` call `isFunctionOfArity(x, 1)`, while `x as (Int) -> Int` calls
-  `beforeCheckcastToFunctionOfArity(x, 1)` before its `checkcast`. The narrowing on an `as?`'s
+  `beforeCheckcastToFunctionOfArity(x, 1)` before its `checkcast`. A suspend function is not a
+  class either: `SuspendFunctionN` and `suspend (P1, …) -> R` erase to `Function{N+1}`, and
+  `x is SuspendFunction0<*>` (and a reified `x is T` once `T` is `suspend () -> R`) is
+  `instanceof kotlin/coroutines/jvm/internal/SuspendFunction` conjoined with
+  `isFunctionOfArity(x, N+1)`. A source `is` of the function-type spelling itself stays rejected
+  as an erased type, the same way `is (Int) -> Int` is. `x as SuspendFunctionN` is only the
+  `checkcast` to `Function{N+1}`; the marker test stays on `is` and on `as?`. A reference to a
+  suspend function keeps that suspend function type even with no expected function type, including
+  a local `::suspendLocal`: its carrier implements `Function{N+1}` and
+  `kotlin/coroutines/jvm/internal/SuspendFunction`, and the erased `invoke` has the continuation
+  parameter. Class-file descriptors erase `SuspendFunctionN` to that same `Function{N+1}`;
+  metadata still names `SuspendFunctionN`. The narrowing on an `as?`'s
   successful branch is a plain `checkcast` (kotlinc's implicit cast), since its `is` already asked.
   These checks read the marker interfaces kotlinc adds to every class or interface with a direct
   Kotlin collection supertype: `KMappedMarker` for read-only faces (once) and `KMutableX` for each
@@ -9353,7 +9364,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the inliner, which also, like kotlinc's `ReifiedTypeInliner`, throws
   `NullPointerException("null cannot be cast to non-null type <type>")` for a non-null `as` (a
   root-package class is spelled `<root>.Token` there) and tests an `as?` before its `checkcast`.
-  (`tests/type_intrinsics_e2e.rs`.)
+  (`tests/type_intrinsics_e2e.rs`,
+  `jvm::inliner::reified::tests::a_suspend_function_argument_tests_the_marker_and_the_jvm_arity`,
+  `fir::body_check::local_function_tests::suspend_local_function_reference_keeps_its_suspend_function_type`.)
+  Corpus: `coroutines/featureIntersection/suspendFunctionIsAs.kt`.
 - **Native `Double`/`Float` `toString`, `%` and `mod` answer what the JVM answers.** The native
   runtime (`src/native/runtime/krusty_fp.c`) renders a floating-point value as the SHORTEST decimal
   that reads back as it, in Java's layout (plain for 10^-3 <= |x| < 10^7, `d.dddEn` outside,

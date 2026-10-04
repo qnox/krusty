@@ -885,11 +885,13 @@ pub(super) fn to_jvm_classfile_type_name(internal: TypeName) -> TypeName {
     } else if let Some(function) = super::function_classifiers::classifier(internal) {
         if function.is_reflective() {
             crate::types::type_name(crate::types::KFUNCTION_INTERNAL)
-        } else if !function.is_suspend() {
-            let runtime = super::names::function_interface_internal_name(function.arity());
-            crate::types::type_name(&runtime)
         } else {
-            to_jvm_type_name(internal)
+            // `SuspendFunctionN` is not a class. Its JVM erasure is `Function{N+1}`, the same
+            // carrier as the suspend function type (the extra slot is the continuation).
+            let runtime = super::names::function_interface_internal_name(
+                function.arity() + usize::from(function.is_suspend()),
+            );
+            crate::types::type_name(&runtime)
         }
     } else {
         to_jvm_type_name(internal)
@@ -1073,6 +1075,14 @@ mod tests {
             ("kotlin/collections/MutableList", "java/util/List"),
             ("kotlin/Function1", "kotlin/jvm/functions/Function1"),
             ("kotlin/Function23", "kotlin/jvm/functions/FunctionN"),
+            (
+                "kotlin/coroutines/SuspendFunction0",
+                "kotlin/jvm/functions/Function1",
+            ),
+            (
+                "kotlin/coroutines/SuspendFunction1",
+                "kotlin/jvm/functions/Function2",
+            ),
             ("kotlin/reflect/KFunction2", "kotlin/reflect/KFunction"),
             (
                 "kotlin/Int.Companion",

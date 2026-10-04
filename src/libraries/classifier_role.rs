@@ -5,7 +5,8 @@ use crate::types::{ClassifierRole, Ty};
 
 impl LibraryType {
     /// The role this declaration plays in type checks and casts: a mapped collection face, or a
-    /// plain `FunctionN` classifier whose arity is its declared callable signature's.
+    /// non-reflective function classifier. Function arity is the source value-parameter count;
+    /// backends own any physical parameters they add.
     pub fn classifier_role(&self) -> Option<ClassifierRole> {
         if let Some(collection) = self.mapped_collection {
             return Some(ClassifierRole::MappedCollection(collection));
@@ -14,9 +15,14 @@ impl LibraryType {
             return None;
         }
         match self.callable_signature? {
-            Ty::Fun(signature) if !signature.suspend => u8::try_from(signature.params.len())
-                .ok()
-                .map(ClassifierRole::FunctionOfArity),
+            Ty::Fun(signature) => {
+                let arity = u8::try_from(signature.params.len()).ok()?;
+                Some(if signature.suspend {
+                    ClassifierRole::SuspendFunctionOfArity(arity)
+                } else {
+                    ClassifierRole::FunctionOfArity(arity)
+                })
+            }
             _ => None,
         }
     }

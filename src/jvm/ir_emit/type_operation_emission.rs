@@ -6,7 +6,10 @@
 use crate::ir::TypeCheckRole;
 use crate::ir::{ExprId, IrBindingStability, IrExpr, IrTypeOp};
 use crate::jvm::classfile::CodeBuilder;
-use crate::jvm::type_intrinsics::{cast, instance_check, IntrinsicCall};
+use crate::jvm::type_intrinsics::{
+    cast, function_arity_check, instance_check, CastCheck, InstanceCheck, IntrinsicCall,
+    SUSPEND_FUNCTION_MARKER,
+};
 use crate::types::{stored_value_ty, Ty};
 
 use super::{
@@ -166,6 +169,12 @@ impl Emitter<'_> {
     /// carrier have one descriptor, so the recorded role is what distinguishes `kotlin/UIntArray`
     /// from `[I`.
     pub(super) fn type_operation_class_name(&self, expression: ExprId, type_operand: Ty) -> String {
+        if let Some(TypeCheckRole::SuspendFunctionOfArity(arity)) =
+            self.ir.type_check_role(type_operand)
+        {
+            // `SuspendFunctionN` is not a class. kotlinc's cast names `Function{N+1}`.
+            return crate::jvm::names::function_interface_internal_name(usize::from(arity) + 1);
+        }
         let jvm_ty = ir_ty_to_jvm(&type_operand);
         self.ir
             .value_class_type_operations
@@ -213,12 +222,37 @@ impl Emitter<'_> {
         code: &mut CodeBuilder,
     ) {
         match self.ir.type_check_role(type_operand) {
-            Some(intrinsic) => self.emit_type_intrinsic_call(&instance_check(intrinsic), code),
+            Some(role) => match instance_check(role) {
+                InstanceCheck::Call(call) => self.emit_type_intrinsic_call(&call, code),
+                InstanceCheck::SuspendFunction { arity } => {
+                    self.emit_suspend_function_instance_check(arity, code);
+                }
+            },
             None => {
                 let class = self.cw.class_ref(internal);
                 code.instance_of(class);
             }
         }
+    }
+
+    /// `x is SuspendFunctionN` / `x is suspend (…) -> R`: the marker, then the JVM arity.
+    ///
+    /// kotlinc keeps the operand for the arity call only when the marker matches, and answers
+    /// `false` otherwise:
+    /// `dup; instanceof SuspendFunction; ifeq fail; isFunctionOfArity; goto end; fail: pop; iconst_0`.
+    fn emit_suspend_function_instance_check(&mut self, arity: u16, code: &mut CodeBuilder) {
+        let fail = code.new_label();
+        let end = code.new_label();
+        code.dup();
+        let marker = self.cw.class_ref(SUSPEND_FUNCTION_MARKER);
+        code.instance_of(marker);
+        code.ifeq(fail);
+        self.emit_type_intrinsic_call(&function_arity_check(arity), code);
+        code.goto(end);
+        code.bind(fail);
+        code.pop();
+        code.push_int(0, self.cw);
+        code.bind(end);
     }
 
     /// A value `!is`: kotlinc negates the 0/1 instance result with a branch, not an `ixor`.
@@ -252,11 +286,22 @@ impl Emitter<'_> {
         intrinsic: TypeCheckRole,
         code: &mut CodeBuilder,
     ) {
-        let (call, checkcast) = cast(intrinsic);
-        self.emit_type_intrinsic_call(&call, code);
-        if checkcast {
-            let class = self.cw.class_ref(internal);
-            code.checkcast(class);
+        match cast(intrinsic) {
+            CastCheck::Call { call, checkcast } => {
+                self.emit_type_intrinsic_call(&call, code);
+                if checkcast {
+                    let class = self.cw.class_ref(internal);
+                    code.checkcast(class);
+                }
+            }
+            CastCheck::SuspendFunction { arity } => {
+                let class =
+                    self.cw
+                        .class_ref(&crate::jvm::names::function_interface_internal_name(
+                            usize::from(arity),
+                        ));
+                code.checkcast(class);
+            }
         }
     }
 
