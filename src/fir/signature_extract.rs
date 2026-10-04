@@ -412,6 +412,7 @@ impl SignatureConstraintExtractor {
                         );
                         self.graph.add_expr(SigExpr::Delegate {
                             delegate: result,
+                            expected: None,
                             scope,
                             site,
                         })
@@ -856,6 +857,7 @@ impl SignatureConstraintExtractor {
                     );
                     result = self.graph.add_expr(SigExpr::Delegate {
                         delegate: result,
+                        expected: None,
                         scope: member_scope,
                         site,
                     });
@@ -2166,21 +2168,31 @@ impl SignatureConstraintExtractor {
                             init,
                             ..
                         } => {
-                            // A local binding is an intermediate value, not the enclosing public
-                            // declaration's exposed result. Keep an anonymous initializer exact so
-                            // later expressions in this compact body can resolve its members; the
-                            // final expression is still approximated if the object itself escapes.
                             let value = self.consumed_expression(file, *init, scope, origin)?;
+                            effects.push(value);
                             self.lexical_values
                                 .last_mut()
                                 .expect("block scope must exist")
                                 .insert(name.clone().into_boxed_str(), value);
                         }
-                        Stmt::Local {
-                            name, ty: Some(ty), ..
-                        }
-                        | Stmt::LocalLateinit { name, ty } => {
+                        local @ (Stmt::Local { ty: Some(_), .. } | Stmt::LocalLateinit { .. }) => {
+                            let (name, ty, initializer) = match local {
+                                Stmt::Local {
+                                    name,
+                                    ty: Some(ty),
+                                    init,
+                                    ..
+                                } => (name, ty, Some(*init)),
+                                Stmt::LocalLateinit { name, ty } => (name, ty, None),
+                                _ => unreachable!("the outer pattern admits only typed locals"),
+                            };
                             let value = self.compact_type(ty, scope, origin);
+                            if let Some(initializer) = initializer {
+                                let initializer =
+                                    self.expression(file, initializer, scope, origin)?;
+                                self.graph.apply_result_expectation(initializer, value);
+                                effects.push(initializer);
+                            }
                             if ty.fun_has_receiver() {
                                 self.lexical_callables
                                     .last_mut()
@@ -2326,41 +2338,31 @@ impl SignatureConstraintExtractor {
                             delegate,
                             by_span,
                         } => {
-                            let value = match ty {
-                                Some(ty) => self.compact_type(ty, scope, origin),
-                                None => {
-                                    let delegate =
-                                        self.consumed_expression(file, *delegate, scope, origin)?;
-                                    let diagnostic_owner = self
-                                        .graph
-                                        .scope(scope)
-                                        .expect("a local delegate must retain its owner scope")
-                                        .owner;
-                                    let site = self.graph.add_delegate_site(
-                                        super::SignatureDelegateSite {
-                                            diagnostic_owner,
-                                            kind: super::SignatureDelegateSiteKind::StatementLocal,
-                                            mutable: *is_var,
-                                            dispatch_diagnostic_name:
-                                                super::SignatureDelegateDispatchName::NONE,
-                                            by_origin: origin(*by_span),
-                                        },
-                                    );
-                                    let value = self.graph.add_expr(SigExpr::Delegate {
-                                        delegate,
-                                        scope,
-                                        site,
-                                    });
-                                    // Builder inference collects constraints from this initializer
-                                    // even when the property is not the block result. An `if`
-                                    // condition is not a result dependency, so `val y by lazy {
-                                    // expect(x) }; if (y.length != 2) ...` would otherwise never
-                                    // evaluate the initializer (KT-65262). A failed effect does
-                                    // not fail the result, matching every other statement.
-                                    effects.push(value);
-                                    value
-                                }
-                            };
+                            let expected =
+                                ty.as_ref().map(|ty| self.compact_type(ty, scope, origin));
+                            let delegate =
+                                self.consumed_expression(file, *delegate, scope, origin)?;
+                            let diagnostic_owner = self
+                                .graph
+                                .scope(scope)
+                                .expect("a local delegate must retain its owner scope")
+                                .owner;
+                            let site = self.graph.add_delegate_site(super::SignatureDelegateSite {
+                                diagnostic_owner,
+                                kind: super::SignatureDelegateSiteKind::StatementLocal,
+                                mutable: *is_var,
+                                dispatch_diagnostic_name:
+                                    super::SignatureDelegateDispatchName::NONE,
+                                by_origin: origin(*by_span),
+                            });
+                            let effect = self.graph.add_expr(SigExpr::Delegate {
+                                delegate,
+                                expected,
+                                scope,
+                                site,
+                            });
+                            effects.push(effect);
+                            let value = expected.unwrap_or(effect);
                             self.lexical_values
                                 .last_mut()
                                 .expect("block scope must exist")

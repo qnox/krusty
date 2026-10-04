@@ -4924,6 +4924,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     &selected,
                     result,
                     &[rhs.get()],
+                    None,
                     demand,
                 )?;
                 if comparison {
@@ -5272,6 +5273,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         &self,
         scope: crate::fir::SignatureScope,
         delegate: crate::fir::ResolvedTy,
+        expected: Option<crate::fir::ResolvedTy>,
         site: crate::fir::ResolvedSignatureDelegateSite,
         demand: &mut dyn FnMut(
             crate::fir::DeclarationId,
@@ -5280,7 +5282,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
         // The delegated-property signature boundary is one responsibility and lives in its own
         // module; this is the trait's entry into it.
-        self.select_delegate_signature(scope, delegate, site, demand)
+        self.select_delegate_signature(scope, delegate, expected, site, demand)
     }
     fn least_upper_bound(
         &self,

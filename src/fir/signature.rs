@@ -184,6 +184,8 @@ pub enum SigExpr {
     },
     Delegate {
         delegate: SigExprId,
+        /// Declared property type constraining the selected `getValue` result.
+        expected: Option<SigExprId>,
         scope: SignatureScopeId,
         site: SignatureDelegateSiteId,
     },
@@ -1076,6 +1078,7 @@ pub trait SignatureSemantics {
         &self,
         scope: SignatureScope,
         delegate: ResolvedTy,
+        expected: Option<ResolvedTy>,
         site: ResolvedSignatureDelegateSite,
         demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
     ) -> Result<ResolvedTy, DiagnosticId>;

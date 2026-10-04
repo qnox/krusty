@@ -2369,15 +2369,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   keeping the default bounds. This is the companion-object shape in
   `PerformanceCounter.getCallStack`. Test:
   `tests/contextual_lambda_expected_return_e2e.rs`.
-- **A local delegate initializer constrains the enclosing builder call even when the property is not the result.** `fun <T> buildConsumer(block: (Consumer<T>) -> Unit): T` used as
-  `buildConsumer { x -> val y by lazy { expectConsumerString(x); "OK" }; if (y.length != 2) throw ... }`
-  (KT-65262) infers `String`. The constraint is the initializer's `Consumer<T> <: Consumer<String>`.
+- **An initialized local statement constrains the enclosing builder call even when its binding is not the result.** `fun <T> buildValue(block: (ValueSink<T>) -> Unit): T` used as
+  `buildValue { x -> val y by deferValue { requireTextSink(x); "OK" }; if (y.length != 2) throw ... }`
+  (KT-65262) infers `String`. The constraint is the initializer's
+  `ValueSink<T> <: ValueSink<String>`.
   Pass 1 owns that expression-bodied result. An `if` condition is not a dependency of the `if`
-  result, and a local is not itself a statement effect, so a `by` whose property is read only from
-  that condition — or not read at all — never evaluated the initializer and left `T` at `Any?`.
-  kotlinc's builder inference still collects the initializer constraint. An untyped local `by` is
-  therefore a block effect: signature evaluation walks it for the constraints it contributes, and a
-  failure there does not reject the enclosing result, the same way other statements behave. Tests:
+  result, and a local was not itself a statement effect, so an initializer whose binding was read
+  only from that condition — or not read at all — left `T` at `Any?`. kotlinc's builder inference
+  still collects initializer constraints. Every initialized local is therefore a block effect:
+  signature evaluation walks ordinary, typed and delegated initializers, while a declared
+  delegated-property type constrains the selected `getValue` result. A failed effect does not reject
+  the enclosing result, the same way other statements behave. Tests:
   `tests/delegate_initializer_constraint_e2e.rs`; box:
   `inference/pcla/pclaRootIsTrySyntheticCallWithDelegate.kt`.
 - **Equally specific candidates: a non-parameterized callable wins.** kotlinc's last tie-break
