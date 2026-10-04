@@ -61,23 +61,19 @@ pub(super) fn symbolic(
     let enclosing = enclosing(index, declaration);
     // A classifier is in scope recursively in its own header. The complete declaration inventory
     // has already assigned its stable identity, but the module-wide spelling table deliberately
-    // does not give a nested classifier's simple name global meaning. The stub retains the lookup
-    // path (`GraphQlTester.Entity`); an F-bound is written with that path or its simple source
-    // spelling (`Entity`). Bind either to this declaration before the ordinary import/package
-    // table, so `interface Entity<S : Entity<S>>` retains `Entity` rather than being approximated
-    // to `Any`. This is the compact-header counterpart of the self binding installed in the full
-    // signature collector's classifier-header scope.
+    // does not give a nested classifier's simple name global meaning. Bind the exact source
+    // declaration segment retained in the compact classifier header before the ordinary
+    // import/package table, so `interface Entity<S : Entity<S>>` retains `Entity` rather than
+    // being approximated to `Any`. This is the compact-header counterpart of the self binding
+    // installed in the full signature collector's classifier-header scope.
     let self_classifier = index
         .classifier_header(declaration)
         .map(|header| header.classifier);
-    let self_simple = declaration_spelling.and_then(|spelling| spelling.rsplit(['.', '$']).next());
     super::super::TParams::symbolic_from_decl_enclosing(
         declared_names,
         declared_bounds,
         &|name| {
-            if self_classifier.is_some()
-                && (declaration_spelling == Some(name) || self_simple == Some(name))
-            {
+            if self_classifier.is_some() && declaration_spelling == Some(name) {
                 self_classifier
             } else {
                 table.class_names.get(name)

@@ -201,6 +201,10 @@ pub enum HeaderDeclarationKind {
         mutable: bool,
     },
     Classifier {
+        /// Exact source declaration segment retained before parser hoisting gives a nested
+        /// classifier its qualified lookup/emission path. Recursive header scope consumes this
+        /// spelling directly; it must not recover a segment from `DeclarationStub::lookup_name`.
+        source_name: LookupNameId,
         type_parameters: HeaderTypeParameterRange,
         /// Enclosing declaration parameters used by a parser-hoisted local/anonymous classifier.
         /// These bind existing semantic declarations; they are not formals owned by this classifier.
@@ -2269,6 +2273,7 @@ pub fn extract_file_header_syntax(
         source: SourceFileId,
         owner: Option<DeclarationId>,
         sibling: u32,
+        source_name: &str,
         class: &ClassDecl,
         ids: &mut DeclarationIds,
         names: &mut LookupNames,
@@ -2367,6 +2372,7 @@ pub fn extract_file_header_syntax(
             annotations,
             annotation_class_literals,
             kind: HeaderDeclarationKind::Classifier {
+                source_name: names.intern(source_name),
                 type_parameters: declared_type_parameters,
                 lexical_type_parameter_captures,
                 bounds,
@@ -2405,8 +2411,8 @@ pub fn extract_file_header_syntax(
                 },
             });
         }
-        if let Some(companion) = class.companion {
-            let Decl::Class(companion) = file.decl(companion) else {
+        if let Some(companion_declaration) = class.companion {
+            let Decl::Class(companion) = file.decl(companion_declaration) else {
                 panic!("a companion declaration edge must target a class")
             };
             classifier(
@@ -2414,6 +2420,10 @@ pub fn extract_file_header_syntax(
                 source,
                 Some(declaration),
                 0,
+                file.hoisted_classifier_source_names
+                    .get(&companion_declaration)
+                    .map(String::as_str)
+                    .unwrap_or(&companion.name),
                 companion,
                 ids,
                 names,
@@ -2581,6 +2591,10 @@ pub fn extract_file_header_syntax(
                 source,
                 nested_owners.get(declaration).copied(),
                 u32::try_from(index).expect("too many file declarations"),
+                file.hoisted_classifier_source_names
+                    .get(declaration)
+                    .map(String::as_str)
+                    .unwrap_or(&value.name),
                 value,
                 ids,
                 names,
