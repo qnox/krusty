@@ -346,6 +346,8 @@ pub enum IrCheckedOperation {
         unsigned_compare: Option<IrRuntimeFunction>,
         body: ExprId,
         label: String,
+        /// The index a destructured `withIndex()` loop over the progression counts beside it.
+        with_index: Option<IrLoopIndex>,
     },
     PropertyReference {
         target: crate::fir::FirPropertyReferenceTarget,
@@ -373,6 +375,21 @@ pub struct IrAnnotationConstruction {
     pub defaults: Vec<Option<ExprId>>,
     /// Lexical classifier containing this call. `None` means a top-level/file-facade scope.
     pub enclosing_class: Option<TypeName>,
+}
+
+/// kotlinc's `WithIndexLoopHeader` over a counted loop: each iteration binds the index, steps the
+/// index when the loop counts its own, then binds the element.
+#[derive(Clone, Debug, PartialEq)]
+pub struct IrLoopIndex {
+    /// The index's `var index = 0` declaration. A backend whose counter starts at constant `0` and
+    /// steps by `1` uses this slot as that counter instead of declaring a second one.
+    pub declaration: ExprId,
+    /// A block of the declarations that read the index, opening each iteration.
+    pub bindings: ExprId,
+    /// Whether the source binds the element. A loop that does not binds no loop variable.
+    pub element_bound: bool,
+    /// A block of the declarations that copy the bound element.
+    pub element_copies: ExprId,
 }
 
 /// An IR expression node (a subset of Kotlin IR's `IrExpression` hierarchy). Operands reference
@@ -1896,6 +1913,22 @@ pub struct IrFile {
     /// Lowered `&&`/`||` identities and their source operators. Backends consume this provenance;
     /// the same generic `when` written by hand must remain distinguishable.
     pub short_circuits: std::collections::HashMap<ExprId, IrShortCircuitKind>,
+    /// Local assignments a lowering generated without the increment or compound-assignment form a
+    /// source update has (kotlinc's `index = index + 1` in `WithIndexLoopHeader`). A target emits
+    /// them as the plain arithmetic and store they are, never as a fused increment.
+    pub plain_updates: std::collections::HashSet<ExprId>,
+    /// Pre-test loops whose body block is a transparent scope, as the body of a `for` loop kotlinc's
+    /// `ForLoopsLowering` rebuilt as a `while` is (an `IrComposite`): the declarations it opens with
+    /// stay in scope until the loop ends.
+    pub transparent_loop_bodies: std::collections::HashSet<ExprId>,
+    /// Post-test loops a counted `for` loop was realized as that keep the `for` loop's origin, with
+    /// a body opening with the loop variable's initialization (kotlinc's `FOR_LOOP_NEXT` block
+    /// heading a `FOR_LOOP_INNER_WHILE` body: the guarded do-while that steps first). kotlinc's
+    /// `visitDoWhileLoop` emits that initialization ahead of the loop's labels, so the body's locals
+    /// keep their ranges through the condition. Any other post-test loop, a written one or the
+    /// overflow-guarded counted shape (`doWhileCounterLoopOrigin`), ends a local the condition does
+    /// not read at the condition (`endUnreferencedDoWhileLocals`).
+    pub for_loop_next_loops: std::collections::HashSet<ExprId>,
     /// The casts the source wrote (`x as T`). Every other cast is compiler-inserted, kotlinc's
     /// `IMPLICIT_CAST` (an `as?`'s narrowing after its `is`, a carrier handed on as its function
     /// type): the value is already known to be a `T`, so a backend narrows it with a plain cast

@@ -883,6 +883,10 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ✅ TDD: `tests/destructure_e2e.rs` (data-class destructuring with `_` skips, incl. inside a `for`
   loop, on the JVM; non-`componentN` type rejection). Full suite 178 green. `for ((a, b) in …)`
   destructuring loops (often over stdlib `withIndex()`/collections) remain a follow-up.
+- ✅ `for ((i, v) in x.withIndex())` iterates `x` itself as kotlinc's `WithIndexHandler` does
+  (arrays, `CharSequence`s, progressions, `Iterable`s and `Sequence`s); see SPEC §7 and
+  `tests/for_in_with_index_e2e.rs`. Unsigned arrays and counted receivers whose element entry is a
+  `var` or needs a conversion still iterate `IndexedValue`s.
 
 ## Phase 72 — Stdlib/built-in type resolution via the classpath (no hardcoded lists)  ✅
 - ✅ **Removed the hardcoded `builtin_exception` table.** Exception types now resolve from the

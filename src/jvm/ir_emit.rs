@@ -7597,7 +7597,7 @@ impl<'a> Emitter<'a> {
                     );
                     return;
                 };
-                match local_updates::iinc_delta(self.ir, var, value, jt) {
+                match local_updates::iinc_delta(self.ir, e, var, value, jt) {
                     Some(delta) => code.iinc(slot, delta),
                     _ => {
                         self.emit_value(value, code);

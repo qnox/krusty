@@ -169,6 +169,7 @@ fn literal_until_loop_stays_checked_until_backend_realization() {
                 unsigned_compare: None,
                 body,
                 label,
+                with_index: None,
             }) => Some((
                 *variable,
                 variable_name.as_deref(),
