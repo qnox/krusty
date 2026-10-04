@@ -11,40 +11,55 @@ use super::common;
 
 /// The generic candidate rule, with no standard-library name involved: a repository-owned
 /// extension imported from a fixture package competes with a receiver-less function of the same
-/// name declared in the calling package. The extension on the implicit `this` wins.
-#[test]
-fn imported_fixture_extension_on_implicit_receiver_precedes_same_package_receiverless_function() {
+/// name declared in the calling package. The extension on the implicit `this` wins whether the
+/// fixture package is imported by name or by `*`.
+fn assert_fixture_extension_precedes_same_package_function(import: &str, stem: &str) {
     const EXTENSION: &str = "package fixtures.towerext\n\
          \n\
          fun <T, R> T.choose(block: T.() -> R): R = block()\n";
-    const MAIN: &str = "package fixtures.towermain\n\
+    let main = format!(
+        "package fixtures.towermain\n\
          \n\
-         import fixtures.towerext.choose\n\
+         import {import}\n\
          \n\
          var picked = \"\"\n\
          \n\
-         fun <R> choose(block: () -> R): R {\n\
+         fun <R> choose(block: () -> R): R {{\n\
          \x20   picked = \"receiver-less\"\n\
          \x20   return block()\n\
-         }\n\
+         }}\n\
          \n\
-         class Holder(val value: String) {\n\
-         \x20   fun get(): String = choose { value }\n\
-         }\n\
+         class Holder(val value: String) {{\n\
+         \x20   fun get(): String = choose {{ value }}\n\
+         }}\n\
          \n\
-         fun box(): String {\n\
+         fun box(): String {{\n\
          \x20   val result = Holder(\"OK\").get()\n\
          \x20   return if (picked.isEmpty()) result else picked\n\
-         }\n";
-    let sources = [("Ext.kt", EXTENSION), ("Main.kt", MAIN)];
+         }}\n"
+    );
+    let sources = [("Ext.kt", EXTENSION), ("Main.kt", main.as_str())];
     assert_eq!(
         common::kotlinc_box_files_result(&sources, "fixtures.towermain.MainKt"),
         "OK",
-        "kotlinc selects the imported extension on the implicit receiver",
+        "{stem}: kotlinc selects the imported extension on the implicit receiver",
     );
-    common::expect_box_ok_files_with_stdlib(
-        &sources,
-        "an imported extension on an implicit receiver beside a same-package receiver-less function",
+    common::expect_box_ok_files_with_stdlib(&sources, stem);
+}
+
+#[test]
+fn star_imported_fixture_extension_on_implicit_receiver_precedes_same_package_function() {
+    assert_fixture_extension_precedes_same_package_function(
+        "fixtures.towerext.*",
+        "a star-imported extension on an implicit receiver beside a same-package function",
+    );
+}
+
+#[test]
+fn named_imported_fixture_extension_on_implicit_receiver_precedes_same_package_function() {
+    assert_fixture_extension_precedes_same_package_function(
+        "fixtures.towerext.choose",
+        "a named-imported extension on an implicit receiver beside a same-package function",
     );
 }
 
