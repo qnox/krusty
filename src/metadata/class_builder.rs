@@ -836,6 +836,16 @@ pub fn build_class(
         class_type_parameters.insert(source.clone(), id.clone());
         class_type_parameters.insert(parameter.semantic_name.clone(), id);
     }
+    // The class header (its type parameters' bounds and its supertypes) belongs to the class
+    // itself, so like any declaration being written it names its own parameters
+    // (`Type.type_parameter_name`); its members address them by table id.
+    let mut class_header_type_parameters = class_type_parameters.clone();
+    class_header_type_parameters.extend(semantic_named_type_parameters(
+        tail.type_params.iter().map(String::as_str),
+        tail.type_param_bounds
+            .iter()
+            .map(|parameter| parameter.semantic_name.as_str()),
+    ));
     let tparam_msgs: Vec<Pb> = tail
         .type_param_bounds
         .iter()
@@ -856,7 +866,7 @@ pub fn build_class(
                         .cloned()
                         .unwrap_or_default(),
                 },
-                &class_type_parameters,
+                &class_header_type_parameters,
             )
             .unwrap_or_else(|error| panic!("invalid emitted metadata type parameter: {error}"))
         })
@@ -877,7 +887,7 @@ pub fn build_class(
                 tail.supertype_spellings
                     .get(index)
                     .unwrap_or(crate::spelling::Spelled::NONE),
-                &class_type_parameters,
+                &class_header_type_parameters,
             ));
         }
         supertype_msgs.push(type_pb(
@@ -886,13 +896,13 @@ pub fn build_class(
                 crate::types::wk::kotlin_enum(),
                 &[Ty::obj_name(class_internal)],
             ),
-            &class_type_parameters,
+            &class_header_type_parameters,
         ));
     } else if tail.supertypes.is_empty() {
         supertype_msgs.push(type_pb(
             &mut st,
             Ty::obj("kotlin/Any"),
-            &class_type_parameters,
+            &class_header_type_parameters,
         ));
     } else {
         for (index, supertype) in tail.supertypes.iter().enumerate() {
@@ -902,7 +912,7 @@ pub fn build_class(
                 tail.supertype_spellings
                     .get(index)
                     .unwrap_or(crate::spelling::Spelled::NONE),
-                &class_type_parameters,
+                &class_header_type_parameters,
             ));
         }
     }
