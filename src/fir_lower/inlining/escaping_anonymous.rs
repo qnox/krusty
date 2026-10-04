@@ -178,9 +178,36 @@ fn specialized_class(
     copy.enclosure = expansion.site.caller.or(copy.enclosure);
     copy.methods = cloned_methods.clone();
     remap_property_accessors(&mut copy, &cloned).map_err(|()| malformed(class_name))?;
+    let source_init = ir.classes[source as usize].init_body;
+    let covered = source_init
+        .map(|body| expression_ids(ir, body))
+        .unwrap_or_default();
+    let property_roots = checked_property_roots(ir, source)
+        .into_iter()
+        .filter(|root| !covered.contains(root))
+        .collect::<Vec<_>>();
     let (init_body, init_owned) = clone_optional_body(ir, copy.init_body, expansion, class_name)?;
     copy.init_body = init_body;
     owned.extend(init_owned);
+    // Property initializers and accessor bodies are still checked expressions here. The constructor
+    // block and accessor functions that publish_one_copy clones are assembled only after every
+    // inline expansion. A later expansion has to see the specialized reified type on this copy, or
+    // it will reuse the copy and leave the outer parameter unsubstituted.
+    let mut property_copies = Vec::new();
+    for root in property_roots {
+        let (cloned_root, cloned_owned) =
+            clone_optional_body(ir, Some(root), expansion, class_name)?;
+        let Some(cloned_root) = cloned_root else {
+            continue;
+        };
+        property_copies.push(cloned_root);
+        owned.extend(cloned_owned);
+    }
+    if !property_copies.is_empty() {
+        let mut stmts = copy.init_body.into_iter().collect::<Vec<_>>();
+        stmts.extend(property_copies);
+        copy.init_body = Some(ir.add_expr(IrExpr::Block { stmts, value: None }));
+    }
     let class_id = ir.add_class(copy);
     for method in &cloned_methods {
         ir.note_class_method(class_id, *method);
@@ -220,6 +247,33 @@ fn specialized_class(
         retarget(ir, body, expansion, seen)?;
     }
     Ok(Some(placeholder))
+}
+
+fn expression_ids(ir: &crate::ir::IrFile, root: ExprId) -> HashSet<ExprId> {
+    let mut pending = vec![root];
+    let mut seen = HashSet::new();
+    while let Some(expression) = pending.pop() {
+        if !seen.insert(expression) {
+            continue;
+        }
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+    }
+    seen
+}
+
+fn checked_property_roots(ir: &crate::ir::IrFile, class: ClassId) -> Vec<ExprId> {
+    let mut roots = Vec::new();
+    for property in ir.checked_properties.values() {
+        if property.class != Some(class) {
+            continue;
+        }
+        roots.extend(property.getter);
+        roots.extend(property.setter);
+        roots.extend(property.initializer);
+    }
+    roots.sort_unstable();
+    roots.dedup();
+    roots
 }
 
 fn clone_optional_body(
@@ -939,7 +993,9 @@ fn dag_uses_binding(
             continue;
         }
         crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
-        if node_uses_binding(ir.expr(expression), bindings) {
+        if node_uses_binding(ir.expr(expression), bindings)
+            || super::escaping_lambda::expression_facts_use_binding(ir, expression, bindings)
+        {
             return true;
         }
         if let IrExpr::New { internal, .. } = ir.expr(expression) {

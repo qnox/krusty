@@ -2512,6 +2512,8 @@ mod unsigned_vararg_e2e;
 
 #[path = "reified_nullable_instance_check_e2e.rs"]
 mod reified_nullable_instance_check_e2e;
+#[path = "reified_object_type_of_e2e.rs"]
+mod reified_object_type_of_e2e;
 
 #[path = "special_builtin_call_sites_e2e.rs"]
 mod special_builtin_call_sites_e2e;
