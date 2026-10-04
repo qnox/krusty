@@ -138,3 +138,37 @@ fn a_plain_string_reuses_an_equal_class_id() {
         "Root_class_named_functionKt",
     );
 }
+
+/// The class header (its type parameters' bounds and its supertypes) is written by the class's own
+/// serializer, which names the parameters the class owns; a member still addresses them by id.
+#[test]
+fn a_class_header_names_its_own_type_parameters() {
+    const SRC: &str = "package app\n\
+        \n\
+        interface Ordered<T>\n\
+        open class Base<X>\n\
+        \n\
+        class Ranked<T : Ordered<T>, U : T>(val first: T) : Base<T>(), Ordered<U> {\n\
+        \x20   fun second(u: U): T = first\n\
+        }\n";
+    assert_identical("class_header_names", SRC, "app/Ranked");
+}
+
+/// A nested class is serialized under its outer classes, whose parameters keep the ids before the
+/// nested class's own even when it is not `inner` and cannot use them.
+#[test]
+fn a_nested_class_numbers_its_type_parameters_after_its_outer_classes() {
+    const SRC: &str = "package app\n\
+        \n\
+        interface Ordered<T>\n\
+        \n\
+        class Outer<P> {\n\
+        \x20   class Middle<Q> {\n\
+        \x20       class Leaf<R : Ordered<R>>(val r: R) {\n\
+        \x20           fun <S> pick(s: S): R = r\n\
+        \x20       }\n\
+        \x20   }\n\
+        }\n";
+    assert_identical("nested_type_parameter_ids", SRC, "app/Outer$Middle$Leaf");
+    assert_identical("nested_type_parameter_ids", SRC, "app/Outer$Middle");
+}

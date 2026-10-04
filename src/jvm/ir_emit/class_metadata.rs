@@ -1339,7 +1339,7 @@ pub(super) fn build_class_metadata_with_facts(
             supertype_spellings: &supertype_spellings,
             type_params: &c.type_params,
             type_param_bounds: class_type_parameters,
-            captured_type_params: super::super::local_classifiers::captured_type_parameters(c),
+            captured_type_params: super::super::local_classifiers::captured_type_parameters(ir, c),
             ctor_param_tparams: &ctor_param_tparams,
             ctor_param_annotations: &named_ctor_param_annotations,
             flags: class_metadata_flags(ir, c),

@@ -591,9 +591,12 @@ pub enum ClassMemberOrder {
 /// The type parameters a class captures from enclosing declarations, and how kotlinc numbers them.
 #[derive(Clone, Copy, Debug)]
 pub enum CapturedTypeParameters<'a> {
-    /// An inner class's: the enclosing classes' parameters hold the ids before its own, outermost
-    /// first.
-    Reserved(&'a [String]),
+    /// A nested class's: the `enclosing` classes' parameters hold the ids before its own,
+    /// outermost first, and an inner class's `captured` ones are the innermost of them.
+    Reserved {
+        enclosing: usize,
+        captured: &'a [String],
+    },
     /// A local or anonymous class's: its own parameters come first, and each captured one takes
     /// the next id on first use (see `TypeParameters`).
     NumberedOnUse(&'a [String]),
@@ -601,7 +604,10 @@ pub enum CapturedTypeParameters<'a> {
 
 impl Default for CapturedTypeParameters<'_> {
     fn default() -> Self {
-        Self::Reserved(&[])
+        Self::Reserved {
+            enclosing: 0,
+            captured: &[],
+        }
     }
 }
 
@@ -737,7 +743,7 @@ impl Default for ClassTail<'_> {
             primary_ctor_jvm_signature: true,
             type_params: &[],
             type_param_bounds: &[],
-            captured_type_params: CapturedTypeParameters::Reserved(&[]),
+            captured_type_params: CapturedTypeParameters::default(),
             sealed_subclasses: &[],
             supertypes: &[],
             annotations: &crate::metadata::NO_ANNOTATIONS,
@@ -815,17 +821,27 @@ pub fn build_class(
         tail.type_params.len(),
         "metadata class type parameters require semantic identities"
     );
-    let (reserved, numbered_on_use) = match tail.captured_type_params {
-        CapturedTypeParameters::Reserved(parameters) => (parameters, &[][..]),
-        CapturedTypeParameters::NumberedOnUse(parameters) => (&[][..], parameters),
+    let (captured_count, reserved, numbered_on_use) = match tail.captured_type_params {
+        CapturedTypeParameters::Reserved {
+            enclosing,
+            captured,
+        } => (enclosing, captured, &[][..]),
+        CapturedTypeParameters::NumberedOnUse(parameters) => (0, &[][..], parameters),
     };
-    let captured_count = reserved.len();
+    assert!(
+        reserved.len() <= captured_count,
+        "an inner class captures only parameters its enclosing classes declare"
+    );
+    let first_captured = captured_count - reserved.len();
     let mut class_type_parameters = TypeParameters::classifier(
         captured_count + tail.type_params.len(),
         numbered_on_use.iter().cloned(),
     );
     for (index, semantic) in reserved.iter().enumerate() {
-        class_type_parameters.insert(semantic.clone(), TypeParameterRef::Captured(index as u64));
+        class_type_parameters.insert(
+            semantic.clone(),
+            TypeParameterRef::Captured((first_captured + index) as u64),
+        );
     }
     for (index, (source, parameter)) in tail
         .type_params
@@ -1519,7 +1535,7 @@ pub fn build_class(
     let inline_underlying: Option<(u32, Option<Pb>)> = tail.inline_underlying.map(|(name, ty)| {
         (
             st.local(name),
-            ty.map(|ty| type_pb(&mut st, ty, &class_type_parameters)),
+            ty.map(|ty| type_pb(&mut st, ty, &class_header_type_parameters)),
         )
     });
 
