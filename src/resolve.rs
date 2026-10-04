@@ -13708,7 +13708,10 @@ impl<'a> Checker<'a> {
                 let checked_ty = selected_property.as_mut().and_then(|property| {
                     self.apply_checked_source_property_result(receiver, property)
                 });
-                let ty = checked_ty.unwrap_or(selected.ty);
+                // A captured invariant argument is an out-projection (`Inv<out (X & Y)>`). The
+                // projection is the argument, not the value a read produces: the read is the upper
+                // bound, which is what exposes `X` and `Y` on `sel(Inv(A), Inv(B)).v`.
+                let ty = checked_ty.unwrap_or(selected.ty).projection_read_ty();
                 // Core property selection already incorporates a nearer covariant accessor override.
                 // The inherited declaration still owns the physical accessor/field shape; its erased
                 // return must not overwrite the selected logical property type.

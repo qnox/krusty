@@ -7,6 +7,7 @@ use nullable_actual::nullable_generic_actual;
 mod bound_relations;
 mod call_constraints;
 mod call_site_variables;
+mod common_supertype;
 mod conditional_result;
 mod postponed_result;
 
@@ -1209,37 +1210,18 @@ pub(crate) fn merge_inferred_ty_from_symbols(
     if !merged.is_erased_top() || !current.is_reference() || !actual.is_reference() {
         return merged;
     }
-    let left = receiver_hierarchy(source, current.non_null());
-    let right = receiver_hierarchy(source, actual.non_null());
-    let mut common = left
-        .iter()
-        .flat_map(|(left_ty, left_depth)| {
-            right.iter().filter_map(move |(right_ty, right_depth)| {
-                let left_name = left_ty.obj_internal()?;
-                let right_name = right_ty.obj_internal()?;
-                (left_name == right_name).then_some((
-                    left_depth + right_depth,
-                    if left_ty == right_ty {
-                        *left_ty
-                    } else {
-                        Ty::obj_name(left_name)
-                    },
-                ))
-            })
-        })
-        .collect::<Vec<_>>();
-    let Some(nearest) = common.iter().map(|(distance, _)| *distance).min() else {
+    // Two invariant instantiations (`Inv<A>` and `Inv<B>`) are not a raw classifier and not `Any`.
+    // Their common supertype keeps the classifier and captures the arguments' own common supertype,
+    // so `sel(Inv(A), Inv(B))` is `Inv<out (X & Y)>` when `A` and `B` share `X` and `Y`.
+    let supertype =
+        common_supertype::common_super_type(source, current.non_null(), actual.non_null());
+    if supertype.is_erased_top() {
         return merged;
-    };
-    common.retain(|(distance, ty)| *distance == nearest && !ty.is_erased_top());
-    common.dedup_by(|left, right| left.1 == right.1);
-    let [(_, common)] = common.as_slice() else {
-        return merged;
-    };
+    }
     if current.is_nullable() || actual.is_nullable() {
-        Ty::nullable(common.non_null())
+        Ty::nullable(supertype.non_null())
     } else {
-        *common
+        supertype
     }
 }
 

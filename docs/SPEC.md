@@ -8777,9 +8777,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   A generic top-level extension property's accessors are generic methods and carry a `Signature`
   (`<P:Ljava/lang/Object;>(TP;)Lkotlin/reflect/KType;`), as kotlinc emits.
   Not yet: a reified member inline function (it is called rather than inlined, `typeOf` or not), a
-  reified parameter inside an anonymous object or lambda class regenerated per call site, a reified
-  argument inferred as an intersection type, and a use-site projection written in a typealias
-  (`typealias T<Y> = MutableMap<in Y, …>` loses its `in`).
+  reified parameter inside an anonymous object or lambda class regenerated per call site, and a
+  use-site projection written in a typealias (`typealias T<Y> = MutableMap<in Y, …>` loses its `in`).
+- **An invariant instantiation joins at a captured out-projection of the arguments' common supertype.**
+  `sel(Inv(A), Inv(B))`, with `A : X, Y` and `B : X, Y`, has type `Inv<out (X & Y)>` rather than a
+  raw `Inv` or `Any`. Reading `v` produces that captured upper bound, so the value has the members
+  of both `X` and `Y` and not a member declared on only one argument. A reified `typeOf` of the
+  intersection uses the single common supertype: `Any` when the components share none, that shared
+  classifier when they do (`X : Z` and `Y : Z` reify as `Z`), and the class itself when the captured
+  bound is one class. Corpus: `reflection/typeOf/intersectionType.kt` (`-ProhibitIntersectionReifiedTypeParameter`).
+  Test: `tests/intersection_reified_type_of_e2e.rs`.
 - **A Java member's flexible return keeps the caller's type arguments.** A Java generic class
   applied to the enclosing declaration's own type parameters (`Shelf<X, Y>` inside `fun <X, Y>`,
   or `LinkedHashMap(map)` over a `Map<K, V>`, which infers `LinkedHashMap<K, V>` from the

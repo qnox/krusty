@@ -181,12 +181,106 @@ impl<'a> TypeParameters<'a> {
 }
 
 /// Append the realization of `typeOf<ty>()` to `out`.
-pub(super) fn generate(
+///
+/// A reified intersection is the one classifier kotlinc reifies. `X & Y` reifies as `Any` when
+/// those interfaces share no supertype. When both extend `Z`, it reifies as `Z`. A captured
+/// out-projection contributes its upper bound before that choice.
+pub(super) fn generate_with_supertypes(
     ty: Ty,
     parameters: &TypeParameters<'_>,
     out: &mut Vec<TypeOfInsn>,
+    supertypes: &dyn Fn(crate::types::TypeName) -> Vec<crate::types::TypeName>,
 ) -> Result<(), TypeOfError> {
-    Generator { parameters, out }.type_of(ty, false)
+    Generator { parameters, out }.type_of(reified_runtime_type(ty, supertypes), false)
+}
+
+/// The classifier a reified operation records for `ty`. An intersection is not a runtime class;
+/// the operation uses the single common supertype of its components.
+pub(super) fn reified_runtime_type(
+    ty: Ty,
+    supertypes: &dyn Fn(crate::types::TypeName) -> Vec<crate::types::TypeName>,
+) -> Ty {
+    let nullable = ty.is_nullable();
+    let inner = ty.non_null().projection_read_ty().non_null();
+    let inner = match inner {
+        Ty::Intersection(parts) => approximate_reified_intersection(parts, supertypes),
+        other => other,
+    };
+    if nullable {
+        Ty::nullable(inner)
+    } else {
+        inner
+    }
+}
+
+fn approximate_reified_intersection(
+    parts: &[Ty],
+    supertypes: &dyn Fn(crate::types::TypeName) -> Vec<crate::types::TypeName>,
+) -> Ty {
+    let names = parts
+        .iter()
+        .filter_map(|part| part.non_null().obj_internal())
+        .collect::<Vec<_>>();
+    if names.len() != parts.len() || names.is_empty() {
+        return Ty::obj("kotlin/Any");
+    }
+    Ty::obj_name(single_reified_supertype(&names, supertypes))
+}
+
+fn single_reified_supertype(
+    components: &[crate::types::TypeName],
+    supertypes: &dyn Fn(crate::types::TypeName) -> Vec<crate::types::TypeName>,
+) -> crate::types::TypeName {
+    let closures = components
+        .iter()
+        .map(|name| supertype_closure(*name, supertypes))
+        .collect::<Vec<_>>();
+    let mut common = closures.first().cloned().unwrap_or_default();
+    for closure in closures.iter().skip(1) {
+        common.retain(|name| closure.contains(name));
+    }
+    loop {
+        if common.is_empty() {
+            return crate::types::wk::any();
+        }
+        let most = common
+            .iter()
+            .copied()
+            .filter(|name| {
+                !common.iter().any(|other| {
+                    other != name && supertype_closure(*other, supertypes).contains(name)
+                })
+            })
+            .collect::<Vec<_>>();
+        if most.len() == 1 {
+            return most[0];
+        }
+        if most.is_empty() || most.len() == common.len() {
+            return crate::types::wk::any();
+        }
+        for name in most {
+            common.remove(&name);
+        }
+    }
+}
+
+fn supertype_closure(
+    name: crate::types::TypeName,
+    supertypes: &dyn Fn(crate::types::TypeName) -> Vec<crate::types::TypeName>,
+) -> std::collections::HashSet<crate::types::TypeName> {
+    let mut seen = std::collections::HashSet::new();
+    let mut pending = vec![name];
+    let any = crate::types::wk::any();
+    while let Some(current) = pending.pop() {
+        if !seen.insert(current) {
+            continue;
+        }
+        pending.extend(supertypes(current));
+        if current != any {
+            pending.push(any);
+        }
+    }
+    seen
 }
 
 struct Generator<'g, 'a> {
@@ -651,7 +745,7 @@ mod tests {
         let ir = IrFile::default();
         let parameters = TypeParameters::new(&ir, "AKt");
         let mut out = Vec::new();
-        generate(ty, &parameters, &mut out).expect("describable");
+        generate_with_supertypes(ty, &parameters, &mut out, &|_| Vec::new()).expect("describable");
         out
     }
 
@@ -719,7 +813,7 @@ mod tests {
         ir.publish_classifier_roles(&MutableListRole);
         let parameters = TypeParameters::new(&ir, "AKt");
         let mut out = Vec::new();
-        generate(ty, &parameters, &mut out).expect("describable");
+        generate_with_supertypes(ty, &parameters, &mut out, &|_| Vec::new()).expect("describable");
         assert_eq!(out[0], TypeOfInsn::LdcClass("java/util/List".to_owned()));
         assert_eq!(
             out.last(),
@@ -752,15 +846,45 @@ mod tests {
     }
 
     #[test]
+    fn an_intersection_reifies_as_its_single_common_supertype() {
+        let x = crate::types::type_name("demo/X");
+        let y = crate::types::type_name("demo/Y");
+        let z = crate::types::type_name("demo/Z");
+        let intersection = Ty::intersection(&[Ty::obj_name(x), Ty::obj_name(y)]);
+        assert_eq!(
+            reified_runtime_type(intersection, &|_| Vec::new()),
+            Ty::obj_name(crate::types::wk::any())
+        );
+        assert_eq!(
+            reified_runtime_type(intersection, &|name| {
+                (name == x || name == y)
+                    .then(|| vec![z])
+                    .unwrap_or_default()
+            }),
+            Ty::obj_name(z)
+        );
+        let out = {
+            let ir = IrFile::default();
+            let parameters = TypeParameters::new(&ir, "AKt");
+            let mut out = Vec::new();
+            generate_with_supertypes(intersection, &parameters, &mut out, &|_| Vec::new())
+                .expect("describable");
+            out
+        };
+        assert_eq!(out[0], TypeOfInsn::LdcClass("java/lang/Object".to_owned()));
+    }
+
+    #[test]
     fn an_unknown_type_parameter_is_refused() {
         let ir = IrFile::default();
         let parameters = TypeParameters::new(&ir, "AKt");
         let mut out = Vec::new();
         assert_eq!(
-            generate(
+            generate_with_supertypes(
                 Ty::ty_param("T@nowhere", Ty::obj("kotlin/Any")),
                 &parameters,
-                &mut out
+                &mut out,
+                &|_| Vec::new()
             ),
             Err(TypeOfError::UnknownTypeParameter("T@nowhere".to_owned()))
         );
