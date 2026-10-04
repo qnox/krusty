@@ -74,6 +74,9 @@ impl Emitter<'_> {
         within: impl FnOnce(&mut Self) -> R,
     ) -> R {
         let saved_slots = std::mem::take(&mut self.slots);
+        // The body numbers its values from zero again: none of them is a constructor-property
+        // parameter of the class whose initializer hosts the call.
+        let saved_initializer_class = self.constructor_initializer_class.take();
         let saved_var_types = std::mem::replace(
             &mut self.var_types,
             collect_body_var_types(self.ir, std::iter::once(inline_body)),
@@ -82,6 +85,7 @@ impl Emitter<'_> {
             self.slots.insert(index as u32, (slot, ty));
         }
         let result = within(self);
+        self.constructor_initializer_class = saved_initializer_class;
         self.slots = saved_slots;
         self.var_types = saved_var_types;
         result
