@@ -2117,6 +2117,10 @@ pub struct IrFile {
     /// The static `constructor-impl` realizing each value-class constructor, with that constructor's
     /// ordinal (`0` is the primary). Its `$default` stub takes kotlinc's `DefaultConstructorMarker`.
     pub(crate) jvm_value_class_constructor_impls: std::collections::HashMap<u32, u32>,
+    /// The Kotlin-level signature of each value-class method the JVM pass creates or moves onto the
+    /// carrier before its main erasure (`constructor-impl`, the synthesized and user-written
+    /// `equals`/`hashCode`/`toString` statics, computed accessors), recorded while still semantic.
+    pub(crate) jvm_value_class_member_signatures: std::collections::HashMap<u32, IrGenericSig>,
     /// Generated JVM methods kotlinc writes without nullability annotations. The JVM value-class
     /// pass records exact function identities; common lowering does not interpret this set.
     pub(crate) jvm_nullability_unannotated_methods: std::collections::HashSet<u32>,
@@ -2516,6 +2520,20 @@ pub struct IrTypeParameter {
     pub reified: bool,
 }
 
+impl IrTypeParameter {
+    /// A use of this parameter as a type.
+    pub(crate) fn ty(&self) -> Ty {
+        Ty::ty_param(&self.semantic_name, self.upper_bound())
+    }
+
+    /// The representative upper bound: the first declared bound, else `Any?`.
+    pub(crate) fn upper_bound(&self) -> Ty {
+        self.bounds
+            .first()
+            .map_or(Ty::nullable(Ty::obj("kotlin/Any")), |(bound, _)| *bound)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IrTypeAlias {
     pub name: String,
@@ -2710,6 +2728,21 @@ impl IrFile {
 
     pub fn class_signature_name(&self, internal: crate::types::TypeName) -> Option<&IrGenericSig> {
         self.class_signatures.get(&internal)
+    }
+
+    /// `class` applied to its own type parameters (`C<T>`): the type of its `this`.
+    pub(crate) fn class_type(&self, class: &IrClass) -> Ty {
+        let arguments: Vec<Ty> = self
+            .class_signature_name(class.fq_name)
+            .map(|signature| {
+                signature
+                    .type_params
+                    .iter()
+                    .map(IrTypeParameter::ty)
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ty::obj_args_name(class.fq_name, &arguments)
     }
 
     pub fn insert_field_signatures(&mut self, internal: &str, sigs: Vec<(String, String)>) {

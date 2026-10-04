@@ -633,10 +633,9 @@ impl EntryHeader {
     ) -> Self {
         let function = &ir.functions[member as usize];
         let signature = ir.signatures.get(&member).and_then(|generic| {
-            let mut generic = super::value_class_signatures::physical_generic_signature(
-                ir, member, function, generic,
-            )
-            .into_owned();
+            let mut generic =
+                super::value_class_signatures::physical_generic_signature(ir, member, generic)
+                    .into_owned();
             assert_eq!(
                 generic.params.len(),
                 function.params.len(),
