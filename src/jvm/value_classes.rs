@@ -28,6 +28,7 @@ mod member_names;
 mod module_members;
 mod operand_nullness;
 mod property_references;
+mod reference_returns;
 mod representation;
 use representation::is_ref;
 mod result_tail_boxing;
@@ -121,7 +122,7 @@ type FieldGetters = HashMap<(u32, u32), Ty>;
 /// future structural bail; today it always returns `true`.
 pub(crate) fn lower_value_classes(
     ir: &mut IrFile,
-    classifiers: &dyn crate::types::ClassifierFactSource,
+    classifiers: &crate::backend::CheckedBackendClassifiers<'_>,
     // Same-module SOURCE value classes (internal name → sole-field underlying), collected from the
     // frontend symbols. A value class declared in ANOTHER file of this module is not in `ir.classes`;
     // the normalized classifier provider supplies its declaration facts without leaking provider
@@ -558,14 +559,10 @@ pub(crate) fn lower_value_classes(
         .collect();
     vc_properties.extend(external_underlying_properties);
 
-    // Interfaces that value classes implement — a function returning one of these (or `Any`) boxes a
-    // value-class tail so virtual/interface dispatch works.
-    let vc_interfaces: HashSet<TypeName> = ir
-        .classes
-        .iter()
-        .filter(|c| c.is_value)
-        .flat_map(|c| c.interfaces.iter_ids())
-        .collect();
+    // Reference supertypes of every known value class. The frozen semantic hierarchy includes
+    // indirect interfaces and value classes declared in sibling files or dependencies.
+    let vc_reference_supertypes =
+        reference_returns::value_class_reference_supertypes(classifiers, &under);
 
     // Functions that are members of a value class — their bodies operate on the BOXED object and must
     // not be rewritten (only their signatures erase).
@@ -3474,6 +3471,18 @@ pub(crate) fn lower_value_classes(
             record_value_boundary(&mut ops, &ir.exprs, &repr_ctx, argument, parameter, &under);
         }
     }
+    let returns = reference_returns::ReferenceReturns {
+        rets: &orig_rets,
+        fields: &orig_fields,
+        slot_types: &slot_types,
+        under: &under,
+        field_getters: &field_getters,
+        carrier_unboxes: &carrier_unboxes,
+        value_class_reference_supertypes: &vc_reference_supertypes,
+        value_members: &vc_methods,
+        lowered_value_members: &lowered_value_members,
+    };
+    reference_returns::record_reference_returns(&mut ops, ir, &returns);
     for (id, is_ne) in vacuous {
         ir.exprs[id as usize] = IrExpr::Const(crate::ir::IrConst::Boolean(is_ne));
     }
@@ -3634,9 +3643,9 @@ pub(crate) fn lower_value_classes(
         })
         .collect();
 
-    // 6. A function returning a nullable value class `X?` boxes its non-null (unboxed) results; a
-    //    function declared to return a reference SUPERTYPE (`Any`/`Any?`/an interface — NOT the value
-    //    class itself) boxes a value-class tail too (`fun f(): Any? = vc`).
+    // 6. A function returning a nullable value class `X?` boxes its non-null (unboxed) results. A
+    //    return to a reference SUPERTYPE (`Any`/`Any?`/an interface) is a step-5 boundary
+    //    (`reference_returns`), recorded with the other representation operations.
     for fid in 0..ir.functions.len() {
         // FunctionN/SAM result representation is one boundary handled by step 7 below. Running this
         // ordinary declaration-return rewrite first would unbox a boxed lambda tail and then make the
@@ -3681,19 +3690,6 @@ pub(crate) fn lower_value_classes(
                     },
                     true,
                 );
-            }
-        } else if orig_rets[fid]
-            .non_null()
-            .obj_internal()
-            .is_some_and(|fq_name| {
-                fq_name == crate::types::wk::any() || vc_interfaces.contains(&fq_name)
-            })
-        {
-            // A function declared to return `Any` or an interface a value class implements (NOT the
-            // value class itself) boxes a value-class tail so the erased call hands back a box (`is X`/
-            // interface dispatch works). Concrete-type returns (e.g. `String`) are left alone.
-            if let Some(body) = ir.functions[fid].body {
-                box_vc_tail(ir, body, &under, &orig_rets, false);
             }
         } else if let Ty::Obj(x, _) = orig_rets[fid].non_null() {
             // A function returning the value class ITSELF (`fun test(): Z = a?.foo()!!`), or an `X?`
