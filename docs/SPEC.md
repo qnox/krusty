@@ -3096,6 +3096,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   a target spelled without type arguments (`as Sm`) takes them from the path's declared supertype
   (`Opt<T>` to `Sm<T>`); an explicit application is the proven type as written. Test:
   `tests/this_smartcast_e2e.rs`; box: `inference/pcla/issues/kt57707.kt`.
+- **A cast of a suspend callable to its continuation-passing function keeps the suspend type.**
+  `Foo::bar as KFunction2<Int, Continuation<Int>, Any?>` and `as Function2<...>` type the cast
+  expression as that ordinary function, but the stable `bar` reference stays a suspend callable.
+  The continuation shape is not a Kotlin subtype (`suspend (Int) -> Int` is not a
+  `(Int, Continuation<Int>) -> Any?`), so a later `is KSuspendFunction1` / `is SuspendFunction1`
+  still sees the suspend value, and `is Function2<Int, Continuation<Int>, Any?>` on a suspend
+  lambda remains the runtime classifier test that shape is allowed to spell. Replacing the stable
+  type with the ordinary function rejects those checks as erased. Test:
+  `tests/suspend_callable_cast_e2e.rs`; corpus:
+  `coroutines/functionReference_Function_SuspendFunction_casts.kt`.
 - **A local `var` smart-casts like a `val`** when no already-created capturing closure can mutate it
   (`tests/var_smartcast_e2e.rs`). Straight-line assignments replace the flow type. Inline-spliced
   lambdas follow the same ordered flow; a lambda declared later does not invalidate an earlier proof.

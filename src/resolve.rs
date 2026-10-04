@@ -50384,10 +50384,15 @@ impl<'a> Checker<'a> {
         // A successful cast contributes an intersection with the path's existing stable type; it
         // never widens that type. In particular, evaluating `nonNull as T?` does not make later
         // reads nullable. Preserve the already-more-specific declaration/flow fact and only use
-        // the cast target when it actually narrows it.
+        // the cast target when it actually narrows it. A suspend value cast to the
+        // continuation-passing function it already implements keeps the suspend type: that
+        // target is not a subtype, so assignability alone would discard it.
         Some(
             declared
-                .filter(|declared| self.receiver_is_assignable(*declared, narrowed))
+                .filter(|declared| {
+                    self.receiver_is_assignable(*declared, narrowed)
+                        || self.suspend_value_keeps_its_type(*declared, narrowed)
+                })
                 .unwrap_or(narrowed),
         )
     }
@@ -62055,20 +62060,13 @@ impl<'a> Checker<'a> {
                                 || match operand {
                                     Ty::Fun(signature) if signature.suspend => {
                                         // A suspend function value also implements the ordinary
-                                        // FunctionN+1 CPS interface: value parameters, trailing
-                                        // Continuation<R>, and nullable Any result. This is a runtime
-                                        // classifier fact used only to validate an explicit FunctionN
-                                        // type test; the expression's semantic suspend shape is retained.
-                                        let mut parameters = signature.params.to_vec();
-                                        parameters.push(Ty::obj_args(
-                                            "kotlin/coroutines/Continuation",
-                                            &[signature.ret],
-                                        ));
-                                        let cps = Ty::fun(
-                                            parameters,
-                                            Ty::nullable(Ty::obj("kotlin/Any")),
-                                        );
-                                        self.receiver_is_assignable(cps, target)
+                                        // FunctionN+1 CPS interface. This is a runtime classifier
+                                        // fact used only to validate an explicit FunctionN type
+                                        // test; the expression's semantic suspend shape is retained.
+                                        self.receiver_is_assignable(
+                                            cast_narrowing::continuation_function_type(signature),
+                                            target,
+                                        )
                                     }
                                     _ => false,
                                 }

@@ -4,10 +4,21 @@
 //! there has run. `&&` and `||` do not: their right operands can be skipped.
 
 use crate::ast::{Expr, ExprId, StmtId};
-use crate::types::Ty;
+use crate::types::{FnSig, Ty};
 
 use super::scope::{NarrowPath, ScopeKind};
 use super::{Checker, CheckerScope};
+
+/// The ordinary `FunctionN+1` shape a suspend function value implements at run time: the value
+/// parameters, a trailing `Continuation` of the suspend result, and a nullable `Any` result.
+pub(super) fn continuation_function_type(signature: &FnSig) -> Ty {
+    let mut parameters = signature.params.to_vec();
+    parameters.push(Ty::obj_args(
+        "kotlin/coroutines/Continuation",
+        &[signature.ret],
+    ));
+    Ty::fun(parameters, Ty::nullable(Ty::obj("kotlin/Any")))
+}
 
 impl Checker<'_> {
     /// Collect checked-cast facts from subexpressions that certainly ran when `expression` ran.
@@ -86,5 +97,26 @@ impl Checker<'_> {
         let rhs_scope = scope.child(ScopeKind::Block);
         self.apply_narrowings(&rhs_scope, &casts, &[], false);
         Some(rhs_scope)
+    }
+
+    /// A suspend callable already implements the continuation-passing `FunctionN+1` /
+    /// `KFunctionN+1` shape, but that shape is not a Kotlin subtype. Casting to it must not
+    /// replace the suspend type: a later `is SuspendFunction` / `is KSuspendFunction` would
+    /// otherwise see only the ordinary function type and be rejected as erased. The cast
+    /// expression itself still has the target type.
+    pub(super) fn suspend_value_keeps_its_type(&self, declared: Ty, narrowed: Ty) -> bool {
+        let source = self.fed_source();
+        crate::symbol_resolver::classifier_callable_signatures(&source, declared.non_null())
+            .into_iter()
+            .any(|signature| {
+                let Ty::Fun(fun) = signature else {
+                    return false;
+                };
+                fun.suspend
+                    && self.receiver_is_assignable(
+                        continuation_function_type(fun),
+                        narrowed.non_null(),
+                    )
+            })
     }
 }
