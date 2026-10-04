@@ -223,11 +223,15 @@ pub(crate) fn lower_value_classes(
     // otherwise step 5 inserts an `Integer.valueOf; checkcast X; unbox-impl` adapter over a carrier
     // that was never boxed.
     //
-    // A COMPANION property keeps the BOXED field (`LX;`) and has its initializer boxed to match:
-    // only the top-level one lives on the file facade kotlinc erases, and holding both under one
-    // rule is what named a `getTopLevel()LZ;` no declaration had.
-    for property in &mut ir.statics {
-        if !property.is_facade_owned() || property.accessors.any_declared() {
+    // A hoisted companion property is the same storage on the outer class. `I?` over a primitive
+    // carrier stays the box, because `erase` does not change that type; `S` and `S?` over `String`
+    // become the carrier. A facade property with a source-declared accessor keeps its own rule.
+    let hoisted_companions: Vec<bool> = (0..ir.statics.len())
+        .map(|index| ir.is_jvm_companion_hoisted_static(index as u32))
+        .collect();
+    for (index, property) in ir.statics.iter_mut().enumerate() {
+        let facade_storage = property.is_facade_owned() && !property.accessors.any_declared();
+        if !facade_storage && !hoisted_companions[index] {
             continue;
         }
         // Derived from the erasure that actually happens, never from stripping nullability. `erase`
@@ -4152,10 +4156,9 @@ fn repr(context: &ReprCtx<'_>, id: ExprId) -> Repr {
     }
     match &exprs[id as usize] {
         // A static's storage says which representation its read has, and the declaration records
-        // that decision rather than this re-deriving it: a FACADE property of value-class type is
-        // realized over the carrier (`getstatic gz:I`), while every other value-class-typed static
-        // — a companion's, notably — keeps the box its declaration retains and the emitter reads
-        // through that boxed descriptor.
+        // that decision rather than this re-deriving it. A facade property and a hoisted companion
+        // property of a value class are the carrier when `erase` changes the type (`getstatic`
+        // of `String` for `S`, of `I` for `I`); `I?` stays the box.
         IrExpr::GetStatic(i) => match types.erased_static_value_class(*i) {
             Some(classifier) => Repr::Unboxed(classifier),
             None => types

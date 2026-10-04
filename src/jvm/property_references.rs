@@ -973,3 +973,107 @@ fn synthesize(
         },
     }
 }
+
+/// A private companion property is realized before its field moves to the outer class. Once that
+/// hoist (and any value-class carrier erasure) has happened, the reference calls
+/// `access$get<X>$cp` there and still reports `get<X>` of the field's physical type.
+pub(crate) fn retarget_hoisted_companion_references(
+    ir: &mut IrFile,
+    realizations: &mut PropertyReferenceRealizations,
+) {
+    struct Retarget {
+        class_index: usize,
+        outer: TypeName,
+        call_name: String,
+        descriptor: String,
+        declared_getter: String,
+        physical: Ty,
+        value_class: Option<TypeName>,
+    }
+
+    let mut pending = Vec::new();
+    for (class_index, class) in ir.classes.iter().enumerate() {
+        if class.prop_ref.is_none() {
+            continue;
+        }
+        let Some(realization) = realizations.get(class.fq_name) else {
+            continue;
+        };
+        let Some(property) = realization.member_access_bridge else {
+            continue;
+        };
+        if ir
+            .checked_properties
+            .get(&property)
+            .is_some_and(|checked| checked.delegate.is_some())
+        {
+            continue;
+        }
+        let Some(IrLocalPropertyLayout::Member {
+            class: companion,
+            property: property_index,
+            ..
+        }) = ir.local_property_layouts.get(&property)
+        else {
+            continue;
+        };
+        let Some(companion_class) = ir.classes.get(*companion as usize) else {
+            continue;
+        };
+        if !companion_class.is_companion {
+            continue;
+        }
+        let Some(static_index) =
+            ir.jvm_companion_property_static(companion_class.fq_name, *property_index)
+        else {
+            continue;
+        };
+        if !ir.is_jvm_companion_hoisted_static(static_index) || ir.is_jvm_field_static(static_index)
+        {
+            continue;
+        }
+        let storage = &ir.statics[static_index as usize];
+        let Some(outer) = storage.owner else {
+            continue;
+        };
+        let physical = storage.ty;
+        let declared_getter = realization.declared_getter_name.clone();
+        let descriptor = format!("(){}", crate::jvm::names::type_descriptor(physical));
+        pending.push(Retarget {
+            class_index,
+            outer,
+            call_name: format!("access${declared_getter}$cp"),
+            descriptor,
+            declared_getter,
+            physical,
+            value_class: storage
+                .erased_declared_ty
+                .and_then(|original| original.non_null().obj_internal()),
+        });
+    }
+
+    for update in pending {
+        let reference_name = ir.classes[update.class_index].fq_name;
+        let Some(realization) = realizations.get_mut(reference_name) else {
+            continue;
+        };
+        realization.physical_getter_ret = Some(update.physical);
+        realization.getter_bridge_owner = Some(update.outer);
+        realization.protected_reflection_getter =
+            Some((update.declared_getter, update.descriptor.clone()));
+        realization.getter_field = None;
+        realization.member_access_bridge = None;
+        realization.accessor_names_are_physical = true;
+        if let Some(value_class) = update.value_class {
+            realization.boxed_value_class = Some(value_class);
+        }
+        let reference = ir.classes[update.class_index]
+            .prop_ref
+            .as_mut()
+            .expect("the scan only queued classes that have a property reference");
+        reference.call_owner_internal = Some(update.outer);
+        reference.getter_name = update.call_name;
+        reference.getter_descriptor = Some(update.descriptor);
+        reference.ext_facade = None;
+    }
+}

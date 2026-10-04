@@ -858,8 +858,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   kotlinc for both the with-parts and empty shapes (unit tests pin the exact bytes).
 - **A companion property that keeps its field still names that field after plainer siblings are
   hoisted.** A plain companion property moves its backing field to the outer class, and the
-  companion's field table is compacted. A property that stays — an open property, a `lateinit`,
-  or a boxed value class — keeps every index that names its field: the declaration, a delegate
+  companion's field table is compacted. A property that stays — an open property or a
+  `lateinit` — keeps every index that names its field: the declaration, a delegate
   field, and the common-IR property layout move with the compaction. A `var` that only
   customizes its setter therefore still gets its default getter, reading the same field the
   setter writes, whether that field was hoisted or stayed. Test:
@@ -887,10 +887,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   initializer store use the hoisted field (`access$…$cp` from the companion, `putstatic` from
   `<clinit>`). A delegate initializer's lambda is a private static method of the outer class,
   the class whose `<clinit>` evaluates it. The companion constructor
-  remains `super()`. An open property, a `lateinit`, or a boxed value class still keeps its
-  instance field, and an initializer that touches that field stays on the constructor.
-  Interface companions keep their own `<clinit>`. Test:
-  `tests/companion_init_block_e2e.rs`.
+  remains `super()`. An open property or a `lateinit` still keeps its instance field, and an
+  initializer that touches that field stays on the constructor. A value-class companion
+  property is hoisted as well: non-null `S` and `S?` over a reference carrier are stored as
+  that carrier, and `I?` over a primitive carrier stays the box. A private property reference
+  (`::ok` where `ok` is a private value-class `val`) reflects `getOk()` of the carrier and
+  calls `access$getOk$p` on a file facade or `access$getOk$cp` on the outer class. Metadata
+  records that carrier as the field descriptor, which is what `kotlin.reflect` resolves.
+  Test: `tests/private_inline_property_ref_e2e.rs`. Interface companions keep their own
+  `<clinit>`. Test: `tests/companion_init_block_e2e.rs`.
 - **`companion { … }` blocks and companion extensions (`CompanionBlocksAndExtensions`).** A block
   member is a static member of the classifier that declares the block, not of the file facade,
   measured against kotlinc 2.4.20: a function is a `public static final` method of `C`; a property

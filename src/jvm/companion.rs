@@ -255,13 +255,14 @@ pub(crate) fn lower_companion_properties(
             // A custom getter or setter does not keep the field on the companion. kotlinc
             // still stores it as a private static of the outer class, and the accessor body
             // reads that static through `access$…$cp`.
+            // A value-class property is hoisted too. kotlinc stores it as a private static of
+            // the outer class — the carrier when that carrier can represent the value, the box
+            // when it cannot (`I?` over `Int`). The value-class pass records which of the two
+            // this static is; leaving the field on the companion made a property reference call
+            // an instance accessor the class does not have.
             if (!visibility.is_public() && !declaration.is_private && !is_jvm_field)
                 || declaration.is_open
                 || backing.is_lateinit()
-                || backing
-                    .ty
-                    .obj_internal()
-                    .is_some_and(|name| crate::jvm::value_classes::is_boxed_value_class(ir, name))
                 || (!is_jvm_field && !inert_receiver)
             {
                 continue;
