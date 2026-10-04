@@ -974,19 +974,24 @@ impl<'a> FileLowering<'a> {
 
     /// The slot of a class's own `name` PROPERTY GETTER, PLUS ONE so that 0 says it has none.
     ///
-    /// By NAME up the chain, because a base's accessor need not be a method at all: a field-backed
-    /// property's accessors are synthesized, and Kotlin rejects a fresh redeclaration of an
-    /// inherited property, so a property of that name IS that one.
+    /// The runtime walk contract selects the source property role here; once found, dispatch uses
+    /// the declaration's stable identity. A base's accessor need not be a method at all because a
+    /// field-backed property's accessors are synthesized.
     fn walk_accessor_slot(&self, class: ClassId, name: &str) -> u32 {
         let mut at = Some(class);
         while let Some(id) = at {
-            if self.ir.classes[id as usize]
+            if let Some((index, _)) = self.ir.classes[id as usize]
                 .properties
                 .iter()
-                .any(|property| property.name == name)
+                .enumerate()
+                .find(|(_, property)| property.name == name)
             {
-                let key = super::super::super::classes::SlotKey::Getter(id, name.to_string());
-                return self.model.slot(class, &key).map_or(0, |slot| slot + 1);
+                if let Some(target) =
+                    super::super::super::classes::local_property_target(self.ir, id, index)
+                {
+                    let key = super::super::super::classes::SlotKey::Getter(target);
+                    return self.model.slot(class, &key).map_or(0, |slot| slot + 1);
+                }
             }
             at = self.model.layout(id).superclass;
         }
@@ -2576,8 +2581,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 property.name
             ));
         }
-        let key = model::SlotKey::Getter(class, property.name.clone());
-        if let Some(slot) = self.file.model.slot(class, &key) {
+        let through_slot = model::local_property_target(self.file.ir, class, index)
+            .and_then(|target| self.file.model.slot(class, &model::SlotKey::Getter(target)));
+        if let Some(slot) = through_slot {
             return self.dispatch(object, slot, &[], property.ty, &[]);
         }
         if let Some(getter) = property.getter {
@@ -2632,8 +2638,8 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         index: usize,
     ) -> Result<Ty, Unsupported> {
         let property = &self.file.ir.classes[class as usize].properties[index];
-        let key = model::SlotKey::Setter(class, property.name.clone());
-        let through_slot = self.file.model.slot(class, &key);
+        let through_slot = model::local_property_target(self.file.ir, class, index)
+            .and_then(|target| self.file.model.slot(class, &model::SlotKey::Setter(target)));
         match (through_slot, property.setter, property.backing_field) {
             (Some(_), _, _) | (None, Some(_), _) => Ok(property.ty),
             (None, None, Some(field)) => {
@@ -2655,8 +2661,8 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         value: Value,
     ) -> Result<(), Unsupported> {
         let property = self.file.ir.classes[class as usize].properties[index].clone();
-        let key = model::SlotKey::Setter(class, property.name.clone());
-        let through_slot = self.file.model.slot(class, &key);
+        let through_slot = model::local_property_target(self.file.ir, class, index)
+            .and_then(|target| self.file.model.slot(class, &model::SlotKey::Setter(target)));
         if let Some(slot) = through_slot {
             self.dispatch(object, slot, &[property.ty], Ty::Unit, &[value])?;
             return Ok(());

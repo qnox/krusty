@@ -272,9 +272,10 @@ pub(super) enum SlotKey {
     /// A method, by its implementation in some class; an override registers under its own id too,
     /// so a further override finds the slot through either.
     Function(FunId),
-    /// A property's getter, by the declaring class and the property name.
-    Getter(ClassId, String),
-    Setter(ClassId, String),
+    /// A property accessor, by the frontend's stable declaration identity. The accessor role is
+    /// part of the key because a mutable property owns two independently dispatched members.
+    Getter(ResolvedPropertyOverrideTarget),
+    Setter(ResolvedPropertyOverrideTarget),
 }
 
 #[derive(Clone, Debug)]
@@ -729,21 +730,41 @@ fn member_name(ir: &IrFile, member: &InterfaceMember) -> String {
     let interface = ir.classes[member.interface as usize].fq_name();
     let name = match &member.key {
         SlotKey::Function(fid) => ir.functions[*fid as usize].name.clone(),
-        SlotKey::Getter(_, name) => format!("get {name}"),
-        SlotKey::Setter(_, name) => format!("set {name}"),
+        SlotKey::Getter(target) => format!("get {}", property_name(ir, *target)),
+        SlotKey::Setter(target) => format!("set {}", property_name(ir, *target)),
         SlotKey::Any(slot) => format!("kotlin.Any slot {slot}"),
     };
     format!("{interface}.{name}")
 }
 
+fn property_name(ir: &IrFile, target: ResolvedPropertyOverrideTarget) -> String {
+    match target {
+        ResolvedPropertyOverrideTarget::Module(property) => ir
+            .checked_properties
+            .get(&property)
+            .map(|property| property.name.clone())
+            .unwrap_or_else(|| format!("property#{}", property.raw())),
+        ResolvedPropertyOverrideTarget::External(property) => {
+            format!("external-property#{}", property.raw())
+        }
+    }
+}
+
 /// A total order over slot keys, so an interface's members are numbered the same way on every
 /// run — the map they come from has no order of its own.
-fn key_order(key: &SlotKey) -> (u8, u32, String) {
+fn key_order(key: &SlotKey) -> (u8, u32, u32) {
     match key {
-        SlotKey::Any(slot) => (0, *slot, String::new()),
-        SlotKey::Function(fid) => (1, *fid, String::new()),
-        SlotKey::Getter(class, name) => (2, *class, name.clone()),
-        SlotKey::Setter(class, name) => (3, *class, name.clone()),
+        SlotKey::Any(slot) => (0, *slot, 0),
+        SlotKey::Function(fid) => (1, *fid, 0),
+        SlotKey::Getter(target) => property_key_order(2, *target),
+        SlotKey::Setter(target) => property_key_order(3, *target),
+    }
+}
+
+fn property_key_order(kind: u8, target: ResolvedPropertyOverrideTarget) -> (u8, u32, u32) {
+    match target {
+        ResolvedPropertyOverrideTarget::Module(property) => (kind, 0, property.raw()),
+        ResolvedPropertyOverrideTarget::External(property) => (kind, 1, property.raw()),
     }
 }
 
@@ -999,15 +1020,11 @@ fn layout_class(
     // unusual; keying the method as the property's getter took it out of the method numbering
     // entirely, so the base's slot kept the base's body and a call through the base jumped into
     // whatever stood there.
-    let mut accessor_keys: HashMap<FunId, SlotKey> = HashMap::new();
-    for property in &class.properties {
-        if let Some(getter) = property.getter {
-            accessor_keys.insert(getter, SlotKey::Getter(id, property.name.clone()));
-        }
-        if let Some(setter) = property.setter {
-            accessor_keys.insert(setter, SlotKey::Setter(id, property.name.clone()));
-        }
-    }
+    let accessor_keys: HashMap<FunId, SlotKey> = class
+        .methods
+        .iter()
+        .filter_map(|&function| property_accessor_key(ir, id, function).map(|key| (function, key)))
+        .collect();
     let overridden_functions = overridden_functions(ir, class)?;
     let overridden_properties = overridden_properties(ir, id, class)?;
 
@@ -1137,28 +1154,29 @@ fn layout_class(
             None => match class_replaces {
                 Some(slot) => Some(slot),
                 None => match &own_key {
-                    SlotKey::Getter(_, name) | SlotKey::Setter(_, name) => {
+                    SlotKey::Getter(target) | SlotKey::Setter(target) => {
                         let setter = matches!(own_key, SlotKey::Setter(..));
+                        let implemented = property_type(ir, *target, &overridden_properties)
+                            .ok_or_else(|| {
+                                format!(
+                                    "a property accessor without a recorded semantic type (`{}.{}`)",
+                                    class.fq_name(),
+                                    function.name
+                                )
+                            })?;
                         match overridden_property_slot(
                             ir,
                             &overridden_properties,
                             &slots,
-                            name,
+                            *target,
                             setter,
                             &class.fq_name(),
                         )? {
                             // The base declares the property with a different REPRESENTATION, so
                             // its slot cannot hold this accessor. This one takes a slot of its own
                             // and the base's gets a bridge, exactly as a method's does.
-                            Some((slot, declared))
-                                if c_kind(declared) != c_kind(own_property_ty(class, name)) =>
-                            {
-                                accessor_bridged.push((
-                                    slot,
-                                    declared,
-                                    own_property_ty(class, name),
-                                    setter,
-                                ));
+                            Some((slot, declared)) if c_kind(declared) != c_kind(implemented) => {
+                                accessor_bridged.push((slot, declared, implemented, setter));
                                 None
                             }
                             Some((slot, _)) => Some(slot),
@@ -1233,15 +1251,26 @@ fn layout_class(
 
     // Open or overriding properties with no source accessor still dispatch: synthesize the
     // field access as a slot.
-    for property in &class.properties {
-        let overrides = overridden_properties.contains_key(&property.name);
+    for (property_index, property) in class.properties.iter().enumerate() {
+        let target = local_property_target(ir, id, property_index);
+        let overrides = target.is_some_and(|target| overridden_properties.contains_key(&target));
         // A property a SUBCLASS hands to an interface is dispatched through as well, whether or
         // not it is `open` here: `class B : C, A<Int>()` implements `C.size` with the `size` that
         // `A` declares plainly, and the interface's number has to reach it. Kotlin needs no
         // `open` for that — B overrides nothing — so the declaration alone cannot say it.
-        if !property.is_open && !overrides && !implements_an_interface(ir, id, &property.name) {
+        if !property.is_open
+            && !overrides
+            && !target.is_some_and(|target| implements_an_interface(ir, target))
+        {
             continue;
         }
+        let target = target.ok_or_else(|| {
+            format!(
+                "a virtual property without a stable declaration identity (`{}.{}`)",
+                class.fq_name(),
+                property.name
+            )
+        })?;
         let accessors = [
             (false, property.getter.is_none()),
             (true, property.is_var && property.setter.is_none()),
@@ -1256,15 +1285,15 @@ fn layout_class(
                 None => Slot::Abstract,
             };
             let key = if setter {
-                SlotKey::Setter(id, property.name.clone())
+                SlotKey::Setter(target)
             } else {
-                SlotKey::Getter(id, property.name.clone())
+                SlotKey::Getter(target)
             };
             let replaces = overridden_property_slot(
                 ir,
                 &overridden_properties,
                 &slots,
-                &property.name,
+                target,
                 setter,
                 &class.fq_name(),
             )?;
@@ -1296,18 +1325,14 @@ fn layout_class(
                 };
             }
             slots.insert(key, slot);
-            for (owner, overridden_name) in overridden_properties
-                .get(&property.name)
-                .into_iter()
-                .flatten()
-            {
-                if !ir.classes[*owner as usize].is_interface {
+            for overridden in overridden_properties.get(&target).into_iter().flatten() {
+                if !overridden.interface {
                     continue;
                 }
                 let key = if setter {
-                    SlotKey::Setter(*owner, overridden_name.clone())
+                    SlotKey::Setter(overridden.target)
                 } else {
-                    SlotKey::Getter(*owner, overridden_name.clone())
+                    SlotKey::Getter(overridden.target)
                 };
                 slots.insert(key, slot);
             }
@@ -1427,18 +1452,6 @@ fn register_inherited_interface_members(
         if !edge.overridden_is_interface {
             continue;
         }
-        let property = |target: &ResolvedPropertyOverrideTarget| match target {
-            ResolvedPropertyOverrideTarget::Module(id) => ir.checked_properties.get(id),
-            ResolvedPropertyOverrideTarget::External(_) => None,
-        };
-        let (Some(implementation), Some(overridden)) =
-            (property(&edge.implementation), property(&edge.overridden))
-        else {
-            continue;
-        };
-        let (Some(owner), Some(interface)) = (implementation.class, overridden.class) else {
-            continue;
-        };
         // The same representation question the METHOD path above asks, for the same reason.
         // `interface C<T> { var size: T }` implemented by `class B : C<Int>, A()` where `A`
         // declares `var size: Int` erases the interface's accessors to a REFERENCE while the
@@ -1446,17 +1459,17 @@ fn register_inherited_interface_members(
         // would have a caller read that integer as a pointer; the number takes a bridge wearing
         // the interface's carrier instead. A property is what `bridges/test7.kt` is about, which
         // is why the method check did not catch it.
-        let bridged = c_kind(implementation.ty) != c_kind(overridden.ty);
+        let bridged = c_kind(edge.implementation_type) != c_kind(edge.declared_type);
         for setter in [false, true] {
             let (from, to) = if setter {
                 (
-                    SlotKey::Setter(owner, implementation.name.clone()),
-                    SlotKey::Setter(interface, overridden.name.clone()),
+                    SlotKey::Setter(edge.implementation),
+                    SlotKey::Setter(edge.overridden),
                 )
             } else {
                 (
-                    SlotKey::Getter(owner, implementation.name.clone()),
-                    SlotKey::Getter(interface, overridden.name.clone()),
+                    SlotKey::Getter(edge.implementation),
+                    SlotKey::Getter(edge.overridden),
                 )
             };
             if let Some(&slot) = slots.get(&from) {
@@ -1464,8 +1477,8 @@ fn register_inherited_interface_members(
                     interface_bridges
                         .entry(to.clone())
                         .or_insert(Slot::AccessorBridge {
-                            declared: overridden.ty,
-                            implemented: implementation.ty,
+                            declared: edge.declared_type,
+                            implemented: edge.implementation_type,
                             setter,
                             target_slot: slot,
                         });
@@ -1477,91 +1490,170 @@ fn register_inherited_interface_members(
     Ok(())
 }
 
-/// Whether any class in this file hands `owner`'s property `name` to an interface it implements.
+/// Whether any class in this file hands this exact property to an interface it implements.
 /// Such a property is reached through the interface's number and so has to dispatch, even where
 /// the declaration is neither `open` nor an override — the class that implements the interface
 /// declares nothing of its own.
-fn implements_an_interface(ir: &IrFile, owner: ClassId, name: &str) -> bool {
-    ir.property_overrides.values().flatten().any(|edge| {
-        edge.overridden_is_interface
-            && match &edge.implementation {
-                ResolvedPropertyOverrideTarget::Module(id) => ir
-                    .checked_properties
-                    .get(id)
-                    .is_some_and(|property| property.class == Some(owner) && property.name == name),
-                ResolvedPropertyOverrideTarget::External(_) => false,
-            }
-    })
+fn implements_an_interface(ir: &IrFile, target: ResolvedPropertyOverrideTarget) -> bool {
+    ir.property_overrides
+        .values()
+        .flatten()
+        .any(|edge| edge.overridden_is_interface && edge.implementation == target)
 }
 
-/// The type `class` declares for its own property `name`, which is what its accessors carry.
-/// `Ty::Unit` for a name the class does not declare, which no accessor of this class is keyed by.
-fn own_property_ty(class: &IrClass, name: &str) -> Ty {
-    class
-        .properties
+/// The stable property identity attached to one class-property coordinate by common lowering.
+pub(super) fn local_property_target(
+    ir: &IrFile,
+    owner: ClassId,
+    property: usize,
+) -> Option<ResolvedPropertyOverrideTarget> {
+    ir.local_property_layouts
         .iter()
-        .find(|property| property.name == name)
-        .map_or(Ty::Unit, |property| property.ty)
+        .find_map(|(identity, layout)| match layout {
+            crate::ir::IrLocalPropertyLayout::Member {
+                class,
+                property: index,
+                ..
+            } if *class == owner
+                && usize::try_from(*index).expect("a property index fits usize") == property =>
+            {
+                Some(ResolvedPropertyOverrideTarget::Module(*identity))
+            }
+            _ => None,
+        })
+}
+
+/// The exact property accessor realized by one common-IR function, if any.
+fn property_accessor_key(ir: &IrFile, owner: ClassId, function: FunId) -> Option<SlotKey> {
+    let owner_name = ir.classes[owner as usize].fq_name_id();
+    let mut found = None;
+    let mut record = |key: SlotKey| {
+        if let Some(existing) = &found {
+            assert_eq!(
+                existing, &key,
+                "one common-IR function cannot realize two property declarations"
+            );
+        } else {
+            found = Some(key);
+        }
+    };
+    for (identity, layout) in &ir.local_property_layouts {
+        let accessors = match layout {
+            crate::ir::IrLocalPropertyLayout::Member {
+                class,
+                getter,
+                setter,
+                ..
+            } if *class == owner => Some((*getter, *setter)),
+            crate::ir::IrLocalPropertyLayout::MemberExtension {
+                owner,
+                getter,
+                setter,
+                ..
+            } if *owner == owner_name => Some((Some(*getter), *setter)),
+            _ => None,
+        };
+        let Some((getter, setter)) = accessors else {
+            continue;
+        };
+        if getter == Some(function) {
+            record(SlotKey::Getter(ResolvedPropertyOverrideTarget::Module(
+                *identity,
+            )));
+        }
+        if setter == Some(function) {
+            record(SlotKey::Setter(ResolvedPropertyOverrideTarget::Module(
+                *identity,
+            )));
+        }
+    }
+    for edge in ir.property_overrides.get(&owner_name).into_iter().flatten() {
+        if edge.implementation_getter == Some(function) {
+            record(SlotKey::Getter(edge.implementation));
+        }
+        if edge.implementation_setter == Some(function) {
+            record(SlotKey::Setter(edge.implementation));
+        }
+    }
+    found
 }
 
 /// The slot key of a method of `owner`: a property accessor is keyed by its property.
 pub(super) fn function_key(ir: &IrFile, owner: ClassId, fid: FunId) -> SlotKey {
-    let class = &ir.classes[owner as usize];
-    for property in &class.properties {
-        if property.getter == Some(fid) {
-            return SlotKey::Getter(owner, property.name.clone());
-        }
-        if property.setter == Some(fid) {
-            return SlotKey::Setter(owner, property.name.clone());
-        }
-    }
-    SlotKey::Function(fid)
+    property_accessor_key(ir, owner, fid).unwrap_or(SlotKey::Function(fid))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PropertyOverrideSlot {
+    target: ResolvedPropertyOverrideTarget,
+    declared: Ty,
+    implemented: Ty,
+    interface: bool,
+}
+
+type PropertyOverrideSlots = HashMap<ResolvedPropertyOverrideTarget, Vec<PropertyOverrideSlot>>;
+
+fn property_type(
+    ir: &IrFile,
+    target: ResolvedPropertyOverrideTarget,
+    overrides: &PropertyOverrideSlots,
+) -> Option<Ty> {
+    overrides
+        .get(&target)
+        .and_then(|targets| targets.first())
+        .map(|edge| edge.implemented)
+        .or_else(|| match target {
+            ResolvedPropertyOverrideTarget::Module(property) => ir
+                .checked_properties
+                .get(&property)
+                .map(|property| property.ty),
+            ResolvedPropertyOverrideTarget::External(_) => None,
+        })
 }
 
 /// The slot an overriding property accessor replaces, found through the overridden property's
 /// declaring class.
 fn overridden_property_slot(
     ir: &IrFile,
-    overridden: &HashMap<String, Vec<(ClassId, String)>>,
+    overridden: &PropertyOverrideSlots,
     slots: &HashMap<SlotKey, u32>,
-    name: &str,
+    implementation: ResolvedPropertyOverrideTarget,
     setter: bool,
     class_name: &str,
 ) -> Result<Option<(u32, Ty)>, Unsupported> {
     // Only a CLASS base owns a slot to replace. An interface base owns a number in the program-wide
     // interface region instead, and that is pointed at this property afterwards rather than
     // replaced here.
-    let Some((owner, overridden_name)) = overridden.get(name).and_then(|targets| {
-        targets
-            .iter()
-            .find(|(owner, _)| !ir.classes[*owner as usize].is_interface)
-    }) else {
+    let Some(overridden) = overridden
+        .get(&implementation)
+        .and_then(|targets| targets.iter().find(|target| !target.interface))
+    else {
         return Ok(None);
     };
     let key = if setter {
-        SlotKey::Setter(*owner, overridden_name.clone())
+        SlotKey::Setter(overridden.target)
     } else {
-        SlotKey::Getter(*owner, overridden_name.clone())
+        SlotKey::Getter(overridden.target)
     };
     // A `val` overridden by a `var` adds a setter the base never had: a new slot, not an override.
     if setter && !slots.contains_key(&key) {
         return Ok(None);
     }
-    // The base's own declared type travels with its slot, because whether the slot can simply be
+    // The base's declared type travels on the exact override edge, because whether the slot can simply be
     // REPLACED depends on it: a base declaring `var size: T` carries a reference where an
     // overriding `var size: Int` carries a machine integer, and replacing then has a caller
     // reading the base's slot read that integer as a pointer.
-    let declared = ir.classes[*owner as usize]
-        .properties
-        .iter()
-        .find(|property| property.name == *overridden_name)
-        .map(|property| property.ty);
-    match (slots.get(&key).copied(), declared) {
-        (Some(slot), Some(declared)) => Ok(Some((slot, declared))),
-        _ => Err(format!(
-            "a property override with no slot to replace (`{class_name}.{name}`)"
-        )),
-    }
+    slots
+        .get(&key)
+        .copied()
+        .map(|slot| (slot, overridden.declared))
+        .map(Some)
+        .ok_or_else(|| {
+            format!(
+                "a property override with no slot to replace (`{class_name}.{}`)",
+                property_name(ir, implementation)
+            )
+        })
 }
 
 /// The fixed slot a dependency override occupies, for the one dependency member that has one.
@@ -1652,43 +1744,45 @@ fn overridden_functions(
     Ok(map)
 }
 
-/// Property name → the (class, name) of the property it overrides, for `class`'s properties.
+/// Exact implementation property → the declarations it overrides in this file.
 fn overridden_properties(
     ir: &IrFile,
     id: ClassId,
     class: &IrClass,
-) -> Result<HashMap<String, Vec<(ClassId, String)>>, Unsupported> {
-    let mut map: HashMap<String, Vec<(ClassId, String)>> = HashMap::new();
+) -> Result<PropertyOverrideSlots, Unsupported> {
+    let mut map: PropertyOverrideSlots = HashMap::new();
     let Some(overrides) = ir.property_overrides.get(&class.fq_name_id()) else {
         return Ok(map);
     };
     for edge in overrides {
-        let ResolvedPropertyOverrideTarget::Module(implementation) = &edge.implementation else {
-            continue;
-        };
-        let Some(property) = ir.checked_properties.get(implementation) else {
-            continue;
-        };
-        if property.class != Some(id) {
+        let implemented_here = edge.implementation_getter.is_some()
+            || edge.implementation_setter.is_some()
+            || match edge.implementation {
+                ResolvedPropertyOverrideTarget::Module(property) => ir
+                    .checked_properties
+                    .get(&property)
+                    .is_some_and(|property| property.class == Some(id)),
+                ResolvedPropertyOverrideTarget::External(_) => false,
+            };
+        if !implemented_here {
             continue;
         }
-        let overridden = match &edge.overridden {
-            ResolvedPropertyOverrideTarget::Module(overridden) => ir
-                .checked_properties
-                .get(overridden)
-                .and_then(|base| Some((base.class?, base.name.clone()))),
-            ResolvedPropertyOverrideTarget::External(_) => None,
-        };
         // An override of a property declared OUTSIDE this file takes a slot of its own, like any
         // property this class declares freshly: a caller naming the class reaches it, and a caller
         // naming the dependency type declines at the call site, where the type it named is still
         // in sight. There is no base slot here to replace, and nothing in this file numbers one.
-        let Some(overridden) = overridden else {
+        if !matches!(edge.overridden, ResolvedPropertyOverrideTarget::Module(_)) {
             continue;
-        };
+        }
         // Every target: a property can override a superclass's and an interface's at once, and
         // the direct base's edge (depth 1) is the one whose slot is replaced, so it goes first.
-        let targets = map.entry(property.name.clone()).or_default();
+        let overridden = PropertyOverrideSlot {
+            target: edge.overridden,
+            declared: edge.declared_type,
+            implemented: edge.implementation_type,
+            interface: edge.overridden_is_interface,
+        };
+        let targets = map.entry(edge.implementation).or_default();
         if !targets.contains(&overridden) {
             if edge.depth == 1 {
                 targets.insert(0, overridden);
@@ -2124,12 +2218,36 @@ mod tests {
             setter_jvm_name: None,
             needs_access_bridge: false,
         }];
+        let property = crate::fir::PropertyId::from_raw(0);
+        ir.local_property_layouts.insert(
+            property,
+            crate::ir::IrLocalPropertyLayout::Member {
+                class: a,
+                owner: crate::types::type_name("A"),
+                backing_field: Some(0),
+                getter: None,
+                setter: None,
+                interface: false,
+                name: "v".to_string(),
+                ty: Ty::Int,
+                mutable: false,
+                private: false,
+                context_parameters: Vec::new(),
+                property: 0,
+            },
+        );
         let model = build(&ir).expect("layout");
         assert_eq!(
             model.layout(a).vtable[4],
             Slot::FieldGetter { class: a, field: 0 }
         );
-        assert_eq!(model.slot(a, &SlotKey::Getter(a, "v".to_string())), Some(4));
+        assert_eq!(
+            model.slot(
+                a,
+                &SlotKey::Getter(ResolvedPropertyOverrideTarget::Module(property))
+            ),
+            Some(4)
+        );
     }
 
     #[test]
