@@ -39,6 +39,8 @@ pub(super) enum ElementSerializerPlan {
         serial_info_unsupported: bool,
     },
     LocalSingleton(ClassId),
+    /// An enum that is not `@Serializable`: its serializer is built at the use site.
+    PlainEnum(super::enum_serializer::PlainEnumSerializer),
     ExternalSingleton(TypeName),
     /// A class type parameter's serializer, which the generic `$serializer` holds in `field`.
     TypeParameter {
@@ -323,6 +325,11 @@ pub(super) fn element_serializer_plan_in(
             classifier: fq_name,
             arguments: Vec::new(),
         });
+    }
+    // An enum that is NOT `@Serializable` has no accessor to read: kotlinc builds its serializer
+    // here, with the same runtime factory a `@Serializable` enum's accessor calls.
+    if let Some(plain) = super::enum_serializer::local_plain_enum_serializer(ir, ctx, fq_name) {
+        return Some(ElementSerializerPlan::PlainEnum(plain));
     }
     // A constructed standard type (`List<T>`, `Pair<A, B>`, `Map.Entry<K, V>`, …) serializes
     // through the runtime serializer selected for its classifier. Its operands come from every
@@ -678,6 +685,9 @@ fn emit_element_serializer(ir: &mut IrFile, plan: ElementSerializerPlan) -> Expr
             ty: class,
             field: "INSTANCE",
         }),
+        ElementSerializerPlan::PlainEnum(plain) => {
+            super::enum_serializer::emit_plain_enum_serializer(ir, plain)
+        }
         ElementSerializerPlan::ExternalSingleton(serializer) => {
             ir.add_expr(IrExpr::ExternalStaticInstance {
                 owner: serializer,

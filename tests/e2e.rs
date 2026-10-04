@@ -2085,6 +2085,8 @@ mod serialization_generated_debug_e2e;
 mod serialization_krusty_only_e2e;
 #[path = "serialization_object_serializer_e2e.rs"]
 mod serialization_object_serializer_e2e;
+#[path = "serialization_plain_enum_element_e2e.rs"]
+mod serialization_plain_enum_element_e2e;
 #[path = "serialization_roundtrip_e2e.rs"]
 mod serialization_roundtrip_e2e;
 #[path = "common/serialization.rs"]
