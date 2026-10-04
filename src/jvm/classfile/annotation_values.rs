@@ -156,6 +156,31 @@ impl ClassWriter {
         }
     }
 
+    /// Give the most recently added method, an annotation element, its declaration default.
+    pub fn set_last_method_annotation_default(&mut self, value: &crate::ir::AnnoValue) {
+        let mut encoded = Vec::new();
+        self.ev_value(&mut encoded, value);
+        if let Some(method) = self.methods.last_mut() {
+            method.annotation_default = Some(ElementDefault::Value(encoded));
+        }
+    }
+
+    /// Record that a Java source header's annotation element declares a default the header parser
+    /// does not evaluate.
+    pub(crate) fn mark_unevaluated_annotation_default(&mut self, name: &str, desc: &str) {
+        let (Some(name), Some(desc)) = (self.cp.lookup_utf8(name), self.cp.lookup_utf8(desc))
+        else {
+            return;
+        };
+        if let Some(method) = self
+            .methods
+            .iter_mut()
+            .find(|method| method.name == name && method.desc == desc)
+        {
+            method.annotation_default = Some(ElementDefault::Unevaluated);
+        }
+    }
+
     /// Encode an `annotation` structure: the type descriptor index + its `element_value_pairs`.
     pub(super) fn ev_annotation(&mut self, out: &mut Vec<u8>, a: &crate::ir::AppliedAnnotation) {
         let ti = self.record_annotation_class(a.internal);
@@ -295,6 +320,31 @@ fn distinct_annotation_writers_keep_only_writer_local_text() {
         } else {
             drop(right);
             drop(left);
+        }
+    }
+}
+
+/// The default an annotation element method declares, as the attribute that records it.
+pub(super) enum ElementDefault {
+    /// The encoded `element_value` of a JVMS `AnnotationDefault` attribute.
+    Value(Vec<u8>),
+    /// A Java source header's default with no evaluated value: an empty attribute that says only
+    /// that the element may be omitted.
+    Unevaluated,
+}
+
+impl ElementDefault {
+    pub(super) fn attribute_name(&self) -> &'static str {
+        match self {
+            Self::Value(_) => "AnnotationDefault",
+            Self::Unevaluated => crate::jvm::classreader::UNEVALUATED_ANNOTATION_DEFAULT,
+        }
+    }
+
+    pub(super) fn bytes(&self) -> &[u8] {
+        match self {
+            Self::Value(bytes) => bytes,
+            Self::Unevaluated => &[],
         }
     }
 }

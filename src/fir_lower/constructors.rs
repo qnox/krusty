@@ -974,7 +974,7 @@ pub(super) fn finalize_constructor_field_indices(
 /// Recover the constant value of a checked constructor default after its explicit FIR conversions
 /// have been lowered. This does not evaluate source syntax: only a constant and the already-selected
 /// representation coercions around it are admissible.
-fn checked_default_constant(
+pub(super) fn checked_default_constant(
     ir: &IrFile,
     expression: u32,
     target: crate::types::Ty,

@@ -371,8 +371,11 @@ pub struct IrAnnotationConstruction {
     pub members: Vec<(String, Ty)>,
     /// Constructor defaults as lowered declarations, not evaluated call operands.
     pub defaults: Vec<Option<ExprId>>,
-    /// Lexical classifier containing this call. `None` means a top-level/file-facade scope.
-    pub enclosing_class: Option<TypeName>,
+    /// The lexical scopes this construction is evaluated in; `None` is the file facade. A written
+    /// construction has its own one. A construction inside an annotation declaration's default is
+    /// evaluated at every construction that omits that element, so it has theirs, and none when no
+    /// construction in this source uses that default.
+    pub scopes: Vec<Option<TypeName>>,
 }
 
 /// An IR expression node (a subset of Kotlin IR's `IrExpression` hierarchy). Operands reference
@@ -1807,6 +1810,9 @@ pub struct IrFile {
     /// keeps one generic construction node; a backend consumes this semantic annotation tag when it
     /// must realize annotation instances through a platform-specific implementation class.
     pub annotation_constructions: std::collections::HashMap<ExprId, IrAnnotationConstruction>,
+    /// Each annotation class this file declares → the closed declaration default of each element
+    /// that has one, by element name. A backend records them with the annotation's declaration.
+    pub annotation_element_defaults: std::collections::HashMap<TypeName, Vec<(String, AnnoValue)>>,
     /// Current class identity → semantic superclass-constructor parameter ordinals omitted by its
     /// primary delegation. Kept separate from `super_args` so common IR does not encode a target's
     /// mask/marker ABI.

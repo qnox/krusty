@@ -790,8 +790,9 @@ impl super::IrFile {
                 *member = ty(*member, names);
             }
             construction
-                .enclosing_class
+                .scopes
                 .iter_mut()
+                .flatten()
                 .for_each(|value| name(value, names));
         }
         for aliases in self.class_type_aliases.values_mut() {

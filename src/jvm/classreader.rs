@@ -7,6 +7,7 @@
 //! string table, which contains type-alias targets used by `classpath.rs` for type resolution.
 
 use crate::kt_string::KtString;
+use crate::libraries::AnnotationElementDefault;
 use crate::types::{TypeName, TypeNameList};
 
 pub const ACC_PUBLIC: u16 = 0x0001;
@@ -125,12 +126,16 @@ struct RawMember {
     attributes: MemberAttributes,
 }
 
+/// The attribute a Java source header stub writes on an annotation element whose `default` it
+/// does not evaluate. It carries no value: the element declares a default, and none is known.
+pub(crate) const UNEVALUATED_ANNOTATION_DEFAULT: &str = "krusty/UnevaluatedAnnotationDefault";
+
 #[derive(Default)]
 struct MemberAttributes {
     signature: Option<String>,
-    /// The method carries an `AnnotationDefault` attribute (JVMS 4.7.22) — it is an annotation
-    /// element with a default, so a use site may omit it.
-    has_annotation_default: bool,
+    /// The default an annotation element declares, which lets a use site omit it: the method's
+    /// `AnnotationDefault` value (JVMS 4.7.22), or a Java source header's unevaluated default.
+    annotation_default: Option<AnnotationElementDefault>,
     const_value: Option<ConstVal>,
     parameter_nullability: Vec<Option<JavaNullability>>,
     declaration_nullability: Option<JavaNullability>,
@@ -174,6 +179,8 @@ pub struct ClassInfo {
     /// constant names). Empty when none is declared.
     pub java_targets: Vec<String>,
     pub inner_classes: Vec<InnerClassRef>,
+    /// For an annotation type: the default each element declares, in method order.
+    pub annotation_element_defaults: Vec<(Box<str>, AnnotationElementDefault)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -848,7 +855,18 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
             nullability: member.attributes.declaration_nullability,
         })
         .collect();
-    let methods: Vec<MethodSig> = read_members(&mut r)?
+    let raw_methods = read_members(&mut r)?;
+    let annotation_element_defaults = raw_methods
+        .iter()
+        .filter_map(|member| {
+            member
+                .attributes
+                .annotation_default
+                .clone()
+                .map(|value| (Box::from(member.name.as_str()), value))
+        })
+        .collect();
+    let methods: Vec<MethodSig> = raw_methods
         .into_iter()
         .map(|member| MethodSig {
             access: member.access,
@@ -858,7 +876,7 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
             parameter_nullability: member.attributes.parameter_nullability,
             return_nullability: member.attributes.declaration_nullability,
             deprecated_hidden: member.attributes.deprecated_hidden,
-            has_annotation_default: member.attributes.has_annotation_default,
+            has_annotation_default: member.attributes.annotation_default.is_some(),
         })
         .collect();
 
@@ -890,6 +908,7 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
         kotlin_targets: attrs.kotlin_targets,
         java_targets: attrs.java_targets,
         inner_classes: attrs.inner_classes,
+        annotation_element_defaults,
     })
 }
 
@@ -1390,12 +1409,20 @@ fn read_member_attributes(r: &mut Reader, cp: &[C]) -> Result<MemberAttributes, 
                     &mut attributes.deprecated_hidden,
                 )?;
             }
-            // The default VALUE is not needed: kotlinc never materializes an omitted element into
-            // the use site's annotation, so only its PRESENCE (may this element be omitted?)
-            // matters here.
+            // An omitted element is never written into an applied annotation, but instantiating
+            // the annotation as a value (`Ann()`) evaluates the declaration default.
             Some(C::Utf8(s)) if s == "AnnotationDefault" => {
-                attributes.has_annotation_default = true;
+                let mut body = Reader {
+                    b: r.take(len)?,
+                    i: 0,
+                };
+                attributes.annotation_default = Some(AnnotationElementDefault::Evaluated(
+                    read_annotation_value(&mut body, cp)?,
+                ));
+            }
+            Some(C::Utf8(s)) if s == UNEVALUATED_ANNOTATION_DEFAULT => {
                 r.take(len)?;
+                attributes.annotation_default = Some(AnnotationElementDefault::Unevaluated);
             }
             _ => {
                 r.take(len)?;

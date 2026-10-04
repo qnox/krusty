@@ -5783,6 +5783,29 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   file's lowered default bodies, which replace the compact payload for that file. Tests:
   `tests/annotation_cross_file_defaults_e2e.rs`,
   `annotations/instances/annotationInstancesEmptyDefaultLowered.kt`.
+- **A dependency annotation's omitted elements take its classfile `AnnotationDefault` values.**
+  `Tree()` against a library `annotation class Tree(val leaf: Leaf = Leaf(), val kind: KClass<*> =
+  Leaf::class, …)` evaluates the declaration defaults, as kotlinc does. The classfile reader decodes
+  each element method's `AnnotationDefault`, and the resolver checks the value against the
+  element's declared type (an `Int` value for a `UInt` element, an enum or annotation of the
+  declared classifier, a class for `KClass`) before closing it into the same payload a module
+  annotation's defaults use. A nested annotation default lists only its explicit arguments; its
+  other members take that annotation's own declaration defaults. A value of another shape is no
+  default, so the omitted element stays unsupplied and lowering reports the incomplete
+  construction instead of guessing a value.
+  - krusty writes `AnnotationDefault` on every Kotlin annotation element method whose default is
+    a closed value, with kotlinc's encoding (a nested annotation default carries only its explicit
+    arguments), so a krusty-built library exposes its defaults to any consumer.
+  - A Java source header declares a default it does not evaluate. Its stub records that fact
+    (`AnnotationElementDefault::Unevaluated`) instead of a value: the element may be omitted where
+    the annotation is applied, but no value exists for a construction to take.
+  - A construction inside a default runs in the scope of every construction that omits that
+    element, transitively. Its implementation class is owned like any other construction's, by
+    the earliest emitted classifier among those scopes; a default no construction in this file
+    uses generates no implementation class (`Holder$annotationImpl$Leaf$0`, never
+    `Branch$annotationImpl$Leaf$0`).
+  Tests: `tests/annotation_instance_defaults_e2e.rs`; box corpus
+  `annotations/instances/{AnnotationInstantiationWithArray,multimoduleTypeParams}.kt`.
 - **A local class interns its `EnclosingMethod` refs before its `InnerClasses` rows.** kotlinc
   visits the `EnclosingMethod` refs before the `InnerClasses` rows, so the enclosing class and
   method come before the local class's own simple name in the pool. The serialized attribute order
