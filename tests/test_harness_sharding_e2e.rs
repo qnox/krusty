@@ -801,8 +801,8 @@ fn ci_runs_every_prebuilt_conformance_test_in_each_version_lane() {
         "each version lane caches its matching serialization corpus"
     );
     assert!(
-        workflow.contains("kotlin-conformance-all-${{ matrix.version }}-"),
-        "the expanded corpus cache must not reuse the immutable box-only key"
+        workflow.contains("kotlin-conformance-mock-jdk-${{ matrix.version }}-"),
+        "the corpus cache must not reuse an immutable key from before its mock JDK input"
     );
     assert!(
         workflow.contains("recorded-kotlinc-bytes-conformance-${{ matrix.version }}-"),
