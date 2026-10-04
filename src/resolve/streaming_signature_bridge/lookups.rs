@@ -895,7 +895,7 @@ impl ProductionSignatureSemantics<'_> {
     ) -> Option<crate::types::TypeName> {
         self.qualified_classifier(scope, spelling).or_else(|| {
             self.applied_source_alias_expansion(scope, spelling, &[])
-                .and_then(|(_, expansion)| expansion.non_null().obj_internal())
+                .and_then(|alias| alias.expansion.non_null().obj_internal())
         })
     }
 

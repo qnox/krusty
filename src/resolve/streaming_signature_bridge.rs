@@ -31,6 +31,7 @@ mod lookups;
 mod postponed_calls;
 mod qualified_calls;
 mod receiver_member_level;
+mod selected_call_facts;
 mod semantics;
 mod source_contracts;
 mod stable_function_index;
@@ -89,22 +90,15 @@ struct ProductionSignatureSemantics<'a> {
         RefCell<HashMap<crate::fir::DeclarationId, crate::symbol_resolver::GSigBinds>>,
     stable_functions: stable_function_index::StableFunctionIndex,
     diagnostics: RefCell<Vec<ProductionSignatureDiagnostic>>,
-    /// The contract of the callable selected for each top-level call, by call origin, so a
-    /// [`crate::fir::SigExpr::ContractNarrowed`] read can ask what the statement proved.
-    selected_call_contracts: RefCell<HashMap<crate::fir::OriginId, SelectedCallContract>>,
+    /// What each selected top-level call recorded, by call origin: its contract and the typealias
+    /// it constructed through.
+    selected_calls: selected_call_facts::SelectedCallFacts,
     /// Same-module source contracts bound before solving starts, by stable declaration, so a
     /// call of a source function with `returns() implies (x != null)` proves as much in a
     /// Pass-1 block as a library one. Publication into the index still happens at finalization.
     source_contracts:
         RefCell<HashMap<crate::fir::DeclarationId, std::sync::Arc<crate::contracts::Contract>>>,
     file_import_scopes: file_import_scopes::FileImportScopes,
-}
-
-struct SelectedCallContract {
-    contract: std::sync::Arc<crate::contracts::Contract>,
-    /// Selected declaration parameter for each argument in source order. The contract refers to
-    /// declaration parameters, while the compact graph retains source argument order.
-    parameter_by_argument: Box<[Option<u32>]>,
 }
 
 #[derive(Clone)]
@@ -4065,7 +4059,7 @@ pub(crate) fn finalized_streamed_signature_index(
         completed_scoped_constraints: RefCell::new(HashMap::new()),
         stable_functions: stable_function_index::StableFunctionIndex::default(),
         diagnostics: RefCell::new(Vec::new()),
-        selected_call_contracts: RefCell::new(HashMap::new()),
+        selected_calls: selected_call_facts::SelectedCallFacts::default(),
         source_contracts: RefCell::new(HashMap::new()),
         file_import_scopes: file_import_scopes::FileImportScopes::default(),
     };
@@ -4726,7 +4720,7 @@ pub(crate) fn finalized_streamed_signature_index(
         completed_scoped_constraints: RefCell::new(HashMap::new()),
         stable_functions: stable_function_index::StableFunctionIndex::default(),
         diagnostics: RefCell::new(Vec::new()),
-        selected_call_contracts: RefCell::new(HashMap::new()),
+        selected_calls: selected_call_facts::SelectedCallFacts::default(),
         source_contracts: RefCell::new(HashMap::new()),
         file_import_scopes: file_import_scopes::FileImportScopes::default(),
     };
