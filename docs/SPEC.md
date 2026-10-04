@@ -2308,9 +2308,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   context). `throw e` → `athrow` (`tests/try_catch_e2e.rs`). In VALUE position the branch types merge
   with the full `join` — `try { x } catch { null }` is `T?`, two different reference classes merge to
   `Any` (or `Any?` when either branch is nullable), and the same class with differing type arguments
-  erases to that class (`List<*>`) — but only
-  for REFERENCE branches (the emitter's untyped merge slot models no primitive widening/boxing, so a
-  primitive mismatch keeps the lenient statement merge, `Unit`)
+  erases to that class (`List<*>`) — whenever at least one branch is a reference: a primitive
+  beside `null` joins exactly as `if (c) s.length else null` does, so `try { s.length } catch (e:
+  Exception) { null }` is `Int?` (in a declared return, a local, or a lambda passed to
+  `map`/`mapNotNull`, suspending or not — `tests/try_primitive_nullable_join_e2e.rs`). Only two
+  disagreeing PRIMITIVE branches keep the lenient statement merge, `Unit` (the emitter's untyped
+  merge slot models no primitive widening)
   (`tests/try_catch_expr_nullable_merge_e2e.rs`, `tests/try_catch_expr_generic_merge_e2e.rs`). A `finally` block is inlined (like kotlinc)
   at each exit: the normal fall-through, the end of each catch, and a synthetic catch-all (any
   throwable) covering the body + catch handlers that runs the `finally` then re-throws. A `try` whose
