@@ -17,6 +17,9 @@ pub enum FirLoweringFailure {
     MalformedDestructureLowering {
         origin: OriginId,
     },
+    /// A `withIndex()` loop whose nested loop is not one a loop over the receiver is checked as,
+    /// or whose consumed destructuring is not a destructuring.
+    MalformedWithIndexLoop(FirStatementId),
     UnsupportedConversion {
         origin: OriginId,
     },

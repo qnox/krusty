@@ -8,7 +8,7 @@ impl BodyFirChecker<'_> {
     /// no source name.
     pub(super) fn loop_variable(&mut self, statement: StmtId, name: &str) -> LocalValueId {
         let variable = self.allocate_local();
-        if self.file.destructuring.loops.contains(&statement) {
+        if self.file.destructuring.loops.contains_key(&statement) {
             self.body.mark_destructuring_loop_container(variable);
         } else {
             self.body.set_debug_value_name(variable, name);

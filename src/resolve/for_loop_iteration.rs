@@ -165,6 +165,62 @@ impl Checker<'_> {
         Ok(Some(elem))
     }
 
+    /// What a `for (… in iterable)` loop may iterate through besides the iterable's own iterator:
+    /// the members of a progression, and the receiver of a destructured `withIndex()`.
+    pub(super) fn record_iteration_plans(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        statement: StmtId,
+        iterable: ExprId,
+    ) {
+        self.record_progression_plans();
+        self.record_with_index_iteration(scope, statement, iterable);
+    }
+
+    /// kotlinc's `WithIndexHandler` iterates the receiver of a `withIndex()` call whose
+    /// `IndexedValue` the loop destructures in its header. An `Iterable` or a `Sequence` receiver
+    /// is iterated through the `iterator()` of the class the declaration receives it as
+    /// (`DefaultIterableHandler`, `DefaultSequenceHandler`), selected here on that receiver type
+    /// and recorded for the receiver expression.
+    fn record_with_index_iteration(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        statement: StmtId,
+        iterable: ExprId,
+    ) {
+        if !self.file.destructuring.loops.contains_key(&statement) {
+            return;
+        }
+        let Some(super::ResolvedCall::Extension(call)) = self.resolved_calls.get(&iterable) else {
+            return;
+        };
+        if call.callable.compiler_intrinsic != Some(crate::libraries::CompilerIntrinsic::WithIndex)
+        {
+            return;
+        }
+        let receiver_ty = call.receiver;
+        let class = receiver_ty.obj_internal();
+        if class != Some(wk::iterable()) && class != Some(wk::sequence()) {
+            return;
+        }
+        let crate::ast::Expr::Call { callee, .. } = self.file.expr(iterable) else {
+            return;
+        };
+        let crate::ast::Expr::Member { receiver, .. } = self.file.expr(*callee) else {
+            return;
+        };
+        let receiver = *receiver;
+        crate::trace_compiler!(
+            "resolve",
+            "withIndex loop receiver {receiver:?} iterated as {receiver_ty:?}",
+        );
+        if let Ok(Some(target)) =
+            self.iterator_protocol_target(scope, None, receiver_ty, self.span(receiver), false)
+        {
+            self.iterator_protocols.insert(receiver, target);
+        }
+    }
+
     /// Select the member plan of every well-known progression class, once per checked file. A
     /// counted loop may read any of them: its iterable's own class, a class `step`/`reversed` is
     /// applied to, or the most precise class of a `val` it reads, whatever type the iterable

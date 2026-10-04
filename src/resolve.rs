@@ -25320,7 +25320,7 @@ impl<'a> Checker<'a> {
         label: Option<String>,
     ) {
         let it = self.expr(scope, iterable);
-        self.record_progression_plans();
+        self.record_iteration_plans(scope, statement, iterable);
         // Java collection accessors yield flexible platform types (`Set<E>!`). A `for` loop is a
         // value-consuming operation, so it selects the non-null lower bound exactly as a member call
         // would; source `Set<E>?` remains nullable and is still rejected.

@@ -71,6 +71,7 @@ mod type_operations;
 mod when_expressions;
 #[cfg(test)]
 mod when_result_type_tests;
+mod with_index_loops;
 
 pub use error::*;
 pub use sink::*;

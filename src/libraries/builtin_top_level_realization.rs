@@ -273,6 +273,31 @@ fn collection_or_text(facts: &BuiltinFunctionDeclaration<'_>) -> Option<Compiler
     }
 }
 
+/// kotlinc's `WithIndexHandler.matchIterable`: `kotlin.collections.withIndex` over an array or an
+/// `Iterable`, `kotlin.text.withIndex` over a `CharSequence`, and `kotlin.sequences.withIndex` over
+/// a `Sequence`.
+fn with_index(facts: &BuiltinFunctionDeclaration<'_>) -> Option<CompilerIntrinsic> {
+    if facts.name != crate::types::wk::WITH_INDEX
+        || !plain(facts, FnKind::Extension)
+        || !facts.params.is_empty()
+        || facts.vararg.is_some()
+        || facts.is_operator
+    {
+        return None;
+    }
+    let receiver = facts.receiver?;
+    let class = receiver.obj_internal();
+    let matches = if facts.package == crate::types::wk::kotlin_collections_package() {
+        receiver.is_array() || class == Some(crate::types::wk::iterable())
+    } else if facts.package == crate::types::wk::kotlin_text_package() {
+        class == Some(crate::types::wk::char_sequence())
+    } else {
+        facts.package == crate::types::wk::kotlin_sequences_package()
+            && class == Some(crate::types::wk::sequence())
+    };
+    matches.then_some(CompilerIntrinsic::WithIndex)
+}
+
 fn kotlin_test(facts: &BuiltinFunctionDeclaration<'_>) -> Option<CompilerIntrinsic> {
     if !facts.package.matches("kotlin/test")
         || !plain(facts, FnKind::TopLevel)
@@ -458,7 +483,9 @@ pub(crate) fn runtime_function_declaration(
 pub(crate) fn function_realization(
     facts: BuiltinFunctionDeclaration<'_>,
 ) -> Option<CompilerIntrinsic> {
-    if facts.package.matches("kotlin") {
+    if let Some(intrinsic) = with_index(&facts) {
+        Some(intrinsic)
+    } else if facts.package.matches("kotlin") {
         kotlin_function(&facts)
     } else if facts.package.matches("kotlin/io") {
         console(&facts)

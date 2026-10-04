@@ -1933,6 +1933,7 @@ mod value_rebasing_tests {
             unsigned_compare: None,
             body: 2,
             label: "loop".to_string(),
+            with_index: None,
         });
 
         assert_eq!(value_indices(&expression), vec![4]);

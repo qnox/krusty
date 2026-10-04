@@ -24,6 +24,8 @@ pub use ranges::{
     FirProgressionClass, FirProgressionSource, FirRangeComparisonProvenance, FirRangeCounterKind,
     FirRangeOperation, FirRuntimeFunction,
 };
+mod with_index;
+pub use with_index::{FirIndexedValueComponent, FirWithIndexLoop};
 mod property_access;
 pub use property_access::{
     FirClassifierProperty, FirInlineAccessorSplice, FirInlineTypeSubstitution, FirPropertyDispatch,
@@ -1607,6 +1609,7 @@ pub enum FirLoopHeader {
         has_next: Box<FirIteratorCall>,
         next: Box<FirIteratorCall>,
     },
+    WithIndex(Box<FirWithIndexLoop>),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

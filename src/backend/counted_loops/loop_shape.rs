@@ -17,6 +17,7 @@ impl Realizer<'_> {
             source,
             body,
             label,
+            with_index,
         } = lp;
         let header = self.progression_header(&source, ty);
         let first_constant = constant_value(self.ir, header.first.value);
@@ -24,13 +25,20 @@ impl Realizer<'_> {
         let java_like = self.style == CounterLoopStyle::JavaLike && !header.last_is_inclusive;
         // The guarded do-while steps the induction variable before the body, so the loop variable is
         // a copy of it. The other shapes step after the body and use the induction variable as the
-        // loop variable, except over unsigned elements, whose loop variable kotlinc always copies.
+        // loop variable, except over unsigned elements and the element of a `withIndex()` loop,
+        // which kotlinc always copies.
         let steps_first = self.style == CounterLoopStyle::JavaLike && !can_overflow && !java_like;
-        let separate_loop_variable = steps_first || is_unsigned(ty);
+        let separate_loop_variable = steps_first || is_unsigned(ty) || with_index.is_some();
+        let index = with_index
+            .as_ref()
+            .map(|with_index| self.loop_index(with_index, &header, ty, first_constant));
         let mut statements = header.prelude.clone();
         let first = self.element_value(header.first.value, ty);
         let (induction, induction_declaration) = if separate_loop_variable {
-            let slot = self.allocate_temporary();
+            let slot = match &index {
+                Some(index) if index.is_counter => index.slot,
+                _ => self.allocate_temporary(),
+            };
             let declaration = self.add(IrExpr::Variable {
                 index: slot,
                 ty,
@@ -62,27 +70,39 @@ impl Realizer<'_> {
             statements.extend(last_statements);
         }
         let (_, step) = self.loop_temporary(header.step, header.step_ty, &mut statements);
+        if let Some(index) = &index {
+            statements.extend(index.declaration);
+        }
         let variables = LoopVariables {
             induction,
             last,
             step,
         };
         let increment = self.increment_induction_variable(&variables, ty);
-        // `val loopVariable = inductionVar` opening the body, when the two are apart.
-        let (loop_variable, loop_variable_declaration) = if separate_loop_variable {
-            let current = self.add(IrExpr::GetValue(induction));
-            let declaration =
-                self.loop_variable_declaration(variable, variable_name.as_deref(), ty, current);
-            (variable, Some(declaration))
-        } else {
-            (induction, None)
+        // `val loopVariable = inductionVar` opening the body, when the two are apart, after what a
+        // `withIndex()` loop binds from its index.
+        let (loop_variable, iteration) = match index {
+            Some(index) => self.with_index_iteration(
+                index,
+                induction,
+                (variable, variable_name.as_deref()),
+                ty,
+                can_overflow,
+            ),
+            None if separate_loop_variable => {
+                let current = self.add(IrExpr::GetValue(induction));
+                let declaration =
+                    self.loop_variable_declaration(variable, variable_name.as_deref(), ty, current);
+                (variable, vec![declaration])
+            }
+            None => (induction, Vec::new()),
         };
-        let body = match loop_variable_declaration {
-            Some(declaration) if !steps_first => self.add(IrExpr::Block {
-                stmts: vec![declaration, body],
-                value: None,
-            }),
-            _ => body,
+        let body = if steps_first || iteration.is_empty() {
+            body
+        } else {
+            let mut stmts = iteration.clone();
+            stmts.push(body);
+            self.add(IrExpr::Block { stmts, value: None })
         };
         let loop_expression = if can_overflow {
             // The induction variable can overflow past an inclusive bound, so the loop leaves by
@@ -135,7 +155,7 @@ impl Realizer<'_> {
             })
         } else {
             // `val loopVariable = inductionVar; inductionVar += step; body` while the bound holds.
-            let mut stmts: Vec<ExprId> = loop_variable_declaration.into_iter().collect();
+            let mut stmts = iteration;
             stmts.extend([increment, body]);
             let body = self.add(IrExpr::Block { stmts, value: None });
             let condition = header.condition(self, &variables);
