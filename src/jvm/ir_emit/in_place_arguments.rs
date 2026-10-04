@@ -19,7 +19,10 @@ fn evaluates_without_local_writes(ir: &IrFile, expression: u32) -> bool {
         | IrExpr::GetStatic(_)
         | IrExpr::ExternalStaticField { .. }
         | IrExpr::ExternalStaticInstance { .. }
-        | IrExpr::EnclosingInstance { .. } => true,
+        | IrExpr::EnclosingInstance { .. }
+        | IrExpr::UnitInstance => true,
+        // `new; dup; <arguments>; invokespecial`: a direct construction stores nothing either.
+        IrExpr::New { args, defaults, .. } if defaults.is_empty() => arguments_movable(ir, args),
         IrExpr::TypeOp {
             op: IrTypeOp::Cast | IrTypeOp::ImplicitCoercion,
             arg,

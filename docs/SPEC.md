@@ -766,6 +766,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   block do not decline the transformer: the block is one point at its own line. Suspend lambdas
   that read their continuation still take the IR machine (`jvm/suspend/bytecode_machine.rs`,
   `jvm/ir_emit/transformed_suspensions.rs`). Tests: `tests/intrinsic_suspension_probes_e2e.rs`.
+- **An `@InlineOnly` call's last operands are read in place.** kotlinc's
+  `InplaceArgumentsMethodTransformer` moves each argument of an `@InlineOnly` callee that passes
+  `canInlineArgumentsInPlace` to where the body loads it. Common lowering keeps a dependency
+  inline call's operands in locals only where the splice needs them: a root operand used once
+  that is a plain read or constant, or the trailing run of such operands whatever their values
+  (unless one suspends), is passed directly, which keeps the source evaluation order. The JVM
+  splice then reads a constructor call or `Unit` in place too, so `x.resume(P("OK"))` stores no
+  local (`fir_lower/source_calls.rs`, `jvm/ir_emit/in_place_arguments.rs`). Tests:
+  `tests/inline_arguments_in_place_e2e.rs`.
 - **A private suspend member's `access$` bridge is the one every other class uses.** A
   continuation re-enters a private member with an ordinary call from its own class, so the owner's
   single `access$<name>` bridge serves both it and a suspend lambda class calling the member.

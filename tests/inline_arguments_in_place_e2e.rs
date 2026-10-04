@@ -9,7 +9,11 @@ use super::common;
 use super::common::{compare_with_kotlinc_plugin, method_instructions};
 use super::temporary_elimination_e2e::stack_map;
 
-const SOURCE: &str = "fun larger(first: Int, second: Int): Int = maxOf(first, second)\n\
+const SOURCE: &str = "import kotlin.coroutines.*\n\
+    class Holder(val text: String)\n\
+    fun resumeBuilt(target: Continuation<Holder>) { target.resume(Holder(\"OK\")) }\n\
+    fun resumeUnit(target: Continuation<Unit>) { target.resume(Unit) }\n\
+    fun larger(first: Int, second: Int): Int = maxOf(first, second)\n\
     fun smaller(first: Long, second: Long): Long = minOf(first, second)\n\
     fun remember(table: MutableMap<String, String>, key: String) { table[key] = key }\n\
     fun checked(ready: Boolean, count: Int): Int { require(ready); return count }\n\
@@ -43,6 +47,8 @@ fn inline_only_arguments_are_read_where_the_body_loads_them_like_kotlinc() {
         "long smaller(",
         "void remember(",
         "int invokeStored(",
+        "void resumeBuilt(",
+        "void resumeUnit(",
     ] {
         let reference = method_instructions(&built.reference, member);
         assert!(!reference.is_empty(), "{member} not found");
