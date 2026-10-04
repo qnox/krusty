@@ -417,8 +417,7 @@ fn an_inlined_suspend_lambda_capture_is_initialized() {
 /// body when deciding captures, or the object loses its outer instance while the member reads it.
 #[test]
 fn lazy_delegate_object_keeps_outer_instance_for_inferred_member() {
-    run_ok(
-        "AnonLazyDelegateOuter",
+    common::expect_box_same_as_kotlinc(
         "abstract class Source { abstract fun read(): String }\n\
          class Holder(private val value: String) {\n\
              private val source: Source by lazy {\n\
@@ -429,5 +428,6 @@ fn lazy_delegate_object_keeps_outer_instance_for_inferred_member() {
              fun get() = source.read()\n\
          }\n\
          fun box(): String = Holder(\"OK\").get()\n",
+        "AnonLazyDelegateOuter",
     );
 }
