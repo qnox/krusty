@@ -14,8 +14,6 @@ fn reflect_jar() -> std::path::PathBuf {
 #[test]
 fn an_unbound_inherited_member_reference_substitutes_through_the_referenced_classifier() {
     let source = r#"
-        package test
-
         interface H<T> {
             fun foo(): T?
         }
@@ -24,7 +22,7 @@ fn an_unbound_inherited_member_reference_substitutes_through_the_referenced_clas
 
         fun box(): String {
             val onSubtype = A::foo.returnType.toString()
-            if (onSubtype != "test.A?") return onSubtype
+            if (onSubtype != "A?") return onSubtype
             val onDeclaration = H<A>::foo.returnType.toString()
             if (onDeclaration != "T?") return onDeclaration
             return "OK"
