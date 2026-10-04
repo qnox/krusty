@@ -317,6 +317,43 @@ fn a_null_capable_reference_carrier_completes_without_a_box() {
     common::expect_box_ok_with_stdlib(RESULT_CARRIER, "SuspendValueClassResults");
 }
 
+/// A state-machine merge stores the value-class box on both its synchronous and resumed edges.
+/// The already-lowered property access consumes that representation exactly once, including when
+/// the selected suspend member is private and emission routes the call through an access bridge.
+#[test]
+fn a_resumed_null_capable_carrier_is_unboxed_once() {
+    const SOURCE: &str = r#"
+import kotlin.coroutines.*
+import kotlin.coroutines.intrinsics.*
+
+@JvmInline value class Opaque(val value: Any?)
+
+var parked: Continuation<Any?>? = null
+
+suspend fun <T> park(): T = suspendCoroutineUninterceptedOrReturn {
+    @Suppress("UNCHECKED_CAST")
+    parked = it as Continuation<Any?>
+    COROUTINE_SUSPENDED
+}
+
+class Holder {
+    private suspend fun value(): Opaque = Opaque(park<String>())
+    fun operation(): suspend () -> Opaque = { value() }
+}
+
+fun box(): String {
+    var result = "fail"
+    suspend { result = Holder().operation()().value as String }.startCoroutine(
+        Continuation(EmptyCoroutineContext) { it.getOrThrow() }
+    )
+    parked?.resume("OK")
+    return result
+}
+"#;
+
+    common::expect_box_ok_with_stdlib(SOURCE, "ResumedNullCapableCarrier");
+}
+
 /// A value class resumed into a caller of `$default` unboxes it, and a suspend lambda hands its
 /// value-class result over boxed, as every lambda does, so its continuation does not box it again.
 #[test]

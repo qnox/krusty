@@ -70,7 +70,7 @@ pub(crate) use specialized_lambda_classes::SpecializedLambdaClasses;
 mod suspend_lambda;
 mod tail_forward;
 mod value_class_results;
-use value_class_results::{boxed_carrier, boxed_on_resume, resumed_carrier};
+use value_class_results::{boxed_carrier, boxed_on_resume};
 mod value_liveness;
 mod value_try;
 
@@ -2637,21 +2637,24 @@ impl Flat<'_> {
         // `kotlin.Unit` singleton here, never a JVM `void` result. Record the stored physical type
         // on the resume local so later checked coercions consume the existing operand instead of
         // materializing a second singleton and leaving the first one on the stack.
+        // A carrier-returning callee uses the carrier only on the synchronous invocation edge.
+        // `split_at_point` boxes that edge before storing it in `cont.result`, while the resumed
+        // edge already receives the box from the callee's continuation. Keep that common box in
+        // the merge local: value-class lowering has already installed the one representation
+        // wrapper that consumes it. Unboxing here as well makes a property/member use unbox twice.
         let physical_ty = realization.map_or_else(
             || crate::types::stored_value_ty(*ty),
-            crate::ir::IrValueClassSuspendResult::boundary_ty,
+            |realization| match realization {
+                crate::ir::IrValueClassSuspendResult::Boxed { classifier, .. }
+                | crate::ir::IrValueClassSuspendResult::Carrier { classifier, .. } => {
+                    Ty::obj_name(classifier)
+                }
+            },
         );
         let unb = match realization {
-            Some(crate::ir::IrValueClassSuspendResult::Boxed { classifier, .. }) => {
+            Some(crate::ir::IrValueClassSuspendResult::Boxed { classifier, .. })
+            | Some(crate::ir::IrValueClassSuspendResult::Carrier { classifier, .. }) => {
                 unbox(self.ir, rg, &Ty::obj_name(classifier))
-            }
-            Some(crate::ir::IrValueClassSuspendResult::Carrier { carrier, .. }) => {
-                match boxed_on_resume(self.ir, call, self.suspend) {
-                    Some((classifier, carrier)) => {
-                        resumed_carrier(self.ir, rg, classifier, carrier)
-                    }
-                    None => unbox(self.ir, rg, &carrier),
-                }
             }
             None => unbox(self.ir, rg, ty),
         };

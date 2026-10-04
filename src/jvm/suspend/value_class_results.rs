@@ -38,51 +38,6 @@ pub(super) fn boxed_on_resume(
     ))
 }
 
-/// The carrier of the boxed value `resumed` reads: `checkcast X; unbox-impl`, with the `null` of a
-/// nullable carrier passing through, since `unbox-impl` is an instance call.
-pub(super) fn resumed_carrier(
-    ir: &mut IrFile,
-    resumed: ExprId,
-    classifier: TypeName,
-    carrier: Ty,
-) -> ExprId {
-    let physical = crate::jvm::physical_type::ir_ty_to_jvm(&carrier);
-    let descriptor = format!(
-        "(){}",
-        crate::jvm::names::type_descriptor(physical.non_null())
-    );
-    let boxed = ir.add_expr(IrExpr::TypeOp {
-        op: IrTypeOp::Cast,
-        arg: resumed,
-        type_operand: Ty::nullable(Ty::obj_name(classifier)),
-    });
-    let unboxed = ir.add_expr(IrExpr::Call {
-        callee: Callee::realized_virtual(
-            classifier,
-            "unbox-impl".to_string(),
-            descriptor,
-            None,
-            false,
-        ),
-        dispatch_receiver: Some(boxed),
-        args: Vec::new(),
-    });
-    if !carrier.is_nullable() {
-        return unboxed;
-    }
-    let tested = ir.add_expr(ir.exprs[resumed as usize].clone());
-    let null = ir.add_expr(IrExpr::Const(IrConst::Null));
-    let is_null = ir.add_expr(IrExpr::PrimitiveBinOp {
-        op: IrBinOp::Eq,
-        lhs: tested,
-        rhs: null,
-    });
-    let passed = ir.add_expr(IrExpr::Const(IrConst::Null));
-    ir.add_expr(IrExpr::When {
-        branches: vec![(Some(is_null), passed), (None, unboxed)],
-    })
-}
-
 /// The box of the carrier `value` holds: `X.box-impl`, with the `null` of a nullable carrier
 /// passing through, since `box-impl` rejects it.
 pub(super) fn boxed_carrier(
