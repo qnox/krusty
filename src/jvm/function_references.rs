@@ -46,6 +46,32 @@ fn reflection_descriptor_ty(ty: Ty) -> Ty {
     }
 }
 
+/// Reflection names the method the declaration was compiled as. A use-site specialization of
+/// that declaration (`::foo` typed `KFunction1<Int, Int>`) belongs to the adapter, not to this
+/// descriptor: the generic method is still `foo(Ljava/lang/Object;)Ljava/lang/Object;`.
+///
+/// A companion-associated extension's receiver names the classifier whose static scope it joins.
+/// It is not a parameter of the method kotlin-reflect looks up.
+fn module_declaration_reflection(declaration: &crate::ir::IrModuleCallable) -> (Vec<Ty>, Ty) {
+    let companion = declaration
+        .flags
+        .has(crate::fir::DeclarationFlags::COMPANION);
+    let parameters = if companion
+        && declaration.parameters.len() == declaration.parameter_identities.len()
+    {
+        declaration
+            .parameters
+            .iter()
+            .zip(declaration.parameter_identities.iter())
+            .filter(|(_, identity)| identity.role != crate::ir::IrParameterRole::ExtensionReceiver)
+            .map(|(parameter, _)| *parameter)
+            .collect()
+    } else {
+        declaration.parameters.to_vec()
+    };
+    (parameters, declaration.result)
+}
+
 /// The class a callable reference at `expression` compiles to: the name the source file's
 /// local-class naming walk gives it. A reference that walk never saw (one lowering synthesized, or
 /// a second copy an inline splice made) keeps an internal name.
@@ -206,6 +232,7 @@ fn realize_adapter_reference(
             .map(|index| format!("$captured${index}"))
             .collect()
     });
+    let mut module_reflection = None;
     let reflected = match reference.target {
         crate::ir::IrCallableReferenceTarget::Module(_) => crate::ir::ReflectedCallable::Source,
         crate::ir::IrCallableReferenceTarget::Local { function, .. } => {
@@ -267,6 +294,7 @@ fn realize_adapter_reference(
                     true,
                 ),
             };
+            module_reflection = Some(module_declaration_reflection(declaration));
             (owner, declaration.name.to_string(), top_level, None)
         }
         crate::ir::IrCallableReferenceTarget::Constructor { classifier } => {
@@ -338,17 +366,21 @@ fn realize_adapter_reference(
         invoke_result = Ty::obj("kotlin/Any");
         target_result = Ty::obj("kotlin/Any");
     }
-    let (mut reflection_parameters, mut reflection_result) = match lifted {
-        Some(lifted) => lifted,
-        None => (
+    let (mut reflection_parameters, mut reflection_result) = if let Some(lifted) = lifted {
+        lifted
+    } else if let Some(declared) = module_reflection {
+        // The published declaration signature, not the use-site specialization stored on the
+        // reference. A local function is reflected by the signature it was lifted to instead.
+        declared
+    } else {
+        (
             reference.declaration_parameters.into_vec(),
             reference.declaration_result,
-        ),
+        )
     };
-    // Common IR retains the selected declaration's use-site captures for reflection identity. A
-    // top-level projection is not a JVM value type, however: the carrier's physical reflection
-    // descriptor uses the capture's exact readable upper bound. This is representation lowering
-    // of an already-selected declaration, not another resolution or a descriptor fallback.
+    // A projection left in that signature is not a JVM value type: the carrier's physical
+    // reflection descriptor uses its readable upper bound. This is representation of an
+    // already-selected declaration, not another resolution or a descriptor fallback.
     reflection_parameters = reflection_parameters
         .into_iter()
         .map(reflection_descriptor_ty)

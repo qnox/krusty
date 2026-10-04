@@ -188,6 +188,8 @@ mod callable_ref_e2e;
 mod callable_ref_equality_e2e;
 #[path = "callable_ref_extension_e2e.rs"]
 mod callable_ref_extension_e2e;
+#[path = "callable_ref_generic_signature_e2e.rs"]
+mod callable_ref_generic_signature_e2e;
 #[path = "callable_ref_to_inferred_member_e2e.rs"]
 mod callable_ref_to_inferred_member_e2e;
 #[path = "callable_ref_unresolved_e2e.rs"]
