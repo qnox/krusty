@@ -20,6 +20,7 @@ mod catalog_availability;
 mod class_locations;
 pub mod content_snapshot;
 mod ct_sym_index;
+mod external_identities;
 mod jimage_catalog;
 mod jimage_locations;
 use builtin_signatures::{
@@ -42,6 +43,7 @@ pub(crate) use crate::libraries::{
 pub use call_metadata::MetadataCallFacts;
 
 use self::ct_sym_index::cached_ct_sym_index;
+use self::external_identities::{ExternalCallableKey, ExternalPropertyKey};
 use self::jimage_catalog::{cached_jimage_index, JimageIndex};
 use self::metadata_indexes::{
     build_entry_ext, build_entry_package_types, build_entry_types, ClassMetadataLoadError,
@@ -1475,23 +1477,6 @@ const ALIAS_PACKAGE_CAP: usize = 1024;
 const GLOBAL_ALIAS_PACKAGE_CAP: usize = 8192;
 const SYMBOLS_CAP: usize = 65536;
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-struct ExternalPropertyKey {
-    getter: crate::fir::ExternalCallableId,
-    setter: Option<crate::fir::ExternalCallableId>,
-}
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct ExternalCallableKey {
-    owner: TypeName,
-    name: String,
-    descriptor: String,
-    physical_params: Vec<Ty>,
-    physical_ret: Ty,
-    default_call: bool,
-    kind: ExternalCallableKind,
-}
-
 /// One lexical layer of in-memory declaration classes. A mixed-source compilation pushes its Java
 /// header classes above any request-local dependency overlay and restores the previous entries when
 /// the source-module provider is dropped. This keeps a reused classpath from leaking declarations
@@ -1879,189 +1864,6 @@ impl Classpath {
     /// (see the `id` field). Unlike an `Rc<Classpath>` pointer, this never aliases a freed classpath.
     pub fn id(&self) -> u64 {
         self.id
-    }
-
-    /// Intern one provider-normalized callable and return the stable identity passed through FIR.
-    /// The key is the exact physical declaration, never a source lookup key.
-    pub(crate) fn intern_external_callable(
-        &self,
-        callable: &LibraryCallable,
-        kind: ExternalCallableKind,
-    ) -> crate::fir::ExternalCallableId {
-        let key = ExternalCallableKey {
-            owner: callable.owner,
-            name: callable.physical_name().to_string(),
-            descriptor: callable.descriptor.clone(),
-            physical_params: callable.physical_params.clone(),
-            physical_ret: callable.physical_ret,
-            default_call: callable.default_call,
-            kind,
-        };
-        let existing = self.external_callable_ids.borrow().get(&key).copied();
-        if let Some(identity) = existing {
-            // The same physical declaration can first be interned through a raw class member and
-            // later encountered through a richer Kotlin declaration view. Converge that stable
-            // identity here too: callers do not necessarily carry `external_identity`, so the
-            // explicit enrichment path in `JvmLibraries` is not sufficient on its own.
-            self.enrich_external_callable(identity, callable);
-            return identity;
-        }
-        let mut callables = self.external_callables.borrow_mut();
-        let identity = crate::fir::ExternalCallableId::from_raw(
-            u32::try_from(callables.len())
-                .expect("too many external callable declarations for packed FIR identity"),
-        );
-        let mut stored = callable.clone();
-        stored.external_identity = Some(identity);
-        callables.push(ExternalCallableRealization {
-            callable: stored,
-            kind,
-            parameter_identities: Box::new([]),
-        });
-        self.external_callable_ids
-            .borrow_mut()
-            .insert(key, identity);
-        identity
-    }
-
-    pub(crate) fn external_callable(
-        &self,
-        identity: crate::fir::ExternalCallableId,
-    ) -> Option<ExternalCallableRealization> {
-        self.external_callables
-            .borrow()
-            .get(identity.raw() as usize)
-            .cloned()
-    }
-
-    /// Intern the semantic property declaration represented by a provider's accessor pair. The
-    /// pair remains JVM-owned; callers outside this module receive only the opaque property id.
-    pub(crate) fn intern_external_property(
-        &self,
-        name: &str,
-        getter: crate::fir::ExternalCallableId,
-        setter: Option<crate::fir::ExternalCallableId>,
-        compile_time_constant: Option<crate::libraries::LibraryConst>,
-    ) -> crate::fir::ExternalPropertyId {
-        let key = ExternalPropertyKey { getter, setter };
-        if let Some(identity) = self.external_property_ids.borrow().get(&key).copied() {
-            return identity;
-        }
-        let declares_value_class_storage = self.getter_declares_value_class_storage(getter);
-        let mut properties = self.external_properties.borrow_mut();
-        let identity = crate::fir::ExternalPropertyId::from_raw(
-            u32::try_from(properties.len())
-                .expect("too many external property declarations for packed FIR identity"),
-        );
-        properties.push(ExternalPropertyRealization {
-            name: name.to_string(),
-            getter,
-            setter,
-            declares_value_class_storage,
-            compile_time_constant,
-        });
-        self.external_property_ids
-            .borrow_mut()
-            .insert(key, identity);
-        identity
-    }
-
-    pub(crate) fn external_property(
-        &self,
-        identity: crate::fir::ExternalPropertyId,
-    ) -> Option<ExternalPropertyRealization> {
-        self.external_properties
-            .borrow()
-            .get(identity.raw() as usize)
-            .cloned()
-    }
-
-    /// Publish declaration facets discovered after an exact external identity was first interned.
-    /// Classifier construction and spelling-indexed callable construction are intentionally lazy and
-    /// can encounter the same physical method in either order. The identity must therefore converge
-    /// on the complete provider realization instead of permanently retaining the first partial view.
-    pub(crate) fn enrich_external_callable(
-        &self,
-        identity: crate::fir::ExternalCallableId,
-        callable: &LibraryCallable,
-    ) {
-        let mut callables = self.external_callables.borrow_mut();
-        let Some(stored) = callables.get_mut(identity.raw() as usize) else {
-            return;
-        };
-        if stored.callable.default_realization.is_none() {
-            stored.callable.default_realization = callable.default_realization.clone();
-        }
-        if stored.callable.nonvirtual_realization.is_none() {
-            stored.callable.nonvirtual_realization = callable.nonvirtual_realization.clone();
-        }
-        if callable
-            .overridden_call_realizations
-            .iter()
-            .any(|candidate| {
-                !stored
-                    .callable
-                    .overridden_call_realizations
-                    .contains(candidate)
-            })
-        {
-            let mut candidates = stored.callable.overridden_call_realizations.to_vec();
-            let additions = callable
-                .overridden_call_realizations
-                .iter()
-                .filter(|candidate| !candidates.contains(candidate))
-                .cloned()
-                .collect::<Vec<_>>();
-            candidates.extend(additions);
-            stored.callable.overridden_call_realizations = candidates.into_boxed_slice();
-        }
-        if !stored.callable.inline.can_inline() && callable.inline.can_inline() {
-            stored.callable.inline = callable.inline;
-        }
-        if stored.callable.inline_body_plan.is_none() {
-            stored.callable.inline_body_plan = callable.inline_body_plan.clone();
-        }
-        if stored.callable.declared_ret.is_none() {
-            stored.callable.declared_ret = callable.declared_ret;
-        }
-        if stored.callable.declared_params.is_none() {
-            stored.callable.declared_params = callable.declared_params.clone();
-        }
-        if stored.callable.inline_modifiers.is_empty() && !callable.inline_modifiers.is_empty() {
-            stored.callable.inline_modifiers = callable.inline_modifiers.clone();
-        }
-        // Spelling-indexed construction can intern the physical method before classifier
-        // publication copies the declaration's visibility. Public is the incomplete default;
-        // a later protected, private, or package-private view of the same method is the
-        // declaration.
-        if stored.callable.visibility == crate::types::Visibility::Public
-            && callable.visibility != crate::types::Visibility::Public
-        {
-            stored.callable.visibility = callable.visibility;
-        }
-    }
-
-    /// Attach the declaration's exact physical parameter identities after callable selection has
-    /// normalized context and extension-receiver slots. The physical callable identity may be
-    /// interned before its complete source facet is decoded, so this enriches that same identity;
-    /// it never searches by spelling.
-    pub(crate) fn publish_external_callable_parameter_identities(
-        &self,
-        identity: crate::fir::ExternalCallableId,
-        identities: Box<[crate::fir::ResolvedParameterIdentity]>,
-    ) {
-        let mut callables = self.external_callables.borrow_mut();
-        let stored = callables
-            .get_mut(identity.raw() as usize)
-            .expect("parameter identities name an interned external callable");
-        if stored.parameter_identities.is_empty() {
-            stored.parameter_identities = identities;
-        } else {
-            assert_eq!(
-                stored.parameter_identities, identities,
-                "one external callable identity cannot publish conflicting parameter identities"
-            );
-        }
     }
 
     /// A one-line snapshot of every cache's entry count — for memory profiling (`KRUSTY_MEM_REPORT`). The
@@ -5130,55 +4932,7 @@ mod fq_tests {
     use super::*;
 
     #[test]
-    fn reinterning_a_physical_callable_preserves_later_declaration_facets() {
-        let cp = Classpath::new(vec![]);
-        let owner = type_name("review/PhysicalOwner");
-        let mut first = LibraryCallable::library(
-            owner,
-            "physicalOperation",
-            vec![],
-            Ty::obj("review/Answer"),
-            Ty::obj("review/Answer"),
-            "()Lreview/Answer;",
-        );
-        first.physical_name = Some("physicalOperation".to_string());
-        first.overridden_call_realizations = vec![crate::libraries::OverriddenCallRealization {
-            kind: crate::libraries::OverriddenCallKind::Function,
-            declaration_owner: type_name("review/FunctionDeclaration"),
-            physical_name: "mappedOperation".to_string(),
-            descriptor: "()Ljava/lang/Object;".to_string(),
-        }]
-        .into_boxed_slice();
-        let identity = cp.intern_external_callable(&first, ExternalCallableKind::Member);
-
-        let mut enriched = first.clone();
-        enriched.overridden_call_realizations = vec![crate::libraries::OverriddenCallRealization {
-            kind: crate::libraries::OverriddenCallKind::PropertyGetter,
-            declaration_owner: type_name("review/PropertyDeclaration"),
-            physical_name: "mappedProperty".to_string(),
-            descriptor: "()Ljava/lang/Object;".to_string(),
-        }]
-        .into_boxed_slice();
-
-        assert_eq!(
-            cp.intern_external_callable(&enriched, ExternalCallableKind::Member),
-            identity
-        );
-        assert_eq!(
-            cp.external_callable(identity)
-                .expect("the stable callable")
-                .callable
-                .overridden_call_realizations,
-            vec![
-                first.overridden_call_realizations[0].clone(),
-                enriched.overridden_call_realizations[0].clone(),
-            ]
-            .into_boxed_slice()
-        );
-    }
-
-    #[test]
-    fn reinterning_a_callable_enriches_visibility_on_the_same_physical_identity() {
+    fn reinterning_a_callable_enriches_the_same_physical_identity() {
         let cp = Classpath::new(Vec::new());
         let mut partial = crate::libraries::LibraryCallable::library(
             type_name("dependency/Base"),
