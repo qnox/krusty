@@ -1296,7 +1296,14 @@ fun main() {
 
     /// A throwaway Gradle build whose krusty compiles go through a recording proxy of the CLI
     /// named by `KRUSTY_GRADLE_TEST_BIN`.
+    /// Gradle integration builds share one Gradle user home, which each fixture installs through
+    /// the process-wide `GRADLE_USER_HOME`. libtest runs tests on parallel threads, so concurrent
+    /// fixtures race on that variable and on the shared daemon registry: under Gradle 7.6.3 the
+    /// single-use daemons time out connecting. One fixture runs at a time.
+    static GRADLE_INTEGRATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     struct IntegrationFixture {
+        _serial: std::sync::MutexGuard<'static, ()>,
         root: PathBuf,
         log: PathBuf,
         proxy: PathBuf,
@@ -1307,6 +1314,10 @@ fun main() {
 
     impl IntegrationFixture {
         fn new(prefix: &str, write: fn(&Path, &str, &str)) -> Self {
+            // A failed test poisons the lock; the next fixture still needs it.
+            let serial = GRADLE_INTEGRATION
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let gradle_bin = ensure_gradle();
             let root = std::env::temp_dir().join(format!(
                 "{prefix}-{}-{}",
@@ -1362,6 +1373,7 @@ fun main() {
                 .map(PathBuf::from)
                 .unwrap_or_else(repository_plugin_project);
             Self {
+                _serial: serial,
                 root,
                 log,
                 proxy,
