@@ -20,6 +20,7 @@ mod inline_body;
 pub(crate) mod physical_parameter_plan;
 mod platform_contract;
 mod property_producer;
+mod result_nullability;
 pub use annotation_application::{
     AnnotationApplication, AnnotationElementDefault, AnnotationParameterPolicy,
     AnnotationPositionalPolicy,
@@ -39,6 +40,7 @@ pub use platform_contract::{
     PlatformInitializationError, PlatformSourceHeaderInput, SourceHeaderError,
 };
 pub use property_producer::PropertyProducer;
+pub use result_nullability::{ResultEnhancement, ReturnInfo};
 
 use crate::types::InlineParameterModifier;
 pub use crate::types::Visibility;
@@ -1085,6 +1087,8 @@ pub struct CallSig {
     pub inline_modifiers: Vec<InlineParameterModifier>,
     /// Per logical Java parameter, whether nullable arguments are accepted.
     pub platform_nullable_params: Vec<bool>,
+    /// Java signature enhancement of the declared result's nullability.
+    pub result_enhancement: ResultEnhancement,
     /// Minimum arguments a caller must supply (params beyond this have defaults). 0 by default.
     pub required: usize,
     /// True if a logical param is `vararg` (callers pack values into its array).
@@ -1552,46 +1556,6 @@ fn vec_for_arity<T>(items: Vec<T>, param_count: usize) -> Vec<T> {
         items
     } else {
         Vec::new()
-    }
-}
-
-#[derive(Clone, Copy, Default)]
-pub struct ReturnInfo {
-    pub nullable: bool,
-    pub class: Option<Ty>,
-}
-
-impl ReturnInfo {
-    pub fn new(nullable: bool, class: Option<Ty>) -> Self {
-        ReturnInfo { nullable, class }
-    }
-
-    pub fn apply(self, fallback: Ty) -> Ty {
-        self.apply_with_class(self.class, fallback)
-    }
-
-    pub fn apply_with_class(self, class: Option<Ty>, fallback: Ty) -> Ty {
-        let ret = match class {
-            // Nullability wraps the declared generic result; it must not hide the already-solved
-            // type arguments. Otherwise a dependency `Box<T>?` specialized as `Box<Base>?` is
-            // collapsed back to raw `Box?` while the equivalent source declaration stays precise.
-            Some(meta) if !fallback.non_null().type_args().is_empty() => {
-                let specialized = Ty::obj_args(&meta.name(), fallback.non_null().type_args());
-                if matches!(meta, Ty::PlatformNullable(_)) {
-                    Ty::platform_nullable(specialized)
-                } else {
-                    specialized
-                }
-            }
-            Some(meta) => meta,
-            None => fallback,
-        };
-        if self.nullable && !ret.is_nullable() && (ret.boxed_ref().is_some() || ret.is_reference())
-        {
-            Ty::nullable(ret)
-        } else {
-            ret
-        }
     }
 }
 

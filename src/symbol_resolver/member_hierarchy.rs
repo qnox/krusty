@@ -1,6 +1,7 @@
 //! Declared and inherited member lookup over applied classifier hierarchies.
 
 mod bound_inner_constructors;
+mod result_enhancement;
 
 pub(crate) use bound_inner_constructors::bound_inner_constructor_candidates;
 
@@ -229,6 +230,16 @@ pub(crate) fn specialize_member_function(
             });
         }
         FnKind::TopLevel => {}
+    }
+    let declared_result = function
+        .generic_sig
+        .as_ref()
+        .map_or(function.callable.ret, |signature| signature.ret);
+    if let Ty::PlatformNullable(rigid) = declared_result {
+        result_enhancement::publish_flexible_result(
+            &mut function.call_sig.result_enhancement,
+            specialize_member_type(source, *rigid, &bindings, TypePosition::Out),
+        );
     }
     specialize_callable(source, &mut function.callable, &bindings);
     function.ret.class = function
@@ -469,6 +480,7 @@ fn normalize_inherited_member_functions_with_family(
         }
     }
     inherit_overridden_semantic_roles(source, functions, intersection_parts);
+    result_enhancement::enhance_overriding_flexible_results(source, functions);
     inherit_overridden_default_arguments(source, functions);
     inherit_overridden_results(source, functions);
     retain_covariant_inherited_overrides(source, functions, intersection_parts);

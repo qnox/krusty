@@ -848,7 +848,7 @@ fn rewrite_anonymous_super_forward(
                 type_operand,
             }))
         }
-        IrExpr::NotNullAssert { operand, message } => {
+        IrExpr::NotNullAssert { operand, check } => {
             let operand = rewrite_anonymous_super_forward(
                 ir,
                 operand,
@@ -856,7 +856,7 @@ fn rewrite_anonymous_super_forward(
                 parameter,
                 declaration,
             )?;
-            Ok(ir.add_expr(IrExpr::NotNullAssert { operand, message }))
+            Ok(ir.add_expr(IrExpr::NotNullAssert { operand, check }))
         }
         IrExpr::ForwardedSuperArgument { .. } => Ok(forward(ir)),
         _ => Err(FirFileLoweringFailure::MissingCallable(declaration)),
