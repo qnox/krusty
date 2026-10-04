@@ -79,7 +79,8 @@ pub(super) fn record_function(
 
 /// Parameters of one emitted common-IR function. Presence of `FnParamInfo` is the explicit contract
 /// that the function has declaration/debug parameter identities; compiler-generated parameters are
-/// flagged from their recorded provenance. A holder receiver is a JVM-generated synthetic prefix.
+/// flagged from their recorded provenance. A holder receiver is a JVM-generated synthetic prefix, and
+/// kotlinc flags every value or receiver a lifted callable captures synthetic too.
 pub(super) fn function(
     ir: &IrFile,
     function: u32,
@@ -115,7 +116,8 @@ pub(super) fn function(
                     IrParameterRole::Generated(
                         IrGeneratedParameterRole::HolderReceiver
                             | IrGeneratedParameterRole::ValueClassCarrier
-                    )
+                    ) | IrParameterRole::CapturedValue { .. }
+                        | IrParameterRole::CapturedReceiver { .. }
                 )) * SYNTHETIC,
             )
         })

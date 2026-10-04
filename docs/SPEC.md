@@ -9299,6 +9299,25 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   for every body-local static it places in a class (`class_static_local_functions`), not by name or
   staticness. Tests: `tests/value_class_member_lambda_return_e2e.rs`,
   `tests/value_class_mangled_lambda_names_e2e.rs`.
+- **A value-class receiver a lifted callable captures is named after its static realization.**
+  kotlinc lowers a value class's members and constructors to statics before it lifts the lambdas
+  and local functions written in them, so the `this` such a callable captures is no dispatch
+  receiver and is not named `this$0`: it is the value the static holds the receiver in, with the
+  `$` prefix of every captured value. A member's or accessor's `-impl` takes it as its carrier
+  parameter `arg0` (`m_impl$lambda$0($arg0)`, also through nested lambdas and local functions); the
+  primary `constructor-impl` running the `init` blocks holds it in its first temporary (`$tmp0`); a
+  secondary constructor's names that temporary after its `$this` hint (`$tmp0_$this`). The same
+  name is the debug local, the `-java-parameters` entry, and a suspend lambda class's field and
+  constructor parameter, which is therefore not `$receiver`. kotlinc flags every captured parameter
+  of a lifted callable synthetic in `MethodParameters`, an ordinary class's `this$0`, a captured
+  value and an extension receiver included. Because kotlinc appends the primary `constructor-impl`
+  after the class's other declarations, what the `init` blocks lift numbers after what a secondary
+  constructor lifts: the secondary's lambda is `constructor_impl$lambda$0`. An extension receiver keeps its own
+  spelling (`$this_mext`, `$this_ext`). Common IR records only that the capture is the enclosing
+  receiver and the lifted callable's outermost container; the JVM backend spells the name from the
+  value-class realization of that container. Tests:
+  `tests/value_class_receiver_capture_debug_names_e2e.rs`,
+  `tests/value_class_mangled_lambda_names_e2e.rs`, `tests/java_parameters_attribute_e2e.rs`.
 - **A value-class default of a primary constructor is lowered like the constructor's other code.**
   `class Test(val x: S, val y: S = S("K"))` fills an omitted `y` in its synthetic
   `<init>(String, String, int, DefaultConstructorMarker)`. The default expression runs over the

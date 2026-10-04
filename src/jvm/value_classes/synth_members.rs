@@ -393,7 +393,7 @@ pub(super) fn synth_value_members(
         let cfid = add_static(ir, "constructor-impl", vec![u_ir], u_ir, body);
         ir.jvm_value_class_representation_order.insert(cfid, 0);
         realized.constructor_impls.insert((internal_name, 0), cfid);
-        ir.jvm_value_class_constructor_impls.insert(cfid);
+        ir.jvm_value_class_constructor_impls.insert(cfid, 0);
         crate::jvm::method_parameters::record_function(ir, cfid, &[&fname], &[]);
         // Unlike a source value-class member converted to `member-impl`, this generated function's
         // carrier is its declared constructor parameter, not a former dispatch receiver. Keeping an
@@ -755,7 +755,8 @@ pub(super) fn synth_value_members(
             realized
                 .constructor_impls
                 .insert((internal_name, ordinal), constructor);
-            ir.jvm_value_class_constructor_impls.insert(constructor);
+            ir.jvm_value_class_constructor_impls
+                .insert(constructor, ordinal);
             let names = sc
                 .named_params
                 .iter()

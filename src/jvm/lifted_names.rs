@@ -40,7 +40,12 @@ pub(crate) fn number(
     let mut containers = HashMap::<(&IrLiftingSequence, u32), String>::new();
     for (sequence, entries) in &ir.lifting_sequences {
         let mut scopes = HashMap::<(String, Option<u32>), (u32, HashSet<&str>)>::new();
-        for (&position, entry) in entries {
+        // kotlinc's value-class lowering appends the primary `constructor-impl`, which runs the
+        // `init` blocks, after the class's other declarations, so what it lifts numbers after what
+        // a secondary constructor's `constructor-impl` lifts. Positions keep their order otherwise.
+        let mut ordered = entries.iter().collect::<Vec<_>>();
+        ordered.sort_by_key(|(_, entry)| in_primary_value_class_constructor(ir, entry.container));
+        for (&position, entry) in ordered {
             let container = container_segment(ir, entry.container, &sequence.container);
             containers.insert((sequence, position), container.clone());
             if !entry.lifted {
@@ -160,17 +165,44 @@ pub(crate) fn realize(
 /// The outermost declaration's name as the first segment: the JVM name the value-class pass gave
 /// `container`'s function, else the source `name`.
 fn container_segment(ir: &IrFile, container: Option<IrEnclosure>, name: &str) -> String {
-    let function = match container {
-        Some(IrEnclosure::Function(function)) => Some(function),
-        Some(IrEnclosure::PropertyAccessor { property, setter }) => {
-            super::ir_emit::enclosure::realized_property_accessor(ir, property, setter)
-        }
-        _ => None,
-    };
-    let renamed = function
+    let renamed = container
+        .and_then(|container| container_function(ir, container))
         .filter(|function| ir.value_class_renamed_functions.contains(function))
         .map(|function| ir.functions[function as usize].name.as_str());
     segment_spelling(renamed.unwrap_or(name))
+}
+
+/// Whether `container` is the primary `constructor-impl` of a value class.
+fn in_primary_value_class_constructor(ir: &IrFile, container: Option<IrEnclosure>) -> bool {
+    container
+        .and_then(|container| container_function(ir, container))
+        .and_then(|function| ir.jvm_value_class_constructor_impls.get(&function))
+        .is_some_and(|&ordinal| ordinal == 0)
+}
+
+/// The function realizing a lifting container that is a function body or a property accessor.
+fn container_function(ir: &IrFile, container: IrEnclosure) -> Option<crate::ir::FunId> {
+    match container {
+        IrEnclosure::Function(function) => Some(function),
+        IrEnclosure::PropertyAccessor { property, setter } => {
+            super::ir_emit::enclosure::realized_property_accessor(ir, property, setter)
+        }
+        _ => None,
+    }
+}
+
+/// The function whose body the lifted callable `function` is written in, through every enclosing
+/// local callable: the outermost declaration of its lifting site, as the target realized it (a
+/// value-class member's `-impl`, the `constructor-impl` running an `init` block). `None` for a
+/// callable that is not lifted, or whose outermost declaration is no function body.
+pub(super) fn root_container(ir: &IrFile, function: crate::ir::FunId) -> Option<crate::ir::FunId> {
+    let (sequence, site) = ir.lifted_functions.get(&function)?;
+    let outermost = site.path.first()?;
+    let entry = ir
+        .lifting_sequences
+        .get(sequence)?
+        .get(&outermost.position)?;
+    container_function(ir, entry.container?)
 }
 
 /// kotlinc replaces the characters a special or mangled name carries (`<init>`, `<get-x>`,

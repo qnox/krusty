@@ -2097,9 +2097,9 @@ pub struct IrFile {
     /// private primary constructor. The JVM value-class pass records the function identities when
     /// it creates them; emission must not recover their roles from generated method spellings.
     pub(crate) jvm_value_class_representation_order: std::collections::HashMap<u32, u8>,
-    /// The static `constructor-impl` realizing each value-class constructor: its `$default` stub
-    /// takes kotlinc's constructor marker (`DefaultConstructorMarker`), not a function's `Object`.
-    pub(crate) jvm_value_class_constructor_impls: std::collections::HashSet<u32>,
+    /// The static `constructor-impl` realizing each value-class constructor, with that constructor's
+    /// ordinal (`0` is the primary). Its `$default` stub takes kotlinc's `DefaultConstructorMarker`.
+    pub(crate) jvm_value_class_constructor_impls: std::collections::HashMap<u32, u32>,
     /// Generated JVM methods kotlinc writes without nullability annotations. The JVM value-class
     /// pass records exact function identities; common lowering does not interpret this set.
     pub(crate) jvm_nullability_unannotated_methods: std::collections::HashSet<u32>,
