@@ -469,6 +469,10 @@ impl Emitter<'_> {
         // The lambda's node is a method of its own: its body's locals are laid out in a frame of
         // their own, above its parameters, captures and marker.
         let caller_frame = std::mem::take(&mut self.frame);
+        // Its body is the method's outermost scope: the locals declared directly in it stay open
+        // to the method's end, as a function's own locals do, and only nested blocks close theirs.
+        let caller_depth = std::mem::replace(&mut self.block_depth, 0);
+        let caller_locals = std::mem::take(&mut self.open_locals);
         let states_before = self.machine_next_ordinal;
         self.frame.reserve_through(args_size + 1);
         let mut scratch = CodeBuilder::new(args_size);
@@ -478,6 +482,8 @@ impl Emitter<'_> {
             .map_err(|_| "an inline lambda's code is too long")?;
         let result = self.emit_fn_body_inline(inline_body, &parameter_slots, &mut scratch);
         self.frame = caller_frame;
+        self.block_depth = caller_depth;
+        let body_locals = std::mem::replace(&mut self.open_locals, caller_locals);
         if self.machine_next_ordinal != states_before {
             return Err("a lambda planned for the inliner started a suspension");
         }
@@ -514,8 +520,9 @@ impl Emitter<'_> {
                 descriptor.to_string()
             }
         };
-        // kotlinc closes the marker and the parameters at the end of the lambda's method, after its
-        // return and after the body's own locals.
+        // kotlinc closes the outermost scope at the end of the lambda's method, after its return:
+        // the marker it declared first, then the body's own locals in declaration order, then the
+        // parameters. A nested block's locals closed earlier, where the block ended.
         if self.record_locals {
             let end = u16::try_from(scratch.bytes.len())
                 .map_err(|_| "an inline lambda's code is too long")?;
@@ -529,6 +536,10 @@ impl Emitter<'_> {
                 &marker,
                 "I",
             );
+            for local in body_locals {
+                let length = end.saturating_sub(local.start);
+                local.record(Some(length), &mut scratch);
+            }
             let identities = self.ir.fn_params.get(&impl_fn).map(|info| &info.identities);
             for (index, &ty) in parameter_types.iter().enumerate() {
                 let name = identities
