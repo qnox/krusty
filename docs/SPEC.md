@@ -10363,6 +10363,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`warning_level_configures_named_diagnostics` in `crates/krusty-cli/src/cli.rs`;
   `warning_level_is_forwarded_to_the_typed_cli_policy` in `crates/krusty-cli/src/worker.rs`;
   `kotlin_compiler_slice_compiles_through_krusty` in `crates/krusty-build/src/gradle.rs`.)
+- **A companion object's nested classifiers are in scope in the class that declares it.** Each
+  lexical class rung contributes its own nested classifiers, then those of its companion object
+  (kotlinc's companion static scope), before the next enclosing rung. A body call (`Edge(2)`), a
+  member signature, a primary-constructor parameter, and another nested classifier's header all
+  bind `Edge` declared in `companion object`; an own nested classifier of the same name wins. A
+  companion's own header does not see its nested classifiers, and a supertype's companion
+  contributes none. Verified against kotlinc 2.4.20.
+  (`tests/companion_nested_classifier_scope_e2e.rs`.)
 
 ## 8. Success criteria for the PoC
 

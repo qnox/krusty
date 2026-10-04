@@ -48941,42 +48941,6 @@ impl<'a> Checker<'a> {
     }
 
     /// Find a nested type visible from the lexical class receiver stack.
-    fn enclosing_nested_type_name(&self, name: &str) -> Option<TypeName> {
-        // Probe the current class and its structural lexical owners in nearest-first order.
-        for outer in self.lexical_source_class_names() {
-            let candidate = type_name_nested_child(outer, name);
-            if self.resolver().classifier(candidate).is_some() {
-                return Some(candidate);
-            }
-        }
-        None
-    }
-
-    /// Classifier declarations visible in a classifier header before package/import lookup. The
-    /// current classifier is recursively visible, as are its own nested declarations and siblings
-    /// owned by enclosing lexical classifiers. Supertype-list resolution does not install this
-    /// context; primary-constructor parameter declarations do.
-    fn classifier_header_lexical_type_name(&self, name: &str) -> Option<TypeName> {
-        let owner = self.classifier_header_owner?;
-        if owner.nested_segment_ref() == name {
-            return Some(owner);
-        }
-        let source = self.fed_source();
-        let nested = type_name_nested_child(owner, name);
-        if source.classifier(nested).is_some() {
-            return Some(nested);
-        }
-        let mut enclosing = owner.nested_owner();
-        while let Some(candidate_owner) = enclosing {
-            let candidate = type_name_nested_child(candidate_owner, name);
-            if source.classifier(candidate).is_some() {
-                return Some(candidate);
-            }
-            enclosing = candidate_owner.nested_owner();
-        }
-        None
-    }
-
     fn inherited_nested_type_for_owner(
         &self,
         name: &str,

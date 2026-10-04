@@ -1377,28 +1377,52 @@ impl ProductionSignatureSemantics<'_> {
         } else {
             self.headers.declarations.anchor(scope.owner)?.owner
         };
-        while let Some(declaration) = owner {
-            if let Some(classifier) = self.headers.owned_stubs(declaration).find_map(|stub| {
+        let owned_classifier = |declaration| {
+            self.headers.owned_stubs(declaration).find_map(|stub| {
                 let classifier = self.classifier_types.get(&stub.id).copied()?;
                 (stub.kind == crate::fir::DeclarationKind::Classifier
                     && self.headers.source_simple_name(stub) == Some(spelling))
                 .then_some(classifier)
-            }) {
+            })
+        };
+        while let Some(declaration) = owner {
+            if let Some(classifier) = owned_classifier(declaration) {
                 return Some(classifier);
+            }
+            // The companion's static classifier scope follows its owner's. A companion whose own
+            // header is being resolved has not entered that scope.
+            let companion = self.headers.owned_stubs(declaration).find(|stub| {
+                stub.kind == crate::fir::DeclarationKind::Classifier
+                    && stub.flags.has(crate::fir::DeclarationFlags::COMPANION)
+            });
+            if let Some(companion) = companion
+                .filter(|companion| include_scope_owner_body || companion.id != scope.owner)
+            {
+                if let Some(classifier) = owned_classifier(companion.id) {
+                    return Some(classifier);
+                }
             }
             owner = self.headers.declarations.anchor(declaration)?.owner;
         }
+        let nested_class = |owner: crate::types::TypeName| {
+            let candidate = owner
+                .existing_nested_child(spelling)
+                .unwrap_or_else(|| crate::types::type_name_nested_child(owner, spelling));
+            self.table
+                .classes
+                .contains_key(&candidate)
+                .then_some(candidate)
+        };
         self.lexical_class_names(scope)
             .into_iter()
             .filter(|owner| include_scope_owner_body || Some(*owner) != scope_owner_classifier)
             .find_map(|owner| {
-                let candidate = owner
-                    .existing_nested_child(spelling)
-                    .unwrap_or_else(|| crate::types::type_name_nested_child(owner, spelling));
-                self.table
-                    .classes
-                    .contains_key(&candidate)
-                    .then_some(candidate)
+                nested_class(owner).or_else(|| {
+                    let companion = self.table.classes.get(&owner)?.companion_internal?;
+                    (include_scope_owner_body || Some(companion) != scope_owner_classifier)
+                        .then(|| nested_class(companion))
+                        .flatten()
+                })
             })
     }
 

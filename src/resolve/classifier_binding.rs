@@ -240,6 +240,57 @@ impl Checker<'_> {
         }
     }
 
+    fn enclosing_nested_type_name(&self, name: &str) -> Option<TypeName> {
+        // Probe the current class and its structural lexical owners in nearest-first order. Each
+        // owner's companion object contributes its static classifier scope right after the owner.
+        let source = self.fed_source();
+        self.lexical_source_class_names()
+            .into_iter()
+            .find_map(|outer| self.static_rung_nested_type_name(&source, outer, name))
+    }
+
+    /// A nested classifier of one lexical class rung: the owner's own nested classifiers, then
+    /// those of its companion object (kotlinc's `staticScope`, then `companionStaticScope`).
+    fn static_rung_nested_type_name(
+        &self,
+        source: &CachedCompositeSource<'_>,
+        owner: TypeName,
+        name: &str,
+    ) -> Option<TypeName> {
+        let own = type_name_nested_child(owner, name);
+        if source.classifier(own).is_some() {
+            return Some(own);
+        }
+        let companion = source.classifier(owner)?.companion_object.as_ref()?.1;
+        let nested = type_name_nested_child(companion, name);
+        source.classifier(nested).is_some().then_some(nested)
+    }
+
+    /// Classifier declarations visible in a classifier header before package/import lookup. The
+    /// current classifier is recursively visible, as are its own nested declarations and siblings
+    /// owned by enclosing lexical classifiers. Supertype-list resolution does not install this
+    /// context; primary-constructor parameter declarations do.
+    fn classifier_header_lexical_type_name(&self, name: &str) -> Option<TypeName> {
+        let owner = self.classifier_header_owner?;
+        if owner.nested_segment_ref() == name {
+            return Some(owner);
+        }
+        let source = self.fed_source();
+        if let Some(nested) = self.static_rung_nested_type_name(&source, owner, name) {
+            return Some(nested);
+        }
+        let mut enclosing = owner.nested_owner();
+        while let Some(candidate_owner) = enclosing {
+            if let Some(candidate) =
+                self.static_rung_nested_type_name(&source, candidate_owner, name)
+            {
+                return Some(candidate);
+            }
+            enclosing = candidate_owner.nested_owner();
+        }
+        None
+    }
+
     fn invalid_alias_selection(
         name: &str,
     ) -> (

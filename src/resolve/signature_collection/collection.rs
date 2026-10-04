@@ -1126,9 +1126,9 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                         .enumerate()
                         .map(|(rank, owner)| (owner, rank))
                         .collect::<HashMap<_, _>>();
-                    extend_lexical_nested_classifier_names(
+                    extend_header_lexical_nested_classifier_names(
                         file,
-                        &header_lexical_owner_ranks,
+                        (&header_lexical_owner_ranks, internal),
                         &mut header_class_names,
                     );
                     let mut referenced_types = std::collections::HashSet::new();
