@@ -10376,6 +10376,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   enclosing classifier; the annotated classifier's own nested declarations are not in scope for its
   annotations (`@Own class C { annotation class Own }` is an unresolved reference). Verified against
   kotlinc 2.4.20. (`tests/nested_class_annotation_scope_e2e.rs`.)
+- **`const val` initializers fold builtin bit operations.** Infix `and`, `or` and `xor` on `Int`,
+  `Long` and `Boolean`, and `inv()` on `Int` and `Long`, are folded when the selected callable is
+  the builtin bit-operation declaration, as kotlinc's constant evaluator does, so
+  `private const val MASK = 0x1 or 0x2` publishes `3` and every read inlines it. Verified against
+  kotlinc 2.4.20. (`tests/const_bit_operation_folding_e2e.rs`.)
 
 ## 8. Success criteria for the PoC
 

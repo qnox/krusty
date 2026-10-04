@@ -464,6 +464,8 @@ mod conditional_branch_inference_e2e;
 mod conditional_sibling_rebind_e2e;
 #[path = "consistent_copy_visibility_e2e.rs"]
 mod consistent_copy_visibility_e2e;
+#[path = "const_bit_operation_folding_e2e.rs"]
+mod const_bit_operation_folding_e2e;
 #[path = "const_constantvalue_e2e.rs"]
 mod const_constantvalue_e2e;
 #[path = "const_read_inline_e2e.rs"]
