@@ -3218,6 +3218,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   stays intact and erases to `Object`. This is representation of an already-selected declaration.
   Test: `star_projected_member_and_extension_references_use_their_declared_bounds` in
   `tests/reference_adaptation_e2e.rs`.
+- **An inherited property reference is owned by the classifier it was written on.** `A::parent`
+  and `a::parent`, where `parent` is declared on a supertype of `A`, reflect `A` and call `A`'s
+  accessor. kotlin-reflect substitutes the property type from that owner (`A?`, not the
+  declaration's `T?`). `H<A>::parent` still reflects `H`. A class that implements the declaring
+  interface calls the accessor with `invokevirtual` on that class. Test:
+  `an_inherited_property_reference_substitutes_through_the_referenced_classifier` in
+  `tests/inherited_property_reference_e2e.rs`. Corpus:
+  `reflection/properties/genericOverriddenProperty.kt`.
 - **Dead-code elimination after a diverging statement.** Statements following a `return`/`break`/
   `continue` or an expression of type `Nothing` (a `throw`, or a call that never returns) in the same
   block are unreachable; krusty drops them (and a trailing block value), matching kotlinc. Emitting them

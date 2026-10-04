@@ -16,8 +16,8 @@ use crate::fir::{
     FirCallableReferenceBinding, FirPropertyReferenceTarget, FirPropertyTarget, PropertyId,
 };
 use crate::ir::{
-    FunId, IrCheckedOperation, IrClass, IrExpr, IrFile, IrLocalPropertyLayout, IrModuleProperty,
-    PropRef,
+    FunId, IrCheckedOperation, IrClass, IrClassifierKind, IrExpr, IrFile, IrLocalPropertyLayout,
+    IrModuleProperty, PropRef,
 };
 use crate::types::{type_name, Ty, TypeName};
 
@@ -181,13 +181,17 @@ pub(super) fn realize(
                     mutable,
                     declared_accessors(ir, target),
                     (&getter, setter.as_deref()),
-                    reference_owner,
+                    ModulePropertySite {
+                        caller: reference_owner,
+                        dispatch: None,
+                    },
                 )?
             }
             FirPropertyReferenceTarget::SpecializedModule {
                 property,
                 getter_name,
                 setter_name,
+                receiver,
                 ..
             } => module_property(
                 ir.referenced_module_properties
@@ -198,7 +202,13 @@ pub(super) fn realize(
                 mutable,
                 declared_accessors(ir, property),
                 (getter_name.as_ref(), setter_name.as_deref()),
-                reference_owner,
+                ModulePropertySite {
+                    caller: reference_owner,
+                    dispatch: referenced_member_dispatch(
+                        ir,
+                        receiver.map(crate::fir::ResolvedTy::get),
+                    ),
+                },
             )?,
             FirPropertyReferenceTarget::Classifier {
                 owner,
@@ -712,6 +722,48 @@ fn callable_descriptor(callable: &crate::backend::BackendCallableFact) -> String
     }
 }
 
+/// Where a source property reference sits, beyond the declaration it selected.
+struct ModulePropertySite {
+    /// Lexical class containing the reference. A protected member uses it as the bridge owner.
+    caller: Option<TypeName>,
+    /// Instance member written on a classifier (`A::parent` while `parent` is declared on a
+    /// supertype). `None` for a delegated metadata reference, which names the declaration.
+    dispatch: Option<ReferencedMemberDispatch>,
+}
+
+/// The classifier an instance property reference was written on, and whether calls through it
+/// are interface calls.
+struct ReferencedMemberDispatch {
+    class: TypeName,
+    is_interface: bool,
+}
+
+fn referenced_member_dispatch(
+    ir: &IrFile,
+    receiver: Option<Ty>,
+) -> Option<ReferencedMemberDispatch> {
+    let class = receiver?.kotlin_class_internal()?;
+    let is_interface = ir
+        .classes
+        .iter()
+        .find(|candidate| candidate.fq_name_id() == class)
+        .map(|candidate| candidate.is_interface || candidate.is_annotation)
+        .or_else(|| {
+            ir.referenced_module_classifiers
+                .get(&class)
+                .map(|classifier| {
+                    matches!(
+                        classifier.kind,
+                        IrClassifierKind::Interface | IrClassifierKind::Annotation
+                    )
+                })
+        })?;
+    Some(ReferencedMemberDispatch {
+        class,
+        is_interface,
+    })
+}
+
 fn module_property(
     property: &IrModuleProperty,
     stems: &[String],
@@ -719,7 +771,7 @@ fn module_property(
     reference_mutable: bool,
     declared: DeclaredAccessors,
     selected_accessor_names: (&str, Option<&str>),
-    reference_owner: Option<TypeName>,
+    site: ModulePropertySite,
 ) -> Result<(PropRef, PropertyReferenceRealization), PropertyReferenceRealizationTarget> {
     let failure = PropertyReferenceRealizationTarget::Module(target);
     if !property.context_parameters.is_empty() || reference_mutable && !property.mutable {
@@ -750,7 +802,7 @@ fn module_property(
         .is_none()
         .then_some(enclosing)
         .flatten()
-        .zip(reference_owner)
+        .zip(site.caller)
         .filter(|(declaring, caller)| declaring.namespace() != caller.namespace())
         .filter(|_| property.extension_receiver.is_none() && !companion_associated)
         .and_then(|(target_owner, bridge_owner)| {
@@ -785,11 +837,30 @@ fn module_property(
             declared.to_owned()
         }
     };
-    let owner = property
-        .extension_receiver
-        .and_then(Ty::kotlin_class_internal)
+    let instance_member =
+        property.extension_receiver.is_none() && !companion_associated && enclosing.is_some();
+    // `A::parent` and `a::parent` name A, even when the declaration is a supertype member.
+    // kotlin-reflect substitutes the property type from that owner, and the getter is A's too.
+    let referenced = instance_member.then_some(site.dispatch).flatten();
+    let owner = referenced
+        .as_ref()
+        .map(|dispatch| dispatch.class)
+        .or_else(|| {
+            property
+                .extension_receiver
+                .and_then(Ty::kotlin_class_internal)
+        })
         .or(enclosing)
         .unwrap_or(static_owner);
+    let call_owner = referenced
+        .as_ref()
+        .map(|dispatch| dispatch.class)
+        .or(enclosing)
+        .unwrap_or(static_owner);
+    let owner_is_interface = referenced
+        .as_ref()
+        .map(|dispatch| dispatch.is_interface)
+        .unwrap_or_else(|| super::module_calls::owner_is_jvm_interface(property));
     // A companion-block receiver names the reflected classifier but is not passed to the accessor.
     // Keep the semantic owner (`C`) separate from the physical static call owner.
     let static_dispatch =
@@ -841,7 +912,7 @@ fn module_property(
     Ok((
         PropRef {
             owner_internal: Some(owner),
-            call_owner_internal: Some(enclosing.unwrap_or(static_owner)),
+            call_owner_internal: Some(call_owner),
             prop_name: name.to_string(),
             getter_name: bridged_name(
                 &declared_getter_name,
@@ -853,7 +924,7 @@ fn module_property(
                 bridged_name(name, bridged_setter.is_some(), declared.setter.is_some())
             }),
             setter_descriptor,
-            owner_is_interface: super::module_calls::owner_is_jvm_interface(property),
+            owner_is_interface,
             prop_ty: property.ty,
             bound: false,
             static_dispatch,

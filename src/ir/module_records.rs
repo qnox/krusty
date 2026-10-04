@@ -95,4 +95,7 @@ pub enum IrClassifierKind {
 pub struct IrModuleClassifier {
     pub singleton: bool,
     pub companion_owner: Option<TypeName>,
+    /// Source kind of this classifier. A property reference calls an inherited member on the
+    /// classifier it was written on, and that kind chooses interface dispatch.
+    pub kind: IrClassifierKind,
 }
