@@ -14855,15 +14855,7 @@ impl<'a> Checker<'a> {
         let mut extension_overloads = callables
             .functions()
             .iter()
-            .filter(|candidate| {
-                candidate.kind == crate::libraries::FnKind::Extension
-                    && (tower_rung.allow_imported_extensions
-                        || !candidate.scope_rung.is_import()
-                        || candidate
-                            .callable
-                            .annotations
-                            .contains(&crate::types::type_name("kotlin/internal/HidesMembers")))
-            })
+            .filter(|candidate| candidate.kind == crate::libraries::FnKind::Extension)
             .cloned()
             .collect::<Vec<_>>();
         for receiver in self.implicit_receivers(scope) {
@@ -68502,18 +68494,7 @@ impl<'a> Checker<'a> {
         let rung = match extension_rung {
             Some(extension) => extension,
             None => {
-                let (mut functions, properties) =
-                    self.stable_receiver_callables(rt, name).into_parts();
-                if !tower_rung.allow_imported_extensions {
-                    functions.overloads.retain(|candidate| {
-                        !candidate.scope_rung.is_import()
-                            || candidate
-                                .callable
-                                .annotations
-                                .contains(&crate::types::type_name("kotlin/internal/HidesMembers"))
-                    });
-                }
-                let callables = crate::libraries::Callables::from_parts(functions, properties);
+                let callables = self.stable_receiver_callables(rt, name);
                 self.select_extension_rung(scope, call_args, rt, &type_args, expected, &callables)
             }
         };
