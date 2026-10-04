@@ -1,12 +1,12 @@
-//! JVM call-site realizations inherited from exact overridden declarations.
+//! JVM call-site realizations published by selected dependency declarations.
 //!
 //! Providers attach physical candidates while source declarations and target policy are joined.
-//! This pass selects one only through checked callable/property identities and override edges, then
-//! records the exact plan on the expression. Emission consumes that plan without name lookup.
+//! This pass selects one only through the checked callable identity, then records the exact plan on
+//! the expression. Emission consumes that plan without name lookup.
 
 use crate::backend::CheckedBackendCallables;
-use crate::fir::{ResolvedFunctionOverrideTarget, ResolvedPropertyOverrideTarget};
-use crate::ir::{Callee, IrExpr, IrFile, IrModuleMemberAccess, IrVirtualTarget};
+use crate::fir::ResolvedFunctionOverrideTarget;
+use crate::ir::{Callee, IrExpr, IrFile, IrVirtualTarget};
 use crate::jvm::jvm_class_map::type_names_map_to_same_jvm_internal;
 use crate::libraries::OverriddenCallRealization;
 use crate::types::TypeName;
@@ -17,11 +17,6 @@ fn callable_candidates(
     callables: &CheckedBackendCallables,
     target: crate::fir::ExternalCallableId,
 ) -> Vec<OverriddenCallRealization> {
-    // `target` is the exact overridden declaration selected by the frontend. A realization may
-    // deliberately name an earlier ancestor than that declaration: an intermediate override still
-    // carries its ancestor's physical call-site contract. Do not re-filter the typed plan against
-    // the nearest override owner; the receiver-hierarchy check in `select` decides whether that
-    // declaration contract applies at the call site.
     callables
         .callable(target)
         .map(|fact| fact.overridden_call_realizations.to_vec())
@@ -29,65 +24,18 @@ fn callable_candidates(
 }
 
 fn function_candidates(
-    ir: &IrFile,
     callables: &CheckedBackendCallables,
     target: ResolvedFunctionOverrideTarget,
 ) -> Vec<OverriddenCallRealization> {
     match target {
         ResolvedFunctionOverrideTarget::External(target) => callable_candidates(callables, target),
-        ResolvedFunctionOverrideTarget::Module(target) => ir
-            .function_overrides
-            .values()
-            .flatten()
-            .filter(|edge| edge.implementation == ResolvedFunctionOverrideTarget::Module(target))
-            .filter_map(|edge| match edge.overridden {
-                ResolvedFunctionOverrideTarget::External(overridden) => Some(overridden),
-                ResolvedFunctionOverrideTarget::Module(_) => None,
-            })
-            .flat_map(|overridden| callable_candidates(callables, overridden))
-            .collect(),
+        // A source override has its own declaration spelling. kotlinc does not replace a call to
+        // that declaration with an ancestor builtin's JVM spelling (`SmartSet.size` remains
+        // `getSize()`); only an already-selected dependency declaration may publish an alternate
+        // call-site realization. Rewalking source override edges here would change the selected
+        // declaration after checking.
+        ResolvedFunctionOverrideTarget::Module(_) => Vec::new(),
     }
-}
-
-fn property_candidates(
-    ir: &IrFile,
-    callables: &CheckedBackendCallables,
-    target: crate::fir::PropertyId,
-) -> Vec<OverriddenCallRealization> {
-    ir.property_overrides
-        .values()
-        .flatten()
-        .filter(|edge| edge.implementation == ResolvedPropertyOverrideTarget::Module(target))
-        .filter_map(|edge| match edge.overridden {
-            ResolvedPropertyOverrideTarget::External(overridden) => Some(overridden),
-            ResolvedPropertyOverrideTarget::Module(_) => None,
-        })
-        .flat_map(|overridden| callable_candidates(callables, overridden))
-        .collect()
-}
-
-fn method_candidates(
-    ir: &IrFile,
-    callables: &CheckedBackendCallables,
-    function: crate::ir::FunId,
-) -> Vec<OverriddenCallRealization> {
-    ir.function_overrides
-        .values()
-        .flatten()
-        .filter(|edge| {
-            edge.implementation_function == Some(function)
-                || matches!(
-                    edge.implementation,
-                    ResolvedFunctionOverrideTarget::Module(target)
-                        if ir.checked_callable_functions.get(&target) == Some(&function)
-                )
-        })
-        .filter_map(|edge| match edge.overridden {
-            ResolvedFunctionOverrideTarget::External(overridden) => Some(overridden),
-            ResolvedFunctionOverrideTarget::Module(_) => None,
-        })
-        .flat_map(|overridden| callable_candidates(callables, overridden))
-        .collect()
 }
 
 fn select(
@@ -105,7 +53,7 @@ fn select(
     Ok(None)
 }
 
-/// Select every inherited call-site realization after JVM transforms have finalized call owners.
+/// Select dependency call-site realizations after JVM transforms have finalized call owners.
 pub(super) fn realize(
     ir: &mut IrFile,
     classifiers: &dyn crate::backend::BackendClassifierSource,
@@ -116,43 +64,19 @@ pub(super) fn realize(
     for (raw, expression) in ir.exprs.iter().enumerate() {
         let id = u32::try_from(raw).expect("too many common IR expressions");
         let (plan_expression, owner, candidates) = match expression {
-            IrExpr::MethodCall { class, index, .. } => {
-                let declaration = &ir.classes[*class as usize];
-                let function = declaration.methods[*index as usize];
-                (
-                    id,
-                    declaration.fq_name_id(),
-                    method_candidates(ir, callables, function),
-                )
-            }
             IrExpr::Call {
                 callee: Callee::Virtual { owner, target, .. },
                 ..
             } => {
                 let candidates = match target {
                     Some(IrVirtualTarget::Function(target)) => {
-                        function_candidates(ir, callables, *target)
+                        function_candidates(callables, *target)
                     }
-                    Some(IrVirtualTarget::PropertyGetter(target)) => {
-                        property_candidates(ir, callables, *target)
-                    }
-                    Some(IrVirtualTarget::PropertySetter(_)) | None => Vec::new(),
+                    Some(IrVirtualTarget::PropertyGetter(_))
+                    | Some(IrVirtualTarget::PropertySetter(_))
+                    | None => Vec::new(),
                 };
                 (id, *owner, candidates)
-            }
-            IrExpr::PropertyRead {
-                owner, operation, ..
-            } => {
-                let operation = operation.unwrap_or(id);
-                let candidates = match ir.module_member_accesses.get(&operation) {
-                    Some(IrModuleMemberAccess::Property {
-                        target,
-                        write: false,
-                        ..
-                    }) => property_candidates(ir, callables, *target),
-                    _ => Vec::new(),
-                };
-                (operation, *owner, candidates)
             }
             _ => continue,
         };

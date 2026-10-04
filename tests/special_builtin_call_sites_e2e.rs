@@ -3,16 +3,15 @@
 //! `MutableList.removeAt` → `remove`, `CharSequence.get` → `charAt`, `Number.toByte` →
 //! `byteValue`).
 //!
-//! kotlinc retargets a NON-SUPER call to the OVERRIDDEN BUILTIN's name and erased descriptor
-//! while the owner and the opcode stay the call's own
+//! kotlinc consumes that alternate name only for the exact selected dependency declaration. A
+//! source override has its own JVM declaration and keeps that declaration's spelling
+//! (`SmartSet.getSize`, `MyList.removeAt`), even when its override chain reaches such a builtin.
+//! For dependency declarations the owner and opcode stay the selected call's own
 //! (`MethodSignatureMapper.mapOverriddenSpecialBuiltinIfNeeded`,
 //! compiler/ir/backend.jvm/.../mapping/MethodSignatureMapper.kt:411-422, backed by
 //! `getOverriddenBuiltinWithDifferentJvmName`,
-//! core/descriptors.jvm/.../specialBuiltinMembers.kt:88-102). There is no `isBuiltIn`
-//! requirement on the overriding class, so a user class reads its `size` as `size()I` even
-//! though its declaration stays `getSize()I`. Super-calls keep the declaration's spelling, and
-//! so do writes: every special property is read-only, so an overriding `var`'s setter overrides
-//! nothing.
+//! core/descriptors.jvm/.../specialBuiltinMembers.kt:88-102). Super calls and source writes keep
+//! the declaration spelling as well.
 use super::common;
 use super::common::{
     assert_class_code_matches_kotlinc_jdk, assert_class_code_matches_kotlinc_jdk_cp,
@@ -26,9 +25,9 @@ fn run_boxed(src: &str) {
     assert_eq!(output.as_deref(), Some("OK"), "fixture runs");
 }
 
-/// A user `AbstractSet` subclass overriding `var size`: its READ call sites spell `size()I`
-/// (the overridden builtin's getter) while the declaration keeps `getSize`/`setSize`, and the
-/// write keeps `setSize`.
+/// A user `AbstractSet` subclass overriding `var size`: reads and writes call its own
+/// `getSize`/`setSize` declarations. The inherited dependency declaration remains `size()I` when
+/// the receiver is typed as `AbstractSet`.
 const SMART_SET: &str = r#"
 class SmartSet<T>(private val data: MutableList<T>) : AbstractSet<T>() {
     override var size: Int
@@ -50,8 +49,8 @@ fun main() {
 
 #[test]
 fn special_set_size_call_sites_match_kotlinc() {
-    // The caller facade: `s.size` reads spell `SmartSet.size:()I`, the write spells
-    // `SmartSet.setSize:(I)V`, the abstract-typed read spells `AbstractMutableSet.size:()I`.
+    // The caller facade: `s.size` reads spell `SmartSet.getSize:()I`, the write spells
+    // `SmartSet.setSize:(I)V`, and the abstract-typed read uses its exact dependency realization.
     assert_class_code_matches_kotlinc_jdk("SpecialSetSize", SMART_SET, "SpecialSetSizeKt");
     // The declaration keeps `getSize`/`setSize` and inherits the final `size()` bridge.
     assert_class_code_matches_kotlinc_jdk("SpecialSetSize", SMART_SET, "SmartSet");
@@ -81,8 +80,8 @@ fun main() {
 
 #[test]
 fn special_map_property_call_sites_match_kotlinc() {
-    // `m.keys`/`m.values`/`m.entries` spell `MyMap.keySet`/`values`/`entrySet` with the
-    // builtin's descriptor.
+    // These reads call the source override accessors. Their inherited dependency declarations
+    // have separate provider-owned physical realizations.
     assert_class_code_matches_kotlinc_jdk("SpecialMapProps", MY_MAP, "SpecialMapPropsKt");
     assert_class_code_matches_kotlinc_jdk("SpecialMapProps", MY_MAP, "MyMap");
 }
@@ -92,8 +91,7 @@ fn special_map_property_call_sites_run() {
     run_boxed(&format!("{MY_MAP}\nfun box(): String = \"OK\"\n"));
 }
 
-/// A covariant `keys` override: the retargeted call carries the BUILTIN's `()Ljava/util/Set;`
-/// descriptor and kotlinc checkcasts the result back to `HashSet`.
+/// A covariant source `keys` override keeps its declared `HashSet` result and accessor spelling.
 const COV_MAP: &str = r#"
 class CovMap<K, V>(private val data: Map<K, V>) : AbstractMap<K, V>() {
     override val entries: Set<Map.Entry<K, V>> get() = data.entries
@@ -158,9 +156,8 @@ fun main() {
 
 #[test]
 fn special_function_call_sites_match_kotlinc() {
-    // `ml.removeAt` spells `MyList.remove:(I)Ljava/lang/Object;`, `cs[0]` spells
-    // `Cs.charAt:(I)C`, `cs.length` spells `Cs.length:()I`, `n.toByte()` spells
-    // `N.byteValue:()B`.
+    // Each call names the source override (`removeAt`, `get`, `getLength`, `toByte`/`toLong`).
+    // The inherited builtins' alternate JVM spellings do not replace source declaration ABI.
     assert_class_code_matches_kotlinc_jdk(
         "SpecialFunctions",
         SPECIAL_FUNCTIONS,
@@ -175,9 +172,8 @@ fn special_function_call_sites_run() {
     ));
 }
 
-/// A non-generic subclass whose `removeAt` override has a CONCRETE (narrower than the builtin's
-/// erased `Object`) return: the call still retargets to `remove(I)Ljava/lang/Object;` and
-/// kotlinc checkcasts the result to `String`.
+/// A non-generic subclass whose `removeAt` override has a concrete return keeps that declaration's
+/// own descriptor; it is not widened back to the inherited builtin's erased result.
 const NARROW_REMOVE_AT: &str = r#"
 class S(private val data: MutableList<String>) : AbstractMutableList<String>() {
     override val size: Int get() = data.size
@@ -201,9 +197,8 @@ fn special_narrowed_override_call_site_match_kotlinc() {
     );
 }
 
-/// Super-calls keep the declaration's spelling (`invokespecial Base.getLength`, `Base.get`),
-/// while a plain read on the subclass retargets (`Sub.length`). A property whose override chain
-/// reaches no special builtin (`Plain.size`) keeps its conventional getter.
+/// Super calls and ordinary calls to source overrides keep the declaration spelling. A property
+/// whose override chain reaches no special builtin (`Plain.size`) does as well.
 const SUPER_AND_NEGATIVE: &str = r#"
 open class Base : CharSequence {
     override val length: Int get() = 3

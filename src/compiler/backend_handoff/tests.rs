@@ -654,63 +654,6 @@ fn every_nonordinary_carrier_of_a_dependency_callable_is_frozen() {
 }
 
 #[test]
-fn a_source_override_freezes_its_special_builtin_call_realization() {
-    const SOURCE: &str = r#"
-class SmartSet<T>(private val data: MutableList<T>) : AbstractSet<T>() {
-    override var size: Int
-        get() = data.size
-        set(value) { if (value > data.size) data.add(data.last()) }
-    override fun iterator(): Iterator<T> = data.iterator()
-}
-
-fun readSize(set: SmartSet<String>): Int = set.size
-"#;
-    let classpath = Rc::new(Classpath::new(platform_paths()));
-    let mut diagnostics = DiagSink::new();
-    let analysis = analyze(SOURCE, "SpecialOverride", &classpath, &mut diagnostics);
-    let recorder = FactRecorder {
-        classpath,
-        callables: RefCell::default(),
-        carriers: RefCell::default(),
-        properties: RefCell::default(),
-        property_carriers: RefCell::default(),
-    };
-    let outputs = emit_analyzed(
-        analysis,
-        &["SpecialOverride".to_string()],
-        &recorder,
-        "main",
-        &mut diagnostics,
-    );
-    assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
-    assert!(outputs.is_empty());
-
-    let callables = recorder.callables.into_inner();
-    let property_overrides = recorder
-        .carriers
-        .into_inner()
-        .into_iter()
-        .filter_map(|(carrier, identity)| (carrier == "property override").then_some(identity))
-        .collect::<Vec<_>>();
-    assert!(
-        !property_overrides.is_empty(),
-        "the source override has an edge"
-    );
-    assert!(property_overrides.into_iter().any(|identity| {
-        callables
-            .iter()
-            .find(|(candidate, _)| *candidate == identity)
-            .is_some_and(|(_, fact)| {
-                fact.overridden_call_realizations.iter().any(|realization| {
-                    realization.declaration_owner == type_name("kotlin/collections/Collection")
-                        && realization.physical_name == "size"
-                        && realization.descriptor == "()I"
-                })
-            })
-    }));
-}
-
-#[test]
 fn dependency_property_accessors_are_frozen_before_backend_realization() {
     let (callables, _, _, _) = frozen_facts(
         r#"import lib.Base

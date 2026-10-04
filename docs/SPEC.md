@@ -4045,27 +4045,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `java_charsequence_get_realization_is_an_operator`,
   `tests/classpath_number_conversion_e2e.rs`.
 
-- **A NON-SUPER call whose override chain reaches a special builtin spells the OVERRIDDEN BUILTIN's JVM
-  name.** kotlinc retargets the call SITE — the declaration keeps its own name — whenever an overriding
-  member's chain reaches a builtin with a different JVM name
+- **A selected DEPENDENCY declaration may publish a special JVM call-site name.** Kotlin builtins
+  such as `Collection.size`, `Map.keys`, `MutableList.removeAt`, `CharSequence.get`, and
+  `Number.toByte` have target spellings that differ from their source names
   (`MethodSignatureMapper.mapOverriddenSpecialBuiltinIfNeeded`,
   compiler/ir/backend.jvm/.../mapping/MethodSignatureMapper.kt:411-422, backed by
   `getOverriddenBuiltinWithDifferentJvmName`,
-  core/descriptors.jvm/.../specialBuiltinMembers.kt:88-102). A user `SmartSet : AbstractSet` overriding
-  `var size` declares `getSize()I` yet every READ spells `SmartSet.size()I` — the builtin
-  `Collection.size`'s getter — and `MyList.removeAt(0)` spells `MyList.remove(I)Ljava/lang/Object;`.
-  The owner and opcode stay the call's own; only the name and erased descriptor come from the builtin.
-  There is no `isBuiltIn` requirement on the overriding class, and a covariantly narrowed return
-  (`keys: HashSet<K>`, `removeAt(...): String`) still retargets, with a `checkcast` back to the
-  override's return (which fires even when the call result is popped, the same over-emission other
-  erased-generic casts share). Super-calls keep the declaration's spelling (`invokespecial
-  Base.getLength`), and writes are never retargeted: every special property is read-only, so an
-  overriding `var`'s setter overrides nothing. At the provider boundary, krusty joins each exact
-  decoded declaration to the target-policy realization candidates it may inherit. The checked
-  callable/property identities and frozen override edges then select a candidate for each call;
-  emission consumes that per-expression plan and never recovers a declaration from a member or
-  accessor spelling. A plain `fun getSize()` or Java bean getter therefore carries no property
-  declaration candidate and is never retargeted. Tests:
+  core/descriptors.jvm/.../specialBuiltinMembers.kt:88-102). The provider joins each exact decoded
+  dependency declaration to its target-policy realization while both identities are available;
+  emission consumes that typed fact after selection and never recovers it from an owner/member
+  spelling. A SOURCE override remains its own selected declaration: `SmartSet.size` calls
+  `SmartSet.getSize()I`, `MyList.removeAt` keeps its concrete declaration descriptor, and a
+  covariant `keys: HashSet<K>` keeps that return. Super calls, writes, plain `fun getSize()`, and
+  Java bean getters likewise retain their declared ABI. Tests:
   `tests/special_builtin_call_sites_e2e.rs`.
 
 - **Unchecked cast to a type parameter (`x as T`).** kotlinc erases the target to the type parameter's
