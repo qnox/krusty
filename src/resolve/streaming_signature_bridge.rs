@@ -35,6 +35,7 @@ mod selected_call_facts;
 mod semantics;
 mod source_contracts;
 mod stable_function_index;
+mod top_level_call;
 mod type_parameter_publication;
 mod value_parameter_publication;
 mod vararg_constructor_property;
@@ -55,24 +56,7 @@ pub(crate) use local_signatures::{
     publish_checked_local_signatures, publish_discovered_local_capture_declarations,
 };
 pub(crate) use source_contracts::{extract_source_contract_candidates, SourceContractCandidate};
-
-enum SelectedTopLevelCall {
-    Ambiguous,
-    Callable {
-        callable: Box<crate::libraries::LibraryCallable>,
-        source: Option<(u32, u32)>,
-        declaration: Option<crate::fir::DeclarationId>,
-        parameter_by_argument: Box<[Option<u32>]>,
-    },
-    Value(Box<crate::libraries::PropertyInfo>),
-    /// A classifier whose constructors do not apply: its associated `operator fun invoke`, then the
-    /// `invoke` convention on the value it denotes (an object singleton or companion), if any.
-    ClassifierInvoke(TypeName, Option<Ty>),
-    Constructor(Box<crate::symbol_resolver::SelectedConstructorDeclaration>),
-    /// A fun-interface name applied to one function value (`I { … }`). The interface declares no
-    /// constructor, so this is not a `Constructor` selection — the result is the interface itself.
-    SamConstructor(crate::types::TypeName),
-}
+use top_level_call::SelectedTopLevelCall;
 
 struct ProductionSignatureSemantics<'a> {
     headers: &'a crate::fir::StreamedHeaderModule,
