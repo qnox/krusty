@@ -68,6 +68,22 @@ fun declaredWhenBlocks(choice: Int): String = when (choice) {
     else -> "fail"
 }
 
+fun subjectWhenInBranch(flag: Boolean, choice: Int): String = if (flag) {
+    build().append("")
+    when (val selected = choice) {
+        0 -> {
+            build().append("")
+            build().toString()
+        }
+        else -> if (selected > 0) "positive" else "negative"
+    }
+} else "fail"
+
+fun subjectWhenResult(choice: Int): String = when (val selected = choice) {
+    0 -> build().toString()
+    else -> if (selected > 0) "positive" else "negative"
+}
+
 fun primitiveElement(): Int {
     val list = ArrayList<Int>()
     list.add(2)
@@ -107,6 +123,8 @@ fun box(): String {
     if (declaredNestedBlock(true) != "OK") return "declaredNestedBlock"
     if (declaredWhenBlocks(0) != "OK") return "declaredWhenBlocks 0"
     if (declaredWhenBlocks(1) != "OK") return "declaredWhenBlocks 1"
+    if (subjectWhenInBranch(true, 0) != "OK") return "subjectWhenInBranch"
+    if (subjectWhenResult(0) != "OK") return "subjectWhenResult"
     if (primitiveElement() != 2) return "primitiveElement"
     if (loopElements() != 2) return "loopElements"
     val list = ArrayList<String?>()
@@ -134,6 +152,8 @@ fn enhanced_java_results_are_checked_like_kotlinc() {
         "declaredBlock",
         "declaredNestedBlock",
         "declaredWhenBlocks",
+        "subjectWhenInBranch",
+        "subjectWhenResult",
         "primitiveElement",
         "loopElements",
         "nullableElements",

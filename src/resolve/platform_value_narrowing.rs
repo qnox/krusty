@@ -79,6 +79,11 @@ impl Checker<'_> {
                     .iter()
                     .any(|arm| self.branch_has_enhanced_result(arm.body));
             }
+            // `when (val x = ...)` is a block declaring the subject before the `when`.
+            Expr::Block { .. } => {
+                let produced = super::conditional_branch::branch_value_expression(self.file, e);
+                return produced != e && self.has_enhanced_result(produced);
+            }
             _ => {}
         }
         self.has_enhanced_call_result(e)
