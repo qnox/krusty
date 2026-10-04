@@ -91,18 +91,26 @@ mod tests {
 
     #[test]
     fn semantic_roles_require_the_complete_builtin_declaration() {
+        fn declaration<'a>(
+            owner: TypeName,
+            name: &'a str,
+            params: &'a [Ty],
+            ret: Ty,
+        ) -> BuiltinMemberDeclaration<'a> {
+            BuiltinMemberDeclaration {
+                owner,
+                name,
+                params,
+                ret,
+                is_property: false,
+                is_operator: false,
+                is_infix: false,
+                annotations: &[],
+            }
+        }
+
         let any = crate::types::wk::any();
         let nullable_any = Ty::nullable(Ty::obj_name(any));
-        let declaration = |owner, name, params: &[Ty], ret| BuiltinMemberDeclaration {
-            owner,
-            name,
-            params,
-            ret,
-            is_property: false,
-            is_operator: false,
-            is_infix: false,
-            annotations: &[],
-        };
         assert_eq!(
             semantic_call_role(declaration(any, "equals", &[nullable_any], Ty::Boolean)),
             Some(SemanticCallRole::KotlinAnyEquals)
