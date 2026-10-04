@@ -2379,7 +2379,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   still collects initializer constraints. Every initialized local is therefore a block effect:
   signature evaluation walks ordinary, typed and delegated initializers, while a declared
   delegated-property type constrains the selected `getValue` result. A failed effect does not reject
-  the enclosing result, the same way other statements behave. Tests:
+  the enclosing result, the same way other statements behave. The `try`/`finally` around that call
+  does not change the constraint; the box covers it. Tests:
   `tests/delegate_initializer_constraint_e2e.rs`; box:
   `inference/pcla/pclaRootIsTrySyntheticCallWithDelegate.kt`.
 - **Equally specific candidates: a non-parameterized callable wins.** kotlinc's last tie-break

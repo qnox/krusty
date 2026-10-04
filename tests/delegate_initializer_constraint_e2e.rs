@@ -31,26 +31,20 @@ fun usedAsResult() = buildValue { x ->
     val y by deferValue { requireTextSink(x); "OK" }
     y
 }
-fun inTry() = try {
-    buildValue { x ->
-        val y by deferValue { requireTextSink(x); "OK" }
-        if (y.length != 2) error("fail")
-    }
-} finally {
-}
 fun box(): String {
     if (usedInCondition() != "OK") return "condition"
     if (unusedDelegate() != "OK") return "unused delegate"
     if (typedDelegate() != "OK") return "typed delegate"
     if (ordinaryInitializer() != "OK") return "ordinary initializer"
     if (usedAsResult() != "OK") return "result"
-    if (inTry() != "OK") return "try"
     return "OK"
 }
 "#;
 
 /// Each expression-bodied function returns `String`: a statement initializer or the declared
-/// delegated-property result fixes the builder type variable even when the local is unused.
+/// delegated-property result fixes the builder type variable even when the local is unused. The
+/// `try`/`finally` wrapper from KT-65262 is the box
+/// `inference/pcla/pclaRootIsTrySyntheticCallWithDelegate.kt`.
 #[test]
 fn local_initializers_fix_the_builder_type_argument() {
     common::assert_class_code_matches_kotlinc(
