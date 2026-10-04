@@ -9252,6 +9252,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the return would box it again, so the pair is dropped, null-safe forms included. A lambda whose
   result is `Any` (`val f: () -> Any = { s[0] }`) returns through the same boundary. Tests:
   `tests/value_class_reference_return_e2e.rs`.
+- **A callable lifted into a value class is not a member that runs on the box.** A lambda, local
+  function, or callable-reference adapter written inside a value-class member becomes a private
+  static function of the value class (`n_txdesME$lambda$0`, `local_txdesME$g`), but it has no
+  dispatch receiver: a captured `this` and every captured value class reach it as carrier
+  parameters. kotlinc lowers its body like any other static function, so each reference boundary in
+  it boxes the carrier: `fun n(t: Tag): () -> Any = { t }` returns `Tag.box-impl(t)`, `{ this }` as
+  `Any` returns `V.box-impl`, an `Any?` or interface result, an `Any` argument, and an `Any` local
+  box the same way, and a `Tag?` argument passes the carrier with no `checkcast`. The backend tells
+  these helpers from the value class's own members by the exact identity common lowering records
+  for every body-local static it places in a class (`class_static_local_functions`), not by name or
+  staticness. Tests: `tests/value_class_member_lambda_return_e2e.rs`,
+  `tests/value_class_mangled_lambda_names_e2e.rs`.
 - **A value-class default of a primary constructor is lowered like the constructor's other code.**
   `class Test(val x: S, val y: S = S("K"))` fills an omitted `y` in its synthetic
   `<init>(String, String, int, DefaultConstructorMarker)`. The default expression runs over the

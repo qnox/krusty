@@ -39,6 +39,7 @@ mod synth_members;
 mod type_operation_roles;
 mod unboxing_rewrites;
 mod value_boundaries;
+mod value_members;
 use crate::ir::{Callee, ExprId, IrExpr, IrFile};
 use crate::jvm::method_descriptors::jvm_tys;
 use crate::jvm::names::{method_descriptor, property_getter_name, type_descriptor};
@@ -564,14 +565,8 @@ pub(crate) fn lower_value_classes(
     let vc_reference_supertypes =
         reference_returns::value_class_reference_supertypes(classifiers, &under);
 
-    // Functions that are members of a value class — their bodies operate on the BOXED object and must
-    // not be rewritten (only their signatures erase).
-    let mut vc_methods: HashSet<u32> = HashSet::new();
-    for c in &ir.classes {
-        if c.is_value {
-            vc_methods.extend(c.methods.iter().copied());
-        }
-    }
+    // Members of a value class: their bodies operate on the BOXED object (only signatures erase).
+    let vc_methods = value_members::value_class_members(ir);
     // Exprs reachable from a value-class member body reference the BOXED class (`other is X`, `this.field`
     // in the synthesized `equals`) and must NOT be erased — those methods run on the boxed object.
     let mut vc_body_exprs: HashSet<ExprId> = HashSet::new();
