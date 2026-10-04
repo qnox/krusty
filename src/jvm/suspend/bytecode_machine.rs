@@ -28,10 +28,7 @@ use super::{
     ensure_tail_return, realize_coroutine_context, recorded_suspension_result, shift_locals,
     suspend_call_fid, value_class_suspension_result, EmitTimeMachines, MachineContext,
 };
-use crate::ir::{
-    for_each_child, Callee, ExprId, IrExpr, IrFile, IrIntrinsicSuspensionKind,
-    IrValueClassSuspendResult,
-};
+use crate::ir::{for_each_child, Callee, ExprId, IrExpr, IrFile, IrValueClassSuspendResult};
 use crate::jvm::local_class_names::name_continuation;
 use crate::types::Ty;
 
@@ -87,10 +84,9 @@ pub(super) fn route(
     realize_coroutine_context(ir, body, IrExpr::CurrentContinuation);
     // A `suspendCoroutineUninterceptedOrReturn` block is given the continuation already: it reads
     // it as a fake one.
-    let calls = suspensions.iter().filter(|suspension| {
-        !ir.intrinsic_suspension_points
-            .contains_key(&suspension.call)
-    });
+    let calls = suspensions
+        .iter()
+        .filter(|suspension| !ir.is_unintercepted_suspension(suspension.call));
     for suspension in calls.collect::<Vec<_>>() {
         let continuation = ir.add_expr(IrExpr::CurrentContinuation);
         // A generated call that enters its line only where its operands begin (a reference
@@ -315,7 +311,7 @@ pub(super) fn eligible_points(
             ir.exprs[call as usize],
             IrExpr::Call { .. } | IrExpr::MethodCall { .. } | IrExpr::InvokeFunction { .. }
         );
-        let block = is_unintercepted_block(ir, call) && subject == Subject::NamedFunction;
+        let block = ir.is_unintercepted_suspension(call) && subject == Subject::NamedFunction;
         (direct && !ir.intrinsic_suspension_points.contains_key(&call) || block)
             // A boxed result arrives as the box on either path, which the call's own unbox
             // consumes; a carrier result arrives boxed only on resume, which the IR machine handles.
@@ -341,7 +337,7 @@ pub(super) fn eligible_points(
 /// outside a `suspendCoroutineUninterceptedOrReturn` block: the block is one suspension point at
 /// its own line, whatever it splices.
 fn splices_inline_code(ir: &IrFile, expression: ExprId) -> bool {
-    if is_unintercepted_block(ir, expression) {
+    if ir.is_unintercepted_suspension(expression) {
         return false;
     }
     if calls_an_inline_function(ir, expression) {
@@ -357,7 +353,7 @@ fn splices_inline_code(ir: &IrFile, expression: ExprId) -> bool {
 /// Whether the body reads its own continuation outside a `suspendCoroutineUninterceptedOrReturn`
 /// block, the one read the transformer takes.
 fn reads_continuation_outside_unintercepted_blocks(ir: &IrFile, expression: ExprId) -> bool {
-    if is_unintercepted_block(ir, expression) {
+    if ir.is_unintercepted_suspension(expression) {
         return false;
     }
     if let IrExpr::CurrentContinuation = ir.exprs[expression as usize] {
@@ -373,7 +369,7 @@ fn reads_continuation_outside_unintercepted_blocks(ir: &IrFile, expression: Expr
 /// The continuation reads inside the body's `suspendCoroutineUninterceptedOrReturn` blocks.
 fn unintercepted_continuation_reads(ir: &IrFile, body: ExprId) -> Vec<ExprId> {
     fn collect(ir: &IrFile, expression: ExprId, inside: bool, reads: &mut Vec<ExprId>) {
-        let inside = inside || is_unintercepted_block(ir, expression);
+        let inside = inside || ir.is_unintercepted_suspension(expression);
         if inside && matches!(ir.exprs[expression as usize], IrExpr::CurrentContinuation) {
             reads.push(expression);
         }
@@ -384,12 +380,6 @@ fn unintercepted_continuation_reads(ir: &IrFile, body: ExprId) -> Vec<ExprId> {
     let mut reads = Vec::new();
     collect(ir, body, false, &mut reads);
     reads
-}
-
-fn is_unintercepted_block(ir: &IrFile, expression: ExprId) -> bool {
-    ir.intrinsic_suspension_points
-        .get(&expression)
-        .is_some_and(|point| point.kind == IrIntrinsicSuspensionKind::Unintercepted)
 }
 
 /// Whether the body reads its own continuation (`suspendCoroutineUninterceptedOrReturn`), which

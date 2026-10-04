@@ -67,7 +67,7 @@ impl Emitter<'_> {
     /// Whether `e` is a `suspendCoroutineUninterceptedOrReturn` block the transformer takes, whose
     /// probe reads the fake continuation.
     pub(super) fn is_transformed_block(&self, e: ExprId) -> bool {
-        self.transformed_result(e).is_some() && self.ir.intrinsic_suspension_points.contains_key(&e)
+        self.transformed_result(e).is_some() && self.ir.is_unintercepted_suspension(e)
     }
 
     /// Emit `e`, a value coerced to `target`, leaving the erased `Object` result when it is a
