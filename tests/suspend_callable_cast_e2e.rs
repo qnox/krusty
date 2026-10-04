@@ -84,3 +84,14 @@ fn a_suspend_callable_keeps_its_type_after_a_continuation_cast() {
     );
     assert_eq!(reference, "OK");
 }
+
+/// Discovering a function value's callable shape is not itself a non-null proof. Only the checked
+/// cast flow above may contribute the non-null constituent.
+#[test]
+fn a_nullable_function_value_is_not_promoted_by_a_function_expectation() {
+    let source = "fun reject(value: (() -> Unit)?) {\n\
+        val nonNull: () -> Unit = value\n\
+    }\n";
+    let result = common::compiler_diagnostics(&[("Main.kt", source)], &[]);
+    common::expect_identical_rejection(&result, "nullable function expectation");
+}

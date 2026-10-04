@@ -112,8 +112,7 @@ impl Checker<'_> {
     ) -> Vec<Ty> {
         let mut facts = Vec::new();
         let mut push = |ty: Ty| {
-            let ty = ty.non_null();
-            if matches!(ty, Ty::Fun(_)) && !facts.contains(&ty) {
+            if matches!(ty.non_null(), Ty::Fun(_)) && !facts.contains(&ty) {
                 facts.push(ty);
             }
         };
