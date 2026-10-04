@@ -30,6 +30,69 @@ pub(super) struct TypeReflectionFacts {
 }
 
 impl IrFile {
+    pub(super) fn remap_type_reflection_classifier_identities(
+        &mut self,
+        names: &HashMap<TypeName, TypeName>,
+        mut remap_ty: impl FnMut(Ty) -> Ty,
+    ) {
+        let remap_parameters = |parameters: &mut [IrTypeParameter],
+                                remap_ty: &mut dyn FnMut(Ty) -> Ty| {
+            for parameter in parameters {
+                for (bound, _) in &mut parameter.bounds {
+                    *bound = remap_ty(*bound);
+                }
+            }
+        };
+
+        for property in &mut self.type_reflection.top_level_generic_properties {
+            remap_parameters(&mut property.type_params, &mut remap_ty);
+        }
+        for facade in self.type_reflection.foreign_template_facades.values_mut() {
+            *facade = names.get(facade).copied().unwrap_or(*facade);
+        }
+        for source in self.type_reflection.foreign_template_sources.values_mut() {
+            source.package = names
+                .get(&source.package)
+                .copied()
+                .unwrap_or(source.package);
+        }
+        for parameters in self
+            .type_reflection
+            .foreign_template_classifiers
+            .values_mut()
+        {
+            remap_parameters(parameters, &mut remap_ty);
+        }
+        self.type_reflection.foreign_template_classifiers =
+            std::mem::take(&mut self.type_reflection.foreign_template_classifiers)
+                .into_iter()
+                .map(|(classifier, parameters)| {
+                    (
+                        names.get(&classifier).copied().unwrap_or(classifier),
+                        parameters,
+                    )
+                })
+                .collect();
+        for parameters in self.type_reflection.lambda_type_parameters.values_mut() {
+            remap_parameters(parameters, &mut remap_ty);
+        }
+    }
+
+    pub(super) fn remap_lambda_type_parameter_classifiers(
+        &mut self,
+        lambda: u32,
+        mut remap_ty: impl FnMut(Ty) -> Ty,
+    ) {
+        let Some(parameters) = self.type_reflection.lambda_type_parameters.get_mut(&lambda) else {
+            return;
+        };
+        for parameter in parameters {
+            for (bound, _) in &mut parameter.bounds {
+                *bound = remap_ty(*bound);
+            }
+        }
+    }
+
     pub(crate) fn record_top_level_generic_property(
         &mut self,
         property: IrGenericTopLevelProperty,
