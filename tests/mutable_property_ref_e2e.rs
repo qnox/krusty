@@ -463,3 +463,28 @@ fun box(): String {
 "#;
     common::expect_box_same_as_kotlinc(MAIN, "PropertyReferenceIdentity");
 }
+
+#[test]
+fn value_class_property_reference_identity_survives_a_private_setter_bridge() {
+    const MAIN: &str = r#"
+@JvmInline
+value class IdentityToken(val bits: Int)
+
+class ValueIdentityOwner(bits: Int) {
+    var token: IdentityToken = IdentityToken(bits)
+        private set
+    fun unbound() = ValueIdentityOwner::token
+    fun bound() = this::token
+}
+
+fun box(): String {
+    val direct = ValueIdentityOwner::token
+    if ((direct as Any) != (ValueIdentityOwner(1).unbound() as Any)) return "Fail unbound"
+    val owner = ValueIdentityOwner(2)
+    if ((owner::token as Any) != (owner.bound() as Any)) return "Fail bound"
+    if (direct.get(owner).bits != 2) return "Fail get"
+    return "OK"
+}
+"#;
+    common::expect_box_same_as_kotlinc(MAIN, "ValuePropertyReferenceIdentity");
+}
