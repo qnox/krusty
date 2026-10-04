@@ -377,6 +377,32 @@ fun box(): String {
     common::expect_box_ok_with_stdlib(SOURCE, "SynchronousSuspendFunctionValue");
 }
 
+/// A callable reference to `suspend fun ok(): R` is a function value. Its adapter returns the box
+/// even though the declaration returns the carrier, so `call(::ok)` can pass that box to `useR`.
+#[test]
+fn a_suspend_callable_reference_returns_the_value_class_box() {
+    const SOURCE: &str = r#"
+import kotlin.coroutines.*
+
+@JvmInline value class R(val x: Any)
+
+suspend fun <T> call(fn: suspend () -> T): T = fn()
+fun useR(r: R) = if (r.x == "OK") "OK" else "fail"
+suspend fun ok() = R("OK")
+
+fun box(): String {
+    var res = "fail"
+    val body: suspend () -> Unit = { res = useR(call(::ok)) }
+    body.startCoroutine(Continuation(EmptyCoroutineContext) { it.getOrThrow() })
+    return res
+}
+"#;
+    assert_eq!(
+        common::compile_and_run_with_stdlib(SOURCE, "SuspendValueClassResults").as_deref(),
+        Some("OK")
+    );
+}
+
 /// A value class resumed into a caller of `$default` unboxes it, and a suspend lambda hands its
 /// value-class result over boxed, as every lambda does, so its continuation does not box it again.
 #[test]

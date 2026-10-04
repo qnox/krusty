@@ -3698,11 +3698,20 @@ pub(crate) fn lower_value_classes(
                 // result crosses directly: `X(null)` is that carrier's null, and the result type is not
                 // itself nullable. A nullable result keeps its ordinary erasure.
                 if let Some(body) = ir.functions[fid].body {
-                    match suspend_result_representation(
-                        &orig_rets[fid],
-                        &under,
-                        force_boxed_suspend_returns.contains(&(fid as u32)),
-                    ) {
+                    // The recorded return is the carrier for a declaration and the box for a
+                    // callable-reference adapter. Recomputing from the declared type alone would
+                    // hand the adapter's `invoke` the carrier.
+                    match ir
+                        .value_class_suspend_returns
+                        .get(&(fid as u32))
+                        .copied()
+                        .or_else(|| {
+                            suspend_result_representation(
+                                &orig_rets[fid],
+                                &under,
+                                force_boxed_suspend_returns.contains(&(fid as u32)),
+                            )
+                        }) {
                         Some(crate::ir::IrValueClassSuspendResult::Boxed { .. }) => {
                             ir.functions[fid].ret = boxed_value_ty(x);
                             restore_boxed_suspension_tails(ir, body, &boxed_suspension_unboxes);
