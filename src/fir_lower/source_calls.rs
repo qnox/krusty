@@ -1150,13 +1150,19 @@ impl BodyLowering<'_> {
 
     pub(super) fn wrap_call_statements(&mut self, statements: Vec<ExprId>, call: ExprId) -> ExprId {
         if statements.is_empty() {
-            call
-        } else {
-            self.ir.add_expr(IrExpr::Block {
-                stmts: statements,
-                value: Some(call),
-            })
+            return call;
         }
+        let binds_operands_only = statements
+            .iter()
+            .all(|statement| self.ir.call_operand_bindings.contains(statement));
+        let block = self.ir.add_expr(IrExpr::Block {
+            stmts: statements,
+            value: Some(call),
+        });
+        if binds_operands_only {
+            self.operand_bound_calls.insert(block, call);
+        }
+        block
     }
 
     pub(super) fn external_constructor_call(

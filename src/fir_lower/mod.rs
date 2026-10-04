@@ -338,6 +338,9 @@ struct BodyLowering<'a> {
     /// [`crate::ir::IrFile::callable_scopes`]).
     root_block: Option<FirExprId>,
     lowered_root_block: Option<ExprId>,
+    /// The call each `{ val t = operand…; call(t…) }` block this body built evaluates once its
+    /// stored operands are bound, recorded when the block is created.
+    operand_bound_calls: HashMap<ExprId, ExprId>,
 }
 
 /// The block a body's executable root evaluates, through the implicit conversions checking put on
@@ -556,6 +559,7 @@ impl<'a> BodyLowering<'a> {
             expression_depth: 0,
             root_block: root_scope_block(body),
             lowered_root_block: None,
+            operand_bound_calls: HashMap::new(),
         }
     }
 
