@@ -92,6 +92,8 @@ impl FunctionInfo {
         callable.owner_is_interface = member.is_interface();
         callable.visibility = member.visibility;
         callable.member_realization = member.realization;
+        callable.compiler_intrinsic = member.realization.compiler_intrinsic();
+        callable.semantic_role = member.semantic_role;
         callable.default_realization = member.default_realization.clone();
         callable.external_default_provider = member.external_default_provider;
         callable.nonvirtual_realization = member.nonvirtual_realization.clone();
@@ -199,6 +201,25 @@ mod tests {
         assert_eq!(
             candidate.callable.reified_type_parameter_ordinals.as_ref(),
             [1]
+        );
+    }
+
+    #[test]
+    fn classifier_conversion_preserves_the_provider_semantic_role() {
+        let owner = crate::types::type_name("fixture/Callable");
+        let mut member = LibraryMember::new(
+            "perform".to_string(),
+            Vec::new(),
+            Ty::Unit,
+            "()V".to_string(),
+        );
+        member.semantic_role = Some(crate::types::SemanticCallRole::KotlinFunctionInvoke);
+
+        let candidate = FunctionInfo::classifier_member(FnKind::Member, owner, member);
+
+        assert_eq!(
+            candidate.callable.semantic_role,
+            Some(crate::types::SemanticCallRole::KotlinFunctionInvoke)
         );
     }
 }
