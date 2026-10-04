@@ -632,12 +632,9 @@ impl EntryHeader {
         formatter: &JvmSignatureFormatter<'_>,
         member: u32,
         entry: &crate::ir::Bridge,
+        descriptor: &str,
         java_parameters: bool,
     ) -> Self {
-        let descriptor = method_descriptor(
-            &jvm_tys(&entry.erased_params),
-            ir_ty_to_jvm(&entry.erased_ret),
-        );
         let function = &ir.functions[member as usize];
         let signature = ir.signatures.get(&member).and_then(|generic| {
             let mut generic = super::value_class_signatures::physical_generic_signature(
@@ -658,7 +655,7 @@ impl EntryHeader {
                 .and_then(|vararg| vararg.index.checked_sub(1));
             formatter
                 .method_signature(&generic, function, vararg_index)
-                .filter(|signature| *signature != descriptor)
+                .filter(|signature| signature != descriptor)
         });
         let nullability = super::declared_nullability::declared_nullability(ir, member);
         let reflected = if java_parameters {
@@ -705,7 +702,7 @@ pub(super) fn emit_value_class_interface_entries(
             continue;
         }
         let descriptor = method_descriptor(&jvm_tys(&b.erased_params), ir_ty_to_jvm(&b.erased_ret));
-        let header = EntryHeader::of(ir, formatter, member, b, env.java_parameters);
+        let header = EntryHeader::of(ir, formatter, member, b, &descriptor, env.java_parameters);
         let class = ClassBridges::new(ir, c, env);
         emit_bridge(&class, cw, bridge_index, b, Some(&header));
         cw.set_method_nullability(&b.name, &descriptor, header.result, &header.parameters);

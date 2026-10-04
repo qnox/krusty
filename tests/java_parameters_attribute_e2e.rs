@@ -527,8 +527,9 @@ fn java_parameters_names_a_value_class_boxed_members() {
 
 /// kotlinc writes an interface member's body on `DefaultImpls` as a static that takes the
 /// interface instance as `$this`, synthetic, and the extension receiver as an ordinary parameter
-/// `$receiver`, flagged mandated like every receiver a static moves; so does the forward a
-/// sub-interface republishes for an inherited member. krusty named it `$this$ie`, unflagged.
+/// `$receiver`, flagged mandated like every receiver a static moves; so do the forward a
+/// sub-interface republishes for an inherited member and a class's `<name>$suspendImpl`. krusty
+/// named it `$this$ie`, unflagged.
 #[test]
 fn java_parameters_flags_a_default_impls_extension_receiver_mandated() {
     assert_parameter_parity(
@@ -539,11 +540,13 @@ fn java_parameters_flags_a_default_impls_extension_receiver_mandated() {
          \x20 val String.pe: Int get() = length\n\
          \x20 fun plain(y: Int): Int = y\n\
          }\n\
-         interface Sub : Face\n",
+         interface Sub : Face\n\
+         open class Open { open suspend fun String.se(n: Int): Int = n + length }\n",
         &[
             "demo/Face$DefaultImpls",
             "demo/Face",
             "demo/Sub$DefaultImpls",
+            "demo/Open",
         ],
     );
 }

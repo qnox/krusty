@@ -568,7 +568,9 @@ pub(super) fn placed(
     if !takes_dispatch_receiver_first(ir, function, holder_receiver) {
         return Some(names);
     }
-    let identities = ir.function_parameter_identities(function)?;
+    let identities = ir
+        .function_parameter_identities(function)
+        .expect("parameter spellings are projected from recorded parameter identities");
     assert_eq!(
         identities.len(),
         names.len(),
