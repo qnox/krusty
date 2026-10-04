@@ -1,12 +1,12 @@
 //! Backend-neutral local-class naming contracts retained by common IR.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::types::{Ty, TypeName};
 
 use super::{
-    Callee, ClassId, EnclosingDeclaration, IrCallableReferenceTarget, IrCheckedArgument,
-    IrCheckedOperation, IrExpr,
+    Callee, ClassId, EnclosingDeclaration, ExprId, FunId, IrCallableReferenceTarget,
+    IrCheckedArgument, IrCheckedOperation, IrExpr,
 };
 
 /// The classifier that lexically owns a local classifier's executable context.
@@ -66,7 +66,16 @@ fn ty(value: Ty, names: &HashMap<TypeName, TypeName>) -> Ty {
         Ty::OutProjection(inner) => Ty::out_projection(ty(*inner, names)),
         Ty::StarProjection(inner) => Ty::star_projection(ty(*inner, names)),
         Ty::TyParam(parameter, bound) => Ty::ty_param(parameter, ty(*bound, names)),
-        other => other,
+        Ty::DefinitelyNotNull(inner) => {
+            Ty::DefinitelyNotNull(crate::types::intern_ty(ty(*inner, names)))
+        }
+        Ty::Intersection(parts) => Ty::intersection(
+            &parts
+                .iter()
+                .map(|part| ty(*part, names))
+                .collect::<Vec<_>>(),
+        ),
+        Ty::Unit | Ty::Null | Ty::Nothing | Ty::Error | Ty::Pending => value,
     }
 }
 
@@ -261,7 +270,7 @@ fn callee(callee: &mut Callee, names: &HashMap<TypeName, TypeName>) {
     }
 }
 
-fn expression(expression: &mut IrExpr, names: &HashMap<TypeName, TypeName>) {
+fn remap_expression(expression: &mut IrExpr, names: &HashMap<TypeName, TypeName>) {
     match expression {
         IrExpr::Checked(operation) => checked_operation(operation, names),
         IrExpr::CallableReference(reference) => {
@@ -523,6 +532,143 @@ fn remap_first_key<K: Eq + std::hash::Hash, V>(
         .collect();
 }
 
+fn remap_class(class: &mut super::IrClass, names: &HashMap<TypeName, TypeName>) {
+    name(&mut class.fq_name, names);
+    for (_, bound) in &mut class.type_param_bounds {
+        *bound = ty(*bound, names);
+    }
+    tys(&mut class.supertypes, names);
+    for property in &mut class.properties {
+        for (_, _, parameter) in &mut property.context_params {
+            *parameter = ty(*parameter, names);
+        }
+        property.ty = ty(property.ty, names);
+        property.storage_ty = property.storage_ty.map(|value| ty(value, names));
+        property
+            .annotations
+            .iter_mut()
+            .for_each(|annotation| name(annotation, names));
+    }
+    annotations(&mut class.applied_annotations, names);
+    annotations(&mut class.primary_ctor_annotations, names);
+    for parameter_annotations in &mut class.ctor_param_annotations {
+        annotations(parameter_annotations, names);
+    }
+    for field in &mut class.field_annotations {
+        annotations(&mut field.annotations, names);
+    }
+    for property in &mut class.property_annotations {
+        annotations(&mut property.annotations, names);
+    }
+    for field in &mut class.fields {
+        field.ty = ty(field.ty, names);
+    }
+    for argument in &mut class.ctor_args {
+        argument.ty = ty(argument.ty, names);
+        argument.declared_ty = argument.declared_ty.map(|value| ty(value, names));
+    }
+    class
+        .annotation_impl_of
+        .iter_mut()
+        .for_each(|value| name(value, names));
+    class
+        .sealed_subclasses
+        .remap(|value| names.get(&value).copied().unwrap_or(value));
+    name(&mut class.superclass, names);
+    tys(&mut class.super_ctor_params, names);
+    for entry in &mut class.enum_entries {
+        tys(&mut entry.constructor_parameter_types, names);
+        entry
+            .subclass
+            .iter_mut()
+            .for_each(|value| name(value, names));
+    }
+    if let Some(parameters) = &mut class.enum_entry_of {
+        tys(parameters, names);
+    }
+    if let Some(reference) = &mut class.prop_ref {
+        reference
+            .owner_internal
+            .iter_mut()
+            .for_each(|value| name(value, names));
+        reference
+            .call_owner_internal
+            .iter_mut()
+            .for_each(|value| name(value, names));
+        reference.prop_ty = ty(reference.prop_ty, names);
+        if let Some(Some(owner)) = &mut reference.ext_facade {
+            name(owner, names);
+        }
+    }
+    if let Some(reference) = &mut class.func_ref {
+        reference
+            .owner_class
+            .iter_mut()
+            .for_each(|value| name(value, names));
+        reference
+            .call_owner
+            .iter_mut()
+            .for_each(|value| name(value, names));
+        reference.reflection_target_ret_ty = reference
+            .reflection_target_ret_ty
+            .map(|value| ty(value, names));
+        if let Some(parameters) = &mut reference.reflection_target_param_tys {
+            tys(parameters, names);
+        }
+        tys(&mut reference.param_tys, names);
+        reference.ret_ty = ty(reference.ret_ty, names);
+        tys(&mut reference.target_param_tys, names);
+        reference.target_ret_ty = ty(reference.target_ret_ty, names);
+        reference
+            .unbox_params
+            .iter_mut()
+            .flatten()
+            .for_each(|value| name(value, names));
+        reference
+            .box_ret
+            .iter_mut()
+            .for_each(|value| name(value, names));
+        reference
+            .staticbound_recv_unbox
+            .iter_mut()
+            .for_each(|value| name(value, names));
+    }
+    for bridge in &mut class.bridges {
+        tys(&mut bridge.erased_params, names);
+        bridge.erased_ret = ty(bridge.erased_ret, names);
+        tys(&mut bridge.concrete_params, names);
+        bridge.concrete_ret = ty(bridge.concrete_ret, names);
+        bridge.target_ret = bridge.target_ret.map(|value| ty(value, names));
+    }
+    class
+        .interfaces
+        .remap(|value| names.get(&value).copied().unwrap_or(value));
+    class
+        .companion_class
+        .iter_mut()
+        .for_each(|value| name(value, names));
+    for constructor in &mut class.secondary_ctors {
+        annotations(&mut constructor.annotations, names);
+        tys(&mut constructor.prefix_params, names);
+        tys(&mut constructor.params, names);
+        for (_, parameter) in &mut constructor.named_params {
+            *parameter = ty(*parameter, names);
+        }
+        match &mut constructor.delegate {
+            super::CtorDelegateTarget::This { target_params, .. } => tys(target_params, names),
+            super::CtorDelegateTarget::Super {
+                owner,
+                target_params,
+                ..
+            } => {
+                name(owner, names);
+                tys(target_params, names);
+            }
+            super::CtorDelegateTarget::ImplicitEnumBase => {}
+        }
+    }
+}
+
 impl super::IrFile {
     /// Replace semantic classifier identities with target physical identities at a backend boundary.
     /// The map is exact and declaration-produced; this operation performs no spelling lookup.
@@ -552,142 +698,7 @@ impl super::IrFile {
             }
         }
         for class in &mut self.classes {
-            name(&mut class.fq_name, names);
-            for (_, bound) in &mut class.type_param_bounds {
-                *bound = ty(*bound, names);
-            }
-            tys(&mut class.supertypes, names);
-            for property in &mut class.properties {
-                for (_, _, parameter) in &mut property.context_params {
-                    *parameter = ty(*parameter, names);
-                }
-                property.ty = ty(property.ty, names);
-                property.storage_ty = property.storage_ty.map(|value| ty(value, names));
-                property
-                    .annotations
-                    .iter_mut()
-                    .for_each(|annotation| name(annotation, names));
-            }
-            annotations(&mut class.applied_annotations, names);
-            annotations(&mut class.primary_ctor_annotations, names);
-            for parameter_annotations in &mut class.ctor_param_annotations {
-                annotations(parameter_annotations, names);
-            }
-            for field in &mut class.field_annotations {
-                annotations(&mut field.annotations, names);
-            }
-            for property in &mut class.property_annotations {
-                annotations(&mut property.annotations, names);
-            }
-            for field in &mut class.fields {
-                field.ty = ty(field.ty, names);
-            }
-            for argument in &mut class.ctor_args {
-                argument.ty = ty(argument.ty, names);
-                argument.declared_ty = argument.declared_ty.map(|value| ty(value, names));
-            }
-            class
-                .annotation_impl_of
-                .iter_mut()
-                .for_each(|value| name(value, names));
-            class
-                .sealed_subclasses
-                .remap(|value| names.get(&value).copied().unwrap_or(value));
-            name(&mut class.superclass, names);
-            tys(&mut class.super_ctor_params, names);
-            for entry in &mut class.enum_entries {
-                tys(&mut entry.constructor_parameter_types, names);
-                entry
-                    .subclass
-                    .iter_mut()
-                    .for_each(|value| name(value, names));
-            }
-            if let Some(parameters) = &mut class.enum_entry_of {
-                tys(parameters, names);
-            }
-            if let Some(reference) = &mut class.prop_ref {
-                reference
-                    .owner_internal
-                    .iter_mut()
-                    .for_each(|value| name(value, names));
-                reference
-                    .call_owner_internal
-                    .iter_mut()
-                    .for_each(|value| name(value, names));
-                reference.prop_ty = ty(reference.prop_ty, names);
-                if let Some(Some(owner)) = &mut reference.ext_facade {
-                    name(owner, names);
-                }
-            }
-            if let Some(reference) = &mut class.func_ref {
-                reference
-                    .owner_class
-                    .iter_mut()
-                    .for_each(|value| name(value, names));
-                reference
-                    .call_owner
-                    .iter_mut()
-                    .for_each(|value| name(value, names));
-                reference.reflection_target_ret_ty = reference
-                    .reflection_target_ret_ty
-                    .map(|value| ty(value, names));
-                if let Some(parameters) = &mut reference.reflection_target_param_tys {
-                    tys(parameters, names);
-                }
-                tys(&mut reference.param_tys, names);
-                reference.ret_ty = ty(reference.ret_ty, names);
-                tys(&mut reference.target_param_tys, names);
-                reference.target_ret_ty = ty(reference.target_ret_ty, names);
-                reference
-                    .unbox_params
-                    .iter_mut()
-                    .flatten()
-                    .for_each(|value| name(value, names));
-                reference
-                    .box_ret
-                    .iter_mut()
-                    .for_each(|value| name(value, names));
-                reference
-                    .staticbound_recv_unbox
-                    .iter_mut()
-                    .for_each(|value| name(value, names));
-            }
-            for bridge in &mut class.bridges {
-                tys(&mut bridge.erased_params, names);
-                bridge.erased_ret = ty(bridge.erased_ret, names);
-                tys(&mut bridge.concrete_params, names);
-                bridge.concrete_ret = ty(bridge.concrete_ret, names);
-                bridge.target_ret = bridge.target_ret.map(|value| ty(value, names));
-            }
-            class
-                .interfaces
-                .remap(|value| names.get(&value).copied().unwrap_or(value));
-            class
-                .companion_class
-                .iter_mut()
-                .for_each(|value| name(value, names));
-            for constructor in &mut class.secondary_ctors {
-                annotations(&mut constructor.annotations, names);
-                tys(&mut constructor.prefix_params, names);
-                tys(&mut constructor.params, names);
-                for (_, parameter) in &mut constructor.named_params {
-                    *parameter = ty(*parameter, names);
-                }
-                match &mut constructor.delegate {
-                    super::CtorDelegateTarget::This { target_params, .. } => {
-                        tys(target_params, names)
-                    }
-                    super::CtorDelegateTarget::Super {
-                        owner,
-                        target_params,
-                        ..
-                    } => {
-                        name(owner, names);
-                        tys(target_params, names);
-                    }
-                    super::CtorDelegateTarget::ImplicitEnumBase => {}
-                }
-            }
+            remap_class(class, names);
         }
         for annotations_by_function in self.function_annotations.values_mut() {
             annotations(annotations_by_function, names);
@@ -706,7 +717,7 @@ impl super::IrFile {
             property.erased_declared_ty = property.erased_declared_ty.map(|value| ty(value, names));
         }
         for expression_value in &mut self.exprs {
-            expression(expression_value, names);
+            remap_expression(expression_value, names);
         }
 
         for callable in self.referenced_module_callables.values_mut() {
@@ -1015,6 +1026,343 @@ impl super::IrFile {
                 .into_iter()
                 .map(|value| names.get(&value).copied().unwrap_or(value))
                 .collect();
+    }
+
+    /// Rename classifiers reachable from one inline expansion.
+    ///
+    /// [`Self::remap_classifier_identities`] rewrites the whole file, including the declaration a
+    /// copy was taken from. This walk uses that same type, expression, and class-field contract on
+    /// `roots`, on functions whose bodies those roots own, and on classes named by a value of
+    /// `names`.
+    ///
+    /// Cloning an expression shares a lambda's `impl_fn` with the inline template. Remapping that
+    /// function in place would retarget every call site. An implementation referenced from outside
+    /// this walk is cloned once. `detached_impls` records those clones so a later walk of the same
+    /// expansion updates them in place instead of cloning again.
+    pub(crate) fn remap_reachable_classifier_identities(
+        &mut self,
+        names: &HashMap<TypeName, TypeName>,
+        roots: impl IntoIterator<Item = ExprId>,
+        detached_impls: &mut HashSet<FunId>,
+    ) {
+        if names.is_empty() {
+            return;
+        }
+        let lambda_sites = self
+            .exprs
+            .iter()
+            .enumerate()
+            .filter_map(|(index, expr)| match expr {
+                IrExpr::Lambda { impl_fn, .. } => Some((index as ExprId, *impl_fn)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let mut closure = HashSet::new();
+        let mut pending = roots.into_iter().collect::<Vec<_>>();
+        while let Some(expression) = pending.pop() {
+            if !closure.insert(expression) {
+                continue;
+            }
+            super::for_each_child(&self.exprs, expression, &mut |child| pending.push(child));
+        }
+
+        let mut seen = HashSet::new();
+        let mut pending = closure.iter().copied().collect::<Vec<_>>();
+        let mut local_clones = HashMap::new();
+        while let Some(expression) = pending.pop() {
+            if !seen.insert(expression) {
+                continue;
+            }
+            if let IrExpr::Lambda { impl_fn, .. } = self.exprs[expression as usize] {
+                let impl_fn = if let Some(existing) = detached_impl(
+                    impl_fn,
+                    expression,
+                    &lambda_sites,
+                    &closure,
+                    &local_clones,
+                    detached_impls,
+                ) {
+                    existing
+                } else {
+                    let cloned = detach_lambda_impl(self, impl_fn);
+                    local_clones.insert(impl_fn, cloned);
+                    detached_impls.insert(cloned);
+                    cloned
+                };
+                if let IrExpr::Lambda { impl_fn: slot, .. } = &mut self.exprs[expression as usize] {
+                    *slot = impl_fn;
+                }
+                if let Some(body) = self.functions[impl_fn as usize].body {
+                    pending.push(body);
+                }
+            }
+            remap_expression(&mut self.exprs[expression as usize], names);
+            let mut children = Vec::new();
+            super::for_each_child(&self.exprs, expression, &mut |child| children.push(child));
+            pending.extend(children);
+        }
+
+        let owned = self
+            .functions
+            .iter()
+            .enumerate()
+            .filter_map(|(index, function)| {
+                function
+                    .body
+                    .is_some_and(|body| seen.contains(&body))
+                    .then_some(index as FunId)
+            })
+            .collect::<Vec<_>>();
+        for function in owned {
+            remap_owned_function(self, function, names);
+        }
+
+        let placeholders = names.values().copied().collect::<HashSet<_>>();
+        let copies = self
+            .classes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, class)| {
+                placeholders
+                    .contains(&class.fq_name)
+                    .then_some(index as ClassId)
+            })
+            .collect::<Vec<_>>();
+        for class in copies {
+            remap_class(&mut self.classes[class as usize], names);
+            remap_class_value(&mut self.shared_class_capture_fields, class, names);
+            remap_class_value(&mut self.shared_super_capture_parameters, class, names);
+            remap_secondary_capture(self, class, names);
+        }
+        for expression_id in seen {
+            remap_expression_facts(self, expression_id, names);
+        }
+    }
+}
+
+fn detached_impl(
+    impl_fn: FunId,
+    expression: ExprId,
+    lambda_sites: &[(ExprId, FunId)],
+    closure: &HashSet<ExprId>,
+    local_clones: &HashMap<FunId, FunId>,
+    detached_impls: &HashSet<FunId>,
+) -> Option<FunId> {
+    if detached_impls.contains(&impl_fn) {
+        return Some(impl_fn);
+    }
+    if let Some(cloned) = local_clones.get(&impl_fn).copied() {
+        return Some(cloned);
+    }
+    let shared = lambda_sites.iter().any(|(site, function)| {
+        *function == impl_fn && *site != expression && !closure.contains(site)
+    });
+    if shared {
+        None
+    } else {
+        Some(impl_fn)
+    }
+}
+
+fn detach_lambda_impl(ir: &mut super::IrFile, source: FunId) -> FunId {
+    let mut shape = ir.functions[source as usize].clone();
+    shape.body = shape
+        .body
+        .map(|body| super::clone_expression_dag(ir, body).0);
+    super::clone::clone_class_method(ir, source, shape, &HashMap::new())
+}
+
+fn remap_owned_function(
+    ir: &mut super::IrFile,
+    function: FunId,
+    names: &HashMap<TypeName, TypeName>,
+) {
+    {
+        let shape = &mut ir.functions[function as usize];
+        tys(&mut shape.params, names);
+        shape.ret = ty(shape.ret, names);
+        if let Some(owner) = &mut shape.dispatch_receiver {
+            name(owner, names);
+        }
+    }
+    if let Some(applied) = ir.function_annotations.get_mut(&function) {
+        annotations(applied, names);
+    }
+    if let Some(parameters) = ir.fn_param_annotations.get_mut(&function) {
+        for parameter in parameters {
+            annotations(parameter, names);
+        }
+    }
+    if let Some(signature) = ir.signatures.get_mut(&function) {
+        generic_signature(signature, names);
+    }
+    if let Some(parameters) = ir.callable_bound_type_parameters.get_mut(&function) {
+        type_parameters(parameters, names);
+    }
+    if let Some((parameters, result)) = ir.member_semantic_sigs.get_mut(&function) {
+        tys(parameters, names);
+        *result = ty(*result, names);
+    }
+    if let Some((parameters, result)) = ir.suspend_declared_sigs.get_mut(&function) {
+        tys(parameters, names);
+        *result = ty(*result, names);
+    }
+    if let Some((_, parameters, result)) = ir.vc_declared_sigs.get_mut(&function) {
+        tys(parameters, names);
+        *result = ty(*result, names);
+    }
+    if let Some(parameters) = ir.default_stub_boxed_params.get_mut(&function) {
+        for (_, parameter) in parameters {
+            *parameter = ty(*parameter, names);
+        }
+    }
+    if let Some(result) = ir.value_class_suspend_returns.get_mut(&function) {
+        value_class_suspend_result(result, names);
+    }
+    if let Some((classifier, _)) = ir.jvm_suspend_impl_bodies.get_mut(&function) {
+        name(classifier, names);
+    }
+    if let Some((parameters, result)) = ir.lambda_sam_signature.get_mut(&function) {
+        tys(parameters, names);
+        *result = ty(*result, names);
+    }
+    if let Some((parameters, result)) = ir.lambda_sam_jvm_signature.get_mut(&function) {
+        tys(parameters, names);
+        *result = ty(*result, names);
+    }
+    if let Some(origin) = ir.lambda_origins.get_mut(&function) {
+        origin
+            .lexical_owner
+            .iter_mut()
+            .for_each(|value| name(value, names));
+    }
+    if let Some(classifier) = ir.lambda_class_names.get_mut(&function) {
+        name(classifier, names);
+    }
+    let captures = ir
+        .shared_capture_parameters
+        .iter()
+        .filter(|((owner, _), _)| *owner == function)
+        .map(|((_, ordinal), value)| (*ordinal, *value))
+        .collect::<Vec<_>>();
+    for (ordinal, value) in captures {
+        ir.shared_capture_parameters
+            .insert((function, ordinal), ty(value, names));
+    }
+}
+
+fn remap_class_value<K>(
+    map: &mut HashMap<(ClassId, K), Ty>,
+    class: ClassId,
+    names: &HashMap<TypeName, TypeName>,
+) where
+    K: Eq + std::hash::Hash + Copy,
+{
+    let keys = map
+        .keys()
+        .copied()
+        .filter(|(owner, _)| *owner == class)
+        .collect::<Vec<_>>();
+    for key in keys {
+        if let Some(value) = map.get_mut(&key) {
+            *value = ty(*value, names);
+        }
+    }
+}
+
+fn remap_secondary_capture(
+    ir: &mut super::IrFile,
+    class: ClassId,
+    names: &HashMap<TypeName, TypeName>,
+) {
+    let keys = ir
+        .shared_secondary_super_capture_parameters
+        .keys()
+        .copied()
+        .filter(|(owner, _, _)| *owner == class)
+        .collect::<Vec<_>>();
+    for key in keys {
+        if let Some(value) = ir.shared_secondary_super_capture_parameters.get_mut(&key) {
+            *value = ty(*value, names);
+        }
+    }
+}
+
+fn remap_expression_facts(
+    ir: &mut super::IrFile,
+    expression: ExprId,
+    names: &HashMap<TypeName, TypeName>,
+) {
+    if let Some(value) = ir.logical_types.get_mut(&expression) {
+        *value = ty(*value, names);
+    }
+    if let Some(value) = ir.physical_types.get_mut(&expression) {
+        *value = ty(*value, names);
+    }
+    if let Some(value) = ir.call_declared_ret.get_mut(&expression) {
+        *value = ty(*value, names);
+    }
+    if let Some(parameters) = ir.call_declared_params.get_mut(&expression) {
+        tys(parameters, names);
+    }
+    if let Some(parameters) = ir.construction_declared_params.get_mut(&expression) {
+        tys(parameters, names);
+    }
+    if let Some(parameters) = ir.physical_call_parameters.get_mut(&expression) {
+        tys(parameters, names);
+    }
+    if let Some(substitutions) = ir.reified_call_subst.get_mut(&expression) {
+        for (_, value) in substitutions {
+            *value = ty(*value, names);
+        }
+    }
+    if let Some(substitutions) = ir.inline_call_type_arguments.get_mut(&expression) {
+        for (_, value) in substitutions {
+            *value = ty(*value, names);
+        }
+    }
+    if let Some(value) = ir.inline_operand_declared_type_mut(expression) {
+        *value = ty(*value, names);
+    }
+    if let Some(owner) = ir.expression_owners.get_mut(&expression) {
+        name(owner, names);
+    }
+    if let Some(owner) = ir.dispatch_classes.get_mut(&expression) {
+        name(owner, names);
+    }
+    if let Some(value) = ir.suspend_calls.get_mut(&expression) {
+        *value = ty(*value, names);
+    }
+    if let Some(results) = ir.suspend_call_overridden_results.get_mut(&expression) {
+        for value in results.iter_mut() {
+            *value = ty(*value, names);
+        }
+    }
+    if let Some(value) = ir.ext_call_source_receiver.get_mut(&expression) {
+        *value = ty(*value, names);
+    }
+    if let Some(value) = ir.whens.exhaustive.get_mut(&expression) {
+        *value = ty(*value, names);
+    }
+    if let Some(result) = ir.value_class_suspend_calls.get_mut(&expression) {
+        value_class_suspend_result(result, names);
+    }
+    if let Some((classifier, underlying)) = ir.erased_value_constructions.get_mut(&expression) {
+        name(classifier, names);
+        *underlying = ty(*underlying, names);
+    }
+    if let Some(construction) = ir.annotation_constructions.get_mut(&expression) {
+        name(&mut construction.interface, names);
+        for (_, member) in &mut construction.members {
+            *member = ty(*member, names);
+        }
+        construction
+            .enclosing_class
+            .iter_mut()
+            .for_each(|value| name(value, names));
+    }
+    if let Some(classifier) = ir.callable_reference_names.get_mut(&expression) {
+        name(classifier, names);
     }
 }
 

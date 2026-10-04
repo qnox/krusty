@@ -98,3 +98,42 @@ fn crossinline_object_type_of_matches_kotlinc() {
     assert_eq!(krusty, reference);
     assert_eq!(krusty, "OK");
 }
+
+const LAMBDA_SOURCE: &str = "\
+import kotlin.reflect.typeOf\n\
+import kotlin.reflect.KType\n\
+inline fun <reified T> typeOfX(x: T) = typeOf<T>()\n\
+inline fun typeOfLocal(crossinline f: () -> Unit): Pair<Any, KType> {\n\
+    val x = object { fun foo() = f() }\n\
+    val read = { x }\n\
+    val value = read()\n\
+    return value to typeOfX(value)\n\
+}\n\
+var seen = \"\"\n\
+fun box(): String {\n\
+    val first = typeOfLocal { seen += \"a\" }\n\
+    val second = typeOfLocal { seen += \"b\" }\n\
+    if (first.first::class != first.second.classifier) return \"FAIL 1\"\n\
+    if (second.first::class != second.second.classifier) return \"FAIL 2\"\n\
+    if (first.first::class == second.first::class) return \"FAIL 3\"\n\
+    if (first.second.classifier == second.second.classifier) return \"FAIL 4\"\n\
+    first.first.javaClass.getDeclaredMethod(\"foo\").invoke(first.first)\n\
+    second.first.javaClass.getDeclaredMethod(\"foo\").invoke(second.first)\n\
+    if (seen != \"ab\") return \"FAIL 5: $seen\"\n\
+    return \"OK\"\n\
+}\n";
+
+#[test]
+fn crossinline_object_returned_from_lambda_classes_match_kotlinc() {
+    let (reference, krusty) = class_names(LAMBDA_SOURCE);
+    assert_eq!(krusty, reference);
+}
+
+#[test]
+fn crossinline_object_returned_from_lambda_type_of_matches_kotlinc() {
+    let krusty = Fixture::new().with_reflect().run_box(LAMBDA_SOURCE);
+    let reflect = common::dist_jar("kotlin-reflect.jar").expect("kotlin-reflect");
+    let reference = common::kotlinc_box_result_with_classpath(LAMBDA_SOURCE, &[reflect]);
+    assert_eq!(krusty, reference);
+    assert_eq!(krusty, "OK");
+}

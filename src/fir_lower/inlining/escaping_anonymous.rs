@@ -47,12 +47,20 @@ pub(super) fn specialize(
     };
     let mut seen = HashSet::new();
     let mut renames = HashMap::new();
+    let mut detached_impls = HashSet::new();
     let roots = roots.into_iter().collect::<Vec<_>>();
     for root in &roots {
-        retarget(ir, *root, &expansion, &mut seen, &mut renames)?;
+        retarget(
+            ir,
+            *root,
+            &expansion,
+            &mut seen,
+            &mut renames,
+            &mut detached_impls,
+        )?;
     }
     for root in &roots {
-        rename_class_types(ir, *root, &renames);
+        ir.remap_reachable_classifier_identities(&renames, [*root], &mut detached_impls);
     }
     Ok(())
 }
@@ -69,6 +77,7 @@ fn retarget(
     expansion: &Expansion<'_>,
     seen: &mut HashSet<ExprId>,
     renames: &mut HashMap<TypeName, TypeName>,
+    detached_impls: &mut HashSet<FunId>,
 ) -> Result<(), super::super::FirLoweringFailure> {
     let mut pending = vec![root];
     let mut constructions = Vec::new();
@@ -86,8 +95,15 @@ fn retarget(
         let IrExpr::New { internal, .. } = ir.expr(expression).clone() else {
             continue;
         };
-        let Some(specialized) =
-            specialized_class(ir, internal, expression, expansion, seen, renames)?
+        let Some(specialized) = specialized_class(
+            ir,
+            internal,
+            expression,
+            expansion,
+            seen,
+            renames,
+            detached_impls,
+        )?
         else {
             continue;
         };
@@ -117,7 +133,7 @@ fn retarget(
             }
         }
     }
-    rename_class_types(ir, root, renames);
+    ir.remap_reachable_classifier_identities(renames, [root], detached_impls);
     Ok(())
 }
 
@@ -128,6 +144,7 @@ fn specialized_class(
     expansion: &Expansion<'_>,
     seen: &mut HashSet<ExprId>,
     renames: &mut HashMap<TypeName, TypeName>,
+    detached_impls: &mut HashSet<FunId>,
 ) -> Result<Option<TypeName>, super::super::FirLoweringFailure> {
     let Some(source) = ir.class_id_by_name(internal) else {
         return Ok(None);
@@ -235,11 +252,11 @@ fn specialized_class(
     );
     for method in ir.classes[class_id as usize].methods.clone() {
         if let Some(body) = ir.functions[method as usize].body {
-            retarget(ir, body, expansion, seen, renames)?;
+            retarget(ir, body, expansion, seen, renames, detached_impls)?;
         }
     }
     if let Some(body) = ir.classes[class_id as usize].init_body {
-        retarget(ir, body, expansion, seen, renames)?;
+        retarget(ir, body, expansion, seen, renames, detached_impls)?;
     }
     Ok(Some(placeholder))
 }
@@ -1214,179 +1231,6 @@ fn shift_capture_map<V: Clone>(
         }
         let index = if index > removed { index - 1 } else { index };
         map.insert((owner, index), value);
-    }
-}
-
-fn rename_class_types(
-    ir: &mut crate::ir::IrFile,
-    root: ExprId,
-    names: &HashMap<TypeName, TypeName>,
-) {
-    if names.is_empty() {
-        return;
-    }
-    let mut pending = vec![root];
-    let mut seen = HashSet::new();
-    while let Some(expression) = pending.pop() {
-        if !seen.insert(expression) {
-            continue;
-        }
-        if let IrExpr::Lambda { .. } = ir.expr(expression) {
-            rename_expression(ir, expression, names);
-            continue;
-        }
-        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
-        rename_expression(ir, expression, names);
-    }
-}
-
-fn rename_expression(
-    ir: &mut crate::ir::IrFile,
-    expression: ExprId,
-    names: &HashMap<TypeName, TypeName>,
-) {
-    if let Some(ty) = ir.logical_types.get_mut(&expression) {
-        *ty = rename_ty(*ty, names);
-    }
-    if let Some(ty) = ir.physical_types.get_mut(&expression) {
-        *ty = rename_ty(*ty, names);
-    }
-    if let Some(ty) = ir.call_declared_ret.get_mut(&expression) {
-        *ty = rename_ty(*ty, names);
-    }
-    if let Some(parameters) = ir.call_declared_params.get_mut(&expression) {
-        rename_tys(parameters, names);
-    }
-    if let Some(substitutions) = ir.reified_call_subst.get_mut(&expression) {
-        for (_, ty) in substitutions {
-            *ty = rename_ty(*ty, names);
-        }
-    }
-    if let Some(substitutions) = ir.inline_call_type_arguments.get_mut(&expression) {
-        for (_, ty) in substitutions {
-            *ty = rename_ty(*ty, names);
-        }
-    }
-    let Some(node) = ir.exprs.get_mut(expression as usize) else {
-        return;
-    };
-    match node {
-        IrExpr::Call { callee, .. } => rename_callee(callee, names),
-        IrExpr::Checked(operation) => rename_checked(operation, names),
-        IrExpr::KClassLiteral { classifier, .. } => {
-            if let Some(classifier) = classifier {
-                *classifier = rename_ty(*classifier, names);
-            }
-        }
-        IrExpr::TypeOp { type_operand, .. } => *type_operand = rename_ty(*type_operand, names),
-        IrExpr::ClassConst {
-            internal: Some(internal),
-        } => {
-            if let Some(name) = names.get(internal) {
-                *internal = *name;
-            }
-        }
-        IrExpr::New {
-            internal,
-            ctor_params,
-            ..
-        } => {
-            if let Some(name) = names.get(internal) {
-                *internal = *name;
-            }
-            if let Some(parameters) = ctor_params {
-                rename_tys(parameters, names);
-            }
-        }
-        IrExpr::InvokeFunction { params, ret, .. } => {
-            rename_tys(params, names);
-            *ret = rename_ty(*ret, names);
-        }
-        IrExpr::Variable { ty, .. } => *ty = rename_ty(*ty, names),
-        _ => {}
-    }
-}
-
-fn rename_callee(callee: &mut crate::ir::Callee, names: &HashMap<TypeName, TypeName>) {
-    if let crate::ir::Callee::External {
-        params,
-        ret,
-        substitutions,
-        ..
-    } = callee
-    {
-        rename_tys(params, names);
-        *ret = rename_ty(*ret, names);
-        for substitution in substitutions {
-            substitution.value = rename_ty(substitution.value, names);
-            rename_tys(&mut substitution.additional_bounds, names);
-        }
-    }
-}
-
-fn rename_checked(
-    operation: &mut crate::ir::IrCheckedOperation,
-    names: &HashMap<TypeName, TypeName>,
-) {
-    let substitutions = match operation {
-        crate::ir::IrCheckedOperation::Call { substitutions, .. }
-        | crate::ir::IrCheckedOperation::ConstructorDelegation { substitutions, .. }
-        | crate::ir::IrCheckedOperation::PropertyRead { substitutions, .. }
-        | crate::ir::IrCheckedOperation::PropertyWrite { substitutions, .. }
-        | crate::ir::IrCheckedOperation::PropertyReference { substitutions, .. } => substitutions,
-        _ => return,
-    };
-    for substitution in substitutions {
-        substitution.value = rename_ty(substitution.value, names);
-        rename_tys(&mut substitution.additional_bounds, names);
-    }
-}
-
-fn rename_tys(types: &mut [Ty], names: &HashMap<TypeName, TypeName>) {
-    for ty in types {
-        *ty = rename_ty(*ty, names);
-    }
-}
-
-fn rename_ty(ty: Ty, names: &HashMap<TypeName, TypeName>) -> Ty {
-    match ty {
-        Ty::Obj(name, args) => {
-            let name = names.get(&name).copied().unwrap_or(name);
-            let args = args
-                .iter()
-                .map(|argument| rename_ty(*argument, names))
-                .collect::<Vec<_>>();
-            Ty::obj_args_name(name, &args)
-        }
-        Ty::Nullable(inner) => Ty::nullable(rename_ty(*inner, names)),
-        Ty::PlatformNullable(inner) => Ty::platform_nullable(rename_ty(*inner, names)),
-        Ty::InProjection(inner) => Ty::in_projection(rename_ty(*inner, names)),
-        Ty::OutProjection(inner) => Ty::out_projection(rename_ty(*inner, names)),
-        Ty::StarProjection(inner) => Ty::star_projection(rename_ty(*inner, names)),
-        Ty::DefinitelyNotNull(inner) => {
-            Ty::DefinitelyNotNull(crate::types::intern_ty(rename_ty(*inner, names)))
-        }
-        Ty::Intersection(parts) => Ty::intersection(
-            &parts
-                .iter()
-                .map(|part| rename_ty(*part, names))
-                .collect::<Vec<_>>(),
-        ),
-        Ty::Fun(signature) => Ty::Fun(crate::types::intern_fnsig(crate::types::FnSig {
-            params: signature
-                .params
-                .iter()
-                .map(|parameter| rename_ty(*parameter, names))
-                .collect(),
-            ret: rename_ty(signature.ret, names),
-            context_count: signature.context_count,
-            has_receiver: signature.has_receiver,
-            suspend: signature.suspend,
-        })),
-        Ty::TyParam(name, bound) => {
-            Ty::TyParam(name, crate::types::intern_ty(rename_ty(*bound, names)))
-        }
-        Ty::Unit | Ty::Null | Ty::Nothing | Ty::Error | Ty::Pending => ty,
     }
 }
 

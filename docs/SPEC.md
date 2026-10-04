@@ -8814,7 +8814,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `typeOf` of the instance names that copy, so two call sites compare unequal. A capture-free
   lambda is inlined into the copy's methods and is not a constructor argument; the declaration
   class still takes the lambda. A lambda that itself captures values stays the copy's constructor
-  argument. Tests: `fir_lower::inlining::escaping_inline_object` and
+  argument. A lambda in that inline function whose result is the object is part of the same copy:
+  its implementation result type is the call-site class, so `typeOf` of the value the lambda
+  returns names that class. Tests: `fir_lower::inlining::escaping_inline_object` and
   `tests/local_object_type_of_e2e.rs`. Corpus: `reflection/typeOf/localClass.kt`.
   A generic top-level extension property's accessors are generic methods and carry a `Signature`
   (`<P:Ljava/lang/Object;>(TP;)Lkotlin/reflect/KType;`), as kotlinc emits.
