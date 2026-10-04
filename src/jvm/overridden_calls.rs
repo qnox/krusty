@@ -8,7 +8,7 @@ use crate::backend::CheckedBackendCallables;
 use crate::fir::ResolvedFunctionOverrideTarget;
 use crate::ir::{Callee, IrExpr, IrFile, IrVirtualTarget};
 use crate::jvm::jvm_class_map::type_names_map_to_same_jvm_internal;
-use crate::libraries::OverriddenCallRealization;
+use crate::libraries::{OverriddenCallKind, OverriddenCallRealization};
 use crate::types::TypeName;
 
 use super::member_dispatch::{CheckedDispatchClassifiers, MissingClassifier};
@@ -16,10 +16,17 @@ use super::member_dispatch::{CheckedDispatchClassifiers, MissingClassifier};
 fn callable_candidates(
     callables: &CheckedBackendCallables,
     target: crate::fir::ExternalCallableId,
+    kind: OverriddenCallKind,
 ) -> Vec<OverriddenCallRealization> {
     callables
         .callable(target)
-        .map(|fact| fact.overridden_call_realizations.to_vec())
+        .map(|fact| {
+            fact.overridden_call_realizations
+                .iter()
+                .filter(|candidate| candidate.kind == kind)
+                .cloned()
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -37,7 +44,11 @@ fn function_candidates(
         }
         match current {
             ResolvedFunctionOverrideTarget::External(target) => {
-                candidates.extend(callable_candidates(callables, target));
+                candidates.extend(callable_candidates(
+                    callables,
+                    target,
+                    OverriddenCallKind::Function,
+                ));
             }
             ResolvedFunctionOverrideTarget::Module(_) => {
                 pending.extend(
@@ -67,7 +78,11 @@ fn property_getter_candidates(
         }
         match current {
             crate::fir::ResolvedPropertyOverrideTarget::External(getter) => {
-                candidates.extend(callable_candidates(callables, getter));
+                candidates.extend(callable_candidates(
+                    callables,
+                    getter,
+                    OverriddenCallKind::PropertyGetter,
+                ));
             }
             crate::fir::ResolvedPropertyOverrideTarget::Module(_) => {
                 pending.extend(
@@ -103,8 +118,14 @@ pub(super) fn realize(
     ir: &mut IrFile,
     classifiers: &dyn crate::backend::BackendClassifierSource,
     callables: &CheckedBackendCallables,
+    property_realizations: &crate::jvm::property_realizations::PropertyRealizations,
 ) -> Result<(), MissingClassifier> {
     let dispatch = CheckedDispatchClassifiers::new(ir, classifiers);
+    let source_callables = ir
+        .checked_callable_functions
+        .iter()
+        .map(|(&callable, &function)| (function, callable))
+        .collect::<std::collections::HashMap<_, _>>();
     let mut plans = Vec::new();
     for (raw, expression) in ir.exprs.iter().enumerate() {
         let id = u32::try_from(raw).expect("too many common IR expressions");
@@ -125,6 +146,57 @@ pub(super) fn realize(
                     Some(IrVirtualTarget::PropertySetter(_)) | None => Vec::new(),
                 };
                 (id, *owner, candidates)
+            }
+            IrExpr::MethodCall { class, index, .. } => {
+                let Some(declaration) = ir.classes.get(*class as usize) else {
+                    continue;
+                };
+                let Some(function) = declaration.methods.get(*index as usize) else {
+                    continue;
+                };
+                let Some(target) = source_callables.get(function) else {
+                    continue;
+                };
+                let owner = super::member_dispatch::call_owner(
+                    &dispatch,
+                    declaration.fq_name_id(),
+                    declaration.is_interface || declaration.is_annotation,
+                    ir.dispatch_classes.get(&id).copied(),
+                )?
+                .0;
+                (
+                    id,
+                    owner,
+                    function_candidates(
+                        ir,
+                        callables,
+                        ResolvedFunctionOverrideTarget::Module(*target),
+                    ),
+                )
+            }
+            IrExpr::PropertyRead {
+                owner,
+                interface,
+                operation: Some(operation),
+                ..
+            } => {
+                let Some(crate::jvm::property_realizations::PropertyRealization::Local(target)) =
+                    property_realizations.get(*operation)
+                else {
+                    continue;
+                };
+                let owner = super::member_dispatch::call_owner(
+                    &dispatch,
+                    *owner,
+                    *interface,
+                    ir.dispatch_classes.get(&id).copied(),
+                )?
+                .0;
+                (
+                    *operation,
+                    owner,
+                    property_getter_candidates(ir, callables, *target),
+                )
             }
             _ => continue,
         };
@@ -178,6 +250,7 @@ mod tests {
 
     fn realization(owner: TypeName) -> OverriddenCallRealization {
         OverriddenCallRealization {
+            kind: OverriddenCallKind::Function,
             declaration_owner: owner,
             physical_name: "physicalOperation".to_string(),
             descriptor: "()Ljava/lang/Object;".to_string(),

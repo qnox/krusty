@@ -165,6 +165,12 @@ pub(super) fn overridden_call_realizations_for_declaration(
             }
         })
         .map(|realization| crate::libraries::OverriddenCallRealization {
+            kind: match realization.kind {
+                MappedBuiltinMemberKind::Function => crate::libraries::OverriddenCallKind::Function,
+                MappedBuiltinMemberKind::Property => {
+                    crate::libraries::OverriddenCallKind::PropertyGetter
+                }
+            },
             declaration_owner: realization.declaration_owner,
             physical_name: realization.physical_name.to_string(),
             descriptor: realization.descriptor.to_string(),

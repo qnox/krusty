@@ -1994,11 +1994,25 @@ impl Classpath {
         if stored.callable.nonvirtual_realization.is_none() {
             stored.callable.nonvirtual_realization = callable.nonvirtual_realization.clone();
         }
-        if stored.callable.overridden_call_realizations.is_empty()
-            && !callable.overridden_call_realizations.is_empty()
+        if callable
+            .overridden_call_realizations
+            .iter()
+            .any(|candidate| {
+                !stored
+                    .callable
+                    .overridden_call_realizations
+                    .contains(candidate)
+            })
         {
-            stored.callable.overridden_call_realizations =
-                callable.overridden_call_realizations.clone();
+            let mut candidates = stored.callable.overridden_call_realizations.to_vec();
+            let additions = callable
+                .overridden_call_realizations
+                .iter()
+                .filter(|candidate| !candidates.contains(candidate))
+                .cloned()
+                .collect::<Vec<_>>();
+            candidates.extend(additions);
+            stored.callable.overridden_call_realizations = candidates.into_boxed_slice();
         }
         if !stored.callable.inline.can_inline() && callable.inline.can_inline() {
             stored.callable.inline = callable.inline;
@@ -5095,12 +5109,20 @@ mod fq_tests {
             "()Lreview/Answer;",
         );
         first.physical_name = Some("physicalOperation".to_string());
+        first.overridden_call_realizations = vec![crate::libraries::OverriddenCallRealization {
+            kind: crate::libraries::OverriddenCallKind::Function,
+            declaration_owner: type_name("review/FunctionDeclaration"),
+            physical_name: "mappedOperation".to_string(),
+            descriptor: "()Ljava/lang/Object;".to_string(),
+        }]
+        .into_boxed_slice();
         let identity = cp.intern_external_callable(&first, ExternalCallableKind::Member);
 
         let mut enriched = first.clone();
         enriched.overridden_call_realizations = vec![crate::libraries::OverriddenCallRealization {
-            declaration_owner: type_name("review/SemanticDeclaration"),
-            physical_name: "mappedOperation".to_string(),
+            kind: crate::libraries::OverriddenCallKind::PropertyGetter,
+            declaration_owner: type_name("review/PropertyDeclaration"),
+            physical_name: "mappedProperty".to_string(),
             descriptor: "()Ljava/lang/Object;".to_string(),
         }]
         .into_boxed_slice();
@@ -5114,7 +5136,11 @@ mod fq_tests {
                 .expect("the stable callable")
                 .callable
                 .overridden_call_realizations,
-            enriched.overridden_call_realizations
+            vec![
+                first.overridden_call_realizations[0].clone(),
+                enriched.overridden_call_realizations[0].clone(),
+            ]
+            .into_boxed_slice()
         );
     }
 

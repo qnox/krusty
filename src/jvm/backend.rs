@@ -331,7 +331,7 @@ fn run_backend_passes_after_plugins(
         lambda_modes,
         &facts.specialized_suspend_lambda_classes,
     );
-    crate::jvm::overridden_calls::realize(ir, classifiers, callables)
+    crate::jvm::overridden_calls::realize(ir, classifiers, callables, &facts.property_realizations)
         .map_err(|missing| SkipReason::MemberDispatch(missing.0))?;
     // Every type the emitter will test or cast against is final now: carry each referenced
     // classifier's checked role into the IR, where type operations read it.

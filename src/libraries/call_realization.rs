@@ -18,9 +18,19 @@ pub struct NonvirtualCallRealization {
 /// source/member spellings never become lookup input again.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OverriddenCallRealization {
+    /// The source declaration facet that owns this realization. A Java getter can be both an
+    /// ordinary function and the physical accessor of a synthetic Kotlin property while sharing
+    /// one classfile identity; consumers must not apply the property's ABI to the function call.
+    pub kind: OverriddenCallKind,
     pub declaration_owner: TypeName,
     pub physical_name: String,
     pub descriptor: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OverriddenCallKind {
+    Function,
+    PropertyGetter,
 }
 
 #[derive(Clone, Debug)]

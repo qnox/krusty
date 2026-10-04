@@ -19,7 +19,8 @@ pub(crate) mod physical_parameter_plan;
 mod platform_contract;
 mod property_producer;
 pub use call_realization::{
-    DefaultCallRealization, NonvirtualCallRealization, OverriddenCallRealization,
+    DefaultCallRealization, NonvirtualCallRealization, OverriddenCallKind,
+    OverriddenCallRealization,
 };
 pub(crate) use classifier_callables::constructor_generic_signature;
 pub use classifier_callables::BoundInnerConstructor;
