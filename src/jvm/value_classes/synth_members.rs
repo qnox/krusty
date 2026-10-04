@@ -59,6 +59,7 @@ pub(super) fn synth_value_members(
     has_init: bool,
     constructor_default: Option<ExprId>,
     realized: &mut SynthesizedValueMembers,
+    rendered_value_class_text: &mut HashSet<ExprId>,
 ) -> bool {
     let internal_name = ir.classes[class_id as usize].fq_name;
     let fname = ir.classes[class_id as usize].fields[0].name.clone();
@@ -443,7 +444,7 @@ pub(super) fn synth_value_members(
             let carrier = ir.add_expr(IrExpr::GetValue(0));
             // A non-null nested value class is this slot's carrier. Name it through its own
             // `toString-impl` (`Outer(i=Inner(x=20))`); the concat then appends that String.
-            let rendered = nested_value_text(ir, u_ir, under, carrier);
+            let rendered = nested_value_text(ir, u_ir, under, carrier, rendered_value_class_text);
             // ONE `StringConcat` (not nested `+`): kotlinc builds a single `StringBuilder` and appends the
             // 1-char closing paren via `append(C)` — a nested concat would emit a second builder.
             let prefix = str_const(ir, format!("{simple}({fname}="));
@@ -922,7 +923,13 @@ fn guard_false(ir: &mut IrFile, cond: ExprId) -> ExprId {
 /// type stays the nested class, so the `StringBuilder` path appends with `append(Object)`; its
 /// physical result is the `String` the call returns, which an `invokedynamic` concat passes as
 /// `String`. A nullable property is left as the value erasure stored.
-fn nested_value_text(ir: &mut IrFile, underlying: Ty, under: &Under, value: ExprId) -> ExprId {
+fn nested_value_text(
+    ir: &mut IrFile,
+    underlying: Ty,
+    under: &Under,
+    value: ExprId,
+    rendered_value_class_text: &mut HashSet<ExprId>,
+) -> ExprId {
     if underlying.is_nullable() {
         return value;
     }
@@ -945,6 +952,7 @@ fn nested_value_text(ir: &mut IrFile, underlying: Ty, under: &Under, value: Expr
     });
     ir.physical_types.insert(call, Ty::String);
     ir.logical_types.insert(call, Ty::obj_name(nested));
+    rendered_value_class_text.insert(call);
     call
 }
 

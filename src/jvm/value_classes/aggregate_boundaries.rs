@@ -7,12 +7,14 @@
 //! kotlinc renders through the static `toString-impl` over its carrier.
 
 use super::{BoxOp, Repr, ReprCtx};
-use crate::ir::{Callee, ExprId, IrExpr};
+use crate::ir::{ExprId, IrExpr};
+use std::collections::HashSet;
 
 pub(super) fn record(
     exprs: &[IrExpr],
     id: ExprId,
     repr_ctx: &ReprCtx<'_>,
+    rendered_value_class_text: &HashSet<ExprId>,
     ops: &mut Vec<(ExprId, BoxOp)>,
 ) {
     let aggregate = match &exprs[id as usize] {
@@ -42,9 +44,10 @@ pub(super) fn record(
             }
         );
         if let Repr::Unboxed(value_class) = representation {
-            // Synthesized `toString-impl` already called the nested class's `toString-impl` and
-            // left a String. Rendering that String again would print the text as a carrier.
-            if template && rendered_by_to_string_impl(exprs, element) {
+            // Synthesis already rendered this value-class carrier to text. The expression keeps
+            // the nested class as its logical type so concat selects kotlinc's Object boundary,
+            // but this exact provenance says the physical String must not be rendered again.
+            if template && rendered_value_class_text.contains(&element) {
                 continue;
             }
             let op = match repr_ctx.box_op(element, value_class) {
@@ -54,14 +57,4 @@ pub(super) fn record(
             ops.push((element, op));
         }
     }
-}
-
-fn rendered_by_to_string_impl(exprs: &[IrExpr], element: ExprId) -> bool {
-    matches!(
-        &exprs[element as usize],
-        IrExpr::Call {
-            callee: Callee::Static { name, .. },
-            ..
-        } if name == "toString-impl"
-    )
 }
