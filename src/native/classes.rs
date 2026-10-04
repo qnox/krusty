@@ -1045,9 +1045,26 @@ fn layout_class(
                         })
                         == Some(&fid)
             });
-        let any_replaces = override_edges
+        let generated_any_replaces = [
+            (crate::ir::IrDataClassMemberRole::Equals, 0),
+            (crate::ir::IrDataClassMemberRole::HashCode, 1),
+            (crate::ir::IrDataClassMemberRole::ToString, 2),
+        ]
+        .into_iter()
+        .find_map(|(role, slot)| {
+            (ir.data_class_member(class.fq_name_id(), role) == Some(fid)).then_some(slot)
+        });
+        let override_any_replaces = override_edges
             .clone()
             .find_map(|edge| any_slot(edge.overridden_semantic_role));
+        if let (Some(generated), Some(overridden)) = (generated_any_replaces, override_any_replaces)
+        {
+            assert_eq!(
+                generated, overridden,
+                "a synthesized data-class role and its override edge must name the same Any slot"
+            );
+        }
+        let any_replaces = generated_any_replaces.or(override_any_replaces);
         // The edge by which this method overrides a function classifier's `invoke`, if it does.
         // Read once, because both the fixed slot below and the stand-in that covers a representation
         // mismatch are the same question about the same exact edge.
@@ -2316,5 +2333,44 @@ mod tests {
             "spelling alone is not an override identity"
         );
         assert_eq!(model.layout(q).vtable[0], Slot::Function(equals));
+    }
+
+    #[test]
+    fn synthesized_data_class_members_follow_their_exact_recorded_roles() {
+        let mut ir = IrFile::default();
+        let record = class(&mut ir, "Record", "kotlin/Any", 0);
+        let owner = ir.classes[record as usize].fq_name_id();
+        let generated = add_method(
+            &mut ir,
+            record,
+            function(
+                "physically-renamed",
+                "Record",
+                vec![Ty::nullable(Ty::obj("kotlin/Any"))],
+                Ty::Boolean,
+                false,
+            ),
+        );
+        ir.record_data_class_member(owner, crate::ir::IrDataClassMemberRole::Equals, generated);
+        let unrelated = add_method(
+            &mut ir,
+            record,
+            function(
+                "equals",
+                "Record",
+                vec![Ty::nullable(Ty::obj("fixture/Other"))],
+                Ty::Boolean,
+                false,
+            ),
+        );
+
+        let model = build(&ir).expect("layout");
+
+        assert_eq!(model.layout(record).vtable[0], Slot::Function(generated));
+        assert_ne!(
+            model.slot(record, &SlotKey::Function(unrelated)),
+            Some(0),
+            "a familiar spelling without the recorded role remains an ordinary overload"
+        );
     }
 }
