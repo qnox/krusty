@@ -1442,11 +1442,8 @@ impl BodyLowering<'_> {
                     if let Some(origin) = self.ir.lambda_origins.get_mut(&impl_fn) {
                         origin.class_provenance = provenance;
                     }
-                }
-                if suspend {
-                    let &IrExpr::Lambda { impl_fn, .. } = &self.ir.exprs[lambda as usize] else {
-                        unreachable!("a checked lambda lowers to a lambda")
-                    };
+                    // Class-strategy `toString()` reads these from the lambda class's metadata,
+                    // including a non-suspend lambda. A suspend lambda's class reads the same record.
                     let type_parameters =
                         super::generics::named_type_parameters(self.index, expression.ty.get());
                     self.ir

@@ -378,3 +378,88 @@ fun box(): String {
     let _ = std::fs::remove_dir_all(work);
     assert_eq!(outcome.as_deref(), Some("OK"), "delegate fixture must run");
 }
+
+/// kotlin-reflect renders `Lambda.toString()` from the class's `@Metadata`. The class strategy
+/// must print the function type, including a receiver and a type parameter, the way kotlinc does.
+#[test]
+fn class_lambda_to_string_matches_kotlinc() {
+    let source = r#"
+fun check(expected: String, obj: Any?) {
+    val actual = obj.toString()
+    if (actual != expected) throw AssertionError("Expected: $expected, actual: $actual")
+}
+fun <T> id(): (T) -> T = { t: T -> t }
+class Holder<T> {
+    fun <V : T> pick(v: V): (List<T>) -> V = fun(t: List<T>): V = v
+}
+fun box(): String {
+    check("() -> kotlin.Unit", { -> })
+    check("(kotlin.String) -> kotlin.Long", fun (s: String) = 42.toLong())
+    check("kotlin.Int.() -> kotlin.Unit", fun Int.() {})
+    val n = 1
+    check("() -> kotlin.Int", { -> n })
+    check("(T) -> T", id<String>().toString())
+    check("(kotlin.collections.List<T>) -> V", Holder<String>().pick("").toString())
+    return "OK"
+}
+"#;
+    let reflect = common::dist_jar("kotlin-reflect.jar").expect("kotlin-reflect.jar");
+    let stdlib = common::stdlib_jar();
+    let work = common::scratch_dir().expect("allocate class-lambda toString fixture");
+    let source_path = work.join("Main.kt");
+    std::fs::write(&source_path, source).expect("write fixture");
+    let krusty_output = work.join("krusty-out");
+    let reference_output = work.join("reference-out");
+    std::fs::create_dir_all(&krusty_output).expect("create krusty output");
+    let classpath = format!("{}:{}", stdlib.to_string_lossy(), reflect.to_string_lossy());
+    let krusty = std::process::Command::new(common::krusty_binary())
+        .args(["-d", krusty_output.to_str().expect("UTF-8 output")])
+        .args(["-Xlambdas=class", "-no-reflect"])
+        .args(["-classpath", &classpath])
+        .arg(&source_path)
+        .output()
+        .expect("run krusty");
+    assert!(
+        krusty.status.success(),
+        "krusty rejected the class-lambda toString fixture: {}",
+        String::from_utf8_lossy(&krusty.stderr)
+    );
+    let reference_args = [
+        "-classpath".to_string(),
+        classpath,
+        "-Xlambdas=class".to_string(),
+    ];
+    let (code, stderr) = common::kotlinc_compile(
+        &std::iter::once(source_path.to_string_lossy().into_owned())
+            .chain(reference_args)
+            .chain([
+                "-d".to_string(),
+                reference_output.to_string_lossy().into_owned(),
+            ])
+            .collect::<Vec<_>>(),
+    )
+    .expect("kotlinc");
+    assert_eq!(
+        code, 0,
+        "kotlinc rejected the class-lambda toString fixture: {stderr}"
+    );
+    let runtime = [stdlib, reflect];
+    let reference = common::run_box(
+        &[],
+        "MainKt",
+        &[reference_output, runtime[0].clone(), runtime[1].clone()],
+    )
+    .expect("run kotlinc class-lambda toString fixture");
+    let krusty = common::run_box(
+        &[],
+        "MainKt",
+        &[krusty_output, runtime[0].clone(), runtime[1].clone()],
+    )
+    .expect("run krusty class-lambda toString fixture");
+    let _ = std::fs::remove_dir_all(work);
+    assert_eq!(reference, "OK", "kotlinc class-lambda toString fixture");
+    assert_eq!(
+        krusty, reference,
+        "class-lambda toString differs from kotlinc"
+    );
+}

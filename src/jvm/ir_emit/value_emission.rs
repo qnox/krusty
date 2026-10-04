@@ -10,14 +10,15 @@ use crate::types::Ty;
 
 use super::{
     access_bridges, array_jvm_element, bottom_values, boxed_descriptor, bytecode_inline_call,
-    class_ctor_jvm_tys, constant_emission, constructor_accessors, declared_jvm_interface,
-    default_mask_bit, default_mask_count, emit_box_impl, emit_constructor_default_arguments,
-    instance_field_jvm_name, ir_ty_to_jvm, jvm_declared_ty, jvm_function_interface,
-    jvm_function_invoke_descriptor, jvm_function_params, jvm_tys, lambda_class, lambda_class_names,
-    load, method_defaults, native_unsigned_impl_target, parse_descriptor_params,
-    physical_call_result_words, prim_newarray_atype, push_zero, ref_class, singleton_instance_load,
-    slot_words, try_emission, ty_from_descriptor_ret, vararg, JvmDefaultMode, LambdaClassPlan,
-    LambdaMode, PropertyOperation, LMF_METAFACTORY_DESC,
+    class_ctor_jvm_tys, class_lambda_reflection, constant_emission, constructor_accessors,
+    declared_jvm_interface, default_mask_bit, default_mask_count, emit_box_impl,
+    emit_constructor_default_arguments, instance_field_jvm_name, ir_ty_to_jvm, jvm_declared_ty,
+    jvm_function_interface, jvm_function_invoke_descriptor, jvm_function_params, jvm_tys,
+    lambda_class, lambda_class_names, load, method_defaults, native_unsigned_impl_target,
+    parse_descriptor_params, physical_call_result_words, prim_newarray_atype, push_zero, ref_class,
+    signature_formatter::JvmSignatureFormatter, singleton_instance_load, slot_words, try_emission,
+    ty_from_descriptor_ret, vararg, JvmDefaultMode, LambdaClassPlan, LambdaMode, PropertyOperation,
+    LMF_METAFACTORY_DESC,
 };
 
 impl super::Emitter<'_> {
@@ -1644,6 +1645,22 @@ impl super::Emitter<'_> {
                         &self.facade,
                         self.lambda_modes,
                     );
+                    let reflection = if sam.is_none() {
+                        let formatter = JvmSignatureFormatter::with_symbols(
+                            self.ir,
+                            self.classifiers,
+                            self.run,
+                        );
+                        match class_lambda_reflection::reflect(self.ir, e, *impl_fn, &formatter) {
+                            Ok(reflection) => reflection,
+                            Err(error) => {
+                                self.run.set_emit_error(error);
+                                return;
+                            }
+                        }
+                    } else {
+                        None
+                    };
                     self.run.lambda_classes.borrow_mut().push(LambdaClassPlan {
                         internal: internal.clone(),
                         iface: iface.clone(),
@@ -1658,6 +1675,7 @@ impl super::Emitter<'_> {
                         function_adapter,
                         identity,
                         owner_is_interface: impl_owner_is_interface,
+                        reflection,
                     });
                     let nullable = sam.as_ref().is_some_and(|target| target.nullable);
                     if nullable {

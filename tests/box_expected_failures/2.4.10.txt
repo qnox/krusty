@@ -7,8 +7,6 @@ bridges/internalMethodOverrideMultipleInheritance.kt
 compileKotlinAgainstKotlin/inlineClasses/privateCompanionObjectValInDifferentModule.kt
 compileKotlinAgainstKotlin/inlineClasses/privateTopLevelValInDifferentModule.kt
 coroutines/tailCallOptimizations/crossinline.kt
-functions/functionNtoString.kt
-functions/functionNtoStringGeneric.kt
 multiplatform/k2/defaultArguments/bothInExpectAndActual.kt
 multiplatform/k2/defaultArguments/bothInExpectAndActual2.kt
 multiplatform/k2/kt66970.kt

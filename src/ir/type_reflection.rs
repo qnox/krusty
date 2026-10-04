@@ -132,10 +132,19 @@ impl IrFile {
 
     /// The type parameters `lambda`'s function type names, directly or through their bounds.
     pub(crate) fn lambda_type_parameters(&self, lambda: u32) -> &[IrTypeParameter] {
+        self.recorded_lambda_type_parameters(lambda)
+            .expect("a lambda records the type parameters its function type names")
+    }
+
+    /// The type parameters recorded for `lambda`, when lowering published them.
+    pub(crate) fn recorded_lambda_type_parameters(
+        &self,
+        lambda: u32,
+    ) -> Option<&[IrTypeParameter]> {
         self.type_reflection
             .lambda_type_parameters
             .get(&lambda)
-            .expect("a suspend lambda records the type parameters its function type names")
+            .map(Vec::as_slice)
     }
 
     pub fn class_signatures(&self) -> impl Iterator<Item = (TypeName, &IrGenericSig)> + '_ {
