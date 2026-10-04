@@ -40335,6 +40335,16 @@ impl<'a> Checker<'a> {
         }
     }
 
+    fn reject_member_extension_reference(&mut self, expression: ExprId, name: &str) -> Ty {
+        self.diags.error(
+            self.member_name_span(expression, name),
+            format!(
+                "'{name}' is a member and an extension at the same time. References to such elements are prohibited."
+            ),
+        );
+        Ty::Error
+    }
+
     fn record_extension_ref(
         &mut self,
         expression: ExprId,
@@ -40346,6 +40356,10 @@ impl<'a> Checker<'a> {
         type_arguments: Vec<Ty>,
         expected: Option<&'static crate::types::FnSig>,
     ) -> Ty {
+        if function.kind == crate::libraries::FnKind::Extension && function.source_member.is_some()
+        {
+            return self.reject_member_extension_reference(expression, name);
+        }
         if !type_arguments.is_empty() {
             self.resolved_call_type_args
                 .insert(expression, type_arguments.into_iter().map(Some).collect());
@@ -43894,6 +43908,9 @@ impl<'a> Checker<'a> {
         type_arguments: Vec<Ty>,
         expected: &'static crate::types::FnSig,
     ) -> Ty {
+        if member.is_member_extension() {
+            return self.reject_member_extension_reference(expression, &member.name);
+        }
         if !type_arguments.is_empty() {
             self.resolved_call_type_args
                 .insert(expression, type_arguments.into_iter().map(Some).collect());
@@ -43963,6 +43980,9 @@ impl<'a> Checker<'a> {
         receiver: Ty,
         mut member: crate::libraries::LibraryMember,
     ) -> Option<Ty> {
+        if member.is_member_extension() {
+            return Some(self.reject_member_extension_reference(expression, &member.name));
+        }
         self.apply_checked_source_callable_result(receiver, &mut member);
         if member.ret == Ty::Nothing {
             return None;

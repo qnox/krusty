@@ -761,6 +761,7 @@ impl BodyLowering<'_> {
                 declaration_result: selected_result,
                 declaration_suspend: realization.suspend,
                 adaptation: adaptation.cloned().map(Box::new),
+                reflection_owner: None,
             },
         ))))
     }

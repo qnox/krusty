@@ -1201,6 +1201,7 @@ pub enum FirExprKind {
         extension_receiver: Option<FirReceiver>,
         substitutions: Box<[FirTypeSubstitution]>,
         adaptation: Option<Box<FirReferenceAdaptation>>,
+        reflection_owner: Option<crate::types::TypeName>,
     },
     LocalCallableReference {
         target: FirLocalCallableRef,

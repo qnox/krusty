@@ -39,27 +39,6 @@ fn adapted_flags(adaptation: &crate::fir::FirReferenceAdaptation, declaration_re
 /// capture records its exact upper bound, which is the declaration's erased value type. An `in`
 /// projection records only a lower bound and remains intact for the descriptor boundary to erase
 /// to `Object`; it cannot be narrowed to its write-only lower bound.
-/// The classifier an unbound instance-member reference was written on.
-///
-/// That classifier is the function type's first parameter (`A::foo` is `(A) -> …`). A bound
-/// reference has already consumed the receiver, so this returns nothing and the declaration's
-/// owner stays in place.
-fn unbound_inherited_reference_owner(
-    reference: &crate::ir::IrCallableReference,
-) -> Option<crate::types::TypeName> {
-    if reference.bound_receiver.is_some() {
-        return None;
-    }
-    let Ty::Fun(function_type) = reference.function_type.non_null() else {
-        return None;
-    };
-    function_type
-        .params
-        .first()
-        .copied()
-        .and_then(Ty::kotlin_class_internal)
-}
-
 fn reflection_descriptor_ty(ty: Ty) -> Ty {
     match ty {
         Ty::OutProjection(upper_bound) | Ty::StarProjection(upper_bound) => *upper_bound,
@@ -266,7 +245,7 @@ fn realize_adapter_reference(
             ..
         }
     );
-    let inherited_owner = unbound_inherited_reference_owner(&reference);
+    let inherited_owner = reference.reflection_owner;
     let (owner_class, name, top_level, reflection_signature) = match reference.target {
         crate::ir::IrCallableReferenceTarget::Module(target) => {
             let declaration = ir
@@ -868,6 +847,7 @@ mod tests {
             declaration_result: signature.ret,
             declaration_suspend,
             adaptation: None,
+            reflection_owner: None,
         };
         own_invoke_realizable(&ir, &reference)
     }

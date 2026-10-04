@@ -337,6 +337,7 @@ fn a_callable_reference_capture_obliges_the_adapter_parameter() {
         declaration_result: Ty::Unit,
         declaration_suspend: false,
         adaptation: None,
+        reflection_owner: None,
     }));
     function_holding(&mut ir, "outer", reference);
     assert_eq!(

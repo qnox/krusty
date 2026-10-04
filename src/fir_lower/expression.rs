@@ -398,6 +398,7 @@ impl BodyLowering<'_> {
                 extension_receiver,
                 substitutions,
                 adaptation,
+                reflection_owner,
             } => self.checked_callable_reference(super::checked::CheckedCallableReference {
                 target: target.clone(),
                 binding: *binding,
@@ -407,6 +408,7 @@ impl BodyLowering<'_> {
                 adaptation: adaptation.as_deref(),
                 reference_ty: function_type.get(),
                 reflective: *reflective,
+                reflection_owner: *reflection_owner,
             })?,
             FirExprKind::LocalCallableReference {
                 target,
