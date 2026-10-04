@@ -180,6 +180,34 @@ pub struct ResolvedFunctionOverride {
 }
 
 impl ResolvedModuleIndex {
+    /// Interfaces reached through this classifier's direct superclass, in the superclass
+    /// hierarchy's semantic order. An empty published slice means there is no such interface;
+    /// absence means the classifier's override plan has not been finalized yet.
+    pub fn superclass_interfaces(&self, classifier: DeclarationId) -> Option<&[TypeName]> {
+        self.superclass_interfaces.get(&classifier).map(Box::as_ref)
+    }
+
+    pub(crate) fn publish_superclass_interfaces(
+        &mut self,
+        classifier: DeclarationId,
+        interfaces: impl IntoIterator<Item = TypeName>,
+    ) {
+        assert!(
+            self.classifier_header(classifier).is_some(),
+            "superclass interface facts require a published classifier"
+        );
+        let interfaces = interfaces
+            .into_iter()
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        assert!(
+            self.superclass_interfaces
+                .insert(classifier, interfaces)
+                .is_none(),
+            "a source classifier may publish superclass interfaces only once"
+        );
+    }
+
     pub fn property_overrides(&self, classifier: DeclarationId) -> &[ResolvedPropertyOverride] {
         self.property_overrides
             .get(&classifier)
