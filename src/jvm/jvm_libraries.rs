@@ -3220,6 +3220,15 @@ impl JvmLibraries {
         if !matches!(callable.origin, crate::libraries::Origin::Library) {
             return;
         }
+        if callable.overridden_call_realizations.is_empty() {
+            callable.overridden_call_realizations =
+                super::mapped_builtin_declarations::overridden_call_realizations_for_declaration(
+                    &callable.name,
+                    &callable.descriptor,
+                    super::mapped_builtin_declarations::MappedBuiltinMemberKind::Function,
+                )
+                .into_boxed_slice();
+        }
         if let Some(plan) = callable.inline_body_plan.as_deref_mut() {
             self.register_inline_body_plan_dependencies(plan);
         }
@@ -3266,6 +3275,13 @@ impl JvmLibraries {
             PropKind::Extension => FnKind::Extension,
             PropKind::Member | PropKind::MemberExtension => FnKind::Member,
         };
+        property.getter.overridden_call_realizations =
+            super::mapped_builtin_declarations::overridden_call_realizations_for_declaration(
+                &property.name,
+                &property.getter.descriptor,
+                super::mapped_builtin_declarations::MappedBuiltinMemberKind::Property,
+            )
+            .into_boxed_slice();
         self.register_external_callable(&mut property.getter, kind);
         if let Some(setter) = &mut property.setter {
             self.register_external_callable(setter, kind);
@@ -5070,6 +5086,18 @@ impl JvmLibraries {
                             )
                         };
                         let mut callable = callable;
+                        // `scope_name` is the provider-normalized Kotlin declaration name. A raw
+                        // Java method may carry only its physical spelling on `m`; attach the
+                        // inherited-call policy here while both views still name the same exact
+                        // declaration. Later phases consume only the external identity and this
+                        // typed candidate set.
+                        callable.overridden_call_realizations =
+                            super::mapped_builtin_declarations::overridden_call_realizations_for_declaration(
+                                scope_name,
+                                &callable.descriptor,
+                                super::mapped_builtin_declarations::MappedBuiltinMemberKind::Function,
+                            )
+                            .into_boxed_slice();
                         // `params` is the call-site-specialized Kotlin declaration shape; the
                         // classfile descriptor remains the physical ABI. In particular, an
                         // object-erased value-class parameter (`Result<T>` -> `Object`) must not be

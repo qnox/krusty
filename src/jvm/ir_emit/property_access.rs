@@ -73,17 +73,20 @@ impl Emitter<'_> {
     /// the property read's Kotlin type.
     pub(super) fn emit_realized_property_read(
         &mut self,
-        operation: crate::ir::ExprId,
-        receiver: Option<crate::ir::ExprId>,
+        operation: &PropertyOperation<'_>,
         access: crate::jvm::inline::PropertyAccess,
-        ty: &Ty,
         code: &mut CodeBuilder,
     ) {
         use crate::jvm::inline::PropertyAccess;
-        let access = access_bridges::protected_property_access(self.run, operation, access);
-        let Some(access) = self.checked_dispatched_accessor(operation, access) else {
+        let access =
+            access_bridges::protected_property_access(self.run, operation.expression, access);
+        let (access, retarget_result_narrow) =
+            self.planned_overridden_read_realization(operation, access);
+        let Some(access) = self.checked_dispatched_accessor(operation.expression, access) else {
             return;
         };
+        let receiver = operation.receiver;
+        let ty = operation.ty;
         let exact_field = matches!(&access, PropertyAccess::Field { .. });
         // Kotlin treats the expression to the left of a static `@JvmField` READ as a qualifier and
         // does not evaluate it.  A write is observably different and still evaluates an explicit
@@ -166,7 +169,7 @@ impl Emitter<'_> {
                 // after the receiver chain has marked its. A read realized as a FIELD is not one,
                 // and deliberately marks nothing — the receiver's line stays in effect through the
                 // `getfield`, exactly as kotlinc records it.
-                self.mark_dispatch_line(operation, code);
+                self.mark_dispatch_line(operation.expression, code);
                 if is_static {
                     let arguments = crate::jvm::names::parse_method_descriptor(&descriptor)
                         .expect("a planned property accessor has a valid JVM descriptor")
@@ -179,6 +182,11 @@ impl Emitter<'_> {
                     code.invokeinterface(m, 0, words);
                 } else {
                     code.invokevirtual(m, 0, words);
+                }
+                if let Some(narrow) = retarget_result_narrow {
+                    let internal = crate::jvm::names::instanceof_internal_name(narrow);
+                    let class = self.cw.class_ref(&internal);
+                    code.checkcast(class);
                 }
                 if words == 0 {
                     return;
@@ -204,7 +212,7 @@ impl Emitter<'_> {
                     .map(|parameter| crate::jvm::physical_type::field_slot(parameter).words())
                     .sum();
                 let m = self.cw.methodref(&owner, &name, &descriptor);
-                self.mark_dispatch_line(operation, code);
+                self.mark_dispatch_line(operation.expression, code);
                 code.invokestatic(m, arguments, words);
                 if words == 0 {
                     return;
@@ -272,6 +280,50 @@ impl Emitter<'_> {
             // A value class has no runtime type of its own — its values ARE the erased underlying — so
             // narrowing to one would `checkcast` to a class the value is not an instance of.
             self.narrow_on_stack(physical, *ty, code);
+        }
+    }
+
+    /// Apply the exact inherited-call plan selected before emission. A field read or access bridge
+    /// is not an ordinary virtual call and deliberately ignores the plan.
+    fn planned_overridden_read_realization(
+        &self,
+        operation: &PropertyOperation<'_>,
+        access: crate::jvm::inline::PropertyAccess,
+    ) -> (crate::jvm::inline::PropertyAccess, Option<Ty>) {
+        use crate::jvm::inline::PropertyAccess;
+        let Some(realization) = self
+            .ir
+            .jvm_overridden_call_realizations
+            .get(&operation.expression)
+        else {
+            return (access, None);
+        };
+        match access {
+            PropertyAccess::Accessor {
+                owner,
+                descriptor,
+                is_static: false,
+                is_interface,
+                static_receiver: None,
+                ..
+            } => {
+                let declared_ret = ty_from_descriptor_ret(&descriptor);
+                let widened_ret = ty_from_descriptor_ret(&realization.descriptor);
+                let narrow = (declared_ret != widened_ret && declared_ret.is_reference())
+                    .then_some(declared_ret);
+                (
+                    PropertyAccess::Accessor {
+                        owner,
+                        name: realization.physical_name.clone(),
+                        descriptor: realization.descriptor.clone(),
+                        is_static: false,
+                        is_interface,
+                        static_receiver: None,
+                    },
+                    narrow,
+                )
+            }
+            access => (access, None),
         }
     }
 

@@ -216,10 +216,10 @@ pub enum IrSuperCallKind {
 pub enum IrVirtualTarget {
     /// A checker-selected current-module or dependency function.
     Function(crate::fir::ResolvedFunctionOverrideTarget),
-    /// The getter of a current-module property.
-    PropertyGetter(crate::fir::PropertyId),
-    /// The setter of a current-module property.
-    PropertySetter(crate::fir::PropertyId),
+    /// The getter of a checker-selected current-module or dependency property.
+    PropertyGetter(crate::fir::ResolvedPropertyOverrideTarget),
+    /// The setter of a checker-selected current-module or dependency property.
+    PropertySetter(crate::fir::ResolvedPropertyOverrideTarget),
 }
 
 impl Callee {

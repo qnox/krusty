@@ -87,17 +87,23 @@ class Other {
             (
                 type_name("Box"),
                 "getLevel".to_owned(),
-                Some(IrVirtualTarget::PropertyGetter(level))
+                Some(IrVirtualTarget::PropertyGetter(
+                    crate::fir::ResolvedPropertyOverrideTarget::Module(level),
+                ))
             ),
             (
                 type_name("Box"),
                 "setLevel".to_owned(),
-                Some(IrVirtualTarget::PropertySetter(level))
+                Some(IrVirtualTarget::PropertySetter(
+                    crate::fir::ResolvedPropertyOverrideTarget::Module(level),
+                ))
             ),
             (
                 type_name("Other"),
                 "getLevel".to_owned(),
-                Some(IrVirtualTarget::PropertyGetter(other))
+                Some(IrVirtualTarget::PropertyGetter(
+                    crate::fir::ResolvedPropertyOverrideTarget::Module(other),
+                ))
             ),
         ]
     );

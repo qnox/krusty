@@ -18,7 +18,10 @@ mod inline_body;
 pub(crate) mod physical_parameter_plan;
 mod platform_contract;
 mod property_producer;
-pub use call_realization::{DefaultCallRealization, NonvirtualCallRealization};
+pub use call_realization::{
+    DefaultCallRealization, NonvirtualCallRealization, OverriddenCallKind,
+    OverriddenCallRealization,
+};
 pub(crate) use classifier_callables::constructor_generic_signature;
 pub use classifier_callables::BoundInnerConstructor;
 pub use classifier_declaration::{AliasExpansion, ClassifierDeclaration};
@@ -1071,6 +1074,10 @@ pub struct LibraryCallable {
     /// Exact nonvirtual target selected by the provider (see [`LibraryMember::nonvirtual_realization`]):
     /// present only when the ordinary physical descriptor is not the legal nonvirtual entry point.
     pub nonvirtual_realization: Option<Box<NonvirtualCallRealization>>,
+    /// Target call-site realizations supplied by declarations this callable may override. These
+    /// candidates are provider-normalized facts; a backend selects one only through the checked
+    /// override/target identities carried by IR.
+    pub overridden_call_realizations: Box<[OverriddenCallRealization]>,
 }
 
 /// How a resolved function relates to the call's receiver — drives Kotlin overload precedence (a member

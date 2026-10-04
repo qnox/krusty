@@ -233,7 +233,9 @@ fn property_read(
                     )),
                     interface: *interface,
                     module_target: None,
-                    target: Some(IrVirtualTarget::PropertyGetter(target)),
+                    target: Some(IrVirtualTarget::PropertyGetter(
+                        crate::fir::ResolvedPropertyOverrideTarget::Module(target),
+                    )),
                 },
                 dispatch_receiver: Some(dispatch),
                 args,
@@ -277,7 +279,9 @@ fn property_read(
                         || class_declaration.is_interface
                         || class_declaration.is_annotation,
                     module_target: None,
-                    target: Some(IrVirtualTarget::PropertyGetter(target)),
+                    target: Some(IrVirtualTarget::PropertyGetter(
+                        crate::fir::ResolvedPropertyOverrideTarget::Module(target),
+                    )),
                 },
                 dispatch_receiver: Some(receiver),
                 args: context_arguments.to_vec(),
@@ -393,7 +397,9 @@ fn property_write(
                     )),
                     interface: *interface,
                     module_target: None,
-                    target: Some(IrVirtualTarget::PropertySetter(target)),
+                    target: Some(IrVirtualTarget::PropertySetter(
+                        crate::fir::ResolvedPropertyOverrideTarget::Module(target),
+                    )),
                 },
                 dispatch_receiver: Some(receiver),
                 args: context_arguments
@@ -436,7 +442,9 @@ fn property_write(
                     )),
                     interface: *interface,
                     module_target: None,
-                    target: Some(IrVirtualTarget::PropertySetter(target)),
+                    target: Some(IrVirtualTarget::PropertySetter(
+                        crate::fir::ResolvedPropertyOverrideTarget::Module(target),
+                    )),
                 },
                 dispatch_receiver: Some(dispatch),
                 args: context_arguments

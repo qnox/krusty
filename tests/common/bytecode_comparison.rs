@@ -18,6 +18,67 @@ pub fn compare_with_kotlinc_plugin(
     jvm_target: &str,
     kotlinc_extra: &[String],
 ) -> Option<ReferenceComparison> {
+    compare_with_kotlinc_plugin_full(
+        name,
+        src,
+        class,
+        cp_jars,
+        cp_jars,
+        jvm_target,
+        kotlinc_extra,
+    )
+}
+
+/// [`compare_with_kotlinc_plugin`] with the JDK modules beside the stdlib on the KRUSTY side
+/// only. A fixture subclassing a JDK-hierarchy stdlib class (`AbstractMutableSet` →
+/// `java.util.AbstractSet`, `Number`) does not resolve for krusty without them; the reference
+/// kotlinc always has its own JDK, so the recorded dump keeps the stdlib-only key and the
+/// `-classpath` the jimage cannot join stays off it.
+pub fn compare_with_kotlinc_plugin_jdk(
+    name: &str,
+    src: &str,
+    class: &str,
+    jvm_target: &str,
+    kotlinc_extra: &[String],
+) -> Option<ReferenceComparison> {
+    compare_with_kotlinc_plugin_jdk_cp(name, src, class, &[], jvm_target, kotlinc_extra)
+}
+
+/// [`compare_with_kotlinc_plugin_jdk`] with `extra_cp` (a javac-built fixture directory, a project
+/// library) on BOTH compilers' classpaths; the JDK modules still join only the krusty side.
+pub fn compare_with_kotlinc_plugin_jdk_cp(
+    name: &str,
+    src: &str,
+    class: &str,
+    extra_cp: &[PathBuf],
+    jvm_target: &str,
+    kotlinc_extra: &[String],
+) -> Option<ReferenceComparison> {
+    let stdlib = super::common_core::stdlib_jar();
+    let mut reference_cp = vec![stdlib];
+    reference_cp.extend(extra_cp.iter().cloned());
+    let mut krusty_cp = reference_cp.clone();
+    krusty_cp.push(super::common_core::jdk_modules());
+    compare_with_kotlinc_plugin_full(
+        name,
+        src,
+        class,
+        &reference_cp,
+        &krusty_cp,
+        jvm_target,
+        kotlinc_extra,
+    )
+}
+
+fn compare_with_kotlinc_plugin_full(
+    name: &str,
+    src: &str,
+    class: &str,
+    cp_jars: &[PathBuf],
+    krusty_cp_jars: &[PathBuf],
+    jvm_target: &str,
+    kotlinc_extra: &[String],
+) -> Option<ReferenceComparison> {
     let inputs =
         super::common_core::byte_dump::class_dump_inputs(src, jvm_target, kotlinc_extra, cp_jars);
     let reference_bytes = super::common_core::byte_dump::kotlinc_class_dumps(
@@ -86,7 +147,7 @@ pub fn compare_with_kotlinc_plugin(
     let classes = super::common_core::compile_in_process_metadata_cp_module_target(
         src,
         name,
-        cp_jars,
+        krusty_cp_jars,
         "main",
         Some(class_major),
     )
@@ -527,6 +588,51 @@ pub fn assert_class_code_matches_kotlinc(
         &super::common_core::language_directives::kotlinc_args(source),
     )
     .expect("reference kotlinc and javap are provisioned");
+    assert_class_code_comparison(class, comparison)
+}
+
+/// [`assert_class_code_matches_kotlinc`] for fixtures that only resolve with the JDK modules
+/// beside the stdlib (see [`compare_with_kotlinc_plugin_jdk`]).
+pub fn assert_class_code_matches_kotlinc_jdk(
+    stem: &str,
+    source: &str,
+    class: &str,
+) -> ReferenceComparison {
+    let comparison = compare_with_kotlinc_plugin_jdk(
+        stem,
+        source,
+        class,
+        "17",
+        &super::common_core::language_directives::kotlinc_args(source),
+    )
+    .expect("reference kotlinc and javap are provisioned");
+    assert_class_code_comparison(class, comparison)
+}
+
+/// [`assert_class_code_matches_kotlinc_jdk`] with `extra_cp` on both compilers' classpaths (see
+/// [`compare_with_kotlinc_plugin_jdk_cp`]).
+pub fn assert_class_code_matches_kotlinc_jdk_cp(
+    stem: &str,
+    source: &str,
+    class: &str,
+    extra_cp: &[PathBuf],
+) -> ReferenceComparison {
+    let comparison = compare_with_kotlinc_plugin_jdk_cp(
+        stem,
+        source,
+        class,
+        extra_cp,
+        "17",
+        &super::common_core::language_directives::kotlinc_args(source),
+    )
+    .expect("reference kotlinc and javap are provisioned");
+    assert_class_code_comparison(class, comparison)
+}
+
+fn assert_class_code_comparison(
+    class: &str,
+    comparison: ReferenceComparison,
+) -> ReferenceComparison {
     let header = |bytes: &[u8]| {
         let info = krusty::jvm::classreader::parse_class(bytes).expect("a readable class file");
         (

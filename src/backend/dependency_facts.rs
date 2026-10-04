@@ -58,6 +58,7 @@ pub struct BackendCallableFact {
     pub inline_modifiers: Box<[InlineParameterModifier]>,
     pub default_realization: Option<Box<DefaultCallRealization>>,
     pub nonvirtual_realization: Option<Box<NonvirtualCallRealization>>,
+    pub overridden_call_realizations: Box<[crate::libraries::OverriddenCallRealization]>,
     pub generic_sig: Option<Box<GenericSig>>,
 }
 
@@ -227,6 +228,7 @@ impl CheckedBackendCallables {
                     inline_modifiers: callable.inline_modifiers,
                     default_realization: callable.default_realization,
                     nonvirtual_realization: callable.nonvirtual_realization,
+                    overridden_call_realizations: callable.overridden_call_realizations,
                     generic_sig: callable.generic_sig,
                 })
             }

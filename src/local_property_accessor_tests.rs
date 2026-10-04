@@ -73,15 +73,21 @@ class Other {
         [
             (
                 "getSlot".to_owned(),
-                Some(IrVirtualTarget::PropertyGetter(slot))
+                Some(IrVirtualTarget::PropertyGetter(
+                    crate::fir::ResolvedPropertyOverrideTarget::Module(slot),
+                ))
             ),
             (
                 "getTwice".to_owned(),
-                Some(IrVirtualTarget::PropertyGetter(twice))
+                Some(IrVirtualTarget::PropertyGetter(
+                    crate::fir::ResolvedPropertyOverrideTarget::Module(twice),
+                ))
             ),
             (
                 "setSlot".to_owned(),
-                Some(IrVirtualTarget::PropertySetter(slot))
+                Some(IrVirtualTarget::PropertySetter(
+                    crate::fir::ResolvedPropertyOverrideTarget::Module(slot),
+                ))
             ),
         ]
     );

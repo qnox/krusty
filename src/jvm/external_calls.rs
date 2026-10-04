@@ -257,6 +257,7 @@ pub(super) fn realize(
             _ => None,
         };
         let mut property_dispatch = crate::ir::IrPropertyDispatch::Ordinary;
+        let mut property_virtual_target = None;
         if let Some((
             property,
             write,
@@ -279,6 +280,12 @@ pub(super) fn realize(
             } else {
                 realization.getter
             };
+            let property_target = crate::fir::ResolvedPropertyOverrideTarget::External(target);
+            property_virtual_target = Some(if write {
+                crate::ir::IrVirtualTarget::PropertySetter(property_target)
+            } else {
+                crate::ir::IrVirtualTarget::PropertyGetter(property_target)
+            });
             ir.exprs[index] = IrExpr::Call {
                 callee: Callee::External {
                     target,
@@ -869,9 +876,11 @@ pub(super) fn realize(
             continue;
         }
         // A member dispatch realizes the dependency declaration the frontend selected.
-        let selected = crate::ir::IrVirtualTarget::Function(
-            crate::fir::ResolvedFunctionOverrideTarget::External(target),
-        );
+        let selected = property_virtual_target.unwrap_or_else(|| {
+            crate::ir::IrVirtualTarget::Function(
+                crate::fir::ResolvedFunctionOverrideTarget::External(target),
+            )
+        });
         match kind {
             ExternalCallableKind::TopLevel => {
                 *callee = Callee::Static {

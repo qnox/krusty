@@ -4045,6 +4045,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `java_charsequence_get_realization_is_an_operator`,
   `tests/classpath_number_conversion_e2e.rs`.
 
+- **An exact override family may publish a special JVM call-site name.** Kotlin builtins
+  such as `Collection.size`, `Map.keys`, `MutableList.removeAt`, `CharSequence.get`, and
+  `Number.toByte` have target spellings that differ from their source names
+  (`MethodSignatureMapper.mapOverriddenSpecialBuiltinIfNeeded`,
+  compiler/ir/backend.jvm/.../mapping/MethodSignatureMapper.kt:411-422, backed by
+  `getOverriddenBuiltinWithDifferentJvmName`,
+  core/descriptors.jvm/.../specialBuiltinMembers.kt:88-102). The provider joins each exact decoded
+  dependency declaration to its target-policy realization while both identities are available.
+  A selected source override reaches that policy only through its exact frontend override edges;
+  emission never recovers it from an owner/member spelling. Thus `SmartSet.size` calls
+  `SmartSet.size()I`, `MyList.removeAt` calls `remove(I)Object`, and a covariant
+  `keys: HashSet<K>` calls `keySet()Set` then narrows the result. Super calls, writes, plain
+  `fun getSize()`, and Java bean getters retain their declared ABI. Tests:
+  `tests/special_builtin_call_sites_e2e.rs`.
+
 - **Unchecked cast to a type parameter (`x as T`).** kotlinc erases the target to the type parameter's
   upper bound — `Object` for an unbounded `<T>` (no `checkcast` emitted), the bound's class for `<T :
   CharSequence>` (a `checkcast`). A non-null bound (`<T : Any>`, `<T : Foo>`) null-checks first
