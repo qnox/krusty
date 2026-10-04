@@ -16,10 +16,14 @@
 //!   - a HOSTED plugin (KSP) → INFO that the real jar runs via the sidecar — or an ERROR from a driver
 //!     that has no codegen host (the kotlinc-compatible command line), which would otherwise drop the
 //!     plugin's generated code;
+//!   - kotlinc's default scripting plugin (which the Kotlin Gradle plugin passes on every JVM
+//!     compile) → nothing: it acts only on script sources, which krusty does not compile;
 //!   - an `-Xplugin` jar krusty neither reimplements nor can host (Compose, any third-party FIR/IR
 //!     plugin) → ERROR. Silently ignoring it would emit wrong bytecode, so a drop-in must fail loudly.
 
-use crate::plugins::cli::{PluginConfig, KSP_PLUGIN_ID, SERIALIZATION_PLUGIN_ID};
+use crate::plugins::cli::{
+    PluginConfig, KSP_PLUGIN_ID, SCRIPTING_PLUGIN_ID, SERIALIZATION_PLUGIN_ID,
+};
 use crate::plugins::serialization::{PluginRelease, SerializationAbi, SerializationPlugin};
 use crate::plugins::{IrPlugin, PluginHost};
 
@@ -44,6 +48,9 @@ pub enum ExtensionKind {
     Native(NativeBuilder),
     /// krusty hosts the real plugin out-of-process (codegen-only: KSP/APT).
     CodegenHost,
+    /// The plugin acts only on Kotlin script sources, which krusty does not compile, so requesting
+    /// it changes nothing for the `.kt` sources krusty does: kotlinc's default scripting plugin.
+    ScriptsOnly,
 }
 
 /// One known extension: the kotlinc plugin id it answers to, the registrar class its jar declares,
@@ -279,6 +286,17 @@ impl PluginRegistry {
             registrar: "com.google.devtools.ksp.KotlinSymbolProcessingComponentRegistrar",
             kind: ExtensionKind::CodegenHost,
         });
+        // kotlinc's scripting plugin jar declares a K2 and a legacy registrar.
+        for registrar in [
+            "org.jetbrains.kotlin.scripting.compiler.plugin.ScriptingK2CompilerPluginRegistrar",
+            "org.jetbrains.kotlin.scripting.compiler.plugin.ScriptingCompilerConfigurationComponentRegistrar",
+        ] {
+            r.register(RegisteredExtension {
+                plugin_id: SCRIPTING_PLUGIN_ID,
+                registrar,
+                kind: ExtensionKind::ScriptsOnly,
+            });
+        }
         r
     }
 
@@ -309,7 +327,7 @@ impl PluginRegistry {
                         build,
                         release: None,
                     }),
-                    ExtensionKind::CodegenHost => None,
+                    ExtensionKind::CodegenHost | ExtensionKind::ScriptsOnly => None,
                 })
                 .collect(),
             ..NativePlugins::none()
@@ -372,6 +390,7 @@ impl PluginRegistry {
                         plugin_id: ext.plugin_id.to_string(),
                     });
                 }
+                ExtensionKind::ScriptsOnly => {}
             }
         }
 
@@ -638,6 +657,31 @@ mod tests {
         let c = cfg(&[&format!("-Xplugin={jar}")]);
         let resolved = PluginRegistry::with_builtins().resolve(&activation(&c, &[]));
         assert!(resolved.native.is_empty());
+        assert_eq!(resolved.diagnostics, Vec::new());
+    }
+
+    /// kotlinc's default scripting plugin, which the Kotlin Gradle plugin puts on every JVM
+    /// compilation's `-Xplugin` classpath, acts on script sources only. Requesting it — by its jar,
+    /// whose two registrars (K2 and legacy) both answer to it, or by `-P` options — runs nothing and
+    /// reports nothing, exactly as a kotlinc compile of `.kt` sources is unaffected by it.
+    #[test]
+    fn kotlincs_default_scripting_plugin_runs_nothing() {
+        let registrars = PluginRegistry::with_builtins()
+            .extensions()
+            .iter()
+            .filter(|ext| ext.plugin_id == SCRIPTING_PLUGIN_ID)
+            .map(|ext| ext.registrar)
+            .collect::<Vec<_>>();
+        assert_eq!(registrars.len(), 2, "{registrars:?}");
+        let jar = plugin_jar("kotlin-scripting-compiler-embeddable.jar", &registrars);
+        let c = cfg(&[
+            &format!("-Xplugin={jar}"),
+            "-P",
+            "plugin:kotlin.scripting:disable-script-definitions-autoloading=true",
+        ]);
+        let resolved = PluginRegistry::with_builtins().resolve(&activation(&c, &[]));
+        assert!(resolved.native.is_empty());
+        assert!(!resolved.ksp_active);
         assert_eq!(resolved.diagnostics, Vec::new());
     }
 

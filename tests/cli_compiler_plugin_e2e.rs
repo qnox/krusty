@@ -317,6 +317,38 @@ fn the_serialization_plugin_runs_as_krustys_native_pass() {
     assert_eq!(compiled.classes, reference);
 }
 
+/// The Kotlin Gradle plugin hands kotlinc its default scripting plugin on every JVM compile, next to
+/// the serialization plugin when that is applied. The scripting plugin acts on script sources only,
+/// so krusty accepts it silently and emits the class set kotlinc emits for the same command line.
+#[test]
+fn kotlincs_default_scripting_plugin_is_accepted_beside_serialization() {
+    let scripting = reference_plugin_jar("kotlin-scripting-compiler.jar");
+    let serialization = reference_plugin_jar("kotlinx-serialization-compiler-plugin.jar");
+    let switches = [format!(
+        "-Xplugin={},{}",
+        serialization.display(),
+        scripting.display()
+    )];
+    let classpath = serialization_runtime();
+    let probe = Probe::new("scripting", SERIALIZABLE_PROBE);
+    let compiled = probe.krusty(&classpath, &switches);
+    let substituted = PluginDiagnostic::NativeSubstitution {
+        plugin_id: krusty::plugins::cli::SERIALIZATION_PLUGIN_ID.to_string(),
+        jar: Some(serialization.display().to_string()),
+    };
+    assert_eq!(
+        compiled.stderr,
+        format!("info: {}\n", substituted.message())
+    );
+    assert_eq!(compiled.code, Some(0));
+    let reference = probe.kotlinc_classes(&classpath, &switches);
+    assert!(
+        reference.contains(&"probe/P$$serializer.class".to_string()),
+        "{reference:?}"
+    );
+    assert_eq!(compiled.classes, reference);
+}
+
 /// Without the plugin kotlinc synthesizes no serializer for a `@Serializable` class — the
 /// annotation is an ordinary runtime annotation — and neither does krusty.
 #[test]

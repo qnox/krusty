@@ -8724,6 +8724,24 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   missing jar), `plugins::registry` unit tests (`a_jar_is_recognized_by_the_registrar_it_declares_not_its_name`,
   `an_unreadable_plugin_entry_is_an_error`, `a_jar_declaring_no_plugin_loads_nothing`, …),
   `plugins::cli` unit tests, and `krusty-cli`'s `cli` tests.
+- **kotlinc's default scripting plugin is accepted and runs nothing; the Gradle plugin forwards
+  KGP's compiler-plugin request verbatim.** kotlinc loads its scripting plugin (`kotlin.scripting`,
+  registrars `ScriptingK2CompilerPluginRegistrar` and legacy
+  `ScriptingCompilerConfigurationComponentRegistrar`) into every compilation, and the Kotlin Gradle
+  plugin also passes `kotlin-scripting-compiler-embeddable` on every JVM compile's `-Xplugin`
+  classpath. It acts only on script sources, which krusty does not compile, so the registry answers
+  to both registrars with an inert `ScriptsOnly` extension: no pass, no diagnostic, and the class set
+  kotlinc emits for the same command line. The Gradle plugin forwards each compile task's
+  `pluginClasspath` as `-Xplugin=<jars>` and `pluginOptions` as `-P plugin:<id>:<key>=<value>`, so
+  `kotlin("plugin.serialization")` generates serializers whether it is applied before or after krusty.
+  Before, a support plugin applied before krusty was put in an apply-time "baseline" and silently
+  ignored (no `$serializer` classes), and one applied after krusty failed the task; now every applied
+  support plugin other than serialization and scripting fails the task, in either order.
+  Tests: `plugins::registry::tests::kotlincs_default_scripting_plugin_runs_nothing`,
+  `tests/cli_compiler_plugin_e2e.rs`
+  (`kotlincs_default_scripting_plugin_is_accepted_beside_serialization`), and the Gradle lane's
+  `krusty-build` `gradle::tests::serialization_plugin_compiles_through_krusty` (serializers generated
+  in both orders and exercised at run time across modules; all-open applied before krusty fails).
 - **`Pair`, `Triple` and `Map.Entry` serialize through the runtime's tuple serializers.** None of
   them is `@Serializable`, but kotlinc's plugin selects a serializer for each by the classifier,
   as it does for a standard collection. `Pair<A, B>` becomes `new PairSerializer(<A>, <B>)`,
