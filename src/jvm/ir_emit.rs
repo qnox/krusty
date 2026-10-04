@@ -94,6 +94,7 @@ mod initializer_lines;
 mod inline_body_emission;
 mod inline_call;
 mod inline_frame_marker;
+mod inline_parameters;
 mod instance_field_names;
 use instance_field_names::instance_field_jvm_name;
 mod interface_compatibility;

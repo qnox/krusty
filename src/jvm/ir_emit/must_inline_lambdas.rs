@@ -29,6 +29,7 @@ pub fn mark_must_inline_lambdas(ir: &mut IrFile) {
     let spliced_as_a_call = splice_called_impls(ir);
     let mut dead: Vec<u32> = Vec::new();
     for i in 0..ir.exprs.len() {
+        let call = u32::try_from(i).expect("IR expression index exceeds ExprId");
         let args = match &ir.exprs[i] {
             IrExpr::Call {
                 callee:
@@ -39,16 +40,15 @@ pub fn mark_must_inline_lambdas(ir: &mut IrFile) {
                 args,
                 ..
             } => args.clone(),
-            IrExpr::Call { args, .. }
-                if ir
-                    .module_inline_calls
-                    .contains(&(u32::try_from(i).expect("IR expression index exceeds ExprId"))) =>
-            {
-                args.clone()
-            }
+            IrExpr::Call { args, .. } if ir.module_inline_calls.contains(&call) => args.clone(),
             _ => continue,
         };
-        for a in args {
+        for (parameter, a) in args.into_iter().enumerate() {
+            // A literal for a parameter the call publishes as no inline parameter is a value the
+            // body receives, so its method is live.
+            if super::inline_parameters::is_inline_parameter(ir, call, parameter) == Some(false) {
+                continue;
+            }
             if let IrExpr::Lambda { impl_fn, .. } = &ir.exprs[a as usize] {
                 if !spliced_as_a_call.contains(impl_fn) {
                     dead.push(*impl_fn);
