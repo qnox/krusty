@@ -3,6 +3,7 @@
 //! rediscover alias-ness from the source spelling after selection.
 
 use super::*;
+use crate::symbol_resolver::{CandidateSelectionWithTies, ClassifierMiss};
 
 /// The typealias binding selected on the classifier tower together with its expanded classifier.
 /// A declared alias carries its qualified identity. `identity` is absent only for a statement-local
@@ -58,7 +59,7 @@ impl Checker<'_> {
         name: &str,
     ) -> (
         InheritedNestedClassifier,
-        Option<String>,
+        Option<ClassifierMiss>,
         Option<SelectedTypeAlias>,
     ) {
         let segments = name
@@ -69,7 +70,7 @@ impl Checker<'_> {
         let Some((_, root_name)) = segments.first() else {
             return (
                 InheritedNestedClassifier::NotFound,
-                Some(name.to_string()),
+                Some(ClassifierMiss::Unresolved(name.to_string())),
                 None,
             );
         };
@@ -96,7 +97,7 @@ impl Checker<'_> {
                 InheritedNestedClassifier::Ambiguous => {
                     return (
                         InheritedNestedClassifier::Ambiguous,
-                        Some(root_name.clone()),
+                        Some(ClassifierMiss::Unresolved(root_name.clone())),
                         None,
                     );
                 }
@@ -130,19 +131,19 @@ impl Checker<'_> {
                         selected_alias = Some(alias);
                         ResolvedQualifier::Classifier(classifier)
                     } else {
-                        let imported = classifier_from_imports(
+                        let imported = imported_classifier_selection(
                             root_name,
                             &self.imports,
                             &self.import_levels,
                             &source,
                         );
-                        crate::trace_compiler!(
-                            "resolve",
-                            "classifier root={root_name} imported={:?}",
-                            imported.found().map(TypeName::render)
-                        );
                         match imported {
-                            InheritedNestedClassifier::Found(internal) => {
+                            CandidateSelectionWithTies::Selected(internal) => {
+                                crate::trace_compiler!(
+                                    "resolve",
+                                    "classifier root={root_name} imported={}",
+                                    internal.render()
+                                );
                                 let internal = self.libraries.canonical_source_type_name(internal);
                                 let Ok(alias) =
                                     self.selected_imported_type_alias(root_name, internal)
@@ -152,14 +153,14 @@ impl Checker<'_> {
                                 selected_alias = alias;
                                 ResolvedQualifier::Classifier(internal)
                             }
-                            InheritedNestedClassifier::Ambiguous => {
+                            CandidateSelectionWithTies::Ambiguous(candidates) => {
                                 return (
                                     InheritedNestedClassifier::Ambiguous,
-                                    Some(root_name.clone()),
+                                    Some(ClassifierMiss::Ambiguous(candidates)),
                                     None,
                                 );
                             }
-                            InheritedNestedClassifier::NotFound => {
+                            CandidateSelectionWithTies::None => {
                                 match self
                                     .classifier_header_owner
                                     .map_or(InheritedNestedClassifier::NotFound, |owner| {
@@ -171,7 +172,7 @@ impl Checker<'_> {
                                     InheritedNestedClassifier::Ambiguous => {
                                         return (
                                             InheritedNestedClassifier::Ambiguous,
-                                            Some(root_name.clone()),
+                                            Some(ClassifierMiss::Unresolved(root_name.clone())),
                                             None,
                                         );
                                     }
@@ -187,7 +188,7 @@ impl Checker<'_> {
                                     InheritedNestedClassifier::NotFound => {
                                         return (
                                             InheritedNestedClassifier::NotFound,
-                                            Some(root_name.clone()),
+                                            Some(ClassifierMiss::Unresolved(root_name.clone())),
                                             None,
                                         );
                                     }
@@ -225,16 +226,20 @@ impl Checker<'_> {
             }
             Ok((ResolvedQualifier::Value | ResolvedQualifier::Package(_), _)) => (
                 InheritedNestedClassifier::NotFound,
-                segments.last().map(|(_, segment)| segment.clone()),
+                segments
+                    .last()
+                    .map(|(_, segment)| ClassifierMiss::Unresolved(segment.clone())),
                 None,
             ),
             Err(QualifierError::UnresolvedSegment { name, .. })
-            | Err(QualifierError::AmbiguousRoot { name, .. }) => {
-                (InheritedNestedClassifier::NotFound, Some(name), None)
-            }
+            | Err(QualifierError::AmbiguousRoot { name, .. }) => (
+                InheritedNestedClassifier::NotFound,
+                Some(ClassifierMiss::Unresolved(name)),
+                None,
+            ),
             Err(QualifierError::NotANameChain { .. }) => (
                 InheritedNestedClassifier::NotFound,
-                Some(root_name.clone()),
+                Some(ClassifierMiss::Unresolved(root_name.clone())),
                 None,
             ),
         }
@@ -295,12 +300,12 @@ impl Checker<'_> {
         name: &str,
     ) -> (
         InheritedNestedClassifier,
-        Option<String>,
+        Option<ClassifierMiss>,
         Option<SelectedTypeAlias>,
     ) {
         (
             InheritedNestedClassifier::Ambiguous,
-            Some(name.to_string()),
+            Some(ClassifierMiss::Unresolved(name.to_string())),
             None,
         )
     }

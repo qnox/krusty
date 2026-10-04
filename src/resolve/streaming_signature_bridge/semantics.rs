@@ -412,13 +412,14 @@ impl ProductionSignatureSemantics<'_> {
             .collect::<Option<Vec<_>>>()
             .ok_or_else(Self::failure)?;
         let enclosing = lexical.visible_tparams();
+        let scope = crate::fir::SignatureScope {
+            owner: declaration,
+            source: anchor.source,
+        };
         let semantic = super::super::TParams::symbolic_from_decl_enclosing(
             &source_names,
             &declared_bounds,
-            &|name| {
-                self.type_parameter_bound_classifier(declaration, anchor.source, name)
-                    .or_else(|| self.table.class_names.get(name))
-            },
+            &|name| self.qualified_type_classifier(scope, name),
             &|name| enclosing.contains(name).then(|| enclosing.bound(name)),
         )
         .alpha_renamed_declaration(
@@ -700,15 +701,11 @@ impl ProductionSignatureSemantics<'_> {
                         reference,
                         include_scope_owner_body,
                     );
-                    let spelling = self
-                        .qualified_type_classifier_binding(lookup_scope, &failed.name)
-                        .1
-                        .unwrap_or_else(|| failed.name.clone());
-                    Err(self.record_unresolved_reference_at(
-                        diagnostic_scope.owner,
-                        diagnostic_scope.source,
+                    Err(self.record_failed_type_reference(
+                        diagnostic_scope,
+                        lookup_scope,
                         failed.span,
-                        &spelling,
+                        &failed.name,
                     ))
                 })
         })?;
@@ -732,16 +729,58 @@ impl ProductionSignatureSemantics<'_> {
             )
             .clone()
         })?;
-        let spelling = self
-            .qualified_type_classifier_binding(lookup_scope, &failed.name)
-            .1
-            .unwrap_or_else(|| failed.name.clone());
-        Err(self.record_unresolved_reference_at(
-            diagnostic_scope.owner,
-            diagnostic_scope.source,
+        Err(self.record_failed_type_reference(
+            diagnostic_scope,
+            lookup_scope,
             failed.span,
-            &spelling,
+            &failed.name,
         ))
+    }
+
+    /// Report a type reference that bound to no single classifier: kotlinc lists the equally
+    /// visible classifiers of an ambiguous name, and names the unbound segment otherwise.
+    fn record_failed_type_reference(
+        &self,
+        diagnostic_scope: crate::fir::SignatureScope,
+        lookup_scope: crate::fir::SignatureScope,
+        span: crate::diag::Span,
+        spelling: &str,
+    ) -> crate::fir::DiagnosticId {
+        match self
+            .qualified_type_classifier_binding(lookup_scope, spelling)
+            .1
+        {
+            Some(crate::symbol_resolver::ClassifierMiss::Ambiguous(candidates)) => {
+                let message = match self.with_resolver(lookup_scope, |resolver| {
+                    Some(super::super::ambiguous_classifier_message(
+                        &candidates,
+                        |candidate| resolver.classifier(candidate),
+                    ))
+                }) {
+                    Ok(message) => message,
+                    Err(diagnostic) => return diagnostic,
+                };
+                self.record_source_diagnostic_at(
+                    diagnostic_scope.owner,
+                    diagnostic_scope.source,
+                    span,
+                    message,
+                )
+            }
+            Some(crate::symbol_resolver::ClassifierMiss::Unresolved(segment)) => self
+                .record_unresolved_reference_at(
+                    diagnostic_scope.owner,
+                    diagnostic_scope.source,
+                    span,
+                    &segment,
+                ),
+            None => self.record_unresolved_reference_at(
+                diagnostic_scope.owner,
+                diagnostic_scope.source,
+                span,
+                spelling,
+            ),
+        }
     }
 
     /// Resolve the restricted compact type-expression subset used by explicit body-local headers.
