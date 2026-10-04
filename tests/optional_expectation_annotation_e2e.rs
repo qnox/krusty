@@ -13,8 +13,16 @@ const PLATFORM: &str = "package optional\n\
 /// Both compilers build `common` as the common source of one multiplatform module beside a platform
 /// file, and every class they write is byte-identical.
 fn assert_common_use_matches_kotlinc(common_source: &str) {
+    assert_source_set_matches_kotlinc(common_source, PLATFORM);
+}
+
+/// [`assert_common_use_matches_kotlinc`] with the platform file's own `box()`.
+fn assert_source_set_matches_kotlinc(common_source: &str, platform_source: &str) {
     let classes = common::classes_against_kotlinc_source_set(
-        &[("Common.kt", common_source), ("Platform.kt", PLATFORM)],
+        &[
+            ("Common.kt", common_source),
+            ("Platform.kt", platform_source),
+        ],
         1,
     );
     let differences = classes.differences();
@@ -58,6 +66,86 @@ fn an_optional_annotation_on_a_common_property_matches_kotlinc() {
          }\n\
          \n\
          fun read(registry: Registry.Companion): String = registry.payload.text\n",
+    );
+}
+
+const PAYLOAD_PLATFORM: &str = "package optional\n\
+    \n\
+    fun box(): String = read(make())\n";
+
+#[test]
+fn an_optional_annotation_on_a_common_top_level_function_matches_kotlinc() {
+    assert_source_set_matches_kotlinc(
+        "package optional\n\
+         \n\
+         class Payload(val text: String)\n\
+         \n\
+         @kotlin.js.JsName(\"makePayload\")\n\
+         fun make(): Payload = Payload(\"OK\")\n\
+         \n\
+         fun read(payload: Payload): String = payload.text\n",
+        PAYLOAD_PLATFORM,
+    );
+}
+
+#[test]
+fn an_optional_annotation_on_a_common_class_matches_kotlinc() {
+    assert_source_set_matches_kotlinc(
+        "package optional\n\
+         \n\
+         @kotlin.js.JsName(\"Box\")\n\
+         class Payload(val text: String)\n\
+         \n\
+         fun make(): Payload = Payload(\"OK\")\n\
+         \n\
+         fun read(payload: Payload): String = payload.text\n",
+        PAYLOAD_PLATFORM,
+    );
+}
+
+#[test]
+fn an_optional_annotation_on_a_common_primary_constructor_matches_kotlinc() {
+    assert_source_set_matches_kotlinc(
+        "package optional\n\
+         \n\
+         class Payload @kotlin.js.JsName(\"primary\") constructor(val text: String)\n\
+         \n\
+         fun make(): Payload = Payload(\"OK\")\n\
+         \n\
+         fun read(payload: Payload): String = payload.text\n",
+        PAYLOAD_PLATFORM,
+    );
+}
+
+#[test]
+fn an_optional_annotation_on_a_common_secondary_constructor_matches_kotlinc() {
+    assert_source_set_matches_kotlinc(
+        "package optional\n\
+         \n\
+         class Payload(val text: String) {\n\
+         \x20   @kotlin.js.JsName(\"secondary\")\n\
+         \x20   constructor(first: Payload, second: Payload) : this(first.text + second.text)\n\
+         }\n\
+         \n\
+         fun make(): Payload = Payload(Payload(\"O\"), Payload(\"K\"))\n\
+         \n\
+         fun read(payload: Payload): String = payload.text\n",
+        PAYLOAD_PLATFORM,
+    );
+}
+
+#[test]
+fn an_optional_annotation_on_a_common_value_parameter_matches_kotlinc() {
+    assert_source_set_matches_kotlinc(
+        "package optional\n\
+         \n\
+         class Payload(val text: String)\n\
+         \n\
+         fun make(): Payload = Payload(\"OK\")\n\
+         \n\
+         @OptIn(kotlin.experimental.ExperimentalObjCName::class)\n\
+         fun read(@kotlin.native.ObjCName(\"source\") payload: Payload): String = payload.text\n",
+        PAYLOAD_PLATFORM,
     );
 }
 

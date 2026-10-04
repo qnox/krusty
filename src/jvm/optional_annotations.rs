@@ -7,7 +7,7 @@
 //! publishes the classes below the class-file provider, so a real class of the same identity always
 //! wins. The checker then restricts their use to common sources.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::libraries::TypeKind;
@@ -52,6 +52,9 @@ pub(super) fn module_optional_annotations(
 #[derive(Default)]
 pub(super) struct OptionalAnnotationIndex {
     classifiers: HashMap<TypeName, Arc<LibraryType>>,
+    /// Every package enclosing one of [`Self::classifiers`]. A JVM classpath may hold no class
+    /// file in such a package (`kotlin.native`), yet a qualified reference walks through it.
+    packages: HashSet<TypeName>,
 }
 
 impl OptionalAnnotationIndex {
@@ -70,13 +73,28 @@ impl OptionalAnnotationIndex {
     /// loaded modules in that order, so a later module's class replaces an earlier one.
     pub(super) fn new(classes: impl IntoIterator<Item = OptionalAnnotationClass>) -> Self {
         let mut classifiers = HashMap::new();
+        let mut packages = HashSet::new();
         for class in classes {
+            let mut package = class.identity.parent();
+            while let Some(current) = package {
+                packages.insert(current);
+                package = current.parent();
+            }
             classifiers.insert(
                 class.identity,
                 Arc::new(annotation_type(&class.declaration)),
             );
         }
-        Self { classifiers }
+        Self {
+            classifiers,
+            packages,
+        }
+    }
+
+    /// Whether `name` is a package directly inside `parent` that encloses an optional annotation.
+    pub(super) fn has_package(&self, parent: TypeName, name: &str) -> bool {
+        crate::types::existing_type_name_child(parent, name)
+            .is_some_and(|package| self.packages.contains(&package))
     }
 
     pub(super) fn classifier(&self, internal: TypeName) -> Option<Arc<LibraryType>> {

@@ -217,7 +217,10 @@ pub(super) fn primary_constructor_parameter_annotations(
     for _ in 0..leading {
         out.insert(0, crate::ir::DeclarationAnnotations::default());
     }
-    if out.iter().all(crate::ir::DeclarationAnnotations::is_empty) {
+    if !out
+        .iter()
+        .any(crate::ir::DeclarationAnnotations::declares_annotations)
+    {
         Vec::new()
     } else {
         out

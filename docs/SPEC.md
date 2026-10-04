@@ -6300,8 +6300,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   writes no annotation record for it, but the declaration's `hasAnnotations` flag is still set
   for a non-SOURCE retention (kotlinc derives that flag from FIR before the removal): the
   checker records `AnnotationSemanticFacts::optional_expectation`, and common lowering keeps
-  only that fact in `DeclarationAnnotations`. Byte-identical to kotlinc for a function and a
-  property. A platform source is rejected at the annotation's type reference with `declaration
+  only that fact in `DeclarationAnnotations`. Every owner hands `@Metadata` one
+  `metadata::MetadataAnnotations` (the declared-annotations fact plus the records), so the flag
+  is never reconstructed from the retained records. Its package (`kotlin.native`) resolves even
+  where no class file lives in it. Byte-identical to kotlinc for a member and a top-level
+  function, a property, a class, a primary and a secondary constructor, and a value parameter.
+  A platform source is rejected at the annotation's type reference with `declaration
   annotated with '@OptionalExpectation' can only be used in common module sources.` (identical
   on 2.4.0, 2.4.10 and 2.4.20). Annotation classifiers are no longer inferred from the common
   stdlib KLIB. Open gap: annotations written on a property ACCESSOR (`@A get()`) are skipped by

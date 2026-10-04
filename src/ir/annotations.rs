@@ -69,8 +69,8 @@ impl DeclarationAnnotations {
     }
 
     /// Partition checked applications for one declaration: SOURCE retention is dropped, an
-    /// optional expectation leaves only the [`Self::has_erased_optional_expectations`] fact, and
-    /// every other application is retained.
+    /// optional expectation leaves only the [`Self::declares_annotations`] fact, and every other
+    /// application is retained.
     pub fn from_checked<'a>(
         applications: impl IntoIterator<Item = (&'a crate::types::AppliedAnnotation, AppliedAnnotation)>,
     ) -> Self {
@@ -92,13 +92,9 @@ impl DeclarationAnnotations {
         annotations
     }
 
-    /// Whether the declaration carried an erased optional expectation (see the field).
-    pub fn has_erased_optional_expectations(&self) -> bool {
-        self.erased_optional_expectations
-    }
-
-    /// Whether this declaration's metadata reports annotations: a retained application or an
-    /// erased optional expectation.
+    /// Whether the declaration declares annotations — the `hasAnnotations` fact its metadata
+    /// reports: a retained application or an erased optional expectation. Never derive it from
+    /// [`Self::retains_none`].
     pub fn declares_annotations(&self) -> bool {
         !self.retained.is_empty() || self.erased_optional_expectations
     }
@@ -117,12 +113,10 @@ impl DeclarationAnnotations {
         self.retained.iter().map(|retained| &retained.annotation)
     }
 
-    pub fn is_empty(&self) -> bool {
+    /// Whether no application survives into the class file. This is a physical fact; whether the
+    /// declaration declares annotations is [`Self::declares_annotations`].
+    pub fn retains_none(&self) -> bool {
         self.retained.is_empty()
-    }
-
-    pub fn len(&self) -> usize {
-        self.retained.len()
     }
 
     /// Whether these annotations include `@kotlin.Deprecated` at any level. kotlinc additionally

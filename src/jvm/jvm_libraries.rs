@@ -3222,11 +3222,12 @@ fn class_implements_name(cp: &Classpath, internal: TypeName, target: TypeName) -
 }
 
 impl JvmLibraries {
-    /// Federate the classpath package catalog with the core declaration source. `symbols()` already
-    /// combines those sources; package-prefix resolution must expose the same namespace or an explicit
-    /// import can be rejected before its core symbol is queried.
+    /// The packages `symbols()` combines (classpath, optional annotations, core declarations), or
+    /// an explicit import can be rejected before its symbol is queried.
     fn package_exists(&self, parent: TypeName, name: &str) -> bool {
-        self.cp.has_package(parent, name) || EmptySymbolSource.package_exists(parent, name)
+        self.cp.has_package(parent, name)
+            || self.optional_annotations.has_package(parent, name)
+            || EmptySymbolSource.package_exists(parent, name)
     }
 
     fn register_external_classifier(

@@ -2168,29 +2168,8 @@ fn return_primitive(code: &mut CodeBuilder, ty: Ty) {
     }
 }
 
-/// Attach any user annotations recorded for `field` (by name) to the most recently added field.
-/// The annotations on a property's synthetic `$annotations` marker — the PROPERTY's own, which
-/// `@Metadata` records as `Property.annotation`. Both retentions rejoin into the single list a
-/// metadata record keeps.
-fn property_marker_annotations(
-    ir: &IrFile,
-    c: &crate::ir::IrClass,
-    property: &str,
-) -> Vec<crate::ir::AppliedAnnotation> {
-    let Some(marker) = ir
-        .property_annotation_markers
-        .get(&(c.fq_name_id(), property.to_string()))
-    else {
-        return Vec::new();
-    };
-    ir.function_annotations
-        .get(marker)
-        .map(|annotations| annotations.applications().cloned().collect())
-        .unwrap_or_default()
-}
-
-/// `(name, descriptor)` of that marker, read from the emitted function so a value-class-mangled
-/// getter's marker is named as the class file spells it.
+/// `(name, descriptor)` of a property's synthetic `$annotations` marker, read from the emitted
+/// function so a value-class-mangled getter's marker is named as the class file spells it.
 fn property_marker_signature(
     ir: &IrFile,
     c: &crate::ir::IrClass,
@@ -2201,19 +2180,6 @@ fn property_marker_signature(
         .get(&(c.fq_name_id(), property.to_string()))?;
     let function = ir.functions.get(*marker as usize)?;
     Some((function.name.clone(), "()V".to_string()))
-}
-
-/// The annotations that landed on the property's BACKING FIELD (`@Target(FIELD)`) — the same records
-/// the field's own class-file attribute carries, mirrored as `Property.backingFieldAnnotation`.
-fn property_backing_field_annotations(
-    c: &crate::ir::IrClass,
-    property: &str,
-) -> Vec<crate::ir::AppliedAnnotation> {
-    c.field_annotations
-        .iter()
-        .find(|annotations| annotations.field == property)
-        .map(|annotations| annotations.annotations.applications().cloned().collect())
-        .unwrap_or_default()
 }
 
 fn apply_enum_entry_annotations(cw: &mut ClassWriter, c: &crate::ir::IrClass, field: &str) {
@@ -3295,7 +3261,7 @@ fn emit_class(
         // Declared PRIMARY-constructor annotations (`class C @Mark constructor(…)`), with the same
         // `Deprecated` / `ACC_SYNTHETIC` companions a secondary constructor's carry.
         let primary_annotations = &c.primary_ctor_annotations;
-        if !primary_annotations.is_empty() {
+        if !primary_annotations.retains_none() {
             let ctor_desc = method_descriptor(&param_tys, Ty::Unit);
             cw.set_method_annotations("<init>", &ctor_desc, primary_annotations);
             if primary_annotations.deprecated() {
@@ -3455,7 +3421,7 @@ fn emit_class(
                 // primary's declared annotations on it (the `$default` overload between them, being
                 // synthetic, gets none). Their descriptors already interned at the primary.
                 let annotations = &c.primary_ctor_annotations;
-                if !annotations.is_empty() {
+                if !annotations.retains_none() {
                     cw.set_method_annotations("<init>", "()V", annotations);
                     if annotations.deprecated() {
                         cw.mark_method_deprecated("<init>", "()V");

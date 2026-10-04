@@ -53,11 +53,9 @@ pub(super) fn class_metadata_flags(ir: &IrFile, c: &crate::ir::IrClass) -> u64 {
     } else {
         0
     };
-    // Only DECLARED annotations set `hasAnnotations`: the `@JvmInline` the class file implies for a
-    // legacy `inline class` is not one (kotlinc: `inline class W(val x: Int)` flags 134).
-    let has_annotations = u64::from(!c.applied_annotations.is_empty());
-    has_annotations
-        | (visibility << 1)
+    // `hasAnnotations` (bit 0) is the metadata writer's, from the class's DECLARED annotations: the
+    // `@JvmInline` the class file implies for a legacy `inline class` is not one (kotlinc: 134).
+    (visibility << 1)
         | (modality << 4)
         | (kind << 6)
         // `IS_INNER` (bit 9): an `inner class` — the record is how a consumer knows construction
@@ -113,15 +111,7 @@ pub(super) fn function_flags(ir: &IrFile, fid: u32, f: &crate::ir::IrFunction) -
     } else {
         0
     };
-    // `hasAnnotations` (bit 0) for an application that left no record: an `@OptionalExpectation`
-    // this platform erased. Retained annotations set the bit where their records are written.
-    let erased_annotations = u64::from(
-        ir.function_annotations
-            .get(&fid)
-            .is_some_and(crate::ir::DeclarationAnnotations::has_erased_optional_expectations),
-    );
-    erased_annotations
-        | (visibility << 1)
+    (visibility << 1)
         | (modality << 4)
         | member_kind
         | operator
