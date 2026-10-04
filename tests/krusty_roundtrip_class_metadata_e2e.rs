@@ -191,7 +191,13 @@ fun use() {\n\
         .find(|(name, _)| name == "A")
         .expect("krusty emits A.class");
     let metadata = parse_class(bytes).expect("A.class parses").meta;
-    assert_eq!(metadata.class_type_parameters.type_params(), &["T"]);
+    // The class's own parameter publishes its declaration identity (declaring classifier +
+    // ordinal), not the bare spelling: a same-spelled parameter of another class is a different
+    // type, and a member's id-keyed reference to it decodes to that same identity.
+    let [ref own_identity] = metadata.class_type_parameters.type_params()[..] else {
+        panic!("the class declares exactly one own type parameter");
+    };
+    assert_ne!(own_identity, "T");
     assert_eq!(
         metadata.class_type_parameters.type_param_bounds(),
         &vec![vec![krusty::types::Ty::String]],
