@@ -3337,6 +3337,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   kotlinc's; runtime pins for `do`/`while`, catch parameters, inline calls after a block and the
   parked exception slot); the coroutine restore's same-value re-declaration keeping one slot is
   pinned by `tests/suspend_spill_slot_reuse_e2e.rs`.
+- **A constructor regenerates `Continuation(context) { … }` under `$special`.** The stdlib factory
+  is inline and its lambda is `crossinline`, so the anonymous continuation is copied into the
+  caller as `Owner$special$$inlined$Continuation$N`, `EnclosingMethod` is that constructor's
+  `<init>`, and `resumeWith` is the lambda body. Leaving the library class and a
+  `_init_$lambda$N` method drops the method (the lambda is inline-only) and the constructor fails
+  to link. The same site covers a secondary constructor. Test:
+  `tests/constructor_continuation_e2e.rs`; corpus
+  `coroutines/featureIntersection/callableReference/function/adapted.kt`.
 - **A local variable's slot is entered before its initializer**, as kotlinc's `visitVariable`
   enters it before visiting the initializer: every local and temporary the initializer declares
   sits above the variable and is free again for the statements after it
