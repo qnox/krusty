@@ -118,7 +118,7 @@ pub use module_records::{
 };
 pub use null_checks::NullCheck;
 pub use operators::{IrBinOp, IrTypeOp};
-pub use overrides::{is_kotlin_primitive, IrFunctionOverride, IrPropertyOverride};
+pub use overrides::{IrFunctionOverride, IrPropertyOverride};
 pub use package_declarations::{
     IrEntryPoint, IrPackageFunction, IrPackageProperty, IrPackageTypeParameter, MainEntryParameters,
 };

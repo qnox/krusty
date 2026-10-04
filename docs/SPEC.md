@@ -9218,12 +9218,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   reference is wanted, and pops it when discarded; the bridge to the erased declaration returns the
   box without converting it; a value class's member is realized as a static `-impl` that returns
   the wrapper too, as does its instance entry. This holds wherever the class is declared. The
-  Kotlin result is unchanged: common IR keeps the primitive result, returns and calls, and the JVM backend records
-  the wrapper per function (`jvm::override_results`) for its descriptors, returns and calls. A
-  declaration's other files see the choice through the module record of the callable
-  (`IrModuleCallable::overrides_non_primitive_result`, derived from the override edges its
-  classifier published), so a caller, a `super` call or a subclass in another file names the
-  wrapper exactly as the declaring file does. A fun interface whose method returns the wrapper
+  Kotlin result is unchanged: common IR keeps the primitive result, returns and calls, and
+  classifies no type as primitive. Whether a result maps to an unboxed scalar where an overridden
+  slot maps to a reference is a JVM representation question, answered and recorded per function
+  in `jvm::override_results` for its descriptors, returns and calls. A declaration's other files
+  answer it from the overridden results the callable's module record carries
+  (`IrModuleCallable::overridden_results`, from the override edges its classifier published), so a
+  caller, a `super` call or a subclass in another file names the wrapper exactly as the declaring
+  file does. A fun interface whose method returns the wrapper
   (`fun interface Child : Base { override fun f(): Int }` over `fun f(): Any`) is converted
   through a class of its own, never `invokedynamic`, as kotlinc does: the SAM selection publishes
   the fact on the conversion (`FirSamConversion::overrides_non_primitive_result`, from the
@@ -9243,7 +9245,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   through the class, a `super` read and a caller in another file name the wrapper and unbox it; the
   `JvmPropertySignature` names it too. Common IR keeps the primitive property type; the JVM
   backend records the boxed properties in `jvm::override_results`, a cross-file declaration's
-  module record carries `IrModuleProperty::overrides_non_primitive_type`, and a kotlinc-compiled
+  module record carries the overridden types (`IrModuleProperty::overridden_types`), and a kotlinc-compiled
   dependency getter already declared with the wrapper is overridden with the same descriptor.
   Tests: `tests/boxed_property_getters_e2e.rs`.
 - **A lambda `LambdaMetafactory` cannot adapt compiles to a class, as kotlinc's does.** kotlinc's

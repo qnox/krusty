@@ -7,16 +7,20 @@
 //! through the class unboxes, and the bridge to the erased declaration returns the box as it is.
 //!
 //! The Kotlin declaration still returns the primitive, and common IR keeps saying so: its function
-//! result, its returns and its calls are untouched. Only the JVM carrier of the result changes, so
-//! this pass records the choice in [`OverrideResults`], keyed by function, and the descriptors and
-//! the emitter read it there. A declaration of another file takes the same choice from the fact its
-//! module record carries, so a caller or a subclass in any file agrees with the declaring one.
+//! result, its returns and its calls are untouched, and it classifies no type as primitive. The
+//! question is one of JVM representation alone ([`scalar_over_reference`]): does the override's
+//! result map to an unboxed scalar where an overridden slot maps to a reference? This pass answers
+//! it from the exact override edges and records the choice in [`OverrideResults`], keyed by
+//! function, and the descriptors and the emitter read it there. A declaration of another file is
+//! answered from the overridden results its module record carries, so a caller or a subclass in any
+//! file agrees with the declaring one.
 
 use std::collections::{HashMap, HashSet};
 
 use crate::fir::{CallableId, ExternalCallableId, PropertyId};
-use crate::ir::{is_kotlin_primitive, Callee, ExprId, FunId, IrExpr, IrFile};
+use crate::ir::{Callee, ExprId, FunId, IrExpr, IrFile};
 use crate::jvm::backend::SkipReason;
+use crate::jvm::physical_type::ir_ty_to_jvm;
 use crate::types::{Ty, TypeName};
 
 /// The functions of this file whose JVM result is the wrapper of their primitive Kotlin result.
@@ -34,6 +38,19 @@ pub(crate) struct OverrideResults {
     super_getter_calls: HashMap<ExprId, Ty>,
 }
 
+/// Whether a declaration result of `ty` maps to an unboxed JVM scalar of its own. An unsigned type
+/// is a value class, whose override result follows the value-class representation instead.
+fn scalar_result(ty: Ty) -> bool {
+    !ty.is_unsigned() && !matches!(ty, Ty::TyParam(..)) && ir_ty_to_jvm(&ty).is_jvm_scalar()
+}
+
+/// Whether an override whose result is `implementation` returns an unboxed JVM scalar where the
+/// overridden slot, declared with the unapplied `overridden`, returns a reference. kotlinc then
+/// declares the override with the scalar's wrapper (`forceBoxedReturnTypeOnOverride`).
+pub(crate) fn scalar_over_reference(implementation: Ty, overridden: Ty) -> bool {
+    scalar_result(implementation) && !scalar_result(overridden)
+}
+
 /// The primitive Kotlin result of the selected dependency member when its exact class-file slot is
 /// that primitive's wrapper. The identity is already frozen at the frontend/backend boundary; a
 /// missing fact is an invalid backend input, never a reason to guess from the semantic type.
@@ -43,13 +60,11 @@ pub(crate) fn external_boxed_result(
     declared: Ty,
 ) -> Result<Option<Ty>, SkipReason> {
     let callable = callables.callable(target).ok_or(SkipReason::Bridges)?;
-    if callable.kind != crate::libraries::ExternalCallableKind::Member
-        || !is_kotlin_primitive(declared)
-    {
+    if callable.kind != crate::libraries::ExternalCallableKind::Member || !scalar_result(declared) {
         return Ok(None);
     }
-    let wrapper = crate::jvm::physical_type::ir_ty_to_jvm(&Ty::nullable(declared));
-    let physical = crate::jvm::physical_type::ir_ty_to_jvm(&callable.physical_ret);
+    let wrapper = ir_ty_to_jvm(&Ty::nullable(declared));
+    let physical = ir_ty_to_jvm(&callable.physical_ret);
     Ok((physical == wrapper).then_some(declared))
 }
 
@@ -91,7 +106,10 @@ impl OverrideResults {
         ir.referenced_module_properties
             .get(&property)
             .filter(|declaration| {
-                declaration.overrides_non_primitive_type && is_kotlin_primitive(declaration.ty)
+                declaration
+                    .overridden_types
+                    .iter()
+                    .any(|&overridden| scalar_over_reference(declaration.ty, overridden))
             })
             .map(|declaration| declaration.ty)
     }
@@ -113,9 +131,10 @@ impl OverrideResults {
                 .referenced_module_callables
                 .get(&callable)
                 .filter(|declaration| {
-                    declaration.overrides_non_primitive_result
-                        && is_kotlin_primitive(declaration.result)
-                        && !declaration.flags.has(crate::fir::DeclarationFlags::SUSPEND)
+                    !declaration.flags.has(crate::fir::DeclarationFlags::SUSPEND)
+                        && declaration.overridden_results.iter().any(|&overridden| {
+                            scalar_over_reference(declaration.result, overridden)
+                        })
                 })
                 .map(|declaration| declaration.result),
         }
@@ -213,11 +232,12 @@ pub(super) fn box_primitive_override_results(
                 }
                 _ => false,
             };
+            let result = ir.functions[function as usize].ret;
             if edge.implementation_owner == owner
                 && ir.classes[class].methods.contains(&function)
-                && is_kotlin_primitive(ir.functions[function as usize].ret)
+                && scalar_result(result)
                 && !ir.suspend_funs.contains(&function)
-                && (edge.overrides_non_primitive_result() || dependency_boxed_result)
+                && (scalar_over_reference(result, edge.declared_result) || dependency_boxed_result)
             {
                 results.boxed.insert(function);
             }
@@ -246,9 +266,9 @@ fn box_primitive_property_overrides(
     };
     for edge in edges {
         if edge.implementation_owner != owner
-            || !is_kotlin_primitive(edge.implementation_type)
+            || !scalar_result(edge.implementation_type)
             || edge.implementation_receiver.is_some()
-            || !(edge.overrides_non_primitive_type()
+            || !(scalar_over_reference(edge.implementation_type, edge.declared_type)
                 || external_boxed_getter(callables, edge.overridden, edge.declared_type)?)
         {
             continue;
