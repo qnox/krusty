@@ -7,6 +7,9 @@
 //! analysis `FastStackAnalyzer` with `FixStackInterpreter` answers there.
 
 use super::nodes::{Constant, Insn, LabelId, MethodNode, Node};
+use crate::jvm::bytecode_passes::coroutines::markers::{
+    is_after_inline_marker, is_before_inline_marker,
+};
 
 /// A stack value's category: which load, store and pop opcodes move it, and how many words it
 /// takes.
@@ -83,6 +86,9 @@ pub enum ShapeError {
     Subroutine(usize),
     /// A label named by a jump, switch or handler is not placed.
     UnplacedLabel(LabelId),
+    /// An `InlineMarker.afterInlineCall` at node `index` with no `beforeInlineCall` that opens it on
+    /// every path reaching it.
+    UnpairedInlineMarker(usize),
 }
 
 fn method_categories(desc: &str) -> Option<(Vec<Category>, Option<Category>)> {
@@ -315,8 +321,22 @@ fn manipulate(op: u8, stack: &mut Vec<Category>, at: usize) -> Result<(), ShapeE
 
 /// The stack before each node of `node`, or `None` for a node no path reaches. Handler entries
 /// start with the caught exception alone.
+///
+/// An `InlineMarker.beforeInlineCall`/`afterInlineCall` pair is followed as FixStack will rewrite it
+/// (`FixStackAnalyzer`): the opening marker saves the stack and clears it, the closing one puts the
+/// saved values back under the bracketed code's result.
 pub fn stack_shapes(node: &MethodNode) -> Result<Vec<Option<Vec<Category>>>, ShapeError> {
     let count = node.nodes.len();
+    // `FixStackContext`: each closing marker's opening one, by nesting.
+    let mut opening = vec![None; count];
+    let mut open = Vec::new();
+    for (index, entry) in node.nodes.iter().enumerate() {
+        if is_before_inline_marker(entry) {
+            open.push(index);
+        } else if is_after_inline_marker(entry) {
+            opening[index] = open.pop();
+        }
+    }
     let mut position = vec![None; node.label_count as usize];
     for (index, entry) in node.nodes.iter().enumerate() {
         if let Node::Label(label) = entry {
@@ -390,6 +410,18 @@ pub fn stack_shapes(node: &MethodNode) -> Result<Vec<Option<Vec<Category>>>, Sha
                     _ => ShapeError::MalformedDescriptor(index),
                 })
             }
+        }
+        let entry = &node.nodes[index];
+        if is_before_inline_marker(entry) {
+            stack.clear();
+        } else if is_after_inline_marker(entry) {
+            let saved = opening[index]
+                .and_then(|opening| shapes[opening].clone())
+                .ok_or(ShapeError::UnpairedInlineMarker(index))?;
+            // The bracketed code's result, normally one value or none; a body that left more is
+            // FixStack's to reject, so its values are kept.
+            let inner = std::mem::replace(&mut stack, saved);
+            stack.extend(inner);
         }
         match insn {
             Insn::Jump { target, .. } => enter(&mut shapes, &mut work, at(*target)?, &stack)?,
