@@ -169,6 +169,9 @@ pub struct Options {
     /// `mv` and as the `.kotlin_module` header version (`[X, Y, 0]`). This does not select language
     /// semantics. `None` keeps the default stamp, the implemented language version.
     pub metadata_version: Option<[i32; 3]>,
+    /// `-Xexplicit-api=strict|warning|disable`: kotlinc's explicit API mode, applied to the
+    /// language settings once they are built.
+    pub explicit_api: Option<String>,
     /// `-Xsuppress-version-warnings`: omit the deprecated and experimental language/API warnings.
     /// Redundant feature arguments stay reported.
     pub suppress_version_warnings: bool,
@@ -203,6 +206,7 @@ impl Default for Options {
             no_param_assertions: false,
             no_call_assertions: false,
             plugins: PluginConfig::default(),
+            explicit_api: None,
             suppress_version_warnings: false,
         }
     }
@@ -226,7 +230,6 @@ pub fn jvm_target_to_major(v: &str) -> Option<u16> {
 /// kotlinc flags that take a following value but which krusty ignores (accept + drop the value).
 const IGNORED_WITH_VALUE: &[&str] = &[
     "-kotlin-home",
-    "-Xexplicit-api",
     "-opt-in",
     "-script-templates",
     "-expression",
@@ -528,6 +531,19 @@ pub fn parse(argv: impl IntoIterator<Item = String>) -> Options {
             // language or API versions. A warning that is not queued cannot be promoted by
             // `-Xwarning-level` either.
             "-Xsuppress-version-warnings" => opts.suppress_version_warnings = true,
+            // `-Xexplicit-api=<mode>` requires public API to state its visibility and types. It
+            // selects diagnostics, not a language feature, so `disable` is never redundant.
+            flag if flag.starts_with("-Xexplicit-api=") => {
+                let value = flag.strip_prefix("-Xexplicit-api=").unwrap_or_default();
+                if matches!(value, "strict" | "warning" | "disable") {
+                    opts.explicit_api = Some(value.to_string());
+                } else {
+                    opts.errors.push(format!(
+                        "unknown value for parameter -Xexplicit-api: '{value}'. Value should be \
+                         one of {{disable, strict, warning}}"
+                    ));
+                }
+            }
             flag if flag.starts_with("-Xkotlin-reference-version=") => {
                 let value = flag
                     .strip_prefix("-Xkotlin-reference-version=")
@@ -606,6 +622,11 @@ pub fn parse(argv: impl IntoIterator<Item = String>) -> Options {
                 opts.suppress_version_warnings,
             );
             opts.language_settings = settings;
+            if let Some(mode) = &opts.explicit_api {
+                opts.language_settings
+                    .features
+                    .apply_explicit_api_mode(mode);
+            }
         }
         Err(error) => opts.errors.push(error),
     }
@@ -1489,6 +1510,54 @@ mod tests {
                 name: WarningName::RedundantCliArg,
                 message: "The argument '-Xcontext-parameters' is redundant for the current language version 2.4.".to_string(),
             }]
+        );
+    }
+
+    #[test]
+    fn nested_type_aliases_flag_is_redundant_on_2_4() {
+        let parsed = parse_args(&["-language-version", "2.4", "-Xnested-type-aliases", "f.kt"]);
+        assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+        assert!(parsed.ignored.is_empty(), "{:?}", parsed.ignored);
+        assert_eq!(
+            parsed.warnings,
+            [CliWarning {
+                name: WarningName::RedundantCliArg,
+                message: "The argument '-Xnested-type-aliases' is redundant for the current language version 2.4.".to_string(),
+            }]
+        );
+    }
+
+    /// `-Xexplicit-api` selects diagnostics rather than a language feature: no mode is redundant,
+    /// the last one wins, and an unknown mode is kotlinc's error.
+    #[test]
+    fn explicit_api_mode_selects_its_checks() {
+        let features = |arguments: &[&str]| {
+            let parsed = parse_args(arguments);
+            assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+            assert!(parsed.ignored.is_empty(), "{:?}", parsed.ignored);
+            assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+            let features = parsed.language_settings.features;
+            (
+                features.has("ExplicitApiStrict"),
+                features.has("ExplicitApiWarning"),
+            )
+        };
+        assert_eq!(features(&["-Xexplicit-api=strict", "f.kt"]), (true, false));
+        assert_eq!(features(&["-Xexplicit-api=warning", "f.kt"]), (false, true));
+        assert_eq!(
+            features(&["-Xexplicit-api=disable", "f.kt"]),
+            (false, false)
+        );
+        assert_eq!(
+            features(&["-Xexplicit-api=strict", "-Xexplicit-api=disable", "f.kt"]),
+            (false, false)
+        );
+        assert_eq!(
+            parse_args(&["-Xexplicit-api=bogus", "f.kt"]).errors,
+            [
+                "unknown value for parameter -Xexplicit-api: 'bogus'. Value should be one of \
+              {disable, strict, warning}"
+            ]
         );
     }
 

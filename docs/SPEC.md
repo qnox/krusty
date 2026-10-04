@@ -10381,6 +10381,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the builtin bit-operation declaration, as kotlinc's constant evaluator does, so
   `private const val MASK = 0x1 or 0x2` publishes `3` and every read inlines it. Verified against
   kotlinc 2.4.20. (`tests/const_bit_operation_folding_e2e.rs`.)
+- **Explicit API mode (`-Xexplicit-api=strict|warning`).** An effectively public declaration
+  (it and every containing classifier `public` or `protected`, none local or anonymous) must write
+  a visibility modifier: classifiers, functions, properties, constructor properties, secondary
+  constructors and type aliases. Exempt are primary constructors, accessors, enum entries,
+  overrides, and properties of `data` and `annotation` classes. The report starts at the first
+  modifier after the annotations (a `context(...)` clause counts), or at the declaration keyword.
+  A public-API property with no written type, and an expression-body function with no written
+  return type, overrides included, are reported at the name. `strict` reports errors and
+  `warning` warnings with the same text; a test selects the mode with `// EXPLICIT_API_MODE:`.
+  Verified against kotlinc 2.4.20. (`tests/explicit_api_mode_e2e.rs`.)
 
 ## 8. Success criteria for the PoC
 

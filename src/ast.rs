@@ -14,6 +14,7 @@ use traversal::{any_class_decl_expr, any_fun_decl_expr, any_property_decl_expr};
 
 mod call_shape;
 mod constructors;
+mod declaration_prefixes;
 pub(crate) mod definitely_evaluated;
 mod destructuring;
 mod operators;
@@ -21,6 +22,7 @@ mod type_refs;
 pub(crate) use call_shape::explicit_call_receiver;
 pub use call_shape::{first_lambda_param_or_it, lambda_params_or_implicit};
 pub use constructors::{CtorDelegation, CtorDelegationCall, SecondaryCtor};
+pub use declaration_prefixes::{DeclarationPrefix, DeclarationPrefixes};
 pub use destructuring::{DestructureProperty, DestructuringSyntax};
 pub use operators::{BinOp, UnOp};
 
@@ -1593,6 +1595,8 @@ pub struct File {
     /// included, since the two are legal only in a multiplatform project and the diagnostic points
     /// at the keyword rather than at the declaration it precedes.
     pub multiplatform_modifiers: Vec<(String, crate::diag::Span)>,
+    /// Each top-level or member declaration's modifier list, as written.
+    pub declaration_prefixes: DeclarationPrefixes,
     pub decl_arena: Vec<Decl>,
     pub expr_arena: Vec<Expr>,
     pub stmt_arena: Vec<Stmt>,
