@@ -52,6 +52,8 @@ mod annotation_emission_e2e;
 mod annotation_impl_class_e2e;
 #[path = "annotation_instance_class_rows_e2e.rs"]
 mod annotation_instance_class_rows_e2e;
+#[path = "annotation_instance_defaults_e2e.rs"]
+mod annotation_instance_defaults_e2e;
 #[path = "annotation_instantiation_e2e.rs"]
 mod annotation_instantiation_e2e;
 #[path = "annotation_kclass_member_e2e.rs"]
@@ -949,6 +951,8 @@ mod ieee754_inline_equality_e2e;
 mod implicit_any_super_method_e2e;
 #[path = "implicit_integer_coercion_e2e.rs"]
 mod implicit_integer_coercion_e2e;
+#[path = "implicit_receiver_extension_tower_e2e.rs"]
+mod implicit_receiver_extension_tower_e2e;
 #[path = "implicit_receiver_member_shadow_e2e.rs"]
 mod implicit_receiver_member_shadow_e2e;
 #[path = "implicit_receiver_named_args_e2e.rs"]
@@ -987,6 +991,8 @@ mod inherited_interface_default_e2e;
 mod inherited_member_owner_e2e;
 #[path = "init_block_lines_e2e.rs"]
 mod init_block_lines_e2e;
+#[path = "inline_call_operand_spill_e2e.rs"]
+mod inline_call_operand_spill_e2e;
 #[path = "inline_capture_splice_e2e.rs"]
 mod inline_capture_splice_e2e;
 #[path = "inline_crossinline_object_e2e.rs"]
@@ -1027,6 +1033,8 @@ mod inline_value_class_lambda_e2e;
 mod inline_vc_suspend_coverage_e2e;
 #[path = "inlined_code_inner_classes_e2e.rs"]
 mod inlined_code_inner_classes_e2e;
+#[path = "inlined_lambda_stack_spill_e2e.rs"]
+mod inlined_lambda_stack_spill_e2e;
 #[path = "inner_class_construction_e2e.rs"]
 mod inner_class_construction_e2e;
 #[path = "inner_class_constructor_e2e.rs"]
@@ -1145,6 +1153,8 @@ mod klib_container_e2e;
 mod klib_semantic_e2e;
 #[path = "kotlin_fun_java_sam_param_e2e.rs"]
 mod kotlin_fun_java_sam_param_e2e;
+#[path = "kotlin_native_provisioning_e2e.rs"]
+mod kotlin_native_provisioning_e2e;
 #[path = "krusty_dep_dir_e2e.rs"]
 mod krusty_dep_dir_e2e;
 #[path = "krusty_roundtrip_class_metadata_e2e.rs"]
@@ -1507,10 +1517,14 @@ mod native_assert_e2e;
 mod native_bottom_value_e2e;
 #[path = "native_boxed_numbers_e2e.rs"]
 mod native_boxed_numbers_e2e;
+#[path = "native_builder_scope_e2e.rs"]
+mod native_builder_scope_e2e;
 #[path = "native_builtin_companions_e2e.rs"]
 mod native_builtin_companions_e2e;
 #[path = "native_builtin_supertypes_e2e.rs"]
 mod native_builtin_supertypes_e2e;
+#[path = "native_callable_name_e2e.rs"]
+mod native_callable_name_e2e;
 #[path = "native_class_literals_e2e.rs"]
 mod native_class_literals_e2e;
 #[path = "native_classes_e2e.rs"]
@@ -1521,10 +1535,22 @@ mod native_codegen_e2e;
 mod native_comparable_e2e;
 #[path = "native_concurrency_e2e.rs"]
 mod native_concurrency_e2e;
+#[path = "native_const_reference_e2e.rs"]
+mod native_const_reference_e2e;
+#[path = "native_context_parameter_sam_e2e.rs"]
+mod native_context_parameter_sam_e2e;
+#[path = "native_delegated_properties_e2e.rs"]
+mod native_delegated_properties_e2e;
 #[path = "native_delegation_e2e.rs"]
 mod native_delegation_e2e;
 #[path = "native_dependency_overrides_e2e.rs"]
 mod native_dependency_overrides_e2e;
+#[path = "native_dependency_property_reference_e2e.rs"]
+mod native_dependency_property_reference_e2e;
+#[path = "native_dependency_reference_e2e.rs"]
+mod native_dependency_reference_e2e;
+#[path = "native_enum_defaults_e2e.rs"]
+mod native_enum_defaults_e2e;
 #[path = "native_enum_entry_interface_e2e.rs"]
 mod native_enum_entry_interface_e2e;
 #[path = "native_exceptions_e2e.rs"]
@@ -1537,6 +1563,12 @@ mod native_float_identity_e2e;
 mod native_float_predicates_e2e;
 #[path = "native_floor_mod_e2e.rs"]
 mod native_floor_mod_e2e;
+#[path = "native_function_slot_bridge_e2e.rs"]
+mod native_function_slot_bridge_e2e;
+#[path = "native_function_type_checks_e2e.rs"]
+mod native_function_type_checks_e2e;
+#[path = "native_function_type_classes_e2e.rs"]
+mod native_function_type_classes_e2e;
 #[path = "native_gc_e2e.rs"]
 mod native_gc_e2e;
 #[path = "native_gc_stress_e2e.rs"]
@@ -1555,6 +1587,10 @@ mod native_not_null_assert_type_e2e;
 mod native_number_subclass_e2e;
 #[path = "native_preconditions_e2e.rs"]
 mod native_preconditions_e2e;
+#[path = "native_property_reference_e2e.rs"]
+mod native_property_reference_e2e;
+#[path = "native_read_only_property_delegate_e2e.rs"]
+mod native_read_only_property_delegate_e2e;
 #[path = "native_receiver_property_e2e.rs"]
 mod native_receiver_property_e2e;
 #[path = "native_reflection_type_checks_e2e.rs"]
@@ -1563,6 +1599,10 @@ mod native_reflection_type_checks_e2e;
 mod native_reified_declarations_e2e;
 #[path = "native_runtime_e2e.rs"]
 mod native_runtime_e2e;
+#[path = "native_sam_e2e.rs"]
+mod native_sam_e2e;
+#[path = "native_secondary_constructor_defaults_e2e.rs"]
+mod native_secondary_constructor_defaults_e2e;
 #[path = "native_secondary_constructors_e2e.rs"]
 mod native_secondary_constructors_e2e;
 #[path = "native_string_builders_e2e.rs"]
@@ -2220,6 +2260,8 @@ mod suspend_return_type_recovery_e2e;
 mod suspend_single_operand_hoist_e2e;
 #[path = "suspend_spill_slot_reuse_e2e.rs"]
 mod suspend_spill_slot_reuse_e2e;
+#[path = "suspend_statement_when_block_arms_e2e.rs"]
+mod suspend_statement_when_block_arms_e2e;
 #[path = "suspend_super_call_refusal_e2e.rs"]
 mod suspend_super_call_refusal_e2e;
 #[path = "suspend_super_calls_e2e.rs"]
@@ -2519,6 +2561,8 @@ mod unsigned_vararg_e2e;
 #[path = "reified_nullable_instance_check_e2e.rs"]
 mod reified_nullable_instance_check_e2e;
 
+#[path = "discarded_inline_result_temporary_e2e.rs"]
+mod discarded_inline_result_temporary_e2e;
 #[path = "special_builtin_call_sites_e2e.rs"]
 mod special_builtin_call_sites_e2e;
 #[path = "type_intrinsics_e2e.rs"]

@@ -174,3 +174,134 @@ fn a_value_class_suspend_lambda_stores_its_captured_receiver_like_kotlinc() {
         assert_eq!(krusty, reference, "{class}: {constructor}");
     }
 }
+
+/// A lambda `LambdaMetafactory` cannot adapt, such as one returning the value class, is a class of
+/// its own. Its field and constructor parameter carry the captured receiver under the same name as
+/// a lifted method's parameter (`$arg0`, `$tmp0`, `$tmp0_$this`), not `this$0` and `$receiver`,
+/// and in capture order among the captured values. A lambda written in an `init` block is enclosed
+/// by the primary `constructor-impl`, which runs it.
+const LAMBDA_CLASSES: &str = "@JvmInline value class Tag(val s: String)\n\
+    @JvmInline value class U(val s: String) {\n\
+    \x20   init {\n\
+    \x20       val f: () -> U = { this }\n\
+    \x20       f()\n\
+    \x20   }\n\
+    \x20   constructor(t: Tag, u: Tag) : this(u.s) {\n\
+    \x20       val g: () -> U = { this }\n\
+    \x20       g()\n\
+    \x20   }\n\
+    \x20   fun mv(): () -> U = { this }\n\
+    \x20   val pv: () -> U get() = { this }\n\
+    \x20   fun mx(x: Int): () -> U = { if (x > 0) this else this }\n\
+    \x20   fun both(t: Tag): () -> Tag = { Tag(t.s + this.s) }\n\
+    \x20   fun inLocal(): () -> U {\n\
+    \x20       fun loc(): () -> U = { this }\n\
+    \x20       return loc()\n\
+    \x20   }\n\
+    }\n\
+    class Holder(val s: String) {\n\
+    \x20   fun m(): () -> U = { U(s) }\n\
+    }\n\
+    fun U.ext(): () -> U = { this }\n";
+
+#[test]
+fn a_value_class_lambda_class_stores_its_captured_receiver_like_kotlinc() {
+    let classes = common::classes_against_kotlinc_module(&[("LambdaClasses.kt", LAMBDA_CLASSES)]);
+    // An ordinary class's instance stays `this$0`, passed as `$receiver`, and an extension
+    // receiver `$this_ext`: only a value-class static's receiver is a captured value.
+    for class in [
+        "U$f$1",
+        "U$g$1",
+        "U$mv$1",
+        "U$pv$1",
+        "U$mx$1",
+        "U$both$1",
+        "U$inLocal$loc$1",
+        "Holder$m$1",
+        "LambdaClassesKt$ext$1",
+    ] {
+        let reference = classes
+            .reference
+            .get(class)
+            .unwrap_or_else(|| panic!("kotlinc writes {class}"));
+        let krusty = classes
+            .krusty
+            .get(class)
+            .unwrap_or_else(|| panic!("krusty writes {class}"));
+        assert_eq!(
+            common::member_table(krusty),
+            common::member_table(reference),
+            "{class}: kotlinc's fields and methods"
+        );
+        let (reference, krusty) = classes.class_listing(class);
+        assert_eq!(
+            krusty, reference,
+            "{class}: kotlinc's code and debug tables"
+        );
+    }
+}
+
+/// An anonymous object or local class written in a value class is lifted with the member's static
+/// too, so the receiver it captures is that static's value: its field, constructor parameter and
+/// local-variable row are `$arg0` in a member's or accessor's `-impl`, `$tmp0` in the primary
+/// `constructor-impl` and `$tmp0_$this` in a secondary one, also through an enclosing lambda or
+/// local function. An ordinary class's instance stays `this$0`, passed as `$receiver`.
+const OBJECTS: &str = "interface Box { fun get(): Any }\n\
+    @JvmInline value class Tag(val s: String)\n\
+    @JvmInline value class O(val s: String) {\n\
+    \x20   init {\n\
+    \x20       val o = object : Box { override fun get(): Any = this@O }\n\
+    \x20       o.get()\n\
+    \x20   }\n\
+    \x20   init {\n\
+    \x20       fun li(): Any = object : Box { override fun get(): Any = this@O }\n\
+    \x20       li()\n\
+    \x20   }\n\
+    \x20   constructor(t: Tag, u: Tag) : this(u.s) {\n\
+    \x20       val o2 = object : Box { override fun get(): Any = this@O }\n\
+    \x20       o2.get()\n\
+    \x20   }\n\
+    \x20   fun m(): Box = object : Box { override fun get(): Any = this@O }\n\
+    \x20   val p: Box get() = object : Box { override fun get(): Any = this@O }\n\
+    \x20   var q: Box\n\
+    \x20       get() = object : Box { override fun get(): Any = this@O }\n\
+    \x20       set(v) { object : Box { override fun get(): Any = this@O }.get() }\n\
+    \x20   fun mx(x: Int): Box = object : Box { override fun get(): Any = this@O.s + x }\n\
+    \x20   fun loc(): Box {\n\
+    \x20       class L : Box { override fun get(): Any = this@O }\n\
+    \x20       return L()\n\
+    \x20   }\n\
+    \x20   fun inLam(): () -> Box = { object : Box { override fun get(): Any = this@O } }\n\
+    \x20   fun inLoc(): Box {\n\
+    \x20       fun lf(): Box = object : Box { override fun get(): Any = this@O }\n\
+    \x20       return lf()\n\
+    \x20   }\n\
+    }\n\
+    class Plain(val s: String) {\n\
+    \x20   fun m(): Box = object : Box { override fun get(): Any = this@Plain }\n\
+    }\n";
+
+#[test]
+fn a_value_class_anonymous_object_stores_its_captured_receiver_like_kotlinc() {
+    let classes = common::classes_against_kotlinc_module(&[("Objects.kt", OBJECTS)]);
+    for class in [
+        "O$o$1",
+        "O$li$1",
+        "O$o2$1",
+        "O$m$1",
+        "O$p$1",
+        "O$q$1",
+        "O$q$2",
+        "O$mx$1",
+        "O$loc$L",
+        "O$inLam$1$1",
+        "O$inLoc$lf$1",
+        "Plain$m$1",
+    ] {
+        let (reference, krusty) = classes.class_listing(class);
+        assert_eq!(
+            krusty, reference,
+            "{class}: kotlinc's fields, code, debug tables and enclosing method"
+        );
+    }
+}

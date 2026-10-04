@@ -5,8 +5,10 @@
 //! a `TypeAdaptationConstraint.CONFLICT`). The lambda then becomes a class of its own: `final`,
 //! extending `Object`, implementing its function type. The lifted lambda function becomes the
 //! class's `invoke`, specialized to the lambda's own signature, and an erased bridge implements
-//! `FunctionN.invoke` over it. Captured values are the class's final `$name` fields (the captured
-//! `this` is `this$0`), stored by the constructor before `Object()`. A lambda that captures nothing
+//! `FunctionN.invoke` over it. Captured values are the class's final fields, stored by the
+//! constructor before `Object()`. The class records what each one captures and where the lambda was
+//! lifted from; the emitter spells the fields after every realization pass, since a value-class
+//! member's lambda captures its static's carrier (`$arg0`) rather than the instance (`this$0`). A lambda that captures nothing
 //! is a singleton read from its `INSTANCE` field.
 //!
 //! The conflict taken so far is a value class whose declared underlying type is neither nullable
@@ -227,10 +229,8 @@ fn inline_call_argument(ir: &IrFile, node: ExprId) -> bool {
 
 /// A captured value's field.
 struct Capture {
-    name: String,
+    capture: crate::ir::IrLambdaCapture,
     ty: Ty,
-    /// Whether its constructor parameter uses kotlinc's `$receiver` spelling.
-    receiver: bool,
 }
 
 /// Realize every lambda whose function type `LambdaMetafactory` cannot adapt as a class of its own.
@@ -491,12 +491,13 @@ fn captures(ir: &IrFile, fid: FunId, body: ExprId, site: &Site) -> Option<Vec<Ca
         .iter()
         .enumerate()
         .map(|(parameter, identity)| {
-            let (name, receiver) = match identity.role {
+            let capture = match identity.role {
                 IrParameterRole::CapturedValue { .. } => {
-                    (format!("${}", identity.source_name.as_ref()?), false)
+                    crate::ir::IrLambdaCapture::Value(identity.source_name.as_deref()?.into())
                 }
                 IrParameterRole::CapturedReceiver { ordinal } => {
-                    crate::jvm::capture_names::lifted_receiver(ir, fid, ordinal as usize)?
+                    parameter_info.captured_receivers.get(ordinal as usize)?;
+                    crate::ir::IrLambdaCapture::Receiver(ordinal)
                 }
                 _ => return None,
             };
@@ -504,7 +505,7 @@ fn captures(ir: &IrFile, fid: FunId, body: ExprId, site: &Site) -> Option<Vec<Ca
                 Some(element) => super::shared_captures::holder_ty(element),
                 None => function.params[parameter],
             };
-            Some(Capture { name, ty, receiver })
+            Some(Capture { capture, ty })
         })
         .collect()
 }
@@ -623,9 +624,15 @@ fn declare_class(
             signature.params.len(),
         ));
     for capture in captures {
+        // The field keeps the capture's source spelling; the emitter spells its JVM name from
+        // `IrLambdaClass::captures`.
+        let source = match &capture.capture {
+            crate::ir::IrLambdaCapture::Value(name) => name.to_string(),
+            crate::ir::IrLambdaCapture::Receiver(_) => "this".to_string(),
+        };
         class
             .fields
-            .push(IrField::new(capture.name.clone(), capture.ty).with_is_final(true));
+            .push(IrField::new(source, capture.ty).with_is_final(true));
         class.ctor_args.push(IrCtorArg {
             name: None,
             context_kind: crate::types::ContextParameterKind::None,
@@ -652,11 +659,17 @@ fn declare_class(
         public_inline: false,
         invoke: fid,
         function_type: site.function_type,
-        receiver_captures: captures
+        captures: captures
             .iter()
-            .enumerate()
-            .filter_map(|(field, capture)| capture.receiver.then_some(field as u32))
+            .map(|capture| capture.capture.clone())
             .collect(),
+        captured_receivers: ir
+            .fn_params
+            .get(&fid)
+            .expect("a realized lambda's captures were read from its parameter record")
+            .captured_receivers
+            .clone(),
+        lifting_root: super::lifted_names::lifting_root(ir, fid),
         bridge: crate::ir::IrInvokeBridge::logical(signature.params.clone(), signature.ret),
     });
     ir.add_class(class)
@@ -811,7 +824,9 @@ mod method_domain_tests {
             public_inline: false,
             invoke: 3,
             function_type: Ty::fun(vec![], Ty::Unit),
-            receiver_captures: vec![],
+            captures: vec![],
+            captured_receivers: vec![],
+            lifting_root: None,
             bridge: crate::ir::IrInvokeBridge::logical(vec![], Ty::Unit),
         });
         closure.methods = vec![3, 4];

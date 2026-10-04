@@ -39,6 +39,7 @@ mod alias_constructor_application;
 mod annotation_applications;
 mod anonymous_extension_functions;
 mod anonymous_object_capture;
+mod dependency_annotation_defaults;
 use anonymous_object_capture::{
     record_anonymous_construction_captures, AnonymousCaptureCandidate,
     SelectedLocalCallableCaptures,
@@ -14827,14 +14828,7 @@ impl<'a> Checker<'a> {
         let mut extension_overloads = callables
             .functions()
             .iter()
-            .filter(|candidate| {
-                candidate.kind == crate::libraries::FnKind::Extension
-                    && (tower_rung.allow_imported_extensions
-                        || !candidate.scope_rung.is_import()
-                        || candidate
-                            .annotations
-                            .contains(&crate::types::type_name("kotlin/internal/HidesMembers")))
-            })
+            .filter(|candidate| candidate.kind == crate::libraries::FnKind::Extension)
             .cloned()
             .collect::<Vec<_>>();
         for receiver in self.implicit_receivers(scope) {
@@ -18380,8 +18374,11 @@ impl<'a> Checker<'a> {
                     let diagnostics = self.diags.diags.len();
                     self.discover_anonymous_captures = true;
                     let saved = self.take_body_state();
+                    let rechecks_completed =
+                        std::mem::replace(&mut self.rechecks_completed_local_methods, true);
                     self.set_anonymous_lexical_class_context(declaration);
                     self.check_class(scope, &class, declaration);
+                    self.rechecks_completed_local_methods = rechecks_completed;
                     self.restore_body_state(saved);
                     if scratch {
                         self.discover_anonymous_captures = false;
@@ -23094,7 +23091,7 @@ impl<'a> Checker<'a> {
                             receiver,
                             &fname,
                             args,
-                            MemberCallTowerRung::implicit(implicit_receiver, true),
+                            MemberCallTowerRung::implicit(implicit_receiver),
                             expected,
                         ) {
                             MemberSlotCall::Resolved(ret) => {
@@ -23320,17 +23317,14 @@ impl<'a> Checker<'a> {
                             top_level_candidates.clone(),
                         )
                     });
-                let allow_imported_receiver_extensions = matches!(
-                    &top_level,
-                    None | Some(CallableCandidateSelection::MissingContext(_))
-                );
-                // An implicit-receiver member is a closer tower rung than a receiver-less
-                // declaration. Current-package receiver extensions also precede imported
-                // receiver-less declarations, while imported receiver extensions remain behind an
-                // applicable receiver-less rung. The candidate's stamped name-scope rung keeps this
-                // ordering independent of whether its declaration comes from this compilation or a
-                // dependency. Applicability within the receiver tower is evaluated one implicit
-                // receiver at a time.
+                // kotlinc's tower gives every implicit receiver a lexical depth, and that
+                // receiver's member level and its extension levels — over every non-local scope,
+                // current package and imports alike — sit at that depth. Receiver-less top-level
+                // declarations live in the file and import scopes, which are always deeper. So an
+                // applicable member or extension on an implicit receiver wins over any applicable
+                // receiver-less declaration (`run { }` in a member is `this.run { }`), wherever
+                // either is declared. Applicability within the receiver tower is evaluated one
+                // implicit receiver at a time.
                 let mut retained_receiver_call_failure = None;
                 let top_level_owns_the_name = matches!(
                     &top_level,
@@ -23353,10 +23347,7 @@ impl<'a> Checker<'a> {
                             args,
                             arg_tys: &arg_tys,
                         },
-                        MemberCallTowerRung::implicit(
-                            implicit_receiver,
-                            allow_imported_receiver_extensions,
-                        ),
+                        MemberCallTowerRung::implicit(implicit_receiver),
                         &fname,
                         expected,
                         &mut retained_receiver_call_failure,
@@ -26651,6 +26642,7 @@ val result = object { fun value(): String = captured }
             retention: None,
             annotation_targets: None,
             mapped_collection: None,
+            annotation_element_defaults: Vec::new(),
         }
     }
 
@@ -29503,6 +29495,7 @@ fun box(): String {
                     retention: None,
                     annotation_targets: None,
                     mapped_collection: None,
+                    annotation_element_defaults: Vec::new(),
                 }));
             }
             [
@@ -29667,6 +29660,7 @@ fun box(): String {
                     retention: None,
                     annotation_targets: None,
                     mapped_collection: None,
+                    annotation_element_defaults: Vec::new(),
                 })
             })
         }
@@ -36115,6 +36109,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         local_method_dependencies: HashMap::new(),
         checking_local_method_dependencies: std::collections::HashSet::new(),
         checked_local_method_dependencies: std::collections::HashSet::new(),
+        rechecks_completed_local_methods: false,
         resolved_body_local_supertypes: HashMap::new(),
         body_local_type_aliases: HashMap::new(),
         checked_local_supertypes: HashMap::new(),
@@ -38764,6 +38759,11 @@ struct Checker<'a> {
         HashMap<crate::fir::DeclarationId, local_method_dependencies::LocalMethodDependency>,
     checking_local_method_dependencies: std::collections::HashSet<crate::fir::DeclarationId>,
     checked_local_method_dependencies: std::collections::HashSet<crate::fir::DeclarationId>,
+    /// Set while an anonymous object's construction-site scratch check decides which enclosing
+    /// receivers the object captures. That decision counts the receiver uses its member bodies make
+    /// inside the check, so a member an earlier visit already completed is read again rather than
+    /// skipped: skipping it hides its receiver uses and drops a capture the body still reads.
+    rechecks_completed_local_methods: bool,
     /// Applied supertype edges of classifiers declared inside an ordinary body. Their header is
     /// resolved on the Pass-2 lexical rung, where statement-local aliases and enclosing type
     /// parameters exist; the module's Pass-1 class inventory cannot legitimately guess that scope.
@@ -39041,7 +39041,6 @@ struct MemberCallTowerRung {
     /// The written receiver of `receiver.name(args)`; it supplies the outer instance when the
     /// member level selects an inner classifier's constructor.
     explicit_receiver: Option<ExprId>,
-    allow_imported_extensions: bool,
 }
 
 impl MemberCallTowerRung {
@@ -39049,15 +39048,13 @@ impl MemberCallTowerRung {
         Self {
             receiver: None,
             explicit_receiver: Some(receiver),
-            allow_imported_extensions: true,
         }
     }
 
-    fn implicit(receiver: ImplicitReceiver, allow_imported_extensions: bool) -> Self {
+    fn implicit(receiver: ImplicitReceiver) -> Self {
         Self {
             receiver: Some(receiver),
             explicit_receiver: None,
-            allow_imported_extensions,
         }
     }
 
@@ -51441,7 +51438,7 @@ impl<'a> Checker<'a> {
                 receiver: Some(_),
                 name,
             } if name == "class" => {
-                AnnotationValue::Class(self.class_literal_targets.get(&e).copied()?)
+                AnnotationValue::Class(Ty::obj_name(self.class_literal_targets.get(&e).copied()?))
             }
             Expr::Call { args, .. } => match self.expr_lowers.get(&e) {
                 Some(ExprLowering::CompilerSynthetic(
@@ -54413,7 +54410,13 @@ impl<'a> Checker<'a> {
                     method_check_index += 1;
                     continue;
                 }
-                if self.registered_local_method_is_complete(source_member) {
+                if !self.rechecks_completed_local_methods
+                    && self.registered_local_method_is_complete(source_member)
+                {
+                    crate::trace_compiler!(
+                        "resolve",
+                        "skip completed local method declaration={stable_declaration:?}",
+                    );
                     self.check_unselected_method_annotation_applications(scope, m);
                     method_check_index += 1;
                     continue;
@@ -68498,17 +68501,7 @@ impl<'a> Checker<'a> {
         let rung = match extension_rung {
             Some(extension) => extension,
             None => {
-                let (mut functions, properties) =
-                    self.stable_receiver_callables(rt, name).into_parts();
-                if !tower_rung.allow_imported_extensions {
-                    functions.overloads.retain(|candidate| {
-                        !candidate.scope_rung.is_import()
-                            || candidate
-                                .annotations
-                                .contains(&crate::types::type_name("kotlin/internal/HidesMembers"))
-                    });
-                }
-                let callables = crate::libraries::Callables::from_parts(functions, properties);
+                let callables = self.stable_receiver_callables(rt, name);
                 self.select_extension_rung(scope, call_args, rt, &type_args, expected, &callables)
             }
         };
@@ -70555,21 +70548,14 @@ impl<'a> Checker<'a> {
             return Ok(LibraryConstructorSelection::NoMatch);
         };
         let annotation = if classifier.is_annotation() {
-            let Some(application) = classifier.annotation_application() else {
+            let Some(construction) = dependency_annotation_defaults::dependency_construction(
+                self.libraries,
+                classifier,
+                &member,
+            ) else {
                 return Ok(LibraryConstructorSelection::NoMatch);
             };
-            let parameters = application.parameters;
-            if parameters.names.len() != parameters.types.len()
-                || parameters.names.len() != member.params.len()
-            {
-                return Ok(LibraryConstructorSelection::NoMatch);
-            }
-            let mut defaults = member.default_values.clone();
-            defaults.resize(parameters.names.len(), None);
-            Some(ResolvedAnnotationConstruction {
-                members: parameters.names.into_iter().zip(parameters.types).collect(),
-                defaults,
-            })
+            Some(construction)
         } else {
             None
         };

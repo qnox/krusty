@@ -42,6 +42,7 @@ use super::jvm_class_map::{erased_top_member_owner, to_kotlin_internal};
 use super::metadata;
 use crate::jvm::names::same_mapped_virtual_name_of;
 use crate::jvm::names::{property_getter_name, type_descriptor};
+use crate::libraries::builtin_top_level_realization::attach_function_realization;
 use crate::libraries::{
     AnnotationParameterPolicy, AnnotationPositionalPolicy, CallSig, EmptySymbolSource, FnFlags,
     FnKind, FunctionInfo, FunctionSet, GenericReturnPolicy, GenericSig, InlineKind, LibConst,
@@ -668,10 +669,7 @@ impl JvmLibraries {
                 return_value_status: None,
             };
             function.annotations = builtin.annotations;
-            function.callable.compiler_intrinsic =
-                crate::libraries::builtin_top_level_realization::normalized_function_realization(
-                    pkg, name, &function,
-                );
+            attach_function_realization(pkg, name, &mut function);
             overloads.push(function);
         }
         overloads
@@ -1673,6 +1671,19 @@ impl JvmLibraries {
                 }
                 parameter_plans::member(&mut member, dispatch_parameter, continuation_parameter);
                 if let Some(declaration) = declaration {
+                    member.semantic_role =
+                        crate::libraries::builtin_declaration::semantic_call_role(
+                            crate::libraries::builtin_declaration::BuiltinMemberDeclaration {
+                                owner: internal_name,
+                                name: &member.name,
+                                params: &member.params,
+                                ret: member.ret,
+                                is_property: false,
+                                is_operator: declaration.is_operator(),
+                                is_infix: declaration.is_infix(),
+                                annotations: &member.annotations,
+                            },
+                        );
                     let facts = crate::libraries::builtin_declaration::BuiltinMemberDeclaration {
                         owner: internal_name,
                         name: &member.name,
@@ -2494,16 +2505,13 @@ impl JvmLibraries {
                 members,
                 companion,
                 constants: self.constants_for_class(internal_name, &ci),
-                sam_eligible: if is_mapped_builtin {
-                    // A Kotlin `actual typealias` to a Java SAM preserves constructor syntax. This
-                    // is distinct from Kotlin's mapped builtins (`List` -> `java.util.List`): those
-                    // have no alias declaration and must not become SAMs merely because their JVM
-                    // realization happens to be an interface. Both facts come from provider metadata.
-                    self.cp.type_alias_target_name(internal_name).is_some()
-                        && Self::sam_eligible_for_class(&ci)
-                } else {
-                    Self::sam_eligible_for_class(&ci)
-                },
+                // A Kotlin `actual typealias` to a Java SAM preserves constructor syntax. This is
+                // distinct from Kotlin's mapped builtins (`List` -> `java.util.List`): those have no
+                // alias declaration and must not become SAMs merely because their JVM realization
+                // happens to be an interface. Both facts come from provider metadata.
+                sam_eligible: (!is_mapped_builtin
+                    || self.cp.type_alias_target_name(internal_name).is_some())
+                    && Self::sam_eligible_for_class(&ci),
                 callable_signature,
                 callable_signatures,
                 companion_object,
@@ -2536,6 +2544,7 @@ impl JvmLibraries {
                 annotation_targets: (kind == crate::libraries::TypeKind::Annotation)
                     .then(|| classpath_annotation_targets(&ci)),
                 mapped_collection: None,
+                annotation_element_defaults: ci.annotation_element_defaults.clone(),
             })
         }
     }
@@ -3266,9 +3275,9 @@ impl JvmLibraries {
             callable.inline_body_plan = self.inline_body_plan(&callable).map(Box::new);
             // A member extension is an extension for source applicability, but its physical method
             // still dispatches on the declaring class/object instance. Keep those independent facts:
-            // the `FunctionInfo` above carries the semantic kind; the external identity carries the
-            // instance-member realization consumed after checked FIR has supplied both receivers.
-            self.register_external_callable(&mut callable, FnKind::Member);
+            // `FunctionInfo` carries semantic kind; the external identity carries the instance-member
+            // realization consumed after checked FIR has supplied both receivers.
+            self.register_external_callable(&mut callable, FnKind::Member, None);
             member.external_identity = callable.external_identity;
             member.inline_body_plan = callable.inline_body_plan;
         }
@@ -3289,12 +3298,12 @@ impl JvmLibraries {
                 member.default_realization = callable.default_realization.clone();
             }
             callable.inline_body_plan = self.inline_body_plan(&callable).map(Box::new);
-            self.register_external_callable(&mut callable, FnKind::TopLevel);
+            self.register_external_callable(&mut callable, FnKind::TopLevel, None);
             member.external_identity = callable.external_identity;
             member.inline_body_plan = callable.inline_body_plan;
         }
         for declarations in classifier.declared_callables.values_mut() {
-            *declarations = self.register_external_callables(declarations.clone());
+            *declarations = self.register_external_callables(declarations.clone(), None);
         }
     }
 
@@ -3307,6 +3316,7 @@ impl JvmLibraries {
             self.cp.intern_external_callable(
                 &callable,
                 super::classpath::ExternalCallableKind::Constructor,
+                None,
             )
         };
         member.external_identity = Some(identity);
@@ -3418,6 +3428,19 @@ impl JvmLibraries {
                     getter.owner_is_interface = ci.is_interface();
                     getter.is_abstract = mp.is_abstract;
                     getter.inline = property_accessor_inline(getter_public);
+                    getter.semantic_role =
+                        crate::libraries::builtin_declaration::semantic_call_role(
+                            crate::libraries::builtin_declaration::BuiltinMemberDeclaration {
+                                owner: cn,
+                                name: &mp.name,
+                                params: &semantic_context,
+                                ret: ty,
+                                is_property: true,
+                                is_operator: false,
+                                is_infix: false,
+                                annotations: &[],
+                            },
+                        );
                     if value_dispatch {
                         getter.member_realization = crate::libraries::MemberRealization::Direct {
                             pass_receiver: true,
@@ -3564,6 +3587,18 @@ impl JvmLibraries {
                     .or_else(|| getter_signature.as_ref().map(|signature| signature.ret))
                     .unwrap_or(ty);
                 getter.ret = ty;
+                getter.semantic_role = crate::libraries::builtin_declaration::semantic_call_role(
+                    crate::libraries::builtin_declaration::BuiltinMemberDeclaration {
+                        owner: cn,
+                        name: &mp.name,
+                        params: &semantic_context,
+                        ret: ty,
+                        is_property: true,
+                        is_operator: false,
+                        is_infix: false,
+                        annotations: &[],
+                    },
+                );
                 let setter = mp.setter.clone().and_then(|s| {
                     let (mut physical_params, physical_ret) = parse_method_desc(&s.desc)?;
                     if carrier_receiver {
@@ -3702,6 +3737,7 @@ impl JvmLibraries {
                 getter.external_identity = Some(self.cp.intern_external_callable(
                     &getter,
                     super::classpath::ExternalCallableKind::InstanceFieldRead,
+                    None,
                 ));
                 let setter = (field.access & 0x0010 == 0).then(|| {
                     let setter_source_name = name.to_string();
@@ -3720,6 +3756,7 @@ impl JvmLibraries {
                     setter.external_identity = Some(self.cp.intern_external_callable(
                         &setter,
                         super::classpath::ExternalCallableKind::InstanceFieldWrite,
+                        None,
                     ));
                     setter
                 });
@@ -3911,10 +3948,10 @@ impl JvmLibraries {
                     || function.callable.descriptor != mapping.descriptor
             });
         }
-        self.register_external_callables(crate::libraries::Callables::from_parts(
-            functions,
-            PropertySet { overloads },
-        ))
+        self.register_external_callables(
+            crate::libraries::Callables::from_parts(functions, PropertySet { overloads }),
+            None,
+        )
     }
 
     /// Build the classifier half of the provider's unified symbol record.
@@ -4422,13 +4459,7 @@ impl JvmLibraries {
         }
         if let SymbolNamespace::Package(package) = namespace {
             for overload in &mut overloads {
-                if let Some(intrinsic) =
-                    crate::libraries::builtin_top_level_realization::normalized_function_realization(
-                        package, name, overload,
-                    )
-                {
-                    overload.callable.compiler_intrinsic = Some(intrinsic);
-                }
+                attach_function_realization(package, name, overload);
             }
             for property in &mut props {
                 if let Some(intrinsic) =
@@ -4495,7 +4526,7 @@ impl JvmLibraries {
         } else {
             platform_callables
         };
-        let callables = self.register_external_callables(callables);
+        let callables = self.register_external_callables(callables, package);
         let importable_declaration = core.importable_declaration || static_field.is_some();
         self.cp.memoize_symbols(
             namespace,
@@ -4934,6 +4965,7 @@ impl JvmLibraries {
                             suspend,
                             context_count: m.context_count,
                             member_realization: m.realization,
+                            compiler_intrinsic: m.realization.compiler_intrinsic(),
                             semantic_role,
                             collection_barrier,
                             signature: m.signature.clone(),

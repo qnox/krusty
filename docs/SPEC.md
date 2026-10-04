@@ -1623,6 +1623,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   and boxes `callableReference/genericLocalClassConstructorReference.kt`,
   `callableReference/genericConstructorReference.kt`, and
   `localClasses/innerOfLocalCaptureExtensionReceiver.kt`.
+- **An anonymous object's capture check reads every member body, including completed ones.** The
+  construction-site scratch check that decides an anonymous object's receiver captures counts the
+  receiver uses its member bodies make during that check. A member whose result is inferred is
+  completed on the first visit, and the authoritative class check skips it afterwards. A revisit
+  of the construction (`by lazy { object : S() { override fun f() = outerProperty } }`, visited
+  again once the `lazy` call settles) still reads that member in its scratch check, so the outer
+  instance the member reads stays captured. Skipping it dropped `this$0` while the member body
+  still selected it, and lowering failed with `MissingImplicitReceiver`. Test:
+  `tests/anon_object_capture_e2e.rs::lazy_delegate_object_keeps_outer_instance_for_inferred_member`.
 - **Nullability is a first-class fact on `Ty`** (`Ty::Nullable(&Ty)`, `types.rs`), not faked as the
   boxed JVM wrapper. `Int?` is `Nullable(Int)` (a Kotlin-level type), and the boxing to a JVM reference
   (`Int?` → `Ljava/lang/Integer;`, `UInt?` → `Lkotlin/UInt;`, a nullable reference → its own descriptor)
@@ -2541,6 +2550,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   known captured-`Ref` initialization residue. Test: `tests/local_shadows_receiver_member_e2e.rs`
   (a local, parameter, materialized local-class capture, and outer property, each pinned by the
   value the box run reads).
+- **An implicit receiver's extension beats a receiver-less top-level function.** kotlinc's tower
+  gives each implicit receiver a lexical depth, and that receiver's member level and its extension
+  levels over every non-local scope sit at that depth. Receiver-less top-level declarations live in
+  the file and import scopes, which are always deeper. So `run { }` inside a member is
+  `this.run { }` (`T.run`, a lambda with a receiver), not `run(block)`, even when the receiver-less
+  `run` is declared in the same package and the extension comes from a default import. Test:
+  `tests/implicit_receiver_extension_tower_e2e.rs`.
 - **A top-level callable beats a context-parameter receiver's member.** kotlinc's tower puts
   `ImplicitOrNonLocal` before `ContextReceiverGroup`, and a dispatch or extension receiver stays in
   `Member`, ahead of both. Inside `context(A) { foo(); b }`, unqualified `foo` and `b` are the
@@ -4681,6 +4697,23 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the body is read from (`MapsKt__MapsKt`), and that is the method the in-place read follows.
   Tests: `tests/reified_class_regeneration_e2e.rs`, `tests/classpath_reified_inline_toplevel_e2e.rs`.
 
+- **A lambda inlined into a classpath inline body runs on an empty operand stack.** kotlinc's
+  `MethodInliner` brackets each inlined lambda with `InlineMarker.beforeInlineCall` /
+  `afterInlineCall`, and the caller's `FixStackMethodTransformer` stores whatever the body left on
+  the stack under the lambda into fresh locals and reloads it under the lambda's result. stdlib
+  `map` is the common case: its inlined `mapTo` has the destination collection on the stack at the
+  `invoke`, so kotlinc spills it (`astore`, then `aload; swap` after the lambda). krusty inlined the
+  lambda over that stack; a lambda holding a `try` (a source `try`/`catch`, or a spliced
+  `runCatching`) then had a handler entered with only the exception while the normal path kept the
+  destination under it, and emission panicked (`an inlined body's stack was already followed:
+  Mismatch`). The unified inliner now keeps the markers around each expanded lambda, the emitter
+  writes them wherever there is something to save (the body's own operands or the caller's,
+  pushed before the inline call), and the same class-stage FixStack that saves operands around an
+  inline body normalizes them in the finished caller, so the save locals sit above every slot of
+  the method as in kotlinc. Until then the emitter and the frame computation follow the stack as
+  FixStack leaves it: empty inside a bracket, the saved values back under the lambda's result
+  after it. Tests: `tests/inlined_lambda_stack_spill_e2e.rs`,
+  `inliner::tests::a_lambda_invoked_over_a_stacked_value_is_bracketed_for_fix_stack`.
 - **A reified `catch (e: E)` uses the inline call's type argument as its JVM catch type.** The
   clause is checked as the reified parameter. Common IR stores only that semantic type. While the
   parameter is still unsubstituted, the JVM reified-operation pass records the declaration's
@@ -5709,8 +5742,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   from a classpath inline body is copied, and so is every expression common lowering copied from
   a same-module inline function's own body (a lambda argument the caller passes is the caller's
   code). A reference or `NameAndType` descriptor that only copied code uses mentions no class.
+  A class constant copied code creates names no class either, whether the copy creates it directly
+  (an inline body's `checkcast Holder$Item`) or as the owner of a member it references (a copied
+  `Tally$Counter.next()` call); one that existed before the copy, such as a supertype, still does,
+  and the class's own later reference to it, directly or through a member, names it again.
+  The coroutine transformer rewrites a generated method with raw ASM, so its body is re-encoded as
+  copied code: a reference the class's own code made stays mapped, a `Continuation.resume` read of
+  `Result.Companion` stays copied, and the transformer's own `checkcast` restoring a spilled
+  `Holder.Item` adds no row. The continuation class of a state machine is still listed, because
+  kotlinc generates it from the class that owns the function.
   Tests: `tests/inlined_code_inner_classes_e2e.rs`,
-  `src/jvm/classfile/member_mapping.rs::tests::a_reference_is_copied_only_until_the_class_names_it_itself`.
+  `src/jvm/classfile/member_mapping.rs::tests::a_reference_is_copied_only_until_the_class_names_it_itself`,
+  `src/jvm/classfile/member_mapping.rs::tests::a_class_constant_is_copied_only_when_the_copy_created_it`,
+  `src/jvm/classfile/member_mapping.rs::tests::a_copied_member_reference_creates_its_owner_as_copied`.
 - **An enum entry's body class is a package-private nested class of its enum.** `FIRST { ... }`
   compiles to `Mode$FIRST`, and both the enum and the entry class list it in `InnerClasses` as
   `static final` with no visibility flag, whatever the enum's own visibility, matching the
@@ -5813,6 +5857,29 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   file's lowered default bodies, which replace the compact payload for that file. Tests:
   `tests/annotation_cross_file_defaults_e2e.rs`,
   `annotations/instances/annotationInstancesEmptyDefaultLowered.kt`.
+- **A dependency annotation's omitted elements take its classfile `AnnotationDefault` values.**
+  `Tree()` against a library `annotation class Tree(val leaf: Leaf = Leaf(), val kind: KClass<*> =
+  Leaf::class, …)` evaluates the declaration defaults, as kotlinc does. The classfile reader decodes
+  each element method's `AnnotationDefault`, and the resolver checks the value against the
+  element's declared type (an `Int` value for a `UInt` element, an enum or annotation of the
+  declared classifier, a class for `KClass`) before closing it into the same payload a module
+  annotation's defaults use. A nested annotation default lists only its explicit arguments; its
+  other members take that annotation's own declaration defaults. A value of another shape is no
+  default, so the omitted element stays unsupplied and lowering reports the incomplete
+  construction instead of guessing a value.
+  - krusty writes `AnnotationDefault` on every Kotlin annotation element method whose default is
+    a closed value, with kotlinc's encoding (a nested annotation default carries only its explicit
+    arguments), so a krusty-built library exposes its defaults to any consumer.
+  - A Java source header declares a default it does not evaluate. Its stub records that fact
+    (`AnnotationElementDefault::Unevaluated`) instead of a value: the element may be omitted where
+    the annotation is applied, but no value exists for a construction to take.
+  - A construction inside a default runs in the scope of every construction that omits that
+    element, transitively. Its implementation class is owned like any other construction's, by
+    the earliest emitted classifier among those scopes; a default no construction in this file
+    uses generates no implementation class (`Holder$annotationImpl$Leaf$0`, never
+    `Branch$annotationImpl$Leaf$0`).
+  Tests: `tests/annotation_instance_defaults_e2e.rs`; box corpus
+  `annotations/instances/{AnnotationInstantiationWithArray,multimoduleTypeParams}.kt`.
 - **A local class interns its `EnclosingMethod` refs before its `InnerClasses` rows.** kotlinc
   visits the `EnclosingMethod` refs before the `InnerClasses` rows, so the enclosing class and
   method come before the local class's own simple name in the pool. The serialized attribute order
@@ -8653,6 +8720,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `tests/native_try_catch_e2e.rs`
   (`a_failed_cast_names_a_local_or_anonymous_class_the_way_kotlin_native_does`); the box corpus's
   `casts/nativeCCEMessage` cases in the native lane.
+- **Native: an override called by its own type takes the defaults of the member it overrides.**
+  An override cannot declare defaults, so `Mid().f()` on an override of `open fun f(x: Int = 23)`
+  fills `x` from the overridden declaration and still runs `Mid.f`. The frontend hands the call
+  over naming that declaration (`default_provider`); native fills the omitted arguments in the
+  provider's frame, so a default reading an earlier parameter sees the argument passed, and then
+  dispatches through the slot the override shares, so a `Mid`-typed `Leaf` runs `Leaf.f`.
+  Tests: `tests/native_classes_e2e.rs`
+  (`an_override_called_by_its_own_type_takes_the_defaults_of_the_member_it_overrides`, whose
+  output kotlinc 2.4.10 prints identically); the box corpus's inherited-default cases
+  (`defaultArguments/function/funInTrait.kt`, `defaultArguments/implementedByFake.kt`, ...) in
+  the native lane.
 - **An extension receiver constrains its declared formal through the receiver's supertypes.** In
   `fun <E> f(a: List<E>, b: List<E>) = a + b`, the receiver `List<E>` reaches
   `Collection<T>.plus` only as `Collection<E>`, which fixes `T := E` for every `plus` overload.
@@ -8701,6 +8779,24 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   missing jar), `plugins::registry` unit tests (`a_jar_is_recognized_by_the_registrar_it_declares_not_its_name`,
   `an_unreadable_plugin_entry_is_an_error`, `a_jar_declaring_no_plugin_loads_nothing`, …),
   `plugins::cli` unit tests, and `krusty-cli`'s `cli` tests.
+- **kotlinc's default scripting plugin is accepted and runs nothing; the Gradle plugin forwards
+  KGP's compiler-plugin request verbatim.** kotlinc loads its scripting plugin (`kotlin.scripting`,
+  registrars `ScriptingK2CompilerPluginRegistrar` and legacy
+  `ScriptingCompilerConfigurationComponentRegistrar`) into every compilation, and the Kotlin Gradle
+  plugin also passes `kotlin-scripting-compiler-embeddable` on every JVM compile's `-Xplugin`
+  classpath. It acts only on script sources, which krusty does not compile, so the registry answers
+  to both registrars with an inert `ScriptsOnly` extension: no pass, no diagnostic, and the class set
+  kotlinc emits for the same command line. The Gradle plugin forwards each compile task's
+  `pluginClasspath` as `-Xplugin=<jars>` and `pluginOptions` as `-P plugin:<id>:<key>=<value>`, so
+  `kotlin("plugin.serialization")` generates serializers whether it is applied before or after krusty.
+  Before, a support plugin applied before krusty was put in an apply-time "baseline" and silently
+  ignored (no `$serializer` classes), and one applied after krusty failed the task; now every applied
+  support plugin other than serialization and scripting fails the task, in either order.
+  Tests: `plugins::registry::tests::kotlincs_default_scripting_plugin_runs_nothing`,
+  `tests/cli_compiler_plugin_e2e.rs`
+  (`kotlincs_default_scripting_plugin_is_accepted_beside_serialization`), and the Gradle lane's
+  `krusty-build` `gradle::tests::serialization_plugin_compiles_through_krusty` (serializers generated
+  in both orders and exercised at run time across modules; all-open applied before krusty fails).
 - **`Pair`, `Triple` and `Map.Entry` serialize through the runtime's tuple serializers.** None of
   them is `@Serializable`, but kotlinc's plugin selects a serializer for each by the classifier,
   as it does for a standard collection. `Pair<A, B>` becomes `new PairSerializer(<A>, <B>)`,
@@ -9325,7 +9421,23 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   constructor lifts: the secondary's lambda is `constructor_impl$lambda$0`. An extension receiver keeps its own
   spelling (`$this_mext`, `$this_ext`). Common IR records only that the capture is the enclosing
   receiver and the lifted callable's outermost container; the JVM backend spells the name from the
-  value-class realization of that container. Tests:
+  value-class realization of that container. A lambda compiled to a class of its own (one
+  `LambdaMetafactory` cannot adapt, such as `fun mv(): () -> U = { this }`) stores the receiver in
+  a field of that name, in capture order among its other captures (`U$mx$1($x, $arg0)`), and its
+  constructor takes it under the same name instead of `$receiver`; with `-java-parameters` every
+  capture of such a constructor is reflected, synthetic, under its field's name (`this$0` and
+  `$this_ext` too, though the local-variable table calls those `$receiver`). The class is realized
+  before the value-class pass places the member's static, so it records what each field captures
+  and the lifting root it was lifted from, and the backend spells the fields at emission. Such a
+  class written in an `init` block is enclosed by the primary `constructor-impl`
+  (`EnclosingMethod`), like one written in a constructor. An anonymous object or local class written
+  in a value-class member, accessor, constructor or `init` block, directly or through a lambda or
+  local function, captures the same value: its field, constructor parameter (local-variable row and
+  `-java-parameters` entry alike) are `$arg0`, `$tmp0` or `$tmp0_$this` (`O$m$1`, `O$o$1`,
+  `O$o2$1`, `O$loc$L`, `O$inLam$1$1`, `O$inLoc$lf$1`), where an ordinary class's instance is
+  `this$0` passed as `$receiver`. The class's recorded enclosure is followed through lifted
+  callables to the declaration it is written in, and the backend spells the capture with the rule
+  a lambda class uses. Tests:
   `tests/value_class_receiver_capture_debug_names_e2e.rs`,
   `tests/value_class_mangled_lambda_names_e2e.rs`, `tests/java_parameters_attribute_e2e.rs`.
 - **A value-class default of a primary constructor is lowered like the constructor's other code.**
@@ -14144,3 +14256,27 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the method is declared with. Spelling that parameter `V` is not a method descriptor, and the JVM
   rejects the continuation class while loading it. This is the receiver of `suspend Unit.() -> Unit`.
   Test: `tests/suspend_unit_receiver_e2e.rs`. Corpus: `coroutines/kt28844.kt`.
+
+- **An inline body with a loop, a try/catch or a suspension point is entered with an empty operand
+  stack** (kotlinc's `requiresEmptyStackOnEntry`: try/catch blocks, a `mark` before a suspend call
+  or an inline suspend call, or any backward jump). When the caller has already pushed operands (an
+  earlier argument, a `new`/`dup` of the object being constructed), kotlinc brackets the inlined
+  body with `InlineMarker.beforeInlineCall`/`afterInlineCall`; its mandatory `FixStack` stores those
+  operands into locals above every slot of the finished method, reloads them under the call's
+  result, and `UninitializedStoresProcessor` then moves a saved `new` after the constructor's
+  arguments. krusty's inliner declined such a body, so a reified call that has no callable fallback
+  (`pair(id, xs.filterIsInstance<String>())`) failed the whole compile with "inline splice failed".
+  The MethodNode inliner now writes the two markers around the body when the stack is not empty,
+  and the class writer runs FixStack and the uninitialized-store move over every finished method
+  that is not a coroutine (a coroutine runs both inside its transformation) before kotlinc's
+  optimizer, so the result is kotlinc's bytes. Once the markers are written the normalization is
+  mandatory: a handler entered over the caller's operands loses them, so the body as emitted need
+  not verify. A method the passes cannot normalize fails the compile with a diagnostic naming it;
+  the class is not written. Not yet kotlinc's bytes: an inline body with handlers is still reached
+  with the operands already moved to temporaries by the operand sequencing ahead of the call
+  (`must_spill_across`), and a call with a literal lambda over a non-empty stack still takes the
+  byte splice.
+  Tests: `tests/inline_call_operand_spill_e2e.rs` (one operand, wide operands, a constructor
+  argument, each run and compared with kotlinc; a try/catch callee under an operand, run), and
+  `classfile::inline_call_stacks::tests::a_method_the_passes_cannot_normalize_fails_the_class`.
+  Corpus: a private-corpus module.

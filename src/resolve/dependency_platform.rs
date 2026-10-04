@@ -660,6 +660,7 @@ mod tests {
             retention: None,
             annotation_targets: None,
             mapped_collection: None,
+            annotation_element_defaults: Vec::new(),
         }
     }
 

@@ -410,3 +410,24 @@ fn an_inlined_suspend_lambda_capture_is_initialized() {
     assert_eq!(common::kotlinc_box_result(SOURCE), "OK");
     run_ok("AnonInlineSuspendLambdaCapture", SOURCE);
 }
+
+/// A `by lazy { object : … { override fun f() = property } }` delegate. The lambda's result type is
+/// inferred from the object, so the construction is visited again once the `lazy` call settles.
+/// The member's inferred result was completed on the first visit; the revisit must still read its
+/// body when deciding captures, or the object loses its outer instance while the member reads it.
+#[test]
+fn lazy_delegate_object_keeps_outer_instance_for_inferred_member() {
+    common::expect_box_same_as_kotlinc(
+        "abstract class Source { abstract fun read(): String }\n\
+         class Holder(private val value: String) {\n\
+             private val source: Source by lazy {\n\
+                 object : Source() {\n\
+                     override fun read() = value\n\
+                 }\n\
+             }\n\
+             fun get() = source.read()\n\
+         }\n\
+         fun box(): String = Holder(\"OK\").get()\n",
+        "AnonLazyDelegateOuter",
+    );
+}

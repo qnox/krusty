@@ -1623,9 +1623,7 @@ fn fun_interface_constructor_reference_returns_a_checked_sam_delegate() {
         module_member_callable(SOURCE, "SamConstructorReference", "Action", "run", Ty::Int);
     assert_eq!(
         delegates[0].1.method_target,
-        crate::fir::FirSamMethod::Declared(crate::fir::ResolvedFunctionOverrideTarget::Module(
-            action_run
-        ))
+        crate::ir::IrSamMethod::Module(action_run)
     );
     assert!(ir.exprs.iter().any(|expression| matches!(
         expression,

@@ -21,7 +21,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::ir::{IrEnclosure, IrFile, IrLiftingSequence};
+use crate::ir::{IrEnclosure, IrFile, IrLiftingRoot, IrLiftingSequence};
 
 /// Number every lifting sequence of the file and record kotlinc's lifted name of each function
 /// lowered from a lambda or local function. A callable inside one that is not lifted (the body of a
@@ -196,13 +196,39 @@ fn container_function(ir: &IrFile, container: IrEnclosure) -> Option<crate::ir::
 /// value-class member's `-impl`, the `constructor-impl` running an `init` block). `None` for a
 /// callable that is not lifted, or whose outermost declaration is no function body.
 pub(super) fn root_container(ir: &IrFile, function: crate::ir::FunId) -> Option<crate::ir::FunId> {
+    root_container_at(ir, &lifting_root(ir, function)?)
+}
+
+/// The outermost position of the path `function` is lifted along, which a lambda realized as a
+/// class keeps after it stops being lifted.
+pub(super) fn lifting_root(ir: &IrFile, function: crate::ir::FunId) -> Option<IrLiftingRoot> {
     let (sequence, site) = ir.lifted_functions.get(&function)?;
-    let outermost = site.path.first()?;
+    Some(IrLiftingRoot {
+        sequence: sequence.clone(),
+        position: site.path.first()?.position,
+    })
+}
+
+/// [`root_container`] from a recorded lifting root.
+pub(super) fn root_container_at(ir: &IrFile, root: &IrLiftingRoot) -> Option<crate::ir::FunId> {
     let entry = ir
         .lifting_sequences
-        .get(sequence)?
-        .get(&outermost.position)?;
+        .get(&root.sequence)?
+        .get(&root.position)?;
     container_function(ir, entry.container?)
+}
+
+/// The function whose body a class declared in `enclosure` is written in, through every enclosing
+/// lambda and local function, as the target realized it: the [`root_container`] of a local
+/// function or suspend lambda, else the function or accessor itself. `None` for an enclosure that
+/// is no function body.
+pub(super) fn enclosure_root(ir: &IrFile, enclosure: IrEnclosure) -> Option<crate::ir::FunId> {
+    match enclosure {
+        IrEnclosure::Function(function) => Some(root_container(ir, function).unwrap_or(function)),
+        IrEnclosure::Lambda(lambda) => root_container(ir, lambda)
+            .or_else(|| enclosure_root(ir, *ir.lambda_enclosures.get(&lambda)?)),
+        _ => container_function(ir, enclosure),
+    }
 }
 
 /// kotlinc replaces the characters a special or mangled name carries (`<init>`, `<get-x>`,

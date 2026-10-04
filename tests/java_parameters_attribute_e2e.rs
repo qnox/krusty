@@ -327,6 +327,67 @@ fn java_parameters_names_a_value_class_receiver_capture() {
     );
 }
 
+/// A lambda compiled to a class of its own, such as one returning a value class, reflects its
+/// constructor's captures under their field names, every one synthetic: a value-class static's
+/// receiver as `$arg0`, `$tmp0` or `$tmp0_$this`, an ordinary instance as `this$0` and an extension
+/// receiver as `$this_ext`, though the constructor's local-variable table calls the latter two
+/// `$receiver`.
+#[test]
+fn java_parameters_names_a_lambda_class_constructors_captures() {
+    assert_parameter_parity(
+        "JavaParametersLambdaClass",
+        "package demo\n\
+         @JvmInline value class Tag(val raw: String)\n\
+         @JvmInline value class Held(val raw: String) {\n\
+         \x20 init { val f: () -> Held = { this }; f() }\n\
+         \x20 constructor(t: Tag, u: Tag) : this(u.raw) { val g: () -> Held = { this }; g() }\n\
+         \x20 fun m(x: Int): (Int) -> Held = { y -> if (x > y) this else this }\n\
+         }\n\
+         class Plain(val raw: String) { fun m(): () -> Held = { Held(raw) } }\n\
+         fun Held.ext(): () -> Held = { this }\n",
+        &[
+            "demo/Held$f$1",
+            "demo/Held$g$1",
+            "demo/Held$m$1",
+            "demo/Plain$m$1",
+            "demo/JavaParametersLambdaClassKt$ext$1",
+        ],
+    );
+}
+
+/// An anonymous object or local class written in a value class reflects the receiver it captures,
+/// synthetic, under the name of the value the member's static holds it in (`$arg0`, `$tmp0`,
+/// `$tmp0_$this`); an ordinary class's instance stays `this$0`.
+#[test]
+fn java_parameters_names_an_anonymous_objects_value_class_receiver() {
+    assert_parameter_parity(
+        "JavaParametersObjectCapture",
+        "package demo\n\
+         interface Box { fun get(k: Int): Any }\n\
+         @JvmInline value class Tag(val raw: String)\n\
+         @JvmInline value class Held(val raw: String) {\n\
+         \x20 init { val o = object : Box { override fun get(k: Int): Any = this@Held }; o.get(0) }\n\
+         \x20 constructor(t: Tag, u: Tag) : this(u.raw) {\n\
+         \x20   val o2 = object : Box { override fun get(k: Int): Any = this@Held }; o2.get(0)\n\
+         \x20 }\n\
+         \x20 fun m(x: Int): Box = object : Box {\n\
+         \x20   override fun get(k: Int): Any = if (raw.length > x + k) this@Held else x\n\
+         \x20 }\n\
+         \x20 fun loc(): Box { class L : Box { override fun get(k: Int): Any = this@Held }; return L() }\n\
+         }\n\
+         class Plain(val raw: String) {\n\
+         \x20 fun m(): Box = object : Box { override fun get(k: Int): Any = this@Plain }\n\
+         }\n",
+        &[
+            "demo/Held$o$1",
+            "demo/Held$o2$1",
+            "demo/Held$m$1",
+            "demo/Held$loc$L",
+            "demo/Plain$m$1",
+        ],
+    );
+}
+
 #[test]
 fn method_parameters_remain_opt_in() {
     let jdk = common::jdk_modules();

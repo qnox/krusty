@@ -34,6 +34,7 @@ impl Classpath {
         &self,
         callable: &LibraryCallable,
         kind: ExternalCallableKind,
+        declaration_package: Option<TypeName>,
     ) -> crate::fir::ExternalCallableId {
         let key = ExternalCallableKey {
             owner: callable.owner,
@@ -49,6 +50,9 @@ impl Classpath {
             // spelling-indexed view and later through its complete classifier declaration. Keep
             // the stable identity, but merge the later declaration facets before returning it.
             self.enrich_external_callable(identity, callable);
+            if let Some(package) = declaration_package {
+                self.publish_external_callable_declaration_package(identity, package);
+            }
             return identity;
         }
         let mut callables = self.external_callables.borrow_mut();
@@ -61,6 +65,7 @@ impl Classpath {
         callables.push(ExternalCallableRealization {
             callable: stored,
             kind,
+            declaration_package,
             parameter_identities: Box::new([]),
         });
         self.external_callable_ids
@@ -219,6 +224,26 @@ impl Classpath {
             );
         }
     }
+
+    /// Publish the semantic package from the package namespace that supplied this declaration.
+    /// The physical callable owner may be a JVM file facade and is deliberately not an input.
+    pub(crate) fn publish_external_callable_declaration_package(
+        &self,
+        identity: crate::fir::ExternalCallableId,
+        package: TypeName,
+    ) {
+        let mut callables = self.external_callables.borrow_mut();
+        let stored = callables
+            .get_mut(identity.raw() as usize)
+            .expect("a declaration package names an interned external callable");
+        match stored.declaration_package {
+            Some(existing) => assert_eq!(
+                existing, package,
+                "one external callable identity cannot have conflicting declaration packages"
+            ),
+            None => stored.declaration_package = Some(package),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -246,7 +271,7 @@ mod tests {
             descriptor: "()Ljava/lang/Object;".to_string(),
         }]
         .into_boxed_slice();
-        let identity = cp.intern_external_callable(&first, ExternalCallableKind::Member);
+        let identity = cp.intern_external_callable(&first, ExternalCallableKind::Member, None);
 
         let mut enriched = first.clone();
         enriched.semantic_role = Some(crate::types::SemanticCallRole::KotlinFunctionInvoke);
@@ -259,7 +284,7 @@ mod tests {
         .into_boxed_slice();
 
         assert_eq!(
-            cp.intern_external_callable(&enriched, ExternalCallableKind::Member),
+            cp.intern_external_callable(&enriched, ExternalCallableKind::Member, None),
             identity
         );
         assert_eq!(
@@ -279,6 +304,33 @@ mod tests {
                 .callable
                 .semantic_role,
             enriched.semantic_role
+        );
+    }
+
+    #[test]
+    fn declaration_package_is_independent_of_the_physical_realization_kind() {
+        let cp = Classpath::new(vec![]);
+        let callable = LibraryCallable::library(
+            type_name("fixture/physical/FacadeKt"),
+            "operation",
+            vec![],
+            Ty::Unit,
+            Ty::Unit,
+            "()V",
+        );
+        let package = type_name("fixture/semantic");
+
+        // A package property or mapped builtin can reuse a storage/member realization. The
+        // declaration namespace remains semantic and must not be inferred from that physical kind.
+        let identity = cp.intern_external_callable(
+            &callable,
+            ExternalCallableKind::StaticFieldRead,
+            Some(package),
+        );
+
+        assert_eq!(
+            cp.external_callable(identity).unwrap().declaration_package,
+            Some(package)
         );
     }
 }

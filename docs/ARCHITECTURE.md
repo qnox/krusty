@@ -102,10 +102,16 @@ krusty. Once any source, classpath, friend path, plugin, compiler option, or com
 the task cleans its Kotlin output directory and recompiles the complete source set. That deliberately
 coarse boundary keeps source additions and removals, multifile facades, generated classes, and
 `.kotlin_module` metadata correct without reconstructing Kotlin's dependency graph from class files.
-Compiler plugins are outside this adapter boundary: applied public
-`KotlinCompilerPluginSupportPlugin` implementations and plugin CLI switches are rejected. KGP's raw
-`pluginClasspath` and `pluginOptions` collections are not treated as activation signals because a
-plain Kotlin/JVM compilation can populate them with implementation plumbing.
+Compiler plugins pass through the adapter as kotlinc receives them: each compile task's KGP
+`pluginClasspath` becomes `-Xplugin=<jars>` and its `pluginOptions` become
+`-P plugin:<id>:<key>=<value>`, and the compiler resolves each jar by the registrar it declares.
+Plugin CLI free arguments stay rejected in favour of that structured input. The applied public
+`KotlinCompilerPluginSupportPlugin` implementations, collected whether they were applied before or
+after krusty, gate the task before krusty runs: `org.jetbrains.kotlinx.serialization` runs as
+krusty's native pass, and `kotlin.scripting` — kotlinc's default scripting plugin, which KGP applies
+to every project and puts on every plugin classpath — acts only on script sources, which the adapter
+never passes. Any other applied support plugin fails the task, and a plugin jar added to the plugin
+classpath without one is refused by the compiler.
 
 Build correctness rests on these contracts:
 
