@@ -6630,7 +6630,7 @@ impl<'a> Emitter<'a> {
             frame: frame_map::FrameMap::default(),
             continuation_slot: None,
             machine_suspensions: HashSet::new(),
-            transformed_suspensions: HashMap::new(),
+            transformed_suspensions: Default::default(),
             suspend_lambda_parameter_reads: HashSet::new(),
             erased_invocations: HashSet::new(),
             inlined_only_cells: HashSet::new(),

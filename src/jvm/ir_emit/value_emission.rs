@@ -1716,6 +1716,7 @@ impl super::Emitter<'_> {
                 let f = self.cw.fieldref("kotlin/Unit", "INSTANCE", "Lkotlin/Unit;");
                 code.getstatic(f, 1);
             }
+            IrExpr::CurrentContinuation if self.emit_fake_continuation(e, code) => {}
             IrExpr::CurrentContinuation => {
                 // The CPS pass rewrites this to a `GetValue` of the continuation slot for every
                 // function whose machine it owns. It leaves the node in place for a function whose

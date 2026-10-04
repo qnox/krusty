@@ -159,3 +159,59 @@ fn a_probed_block_still_resumes() {
     );
     common::expect_box_same_as_kotlinc(&main, "IntrinsicProbesRun");
 }
+
+/// A method body from its first probe window to its end, without offsets or branch targets.
+fn from_first_probe(body: &[String]) -> Vec<String> {
+    let codes: Vec<&str> = body
+        .iter()
+        .map(|row| row.split_once(": ").map_or(row.as_str(), |(_, code)| code))
+        .collect();
+    let start = codes
+        .windows(2)
+        .position(|pair| pair[0] == "dup" && pair[1].contains("getCOROUTINE_SUSPENDED"))
+        .expect("a probe window");
+    codes[start..]
+        .iter()
+        .map(|code| {
+            let op = code.split(' ').next().unwrap_or(code);
+            match op.starts_with("if") || op == "goto" {
+                true => op.to_string(),
+                false => code.to_string(),
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn a_unit_block_statement_returns_its_suspension_like_kotlinc() {
+    // A `Unit` function whose body is the block: kotlinc probes the block's value, returns it when
+    // it is `COROUTINE_SUSPENDED`, and only then answers `Unit`, with no state machine.
+    let source = "import kotlin.coroutines.*\n\
+        import kotlin.coroutines.intrinsics.*\n\
+        class ProbeRecord { var text = \"fail\" }\n\
+        suspend fun record(target: ProbeRecord): Unit = suspendCoroutineUninterceptedOrReturn { x ->\n\
+        \x20   target.text = \"OK\"\n\
+        \x20   x.resume(Unit)\n\
+        \x20   COROUTINE_SUSPENDED\n\
+        }\n";
+    let built = compare_with_kotlinc_plugin(
+        "IntrinsicUnitProbe",
+        source,
+        "IntrinsicUnitProbeKt",
+        &[common::stdlib_jar()],
+        "25",
+        &[],
+    )
+    .expect("reference kotlinc and javap are required");
+    let member = "java.lang.Object record(";
+    let reference = from_first_probe(&method_instructions(&built.reference, member));
+    assert_eq!(
+        reference.last().map(String::as_str),
+        Some("areturn"),
+        "kotlinc: {reference:?}"
+    );
+    assert_eq!(
+        from_first_probe(&method_instructions(&built.krusty, member)),
+        reference
+    );
+}

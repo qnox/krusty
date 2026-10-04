@@ -771,7 +771,11 @@ impl Emitter<'_> {
             && !args.is_empty()
             && !args.iter().any(|&argument| function_typed(argument))
             && inliner::can_inline_arguments_in_place(callee)
-            && in_place_arguments::arguments_movable(self.ir, args);
+            && in_place_arguments::arguments_movable(self.ir, args, &|construction| {
+                !self
+                    .sam_wrapper_realizations
+                    .is_nullable_construction(construction)
+            });
         let mut supplies = Vec::with_capacity(args.len());
         for (index, &argument) in args.iter().enumerate() {
             let evaluated = if in_place {

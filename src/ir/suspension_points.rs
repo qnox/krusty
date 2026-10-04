@@ -1,7 +1,7 @@
 //! Coroutine suspension points common IR retains: the non-call ones kotlinc expands itself, and
 //! how a value-class result crosses one.
 
-use super::Ty;
+use super::{ExprId, IrFile, Ty};
 use crate::types::TypeName;
 
 /// Representation selected for a value-class result crossing a coroutine suspension boundary.
@@ -38,4 +38,14 @@ pub enum IrIntrinsicSuspensionKind {
 pub struct IrIntrinsicSuspensionPoint {
     pub result: Ty,
     pub kind: IrIntrinsicSuspensionKind,
+}
+
+impl IrFile {
+    /// Whether `e` is a `suspendCoroutineUninterceptedOrReturn` block, which reads the caller's
+    /// own continuation.
+    pub fn is_unintercepted_suspension(&self, e: ExprId) -> bool {
+        self.intrinsic_suspension_points
+            .get(&e)
+            .is_some_and(|point| point.kind == IrIntrinsicSuspensionKind::Unintercepted)
+    }
 }
