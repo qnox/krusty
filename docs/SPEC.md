@@ -9131,7 +9131,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `T` to `R<Int>` would unbox it and the consumer would box it again, and kotlinc emits neither
   call. Reading `c.a` as `R<Int>` still unboxes once. Tests: `tests/value_class_generic_carrier_e2e.rs`.
 - **A return to a reference supertype is a value-class boundary.** A function declared to return
-  `Any`, `Any?`, or an interface a value class implements hands each returned value, a guard
+  `Any`, `Any?`, or a direct or indirect interface a value class implements hands each returned
+  value, a guard
   `return` as much as the tail, through a reference slot, exactly as an `Any` parameter or local
   takes it. A carrier (a value-class parameter, local, or call result) is boxed: `fun f(t: Tag): Any
   = t` returns `Tag.box-impl(t)`. A value that already is the box is returned unchanged:

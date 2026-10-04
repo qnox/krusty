@@ -6,6 +6,7 @@
 //! class) is returned as it is.
 
 use super::{record_value_boundary, BoxOp, CarrierUnboxes, FieldGetters, ReprInputs, Under};
+use crate::backend::BackendClassifierSource;
 use crate::ir::{for_each_child, ExprId, IrExpr, IrFile};
 use crate::types::{Ty, TypeName};
 use std::collections::{HashMap, HashSet};
@@ -19,12 +20,36 @@ pub(super) struct ReferenceReturns<'a> {
     pub(super) under: &'a Under,
     pub(super) field_getters: &'a FieldGetters,
     pub(super) carrier_unboxes: &'a CarrierUnboxes,
-    /// The interfaces value classes implement.
-    pub(super) value_class_interfaces: &'a HashSet<TypeName>,
+    /// Every reference supertype of a known value class, including indirect interfaces.
+    pub(super) value_class_reference_supertypes: &'a HashSet<TypeName>,
     /// Value-class members; those not lowered to static carrier functions are synthesized wrappers
     /// whose bodies run on the box and keep their own returns.
     pub(super) value_members: &'a HashSet<u32>,
     pub(super) lowered_value_members: &'a HashSet<u32>,
+}
+
+/// The transitive semantic supertypes of every value class known to this compilation. The backend
+/// handoff already froze direct classifier relationships, so this is an identity traversal over
+/// the common class model, not a provider lookup or a reconstruction from JVM names.
+pub(super) fn value_class_reference_supertypes(
+    classifiers: &dyn BackendClassifierSource,
+    value_classes: &Under,
+) -> HashSet<TypeName> {
+    let mut pending = value_classes
+        .keys()
+        .filter_map(|classifier| classifiers.classifier(*classifier))
+        .flat_map(|facts| facts.supertypes.iter().copied().collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+    let mut supertypes = HashSet::new();
+    while let Some(classifier) = pending.pop() {
+        if !supertypes.insert(classifier) {
+            continue;
+        }
+        if let Some(facts) = classifiers.classifier(classifier) {
+            pending.extend(facts.supertypes.iter().copied());
+        }
+    }
+    supertypes
 }
 
 /// Record, for every function declared to return `Any` or a value-class interface, the boundary
@@ -39,7 +64,9 @@ pub(super) fn record_reference_returns(
         let result = returns.rets[fid];
         let reference_supertype = result.non_null().obj_internal().is_some_and(|classifier| {
             classifier == crate::types::wk::any()
-                || returns.value_class_interfaces.contains(&classifier)
+                || returns
+                    .value_class_reference_supertypes
+                    .contains(&classifier)
         });
         let (Some(body), true) = (function.body, reference_supertype) else {
             continue;

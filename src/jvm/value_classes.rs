@@ -122,7 +122,7 @@ type FieldGetters = HashMap<(u32, u32), Ty>;
 /// future structural bail; today it always returns `true`.
 pub(crate) fn lower_value_classes(
     ir: &mut IrFile,
-    classifiers: &dyn crate::types::ClassifierFactSource,
+    classifiers: &crate::backend::CheckedBackendClassifiers<'_>,
     // Same-module SOURCE value classes (internal name → sole-field underlying), collected from the
     // frontend symbols. A value class declared in ANOTHER file of this module is not in `ir.classes`;
     // the normalized classifier provider supplies its declaration facts without leaking provider
@@ -559,14 +559,10 @@ pub(crate) fn lower_value_classes(
         .collect();
     vc_properties.extend(external_underlying_properties);
 
-    // Interfaces that value classes implement — a function returning one of these (or `Any`) boxes a
-    // value-class tail so virtual/interface dispatch works.
-    let vc_interfaces: HashSet<TypeName> = ir
-        .classes
-        .iter()
-        .filter(|c| c.is_value)
-        .flat_map(|c| c.interfaces.iter_ids())
-        .collect();
+    // Reference supertypes of every known value class. The frozen semantic hierarchy includes
+    // indirect interfaces and value classes declared in sibling files or dependencies.
+    let vc_reference_supertypes =
+        reference_returns::value_class_reference_supertypes(classifiers, &under);
 
     // Functions that are members of a value class — their bodies operate on the BOXED object and must
     // not be rewritten (only their signatures erase).
@@ -3482,7 +3478,7 @@ pub(crate) fn lower_value_classes(
         under: &under,
         field_getters: &field_getters,
         carrier_unboxes: &carrier_unboxes,
-        value_class_interfaces: &vc_interfaces,
+        value_class_reference_supertypes: &vc_reference_supertypes,
         value_members: &vc_methods,
         lowered_value_members: &lowered_value_members,
     };
