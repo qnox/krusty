@@ -48,17 +48,24 @@ fn reflection_descriptor_ty(ty: Ty) -> Ty {
 
 /// Reflection names the method the declaration was compiled as. A use-site specialization of
 /// that declaration (`::foo` typed `KFunction1<Int, Int>`) belongs to the adapter, not to this
-/// descriptor: the generic method is still `foo(Ljava/lang/Object;)Ljava/lang/Object;`.
+/// descriptor: the generic method is still the declaration's erased JVM signature
+/// (`foo(Ljava/lang/Object;)Ljava/lang/Object;` for an unbounded `T`, and
+/// `foo(Ljava/lang/CharSequence;)Ljava/lang/CharSequence;` when `T : CharSequence`).
 ///
 /// A companion-associated extension's receiver names the classifier whose static scope it joins.
-/// It is not a parameter of the method kotlin-reflect looks up.
-fn module_declaration_reflection(declaration: &crate::ir::IrModuleCallable) -> (Vec<Ty>, Ty) {
+/// It is not a parameter of the method kotlin-reflect looks up. The receiver is identified by the
+/// parameter identity parallel to the declaration parameter; a signature whose identities do not
+/// line up is not a different reflection shape.
+fn module_declaration_reflection(
+    declaration: &crate::ir::IrModuleCallable,
+) -> Result<(Vec<Ty>, Ty), FunctionReferenceRealizationTarget> {
     let companion = declaration
         .flags
         .has(crate::fir::DeclarationFlags::COMPANION);
-    let parameters = if companion
-        && declaration.parameters.len() == declaration.parameter_identities.len()
-    {
+    let parameters = if companion {
+        if declaration.parameters.len() != declaration.parameter_identities.len() {
+            return Err(FunctionReferenceRealizationTarget::Invalid);
+        }
         declaration
             .parameters
             .iter()
@@ -69,7 +76,18 @@ fn module_declaration_reflection(declaration: &crate::ir::IrModuleCallable) -> (
     } else {
         declaration.parameters.to_vec()
     };
-    (parameters, declaration.result)
+    let parameters = super::generic_erasure::erased_callable_parameters(
+        &parameters,
+        &declaration.type_parameters,
+    );
+    let result = super::generic_erasure::erased_callable_parameters(
+        std::slice::from_ref(&declaration.result),
+        &declaration.type_parameters,
+    );
+    let Some(result) = result.into_iter().next() else {
+        return Err(FunctionReferenceRealizationTarget::Invalid);
+    };
+    Ok((parameters, result))
 }
 
 /// The class a callable reference at `expression` compiles to: the name the source file's
@@ -294,7 +312,7 @@ fn realize_adapter_reference(
                     true,
                 ),
             };
-            module_reflection = Some(module_declaration_reflection(declaration));
+            module_reflection = Some(module_declaration_reflection(declaration)?);
             (owner, declaration.name.to_string(), top_level, None)
         }
         crate::ir::IrCallableReferenceTarget::Constructor { classifier } => {
