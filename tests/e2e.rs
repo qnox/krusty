@@ -446,6 +446,8 @@ mod companion_member_read_e2e;
 mod companion_nested_classifier_scope_e2e;
 #[path = "companion_non_const_prop_e2e.rs"]
 mod companion_non_const_prop_e2e;
+#[path = "companion_private_members_e2e.rs"]
+mod companion_private_members_e2e;
 #[path = "companion_supertype_e2e.rs"]
 mod companion_supertype_e2e;
 #[path = "companion_toplevel_property_e2e.rs"]
@@ -460,6 +462,8 @@ mod comparison_under_operands_e2e;
 mod compound_index_assign_e2e;
 #[path = "compound_member_assign_lhs_caching_e2e.rs"]
 mod compound_member_assign_lhs_caching_e2e;
+#[path = "compound_receiver_reuse_e2e.rs"]
+mod compound_receiver_reuse_e2e;
 #[path = "computed_frames_e2e.rs"]
 mod computed_frames_e2e;
 #[path = "computed_prop_e2e.rs"]

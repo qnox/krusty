@@ -2792,21 +2792,21 @@ impl BodyFirChecker<'_> {
                 } else {
                     selector
                 };
-                let expression = if let Some(assignments::CompoundMemberReceiver::Snapshot(
-                    declaration,
-                )) = receiver_binding
-                {
-                    self.body.add_expr(FirExpr {
-                        origin,
-                        ty: ResolvedTy::new(Ty::Unit).expect("Unit is a publishable FIR type"),
-                        kind: FirExprKind::Block {
-                            statements: vec![declaration].into_boxed_slice(),
-                            result: Some(expression),
-                        },
-                    })
-                } else {
-                    expression
-                };
+                let expression =
+                    if let Some(assignments::CompoundMemberReceiver::Snapshot(declaration)) =
+                        receiver_binding
+                    {
+                        self.body.add_expr(FirExpr {
+                            origin,
+                            ty: ResolvedTy::new(Ty::Unit).expect("Unit is a publishable FIR type"),
+                            kind: FirExprKind::Block {
+                                statements: vec![declaration].into_boxed_slice(),
+                                result: Some(expression),
+                            },
+                        })
+                    } else {
+                        expression
+                    };
                 FirStatementKind::Expression(expression)
             }
             Stmt::IncDec {

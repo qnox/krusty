@@ -11034,6 +11034,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   carries kotlinc's `@NotNull`/`@Nullable` on its result and parameters in an abstract class and an
   enum exactly as in an interface. Tests: `tests/abstract_member_shape_e2e.rs`.
 
+- **Private members of a companion object.** Kotlin's `private` is lexical, so a declaration that
+  is private inside a companion object is visible from everything in the companion's containing
+  class: a `private data class` nested in a `private companion object` is constructed and read from
+  the outer class's methods. A `private` or `protected` companion keeps that visibility on the outer
+  class's `Companion` field (`private static final`), as kotlinc writes it; an interface's field
+  stays public. Verified against kotlinc 2.4.20. (`tests/companion_private_members_e2e.rs`.)
+- **The receiver of a compound member assignment.** `receiver.x op= value` evaluates `receiver`
+  once. A read of a `val`, a parameter, or a value a lambda or local function lifted to a method
+  receives as a parameter is read again for the setter, and so is every `this` receiver, including
+  a local class's captured `this@Outer`. Any other receiver is saved in a temporary first: a `var`,
+  a property, or a `val` a local class or a suspend lambda captured into a field, which kotlinc's
+  local declaration lowering turns into a field read. Verified against kotlinc 2.4.20.
+  (`tests/compound_receiver_reuse_e2e.rs`.)
+
 ## 8. Success criteria for the PoC
 
 1. krusty compiles the `kotlin-memory-bench` `many_functions` / `multifile` / `bodyheavy` programs.

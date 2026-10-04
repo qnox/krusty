@@ -249,7 +249,11 @@ impl BodyFirChecker<'_> {
     /// while a receiver is never saved in a temporary at all.
     fn is_immutable_binding_read(&self, expression: FirExprId) -> bool {
         let immutable = |binding: &LocalBinding| !binding.mutable && !binding.lateinit;
-        match self.body.expr(expression).map(|expression| &expression.kind) {
+        match self
+            .body
+            .expr(expression)
+            .map(|expression| &expression.kind)
+        {
             Some(
                 FirExprKind::ImplicitReceiver { .. }
                 | FirExprKind::EnclosingReceiver { .. }
