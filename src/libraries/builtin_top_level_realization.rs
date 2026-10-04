@@ -13,6 +13,107 @@ use crate::libraries::{
 };
 use crate::types::{ArrayFactoryKind, Ty, TypeName};
 
+/// Attach every compiler-owned realization fact for one normalized top-level declaration.
+/// Providers call this only after constructing the complete semantic signature; consumers never
+/// rediscover either fact from a package, facade, or member spelling.
+pub(crate) fn attach_function_realization(
+    package: TypeName,
+    name: &str,
+    function: &mut FunctionInfo,
+) {
+    if let Some(intrinsic) = normalized_function_realization(package, name, function) {
+        function.callable.compiler_intrinsic = Some(intrinsic);
+    }
+    function.callable.semantic_role = normalized_function_semantic_role(package, name, function);
+}
+
+fn property_reference_receiver(receiver: Ty, mutable: bool) -> Option<(u8, &'static [Ty])> {
+    let receiver = receiver.non_null();
+    let internal = receiver.obj_internal()?;
+    let arity = [
+        (
+            if mutable {
+                "kotlin/reflect/KMutableProperty0"
+            } else {
+                "kotlin/reflect/KProperty0"
+            },
+            0,
+        ),
+        (
+            if mutable {
+                "kotlin/reflect/KMutableProperty1"
+            } else {
+                "kotlin/reflect/KProperty1"
+            },
+            1,
+        ),
+    ]
+    .into_iter()
+    .find_map(|(candidate, arity)| {
+        (internal == crate::types::type_name(candidate)).then_some(arity)
+    })?;
+    let arguments = receiver.type_args();
+    (arguments.len() == arity as usize + 1).then_some((arity, arguments))
+}
+
+fn property_reference_metadata_parameter(ty: Ty) -> bool {
+    let ty = ty.non_null();
+    ty.obj_internal() == Some(crate::types::type_name("kotlin/reflect/KProperty"))
+        && matches!(ty.type_args(), [Ty::StarProjection(_)])
+}
+
+pub(crate) fn function_semantic_role(
+    facts: &BuiltinFunctionDeclaration<'_>,
+) -> Option<crate::types::SemanticCallRole> {
+    use crate::types::SemanticCallRole;
+
+    if facts.package != crate::types::wk::kotlin_package()
+        || facts.kind != FnKind::Extension
+        || facts.context_count != 0
+        || facts.is_suspend
+        || !facts.is_operator
+        || facts.is_infix
+        || facts.vararg.is_some()
+    {
+        return None;
+    }
+    let receiver = facts.receiver?;
+    if facts.name == "getValue" {
+        let (arity, arguments) = property_reference_receiver(receiver, false)?;
+        let [this_ref, property] = facts.params else {
+            return None;
+        };
+        let this_ref_matches = match arity {
+            0 => *this_ref == Ty::nullable(Ty::obj_name(crate::types::wk::any())),
+            1 => *this_ref == arguments[0],
+            _ => false,
+        };
+        return (facts.type_parameter_count == arity as usize + 1
+            && this_ref_matches
+            && property_reference_metadata_parameter(*property)
+            && facts.ret == arguments[arity as usize])
+            .then_some(SemanticCallRole::KotlinPropertyReferenceDelegateGet(arity));
+    }
+    if facts.name == "setValue" {
+        let (arity, arguments) = property_reference_receiver(receiver, true)?;
+        let [this_ref, property, value] = facts.params else {
+            return None;
+        };
+        let this_ref_matches = match arity {
+            0 => *this_ref == Ty::nullable(Ty::obj_name(crate::types::wk::any())),
+            1 => *this_ref == arguments[0],
+            _ => false,
+        };
+        return (facts.type_parameter_count == arity as usize + 1
+            && this_ref_matches
+            && property_reference_metadata_parameter(*property)
+            && *value == arguments[arity as usize]
+            && facts.ret == Ty::Unit)
+            .then_some(SemanticCallRole::KotlinPropertyReferenceDelegateSet(arity));
+    }
+    None
+}
+
 fn plain(facts: &BuiltinFunctionDeclaration<'_>, kind: FnKind) -> bool {
     facts.kind == kind
         && facts.context_count == 0
@@ -574,6 +675,31 @@ pub(crate) fn normalized_function_realization(
     function_realization(facts)
 }
 
+/// Attach a semantic language role to an already-normalized provider callable. Unlike a compiler
+/// intrinsic this is consumed by every backend and remains tied to the selected declaration.
+pub(crate) fn normalized_function_semantic_role(
+    package: TypeName,
+    name: &str,
+    function: &FunctionInfo,
+) -> Option<crate::types::SemanticCallRole> {
+    let params = function.semantic_params();
+    let generic = function.generic_sig.as_ref();
+    function_semantic_role(&BuiltinFunctionDeclaration {
+        package,
+        name,
+        kind: function.kind,
+        receiver: function.semantic_receiver(),
+        params: params.as_ref(),
+        ret: generic.map_or(function.callable.ret, |signature| signature.ret),
+        context_count: function.context_count,
+        type_parameter_count: generic.map_or(0, |signature| signature.formals.len()),
+        vararg: function.call_sig.vararg_index,
+        is_suspend: function.flags.suspend,
+        is_operator: function.flags.operator,
+        is_infix: function.flags.infix,
+    })
+}
+
 pub(crate) fn property_realization(
     facts: BuiltinPropertyDeclaration<'_>,
 ) -> Option<CompilerIntrinsic> {
@@ -998,5 +1124,41 @@ mod tests {
             normalized_function_realization(package, "rangeTo", &same_shape),
             None
         );
+    }
+
+    #[test]
+    fn property_reference_delegate_roles_require_the_complete_extension_signature() {
+        let any = Ty::obj_name(crate::types::wk::any());
+        let value = Ty::ty_param("V", any);
+        let receiver = Ty::obj_args("kotlin/reflect/KProperty0", &[value]);
+        let property = Ty::obj_args(
+            "kotlin/reflect/KProperty",
+            &[Ty::star_projection(Ty::nullable(any))],
+        );
+        let params = [Ty::nullable(any), property];
+        let declaration = BuiltinFunctionDeclaration {
+            package: crate::types::wk::kotlin_package(),
+            name: "getValue",
+            kind: FnKind::Extension,
+            receiver: Some(receiver),
+            params: &params,
+            ret: value,
+            context_count: 0,
+            type_parameter_count: 1,
+            vararg: None,
+            is_suspend: false,
+            is_operator: true,
+            is_infix: false,
+        };
+        assert_eq!(
+            function_semantic_role(&declaration),
+            Some(crate::types::SemanticCallRole::KotlinPropertyReferenceDelegateGet(0))
+        );
+
+        let lookalike = BuiltinFunctionDeclaration {
+            package: crate::types::type_name("fixture"),
+            ..declaration
+        };
+        assert_eq!(function_semantic_role(&lookalike), None);
     }
 }

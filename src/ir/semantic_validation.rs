@@ -865,7 +865,7 @@ mod tests {
         IrSamTarget {
             classifier: crate::types::type_name("Action"),
             method: "invoke".to_string(),
-            method_target: crate::fir::FirSamMethod::FunctionTypeInvoke,
+            method_target: crate::ir::IrSamMethod::FunctionTypeInvoke,
             parameters: Vec::new(),
             result: Ty::Unit,
             declared_parameters: Vec::new(),

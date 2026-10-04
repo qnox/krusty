@@ -27,18 +27,26 @@ fn facade_storage_is_carrier_erased(
     realization.facade_storage && erase(&reference.prop_ty, under) != reference.prop_ty
 }
 
-/// Whether the selected getter physically hands back something OTHER than `value_class`'s carrier.
+/// Whether a dependency getter physically hands back something OTHER than `value_class`'s carrier.
 ///
 /// A specialized generic property (`Pair<UInt, _>::first`) has semantic type `UInt`, but its
 /// selected declaration still exposes `getFirst(): Object`. That object is already the boxed value
-/// and the declaration is not value-class-mangled, so no realization applies to it. The answer
-/// comes from the physical return the selection RECORDED; reading it back out of a rendered
-/// descriptor would make a rendering the authority over a declaration.
-fn getter_bypasses_the_carrier(
+/// and the declaration is not value-class-mangled, so no realization applies to it. A source
+/// accessor is different: its recorded return and descriptor are still pre-realization inputs and
+/// this pass is what projects them to the carrier. Treating that semantic return as already
+/// physical leaves private/extension bridges on the boxed descriptor and makes their reflection
+/// identity disagree with an ordinary reference to the same declaration.
+///
+/// The dependency answer comes from the physical return the provider RECORDED; reading it back out
+/// of a rendered descriptor would make a rendering the authority over a declaration.
+fn dependency_getter_bypasses_the_carrier(
     realization: &PropertyReferenceRealization,
     value_class: TypeName,
     under: &Under,
 ) -> bool {
+    if !realization.accessor_names_are_physical {
+        return false;
+    }
     let Some(physical) = realization.physical_getter_ret else {
         return false;
     };
@@ -84,7 +92,9 @@ pub(super) fn realize(
         else {
             continue;
         };
-        if !top_level && getter_bypasses_the_carrier(realization, value_class, callable_under) {
+        if !top_level
+            && dependency_getter_bypasses_the_carrier(realization, value_class, callable_under)
+        {
             continue;
         }
         if !carrier_erased {
@@ -118,15 +128,22 @@ pub(super) fn realize(
         // mangling: `getTopLevel()I` keeps its plain name while a member's `getZ-a_XrcN0()I` does
         // not. Its SETTER still mangles — a value-class PARAMETER always does — which is why the
         // two accessors of the same property do not agree on it.
-        if !realization.accessor_names_are_physical {
-            reference.getter_name = vc_mangle(
+        let physical_getter_name = if realization.accessor_names_are_physical {
+            reference.getter_name.clone()
+        } else {
+            vc_mangle(
                 &realization.declared_getter_name,
                 &[],
                 &reference.prop_ty,
                 callable_under,
                 top_level,
                 false,
-            );
+            )
+        };
+        // A private member bridge remains the physical call target. Its declaration's realized
+        // name is nevertheless the property identity Kotlin reflection reports.
+        if realization.accessor_role != PropertyAccessorRole::AccessBridge {
+            reference.getter_name.clone_from(&physical_getter_name);
         }
         // The accessor exchanges the value class's erased CARRIER, never the boxed object. A
         // member or top-level property has no written descriptor, so the one the emitter would
@@ -152,19 +169,26 @@ pub(super) fn realize(
             }
             (None, None) => {}
         }
+        if let Some((name, descriptor)) = realization.reflection_getter.as_mut() {
+            name.clone_from(&physical_getter_name);
+            *descriptor = erase_descriptor(descriptor, callable_under);
+        }
         if !realization.accessor_names_are_physical {
             if let (true, Some(declared_setter)) = (
                 reference.setter_name.is_some(),
                 realization.declared_setter_name.as_deref(),
             ) {
-                reference.setter_name = Some(vc_mangle(
+                let physical_setter_name = vc_mangle(
                     declared_setter,
                     std::slice::from_ref(&reference.prop_ty),
                     &Ty::Unit,
                     callable_under,
                     top_level,
                     false,
-                ));
+                );
+                if realization.accessor_role != PropertyAccessorRole::AccessBridge {
+                    reference.setter_name = Some(physical_setter_name);
+                }
             }
         }
         match (
@@ -282,8 +306,13 @@ pub(super) fn realize(
             .physical_getter_ret
             .map(|physical| desc(&physical))
             .unwrap_or_else(|| desc(&erase(&reference.prop_ty, callable_under)));
+        let getter_descriptor = format!("({}){physical_ret}", desc(&carrier));
+        if let Some((name, descriptor)) = realization.reflection_getter.as_mut() {
+            name.clone_from(&getter);
+            descriptor.clone_from(&getter_descriptor);
+        }
         reference.getter_name = getter;
-        reference.getter_descriptor = Some(format!("({}){physical_ret}", desc(&carrier)));
+        reference.getter_descriptor = Some(getter_descriptor);
         if let (Some(setter), Some(declared_setter)) = (
             reference.setter_name.as_mut(),
             realization.declared_setter_name.as_deref(),
@@ -426,7 +455,7 @@ mod tests {
                 unboxed_receiver_value_class: None,
                 getter_bridge_owner: None,
                 setter_bridge_owner: None,
-                protected_reflection_getter: None,
+                reflection_getter: None,
                 protected_bridge: None,
                 protected_getter_bridge: None,
                 protected_setter_bridge: None,
@@ -467,15 +496,36 @@ mod tests {
         );
     }
 
+    /// A source accessor's descriptor is an input to this pass, even when a private/extension
+    /// bridge made that descriptor explicit. Only a provider's already-physical dependency
+    /// accessor may prove that the selected declaration returns a box instead of the carrier.
+    #[test]
+    fn only_a_dependency_physical_return_can_bypass_carrier_realization() {
+        let (_, mut under, mut realizations, reference) = reference_to("readTally");
+        let token = crate::types::type_name("Token");
+        under.insert(token, Ty::Int);
+        let realization = realizations.get_mut(reference).expect("the realization");
+        realization.physical_getter_ret = Some(Ty::obj_name(token));
+
+        assert!(
+            !dependency_getter_bypasses_the_carrier(realization, token, &under),
+            "a source return is still awaiting value-class realization",
+        );
+        realization.accessor_names_are_physical = true;
+        assert!(
+            dependency_getter_bypasses_the_carrier(realization, token, &under),
+            "a provider's Object return is the dependency declaration's final ABI",
+        );
+    }
+
     /// An access bridge is named after the exact accessor the SELECTION recorded, not after a name
     /// this pass rebuilt: the bridge exists for that one declaration.
     #[test]
     fn an_access_bridge_is_named_after_the_accessor_the_selection_recorded() {
         let (mut ir, under, mut realizations, reference) = reference_to("readTally");
-        realizations
-            .get_mut(reference)
-            .expect("the realization")
-            .accessor_role = PropertyAccessorRole::AccessBridge;
+        let realization = realizations.get_mut(reference).expect("the realization");
+        realization.accessor_role = PropertyAccessorRole::AccessBridge;
+        realization.reflection_getter = Some(("readTally".to_owned(), "()I".to_owned()));
         assert!(realize(&mut ir, &under, &mut realizations));
         assert_eq!(
             ir.classes[0]
@@ -492,6 +542,15 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![0],
             "the bridge is planned for the recorded accessor itself",
+        );
+        assert_eq!(
+            realizations
+                .get(reference)
+                .expect("the realization")
+                .reflection_getter
+                .as_ref(),
+            Some(&("readTally-impl".to_owned(), "(I)I".to_owned())),
+            "reflection names the realized declaration, not its access bridge",
         );
     }
 

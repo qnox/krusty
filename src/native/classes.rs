@@ -345,7 +345,12 @@ fn any_slot(role: Option<crate::types::SemanticCallRole>) -> Option<u32> {
         Some(crate::types::SemanticCallRole::KotlinAnyToString) => Some(2),
         Some(
             crate::types::SemanticCallRole::KotlinComparableCompareTo
-            | crate::types::SemanticCallRole::KotlinFunctionInvoke,
+            | crate::types::SemanticCallRole::KotlinFunctionInvoke
+            | crate::types::SemanticCallRole::KotlinCallableReferenceName
+            | crate::types::SemanticCallRole::KotlinPropertyReferenceGet(_)
+            | crate::types::SemanticCallRole::KotlinPropertyReferenceSet(_)
+            | crate::types::SemanticCallRole::KotlinPropertyReferenceDelegateGet(_)
+            | crate::types::SemanticCallRole::KotlinPropertyReferenceDelegateSet(_),
         ) => None,
         None => None,
     }
@@ -1697,7 +1702,7 @@ fn overridden_property_slot(
 /// needs a bridge and declines instead of being pointed at.
 /// The vtable number every function value's body occupies, which the runtime names as
 /// `KT_SLOT_INVOKE`: right after `kotlin.Any`'s three.
-const FUNCTION_SLOT: u32 = 3;
+pub(super) const FUNCTION_SLOT: u32 = 3;
 
 fn external_invoke_slot(
     edge: &crate::ir::IrFunctionOverride,

@@ -4,8 +4,7 @@
 //! checker's decision (`fir::body_check::lambda_tests`); these tests show lowering carries it.
 
 use super::tests::lower_single_source;
-use crate::fir::{FirSamMethod, ResolvedFunctionOverrideTarget};
-use crate::ir::{IrExpr, IrFile, IrSamTarget};
+use crate::ir::{IrExpr, IrFile, IrSamMethod, IrSamTarget};
 use crate::types::{type_name, Ty};
 
 /// Every SAM target in the file, in expression order.
@@ -20,7 +19,7 @@ fn sam_targets(ir: &IrFile) -> Vec<&IrSamTarget> {
 }
 
 /// The checked callable of the member `name(parameters)` that `owner` declares in this file.
-fn member(ir: &IrFile, owner: &str, name: &str, parameters: &[Ty]) -> FirSamMethod {
+fn member(ir: &IrFile, owner: &str, name: &str, parameters: &[Ty]) -> IrSamMethod {
     let owner = type_name(owner);
     let matches = ir
         .checked_callable_functions
@@ -31,9 +30,7 @@ fn member(ir: &IrFile, owner: &str, name: &str, parameters: &[Ty]) -> FirSamMeth
                 && function.name == name
                 && function.params == parameters
         })
-        .map(|(callable, _)| {
-            FirSamMethod::Declared(ResolvedFunctionOverrideTarget::Module(*callable))
-        })
+        .map(|(callable, _)| IrSamMethod::Module(*callable))
         .collect::<Vec<_>>();
     let [target] = matches[..] else {
         panic!("one {name}{parameters:?} in {owner:?}, found {matches:?}")
@@ -100,7 +97,7 @@ fn a_function_type_invoke_target_survives_lowering() {
     };
     assert_eq!(
         (target.method_target, target.wraps_function_value),
-        (FirSamMethod::FunctionTypeInvoke, false)
+        (IrSamMethod::FunctionTypeInvoke, false)
     );
 }
 

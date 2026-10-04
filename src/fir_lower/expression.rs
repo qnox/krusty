@@ -1704,7 +1704,9 @@ impl BodyLowering<'_> {
                     let target = crate::ir::IrSamTarget {
                         classifier: conversion.classifier,
                         method: conversion.method.into(),
-                        method_target: conversion.method_target,
+                        method_target: super::sam_conversions::ir_sam_method(
+                            conversion.method_target,
+                        ),
                         parameters: conversion.parameters.iter().map(|ty| ty.get()).collect(),
                         result: conversion.result.get(),
                         declared_parameters: conversion

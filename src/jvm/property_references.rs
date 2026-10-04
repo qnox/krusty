@@ -457,7 +457,7 @@ fn classifier_property(
             unboxed_receiver_value_class: None,
             getter_bridge_owner: None,
             setter_bridge_owner: None,
-            protected_reflection_getter: None,
+            reflection_getter: None,
             protected_bridge: None,
             protected_getter_bridge: None,
             protected_setter_bridge: None,
@@ -648,7 +648,7 @@ fn external_property(
             unboxed_receiver_value_class: None,
             getter_bridge_owner: None,
             setter_bridge_owner: None,
-            protected_reflection_getter: None,
+            reflection_getter: None,
             protected_bridge: None,
             protected_getter_bridge: None,
             protected_setter_bridge: None,
@@ -812,6 +812,13 @@ fn module_property(
             crate::jvm::names::method_descriptor(std::slice::from_ref(&receiver), property.ty)
         })
     };
+    let reflection_getter = access_bridge.then(|| {
+        let params = property.extension_receiver.into_iter().collect::<Vec<_>>();
+        (
+            declared_getter_name.clone(),
+            crate::jvm::names::method_descriptor(&params, property.ty),
+        )
+    });
     // `@JvmField` makes the declaration's storage its JVM surface. A compile-time constant instead
     // returns its semantic payload directly, matching kotlinc without choosing a field owner.
     let field = (getter_constant.is_none() && !access_bridge)
@@ -903,7 +910,7 @@ fn module_property(
             unboxed_receiver_value_class: None,
             getter_bridge_owner: None,
             setter_bridge_owner: None,
-            protected_reflection_getter: None,
+            reflection_getter,
             protected_bridge,
             protected_getter_bridge: None,
             protected_setter_bridge: None,

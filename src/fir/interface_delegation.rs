@@ -123,8 +123,10 @@ pub struct ResolvedDelegatedProperty {
     pub context_parameters: Box<[ResolvedDelegatedContextParameter]>,
     pub getter: ResolvedDelegatedCall,
     pub setter: Option<ResolvedDelegatedCall>,
-    /// Interface declaration the forwarders realize (the `var` one when a setter is delegated).
-    pub overridden: Box<ResolvedDelegatedPropertyDeclaration>,
+    /// Exact declarations the generated accessors override. The delegated interface declaration
+    /// comes first; a concrete inherited class property follows when Kotlin delegation replaces
+    /// that superclass slot (KT-70417).
+    pub overridden: Box<[ResolvedDelegatedPropertyDeclaration]>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -133,9 +135,13 @@ pub struct ResolvedDelegatedPropertyDeclaration {
     pub owner: TypeName,
     /// Unsubstituted declared type, the one the overridden accessors are erased from.
     pub ty: ResolvedTy,
+    /// The declaration as viewed through the delegating classifier's applied hierarchy.
+    pub applied_ty: ResolvedTy,
     /// Unsubstituted declared receiver of a member-extension property, erased likewise.
     pub receiver: Option<ResolvedTy>,
+    pub mutable: bool,
     pub interface: bool,
+    pub depth: u32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -194,6 +200,8 @@ impl ResolvedInterfaceDelegation {
                     ResolvedDelegatedMember::Property(property) => {
                         property.name.len()
                             + type_parameters_payload_bytes(&property.type_parameters)
+                            + property.overridden.len()
+                                * std::mem::size_of::<ResolvedDelegatedPropertyDeclaration>()
                             + property.context_parameters.len()
                                 * std::mem::size_of::<ResolvedDelegatedContextParameter>()
                             + property

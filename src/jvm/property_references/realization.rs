@@ -115,9 +115,13 @@ pub(crate) struct PropertyReferenceRealization {
     /// separate because a public getter may be paired with a protected setter.
     pub getter_bridge_owner: Option<TypeName>,
     pub setter_bridge_owner: Option<TypeName>,
-    /// The selected getter signature reported to Kotlin reflection when the physical call is
-    /// redirected through a protected bridge.
-    pub protected_reflection_getter: Option<(String, String)>,
+    /// The selected declaration's getter signature reported to Kotlin reflection when the
+    /// physical call is redirected through a bridge.
+    ///
+    /// A bridge is an invocation detail, not a new property identity. Keeping the declaration
+    /// signature here makes immutable and mutable views of the same property compare equal even
+    /// when only the mutable carrier needs an access bridge for a private setter.
+    pub reflection_getter: Option<(String, String)>,
     /// A protected accessor referenced from a subclass in another package needs a static bridge on
     /// that subclass: the generated reference carrier is not itself a subclass and therefore
     /// cannot issue the protected call. Getter and setter are independent because Kotlin permits a
@@ -265,7 +269,7 @@ impl PropertyReferenceRealizations {
                 reference.getter_name = bridge_name;
                 reference.getter_descriptor = Some(bridge_descriptor);
                 realization.getter_bridge_owner = Some(intent.bridge_owner);
-                realization.protected_reflection_getter = Some((target_name, target_descriptor));
+                realization.reflection_getter = Some((target_name, target_descriptor));
             }
             if intent.setter {
                 let Some(target_name) = reference.setter_name.clone() else {

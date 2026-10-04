@@ -422,33 +422,38 @@ fn materialize_delegation(
                         .insert(setter, crate::ir::FnParamInfo::identities(identities));
                 }
                 let implementation_owner = ir.classes[class as usize].fq_name;
-                ir.property_overrides
-                    .entry(implementation_owner)
-                    .or_default()
-                    .push(crate::ir::IrPropertyOverride {
-                        // As for a delegated function, the forwarders realize this exact interface
-                        // declaration; `implementation_getter` names their generated body.
-                        implementation: property.overridden.target,
-                        implementation_getter: Some(getter),
-                        implementation_setter: setter,
-                        implementation_owner,
-                        overridden: property.overridden.target,
-                        overridden_owner: property.overridden.owner,
-                        overridden_is_interface: property.overridden.interface,
-                        name: name.clone(),
-                        declared_type: property.overridden.ty.get(),
-                        applied_type: ty,
-                        implementation_type: ty,
-                        declared_receiver: property
-                            .overridden
-                            .receiver
-                            .map(crate::fir::ResolvedTy::get),
-                        implementation_receiver: extension_receiver,
-                        overridden_mutable: setter.is_some(),
-                        implementation_mutable: setter.is_some(),
-                        has_kotlin_superclass_override: false,
-                        depth: 0,
-                    });
+                let implementation = property
+                    .overridden
+                    .first()
+                    .ok_or(FirFileLoweringFailure::MissingClassifier(declaration))?
+                    .target;
+                for overridden in &property.overridden {
+                    ir.property_overrides
+                        .entry(implementation_owner)
+                        .or_default()
+                        .push(crate::ir::IrPropertyOverride {
+                            // As for a delegated function, the forwarders realize this exact interface
+                            // declaration; `implementation_getter` names their generated body. One
+                            // generated property can also replace a concrete superclass declaration.
+                            implementation,
+                            implementation_getter: Some(getter),
+                            implementation_setter: setter,
+                            implementation_owner,
+                            overridden: overridden.target,
+                            overridden_owner: overridden.owner,
+                            overridden_is_interface: overridden.interface,
+                            name: name.clone(),
+                            declared_type: overridden.ty.get(),
+                            applied_type: overridden.applied_ty.get(),
+                            implementation_type: ty,
+                            declared_receiver: overridden.receiver.map(crate::fir::ResolvedTy::get),
+                            implementation_receiver: extension_receiver,
+                            overridden_mutable: overridden.mutable,
+                            implementation_mutable: setter.is_some(),
+                            has_kotlin_superclass_override: false,
+                            depth: overridden.depth,
+                        });
+                }
                 let type_params = ir_type_parameters(&property.type_parameters);
                 if !type_params.is_empty() {
                     for accessor in std::iter::once(getter).chain(setter) {

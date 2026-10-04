@@ -64,6 +64,15 @@ pub(crate) fn semantic_call_role(
     declaration: BuiltinMemberDeclaration<'_>,
 ) -> Option<SemanticCallRole> {
     if declaration.is_property {
+        if declaration.owner == crate::types::type_name("kotlin/reflect/KCallable")
+            && declaration.name == "name"
+            && declaration.params.is_empty()
+            && declaration.ret == Ty::String
+            && !declaration.is_operator
+            && !declaration.is_infix
+        {
+            return Some(SemanticCallRole::KotlinCallableReferenceName);
+        }
         return None;
     }
     if declaration.owner == crate::types::wk::any() {
@@ -78,13 +87,64 @@ pub(crate) fn semantic_call_role(
             _ => None,
         };
     }
-    (declaration.owner == crate::types::wk::comparable()
+    if declaration.owner == crate::types::wk::comparable()
         && declaration.name == "compareTo"
         && matches!(declaration.params, [Ty::TyParam(..)])
         && declaration.ret == Ty::Int
         && declaration.is_operator
-        && !declaration.is_infix)
-        .then_some(SemanticCallRole::KotlinComparableCompareTo)
+        && !declaration.is_infix
+    {
+        return Some(SemanticCallRole::KotlinComparableCompareTo);
+    }
+
+    let property_arity = [
+        ("kotlin/reflect/KProperty0", 0),
+        ("kotlin/reflect/KProperty1", 1),
+        ("kotlin/reflect/KProperty2", 2),
+    ]
+    .into_iter()
+    .find_map(|(owner, arity)| {
+        (declaration.owner == crate::types::type_name(owner)).then_some(arity)
+    });
+    if let Some(arity) = property_arity {
+        let signature_matches = declaration.params.len() == arity as usize
+            && declaration
+                .params
+                .iter()
+                .all(|parameter| matches!(parameter, Ty::TyParam(..)))
+            && matches!(declaration.ret, Ty::TyParam(..))
+            && !declaration.is_infix;
+        if signature_matches
+            && ((declaration.name == "get" && !declaration.is_operator)
+                || (declaration.name == "invoke" && declaration.is_operator))
+        {
+            return Some(SemanticCallRole::KotlinPropertyReferenceGet(arity));
+        }
+    }
+
+    let mutable_property_arity = [
+        ("kotlin/reflect/KMutableProperty0", 0),
+        ("kotlin/reflect/KMutableProperty1", 1),
+        ("kotlin/reflect/KMutableProperty2", 2),
+    ]
+    .into_iter()
+    .find_map(|(owner, arity)| {
+        (declaration.owner == crate::types::type_name(owner)).then_some(arity)
+    });
+    if let Some(arity) = mutable_property_arity {
+        let signature_matches = declaration.params.len() == arity as usize + 1
+            && declaration
+                .params
+                .iter()
+                .all(|parameter| matches!(parameter, Ty::TyParam(..)))
+            && declaration.ret == Ty::Unit
+            && !declaration.is_operator
+            && !declaration.is_infix;
+        if signature_matches && declaration.name == "set" {
+            return Some(SemanticCallRole::KotlinPropertyReferenceSet(arity));
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -155,6 +215,41 @@ mod tests {
             )),
             None,
             "the Comparable owner and spelling do not replace its generic declaration signature"
+        );
+
+        let mut callable_name = declaration(
+            crate::types::type_name("kotlin/reflect/KCallable"),
+            "name",
+            &[],
+            Ty::String,
+        );
+        callable_name.is_property = true;
+        assert_eq!(
+            semantic_call_role(callable_name),
+            Some(SemanticCallRole::KotlinCallableReferenceName)
+        );
+
+        let receiver = Ty::ty_param("T", Ty::obj_name(any));
+        let value = Ty::ty_param("V", Ty::obj_name(any));
+        let get_parameters = [receiver];
+        assert_eq!(
+            semantic_call_role(declaration(
+                crate::types::type_name("kotlin/reflect/KProperty1"),
+                "get",
+                &get_parameters,
+                value,
+            )),
+            Some(SemanticCallRole::KotlinPropertyReferenceGet(1))
+        );
+        assert_eq!(
+            semantic_call_role(declaration(
+                crate::types::type_name("fixture/KProperty1"),
+                "get",
+                &get_parameters,
+                value,
+            )),
+            None,
+            "a reflection-shaped lookalike has no language role"
         );
     }
 }

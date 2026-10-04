@@ -2254,11 +2254,7 @@ pub(crate) fn lower_value_classes(
                 let (name, ret) = match ir.semantic_call_roles[&id] {
                     SemanticCallRole::KotlinAnyHashCode => ("hashCode-impl", "I"),
                     SemanticCallRole::KotlinAnyToString => ("toString-impl", "Ljava/lang/String;"),
-                    SemanticCallRole::KotlinAnyEquals
-                    | SemanticCallRole::KotlinComparableCompareTo
-                    | SemanticCallRole::KotlinFunctionInvoke => {
-                        unreachable!("excluded by the guard")
-                    }
+                    _ => unreachable!("excluded by the guard"),
                 };
                 let Repr::Unboxed(value_class) = repr_ctx.repr(*receiver) else {
                     unreachable!("guarded unboxed receiver")

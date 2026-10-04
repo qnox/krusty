@@ -19,6 +19,26 @@ impl BodyLowering<'_, '_, '_> {
         args: &[u32],
         ret: Ty,
     ) -> Option<Result<Option<Value>, Unsupported>> {
+        let operation = match intrinsic {
+            Some(crate::backend::BackendCompilerIntrinsic::ArrayGet) => Some(IrIntrinsic::ArrayGet),
+            Some(crate::backend::BackendCompilerIntrinsic::ArraySet) => Some(IrIntrinsic::ArraySet),
+            Some(crate::backend::BackendCompilerIntrinsic::ArraySize) => {
+                Some(IrIntrinsic::ArraySize)
+            }
+            Some(crate::backend::BackendCompilerIntrinsic::StringGet) => {
+                Some(IrIntrinsic::StringGet)
+            }
+            Some(crate::backend::BackendCompilerIntrinsic::StringLength) => {
+                Some(IrIntrinsic::StringLength)
+            }
+            Some(crate::backend::BackendCompilerIntrinsic::NullableAnyToString) => {
+                Some(IrIntrinsic::NullableAnyToString)
+            }
+            _ => None,
+        };
+        if let Some(operation) = operation {
+            return Some(self.intrinsic(operation, ret, receiver, args));
+        }
         match intrinsic {
             Some(crate::backend::BackendCompilerIntrinsic::StringPlus) => {
                 let (Some(receiver), [argument]) = (receiver, args) else {
@@ -36,12 +56,6 @@ impl BodyLowering<'_, '_, '_> {
                     ));
                 }
                 Some(self.boolean_not(receiver, ret))
-            }
-            Some(crate::backend::BackendCompilerIntrinsic::StringGet) => {
-                let (Some(receiver), [index]) = (receiver, args) else {
-                    return Some(Err("a malformed `String.get`".to_string()));
-                };
-                Some(self.string_get(receiver, *index, ret))
             }
             _ => None,
         }
@@ -61,12 +75,17 @@ pub(super) fn runtime_member_role(
             Some(RuntimeMemberRole::ToString)
         }
         (_, Some(BackendSemanticCallRole::KotlinAnyHashCode)) => Some(RuntimeMemberRole::HashCode),
+        (_, Some(BackendSemanticCallRole::KotlinAnyEquals)) => Some(RuntimeMemberRole::Equals),
         (
             _,
             Some(
-                BackendSemanticCallRole::KotlinAnyEquals
-                | BackendSemanticCallRole::KotlinComparableCompareTo
-                | BackendSemanticCallRole::KotlinFunctionInvoke,
+                BackendSemanticCallRole::KotlinComparableCompareTo
+                | BackendSemanticCallRole::KotlinFunctionInvoke
+                | BackendSemanticCallRole::KotlinCallableReferenceName
+                | BackendSemanticCallRole::KotlinPropertyReferenceGet(_)
+                | BackendSemanticCallRole::KotlinPropertyReferenceSet(_)
+                | BackendSemanticCallRole::KotlinPropertyReferenceDelegateGet(_)
+                | BackendSemanticCallRole::KotlinPropertyReferenceDelegateSet(_),
             ),
         ) => None,
         _ => None,
@@ -85,6 +104,13 @@ mod tests {
                 Some(crate::backend::BackendSemanticCallRole::KotlinAnyToString),
             ),
             Some(crate::native::intrinsics::RuntimeMemberRole::ToString)
+        );
+        assert_eq!(
+            runtime_member_role(
+                None,
+                Some(crate::backend::BackendSemanticCallRole::KotlinAnyEquals),
+            ),
+            Some(crate::native::intrinsics::RuntimeMemberRole::Equals)
         );
     }
 }

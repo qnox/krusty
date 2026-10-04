@@ -254,6 +254,37 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         }
     }
 
+    /// The carrier a write of a top-level property must produce.
+    pub(super) fn top_level_written_ty(
+        &mut self,
+        target: &crate::fir::PropertyId,
+    ) -> Result<Ty, Unsupported> {
+        Ok(match self.top_level(target, true)? {
+            TopLevel::Slot(index) => self.file.ir.statics[index as usize].ty,
+            TopLevel::Accessor(function) => self.file.ir.functions[function as usize].params[0],
+        })
+    }
+
+    /// [`Self::top_level_write`] with the value already evaluated at that carrier.
+    pub(super) fn top_level_write_value(
+        &mut self,
+        target: &crate::fir::PropertyId,
+        value: Value,
+    ) -> Result<(), Unsupported> {
+        match self.top_level(target, true)? {
+            TopLevel::Slot(index) => {
+                let slot = self.file.statics[index as usize];
+                let address = self.data_address(slot);
+                self.builder.ins().store(trusted(), value, address, 0);
+                Ok(())
+            }
+            TopLevel::Accessor(function) => {
+                self.accessor_call(function, &[value])?;
+                Ok(())
+            }
+        }
+    }
+
     pub(super) fn static_read(&mut self, index: u32) -> Result<Option<Value>, Unsupported> {
         let ty = self.file.ir.statics[index as usize].ty;
         let slot = self.file.statics[index as usize];

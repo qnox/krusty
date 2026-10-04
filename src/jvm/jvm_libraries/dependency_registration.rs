@@ -10,7 +10,12 @@ use crate::libraries::{
 };
 
 impl JvmLibraries {
-    pub(super) fn register_external_callable(&self, callable: &mut LibraryCallable, kind: FnKind) {
+    pub(super) fn register_external_callable(
+        &self,
+        callable: &mut LibraryCallable,
+        kind: FnKind,
+        declaration_package: Option<crate::types::TypeName>,
+    ) {
         if !matches!(callable.origin, crate::libraries::Origin::Library) {
             return;
         }
@@ -28,6 +33,10 @@ impl JvmLibraries {
         }
         if let Some(identity) = callable.external_identity {
             self.cp.enrich_external_callable(identity, callable);
+            if let Some(package) = declaration_package {
+                self.cp
+                    .publish_external_callable_declaration_package(identity, package);
+            }
             return;
         }
         let kind = match kind {
@@ -35,7 +44,11 @@ impl JvmLibraries {
             FnKind::Extension => super::super::classpath::ExternalCallableKind::Extension,
             FnKind::Member => super::super::classpath::ExternalCallableKind::Member,
         };
-        callable.external_identity = Some(self.cp.intern_external_callable(callable, kind));
+        callable.external_identity = Some(self.cp.intern_external_callable(
+            callable,
+            kind,
+            declaration_package,
+        ));
     }
 
     pub(super) fn register_external_inline_member(&self, member: &mut LibraryMember) {
@@ -51,7 +64,7 @@ impl JvmLibraries {
         kind: FnKind,
     ) {
         callable.external_identity = None;
-        self.register_external_callable(callable, kind);
+        self.register_external_callable(callable, kind, None);
     }
 
     fn register_external_inline_callable(&self, member: &mut LibraryMember, kind: FnKind) {
@@ -63,7 +76,11 @@ impl JvmLibraries {
         member.external_identity = callable.external_identity;
     }
 
-    pub(super) fn register_external_property(&self, property: &mut PropertyInfo) {
+    pub(super) fn register_external_property(
+        &self,
+        property: &mut PropertyInfo,
+        declaration_package: Option<crate::types::TypeName>,
+    ) {
         // A JavaBean projection reuses the Java methods' declarations; it does not declare Kotlin
         // accessors with generated property-parameter roles. The function provider publishes those
         // methods' exact parameter identities before this projection is registered.
@@ -97,7 +114,7 @@ impl JvmLibraries {
             "a normalized dependency property getter publishes every parameter identity"
         );
         property.getter.visibility = property.visibility;
-        self.register_external_callable(&mut property.getter, kind);
+        self.register_external_callable(&mut property.getter, kind, declaration_package);
         if declares_accessors {
             if let Some(identity) = property.getter.external_identity {
                 self.cp.publish_external_callable_parameter_identities(
@@ -124,7 +141,7 @@ impl JvmLibraries {
                 setter_parameter_identities.len(),
                 "a normalized dependency property setter publishes every parameter identity"
             );
-            self.register_external_callable(setter, kind);
+            self.register_external_callable(setter, kind, declaration_package);
             if declares_accessors {
                 if let Some(identity) = setter.external_identity {
                     self.cp.publish_external_callable_parameter_identities(
@@ -156,6 +173,7 @@ impl JvmLibraries {
     pub(super) fn register_external_callables(
         &self,
         callables: crate::libraries::Callables,
+        declaration_package: Option<crate::types::TypeName>,
     ) -> crate::libraries::Callables {
         let (mut functions, mut properties) = callables.into_parts();
         for function in &mut functions.overloads {
@@ -182,7 +200,11 @@ impl JvmLibraries {
                             "a normalized protected dependency function publishes every parameter identity",
                         )
                 });
-            self.register_external_callable(&mut function.callable, function.kind);
+            self.register_external_callable(
+                &mut function.callable,
+                function.kind,
+                declaration_package,
+            );
             if let (Some(identity), Some(parameter_identities)) =
                 (function.callable.external_identity, parameter_identities)
             {
@@ -191,7 +213,7 @@ impl JvmLibraries {
             }
         }
         for property in &mut properties.overloads {
-            self.register_external_property(property);
+            self.register_external_property(property, declaration_package);
         }
         crate::libraries::Callables::from_parts(functions, properties)
     }

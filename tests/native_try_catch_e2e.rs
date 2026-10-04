@@ -280,26 +280,6 @@ fn a_null_cast_is_a_null_pointer_exception_naming_the_target_type() {
 }
 
 #[test]
-fn a_null_cast_to_an_erased_type_parameter_names_it_by_its_owner() {
-    // The descriptor is erased, the name is not. Kotlin/Native 2.4.20 raises this exception with no
-    // message; krusty renders the target as the JVM backend does, except that a target without file
-    // facades keeps a top-level function in its package: `T of p.generic` where the JVM says
-    // `T of p.ErasedNullCastKt.generic`.
-    expect_native_box(
-        "package p\n\
-         fun <T : Any> generic(a: Any?): T = a as T\n\
-         fun box(): String {\n\
-         \x20   val cast = try { generic<String>(null); \"no throw\" }\n\
-         \x20              catch (e: NullPointerException) { e.message ?: \"none\" }\n\
-         \x20   if (cast != \"null cannot be cast to non-null type T of p.generic\") return cast\n\
-         \x20   return if (generic<String>(\"k\") == \"k\") \"OK\" else \"fail: non-null\"\n\
-         }\n",
-        "ErasedNullCast",
-        "OK",
-    );
-}
-
-#[test]
 fn reading_a_lateinit_property_before_it_is_set_throws() {
     // The guard is at the READ, which is where kotlinc puts it: the field being null is the only
     // evidence there is, and it is why `lateinit` is confined to types that have a null.
@@ -344,6 +324,32 @@ fn valueof_of_an_unknown_constant_throws() {
 }
 
 #[test]
+fn a_throw_inside_an_invoked_lambda_reaches_the_try_around_the_call() {
+    // A DISPATCHED call is as able to throw as a direct one and easier to forget: it is the one
+    // call this backend emits that does not go through the ordinary call helper. `expectFail { … }`
+    // is the corpus's own shape and the exception walked straight out of the `try` until the
+    // indirect call checked too.
+    expect_native_box(
+        "fun expectFail(f: () -> Unit): String {\n\
+         \x20   try {\n\
+         \x20       f()\n\
+         \x20   } catch (e: ArithmeticException) {\n\
+         \x20       return \"caught\"\n\
+         \x20   }\n\
+         \x20   return \"fail: no throw\"\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   val zero = 0\n\
+         \x20   val one = expectFail { 1 / zero }\n\
+         \x20   val two = expectFail { 2 * (1 / zero) }\n\
+         \x20   return if (one == \"caught\" && two == \"caught\") \"OK\" else \"fail: $one/$two\"\n\
+         }\n",
+        "ThrowThroughLambda",
+        "OK",
+    );
+}
+
+#[test]
 fn a_lateinit_property_that_overrides_one_is_guarded_too() {
     // The read goes through a vtable slot because the property overrides an interface's, so it
     // reaches the synthesized getter rather than the field directly. The guard has to be on what
@@ -363,6 +369,141 @@ fn a_lateinit_property_that_overrides_one_is_guarded_too() {
          \x20   return if (tagged.read() == \"set\") \"OK\" else \"fail after set\"\n\
          }\n",
         "LateinitOverride",
+        "OK",
+    );
+}
+
+#[test]
+fn a_cast_between_two_primitives_can_only_be_an_erased_object_cast() {
+    // Kotlin has no cast between two primitive types -- `val x: Int = 1; x as Byte` does not
+    // compile -- so when one reaches this backend the source was a type PARAMETER that the call
+    // substituted. The question it is really asking is the one the value's own box answers, and
+    // unboxing and converting instead would answer `1` where Kotlin raises ClassCastException.
+    expect_native_box(
+        "fun <T> check(param: T, f: (T) -> Unit): String {\n\
+         \x20   try { f(param) } catch (e: ClassCastException) { return \"threw\" }\n\
+         \x20   return \"quiet\"\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   val a = check(1, { it as Byte })\n\
+         \x20   val b = check(1, { it as Int })\n\
+         \x20   return if (a == \"threw\" && b == \"quiet\") \"OK\" else \"fail: $a/$b\"\n\
+         }\n",
+        "ErasedPrimitiveCast",
+        "OK",
+    );
+}
+
+#[test]
+fn assert_fails_with_answers_the_exception_the_block_threw() {
+    // The reified `T` never reaches the backend as a type argument: kotlinc resolves it into the
+    // call's RETURN type, so the class to test against is read from there.
+    expect_native_box(
+        "import kotlin.test.assertFailsWith\n\
+         fun box(): String {\n\
+         \x20   val e = assertFailsWith<IllegalStateException> { error(\"boom\") }\n\
+         \x20   return if (e.message == \"boom\") \"OK\" else \"fail: ${e.message}\"\n\
+         }\n",
+        "AssertFailsWith",
+        "OK",
+    );
+}
+
+#[test]
+fn assert_fails_with_a_supertype_takes_it() {
+    // The test is `is_instance`, the same one a `catch` clause makes, so a supertype matches.
+    // kotlinc 2.4.10 confirms: `assertFailsWith<RuntimeException>` takes an IllegalStateException.
+    expect_native_box(
+        "import kotlin.test.assertFailsWith\n\
+         fun box(): String {\n\
+         \x20   val e = assertFailsWith<RuntimeException> { error(\"sup\") }\n\
+         \x20   return if (e.message == \"sup\") \"OK\" else \"fail: ${e.message}\"\n\
+         }\n",
+        "AssertFailsWithSupertype",
+        "OK",
+    );
+}
+
+#[test]
+fn a_block_that_completes_fails_the_assertion() {
+    expect_native_box(
+        "import kotlin.test.assertFailsWith\n\
+         fun box(): String {\n\
+         \x20   return try {\n\
+         \x20       assertFailsWith<IllegalStateException> { }\n\
+         \x20       \"fail: no throw\"\n\
+         \x20   } catch (e: AssertionError) {\n\
+         \x20       val want = \"Expected an exception of class kotlin.IllegalStateException\" +\n\
+         \x20                  \" to be thrown, but was completed successfully.\"\n\
+         \x20       if (e.message == want) \"OK\" else \"fail: ${e.message}\"\n\
+         \x20   }\n\
+         }\n",
+        "AssertFailsWithNoThrow",
+        "OK",
+    );
+}
+
+#[test]
+fn a_block_that_throws_the_wrong_type_fails_the_assertion_rather_than_propagating() {
+    // The plausible reading is that the unexpected exception travels on. kotlin-test catches
+    // `Throwable` and fails the assertion with what it caught, so the original is REPLACED — and
+    // kotlinc 2.4.10 is what settled it, not the reading.
+    expect_native_box(
+        "import kotlin.test.assertFailsWith\n\
+         fun box(): String {\n\
+         \x20   return try {\n\
+         \x20       assertFailsWith<IllegalStateException> { throw NumberFormatException(\"nfe\") }\n\
+         \x20       \"fail: no throw\"\n\
+         \x20   } catch (e: NumberFormatException) {\n\
+         \x20       \"fail: the wrong exception propagated\"\n\
+         \x20   } catch (e: AssertionError) {\n\
+         \x20       val want = \"Expected an exception of class kotlin.IllegalStateException\" +\n\
+         \x20                  \" to be thrown, but was kotlin.NumberFormatException: nfe\"\n\
+         \x20       if (e.message == want) \"OK\" else \"fail: ${e.message}\"\n\
+         \x20   }\n\
+         }\n",
+        "AssertFailsWithWrongType",
+        "OK",
+    );
+}
+
+#[test]
+fn a_supplied_message_is_a_prefix() {
+    // `message` is declared BEFORE the block and defaulted, so the block is the LAST argument and
+    // never the first — a call that supplies a message passes two.
+    expect_native_box(
+        "import kotlin.test.assertFailsWith\n\
+         fun box(): String {\n\
+         \x20   return try {\n\
+         \x20       assertFailsWith<IllegalStateException>(\"mine\") { }\n\
+         \x20       \"fail: no throw\"\n\
+         \x20   } catch (e: AssertionError) {\n\
+         \x20       val want = \"mine. Expected an exception of class kotlin.IllegalStateException\" +\n\
+         \x20                  \" to be thrown, but was completed successfully.\"\n\
+         \x20       if (e.message == want) \"OK\" else \"fail: ${e.message}\"\n\
+         \x20   }\n\
+         }\n",
+        "AssertFailsWithMessage",
+        "OK",
+    );
+}
+
+#[test]
+fn a_null_cast_to_an_erased_type_parameter_names_it_by_its_owner() {
+    // The descriptor is erased, the name is not. Kotlin/Native 2.4.20 raises this exception with no
+    // message; krusty renders the target as the JVM backend does, except that a target without file
+    // facades keeps a top-level function in its package: `T of p.generic` where the JVM says
+    // `T of p.ErasedNullCastKt.generic`.
+    expect_native_box(
+        "package p\n\
+         fun <T : Any> generic(a: Any?): T = a as T\n\
+         fun box(): String {\n\
+         \x20   val cast = try { generic<String>(null); \"no throw\" }\n\
+         \x20              catch (e: NullPointerException) { e.message ?: \"none\" }\n\
+         \x20   if (cast != \"null cannot be cast to non-null type T of p.generic\") return cast\n\
+         \x20   return if (generic<String>(\"k\") == \"k\") \"OK\" else \"fail: non-null\"\n\
+         }\n",
+        "ErasedNullCast",
         "OK",
     );
 }

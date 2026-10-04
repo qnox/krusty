@@ -442,3 +442,54 @@ fun box(): String {
 "#;
     common::expect_box_same_as_kotlinc(MAIN, "InaccessiblePrivateSetter");
 }
+
+#[test]
+fn property_reference_identity_is_independent_of_effective_mutability() {
+    const MAIN: &str = r#"
+class IdentityOwner(name: String) {
+    var value: String = name
+        private set
+    fun unbound() = IdentityOwner::value
+    fun bound() = this::value
+}
+
+fun box(): String {
+    val direct = IdentityOwner::value
+    if ((direct as Any) != (IdentityOwner("first").unbound() as Any)) return "Fail unbound"
+    val owner = IdentityOwner("bound")
+    if ((owner::value as Any) != (owner.bound() as Any)) return "Fail bound"
+    return "OK"
+}
+"#;
+    common::expect_box_same_as_kotlinc(MAIN, "PropertyReferenceIdentity");
+}
+
+#[test]
+fn value_class_property_reference_identity_survives_a_private_setter_bridge() {
+    const MAIN: &str = r#"
+@JvmInline
+value class IdentityToken(val bits: Int)
+
+class ValueIdentityOwner(bits: Int) {
+    var token: IdentityToken = IdentityToken(bits)
+        private set
+    fun unbound() = ValueIdentityOwner::token
+    fun bound() = this::token
+}
+
+fun box(): String {
+    val direct = ValueIdentityOwner::token
+    val unboundMutable = ValueIdentityOwner(1).unbound()
+    if ((direct as Any) != (unboundMutable as Any)) return "Fail unbound"
+    val owner = ValueIdentityOwner(2)
+    val boundMutable = owner.bound()
+    if ((owner::token as Any) != (boundMutable as Any)) return "Fail bound"
+    if (direct.get(owner).bits != 2) return "Fail get"
+    if (unboundMutable.get(owner).bits != 2) return "Fail mutable get"
+    unboundMutable.set(owner, IdentityToken(3))
+    if (boundMutable.get().bits != 3) return "Fail mutable set"
+    return "OK"
+}
+"#;
+    common::expect_box_same_as_kotlinc(MAIN, "ValuePropertyReferenceIdentity");
+}

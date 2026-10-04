@@ -166,12 +166,24 @@ fn reified_delegate_accessor_plan_stays_one_erased_declaration_helper() {
     // The reused helper keeps the declaration's reified marker, so invoking the lambda throws.
     // Both compilers do that; a successful `OK` would mean the helper was specialized.
     let reference = common::kotlinc_box_result(REUSED_REIFIED_PLAN);
-    let krusty =
-        common::expect_box_run_with_stdlib(REUSED_REIFIED_PLAN, "ReusedReifiedDelegatePlan");
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let krusty = common::expect_box_run(
+        REUSED_REIFIED_PLAN,
+        "ReusedReifiedDelegatePlan",
+        &[stdlib],
+        Some(jdk.as_path()),
+    );
     assert_eq!(krusty, reference, "ReusedReifiedDelegatePlan");
     assert!(
         reference.starts_with("ERROR:UnsupportedOperationException:"),
         "the shared helper still executes its reified marker: {reference}"
+    );
+    common::expect_native_exit(
+        REUSED_REIFIED_PLAN,
+        "ReusedReifiedDelegatePlanNative",
+        134,
+        "UnsupportedOperationException: This function has a reified type parameter",
     );
 
     let pair = common::ModuleClassPair::compile(
@@ -262,6 +274,7 @@ fun box(): String {
 fn inline_delegate_reflection_identity_stays_with_its_declaration() {
     let source = format!("{REFLECTION_DECLARATION}{REFLECTION_CALLER}");
     common::expect_box_same_as_kotlinc(&source, "DeclarationDelegateReflection");
+    common::expect_native_box(&source, "DeclarationDelegateReflectionNative", "OK");
 }
 
 #[test]

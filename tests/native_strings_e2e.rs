@@ -5,7 +5,7 @@
 //! answers what the JVM answers, including where the two encodings disagree most: a character
 //! outside the BMP is one UTF-8 sequence and TWO Kotlin indices.
 
-use super::common::{expect_box_ok_with_stdlib, expect_box_run_with_stdlib, expect_native_box};
+use super::common::{expect_box_run_with_stdlib, expect_native_box};
 
 #[test]
 fn a_string_is_indexed_by_utf16_code_unit() {
@@ -31,26 +31,27 @@ fn a_string_is_indexed_by_utf16_code_unit() {
 #[test]
 fn a_string_get_reference_uses_the_selected_intrinsic() {
     // The call through this reference is an ordinary dependency call in IR. Its selected
-    // declaration still carries `CompilerIntrinsic::StringGet`. Native callable-reference
-    // realization lands in ncg/03; this tier keeps the frontend/JVM regression without claiming
-    // that later backend capability.
-    expect_box_ok_with_stdlib(
+    // declaration still carries `CompilerIntrinsic::StringGet`; this tier realizes callable
+    // references natively and must consume that identity instead of recognizing the spelling.
+    expect_native_box(
         "fun box(): String {\n\
          \x20   val read: (String, Int) -> Char = String::get\n\
          \x20   return if (read(\"OK\", 1) == 'K') \"OK\" else \"fail\"\n\
          }\n",
         "StringGetReference",
+        "OK",
     );
 }
 
 #[test]
 fn a_string_length_reference_uses_the_selected_intrinsic() {
-    expect_box_ok_with_stdlib(
+    expect_native_box(
         "fun box(): String {\n\
          \x20   val length: (String) -> Int = String::length\n\
          \x20   return if (length(\"OK\") == 2) \"OK\" else \"fail\"\n\
          }\n",
         "StringLengthReference",
+        "OK",
     );
 }
 
