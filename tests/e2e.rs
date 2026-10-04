@@ -951,6 +951,8 @@ mod ieee754_inline_equality_e2e;
 mod implicit_any_super_method_e2e;
 #[path = "implicit_integer_coercion_e2e.rs"]
 mod implicit_integer_coercion_e2e;
+#[path = "implicit_receiver_extension_tower_e2e.rs"]
+mod implicit_receiver_extension_tower_e2e;
 #[path = "implicit_receiver_member_shadow_e2e.rs"]
 mod implicit_receiver_member_shadow_e2e;
 #[path = "implicit_receiver_named_args_e2e.rs"]
