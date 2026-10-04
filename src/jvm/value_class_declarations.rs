@@ -16,9 +16,17 @@ pub(super) struct ValueClassDeclaration {
 
 pub(super) fn from_class_info(class: &ClassInfo) -> Option<ValueClassDeclaration> {
     let metadata = crate::jvm::metadata::class_inline(class)?;
-    let underlying = match metadata.underlying_class.as_deref() {
-        Some(classifier) => crate::jvm::classpath::kotlin_name_to_ty(classifier),
-        None => class
+    // A type parameter, or an array of one, is carried as its bound (an array of it): the
+    // declared type says which, where the underlying class alone names only `Array`.
+    let parameter_carrier = metadata.declaration.as_ref().and_then(|declaration| {
+        let declared = declaration.underlying.non_null();
+        (declared.is_ty_param() || declared.is_reference_array())
+            .then(|| declared.substitute_erased(&std::collections::HashMap::new()))
+    });
+    let underlying = match (parameter_carrier, metadata.underlying_class.as_deref()) {
+        (Some(carrier), _) => carrier,
+        (None, Some(classifier)) => crate::jvm::classpath::kotlin_name_to_ty(classifier),
+        (None, None) => class
             .methods
             .iter()
             .find(|method| method.name == "box-impl")
