@@ -635,14 +635,21 @@ fn fixup_parenless_base_classes(file: &mut File) {
 type TypeAliasShapes = std::collections::HashMap<String, (Vec<String>, TypeRef)>;
 
 /// Replace every leaf reference to one of `params` in `ty` with the corresponding use-site type
-/// argument. The use site's nullability and source span remain attached to the substituted node.
+/// argument. The occurrence's nullability, variance, and source span stay on the substituted node:
+/// `MutableMap<in Y, X?>` keeps `in` and `?` after `Y` and `X` are replaced.
 fn substitute_type_alias_parameters(ty: &mut TypeRef, params: &[String], args: &[TypeRef]) {
     if ty.fun_params.is_empty() && ty.name != "<fun>" && ty.targs.is_empty() {
         if let Some(index) = params.iter().position(|param| *param == ty.name) {
             let nullable = ty.nullable();
+            let in_projection = ty.in_projection();
+            let out_projection = ty.out_projection();
             let span = ty.span;
             *ty = args[index].clone();
             ty.set_nullable(ty.nullable() || nullable);
+            ty.set_projection(
+                ty.in_projection() || in_projection,
+                ty.out_projection() || out_projection,
+            );
             ty.span = span;
             return;
         }
