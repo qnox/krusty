@@ -690,6 +690,7 @@ pub(super) fn realize(
         // A property accessor call keeps its declaration's parameter vector (contexts, receiver,
         // value), the same checked fact an ordinary call carries for representation boundaries.
         let mut accessor_parameters = None;
+        let mut annotation_member_semantic = None::<(PropertyId, crate::types::Ty)>;
         let replacement = match ir.exprs[raw].clone() {
             IrExpr::Call {
                 callee:
@@ -768,7 +769,7 @@ pub(super) fn realize(
                         operation: Some(raw as ExprId),
                     })
                 } else {
-                    let (call, parameters) = realize_property(
+                    let (call, parameters, semantic) = realize_property(
                         &property,
                         stems,
                         target,
@@ -778,6 +779,7 @@ pub(super) fn realize(
                         None,
                     )?;
                     accessor_parameters = Some(parameters);
+                    annotation_member_semantic = semantic.map(|ty| (target, ty));
                     Some(call)
                 }
             }
@@ -822,7 +824,7 @@ pub(super) fn realize(
                         operation: Some(raw as ExprId),
                     })
                 } else {
-                    let (call, parameters) = realize_property(
+                    let (call, parameters, _) = realize_property(
                         &property,
                         stems,
                         target,
@@ -865,6 +867,25 @@ pub(super) fn realize(
         if let Some(parameters) = accessor_parameters {
             ir.call_declared_params
                 .insert(raw as ExprId, parameters.into_boxed_slice());
+        }
+        if let Some((target, semantic)) = annotation_member_semantic {
+            let IrExpr::Call {
+                callee:
+                    Callee::Virtual {
+                        params: Some((_, physical)),
+                        ..
+                    },
+                ..
+            } = &ir.exprs[raw]
+            else {
+                return Err(ModuleRealizationTarget::Property(target));
+            };
+            let physical = *physical;
+            if physical != semantic {
+                let call =
+                    super::external_calls::bridge_external_result(ir, raw, physical, semantic);
+                ir.call_declared_ret.insert(call, physical);
+            }
         }
     }
     Ok(())
@@ -960,7 +981,7 @@ fn realize_property(
     extension_receiver: Option<crate::ir::ExprId>,
     context_arguments: Vec<crate::ir::ExprId>,
     value: Option<crate::ir::ExprId>,
-) -> Result<(IrExpr, Vec<crate::types::Ty>), ModuleRealizationTarget> {
+) -> Result<(IrExpr, Vec<crate::types::Ty>, Option<crate::types::Ty>), ModuleRealizationTarget> {
     let failure = ModuleRealizationTarget::Property(target);
     if context_arguments.len() != property.context_parameters.len() {
         return Err(failure);
@@ -986,11 +1007,17 @@ fn realize_property(
         parameters.push(ty);
         arguments.push(value);
     }
-    let ret = if value.is_some() {
-        crate::types::Ty::Unit
+    let stored = if property.owner_kind == Some(IrClassifierKind::Annotation) {
+        crate::jvm::annotation_kclass::annotation_member_jvm_type(ty)
     } else {
         ty
     };
+    let ret = if value.is_some() {
+        crate::types::Ty::Unit
+    } else {
+        stored
+    };
+    let semantic = (value.is_none() && stored != ty).then_some(ty);
     let accessor = if value.is_some() {
         crate::names::property_setter_name(&property.name)
     } else {
@@ -1023,6 +1050,7 @@ fn realize_property(
                 args: arguments,
             },
             parameters,
+            semantic,
         ))
     } else {
         if dispatch_receiver.is_some() {
@@ -1043,6 +1071,7 @@ fn realize_property(
                 args: arguments,
             },
             parameters,
+            None,
         ))
     }
 }
