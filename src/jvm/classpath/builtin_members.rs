@@ -121,11 +121,23 @@ impl Classpath {
                             annotations: &m.annotations,
                         },
                     );
+                    let semantic_role = crate::libraries::builtin_declaration::semantic_call_role(
+                        crate::libraries::builtin_declaration::BuiltinMemberDeclaration {
+                            owner: internal_id,
+                            name: &m.name,
+                            params: &m.generic_sig.params,
+                            ret: m.generic_sig.ret,
+                            is_property: m.is_property,
+                            is_operator: m.is_operator,
+                            is_infix: m.is_infix,
+                            annotations: &m.annotations,
+                        },
+                    );
                     crate::libraries::LibraryMember {
                         external_identity: None,
                         external_default_provider: None,
                         external_property_identity: None,
-                        semantic_role: None,
+                        semantic_role,
                         singleton_dispatch: None,
                         name: m.name.clone(),
                         owner: Some(owner),

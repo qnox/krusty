@@ -1210,7 +1210,7 @@ fn materialize_member_property(
         None
     };
 
-    let getter = property.getter.map(|body| {
+    let mut getter = property.getter.map(|body| {
         let function = add_accessor_function(
             ir,
             crate::names::property_getter_name(&property.name),
@@ -1227,22 +1227,21 @@ fn materialize_member_property(
     // An abstract property has no FIR body and no backing field, but its accessor declarations are
     // still part of the class ABI. Publish those methods explicitly in common IR so every backend
     // sees the same checked declaration shape; a backend must not infer them from a property name.
+    let mut abstract_setter = None;
     if backing_field.is_none()
         && property.getter.is_none()
         && (class_flags.has(DeclarationFlags::INTERFACE)
             || property.flags.has(DeclarationFlags::ABSTRACT))
     {
-        let getter = add_abstract_accessor_function(
+        let abstract_getter = add_abstract_accessor_function(
             ir,
             crate::names::property_getter_name(&property.name),
             context_parameters.clone(),
             property.ty,
             owner,
         );
-        ir.fn_source_order.insert(getter, source_order);
-        ir.open_methods.insert(getter);
-        ir.classes[class_id as usize].methods.push(getter);
-        set_accessor_parameter_identities(index, property.declaration, false, getter, ir)?;
+        ir.open_methods.insert(abstract_getter);
+        ir.classes[class_id as usize].methods.push(abstract_getter);
         // The accessor of a property typed by an enclosing-class type parameter signs `()TT;`, the
         // same as a member function returning `T`. A declared function gets this from
         // `attach_callable_generic_facts`, which runs over CALLABLES; an accessor is synthesized
@@ -1250,11 +1249,10 @@ fn materialize_member_property(
         // mentions no type parameter formats to the descriptor and the attribute is dropped
         // downstream, so this does not need to decide genericity itself.
         ir.member_semantic_sigs
-            .insert(getter, (context_parameters.clone(), property.ty));
-        let type_params = declaration_type_parameters(index, property.declaration);
-        attach_accessor_type_parameters(ir, getter, &type_params);
+            .insert(abstract_getter, (context_parameters.clone(), property.ty));
+        getter = Some(abstract_getter);
         if property.flags.has(DeclarationFlags::MUTABLE) {
-            let setter = add_abstract_accessor_function(
+            let abstract_setter_function = add_abstract_accessor_function(
                 ir,
                 crate::names::property_setter_name(&property.name),
                 context_parameters
@@ -1265,12 +1263,12 @@ fn materialize_member_property(
                 Ty::Unit,
                 owner,
             );
-            ir.fn_source_order.insert(setter, source_order);
-            ir.open_methods.insert(setter);
-            ir.classes[class_id as usize].methods.push(setter);
-            set_accessor_parameter_identities(index, property.declaration, true, setter, ir)?;
+            ir.open_methods.insert(abstract_setter_function);
+            ir.classes[class_id as usize]
+                .methods
+                .push(abstract_setter_function);
             ir.member_semantic_sigs.insert(
-                setter,
+                abstract_setter_function,
                 (
                     context_parameters
                         .iter()
@@ -1280,27 +1278,30 @@ fn materialize_member_property(
                     Ty::Unit,
                 ),
             );
-            attach_accessor_type_parameters(ir, setter, &type_params);
+            abstract_setter = Some(abstract_setter_function);
         }
     }
-    let setter = property.setter.map(|body| {
-        let function = add_accessor_function(
-            ir,
-            crate::names::property_setter_name(&property.name),
-            context_parameters
-                .iter()
-                .copied()
-                .chain(std::iter::once(property.ty))
-                .collect(),
-            Ty::Unit,
-            body,
-            AccessorResult::AsDeclared,
-            false,
-            Some(owner),
-        );
-        ir.classes[class_id as usize].methods.push(function);
-        function
-    });
+    let setter = property
+        .setter
+        .map(|body| {
+            let function = add_accessor_function(
+                ir,
+                crate::names::property_setter_name(&property.name),
+                context_parameters
+                    .iter()
+                    .copied()
+                    .chain(std::iter::once(property.ty))
+                    .collect(),
+                Ty::Unit,
+                body,
+                AccessorResult::AsDeclared,
+                false,
+                Some(owner),
+            );
+            ir.classes[class_id as usize].methods.push(function);
+            function
+        })
+        .or(abstract_setter);
     if let Some(getter) = getter {
         set_accessor_parameter_identities(index, property.declaration, false, getter, ir)?;
     }

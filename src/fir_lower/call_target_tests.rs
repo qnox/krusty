@@ -194,6 +194,42 @@ class Forwarding(source: Source) : Source by source
 }
 
 #[test]
+fn one_delegation_forwarder_records_each_independent_interface_obligation() {
+    let ir = lower_single_source(
+        "interface A { fun foo(): Int }\n\
+         interface B { fun foo(): Int }\n\
+         class Z(val delegate: A) : A by delegate, B\n",
+        "DelegationObligations",
+    );
+    let a = member(&ir, "A", "foo", &[]);
+    let b = member(&ir, "B", "foo", &[]);
+    let edges = ir
+        .function_overrides
+        .get(&type_name("Z"))
+        .expect("Z has an exact override plan")
+        .iter()
+        .filter(|edge| edge.name == "foo")
+        .collect::<Vec<_>>();
+    assert_eq!(edges.len(), 2, "one edge per interface declaration");
+    let forwarder = edges[0]
+        .implementation_function
+        .expect("delegation materializes one generated body");
+    assert!(edges
+        .iter()
+        .all(|edge| edge.implementation_function == Some(forwarder)));
+    assert_eq!(
+        edges
+            .iter()
+            .map(|edge| edge.overridden)
+            .collect::<std::collections::HashSet<_>>(),
+        std::collections::HashSet::from([
+            ResolvedFunctionOverrideTarget::Module(a),
+            ResolvedFunctionOverrideTarget::Module(b),
+        ])
+    );
+}
+
+#[test]
 fn a_super_accessor_names_its_property_and_a_super_call_its_declaration() {
     let ir = lower_single_source(
         "open class Base {

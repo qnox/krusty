@@ -18,6 +18,8 @@
 //! prebuilt runtime that target's link draws on, and the LINKER that draws on it. The code
 //! generator whose objects it links follows.
 
+mod captures;
+mod classes;
 mod codegen;
 mod intrinsics;
 mod linker;

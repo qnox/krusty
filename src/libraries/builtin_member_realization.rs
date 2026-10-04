@@ -12,6 +12,20 @@ use crate::libraries::{
 };
 use crate::types::{Ty, TypeName};
 
+impl MemberRealization {
+    /// The compiler operation carried by this exact provider realization, if any.
+    ///
+    /// Classifier declarations use `MemberRealization` while normalized callable candidates use
+    /// `LibraryCallable::compiler_intrinsic`. Keeping the projection here makes either direction of
+    /// that provider-boundary conversion preserve the same typed declaration fact.
+    pub const fn compiler_intrinsic(self) -> Option<CompilerIntrinsic> {
+        match self {
+            Self::Intrinsic(intrinsic) => Some(intrinsic),
+            Self::Dispatch | Self::Direct { .. } | Self::RangeConstruction { .. } => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Scalar {
     Byte,

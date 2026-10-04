@@ -15,7 +15,7 @@
 //!
 //! Every expectation is kotlinc's, taken by running the same program under it.
 
-use super::common::{expect_box_ok_with_stdlib, expect_native_box};
+use super::common::{expect_box_ok_with_stdlib, expect_native_box, expect_native_decline};
 
 /// A boxed primitive and a string, compared through the type that says nothing more.
 #[test]
@@ -74,4 +74,32 @@ fn a_comparable_type_parameter_is_ordered_the_same_way() {
          }\n";
     expect_box_ok_with_stdlib(source, "ComparableBound");
     expect_native_box(source, "ComparableBound", "OK");
+}
+
+/// A file declaring its own `Comparable` declines — the runtime has no order for its object.
+#[test]
+fn a_file_that_declares_its_own_comparable_declines() {
+    expect_native_decline(
+        "interface A : Comparable<A>\n\
+         class B(val x: Int) : A {\n\
+         \x20   override fun compareTo(other: A) = x.compareTo((other as B).x)\n\
+         }\n\
+         fun less(x: A, y: A) = x < y\n\
+         fun box(): String = if (less(B(0), B(1))) \"OK\" else \"fail\"\n",
+        "DeclaredComparable",
+        "Comparable.compareTo",
+    );
+}
+
+/// So does a file declaring an ENUM, which is a `Comparable` with nothing written: the comparison
+/// is by ordinal, and an ordinal is a field this generator lays out.
+#[test]
+fn a_file_that_declares_an_enum_declines() {
+    expect_native_decline(
+        "enum class E { A, B }\n\
+         fun <T : Comparable<T>> smaller(a: T, b: T): T = if (a.compareTo(b) < 0) a else b\n\
+         fun box(): String = if (smaller(E.A, E.B) == E.A) \"OK\" else \"fail\"\n",
+        "DeclaredEnumComparable",
+        "Comparable.compareTo",
+    );
 }

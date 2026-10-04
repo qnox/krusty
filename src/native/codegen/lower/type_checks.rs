@@ -67,9 +67,15 @@ impl<'a> FileLowering<'a> {
         Ok(id)
     }
 
-    /// The runtime descriptor for a type an `is`/`as` names: one the runtime declares.
+    /// The runtime descriptor for a type an `is`/`as` names: an in-file class or a built-in.
     pub(super) fn type_descriptor(&mut self, ty: Ty) -> Result<Option<DataId>, Unsupported> {
         let target = ty.non_null();
+        if let Some(class) = target
+            .obj_internal()
+            .and_then(|name| self.ir.class_id_by_name(name))
+        {
+            return Ok(Some(self.classes[class as usize].descriptor));
+        }
         let symbol = match target {
             Ty::String => "kt_type_string",
             Ty::Boolean => "kt_type_boolean",
@@ -114,7 +120,7 @@ impl<'a> FileLowering<'a> {
             // `Ty::Unit` names, and it is one type either way.
             _ if target
                 .obj_internal()
-                .is_some_and(|name| name.matches("kotlin/Unit")) =>
+                .is_some_and(|name| name == crate::types::wk::unit()) =>
             {
                 "kt_type_unit"
             }
@@ -133,6 +139,46 @@ impl<'a> FileLowering<'a> {
                     .and_then(super::super::super::intrinsics::throwable_descriptor)
                     .expect("just matched")
             }
+            // A FUNCTION TYPE. The object is of a type of its own — one per lambda and per
+            // callable reference — so what a check asks about is the marker every such descriptor
+            // names, and the arity is what separates one from another.
+            _ if target
+                .obj_internal()
+                .and_then(|internal| self.function_type_descriptor(internal))
+                .is_some() =>
+            {
+                target
+                    .obj_internal()
+                    .and_then(|internal| self.function_type_descriptor(internal))
+                    .expect("just matched")
+            }
+            // `kotlin.collections.List`. The runtime builds two kinds and a check names neither,
+            // so both name a marker and that is what this compares against. Only where THIS FILE
+            // implements no list of its own: a class of the program standing behind the type would
+            // wear no marker, and answering `false` for one is a wrong answer rather than a
+            // decline. That file keeps declining, exactly as it did before.
+            _ if target
+                .obj_internal()
+                .is_some_and(|internal| self.is_list_check_type(internal))
+                && !self.implements_collection_shape(
+                    super::super::super::intrinsics::CollectionShape::Iterable,
+                ) =>
+            {
+                "kt_type_list_interface"
+            }
+            // One of Kotlin's REFLECTION types, asked about the same way a function type is: the
+            // reference object's own type is one of a kind, so the markers are what it shares with
+            // the type written at the site.
+            _ if target
+                .obj_internal()
+                .and_then(super::super::super::intrinsics::reflection_type_descriptor)
+                .is_some() =>
+            {
+                target
+                    .obj_internal()
+                    .and_then(super::super::super::intrinsics::reflection_type_descriptor)
+                    .expect("just matched")
+            }
             _ => return Ok(None),
         };
         self.import_data(symbol).map(Some)
@@ -140,10 +186,56 @@ impl<'a> FileLowering<'a> {
 }
 
 impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
+    /// Fail loudly on a null receiver, as the runtime's `kt_dispatch` did: a member access on
+    /// `null` is a checked failure, never a load from address zero.
+    pub(super) fn null_check(&mut self, receiver: Value) -> Result<(), Unsupported> {
+        let is_null = self.is_null(receiver);
+        let fail = self.builder.create_block();
+        let proceed = self.builder.create_block();
+        self.builder.ins().brif(is_null, fail, &[], proceed, &[]);
+        self.continue_in(fail);
+        self.runtime_call("kt_null_receiver", &[], Ty::Unit, &[])?;
+        self.builder.ins().trap(TrapCode::unwrap_user(2));
+        self.continue_in(proceed);
+        Ok(())
+    }
+
     /// The receiver of a member access, evaluated to a reference.
     pub(super) fn receiver(&mut self, receiver: u32) -> Result<Option<Value>, Unsupported> {
         let value = self.reference(receiver)?;
         Ok((!self.terminated).then_some(value))
+    }
+
+    /// Realize `x!!`: evaluate the receiver once, reject `null`, and otherwise pass its value
+    /// through. A nullable primitive is unboxed after the check.
+    ///
+    /// An asserted nullable substitution of an erased generic number is one boundary, not a
+    /// stored wrapper followed by an assertion. It consumes the physical reference before the
+    /// declaration coercion can check it as that wrapper; after the null check Kotlin reads it
+    /// through `Number.toX`.
+    pub(super) fn not_null_assert(&mut self, operand: u32) -> Result<Option<Value>, Unsupported> {
+        let ty = self.type_of(operand);
+        let (value, primitive) = match self.asserted_declaration_number(operand) {
+            Some((produced, primitive)) => (self.reference(produced)?, Some(primitive)),
+            None => (self.reference(operand)?, None),
+        };
+        if self.terminated {
+            return Ok(None);
+        }
+        let checked = self
+            .runtime_call("kt_not_null", &[any()], any(), &[value])?
+            .expect("`kt_not_null` returns its argument");
+        if self.terminated {
+            return Ok(None);
+        }
+        if let Some(primitive) = primitive {
+            return self.number_result(checked, primitive);
+        }
+        // `x!!` on a nullable primitive is the unboxing Kotlin means by it.
+        match ty.map(Ty::non_null) {
+            Some(ty) if carrier(ty) != Carrier::Ref => self.convert(checked, Some(any()), ty),
+            _ => Ok(Some(checked)),
+        }
     }
 
     /// The descriptor a CAST to `ty` must be checked against, or `None` when the cast is a
@@ -165,6 +257,12 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             _ => ty,
         };
         let target = ty.non_null();
+        if let Some(class) = target
+            .obj_internal()
+            .and_then(|name| self.file.ir.class_id_by_name(name))
+        {
+            return Ok(Some(self.file.classes[class as usize].descriptor));
+        }
         if carrier(target) != Carrier::Ref {
             return Ok(None);
         }
@@ -228,7 +326,35 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         op: IrTypeOp,
         arg: u32,
         type_operand: Ty,
+        declaration_result: bool,
     ) -> Result<Option<Value>, Unsupported> {
+        // This exact coercion was placed between a call's declared result and the substitution
+        // selected at the call site. A bare type parameter physically returns a reference, but
+        // the operation that reads it depends on the selected result. Kotlin discards a `Unit`
+        // result, reads a non-null number through `Number.toX`, and checks every other concrete
+        // result against its own runtime type before adapting the representation. A nullable
+        // primitive remains in that last group: storing `f<T>()` into `Int?` checks the `Integer`
+        // wrapper rather than accepting an arbitrary `Number`.
+        //
+        // The common-IR marker is the authority: an ordinary implicit coercion is still only a
+        // representation change and must not acquire any of these declaration-boundary semantics.
+        if declaration_result
+            && op == IrTypeOp::ImplicitCoercion
+            && self
+                .declared_call_result(arg)
+                .is_some_and(|declared| matches!(declared.non_null(), Ty::TyParam(..)))
+        {
+            if type_operand == Ty::Unit {
+                return self.coerce(arg, type_operand);
+            }
+            if !type_operand.is_nullable() && type_operand.is_numeric() {
+                let Some(value) = self.receiver(arg)? else {
+                    return Ok(None);
+                };
+                return self.number_result(value, type_operand);
+            }
+            return self.type_operation(IrTypeOp::Cast, arg, type_operand, false);
+        }
         match op {
             IrTypeOp::InstanceOf | IrTypeOp::NotInstanceOf => {
                 // Two of Kotlin's types answer without asking the object anything, because their
@@ -388,6 +514,91 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 self.coerce(arg, type_operand)
             }
         }
+    }
+
+    /// The declaration result attached to the terminal call beneath a result-boundary wrapper.
+    /// Blocks are transparent because argument ordering may have wrapped a checked call in its
+    /// evaluation statements; no other shape is reinterpreted as a call.
+    fn declared_call_result(&self, mut expression: u32) -> Option<Ty> {
+        loop {
+            match self.file.ir.expr(expression) {
+                IrExpr::Call { .. } | IrExpr::MethodCall { .. } => {
+                    return self.file.ir.call_declared_ret.get(&expression).copied();
+                }
+                IrExpr::Block {
+                    value: Some(value), ..
+                } => expression = *value,
+                _ => return None,
+            }
+        }
+    }
+
+    /// The erased call result beneath `f<T>()!!` when the selected nullable substitution is a
+    /// numeric primitive. The assertion consumes the call's reference directly: the intermediate
+    /// nullable wrapper was never a stored or explicitly cast value, so checking it as (for
+    /// example) `Integer` would reject the `Long` that Kotlin's following `Number.intValue`
+    /// accepts.
+    pub(super) fn asserted_declaration_number(&self, expression: u32) -> Option<(u32, Ty)> {
+        if !self
+            .file
+            .ir
+            .declaration_result_coercions
+            .contains(&expression)
+        {
+            return None;
+        }
+        let IrExpr::TypeOp {
+            op: IrTypeOp::ImplicitCoercion,
+            arg,
+            type_operand,
+        } = self.file.ir.expr(expression)
+        else {
+            return None;
+        };
+        let primitive = type_operand.nullable_primitive()?;
+        if !primitive.is_numeric()
+            || !self
+                .declared_call_result(*arg)
+                .is_some_and(|declared| matches!(declared.non_null(), Ty::TyParam(..)))
+        {
+            return None;
+        }
+        Some((*arg, primitive))
+    }
+
+    /// Read an erased reference as a non-null Kotlin number. The cast to `Number` is observable:
+    /// an unchecked generic result can hold a string, which must raise `ClassCastException`
+    /// rather than reaching the runtime conversion as an impossible descriptor.
+    pub(super) fn number_result(
+        &mut self,
+        value: Value,
+        target: Ty,
+    ) -> Result<Option<Value>, Unsupported> {
+        debug_assert!(target.is_numeric() && !target.is_nullable());
+        let descriptor = self
+            .file
+            .type_descriptor(Ty::obj("kotlin/Number"))?
+            .expect("the native runtime defines kotlin.Number");
+        let descriptor = self.data_address(descriptor);
+        let Some(number) = self.runtime_call(
+            "kt_cast_non_null",
+            &[any(), any()],
+            any(),
+            &[value, descriptor],
+        )?
+        else {
+            return Ok(None);
+        };
+        if self.terminated {
+            return Ok(None);
+        }
+        let suffix = scalar_suffix(target).expect("a numeric primitive has a scalar suffix");
+        self.runtime_call(
+            &format!("kt_number_to_{suffix}"),
+            &[any()],
+            target,
+            &[number],
+        )
     }
 
     /// `value as T` for an erased `T`: `null` raises the NullPointerException naming `T`, and

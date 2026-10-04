@@ -4,6 +4,11 @@
 /// or target metadata.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SemanticCallRole {
+    KotlinAnyEquals,
     KotlinAnyHashCode,
     KotlinAnyToString,
+    /// The single comparison operation declared by `kotlin.Comparable`.
+    KotlinComparableCompareTo,
+    /// The invocation operation declared by a compiler-provided Kotlin function classifier.
+    KotlinFunctionInvoke,
 }

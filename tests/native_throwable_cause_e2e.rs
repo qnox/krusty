@@ -8,7 +8,9 @@
 //!
 //! Every expectation is kotlinc's, taken by running the same program under it.
 
-use super::common::{expect_box_ok_with_stdlib, expect_native_box, kotlinc_box_result};
+use super::common::{
+    expect_box_ok_with_stdlib, expect_native_box, expect_native_decline, kotlinc_box_result,
+};
 
 /// Require kotlinc's answer, krusty's JVM answer and the NATIVE answer to agree.
 fn every_backend_agrees_with_kotlinc(stem: &str, source: &str) {
@@ -65,6 +67,30 @@ fn a_throwable_built_from_nothing_has_neither() {
     every_backend_agrees_with_kotlinc("ThrowableEmpty", source);
 }
 
+/// A SUBCLASS declared in this file is laid out on top of the runtime's storage, and its secondary
+/// constructors reach all four of the base's forms.
+#[test]
+fn a_subclass_delegates_to_every_throwable_constructor() {
+    let source = "class CustomException : Throwable {\n\
+         \x20   constructor(message: String?, cause: Throwable?) : super(message, cause)\n\
+         \x20   constructor(message: String?) : super(message)\n\
+         \x20   constructor(cause: Throwable?) : super(cause)\n\
+         \x20   constructor() : super()\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   val both = CustomException(\"O\", Throwable(\"K\"))\n\
+         \x20   if (both.message != \"O\" || both.cause?.message != \"K\") return \"fail1\"\n\
+         \x20   val fromCause = CustomException(Throwable(\"OK\"))\n\
+         \x20   if (fromCause.message == null || fromCause.cause?.message != \"OK\") return \"fail2\"\n\
+         \x20   val only = CustomException(\"OK\")\n\
+         \x20   if (only.message != \"OK\" || only.cause != null) return \"fail3\"\n\
+         \x20   val neither = CustomException()\n\
+         \x20   if (neither.message != null || neither.cause != null) return \"fail4\"\n\
+         \x20   return \"OK\"\n\
+         }\n";
+    every_backend_agrees_with_kotlinc("SubclassThrowableCause", source);
+}
+
 /// A cause SURVIVES being thrown and caught, so the field is real storage rather than something
 /// the construction site folded.
 #[test]
@@ -88,4 +114,23 @@ fn a_cause_chain_reads_through_every_hop() {
          \x20   return t.cause?.cause?.message ?: \"fail\"\n\
          }\n";
     every_backend_agrees_with_kotlinc("ThrowableCauseChain", source);
+}
+
+/// A file that REDECLARES either accessor declines the read rather than answering the field.
+///
+/// Both are `open val`s of the runtime's own class, read here with a runtime function because the
+/// class is the runtime's and so is its layout. A class of the program overriding one is where that
+/// stops being right — Kotlin dispatches to the override, and the base reserves no slot to dispatch
+/// through. Answering the field would be the wrong half of the question, so it declines instead.
+#[test]
+fn a_file_that_overrides_a_throwable_accessor_declines_the_read() {
+    let source = "open class Loud(message: String?) : Throwable(message) {\n\
+         \x20   override val message: String?\n\
+         \x20       get() = \"Loud: \" + super.message\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   val t: Throwable = Loud(\"OK\")\n\
+         \x20   return if (t.message == \"Loud: OK\") \"OK\" else \"fail\"\n\
+         }\n";
+    expect_native_decline(source, "OverriddenThrowableMessage", "overrides one");
 }

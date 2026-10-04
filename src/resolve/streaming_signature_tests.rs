@@ -6269,7 +6269,7 @@ class Host(delegate: Api) : Api by delegate
             })
             .unwrap_or_else(|| panic!("delegated {name}"));
         assert_eq!(
-            function.overridden.parameter_identities.as_ref(),
+            function.overridden[0].parameter_identities.as_ref(),
             published_context_roles(name),
             "delegated {name}"
         );

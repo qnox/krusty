@@ -175,6 +175,17 @@ impl Classpath {
         if stored.callable.inline_modifiers.is_empty() && !callable.inline_modifiers.is_empty() {
             stored.callable.inline_modifiers = callable.inline_modifiers.clone();
         }
+        if stored.callable.compiler_intrinsic.is_none() {
+            stored.callable.compiler_intrinsic = callable.compiler_intrinsic;
+        }
+        if stored.callable.semantic_role.is_none() {
+            stored.callable.semantic_role = callable.semantic_role;
+        }
+        if stored.callable.member_realization == crate::libraries::MemberRealization::Dispatch
+            && callable.member_realization != crate::libraries::MemberRealization::Dispatch
+        {
+            stored.callable.member_realization = callable.member_realization;
+        }
         // Spelling-indexed construction can intern the physical method before classifier
         // publication copies the declaration's visibility. Public is the incomplete default;
         // a later protected, private, or package-private view of the same method is the
@@ -238,6 +249,7 @@ mod tests {
         let identity = cp.intern_external_callable(&first, ExternalCallableKind::Member);
 
         let mut enriched = first.clone();
+        enriched.semantic_role = Some(crate::types::SemanticCallRole::KotlinFunctionInvoke);
         enriched.overridden_call_realizations = vec![crate::libraries::OverriddenCallRealization {
             kind: crate::libraries::OverriddenCallKind::PropertyGetter,
             declaration_owner: type_name("review/PropertyDeclaration"),
@@ -260,6 +272,13 @@ mod tests {
                 enriched.overridden_call_realizations[0].clone(),
             ]
             .into_boxed_slice()
+        );
+        assert_eq!(
+            cp.external_callable(identity)
+                .expect("the enriched callable")
+                .callable
+                .semantic_role,
+            enriched.semantic_role
         );
     }
 }
