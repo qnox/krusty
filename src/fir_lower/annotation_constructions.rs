@@ -166,7 +166,7 @@ fn element_value(ir: &IrFile, expression: ExprId, declared: Ty) -> Option<AnnoVa
             classifier: Some(classifier),
             value: None,
             type_argument: false,
-        } => AnnoValue::Class(classifier.get()),
+        } => AnnoValue::Class(*classifier),
         IrExpr::Vararg {
             spreads, elements, ..
         } if !spreads.contains(&true) => {
