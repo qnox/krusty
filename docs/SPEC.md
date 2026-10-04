@@ -12008,6 +12008,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   resulting exit on the setter body (`IrFile::record_accessor_body_exit`), and the accessor that
   appends the `return` marks it (`UnitBodyExit`). Test: `tests/setter_return_line_e2e.rs`.
 
+- **A local inner class's enclosing-instance store carries the class's line.** kotlinc's
+  `LocalDeclarationsLowering` stores a local class's captured values ahead of the delegation with
+  no source offsets, so the constructor's first line is whatever follows them. An inner class's
+  `this$0` store is not a capture: it keeps the constructor's position even when the inner class is
+  itself local (`class Outer { inner class Inner }` inside a function, or an inner class of an
+  object literal), so its line entry sits on the `putfield this$0` rather than on the delegation.
+  The backend starts the constructor's first line after the last pre-super store that is not the
+  enclosing instance, selected by `IrCtorParameterProvenance` rather than by the field's name. Test:
+  `tests/local_inner_enclosing_line_e2e.rs`.
+
 - **Backend temporaries are entered and left on the frame's stack, as kotlinc's `enterTemp` and
   `leaveTemp` move `FrameMapBase.currentSize`.** Leaving the newest entry, keyed or not, hands its
   slot back to whatever is entered next. `javap -c -p` of `ExpressionCodegen` in kotlinc 2.4.20's
