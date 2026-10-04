@@ -225,6 +225,7 @@ pub(super) fn route(
         TransformedMachine {
             continuation_class: internal.render(),
             suspensions,
+            fake_continuations: Vec::new(),
             lambda: Some(SuspendLambdaMachine {
                 parameter_reads,
                 declared_spill_fields,

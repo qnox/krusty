@@ -19,6 +19,12 @@ impl Emitter<'_> {
         value: Option<u32>,
         code: &mut CodeBuilder,
     ) {
+        // A `suspendCoroutineUninterceptedOrReturn` block statement is still a suspension point:
+        // its result is probed and discarded the way any suspension statement's is.
+        if self.is_transformed_block(block) {
+            self.emit_discarding(block, code);
+            return;
+        }
         self.link_safe_call_chain(block, code);
         let saved = self.open_slot_scope();
         let terminal_target = self.terminal_statement_target.take();
