@@ -397,9 +397,10 @@ fn function_call(
 fn delegated_function_declaration(
     source: &dyn SymbolSource,
     index: &ResolvedModuleIndex,
+    root: Ty,
     function: &FunctionInfo,
 ) -> Option<ResolvedDelegatedFunctionDeclaration> {
-    let (target, parameters, result, parameter_identities) =
+    let (target, parameters, result, applied_parameters, applied_result, parameter_identities) =
         if let Some(declaration) = function.stable_declaration {
             let callable = index.callable_for_declaration(declaration)?;
             let signature = index.signature(declaration)?;
@@ -421,10 +422,32 @@ fn delegated_function_declaration(
             // value, never an ordinary parameter a provider's call shape spells by its name.
             let parameter_identities =
                 index.callable_parameter_identities(callable.id, parameters.len())?;
+            let (mut applied_parameters, applied_result) =
+                stable_member_signature(source, index, root, function.callable.owner, declaration)?;
+            if let Some(receiver) = callable.shape.extension_receiver {
+                let applied_owner = applied_owner_type(source, root, function.callable.owner)?;
+                let classifier = source.classifier(function.callable.owner)?;
+                let bindings =
+                    crate::symbol_resolver::classifier_bindings(&classifier, applied_owner);
+                let receiver = crate::symbol_resolver::specialize_signature_receiver_type(
+                    source,
+                    receiver.get(),
+                    &bindings,
+                );
+                applied_parameters.insert(
+                    callable
+                        .shape
+                        .context_parameter_count
+                        .min(applied_parameters.len() as u32) as usize,
+                    receiver,
+                );
+            }
             (
                 ResolvedFunctionOverrideTarget::Module(callable.id),
                 parameters.into_boxed_slice(),
                 signature.result.get(),
+                applied_parameters,
+                applied_result,
                 parameter_identities,
             )
         } else {
@@ -445,6 +468,8 @@ fn delegated_function_declaration(
                 ResolvedFunctionOverrideTarget::External(identity),
                 parameters,
                 result,
+                applied_function_parameters(function),
+                function.ret.apply(function.callable.ret),
                 parameter_identities,
             )
         };
@@ -456,6 +481,8 @@ fn delegated_function_declaration(
         parameter_identities,
         parameters: resolved_types(parameters.iter().copied())?,
         result: ResolvedTy::new(result).ok()?,
+        applied_parameters: resolved_types(applied_parameters)?,
+        applied_result: ResolvedTy::new(applied_result).ok()?,
         interface: function.callable.owner_is_interface,
     })
 }
@@ -772,18 +799,42 @@ fn delegation_members(
             if function.flags.inherited_by_delegation {
                 continue;
             }
-            let call = function_call(source, index, interface, function);
-            let overridden = delegated_function_declaration(source, index, function)?;
+            let call = function_call(source, index, interface, function)?;
+            let primary = delegated_function_declaration(source, index, interface, function)?;
             let parameter_identities =
-                delegated_forwarder_parameter_identities(&overridden.parameter_identities);
+                delegated_forwarder_parameter_identities(&primary.parameter_identities);
             let type_parameters = delegated_type_parameters(function.generic_sig.as_ref())?;
+            let mut overridden = vec![primary];
+            for obligation in own_callables.functions().iter().filter(|obligation| {
+                obligation.visibility != crate::libraries::Visibility::Private
+                    && obligation.callable.owner_is_interface
+                    && function_slot(obligation) == slot
+                    && applied_function_result(source, index, own, obligation).is_some_and(
+                        |result| {
+                            crate::symbol_resolver::resolution_subtype(
+                                source,
+                                call.result.get(),
+                                result,
+                            )
+                        },
+                    )
+            }) {
+                let obligation = delegated_function_declaration(source, index, own, obligation)?;
+                if overridden
+                    .iter()
+                    .any(|known| known.target == obligation.target)
+                {
+                    continue;
+                }
+                overridden.push(obligation);
+            }
             members.push(ResolvedDelegatedMember::Function(
                 ResolvedDelegatedFunction {
                     name: function.callable.name.clone().into_boxed_str(),
                     parameter_identities,
                     type_parameters,
-                    overridden,
-                    call: call?,
+                    overridden: overridden.into_boxed_slice(),
+                    call,
                 },
             ));
         }

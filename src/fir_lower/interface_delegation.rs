@@ -277,35 +277,40 @@ fn materialize_delegation(
                     ir.fn_context_counts.insert(function, receiver as usize);
                 }
                 let implementation_owner = ir.classes[class as usize].fq_name;
-                ir.function_overrides
+                let implementation = member
+                    .overridden
+                    .first()
+                    .map(|declaration| declaration.target)
+                    .ok_or(FirFileLoweringFailure::MissingClassifier(declaration))?;
+                let edges = ir
+                    .function_overrides
                     .entry(implementation_owner)
-                    .or_default()
-                    .push(crate::ir::IrFunctionOverride {
+                    .or_default();
+                for overridden in &member.overridden {
+                    edges.push(crate::ir::IrFunctionOverride {
                         // The forwarder semantically realizes this exact interface declaration;
                         // `implementation_function` names its generated common-IR body.
-                        implementation: member.overridden.target,
+                        implementation,
                         implementation_function: Some(function),
                         implementation_owner,
-                        overridden: member.overridden.target,
-                        overridden_owner: member.overridden.owner,
-                        overridden_semantic_role: member.overridden.semantic_role,
-                        collection_barrier: member.overridden.collection_barrier,
-                        overridden_is_interface: member.overridden.interface,
+                        overridden: overridden.target,
+                        overridden_owner: overridden.owner,
+                        overridden_semantic_role: overridden.semantic_role,
+                        collection_barrier: overridden.collection_barrier,
+                        overridden_is_interface: overridden.interface,
                         name: member.name.to_string(),
-                        declared_parameters: member
-                            .overridden
+                        declared_parameters: overridden
                             .parameters
                             .iter()
                             .map(|parameter| parameter.get())
                             .collect(),
-                        declared_result: member.overridden.result.get(),
-                        applied_parameters: member
-                            .call
-                            .parameters
+                        declared_result: overridden.result.get(),
+                        applied_parameters: overridden
+                            .applied_parameters
                             .iter()
                             .map(|parameter| parameter.get())
                             .collect(),
-                        applied_result: member.call.result.get(),
+                        applied_result: overridden.applied_result.get(),
                         implementation_parameters: member
                             .call
                             .parameters
@@ -313,10 +318,7 @@ fn materialize_delegation(
                             .map(|parameter| parameter.get())
                             .collect(),
                         implementation_parameter_identities: member.parameter_identities.to_vec(),
-                        overridden_parameter_identities: member
-                            .overridden
-                            .parameter_identities
-                            .to_vec(),
+                        overridden_parameter_identities: overridden.parameter_identities.to_vec(),
                         implementation_result: member.call.result.get(),
                         suspend: member.call.suspend,
                         // A delegation forwarder implements an interface obligation no superclass
@@ -324,6 +326,7 @@ fn materialize_delegation(
                         has_kotlin_superclass_override: false,
                         depth: 0,
                     });
+                }
                 if member.call.suspend {
                     ir.suspend_funs.push(function);
                 }
