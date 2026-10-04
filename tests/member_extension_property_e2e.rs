@@ -617,8 +617,7 @@ fun box(): String = Test("OK").test("x")
 /// `compute.observable` reads a protected member of `this` and is legal.
 #[test]
 fn protected_member_extension_property_read_in_declaring_class() {
-    common::expect_box_same_as_kotlinc(
-        r#"
+    let source = r#"
 abstract class Store {
     protected abstract val <K, V> ((K) -> V).observable: (K) -> V
 
@@ -631,9 +630,9 @@ class Impl : Store() {
 }
 
 fun box(): String = Impl().memoize({ it + "OK" })("")
-"#,
-        "ProtectedMemberExtPropRead",
-    );
+"#;
+    common::expect_box_same_as_kotlinc(source, "ProtectedMemberExtPropRead");
+    common::expect_native_box(source, "ProtectedMemberExtPropReadNative", "OK");
 }
 
 /// The same protected read from a SUBCLASS through its implicit dispatch receiver.
