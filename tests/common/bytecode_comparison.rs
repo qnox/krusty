@@ -462,7 +462,12 @@ pub fn classes_against_kotlinc_lib_target(
             ];
             if let Some(target) = jvm_target {
                 arguments.push("-jvm-target".to_string());
-                arguments.push(target.to_string());
+                // kotlinc spells the Java 8 target as `1.8`. Later releases use the major number.
+                arguments.push(if target == 8 {
+                    "1.8".to_string()
+                } else {
+                    target.to_string()
+                });
             }
             arguments.push(source.to_string_lossy().into_owned());
             let (code, stderr) = super::common_core::kotlinc_compile(&arguments)?;
