@@ -1782,6 +1782,7 @@ pub struct FirBody {
     bodiless_lifting_sites: Vec<FirLiftingSite>,
     /// Target-neutral selected convention plans for local delegated properties declared here.
     local_delegate_plans: Vec<FirLocalDelegatePlan>,
+    pub(super) interface_delegate_calls: Vec<super::FirInterfaceDelegateCalls>,
     context_receiver_types: Vec<ResolvedTy>,
     context_parameter_kinds: Vec<crate::types::ContextParameterKind>,
     /// Declaration-owned inline semantics, in physical parameter order. The checker publishes
@@ -1839,6 +1840,7 @@ impl FirBody {
             lifting_site: None,
             bodiless_lifting_sites: Vec::new(),
             local_delegate_plans: Vec::new(),
+            interface_delegate_calls: Vec::new(),
             context_receiver_types: Vec::new(),
             context_parameter_kinds: Vec::new(),
             inline_parameter_modifiers: Vec::new(),

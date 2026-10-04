@@ -170,6 +170,7 @@ pub(crate) fn lower_body_with_context(
     let owner = body.owner();
     ir.source_line_count = ir.source_line_count.max(body.source_line_count());
     local_callables::record_lifting_sites(&body, index, ir);
+    interface_delegation::record_delegate_calls(&body, ir);
     #[cfg(feature = "trace")]
     body_trace::trace_checked_body(&body, index);
     let declaration = crate::fir::DeclarationId::from_raw(owner.raw());

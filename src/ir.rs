@@ -1694,6 +1694,12 @@ pub struct IrFile {
     /// never searches the constructor IR for a matching field assignment.
     pub checked_interface_delegation_initializers:
         std::collections::HashSet<(crate::fir::DeclarationId, u32)>,
+    /// `(classifier declaration, interface-delegation ordinal)` to the calls its forwarders make on
+    /// the delegate value, published by the checked constructor body that evaluates it.
+    pub checked_interface_delegate_calls: std::collections::HashMap<
+        (crate::fir::DeclarationId, u32),
+        Box<[crate::fir::ResolvedDelegateMemberCalls]>,
+    >,
     /// Stable enum-entry declaration to its compiler-generated common-IR subclass. The entry keeps
     /// the enum classifier as its semantic receiver in FIR; this transient edge only owns where its
     /// declared methods/properties are physically attached in the active file.

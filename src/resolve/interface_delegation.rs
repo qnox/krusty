@@ -7,6 +7,10 @@
 
 use std::collections::{HashSet, VecDeque};
 
+mod delegate_calls;
+
+pub(super) use delegate_calls::delegate_member_calls;
+
 use crate::fir::{
     ResolvedDelegatedCall, ResolvedDelegatedCallTarget, ResolvedDelegatedContextParameter,
     ResolvedDelegatedFunction, ResolvedDelegatedFunctionDeclaration, ResolvedDelegatedMember,
