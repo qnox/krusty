@@ -1,9 +1,11 @@
 //! Common semantic declarations distributed beside the JVM stdlib classfiles.
 //!
-//! Kotlin ships the common `expect` headers in the distribution KLIB next to `kotlin-stdlib.jar`.
-//! Optional annotation classifiers whose metadata carries `IS_EXPECT_CLASS` enter the symbol
-//! source. Exact public callable identities may authorize roles that are then joined to the paired
-//! platform realization; other platform declarations in the archive do not enter the JVM source.
+//! Kotlin ships the common declarations in the distribution KLIB next to `kotlin-stdlib.jar`. Exact
+//! public callable identities from it authorize language roles (floating-point range membership,
+//! `enumEntries`) that are then joined to the paired platform realization. The JVM stdlib's class
+//! files and `.kotlin_module` carry no such identity, which is why this KLIB is still read. Optional
+//! annotation classes do not come from here: kotlinc reads them from each classpath root's
+//! `.kotlin_module` (see `optional_annotations`).
 //!
 //! The authoritative metadata model and decoder are target-independent. This module is the JVM
 //! backend's *use* of that model and consumes it directly; no JVM builtins adapter participates in
@@ -14,14 +16,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::klib::{KlibArchive, KlibError};
-use crate::libraries::{
-    CallSig, ClassifierInheritance, CompilerIntrinsic, FnKind, FunctionInfo, GenericSig,
-    InlineKind, LibraryMember, LibraryType, ParamList, TypeKind,
-};
+use crate::libraries::{CompilerIntrinsic, FnKind, FunctionInfo, GenericSig, InlineKind};
 use crate::metadata::id_signature::KlibPublicIdSignature;
 use crate::metadata::{decode, semantic};
 use crate::symbol_source::SymbolNamespace;
-use crate::types::{type_name, Ty, TypeName, TypeNameList, TypeParameters};
+use crate::types::{type_name, Ty, TypeName};
 
 #[derive(Debug)]
 pub(super) enum CommonExpectationError {
@@ -103,7 +102,6 @@ impl From<KlibError> for CommonExpectationError {
 
 #[derive(Default)]
 pub(super) struct CommonExpectationIndex {
-    classifiers: HashMap<TypeName, Arc<LibraryType>>,
     package_function_roles: Vec<CommonPackageFunctionRole>,
 }
 
@@ -182,14 +180,6 @@ impl CommonExpectationIndex {
         shared
             .get_or_init(|| Self::read(&path).map(Arc::new).map_err(Arc::new))
             .clone()
-    }
-
-    pub(super) fn classifier(&self, internal: TypeName) -> Option<Arc<LibraryType>> {
-        self.classifiers.get(&internal).cloned()
-    }
-
-    pub(super) fn contains(&self, internal: TypeName) -> bool {
-        self.classifiers.contains_key(&internal)
     }
 
     /// Role of the exact common declaration actualized by one normalized JVM callable.
@@ -289,28 +279,19 @@ impl CommonExpectationIndex {
                 fragments: fragment_packages,
             });
         }
-        let mut classifiers = HashMap::new();
+        // The KLIB is a dependency: every fragment crosses the checked boundary even though only
+        // the IR identities above carry roles.
         for fragment in fragments {
             let bytes = archive.read(&fragment.entry)?;
-            let package = semantic::parse_package_fragment_checked(&bytes).map_err(|source| {
+            semantic::parse_package_fragment_checked(&bytes).map_err(|source| {
                 CommonExpectationError::InvalidFragment {
                     archive: path.to_path_buf(),
                     entry: fragment.entry,
                     source,
                 }
             })?;
-            for (internal, declaration) in package.classes {
-                if declaration.kind != TypeKind::Annotation || !declaration.is_expect {
-                    continue;
-                }
-                let identity = type_name(&internal);
-                classifiers
-                    .entry(identity)
-                    .or_insert_with(|| Arc::new(annotation_type(declaration)));
-            }
         }
         Ok(Self {
-            classifiers,
             package_function_roles,
         })
     }
@@ -412,122 +393,6 @@ fn enum_entries_signature() -> GenericSig {
         params: Vec::new(),
         ret: Ty::obj_args("kotlin/enums/EnumEntries", &[parameter]),
         return_policy: Default::default(),
-    }
-}
-
-fn annotation_type(declaration: semantic::KotlinClass) -> LibraryType {
-    let bounds = semantic::semantic_bounds(&declaration.type_params, &HashMap::new());
-    let type_parameters = TypeParameters::new(
-        declaration
-            .type_params
-            .iter()
-            .map(|parameter| parameter.name.clone())
-            .collect(),
-        declaration
-            .type_params
-            .iter()
-            .map(|parameter| {
-                parameter
-                    .bounds
-                    .iter()
-                    .map(|bound| semantic::semantic_ty(bound, &bounds))
-                    .collect()
-            })
-            .collect(),
-        declaration
-            .type_params
-            .iter()
-            .map(|parameter| parameter.variance)
-            .collect(),
-    );
-    let supertype_templates = declaration
-        .supertype_tys
-        .iter()
-        .map(|supertype| semantic::semantic_ty(supertype, &bounds))
-        .collect::<Vec<_>>();
-    let supertypes = declaration
-        .supertypes
-        .iter()
-        .map(|supertype| type_name(supertype))
-        .collect::<Vec<_>>()
-        .into();
-    let mut constructors = Vec::new();
-    let mut named_parameter_lists = Vec::new();
-    for constructor in declaration.constructors {
-        let params = constructor
-            .params
-            .iter()
-            .map(|parameter| semantic::semantic_ty(parameter, &bounds))
-            .collect::<Vec<_>>();
-        let mut member = LibraryMember::new(
-            "<init>".to_string(),
-            params.clone(),
-            Ty::Unit,
-            String::new(),
-        );
-        member.visibility = constructor.visibility;
-        member.call_sig = CallSig::metadata_member(
-            params.len(),
-            constructor.param_names.clone(),
-            constructor.param_defaults.clone(),
-            constructor.vararg,
-        );
-        constructors.push(member);
-        named_parameter_lists.push(ParamList {
-            visibility: constructor.visibility,
-            names: constructor.param_names,
-            defaults: constructor.param_defaults,
-            types: params,
-            recv_fun: Vec::new(),
-            vararg: constructor.vararg,
-            annotation: None,
-        });
-    }
-    LibraryType {
-        access: declaration.visibility.into(),
-        is_kotlin: true,
-        source_file: None,
-        stable_declaration: None,
-        is_nested: declaration.is_nested,
-        outer_instance: None,
-        kind: TypeKind::Annotation,
-        inheritance: ClassifierInheritance {
-            is_abstract: true,
-            is_extensible: false,
-            has_no_arg_constructor: constructors
-                .iter()
-                .any(|constructor| constructor.params.is_empty()),
-        },
-        supertypes,
-        supertype_templates,
-        constructors,
-        hidden_member_properties: Default::default(),
-        hidden_deprecated_callables: Default::default(),
-        declared_callables: HashMap::new(),
-        declared_callable_order: Vec::new(),
-        members: Vec::new(),
-        companion: Vec::new(),
-        constants: HashMap::new(),
-        sam_eligible: false,
-        callable_signature: None,
-        callable_signatures: Vec::new(),
-        companion_object: None,
-        qualified_name: None,
-        value_underlying: None,
-        value_underlying_property: None,
-        alias_target: None,
-        own_type_parameter_count: type_parameters.type_params.len(),
-        type_parameters,
-        sealed_subclasses: TypeNameList::new(),
-        enum_entries: Vec::new(),
-        enum_entries_accessor: None,
-        named_parameter_lists,
-        // No JVM actual exists, so this platform erases the optional annotation after checking.
-        annotations: Vec::new(),
-        retention: Some("SOURCE".to_string()),
-        annotation_targets: None,
-        mapped_collection: None,
-        annotation_element_defaults: Vec::new(),
     }
 }
 
@@ -646,7 +511,6 @@ mod tests {
         let candidate = floating_range_candidate(&exact);
         let index = CommonExpectationIndex {
             package_function_roles: vec![exact],
-            ..CommonExpectationIndex::default()
         };
         assert_eq!(
             index.package_function_role(
@@ -812,7 +676,6 @@ mod tests {
         let candidate = enum_entries_candidate(&exact);
         let index = CommonExpectationIndex {
             package_function_roles: vec![exact],
-            ..CommonExpectationIndex::default()
         };
         assert_eq!(
             index.package_function_role(false, type_name("kotlin/enums"), "enumEntries", &candidate),

@@ -108,6 +108,7 @@ pub struct JvmLibraries {
     /// normalized class headers and restores any outer request overlay when this provider drops.
     source_headers: std::cell::RefCell<Option<super::classpath::StubOverlayGuard>>,
     common_expectations: std::sync::Arc<super::common_metadata::CommonExpectationIndex>,
+    optional_annotations: super::optional_annotations::OptionalAnnotationIndex,
     builtins_customizer: JvmBuiltInsCustomizer,
     /// `-api-version` for this compilation. Classpath caches stay shared; availability is decided
     /// here, per provider, when a `@SinceKotlin` callable is offered as a candidate.
@@ -950,10 +951,12 @@ impl JvmLibraries {
                 .map_err(|error| crate::libraries::PlatformInitializationError {
                     message: format!("cannot load Kotlin common-expectation dependency: {error}"),
                 })?;
+        let optional_annotations = super::optional_annotations::OptionalAnnotationIndex::load(&cp)?;
         Ok(JvmLibraries {
             cp,
             source_headers: Default::default(),
             common_expectations,
+            optional_annotations,
             builtins_customizer: JvmBuiltInsCustomizer,
             api_version: LanguageVersion::default(),
             api_withheld: Default::default(),
@@ -3177,11 +3180,12 @@ fn class_implements_name(cp: &Classpath, internal: TypeName, target: TypeName) -
 }
 
 impl JvmLibraries {
-    /// Federate the classpath package catalog with the core declaration source. `symbols()` already
-    /// combines those sources; package-prefix resolution must expose the same namespace or an explicit
-    /// import can be rejected before its core symbol is queried.
+    /// The packages `symbols()` combines (classpath, optional annotations, core declarations), or
+    /// an explicit import can be rejected before its symbol is queried.
     fn package_exists(&self, parent: TypeName, name: &str) -> bool {
-        self.cp.has_package(parent, name) || EmptySymbolSource.package_exists(parent, name)
+        self.cp.has_package(parent, name)
+            || self.optional_annotations.has_package(parent, name)
+            || EmptySymbolSource.package_exists(parent, name)
     }
 
     fn register_external_classifier(
@@ -4007,9 +4011,7 @@ impl JvmLibraries {
                     std::sync::Arc::new(classifier)
                 })
         }
-        .or_else(|| {
-            self.common_expectations.classifier(internal_name)
-        });
+        .or_else(|| self.optional_annotations.classifier(internal_name));
         self.cp
             .cache_library_type_name(internal_name, built.clone());
         built
@@ -5144,14 +5146,11 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
     }
 
     fn is_optional_expectation(&self, classifier: TypeName) -> bool {
-        if !self.common_expectations.contains(classifier) {
+        if !self.optional_annotations.contains(classifier) {
             return false;
         }
 
-        // Common metadata can contain both target-less optional expectations (for example
-        // `kotlin.js.JsStatic` on JVM) and expectations with a real JVM actual (for example
-        // `kotlin.jvm.JvmInline`). Only the former disappear from platform sources. Target
-        // declarations always shadow the common header.
+        // Ranked below class files (kotlinc): a target declaration shadows the optional header.
         !self.cp.class_exists_name(classifier)
             && self.cp.type_alias_target_name(classifier).is_none()
             && self.cp.builtin_classifier_name(classifier).is_none()

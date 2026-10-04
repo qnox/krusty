@@ -2,6 +2,8 @@
 
 use protobuf::Pb;
 
+pub mod annotations;
+pub use annotations::{MetadataAnnotations, NO_ANNOTATIONS};
 pub mod builder;
 pub mod class_builder;
 pub(crate) mod decode;

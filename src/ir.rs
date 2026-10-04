@@ -1178,7 +1178,8 @@ pub struct IrClass {
     /// `@Target` admits `PROPERTY`), by property name. Kotlin properties have no class-file
     /// declaration, so these are emitted onto a synthetic `get<Name>$annotations()` marker method
     /// that the property's `JvmPropertySignature` names. Empty for a class whose properties carry
-    /// none.
+    /// none. The marker pass consumes every entry that retains an annotation; an entry left after
+    /// it records only erased optional expectations, which reach `@Metadata` as a flag alone.
     pub property_annotations: Vec<PropertyAnnotations>,
     /// User annotations declared on the PRIMARY constructor (`class C @Mark constructor(…)`) — the
     /// primary-`<init>` analogue of [`IrSecondaryCtor::annotations`], carrying retention per

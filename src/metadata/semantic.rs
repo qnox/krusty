@@ -8,7 +8,10 @@
 use std::collections::HashMap;
 
 use crate::libraries::TypeKind;
-use crate::metadata::decode::{decode_package_fragment, strip_builtins_header};
+use crate::metadata::decode::{
+    decode_module_optional_annotations, decode_package_fragment, strip_builtins_header,
+    ClassAnnotationProtocol,
+};
 use crate::types::{Ty, Visibility};
 
 pub use crate::metadata::decode::PackageFragmentDecodeError;
@@ -28,7 +31,17 @@ pub fn parse_builtins(data: &[u8]) -> Result<KotlinPackage, PackageFragmentDecod
         offset: 0,
         detail: "truncated Kotlin builtins version header".to_string(),
     })?;
-    parse_package_fragment_checked(fragment)
+    let mut decoded = decode_package_fragment(fragment)?;
+    decoded.class_annotations = ClassAnnotationProtocol::BuiltIns;
+    klib::parse(decoded)
+}
+
+/// Decode the optional annotation classes of a JVM `META-INF/<module>.kotlin_module` file through
+/// the same semantic boundary as a KLIB fragment's classes.
+pub fn parse_module_optional_annotations(
+    bytes: &[u8],
+) -> Result<KotlinPackage, PackageFragmentDecodeError> {
+    klib::parse(decode_module_optional_annotations(bytes)?)
 }
 
 /// A type decoded from Kotlin metadata before any target representation is chosen.
@@ -212,7 +225,38 @@ pub struct KotlinClass {
     pub is_nested: bool,
     /// Original Kotlin metadata flags retained for adapters that must preserve an external ABI.
     pub metadata_flags: u64,
+    /// The class's own annotations, with the arguments a declaration-level reader needs.
+    pub annotations: Vec<AnnotationApplication>,
     pub nullable_member_returns: Vec<(String, usize)>,
+}
+
+/// One annotation recorded on a metadata declaration.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AnnotationApplication {
+    pub identity: crate::types::TypeName,
+    /// Arguments in recorded order, by parameter name.
+    pub arguments: Vec<(String, AnnotationArgument)>,
+}
+
+/// A recorded annotation argument. Only the enum shape (and arrays of it) is decoded: that is what
+/// `kotlin.annotation.Retention` and `kotlin.annotation.Target` carry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AnnotationArgument {
+    Enum {
+        class: crate::types::TypeName,
+        entry: String,
+    },
+    Array(Vec<AnnotationArgument>),
+    Other,
+}
+
+impl AnnotationApplication {
+    pub fn argument(&self, name: &str) -> Option<&AnnotationArgument> {
+        self.arguments
+            .iter()
+            .find(|(parameter, _)| parameter == name)
+            .map(|(_, value)| value)
+    }
 }
 
 /// Kotlin declaration modality, independent of a target's access flags.

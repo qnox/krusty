@@ -39,6 +39,28 @@ pub(crate) fn compile(
     metadata_version: Option<[i32; 3]>,
     language_settings: &krusty::language_settings::LanguageSettings,
 ) -> Option<Vec<(String, Vec<u8>)>> {
+    compile_source_set(
+        sources,
+        0,
+        cp_jars,
+        jdk_modules,
+        class_major,
+        metadata_version,
+        language_settings,
+    )
+}
+
+/// One JVM compilation whose first `common` sources are common sources, as kotlinc's
+/// `-Xcommon-sources` names them.
+pub(crate) fn compile_source_set(
+    sources: &[(&str, &str)],
+    common: usize,
+    cp_jars: &[PathBuf],
+    jdk_modules: Option<&std::path::Path>,
+    class_major: Option<u16>,
+    metadata_version: Option<[i32; 3]>,
+    language_settings: &krusty::language_settings::LanguageSettings,
+) -> Option<Vec<(String, Vec<u8>)>> {
     let _pg = super::ProfGuard::new("krusty");
     let mut diags = DiagSink::new();
     let stems = sources
@@ -48,7 +70,15 @@ pub(crate) fn compile(
     let inputs = sources
         .iter()
         .zip(&stems)
-        .map(|((_, source), stem)| SourceInput::kotlin(source).with_file_stem(stem))
+        .enumerate()
+        .map(|(index, ((_, source), stem))| {
+            let input = SourceInput::kotlin(source).with_file_stem(stem);
+            if index < common {
+                input.common()
+            } else {
+                input
+            }
+        })
         .collect::<Vec<_>>();
     let cp = super::cached_classpath(cp_jars, jdk_modules);
     let platform = Box::new(

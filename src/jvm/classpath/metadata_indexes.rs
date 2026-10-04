@@ -468,7 +468,11 @@ mod tests {
             [2, 4, 0],
         );
         let mut packages = JarPackages::default();
-        super::super::record_kotlin_module(&module, &mut packages);
+        super::super::module_optional_annotations::record_kotlin_module(
+            "META-INF/main.kotlin_module",
+            &module,
+            &mut packages,
+        );
 
         assert!(ext_scan_wanted("p/Utils", &packages));
         assert!(type_alias_scan_wanted("p/Utils", &packages));

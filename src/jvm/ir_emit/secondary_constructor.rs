@@ -551,7 +551,7 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
         }
         // Declared constructor annotations, with the same `Deprecated` / `ACC_SYNTHETIC` companions
         // a function's carry (see the method emitter).
-        if !sc.annotations.is_empty() {
+        if !sc.annotations.retains_none() {
             cw.set_method_annotations("<init>", &sc_desc, &sc.annotations);
             if sc.annotations.deprecated() {
                 cw.mark_method_deprecated("<init>", &sc_desc);

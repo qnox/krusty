@@ -6341,6 +6341,36 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   same-file). Tests: `mpp_expect_actual_e2e`; corpus `multiplatform/` 75 PASS / 0 FAIL
   (box total 2744 → 2825).
 
+- **`@OptionalExpectation` annotation classes come from a library's `.kotlin_module`.** A JVM
+  library carries no class file for an optional annotation that has no JVM actual
+  (`kotlin.js.JsStatic`, `kotlin.native.CName`, …); kotlinc writes the `expect annotation class`
+  into field 16 (`optional_annotation_class`) of the library's `META-INF/*.kotlin_module`, and its
+  `OptionalAnnotationClassesProvider` reads it from every direct child of `META-INF` with that
+  extension. krusty decodes the same section (`metadata::decode::module_mapping`: the version
+  header, the flags word from 1.4, then the module message with its own string and qualified-name
+  tables; class annotations from field 25, else builtins extension 150), keeps a class only when it
+  is an `expect annotation class` annotated with `kotlin.OptionalExpectation`, ranks the result
+  below class files, and lets a later classpath module win a duplicate class id. A malformed module
+  is a platform-initialization error, not a silent skip. The class's own `@Retention` and
+  `@Target` are decoded from the same record (`kotlin.js.JsStatic` is BINARY, property-targeted).
+  Common sources resolve and apply the annotation. Like kotlinc, which removes the application
+  from IR together with its `expect` class, nothing in the class file names it and `@Metadata`
+  writes no annotation record for it, but the declaration's `hasAnnotations` flag is still set
+  for a non-SOURCE retention (kotlinc derives that flag from FIR before the removal): the
+  checker records `AnnotationSemanticFacts::optional_expectation`, and common lowering keeps
+  only that fact in `DeclarationAnnotations`. Every owner hands `@Metadata` one
+  `metadata::MetadataAnnotations` (the declared-annotations fact plus the records), so the flag
+  is never reconstructed from the retained records. Its package (`kotlin.native`) resolves even
+  where no class file lives in it. Byte-identical to kotlinc for a member and a top-level
+  function, a property, a class, a primary and a secondary constructor, and a value parameter.
+  A platform source is rejected at the annotation's type reference with `declaration
+  annotated with '@OptionalExpectation' can only be used in common module sources.` (identical
+  on 2.4.0, 2.4.10 and 2.4.20). Annotation classifiers are no longer inferred from the common
+  stdlib KLIB. Open gap: annotations written on a property ACCESSOR (`@A get()`) are skipped by
+  the parser for every annotation class, so accessor uses are neither checked nor flagged.
+  Tests: `optional_expectation_annotation_e2e`, `jvm::optional_annotations` and
+  `metadata::decode::module_mapping` unit tests.
+
 - **`expect`/`actual` requires the multiplatform feature, and an `expect` declaration may not carry
   a body.** Two independent checks, both syntactic and both measured against the reference
   compiler. (1) Without `+MultiPlatformProjects`, every `expect`/`actual` MODIFIER is an error

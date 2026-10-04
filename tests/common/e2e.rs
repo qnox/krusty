@@ -47,6 +47,25 @@ pub fn compile_in_process_files_language_settings(
     )
 }
 
+/// Compile a multiplatform JVM module whose first `common` sources are common (dependsOn)
+/// sources, as kotlinc's `-Xmulti-platform -Xcommon-sources=…` names them.
+pub fn compile_in_process_files_common(
+    sources: &[(&str, &str)],
+    common: usize,
+    cp_jars: &[PathBuf],
+    jdk_modules: Option<&std::path::Path>,
+) -> Option<Vec<(String, Vec<u8>)>> {
+    common::source_set_compile::compile_source_set(
+        sources,
+        common,
+        cp_jars,
+        jdk_modules,
+        None,
+        None,
+        &krusty::language_settings::LanguageSettings::default(),
+    )
+}
+
 /// A positive front-end coverage test upgraded to true e2e: the source must be checker-clean, the
 /// backend must emit it (a lowering/emit bail is a failure, not a skip), and when it declares
 /// `fun box()`, running it must return "OK". This belongs in the e2e-only helper module so the

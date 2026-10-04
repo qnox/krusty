@@ -62,6 +62,7 @@ mod method_parameters;
 mod module_calls;
 pub mod names;
 mod operation_relocation;
+mod optional_annotations;
 mod overridden_calls;
 mod override_results;
 mod parameter_assertions;

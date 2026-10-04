@@ -68,9 +68,12 @@ impl Checker<'_> {
             && self.is_optional_expectation_classifier(internal)
             && !self.suppresses_diagnostic("OPTIONAL_DECLARATION_USAGE_IN_NON_COMMON_SOURCE")
         {
+            // kotlinc's OPTIONAL_DECLARATION_USAGE_IN_NON_COMMON_SOURCE, on the type reference.
             self.diags.error(
                 annotation.span,
-                format!("unresolved reference '{}'.", annotation.name),
+                "declaration annotated with '@OptionalExpectation' can only be used in common \
+                 module sources."
+                    .to_string(),
             );
             return;
         }

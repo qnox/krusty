@@ -1179,7 +1179,7 @@ mod tests {
             state: &mut Self::State,
             _diags: &mut DiagSink,
         ) -> Vec<Artifact> {
-            *state += file.ir.file_annotations.len();
+            *state += file.ir.file_annotations.iter().len();
             Vec::new()
         }
 
