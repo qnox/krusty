@@ -3,10 +3,10 @@
 //! Checked FIR and common IR retain a type parameter as its semantic identity plus the declaration's
 //! complete intersection of upper bounds. A JVM method descriptor instead needs one physical bound:
 //! the concrete class bound when present, otherwise the first interface bound, otherwise `Object`.
-//! A method type parameter may be bounded by a type parameter of the enclosing classifier. Common
-//! IR records that exact declaration layout on the callable; the backend does not reconstruct an
-//! owner from a JVM name. Keeping the conversion here prevents common lowering from committing a
-//! backend representation.
+//! A method type parameter may be bounded by a type parameter of an enclosing declaration. Common
+//! IR records the exact non-local declarations its bounds reference; the backend does not
+//! reconstruct an owner from a JVM name. Keeping the conversion here prevents common lowering from
+//! committing a backend representation.
 
 use crate::ir::{IrFile, IrTypeParameter};
 use crate::types::{wk, Ty};
@@ -26,18 +26,18 @@ fn declared_primary_bound(parameter: &IrTypeParameter) -> Option<Ty> {
 fn parameter_named<'a>(
     name: &str,
     parameters: &'a [IrTypeParameter],
-    enclosing: &'a [IrTypeParameter],
+    referenced: &'a [IrTypeParameter],
 ) -> Option<&'a IrTypeParameter> {
     parameters
         .iter()
-        .chain(enclosing)
+        .chain(referenced)
         .find(|parameter| parameter.semantic_name == name)
 }
 
 fn resolve_primary_bound(
     name: &str,
     parameters: &[IrTypeParameter],
-    enclosing: &[IrTypeParameter],
+    referenced: &[IrTypeParameter],
     resolved: &mut HashMap<String, Ty>,
     visiting: &mut HashSet<String>,
 ) -> Ty {
@@ -47,11 +47,11 @@ fn resolve_primary_bound(
     if !visiting.insert(name.to_owned()) {
         return Ty::obj_name(wk::any());
     }
-    let bound = parameter_named(name, parameters, enclosing)
+    let bound = parameter_named(name, parameters, referenced)
         .and_then(declared_primary_bound)
         .map(|bound| match bound.non_null() {
             Ty::TyParam(other, _) => {
-                resolve_primary_bound(other, parameters, enclosing, resolved, visiting)
+                resolve_primary_bound(other, parameters, referenced, resolved, visiting)
             }
             concrete => concrete.erased_recv(),
         })
@@ -123,18 +123,18 @@ pub(super) fn parameter_erasures(parameters: &[IrTypeParameter]) -> HashMap<Stri
     parameter_erasures_with(parameters, &[])
 }
 
-/// Erase `parameters` the way [`parameter_erasures`] does, also consulting the exact `enclosing`
-/// declarations recorded by common lowering when a bound names a classifier type parameter.
+/// Erase `parameters` the way [`parameter_erasures`] does, also consulting the exact non-local
+/// declarations common lowering recorded from their bounds.
 pub(super) fn parameter_erasures_with(
     parameters: &[IrTypeParameter],
-    enclosing: &[IrTypeParameter],
+    referenced: &[IrTypeParameter],
 ) -> HashMap<String, Ty> {
     let mut erasures = HashMap::new();
     for parameter in parameters {
         resolve_primary_bound(
             &parameter.semantic_name,
             parameters,
-            enclosing,
+            referenced,
             &mut erasures,
             &mut HashSet::new(),
         );
@@ -142,11 +142,9 @@ pub(super) fn parameter_erasures_with(
     erasures
 }
 
-/// Exact type parameters of `function`'s enclosing classifier layout. This includes captured outer
-/// parameters for an `inner` classifier and excludes parameters of a static nested classifier's
-/// lexical owner.
-pub(super) fn enclosing_type_parameters(ir: &IrFile, function: u32) -> Vec<IrTypeParameter> {
-    ir.callable_enclosing_type_parameters
+/// Exact non-local type-parameter declarations referenced by `function`'s own bounds.
+pub(super) fn bound_type_parameters(ir: &IrFile, function: u32) -> Vec<IrTypeParameter> {
+    ir.callable_bound_type_parameters
         .get(&function)
         .cloned()
         .unwrap_or_default()
@@ -161,15 +159,15 @@ pub(super) fn lower_function_type_parameters(ir: &mut IrFile) {
     let signatures = signatures
         .into_iter()
         .map(|(function, parameters)| {
-            let enclosing = enclosing_type_parameters(ir, function);
-            (function, parameters, enclosing)
+            let referenced = bound_type_parameters(ir, function);
+            (function, parameters, referenced)
         })
         .collect::<Vec<_>>();
-    for (function, parameters, enclosing) in signatures {
+    for (function, parameters, referenced) in signatures {
         if parameters.is_empty() {
             continue;
         }
-        let erasures = parameter_erasures_with(&parameters, &enclosing);
+        let erasures = parameter_erasures_with(&parameters, &referenced);
         let Some(function) = ir.functions.get_mut(function as usize) else {
             continue;
         };
@@ -185,10 +183,10 @@ mod tests {
     use super::*;
     use crate::types::TypeVariance;
 
-    fn parameter(name: &str, bound: Ty) -> IrTypeParameter {
+    fn parameter(source_name: &str, semantic_name: &str, bound: Ty) -> IrTypeParameter {
         IrTypeParameter {
-            name: name.to_owned(),
-            semantic_name: name.to_owned(),
+            name: source_name.to_owned(),
+            semantic_name: semantic_name.to_owned(),
             bounds: vec![(bound, false)],
             variance: TypeVariance::Invariant,
             reified: false,
@@ -197,21 +195,31 @@ mod tests {
 
     #[test]
     fn a_method_parameter_erases_through_an_enclosing_class_parameter() {
-        let class_parameter = parameter("S", Ty::obj("sample/Entity"));
-        let method_parameter = parameter("T", Ty::ty_param("S", Ty::obj("sample/Entity")));
+        let class_parameter = parameter("S", "classifier#S", Ty::obj("sample/Entity"));
+        let method_parameter = parameter(
+            "T",
+            "callable#T",
+            Ty::ty_param("classifier#S", Ty::obj("sample/Entity")),
+        );
 
         let erasures = parameter_erasures_with(&[method_parameter], &[class_parameter]);
 
-        assert_eq!(erasures.get("T").copied(), Some(Ty::obj("sample/Entity")));
+        assert_eq!(
+            erasures.get("callable#T").copied(),
+            Some(Ty::obj("sample/Entity"))
+        );
     }
 
     #[test]
-    fn a_method_parameter_shadows_an_enclosing_parameter_with_the_same_identity() {
-        let class_parameter = parameter("T", Ty::obj("sample/Entity"));
-        let method_parameter = parameter("T", Ty::obj("sample/Text"));
+    fn a_method_parameter_shadows_an_enclosing_parameter_with_the_same_source_spelling() {
+        let class_parameter = parameter("T", "classifier#T", Ty::obj("sample/Entity"));
+        let method_parameter = parameter("T", "callable#T", Ty::obj("sample/Text"));
 
         let erasures = parameter_erasures_with(&[method_parameter], &[class_parameter]);
 
-        assert_eq!(erasures.get("T").copied(), Some(Ty::obj("sample/Text")));
+        assert_eq!(
+            erasures.get("callable#T").copied(),
+            Some(Ty::obj("sample/Text"))
+        );
     }
 }

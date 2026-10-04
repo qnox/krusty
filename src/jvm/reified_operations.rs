@@ -166,7 +166,7 @@ fn collect_reified_parameters(ir: &IrFile) -> HashMap<String, ReifiedParameter> 
         .collect::<Vec<_>>();
     let mut parameters = HashMap::new();
     for (function, type_params) in signatures {
-        let enclosing = super::generic_erasure::enclosing_type_parameters(ir, function);
+        let enclosing = super::generic_erasure::bound_type_parameters(ir, function);
         for (identity, parameter) in reified_parameters(&type_params, &enclosing) {
             if let Some(previous) = parameters.insert(identity, parameter.clone()) {
                 assert_eq!(

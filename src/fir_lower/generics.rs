@@ -13,6 +13,53 @@ pub(super) fn declaration_type_parameters(
         .collect()
 }
 
+/// Exact non-local type-parameter declarations referenced by a callable's own bounds.
+///
+/// A classifier-wide list is too broad and still requires a later phase to reconnect `T : S` to
+/// the right `S`. Follow the already-resolved semantic identity from each bound through the
+/// declaration scope instead, then close transitively over that declaration's bounds.
+fn referenced_bound_type_parameters(
+    index: &ResolvedModuleIndex,
+    declaration: DeclarationId,
+    own: &[IrTypeParameter],
+) -> Vec<IrTypeParameter> {
+    let own = own
+        .iter()
+        .map(|parameter| parameter.semantic_name.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    let mut names = Vec::new();
+    for ordinal in 0.. {
+        let Some(parameter) = index.type_parameter(declaration, ordinal) else {
+            break;
+        };
+        let header = index
+            .type_parameter_header(parameter)
+            .expect("a callable type parameter must retain its stable header");
+        for bound in &header.bounds {
+            type_parameters_named_by(bound.ty.get(), &mut names);
+        }
+    }
+
+    let mut parameters = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut cursor = 0;
+    while let Some(&name) = names.get(cursor) {
+        cursor += 1;
+        if own.contains(name) || !seen.insert(name) {
+            continue;
+        }
+        let identity = index
+            .type_parameter_in_declaration_scope(declaration, name)
+            .expect("a bound's semantic type-parameter identity must resolve in declaration scope");
+        let parameter = type_parameter(index, identity);
+        for &(bound, _) in &parameter.bounds {
+            type_parameters_named_by(bound, &mut names);
+        }
+        parameters.push(parameter);
+    }
+    parameters
+}
+
 /// Record a property's own type parameters on one accessor. Class type parameters stay on the
 /// class; these are the declaration's (`var <X, Y> ctx: Map<X, Y>`).
 pub(super) fn attach_accessor_type_parameters(
@@ -172,22 +219,14 @@ pub(super) fn attach_callable_generic_facts(
 ) {
     let parameters = declaration_type_parameters(index, declaration);
     if !parameters.is_empty() {
-        if let Some(classifier) = index.enclosing_classifier(declaration) {
-            let enclosing = index
-                .classifier_type_arguments(classifier.declaration)
-                .into_iter()
-                .flatten()
-                .copied()
-                .map(|parameter| type_parameter(index, parameter))
-                .collect::<Vec<_>>();
-            if !enclosing.is_empty() {
-                assert!(
-                    ir.callable_enclosing_type_parameters
-                        .insert(function, enclosing)
-                        .is_none(),
-                    "one callable publishes its enclosing type-parameter layout once"
-                );
-            }
+        let referenced = referenced_bound_type_parameters(index, declaration, &parameters);
+        if !referenced.is_empty() {
+            assert!(
+                ir.callable_bound_type_parameters
+                    .insert(function, referenced)
+                    .is_none(),
+                "one callable publishes its non-local bound declarations once"
+            );
         }
     }
     let callable = index.callable_for_declaration(declaration);

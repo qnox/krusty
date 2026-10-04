@@ -714,7 +714,7 @@ impl IrFile {
         {
             validate_generic_signature(signature)?;
         }
-        for parameters in self.callable_enclosing_type_parameters.values() {
+        for parameters in self.callable_bound_type_parameters.values() {
             for parameter in parameters {
                 validate_type_parameter(parameter)?;
             }

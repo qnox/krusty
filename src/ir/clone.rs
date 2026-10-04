@@ -564,8 +564,8 @@ fn copy_function_implementation_facts(
             }
         }
     }
-    copy_map!(callable_enclosing_type_parameters);
-    if let Some(parameters) = ir.callable_enclosing_type_parameters.get_mut(&target) {
+    copy_map!(callable_bound_type_parameters);
+    if let Some(parameters) = ir.callable_bound_type_parameters.get_mut(&target) {
         for parameter in parameters {
             for (bound, _) in &mut parameter.bounds {
                 *bound = ty_subst_keep_unbound(*bound, bindings);
@@ -690,7 +690,7 @@ mod tests {
         ir.fn_decl_lines.insert(source, 4);
         ir.inline_fns.insert(source);
         ir.signatures.insert(source, signature(parameter));
-        ir.callable_enclosing_type_parameters.insert(
+        ir.callable_bound_type_parameters.insert(
             source,
             vec![IrTypeParameter {
                 name: "C".to_string(),
@@ -759,11 +759,11 @@ mod tests {
         assert_eq!(ir.signatures[&first].params, vec![specialized]);
         assert_eq!(ir.signatures[&first].ret, Some(specialized));
         assert_eq!(
-            ir.callable_enclosing_type_parameters[&source][0].bounds[0].0,
+            ir.callable_bound_type_parameters[&source][0].bounds[0].0,
             parameter
         );
         assert_eq!(
-            ir.callable_enclosing_type_parameters[&first][0].bounds[0].0,
+            ir.callable_bound_type_parameters[&first][0].bounds[0].0,
             specialized
         );
         assert_eq!(ir.lambda_type_parameters(first).len(), 1);
