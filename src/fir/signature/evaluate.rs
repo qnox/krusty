@@ -1330,12 +1330,20 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                     }
                     SigExpr::Delegate {
                         delegate,
+                        expected,
                         scope,
                         site,
                     } => {
                         let delegate = evaluate_expression(
                             semantics, delegate, graph, demand, memo, computing,
                         )?;
+                        let expected = expected
+                            .map(|expected| {
+                                evaluate_expression(
+                                    semantics, expected, graph, demand, memo, computing,
+                                )
+                            })
+                            .transpose()?;
                         let site = graph
                             .delegate_site(site)
                             .expect("a delegated signature retains its graph-owned site");
@@ -1381,7 +1389,7 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                         let scope = graph
                             .scope(scope)
                             .expect("a delegated signature must retain its declaration scope");
-                        semantics.select_delegate(scope, delegate, site, demand)
+                        semantics.select_delegate(scope, delegate, expected, site, demand)
                     }
                     SigExpr::Join {
                         operands,

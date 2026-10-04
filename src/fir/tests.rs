@@ -2463,6 +2463,7 @@ impl SignatureSemantics for TestSignatureSemantics {
         &self,
         _scope: SignatureScope,
         delegate: ResolvedTy,
+        _expected: Option<ResolvedTy>,
         _site: ResolvedSignatureDelegateSite,
         _demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
     ) -> Result<ResolvedTy, DiagnosticId> {

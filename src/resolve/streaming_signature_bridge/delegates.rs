@@ -13,6 +13,7 @@ impl ProductionSignatureSemantics<'_> {
         &self,
         scope: crate::fir::SignatureScope,
         delegate: crate::fir::ResolvedTy,
+        expected: Option<crate::fir::ResolvedTy>,
         site: crate::fir::ResolvedSignatureDelegateSite,
         demand: &mut dyn FnMut(
             crate::fir::DeclarationId,
@@ -47,26 +48,32 @@ impl ProductionSignatureSemantics<'_> {
             }
             Err(diagnostic) => return Err(diagnostic),
         };
-        let select_ordinary =
-            |receiver, name, arguments, kind| match self.with_resolver(scope, |resolver| {
+        let select_ordinary = |receiver, name, arguments, kind, expected_result| match self
+            .with_resolver(scope, |resolver| {
                 Some(
                     crate::resolve::delegated_properties::select_delegate_operator_kind(
-                        resolver, receiver, name, arguments, kind,
+                        resolver,
+                        receiver,
+                        name,
+                        arguments,
+                        kind,
+                        expected_result,
                     ),
                 )
             }) {
-                Ok(selection) => Ok(selection),
-                Err(diagnostic) if diagnostic.raw() == 0 => {
-                    panic!("a retained delegate signature scope must construct its resolver")
-                }
-                Err(diagnostic) => Err(diagnostic),
-            };
+            Ok(selection) => Ok(selection),
+            Err(diagnostic) if diagnostic.raw() == 0 => {
+                panic!("a retained delegate signature scope must construct its resolver")
+            }
+            Err(diagnostic) => Err(diagnostic),
+        };
         let provide_arguments = [provide_ref, property_reference];
         let provided = select_ordinary(
             delegate.get(),
             "provideDelegate",
             &provide_arguments,
             crate::libraries::FnKind::Member,
+            None,
         )?;
         let stored = match provided {
             crate::resolve::delegated_properties::DelegateConventionSelection::None(_) => {
@@ -122,6 +129,7 @@ impl ProductionSignatureSemantics<'_> {
                         "provideDelegate",
                         &provide_arguments,
                         crate::libraries::FnKind::Extension,
+                        None,
                     )? {
                         crate::resolve::delegated_properties::DelegateConventionSelection::Selected(
                             selected,
@@ -134,6 +142,7 @@ impl ProductionSignatureSemantics<'_> {
                                 &selected,
                                 result,
                                 &provide_arguments,
+                                None,
                                 demand,
                             ),
                         )?,
@@ -156,6 +165,7 @@ impl ProductionSignatureSemantics<'_> {
                     &selected,
                     result,
                     &provide_arguments,
+                    None,
                     demand,
                 ),
             )?,
@@ -166,6 +176,7 @@ impl ProductionSignatureSemantics<'_> {
             "getValue",
             &get_arguments,
             crate::libraries::FnKind::Member,
+            expected.map(crate::fir::ResolvedTy::get),
         )?;
         match selected {
             crate::resolve::delegated_properties::DelegateConventionSelection::Selected(
@@ -179,6 +190,7 @@ impl ProductionSignatureSemantics<'_> {
                     &selected,
                     result,
                     &get_arguments,
+                    expected.map(crate::fir::ResolvedTy::get),
                     demand,
                 ),
             ),
@@ -195,7 +207,7 @@ impl ProductionSignatureSemantics<'_> {
                                 .map(crate::symbol_resolver::CallArgKind::Typed),
                             ..Default::default()
                         },
-                        None,
+                        expected.map(crate::fir::ResolvedTy::get),
                         super::super::MemberExtensionSelection::DelegateConventions,
                     );
                     let (result, declaration) = match selection {
@@ -242,6 +254,7 @@ impl ProductionSignatureSemantics<'_> {
                     "getValue",
                     &get_arguments,
                     crate::libraries::FnKind::Extension,
+                    expected.map(crate::fir::ResolvedTy::get),
                 )? {
                     crate::resolve::delegated_properties::DelegateConventionSelection::Selected(
                         selected,
@@ -255,6 +268,7 @@ impl ProductionSignatureSemantics<'_> {
                                 &selected,
                                 result,
                                 &get_arguments,
+                                expected.map(crate::fir::ResolvedTy::get),
                                 demand,
                             ),
                         )
