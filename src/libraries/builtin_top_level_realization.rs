@@ -13,6 +13,20 @@ use crate::libraries::{
 };
 use crate::types::{ArrayFactoryKind, Ty, TypeName};
 
+/// Attach every compiler-owned realization fact for one normalized top-level declaration.
+/// Providers call this only after constructing the complete semantic signature; consumers never
+/// rediscover either fact from a package, facade, or member spelling.
+pub(crate) fn attach_function_realization(
+    package: TypeName,
+    name: &str,
+    function: &mut FunctionInfo,
+) {
+    if let Some(intrinsic) = normalized_function_realization(package, name, function) {
+        function.callable.compiler_intrinsic = Some(intrinsic);
+    }
+    function.callable.semantic_role = normalized_function_semantic_role(package, name, function);
+}
+
 fn property_reference_receiver(receiver: Ty, mutable: bool) -> Option<(u8, &'static [Ty])> {
     let receiver = receiver.non_null();
     let internal = receiver.obj_internal()?;

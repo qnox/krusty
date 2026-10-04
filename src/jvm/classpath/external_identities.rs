@@ -34,6 +34,7 @@ impl Classpath {
         &self,
         callable: &LibraryCallable,
         kind: ExternalCallableKind,
+        declaration_package: Option<TypeName>,
     ) -> crate::fir::ExternalCallableId {
         let key = ExternalCallableKey {
             owner: callable.owner,
@@ -49,6 +50,9 @@ impl Classpath {
             // spelling-indexed view and later through its complete classifier declaration. Keep
             // the stable identity, but merge the later declaration facets before returning it.
             self.enrich_external_callable(identity, callable);
+            if let Some(package) = declaration_package {
+                self.publish_external_callable_declaration_package(identity, package);
+            }
             return identity;
         }
         let mut callables = self.external_callables.borrow_mut();
@@ -58,11 +62,14 @@ impl Classpath {
         );
         let mut stored = callable.clone();
         stored.external_identity = Some(identity);
-        let declaration_package = matches!(
-            kind,
-            ExternalCallableKind::TopLevel | ExternalCallableKind::Extension
-        )
-        .then(|| callable.owner.parent().unwrap_or(TypeName::ROOT));
+        assert!(
+            declaration_package.is_none()
+                || matches!(
+                    kind,
+                    ExternalCallableKind::TopLevel | ExternalCallableKind::Extension
+                ),
+            "only a package declaration can publish a declaration package"
+        );
         callables.push(ExternalCallableRealization {
             callable: stored,
             kind,
@@ -225,6 +232,33 @@ impl Classpath {
             );
         }
     }
+
+    /// Publish the semantic package from the package namespace that supplied this declaration.
+    /// The physical callable owner may be a JVM file facade and is deliberately not an input.
+    pub(crate) fn publish_external_callable_declaration_package(
+        &self,
+        identity: crate::fir::ExternalCallableId,
+        package: TypeName,
+    ) {
+        let mut callables = self.external_callables.borrow_mut();
+        let stored = callables
+            .get_mut(identity.raw() as usize)
+            .expect("a declaration package names an interned external callable");
+        assert!(
+            matches!(
+                stored.kind,
+                ExternalCallableKind::TopLevel | ExternalCallableKind::Extension
+            ),
+            "only a package declaration can publish a declaration package"
+        );
+        match stored.declaration_package {
+            Some(existing) => assert_eq!(
+                existing, package,
+                "one external callable identity cannot have conflicting declaration packages"
+            ),
+            None => stored.declaration_package = Some(package),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -252,7 +286,7 @@ mod tests {
             descriptor: "()Ljava/lang/Object;".to_string(),
         }]
         .into_boxed_slice();
-        let identity = cp.intern_external_callable(&first, ExternalCallableKind::Member);
+        let identity = cp.intern_external_callable(&first, ExternalCallableKind::Member, None);
 
         let mut enriched = first.clone();
         enriched.semantic_role = Some(crate::types::SemanticCallRole::KotlinFunctionInvoke);
@@ -265,7 +299,7 @@ mod tests {
         .into_boxed_slice();
 
         assert_eq!(
-            cp.intern_external_callable(&enriched, ExternalCallableKind::Member),
+            cp.intern_external_callable(&enriched, ExternalCallableKind::Member, None),
             identity
         );
         assert_eq!(
@@ -285,6 +319,28 @@ mod tests {
                 .callable
                 .semantic_role,
             enriched.semantic_role
+        );
+    }
+
+    #[test]
+    fn top_level_package_is_published_independently_of_the_physical_facade() {
+        let cp = Classpath::new(vec![]);
+        let callable = LibraryCallable::library(
+            type_name("fixture/physical/FacadeKt"),
+            "operation",
+            vec![],
+            Ty::Unit,
+            Ty::Unit,
+            "()V",
+        );
+        let package = type_name("fixture/semantic");
+
+        let identity =
+            cp.intern_external_callable(&callable, ExternalCallableKind::TopLevel, Some(package));
+
+        assert_eq!(
+            cp.external_callable(identity).unwrap().declaration_package,
+            Some(package)
         );
     }
 }

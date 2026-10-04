@@ -4942,10 +4942,10 @@ mod fq_tests {
             Ty::String,
             "(I)Ljava/lang/String;",
         );
-        let identity = cp.intern_external_callable(&partial, ExternalCallableKind::Member);
+        let identity = cp.intern_external_callable(&partial, ExternalCallableKind::Member, None);
 
         partial.visibility = crate::types::Visibility::Protected;
-        let reinterned = cp.intern_external_callable(&partial, ExternalCallableKind::Member);
+        let reinterned = cp.intern_external_callable(&partial, ExternalCallableKind::Member, None);
 
         assert_eq!(reinterned, identity);
         assert_eq!(

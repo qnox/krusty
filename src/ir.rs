@@ -130,7 +130,7 @@ pub use references::{
     FuncRef, IrCallableReference, IrCallableReferenceTarget, IrClassifierCallable, PropRef,
     ReflectedCallable,
 };
-pub use sam_target::IrSamTarget;
+pub use sam_target::{IrSamMethod, IrSamTarget};
 pub use static_properties::{IrStatic, IrStaticAccessor, IrStaticAccessors};
 pub use type_check_role::TypeCheckRole;
 pub use type_reflection::IrGenericTopLevelProperty;

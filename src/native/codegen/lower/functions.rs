@@ -471,9 +471,7 @@ impl<'a> FileLowering<'a> {
             ));
         };
         let (method, slot) = match target.method_target {
-            crate::fir::FirSamMethod::Declared(
-                crate::fir::ResolvedFunctionOverrideTarget::Module(callable),
-            ) => {
+            crate::ir::IrSamMethod::Module(callable) => {
                 let method = self
                     .ir
                     .checked_callable_functions
@@ -492,10 +490,10 @@ impl<'a> FileLowering<'a> {
                 })? as usize;
                 (Some(method), slot)
             }
-            crate::fir::FirSamMethod::Declared(
-                crate::fir::ResolvedFunctionOverrideTarget::External(_),
-            ) => return Err("a functional interface declared outside this file".into()),
-            crate::fir::FirSamMethod::FunctionTypeInvoke => (None, model::FUNCTION_SLOT as usize),
+            crate::ir::IrSamMethod::External(_) => {
+                return Err("a functional interface declared outside this file".into());
+            }
+            crate::ir::IrSamMethod::FunctionTypeInvoke => (None, model::FUNCTION_SLOT as usize),
         };
 
         // The thunk wears the interface member's own signature, because that is what the call site
