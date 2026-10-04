@@ -426,7 +426,7 @@ mod tests {
                 unboxed_receiver_value_class: None,
                 getter_bridge_owner: None,
                 setter_bridge_owner: None,
-                protected_reflection_getter: None,
+                reflection_getter: None,
                 protected_bridge: None,
                 protected_getter_bridge: None,
                 protected_setter_bridge: None,

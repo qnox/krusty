@@ -102,7 +102,7 @@ impl PropertyReferenceTarget {
         let (getter_params, getter_ret) = parse_physical_method_desc(&getter_descriptor)
             .expect("validated property getter descriptor");
         let signature = realization
-            .protected_reflection_getter
+            .reflection_getter
             .as_ref()
             .map(|(name, descriptor)| format!("{name}{descriptor}"))
             .unwrap_or_else(|| format!("{}{getter_descriptor}", property.getter_name));

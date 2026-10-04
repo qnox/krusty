@@ -444,7 +444,7 @@ fun box(): String {
 }
 
 #[test]
-fn native_property_reference_identity_is_independent_of_effective_mutability() {
+fn property_reference_identity_is_independent_of_effective_mutability() {
     const MAIN: &str = r#"
 class IdentityOwner(name: String) {
     var value: String = name
@@ -461,6 +461,5 @@ fun box(): String {
     return "OK"
 }
 "#;
-    assert_eq!(common::kotlinc_box_result(MAIN), "OK");
-    common::expect_native_box(MAIN, "NativePropertyReferenceIdentity", "OK");
+    common::expect_box_same_as_kotlinc(MAIN, "PropertyReferenceIdentity");
 }
