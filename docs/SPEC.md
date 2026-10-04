@@ -9412,9 +9412,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the backend follows the lambda class's enclosure to the declaration it is written in. With
   `-java-parameters` a suspend lambda's class reflects its constructor's captures (synthetic,
   under their field names) and `$completion`, `create`'s `value` and `$completion`, and the
-  typed `invoke`'s `p1`, `p2`, …, like kotlinc. Not yet matched: an object or lambda written in a
+  typed `invoke`'s `p1`, `p2`, … (the overridden `FunctionN.invoke`'s parameters, the
+  continuation included), like kotlinc. The class's realization records each member's parameter
+  identities (each capture's own captured identity, the completion, `create`'s value, the
+  `FunctionN.invoke` values by ordinal); the `LocalVariableTable` and `MethodParameters` each
+  format that record, never the other's rows or a descriptor position, and a record that does not
+  match the descriptor's arity is an internal error. Not yet matched: an object or lambda written in a
   method of a local class or object inside a value-class member (`W$inObj$1$get$o$1`,
   `W$inObjLam$1$get$f$1`), which kotlinc gives the static's `$arg0` value. Tests:
+  `src/jvm/suspend/cps/member_parameters.rs`,
   `tests/value_class_receiver_capture_debug_names_e2e.rs`,
   `tests/value_class_mangled_lambda_names_e2e.rs`, `tests/java_parameters_attribute_e2e.rs`.
 - **A value-class default of a primary constructor is lowered like the constructor's other code.**

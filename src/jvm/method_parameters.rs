@@ -4,6 +4,7 @@ use crate::ir::{
     IrClass, IrFile, IrGeneratedParameterRole, IrParameterIdentity, IrParameterRole,
     IrSecondaryCtor,
 };
+use crate::jvm::suspend::cps::{SuspendLambdaMember, SuspendLambdaParameters};
 use crate::types::{Ty, TypeName};
 
 pub(super) type MethodParameter = (Option<String>, u16);
@@ -370,24 +371,36 @@ pub(super) fn continuation_invoke_suspend() -> [MethodParameter; 1] {
     [parameter("$result", 0)]
 }
 
-/// A suspend lambda class's constructor: each captured value under its field's name, synthetic,
-/// then the completion.
-pub(super) fn suspend_lambda_constructor<'a>(
-    capture_fields: impl IntoIterator<Item = &'a str>,
+/// `MethodParameters` of a suspend lambda class's generated `member`, formatted from the
+/// parameter identities its realization recorded and checked against `physical_parameters`: a
+/// captured value or receiver under the name of the field it initializes, synthetic; the
+/// completion, `create`'s value and the typed `invoke`'s `FunctionN` values as their roles spell
+/// them.
+pub(super) fn suspend_lambda_member(
+    ir: &IrFile,
+    parameters: &SuspendLambdaParameters,
+    member: SuspendLambdaMember,
+    physical_parameters: &[Ty],
 ) -> Vec<MethodParameter> {
-    capture_fields
-        .into_iter()
-        .map(|field| parameter(field, SYNTHETIC))
-        .chain(std::iter::once(parameter("$completion", 0)))
-        .collect()
-}
-
-/// A generated method whose every parameter kotlinc reflects under its local-variable name, as a
-/// suspend lambda's `create` and typed `invoke` do: the locals after `this`.
-pub(super) fn generated_locals(locals: &[(String, String, u16)]) -> Vec<MethodParameter> {
-    locals
+    parameters
+        .physical(member, physical_parameters.len())
         .iter()
-        .skip(1)
-        .map(|(name, _, _)| parameter(name.clone(), 0))
+        .map(|identity| match identity.role {
+            IrParameterRole::CapturedValue { .. } | IrParameterRole::CapturedReceiver { .. } => {
+                let names =
+                    crate::jvm::capture_names::suspend_lambda_capture(ir, parameters, identity);
+                parameter(names.field, SYNTHETIC)
+            }
+            IrParameterRole::Generated(
+                IrGeneratedParameterRole::Continuation
+                | IrGeneratedParameterRole::SuspendLambdaCreateValue
+                | IrGeneratedParameterRole::FunctionInvokeValue { .. },
+            ) => parameter(
+                crate::jvm::parameter_names::method_parameter(identity, "")
+                    .expect("a suspend lambda's generated parameter role has a JVM name"),
+                0,
+            ),
+            role => panic!("a suspend lambda's {member:?} declares no {role:?} parameter"),
+        })
         .collect()
 }

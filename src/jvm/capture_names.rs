@@ -8,9 +8,10 @@
 use crate::fir::CapturedCallableOwner;
 use crate::ir::{
     FunId, IrCapturedReceiver, IrClass, IrConstructorCapture, IrFile, IrLambdaCapture,
-    IrLambdaClass,
+    IrLambdaClass, IrParameterIdentity, IrParameterRole,
 };
 use crate::jvm::anonymous_context_labels;
+use crate::jvm::suspend::cps::SuspendLambdaParameters;
 use crate::types::CapturedContextKind;
 
 /// The field a local or anonymous `class` stores `capture` in, which is also the constructor's
@@ -84,6 +85,37 @@ pub(super) fn lambda_class_capture(
             receiver_capture(ir, &lambda.captured_receivers, ordinal as usize, container)
         }
     })
+}
+
+/// The field a suspend lambda's class stores `capture`, one of its constructor's recorded captures,
+/// in, and the constructor parameter that passes it: spelled like [`lambda_class_capture`], from
+/// the receiver origins and lifting root the class's parameter record keeps.
+pub(super) fn suspend_lambda_capture(
+    ir: &IrFile,
+    parameters: &SuspendLambdaParameters,
+    capture: &IrParameterIdentity,
+) -> CaptureNames {
+    match capture.role {
+        IrParameterRole::CapturedValue { .. } => CaptureNames::value(
+            capture
+                .source_name
+                .as_deref()
+                .expect("a suspend lambda's captured value keeps its source name"),
+        ),
+        IrParameterRole::CapturedReceiver { ordinal } => {
+            let container = parameters
+                .lifting_root
+                .as_ref()
+                .and_then(|root| super::lifted_names::root_container_at(ir, root));
+            receiver_capture(
+                ir,
+                &parameters.captured_receivers,
+                ordinal as usize,
+                container,
+            )
+        }
+        role => panic!("a suspend lambda's constructor captures no {role:?}"),
+    }
 }
 
 /// The field a class stores a capture in and the constructor parameter that passes it.
