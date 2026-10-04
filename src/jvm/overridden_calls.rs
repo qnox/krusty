@@ -67,10 +67,10 @@ fn function_candidates(
 fn property_getter_candidates(
     ir: &IrFile,
     callables: &CheckedBackendCallables,
-    target: crate::fir::PropertyId,
+    target: crate::fir::ResolvedPropertyOverrideTarget,
 ) -> Vec<OverriddenCallRealization> {
     let mut candidates = Vec::new();
-    let mut pending = vec![crate::fir::ResolvedPropertyOverrideTarget::Module(target)];
+    let mut pending = vec![target];
     let mut seen = std::collections::HashSet::new();
     while let Some(current) = pending.pop() {
         if !seen.insert(current) {
