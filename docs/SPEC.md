@@ -3099,7 +3099,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **A cast of a suspend callable to its continuation-passing function keeps both types.**
   `ref as Function2<Int, Continuation<Int>, Any?>` on `ref: suspend (Int) -> Int` types the cast
   expression as that ordinary function and makes the same carrier the stable path's read
-  projection, so a later `ref(1, c)` uses the cast-proven invoke. The original suspend value stays
+  projection, so a later `ref(1, c)` uses the cast-proven invoke. That call publishes the carrier
+  on the callee expression; checked FIR then invokes the selected signature instead of the
+  declaration's storage type. The original suspend value stays
   an intersection constituent: a later `is SuspendFunction` / `is KSuspendFunction`, and a use that
   expects the suspend type, see that constituent rather than only the carrier. A non-null cast of a
   nullable suspend value removes nullability from the carrier and from the retained suspend

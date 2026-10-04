@@ -59301,11 +59301,15 @@ impl<'a> Checker<'a> {
         if let Some(function) = self.expression_function_value_type(scope, expression, nominal) {
             types.push(function.non_null());
         }
-        // The read projection stays first, so invoke keeps the cast carrier. Intersection and
-        // callable-reference facts supply the suspend value the carrier does not subtype.
-        for fact in self.proven_function_value_facts(scope, expression) {
-            if !types.contains(&fact) {
-                types.push(fact);
+        // A cast expression is the target. Facts proved about its operand belong to a later read
+        // of that stable path; using them here would invoke the pre-cast suspend signature.
+        if !matches!(self.file.expr(expression), Expr::As { .. }) {
+            // The read projection stays first, so invoke keeps the cast carrier. Intersection and
+            // callable-reference facts supply the suspend value the carrier does not subtype.
+            for fact in self.proven_function_value_facts(scope, expression) {
+                if !types.contains(&fact) {
+                    types.push(fact);
+                }
             }
         }
         if types.is_empty() {
