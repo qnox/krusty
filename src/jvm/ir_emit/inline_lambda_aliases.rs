@@ -159,16 +159,16 @@ impl Emitter<'_> {
     /// Bind the captures of the literal lambda `lambda`, operand `operand` of the call placing its
     /// body in this frame. Each capture that is not a caller local is materialized into a temporary
     /// of the call's frame, recorded in `materializations` for the call to evaluate in argument
-    /// order. `None` after reporting an emission error when a capture fact is missing.
+    /// order. An error names the capture fact that is missing.
     pub(super) fn bind_placed_captures(
         &mut self,
         lambda: ExprId,
         operand: usize,
         materializations: &mut Vec<(usize, ExprId, u16, Ty)>,
-    ) -> Option<CaptureBindings> {
+    ) -> Result<CaptureBindings, &'static str> {
         let caller_slots = &self.slots;
         let frame = &mut self.frame;
-        let bound = bind_spliced_captures(
+        bind_spliced_captures(
             self.ir,
             lambda,
             &|value| caller_slots.get(&value).map(|&(slot, _)| slot),
@@ -179,10 +179,7 @@ impl Emitter<'_> {
                 materializations.push((operand, capture, slot, ty));
                 slot
             },
-        );
-        bound
-            .map_err(|reason| self.run.set_emit_error(reason.to_string()))
-            .ok()
+        )
     }
 
     /// Invoke the captured literal lambda `alias` with `args`, by placing its body here. Each

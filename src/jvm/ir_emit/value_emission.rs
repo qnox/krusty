@@ -934,7 +934,9 @@ impl super::Emitter<'_> {
                         );
                         // The call's temporaries go with its frame, as kotlinc's `leaveTemps` does.
                         self.frame.drop_to(call_frame);
-                        if spliced {
+                        // A lowering that owned the call, even one that failed, is final: only a
+                        // call no inline lowering applied to is called for real.
+                        if spliced.owns_call() {
                             return;
                         }
                         // The selected declaration already owns fallback legality. `MustInline`

@@ -74,6 +74,11 @@ pub(super) struct StaticSpliceRequest<'a> {
 pub(super) const REIFIED_BODY_ON_BYTE_SPLICE: &str =
     "a reified inline body in a call shape only the byte splice handles";
 
+/// The failure of a call whose selected literals its body uses only as values, when the bridge
+/// cannot splice the body around them.
+const VALUE_USED_LITERAL_UNSPLICED: &str =
+    "an inline body that takes a literal lambda as a value cannot be spliced around it";
+
 /// How the call site supplies one parameter.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Supply {
@@ -111,7 +116,7 @@ impl Emitter<'_> {
         &mut self,
         request: StaticSpliceRequest<'_>,
         code: &mut CodeBuilder,
-    ) -> bool {
+    ) -> InlineCallOutcome {
         let StaticSpliceRequest {
             call_expression,
             owner,
@@ -171,15 +176,173 @@ impl Emitter<'_> {
         }
     }
 
+    /// Splice `owner.name` whose REAL (body-fetch) descriptor is `descriptor`, mapping the body's
+    /// locals per `splice_desc`. For an ordinary static they are equal; for an INSTANCE inline
+    /// method spliced through this path, `splice_desc` PREPENDS the receiver as the first parameter
+    /// (`this` = local 0) and `args[0]` is that receiver — so the body's `aload_0`/`aload_1`/… map
+    /// to receiver/params.
+    ///
+    /// [`InlineCallOutcome::NotApplicable`] only before any literal lambda is selected: no body, a
+    /// body this class cannot reach, or a call without inlined literals the port does not cover.
+    /// Once literals are selected, the chosen route owns the call.
+    fn try_inline_static_as(
+        &mut self,
+        call_expression: u32,
+        target: InlineStaticTarget<'_>,
+        args: &[u32],
+        leading_non_argument_operands: usize,
+        code: &mut CodeBuilder,
+        reified: &crate::jvm::reified_arguments::ReifiedArguments,
+    ) -> InlineCallOutcome {
+        let InlineStaticTarget {
+            owner,
+            name,
+            descriptor,
+            splice_desc,
+            allow_owner_bridge,
+            for_inline_copy,
+            ..
+        } = target;
+        crate::trace_compiler!(
+            "splice",
+            "inline target {owner}.{name}{descriptor} splice_descriptor={splice_desc} args={}",
+            args.len()
+        );
+        // Only a callable suspend inline function's `$$forInline` copy is spliced: its `name` body
+        // is already the callee's own state machine. Without the copy the call declines (a
+        // must-inline one bails), never splicing that machine.
+        let for_inline;
+        let body_name = if for_inline_copy {
+            for_inline = format!("{name}$$forInline");
+            for_inline.as_str()
+        } else {
+            name
+        };
+        let Some(body) = self.bodies.body(owner, body_name, descriptor) else {
+            crate::trace_compiler!("splice", "no body for {owner}.{body_name}{descriptor}");
+            return InlineCallOutcome::NotApplicable;
+        };
+        // A body that references a PRIVATE member (its own facade's helper or backing field) runs
+        // legally only inside the defining class — spliced into the caller, the reference is an
+        // IllegalAccessError (kotlinc rewrites it to a synthetic `access$…` bridge, which krusty
+        // does not model). Decline: the caller emits a real call, which stays in the class.
+        if crate::jvm::inline::references_private_member(
+            &body.code,
+            &body.source_cp,
+            &body.bootstrap_methods,
+            &mut |o, n, d| self.bodies.member_is_private(o, n, d),
+            &mut |o, n, d| self.bodies.member_is_publicly_reachable(o, n, d),
+            &mut |class| self.bodies.class_is_publicly_reachable(class),
+        ) {
+            crate::trace_compiler!(
+                "splice",
+                "inaccessible relocation dependency in {owner}.{name}{descriptor}"
+            );
+            return InlineCallOutcome::NotApplicable;
+        }
+        if !allow_owner_bridge && owner != methodref_owner(&body, name, descriptor).unwrap_or(owner)
+        {
+            crate::trace_compiler!(
+                "splice",
+                "owner-bridge mismatch for {owner}.{name}{descriptor} (real owner {:?})",
+                methodref_owner(&body, name, descriptor)
+            );
+            return InlineCallOutcome::NotApplicable;
+        }
+        // Splice the body's locals above BOTH the slot allocator's next free slot and the code's
+        // high-water mark, so the spliced temporaries can never collide with a caller local (live
+        // or reserved-but-unstored).
+        let base = self.frame.size().max(code.max_locals);
+        let inline_call = ClasspathInlineCall {
+            call_expression,
+            target: &target,
+            args,
+            leading_non_argument_operands,
+            body: &body,
+            reified,
+        };
+        let has_lambda_arg = args.iter().any(|&argument| {
+            matches!(
+                self.ir.expr(argument),
+                IrExpr::Lambda {
+                    inline_body: Some(_),
+                    ..
+                }
+            )
+        });
+        if !has_lambda_arg {
+            return InlineCallOutcome::declined_or_handled(
+                self.try_inline_classpath_body(&inline_call, code),
+            );
+        }
+        // kotlinc expands every literal whose parameter is not `noinline`; a `noinline` literal is
+        // an ordinary argument, the function object the body receives. A call with only such
+        // literals is therefore inlined like one without lambdas.
+        if !self.ir.call_inline_modifiers.contains_key(&call_expression) {
+            return InlineCallOutcome::NotApplicable;
+        }
+        let positions = match self.inlined_literal_positions(
+            call_expression,
+            leading_non_argument_operands,
+            args,
+        ) {
+            Ok(positions) if positions.is_empty() => {
+                return InlineCallOutcome::declined_or_handled(
+                    self.try_inline_classpath_body(&inline_call, code),
+                );
+            }
+            Ok(positions) => positions,
+            Err(reason) => {
+                self.run.set_inline_bail(reason);
+                return InlineCallOutcome::HandledWithError;
+            }
+        };
+        // The literals are selected: from here the call is owned, and a failure is an error.
+        // If the body INVOKES the lambda parameter (`FunctionN.invoke`), its lambda bodies replace
+        // those invokes. If the lambda is used only as a VALUE, passed to the constructor of an
+        // anonymous object the body creates (`Continuation(ctx){…}`'s
+        // `new …$Continuation$1(ctx, resumeWith)`), the object is regenerated around it.
+        let body_invokes_lambda =
+            crate::jvm::inline::disassemble(&body.code).is_some_and(|insns| {
+                !crate::jvm::inline::function_invoke_sites(&insns, &body.source_cp).is_empty()
+            });
+        if !body_invokes_lambda {
+            return self.inline_value_used_lambda_call(&inline_call, code);
+        }
+        let reason = match self.lambda_call_route(&inline_call, code) {
+            Ok(LambdaCallRoute::MethodInliner(callee)) => {
+                return match self.inline_classpath_lambda_call(
+                    &inline_call,
+                    &callee,
+                    LambdaPlacement::Invokes,
+                    code,
+                ) {
+                    Ok(()) => InlineCallOutcome::Handled,
+                    Err(reason) => {
+                        self.run.set_inline_bail(reason);
+                        InlineCallOutcome::HandledWithError
+                    }
+                };
+            }
+            Ok(LambdaCallRoute::Splice(reason)) => reason,
+            Err(reason) => {
+                self.run.set_inline_bail(reason);
+                return InlineCallOutcome::HandledWithError;
+            }
+        };
+        crate::trace_compiler!("splice", "literal-lambda call spliced: {reason:?}");
+        self.splice_selected_literals(&inline_call, &positions, base, code)
+    }
+
     /// A call whose literal lambdas the callee's body uses only as values: each is passed to the
     /// constructor of an anonymous object the body creates (`Continuation(ctx){…}`'s
-    /// `new …$Continuation$1(ctx, resumeWith)`), and the object is regenerated around it. Whether
-    /// the call was handled, as the other inline-call routes report it.
+    /// `new …$Continuation$1(ctx, resumeWith)`), and the object is regenerated around it. The
+    /// literals are selected, so the call is owned: a failure is an error, never a real call.
     pub(super) fn inline_value_used_lambda_call(
         &mut self,
         inline_call: &ClasspathInlineCall<'_, '_>,
         code: &mut CodeBuilder,
-    ) -> bool {
+    ) -> InlineCallOutcome {
         // A shape the port does not own yet stays on the byte bridge. A body that constructs no
         // anonymous object takes the literal as an ordinary value (one passed where the parameter
         // is not function-typed, as `map[key] = { … }`).
@@ -187,15 +350,18 @@ impl Emitter<'_> {
             Ok(LambdaCallRoute::MethodInliner(callee))
                 if crate::jvm::inliner::constructs_anonymous_object(&callee, &self.bodies) =>
             {
-                if let Err(reason) = self.inline_classpath_lambda_call(
+                return match self.inline_classpath_lambda_call(
                     inline_call,
                     &callee,
                     LambdaPlacement::Objects,
                     code,
                 ) {
-                    self.run.set_inline_bail(reason);
-                }
-                return true;
+                    Ok(()) => InlineCallOutcome::Handled,
+                    Err(reason) => {
+                        self.run.set_inline_bail(reason);
+                        InlineCallOutcome::HandledWithError
+                    }
+                };
             }
             Ok(LambdaCallRoute::MethodInliner(_)) => {
                 crate::trace_compiler!("splice", "value-used lambda bridged: no object");
@@ -205,7 +371,7 @@ impl Emitter<'_> {
             }
             Err(reason) => {
                 self.run.set_inline_bail(reason);
-                return true;
+                return InlineCallOutcome::HandledWithError;
             }
         }
         if let Err(reason) = check_byte_splice_body(
@@ -214,10 +380,16 @@ impl Emitter<'_> {
             inline_call.body,
         ) {
             self.run.set_inline_bail(reason);
-            return true;
+            return InlineCallOutcome::HandledWithError;
         }
-        self.try_inline_materialized_lambda_body(inline_call, code)
-            .is_some()
+        match self.try_inline_materialized_lambda_body(inline_call, code) {
+            Some(()) => InlineCallOutcome::Handled,
+            None => {
+                self.run
+                    .set_emit_error(VALUE_USED_LITERAL_UNSPLICED.to_string());
+                InlineCallOutcome::HandledWithError
+            }
+        }
     }
 
     /// Temporary migration bridge for a literal lambda the inline body uses as a value (for
