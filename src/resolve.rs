@@ -50384,15 +50384,13 @@ impl<'a> Checker<'a> {
         // A successful cast contributes an intersection with the path's existing stable type; it
         // never widens that type. In particular, evaluating `nonNull as T?` does not make later
         // reads nullable. Preserve the already-more-specific declaration/flow fact and only use
-        // the cast target when it actually narrows it. A suspend value cast to the
-        // continuation-passing function it already implements keeps the suspend type: that
-        // target is not a subtype, so assignability alone would discard it.
+        // the cast target when it actually narrows it. A suspend value is not a subtype of its
+        // continuation-passing carrier, so this read projection is the carrier. `apply_narrowings`
+        // keeps the incomparable suspend constituent beside it, and a non-null cast still drops
+        // nullability from that read.
         Some(
             declared
-                .filter(|declared| {
-                    self.receiver_is_assignable(*declared, narrowed)
-                        || self.suspend_value_keeps_its_type(*declared, narrowed)
-                })
+                .filter(|declared| self.receiver_is_assignable(*declared, narrowed))
                 .unwrap_or(narrowed),
         )
     }
@@ -59299,10 +59297,22 @@ impl<'a> Checker<'a> {
         expression: ExprId,
         nominal: Ty,
     ) -> Vec<Ty> {
+        let mut types = Vec::new();
         if let Some(function) = self.expression_function_value_type(scope, expression, nominal) {
-            return vec![function];
+            types.push(function.non_null());
         }
-        self.nominal_function_types(scope, nominal)
+        // The read projection stays first, so invoke keeps the cast carrier. Intersection and
+        // callable-reference facts supply the suspend value the carrier does not subtype.
+        for fact in self.proven_function_value_facts(scope, expression) {
+            if !types.contains(&fact) {
+                types.push(fact);
+            }
+        }
+        if types.is_empty() {
+            self.nominal_function_types(scope, nominal)
+        } else {
+            types
+        }
     }
 
     /// Callable constituent of an expression used for a particular SAM target. A type parameter
@@ -62074,7 +62084,13 @@ impl<'a> Checker<'a> {
                 let statically_proven = !ot.contains_error()
                     && !tt.contains_error()
                     && (self.receiver_is_assignable(ot.non_null(), tt)
-                        || callable_components_proven);
+                        || callable_components_proven
+                        || self.suspend_intersection_proves_check(
+                            scope,
+                            operand,
+                            tt,
+                            proof_target,
+                        ));
                 crate::trace_compiler!(
                     "resolve",
                     "runtime function test operand={ot:?} proof_operand={proof_operand:?} target={tt:?} proof_target={proof_target:?} proven={statically_proven}",
