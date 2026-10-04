@@ -1556,7 +1556,14 @@ fn extract_file_stub_inventory(
                     nested_owners.get(declaration).copied(),
                     u32::try_from(index).expect("too many file declarations"),
                     &mut stubs,
-                )
+                );
+                // Parser hoisting gives a nested classifier a qualified emission name. Lookup
+                // still starts from the source segment retained alongside that hoist; keep it on
+                // the declaration stub so recursive header resolution never has to split the
+                // emission spelling back into source syntax.
+                if let Some(source_name) = file.hoisted_classifier_source_names.get(declaration) {
+                    stubs[first_stub].lookup_name = Some(names.intern(source_name));
+                }
             }
         }
         source_declarations[index] = Some(stubs[first_stub].id);

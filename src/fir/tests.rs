@@ -1595,11 +1595,7 @@ enum class Choice {
         .iter()
         .find(|stub| {
             stub.kind == DeclarationKind::Classifier
-                && stub
-                    .lookup_name
-                    .and_then(|name| names.get(name))
-                    .and_then(|name| name.rsplit('.').next())
-                    == Some("Inner")
+                && stub.lookup_name.and_then(|name| names.get(name)) == Some("Inner")
         })
         .unwrap_or_else(|| {
             panic!(
