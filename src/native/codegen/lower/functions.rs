@@ -470,32 +470,43 @@ impl<'a> FileLowering<'a> {
                 target.classifier.render()
             ));
         };
-        let declaration = &self.ir.classes[interface as usize];
-        let method = declaration
-            .methods
-            .iter()
-            .copied()
-            .find(|&fid| self.ir.functions[fid as usize].name == target.method)
-            .ok_or_else(|| {
-                format!(
-                    "a functional interface without its own `{}` (`{}`)",
-                    target.method,
-                    target.classifier.render()
-                )
-            })?;
-        let key = model::function_key(self.ir, interface, method);
-        let slot = self.model.slot(interface, &key).ok_or_else(|| {
-            format!(
-                "a functional interface member with no slot (`{}.{}`)",
-                target.classifier.render(),
-                target.method
-            )
-        })? as usize;
+        let (method, slot) = match target.method_target {
+            crate::fir::FirSamMethod::Declared(
+                crate::fir::ResolvedFunctionOverrideTarget::Module(callable),
+            ) => {
+                let method = self
+                    .ir
+                    .checked_callable_functions
+                    .get(&callable)
+                    .copied()
+                    .ok_or_else(|| "a functional interface method outside this file".to_string())?;
+                if !self.ir.classes[interface as usize]
+                    .methods
+                    .contains(&method)
+                {
+                    return Err("a functional interface method owned by another classifier".into());
+                }
+                let key = model::function_key(self.ir, interface, method);
+                let slot = self.model.slot(interface, &key).ok_or_else(|| {
+                    "a functional interface method with no dispatch slot".to_string()
+                })? as usize;
+                (Some(method), slot)
+            }
+            crate::fir::FirSamMethod::Declared(
+                crate::fir::ResolvedFunctionOverrideTarget::External(_),
+            ) => return Err("a functional interface declared outside this file".into()),
+            crate::fir::FirSamMethod::FunctionTypeInvoke => (None, model::FUNCTION_SLOT as usize),
+        };
 
         // The thunk wears the interface member's own signature, because that is what the call site
         // dispatches with — not the boxed one an ordinary function value's invoke slot uses.
-        let parameters = self.ir.functions[method as usize].params.clone();
-        let result = self.ir.functions[method as usize].ret;
+        let (parameters, result) = method.map_or_else(
+            || (target.declared_parameters.clone(), target.declared_result),
+            |method| {
+                let method = &self.ir.functions[method as usize];
+                (method.params.clone(), method.ret)
+            },
+        );
         let mut signature = vec![any()];
         signature.extend(parameters.iter().copied());
         let thunk = self.declare_local_function(&format!("{base}_invoke"), &signature, result)?;
@@ -698,7 +709,7 @@ impl<'a> FileLowering<'a> {
             descriptor,
             &base,
             super::objects::DescriptorShape {
-                kotlin_name: "kotlin.jvm.internal.Ref",
+                kotlin_name: "krusty.native.internal.SharedCell",
                 instance_size,
                 reference_offsets: &references,
                 vtable: &vtable,
@@ -729,13 +740,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         // null — `isNull(nullableFun(true))` must answer true, not call `invoke` on a wrapper
         // around nothing. The checked lowering expresses such a conversion as a lambda whose one
         // capture is the value being converted, so the null test is on that capture.
-        if sam.is_some() {
+        if let Some(target) = sam.as_ref() {
             if let [operand] = captures.as_slice() {
-                let converts = self.file.ir.functions[impl_fn as usize]
-                    .name
-                    .starts_with("$fir_sam_delegate_");
-                let nullable = self.type_of(*operand).is_some_and(|ty| ty.is_nullable());
-                if converts && nullable {
+                if target.wraps_function_value && target.nullable {
                     return self.nullable_sam(site, *operand);
                 }
             }

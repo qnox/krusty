@@ -1697,7 +1697,7 @@ fn overridden_property_slot(
 /// needs a bridge and declines instead of being pointed at.
 /// The vtable number every function value's body occupies, which the runtime names as
 /// `KT_SLOT_INVOKE`: right after `kotlin.Any`'s three.
-const FUNCTION_SLOT: u32 = 3;
+pub(super) const FUNCTION_SLOT: u32 = 3;
 
 fn external_invoke_slot(
     edge: &crate::ir::IrFunctionOverride,
