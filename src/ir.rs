@@ -1547,6 +1547,10 @@ pub struct IrSpecializedAnonymousClass {
     /// Later materialization appends backing fields and accessors past these prefixes.
     pub field_count: u32,
     pub property_count: u32,
+    /// Property reads and writes in the inlined caller whose receiver is this copy's construction.
+    /// Accessor functions are not available when the construction is retargeted, so the read is
+    /// rebound once the copy's properties exist.
+    pub caller_property_uses: Vec<ExprId>,
 }
 
 /// One lowered source file (`IrFile`) — its arenas. Index-based, bulk-freeable.

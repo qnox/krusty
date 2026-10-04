@@ -8811,8 +8811,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   typeOf<T>() }.x` inlined as `foo<List<T>>()` from `inline fun <reified T> bar`, and then as
   `bar<Int>()`, therefore realizes `typeOf<List<Int>>()`. The same holds for an object written
   directly in `bar` (`typeOf<List<T>>()`) and for the direct call. The declaration class keeps the
-  reified parameter. Tests: `fir_lower::inlining::escaping_reified_object` (the call-site
-  substitution) and `tests/reified_object_type_of_e2e.rs` (those three results against kotlinc).
+  reified parameter. A read of that property in the inlined caller (`object { val x = typeOf<T>()
+  }.x`) names the copy, not the declaration class. Tests:
+  `fir_lower::inlining::escaping_reified_object` (the call-site substitution) and
+  `tests/reified_object_type_of_e2e.rs` (those three results against kotlinc).
   Not yet: a reified member inline function (it is called rather than inlined, `typeOf` or not), a
   reified parameter inside a lambda class regenerated per call site, a reified argument inferred as
   an intersection type, and a use-site projection written in a typealias

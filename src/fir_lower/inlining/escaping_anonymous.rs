@@ -106,6 +106,137 @@ fn retarget(
             }
         }
     }
+    note_caller_property_uses(ir, root);
+    Ok(())
+}
+
+fn note_caller_property_uses(ir: &mut crate::ir::IrFile, root: ExprId) {
+    let mut pending = vec![root];
+    let mut seen = HashSet::new();
+    let mut uses = Vec::new();
+    while let Some(expression) = pending.pop() {
+        if !seen.insert(expression) {
+            continue;
+        }
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+        let receiver = match ir.expr(expression) {
+            IrExpr::Checked(
+                crate::ir::IrCheckedOperation::PropertyRead {
+                    dispatch_receiver, ..
+                }
+                | crate::ir::IrCheckedOperation::PropertyWrite {
+                    dispatch_receiver, ..
+                },
+            ) => *dispatch_receiver,
+            _ => None,
+        };
+        let Some(receiver) = receiver else {
+            continue;
+        };
+        let IrExpr::New { internal, .. } = ir.expr(receiver) else {
+            continue;
+        };
+        let Some(class) = ir.class_id_by_name(*internal) else {
+            continue;
+        };
+        if ir.specialized_anonymous_classes.contains_key(&class) {
+            uses.push((class, expression));
+        }
+    }
+    for (class, expression) in uses {
+        let Some(record) = ir.specialized_anonymous_classes.get_mut(&class) else {
+            continue;
+        };
+        if !record.caller_property_uses.contains(&expression) {
+            record.caller_property_uses.push(expression);
+        }
+    }
+}
+
+fn retarget_caller_property_uses(
+    ir: &mut crate::ir::IrFile,
+    copy_id: ClassId,
+    spec: &crate::ir::IrSpecializedAnonymousClass,
+    source_name: TypeName,
+) -> Result<(), super::super::FirLoweringFailure> {
+    for expression in spec.caller_property_uses.clone() {
+        retarget_caller_property_use(ir, expression, copy_id, source_name)?;
+    }
+    Ok(())
+}
+
+fn retarget_caller_property_use(
+    ir: &mut crate::ir::IrFile,
+    expression: ExprId,
+    copy_id: ClassId,
+    source_name: TypeName,
+) -> Result<(), super::super::FirLoweringFailure> {
+    let IrExpr::Checked(operation) = ir.expr(expression).clone() else {
+        return Ok(());
+    };
+    let (target, receiver, extension_receiver, context_arguments, value) = match operation {
+        crate::ir::IrCheckedOperation::PropertyRead {
+            target,
+            dispatch_receiver,
+            extension_receiver,
+            context_arguments,
+            ..
+        } => (
+            target,
+            dispatch_receiver,
+            extension_receiver,
+            context_arguments,
+            None,
+        ),
+        crate::ir::IrCheckedOperation::PropertyWrite {
+            target,
+            dispatch_receiver,
+            extension_receiver,
+            context_arguments,
+            value,
+            ..
+        } => (
+            target,
+            dispatch_receiver,
+            extension_receiver,
+            context_arguments,
+            Some(value),
+        ),
+        _ => return Ok(()),
+    };
+    if extension_receiver.is_some() || !context_arguments.is_empty() {
+        return Err(malformed(source_name));
+    }
+    let name = match ir.local_property_layouts.get(&target) {
+        Some(crate::ir::IrLocalPropertyLayout::Member { name, .. }) => name.clone(),
+        _ => return Err(malformed(source_name)),
+    };
+    let property = ir.classes[copy_id as usize]
+        .properties
+        .iter()
+        .find(|property| property.name == name)
+        .ok_or_else(|| malformed(source_name))?;
+    let ty = property.ty;
+    let owner = ir.classes[copy_id as usize].fq_name;
+    ir.exprs[expression as usize] = match value {
+        Some(value) => IrExpr::PropertyWrite {
+            receiver,
+            owner,
+            name,
+            value,
+            ty,
+            interface: false,
+            operation: Some(expression),
+        },
+        None => IrExpr::PropertyRead {
+            receiver,
+            owner,
+            name,
+            ty,
+            interface: false,
+            operation: Some(expression),
+        },
+    };
     Ok(())
 }
 
@@ -236,6 +367,7 @@ fn specialized_class(
             reified_bindings: expansion.reified_bindings.clone(),
             field_count,
             property_count,
+            caller_property_uses: Vec::new(),
         },
     );
     for method in ir.classes[class_id as usize].methods.clone() {
@@ -548,6 +680,7 @@ fn publish_one_copy(
     }
     publish_property_members(ir, source, source_name, copy_name, &clones)?;
     retarget_copied_property_calls(ir, copy_id, source, source_name, &clones)?;
+    retarget_caller_property_uses(ir, copy_id, &spec, source_name)?;
     specialize(
         ir,
         nested,
