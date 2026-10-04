@@ -175,15 +175,14 @@ pub enum SigExpr {
         result: SigExprId,
         scope: SignatureScopeId,
     },
-    /// Evaluate compact side effects in source order, then yield `result`. This is used only when
-    /// an expression that determines a published signature contains nested executable syntax whose
-    /// constraints affect that signature (for example a selected anonymous-object method).
+    /// Evaluate nested executable effects in source order before yielding the signature result.
     Sequence {
         effects: OperandRange,
         result: SigExprId,
     },
     Delegate {
         delegate: SigExprId,
+        expected: Option<SigExprId>,
         scope: SignatureScopeId,
         site: SignatureDelegateSiteId,
     },
@@ -1076,6 +1075,7 @@ pub trait SignatureSemantics {
         &self,
         scope: SignatureScope,
         delegate: ResolvedTy,
+        expected: Option<ResolvedTy>,
         site: ResolvedSignatureDelegateSite,
         demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
     ) -> Result<ResolvedTy, DiagnosticId>;
@@ -1590,6 +1590,10 @@ pub struct ResolvedModuleIndex {
     /// are semantic declaration headers; target erasure and bridge materialization are absent.
     pub(super) property_overrides: HashMap<DeclarationId, Box<[super::ResolvedPropertyOverride]>>,
     pub(super) function_overrides: HashMap<DeclarationId, Box<[super::ResolvedFunctionOverride]>>,
+    /// Exact interface identities inherited through the direct superclass of each source
+    /// classifier. Pass 1 computes this while the semantic hierarchy provider is live; target
+    /// backends consume it instead of walking superclass declarations again.
+    pub(super) superclass_interfaces: HashMap<DeclarationId, Box<[TypeName]>>,
     /// Non-default return-value statuses of module declarations, derived from the frozen edges.
     pub(super) callable_inherited_statuses: HashMap<CallableId, super::InheritedCallableStatus>,
     pub(super) property_return_value_statuses: HashMap<PropertyId, crate::types::ReturnValueStatus>,
@@ -3340,6 +3344,13 @@ impl ResolvedModuleIndex {
                             })
                             .sum::<usize>()
                 })
+                .sum::<usize>()
+            + self.superclass_interfaces.len()
+                * (std::mem::size_of::<DeclarationId>() + std::mem::size_of::<Box<[TypeName]>>())
+            + self
+                .superclass_interfaces
+                .values()
+                .map(|interfaces| interfaces.len() * std::mem::size_of::<TypeName>())
                 .sum::<usize>()
             + self
                 .classifiers

@@ -369,9 +369,13 @@ impl BodyFirChecker<'_> {
             crate::libraries::DefaultValue::Float(value) => FirConstant::Float(value),
             crate::libraries::DefaultValue::Double(value) => FirConstant::Double(value),
             crate::libraries::DefaultValue::Str(value) => FirConstant::String(value),
-            // Resolution never records an `Object` as a literal. Seeing one here means the checked
-            // call facts disagree; do not silently switch realization strategies in FIR.
-            crate::libraries::DefaultValue::Object(_) => {
+            // Resolution never records a declaration, class literal, array, or nested annotation as
+            // a call literal. Seeing one here means the checked call facts disagree.
+            crate::libraries::DefaultValue::Object(_)
+            | crate::libraries::DefaultValue::EnumEntry { .. }
+            | crate::libraries::DefaultValue::KClass(_)
+            | crate::libraries::DefaultValue::Array { .. }
+            | crate::libraries::DefaultValue::Annotation { .. } => {
                 return Err(self.failure(
                     self.file.expr_span(expression),
                     BodyCheckFailureKind::UnsupportedCallShape,
