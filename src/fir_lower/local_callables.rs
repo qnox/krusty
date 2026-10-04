@@ -374,6 +374,11 @@ impl BodyLowering<'_> {
         suspend: bool,
     ) -> Result<ExprId, FirLoweringFailure> {
         let (function, owner) = self.predeclare_local_function(body, callable)?;
+        if let Some(inferred) = body.inferred_result_type() {
+            self.ir
+                .lambda_inferred_results
+                .insert(function, inferred.get());
+        }
         let unit_as_value = body
             .result_type()
             .is_some_and(|result| result.get() == Ty::Unit);

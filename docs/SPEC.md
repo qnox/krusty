@@ -9176,6 +9176,30 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   never an `invokedynamic` that cannot link. Tests: `tests/value_class_lambda_class_e2e.rs` (each class byte for byte
   against kotlinc; the whole source at run time; the exact error for the unrealized shape) and
   `tests/inline_value_class_lambda_e2e.rs`.
+- **A lambda with a `Nothing`/`Nothing?` type the factory cannot adapt is the same class, with a raw
+  supertype.** kotlinc's `computeParameterTypeAdaptationConstraint` also returns CONFLICT when the
+  adaptee type `isNothing() || isNullableNothing()`: a parameter typed `Nothing`/`Nothing?` by the
+  selected function type, or the specialized invoke's RESULT typed by the lambda body's own inferred
+  type — `private val ALWAYS_NULL: (Any?) -> Any? = { null }` selects `(Any?) -> Any?` yet the body
+  infers `Nothing?`, which maps to `Void` and has no adaptee. The lambda then compiles to a
+  captureless singleton (`<Facade>$ALWAYS_NULL$1` with `INSTANCE`, a package-private constructor, the
+  specialized `invoke(Object)Void` and the erased `invoke(Object)Object` bridge), and the facade's
+  field initializer reads `INSTANCE` with a `checkcast Function1` instead of invoking a bootstrap.
+  Whether the class implements the RAW `FunctionN` follows kotlinc's
+  `hasNothingInNonContravariantPosition`, not the conflict itself: a `Nothing?` parameter or a
+  `Nothing`/`Nothing?` inferred result drops the generic `Signature`, while a non-null `Nothing`
+  parameter (an `in` position) keeps `FunctionN<*…>` with a star argument, matching
+  `processUnboundedWildcard`. A value-class or inlining-hazard class always carries
+  `FunctionN<…>`. krusty's checker records every lambda body's inferred result before
+  coercion to the selected function type's return (`TypeInfo::lambda_body_results` → FIR
+  `inferred_result_type` → `IrFile::lambda_inferred_results`); the JVM realization uses it only for
+  this conflict, pinning the invoke's result to `Void`/`Void`-nullable and leaving every other
+  lambda on its established typing. The reference recipe this mirrors is the Kotlin repository's
+  `core:util.runtime` (`-language-version 2.2 -api-version 2.2`, whose `@Metadata` is `mv=[2,2,0]`):
+  under 2.2 the impl result is the inferred body type, so krusty stamps `mv=[2,2,0]` through its
+  internal `-Xmetadata-version` and the classes compare byte for byte. Tests:
+  `tests/indy_lambda_fallback_parity_e2e.rs` (both lambda classes and the facade byte for byte, the
+  source at run time).
 - **Which constructor slots hide a constructor behind `DefaultConstructorMarker`.** kotlinc decides
   it from the slots a constructor has when it lowers value classes: declared parameters, an inner
   class's outer instance (`Z.Inner(y)` of a value class `Z` is `Z$Inner(int, int, DCM)`), and a

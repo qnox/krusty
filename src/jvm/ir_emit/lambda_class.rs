@@ -21,11 +21,16 @@ pub(super) fn emit_lambda_class(
     let class = c.fq_name();
     let arity = u8::try_from(lambda.bridge.param_tys.len())
         .expect("a lambda class's arity fits a numbered FunctionN");
-    // The class's generic header: `Object`, then the function type it implements.
+    // The class's generic header: `Object`, then the function type it implements — except when
+    // kotlinc's `hasNothingInNonContravariantPosition` leaves that supertype raw (no `Signature`).
     let formatter = JvmSignatureFormatter::new(ir, env);
-    let signature = formatter
-        .ty_at(&lambda.function_type, Wildcards::Suppressed)
-        .map(|function| format!("L{OBJECT};{function}"));
+    let signature = if lambda.raw_supertype {
+        None
+    } else {
+        formatter
+            .ty_at(&lambda.function_type, Wildcards::Suppressed)
+            .map(|function| format!("L{OBJECT};{function}"))
+    };
     let mut cw = new_writer_generic(&class, signature.as_deref(), OBJECT, opts);
     if let Some(signature) = &signature {
         cw.set_signature(signature);

@@ -1753,6 +1753,10 @@ pub struct FirBody {
     constructor_context_parameter_count: u32,
     receiver_type: Option<ResolvedTy>,
     result_type: Option<ResolvedTy>,
+    /// A lambda body's own inferred result, recorded before coercion to the selected function
+    /// type's return (`result_type` is that caller-facing boundary). A target specializing the
+    /// implementation method's signature reads the body's own type.
+    inferred_result_type: Option<ResolvedTy>,
     implicit_return: bool,
     default_fragment: bool,
     property_storage_type: Option<ResolvedTy>,
@@ -1820,6 +1824,7 @@ impl FirBody {
             constructor_context_parameter_count: 0,
             receiver_type: None,
             result_type: None,
+            inferred_result_type: None,
             implicit_return: false,
             default_fragment: false,
             property_storage_type: None,
@@ -1926,6 +1931,17 @@ impl FirBody {
 
     pub const fn result_type(&self) -> Option<ResolvedTy> {
         self.result_type
+    }
+
+    pub fn set_inferred_result_type(&mut self, result: ResolvedTy) {
+        assert!(
+            self.inferred_result_type.replace(result).is_none(),
+            "a FIR body may publish its inferred result type only once"
+        );
+    }
+
+    pub const fn inferred_result_type(&self) -> Option<ResolvedTy> {
+        self.inferred_result_type
     }
 
     pub(crate) fn replace_result_type_with_property_storage(&mut self, storage: ResolvedTy) {

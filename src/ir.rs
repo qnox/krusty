@@ -2457,6 +2457,12 @@ pub struct IrFile {
     /// BOXED there — the value-class pass reads this to type such a slot as the boxed value class (so
     /// `it.getOrThrow()` unboxes it), without the lowerer probing value-class-ness itself.
     pub lambda_own_params_from: std::collections::HashMap<u32, u32>,
+    /// Lambda implementation id → the body's own inferred result type, recorded before coercion to
+    /// the selected function type's return (`IrFunction::ret` is that caller-facing boundary).
+    /// kotlinc's indy metafactory adaptation checks the IMPLEMENTATION's inferred types: a
+    /// `Nothing`/`Nothing?` result is a `TypeAdaptationConstraint.CONFLICT` the factory cannot
+    /// adapt, so the lambda compiles to a class whose specialized `invoke` returns `Void`.
+    pub lambda_inferred_results: std::collections::HashMap<FunId, Ty>,
     /// Lifted-lambda function id → the DECLARED parameter types and return type of the user
     /// `fun interface` method the lambda was SAM-converted to. Absent for a plain `FunctionN` lambda,
     /// whose `invoke` slots are all generic. The distinction only matters to a target that erases

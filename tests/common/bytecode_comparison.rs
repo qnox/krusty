@@ -79,6 +79,73 @@ fn compare_with_kotlinc_plugin_full(
     jvm_target: &str,
     kotlinc_extra: &[String],
 ) -> Option<ReferenceComparison> {
+    compare_with_kotlinc_plugin_request(ComparisonRequest {
+        name,
+        src,
+        class,
+        cp_jars,
+        krusty_cp_jars,
+        jvm_target,
+        kotlinc_extra,
+        metadata_version: None,
+    })
+}
+
+/// [`compare_with_kotlinc_plugin`] with the krusty `@Metadata` `mv` stamp pinned, for fixtures
+/// whose reference recipe passes an older `-language-version` in `kotlinc_extra`: the recorded
+/// reference then carries that level's `mv`, and krusty stamps the same via its internal
+/// `-Xmetadata-version` while compiling its implemented semantics. The JDK modules sit beside the
+/// stdlib on the krusty side only (see [`compare_with_kotlinc_plugin_jdk`]); the reference kotlinc
+/// always has its own JDK, so the recorded dump keeps the requested classpath.
+pub fn compare_with_kotlinc_plugin_metadata_stamp(
+    name: &str,
+    src: &str,
+    class: &str,
+    cp_jars: &[PathBuf],
+    jvm_target: &str,
+    kotlinc_extra: &[String],
+    metadata_version: [i32; 3],
+) -> Option<ReferenceComparison> {
+    let mut krusty_cp = cp_jars.to_vec();
+    krusty_cp.push(super::common_core::jdk_modules());
+    compare_with_kotlinc_plugin_request(ComparisonRequest {
+        name,
+        src,
+        class,
+        cp_jars,
+        krusty_cp_jars: &krusty_cp,
+        jvm_target,
+        kotlinc_extra,
+        metadata_version: Some(metadata_version),
+    })
+}
+
+/// One class compared against the reference compiler: what to build, the classpaths each side
+/// sees, and the recipe knobs the kotlinc invocation and the krusty `@Metadata` stamp take.
+struct ComparisonRequest<'a> {
+    name: &'a str,
+    src: &'a str,
+    class: &'a str,
+    cp_jars: &'a [PathBuf],
+    krusty_cp_jars: &'a [PathBuf],
+    jvm_target: &'a str,
+    kotlinc_extra: &'a [String],
+    metadata_version: Option<[i32; 3]>,
+}
+
+fn compare_with_kotlinc_plugin_request(
+    request: ComparisonRequest<'_>,
+) -> Option<ReferenceComparison> {
+    let ComparisonRequest {
+        name,
+        src,
+        class,
+        cp_jars,
+        krusty_cp_jars,
+        jvm_target,
+        kotlinc_extra,
+        metadata_version,
+    } = request;
     let inputs =
         super::common_core::byte_dump::class_dump_inputs(src, jvm_target, kotlinc_extra, cp_jars);
     let reference_bytes = super::common_core::byte_dump::kotlinc_class_dumps(
@@ -144,13 +211,26 @@ fn compare_with_kotlinc_plugin_full(
             .map(|target| target + 44)
             .unwrap_or_else(|| panic!("unknown -jvm-target {other}")),
     };
-    let classes = super::common_core::compile_in_process_metadata_cp_module_target(
-        src,
-        name,
-        krusty_cp_jars,
-        "main",
-        Some(class_major),
-    )
+    let classes = match metadata_version {
+        // The pinned-stamp recipe goes through the module-wide helper, which already pairs
+        // `with_class_major` with `with_metadata_version`; the plain path keeps its established
+        // single-file entry point.
+        Some(stamp) => super::common_core::source_set_compile::compile(
+            &[(name, src)],
+            krusty_cp_jars,
+            None,
+            Some(class_major),
+            Some(stamp),
+            &krusty::language_settings::LanguageSettings::default(),
+        ),
+        None => super::common_core::compile_in_process_metadata_cp_module_target(
+            src,
+            name,
+            krusty_cp_jars,
+            "main",
+            Some(class_major),
+        ),
+    }
     .unwrap_or_else(|| panic!("{name}: krusty failed to compile"));
     for (internal, bytes) in &classes {
         let path = krusty_dir.join(format!("{internal}.class"));

@@ -5910,7 +5910,10 @@ fn parameterized_sig_at(
             let sig = formatter.ty_at(inner, wildcards)?;
             (sig != ir_type_desc(inner)).then_some(sig)
         }
-        Ty::Fun(_) => formatter.ty_at(inner, wildcards),
+        Ty::Fun(_) => {
+            let sig = formatter.ty_at(inner, wildcards)?;
+            (sig != ir_type_desc(inner)).then_some(sig)
+        }
         _ => None,
     }
 }
