@@ -1551,6 +1551,10 @@ pub struct IrSpecializedAnonymousClass {
     /// Accessor functions are not available when the construction is retargeted, so the read is
     /// rebound once the copy's properties exist.
     pub caller_property_uses: Vec<ExprId>,
+    /// Cloned property initializer and accessor roots. Accessor functions do not exist yet, and
+    /// these roots are not constructor statements. Nested specialization walks this field;
+    /// [`IrClass::init_body`] stays the constructor body.
+    pub pending_property_roots: Vec<ExprId>,
 }
 
 /// One lowered source file (`IrFile`) — its arenas. Index-based, bulk-freeable.

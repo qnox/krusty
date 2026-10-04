@@ -8806,7 +8806,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   type its members use. A property initializer is one of those members: `typeOf<T>()` stays an
   external call until the JVM realizes it, and the reified substitution is what selects the copy.
   The copy is taken before the constructor's initializer block and the accessor functions exist, so
-  the initializer expression itself is copied onto the class. A later inline expansion sees that
+  the initializer expression itself is copied onto the class's specialization record, separate from
+  the constructor body. A later inline expansion sees that
   specialized type and copies the class again. `inline fun <reified T> foo() = object { val x =
   typeOf<T>() }.x` inlined as `foo<List<T>>()` from `inline fun <reified T> bar`, and then as
   `bar<Int>()`, therefore realizes `typeOf<List<Int>>()`. The same holds for an object written

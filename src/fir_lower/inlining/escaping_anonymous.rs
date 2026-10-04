@@ -320,10 +320,10 @@ fn specialized_class(
     let (init_body, init_owned) = clone_optional_body(ir, copy.init_body, expansion, class_name)?;
     copy.init_body = init_body;
     owned.extend(init_owned);
-    // Property initializers and accessor bodies are still checked expressions here. The constructor
-    // block and accessor functions that publish_one_copy clones are assembled only after every
-    // inline expansion. A later expansion has to see the specialized reified type on this copy, or
-    // it will reuse the copy and leave the outer parameter unsubstituted.
+    // Property initializers and accessor bodies are still checked expressions here. They stay on
+    // the specialization record, not in the constructor: accessor functions are assembled only
+    // after every inline expansion. A later expansion has to see the specialized reified type on
+    // this copy, or it will reuse the copy and leave the outer parameter unsubstituted.
     let mut property_copies = Vec::new();
     for root in property_roots {
         let (cloned_root, cloned_owned) =
@@ -333,11 +333,6 @@ fn specialized_class(
         };
         property_copies.push(cloned_root);
         owned.extend(cloned_owned);
-    }
-    if !property_copies.is_empty() {
-        let mut stmts = copy.init_body.into_iter().collect::<Vec<_>>();
-        stmts.extend(property_copies);
-        copy.init_body = Some(ir.add_expr(IrExpr::Block { stmts, value: None }));
     }
     let class_id = ir.add_class(copy);
     for method in &cloned_methods {
@@ -368,6 +363,7 @@ fn specialized_class(
             field_count,
             property_count,
             caller_property_uses: Vec::new(),
+            pending_property_roots: property_copies,
         },
     );
     for method in ir.classes[class_id as usize].methods.clone() {
@@ -377,6 +373,14 @@ fn specialized_class(
     }
     if let Some(body) = ir.classes[class_id as usize].init_body {
         retarget(ir, body, expansion, seen)?;
+    }
+    let pending_roots = ir
+        .specialized_anonymous_classes
+        .get(&class_id)
+        .map(|record| record.pending_property_roots.clone())
+        .unwrap_or_default();
+    for root in pending_roots {
+        retarget(ir, root, expansion, seen)?;
     }
     Ok(Some(placeholder))
 }
