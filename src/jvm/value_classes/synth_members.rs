@@ -440,12 +440,15 @@ pub(super) fn synth_value_members(
     {
         let simple = internal_name.segment_ref().replace('$', ".");
         if !custom_to_string {
-            let v = ir.add_expr(IrExpr::GetValue(0));
+            let carrier = ir.add_expr(IrExpr::GetValue(0));
+            // A non-null nested value class is this slot's carrier. Name it through its own
+            // `toString-impl` (`Outer(i=Inner(x=20))`); the concat then appends that String.
+            let rendered = nested_value_text(ir, u_ir, under, carrier);
             // ONE `StringConcat` (not nested `+`): kotlinc builds a single `StringBuilder` and appends the
             // 1-char closing paren via `append(C)` — a nested concat would emit a second builder.
             let prefix = str_const(ir, format!("{simple}({fname}="));
             let close = str_const(ir, ")".to_string());
-            let acc = ir.add_expr(IrExpr::StringConcat(vec![prefix, v, close]));
+            let acc = ir.add_expr(IrExpr::StringConcat(vec![prefix, rendered, close]));
             let sbody = ret_block(ir, acc);
             let impl_fid = add_static(ir, "toString-impl", vec![u_ir], str_ir, sbody);
             crate::jvm::method_parameters::record_function(ir, impl_fid, &["arg0"], &[0]);
@@ -912,6 +915,37 @@ fn guard_false(ir: &mut IrFile, cond: ExprId) -> ExprId {
     ir.add_expr(IrExpr::When {
         branches: vec![(Some(cond), blk)],
     })
+}
+
+/// Render a non-null nested value class with its static `toString-impl`. The slot already holds
+/// that class's carrier, and the call's descriptor names the fully erased carrier. Its logical
+/// type stays the nested class, so the `StringBuilder` path appends with `append(Object)`; its
+/// physical result is the `String` the call returns, which an `invokedynamic` concat passes as
+/// `String`. A nullable property is left as the value erasure stored.
+fn nested_value_text(ir: &mut IrFile, underlying: Ty, under: &Under, value: ExprId) -> ExprId {
+    if underlying.is_nullable() {
+        return value;
+    }
+    let Some(nested) = underlying.non_null().obj_internal() else {
+        return value;
+    };
+    if !under.contains_key(&nested) {
+        return value;
+    }
+    let carrier = erase(&underlying, under);
+    let call = ir.add_expr(IrExpr::Call {
+        callee: Callee::Static {
+            owner: nested,
+            name: "toString-impl".to_string(),
+            descriptor: format!("({})Ljava/lang/String;", super::desc(&carrier)),
+            inline: InlineKind::None,
+        },
+        dispatch_receiver: None,
+        args: vec![value],
+    });
+    ir.physical_types.insert(call, Ty::String);
+    ir.logical_types.insert(call, Ty::obj_name(nested));
+    call
 }
 
 /// kotlinc's generated-member hash of the sole property, the one a data class gives each of its

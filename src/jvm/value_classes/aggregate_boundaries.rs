@@ -7,7 +7,7 @@
 //! kotlinc renders through the static `toString-impl` over its carrier.
 
 use super::{BoxOp, Repr, ReprCtx};
-use crate::ir::{ExprId, IrExpr};
+use crate::ir::{Callee, ExprId, IrExpr};
 
 pub(super) fn record(
     exprs: &[IrExpr],
@@ -42,6 +42,11 @@ pub(super) fn record(
             }
         );
         if let Repr::Unboxed(value_class) = representation {
+            // Synthesized `toString-impl` already called the nested class's `toString-impl` and
+            // left a String. Rendering that String again would print the text as a carrier.
+            if template && rendered_by_to_string_impl(exprs, element) {
+                continue;
+            }
             let op = match repr_ctx.box_op(element, value_class) {
                 BoxOp::Box(value_class) if template => BoxOp::StringOf(value_class),
                 op => op,
@@ -49,4 +54,14 @@ pub(super) fn record(
             ops.push((element, op));
         }
     }
+}
+
+fn rendered_by_to_string_impl(exprs: &[IrExpr], element: ExprId) -> bool {
+    matches!(
+        &exprs[element as usize],
+        IrExpr::Call {
+            callee: Callee::Static { name, .. },
+            ..
+        } if name == "toString-impl"
+    )
 }
