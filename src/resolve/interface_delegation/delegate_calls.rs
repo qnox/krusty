@@ -35,7 +35,27 @@ pub(in crate::resolve) fn delegate_member_calls(
     delegate: Ty,
 ) -> Option<Box<[ResolvedDelegateMemberCalls]>> {
     let interface = delegation.interface.get();
-    let delegate = delegate.non_null();
+    // A type-parameter delegate offers its bound's members.
+    let mut delegate = delegate.non_null();
+    while let Ty::TyParam(_, bound) = delegate {
+        delegate = bound.non_null();
+    }
+    if !matches!(delegate, Ty::Obj(..)) {
+        return Some(
+            delegation
+                .members
+                .iter()
+                .map(|member| match member {
+                    ResolvedDelegatedMember::Function(function) => {
+                        ResolvedDelegateMemberCalls::Function(unchanged(&function.call))
+                    }
+                    ResolvedDelegatedMember::Property(property) => {
+                        unchanged_property(property)
+                    }
+                })
+                .collect(),
+        );
+    }
     delegation
         .members
         .iter()
@@ -56,6 +76,22 @@ pub(in crate::resolve) fn delegate_member_calls(
             calls
         })
         .collect()
+}
+
+/// The interface declaration's own call, unchecked: what a delegate offering no more specific
+/// member forwards to.
+fn unchanged(call: &crate::fir::ResolvedDelegatedCall) -> ResolvedDelegateCall {
+    ResolvedDelegateCall {
+        call: call.clone(),
+        result_check: None,
+    }
+}
+
+fn unchanged_property(property: &ResolvedDelegatedProperty) -> ResolvedDelegateMemberCalls {
+    ResolvedDelegateMemberCalls::Property {
+        getter: unchanged(&property.getter),
+        setter: property.setter.as_ref().map(unchanged),
+    }
 }
 
 /// Whether `implementation`, found on the delegate, overrides the forwarded `declaration`: the same
@@ -98,13 +134,9 @@ fn delegate_function_call(
     delegate: Ty,
     forwarded: &ResolvedDelegatedFunction,
 ) -> Option<ResolvedDelegateCall> {
-    let unchanged = || ResolvedDelegateCall {
-        call: forwarded.call.clone(),
-        result_check: None,
-    };
     // A member extension forwards the interface's own declaration.
     if forwarded.call.extension_receiver_parameter.is_some() {
-        return Some(unchanged());
+        return Some(unchanged(&forwarded.call));
     }
     let interface_owners = interface_owners(source, interface)?;
     let declared = crate::symbol_resolver::members_in_hierarchy(source, interface, &forwarded.name);
@@ -139,16 +171,7 @@ fn delegate_property_calls(
 ) -> Option<ResolvedDelegateMemberCalls> {
     // A member-extension property forwards the interface's own accessors.
     if forwarded.getter.extension_receiver_parameter.is_some() {
-        return Some(ResolvedDelegateMemberCalls::Property {
-            getter: ResolvedDelegateCall {
-                call: forwarded.getter.clone(),
-                result_check: None,
-            },
-            setter: forwarded.setter.clone().map(|call| ResolvedDelegateCall {
-                call,
-                result_check: None,
-            }),
-        });
+        return Some(unchanged_property(forwarded));
     }
     let available = crate::symbol_resolver::members_in_hierarchy(source, delegate, &forwarded.name);
     let candidates = available

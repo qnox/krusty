@@ -582,7 +582,7 @@ fn property_call(
                 } else {
                     signature.result
                 },
-                interface: true,
+                interface: callable.owner_is_interface,
             },
             None,
         )
