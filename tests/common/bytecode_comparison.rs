@@ -433,10 +433,9 @@ pub fn classes_against_kotlinc_lib_target(
     jvm_target: Option<u16>,
 ) -> Option<ClassSets> {
     let library = super::common_core::kotlinc_lib_out(lib)?;
-    let target = match jvm_target {
-        Some(target) => target.to_string(),
-        None => "default".to_string(),
-    };
+    let target = jvm_target
+        .map(super::common_core::kotlinc_jvm_target_argument)
+        .unwrap_or_else(|| "default".to_string());
     let inputs = super::common_core::byte_dump::class_dump_inputs(
         src,
         &target,
@@ -460,14 +459,9 @@ pub fn classes_against_kotlinc_lib_target(
                 "-cp".to_string(),
                 library.to_string_lossy().into_owned(),
             ];
-            if let Some(target) = jvm_target {
+            if jvm_target.is_some() {
                 arguments.push("-jvm-target".to_string());
-                // kotlinc spells the Java 8 target as `1.8`. Later releases use the major number.
-                arguments.push(if target == 8 {
-                    "1.8".to_string()
-                } else {
-                    target.to_string()
-                });
+                arguments.push(target.clone());
             }
             arguments.push(source.to_string_lossy().into_owned());
             let (code, stderr) = super::common_core::kotlinc_compile(&arguments)?;
