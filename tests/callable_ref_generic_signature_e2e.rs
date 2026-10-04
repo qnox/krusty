@@ -60,6 +60,7 @@ fn a_bounded_generic_function_reference_reports_the_declaration_type_parameter()
 fn a_companion_associated_extension_omits_its_static_scope_receiver() {
     agree(
         r#"
+        // LANGUAGE: +CompanionBlocksAndExtensions
         class C
         companion fun C.answer(value: Int): String = value.toString()
 
