@@ -1897,7 +1897,13 @@ impl Classpath {
             default_call: callable.default_call,
             kind,
         };
-        if let Some(identity) = self.external_callable_ids.borrow().get(&key).copied() {
+        let existing = self.external_callable_ids.borrow().get(&key).copied();
+        if let Some(identity) = existing {
+            // The same physical declaration can first be interned through a raw class member and
+            // later encountered through a richer Kotlin declaration view. Converge that stable
+            // identity here too: callers do not necessarily carry `external_identity`, so the
+            // explicit enrichment path in `JvmLibraries` is not sufficient on its own.
+            self.enrich_external_callable(identity, callable);
             return identity;
         }
         let mut callables = self.external_callables.borrow_mut();
@@ -5075,6 +5081,42 @@ mod fq_tests {
         test_temp_dir, write_test_archive_entries, write_test_jar_with_entry,
     };
     use super::*;
+
+    #[test]
+    fn reinterning_a_physical_callable_preserves_later_declaration_facets() {
+        let cp = Classpath::new(vec![]);
+        let owner = type_name("review/PhysicalOwner");
+        let mut first = LibraryCallable::library(
+            owner,
+            "physicalOperation",
+            vec![],
+            Ty::obj("review/Answer"),
+            Ty::obj("review/Answer"),
+            "()Lreview/Answer;",
+        );
+        first.physical_name = Some("physicalOperation".to_string());
+        let identity = cp.intern_external_callable(&first, ExternalCallableKind::Member);
+
+        let mut enriched = first.clone();
+        enriched.overridden_call_realizations = vec![crate::libraries::OverriddenCallRealization {
+            declaration_owner: type_name("review/SemanticDeclaration"),
+            physical_name: "mappedOperation".to_string(),
+            descriptor: "()Ljava/lang/Object;".to_string(),
+        }]
+        .into_boxed_slice();
+
+        assert_eq!(
+            cp.intern_external_callable(&enriched, ExternalCallableKind::Member),
+            identity
+        );
+        assert_eq!(
+            cp.external_callable(identity)
+                .expect("the stable callable")
+                .callable
+                .overridden_call_realizations,
+            enriched.overridden_call_realizations
+        );
+    }
 
     #[test]
     fn suspend_receiver_function_metadata_matches_its_function_interface_erasure() {
