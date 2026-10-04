@@ -37,7 +37,8 @@ impl BodyLowering<'_, '_, '_> {
                 };
                 let func_ref = self.func_ref(id);
                 let call = self.emit_call(func_ref, &arguments)?;
-                Ok(self.builder.inst_results(call).first().copied())
+                let result = self.builder.inst_results(call).first().copied();
+                self.local_generic_result(site, *function, result)
             }
             Callee::Super {
                 owner,
@@ -499,5 +500,48 @@ impl BodyLowering<'_, '_, '_> {
             }
             other => Err(format!("a {} call", callee_kind(other))),
         }
+    }
+
+    /// Realize the checked result type of a same-file generic call.
+    ///
+    /// A function returning its own `T` physically returns a reference. The call site's checked
+    /// type is the selected substitution, and Kotlin checks that concrete type at the call
+    /// boundary (the JVM spelling is `checkcast`). Keeping only the reference silently accepts a
+    /// value that the declaration produced through an unchecked cast. Common IR already records
+    /// both facts; Native consumes them here without reopening inference or inspecting a name.
+    fn local_generic_result(
+        &mut self,
+        site: u32,
+        function: FunId,
+        result: Option<Value>,
+    ) -> Result<Option<Value>, Unsupported> {
+        let Some(result) = result else {
+            return Ok(None);
+        };
+        let declared = self.file.ir.functions[function as usize].ret;
+        if !matches!(declared.non_null(), Ty::TyParam(..)) {
+            return Ok(Some(result));
+        }
+        let Some(selected) = self.file.ir.logical_types.get(&site).copied() else {
+            return Ok(Some(result));
+        };
+        let runtime_type = match selected.non_null() {
+            Ty::TyParam(_, bound) => bound.non_null(),
+            concrete => concrete,
+        };
+        if runtime_type
+            .obj_internal()
+            .is_some_and(super::super::super::intrinsics::is_any)
+        {
+            return Ok(Some(result));
+        }
+        let Some(descriptor) = self.file.type_descriptor(runtime_type)? else {
+            return Err(format!(
+                "a generic call result selected as `{}` without a runtime descriptor",
+                super::type_checks::type_name_of(selected)
+            ));
+        };
+        let descriptor = self.data_address(descriptor);
+        self.runtime_call("kt_cast", &[any(), any()], any(), &[result, descriptor])
     }
 }
