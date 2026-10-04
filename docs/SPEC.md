@@ -14186,3 +14186,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the method is declared with. Spelling that parameter `V` is not a method descriptor, and the JVM
   rejects the continuation class while loading it. This is the receiver of `suspend Unit.() -> Unit`.
   Test: `tests/suspend_unit_receiver_e2e.rs`. Corpus: `coroutines/kt28844.kt`.
+
+- **An inline body with a loop or a try/catch is entered with an empty operand stack** (kotlinc's
+  `requiresEmptyStackOnEntry`). When the caller has already pushed operands (an earlier argument, a
+  `new`/`dup` of the object being constructed), kotlinc brackets the inlined body with
+  `InlineMarker.beforeInlineCall`/`afterInlineCall`; its mandatory `FixStack` stores those operands
+  into locals above every other, reloads them under the call's result, and `UninitializedStoresProcessor`
+  then moves a saved `new` after the constructor's arguments. krusty's inliner declined such a body,
+  so a reified call that has no callable fallback (`pair(id, xs.filterIsInstance<String>())`) failed
+  the whole compile with "inline splice failed". The emitter now writes the two markers around the
+  body when the stack is not empty, and the class writer runs FixStack and the uninitialized-store
+  move over every method that is not a coroutine (a coroutine runs both inside its transformation)
+  before kotlinc's optimizer, so the result is kotlinc's bytes. A body the passes cannot normalize keeps
+  its operands under the inlined code, which is valid; only its markers are erased.
+  Tests: `tests/inline_call_operand_spill_e2e.rs` (one operand, wide operands, a constructor argument;
+  each run and compared with kotlinc). Corpus: a private-corpus module.

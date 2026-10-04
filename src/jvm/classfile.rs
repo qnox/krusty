@@ -20,6 +20,7 @@ mod coroutine_transform;
 mod debug_metadata;
 mod descriptor_mentions;
 mod enclosing_method;
+mod inline_call_stacks;
 mod inner_classes;
 mod late_fields;
 mod line_numbers;
@@ -1433,8 +1434,10 @@ impl ClassWriter {
         mut self,
     ) -> (Vec<u8>, Vec<coroutine_transform::TransformedCoroutine>) {
         // Every method's tables are final now: the coroutine transformer runs over the suspend
-        // functions it was asked for, then kotlinc's bytecode rewrites over the rest.
+        // functions it was asked for, the operand stack is saved around the other methods' inline
+        // calls, then kotlinc's bytecode rewrites run over the rest.
         let coroutines = self.transform_coroutines();
+        self.fix_inline_call_stacks();
         (self.write(), coroutines)
     }
 
