@@ -1241,7 +1241,19 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     return Ok(());
                 }
                 let variable = self.declare_value(index, ty)?;
-                if let Some(init) = init {
+                let deferred_zero = self.file.ir.deferred_local_types.contains_key(&id)
+                    && init.is_some_and(|initializer| {
+                        matches!(self.file.ir.expr(initializer), IrExpr::Const(_))
+                    });
+                if deferred_zero {
+                    // Common IR keeps the parser's synthetic declaration initializer and the
+                    // original generic type as separate provenance. JVM needs the original type's
+                    // erased zero; Native stores the specialized value directly, so seed the SSA
+                    // variable with this target's zero instead of trying to unbox the placeholder
+                    // `null` into a specialized primitive.
+                    let zero = self.zero_of(ty);
+                    self.builder.def_var(variable, zero);
+                } else if let Some(init) = init {
                     let value = self.coerce(init, ty)?;
                     if self.terminated {
                         return Ok(());
