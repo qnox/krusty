@@ -5173,6 +5173,32 @@ mod fq_tests {
     }
 
     #[test]
+    fn reinterning_a_callable_enriches_visibility_on_the_same_physical_identity() {
+        let cp = Classpath::new(Vec::new());
+        let mut partial = crate::libraries::LibraryCallable::library(
+            type_name("dependency/Base"),
+            "step",
+            vec![Ty::Int],
+            Ty::String,
+            Ty::String,
+            "(I)Ljava/lang/String;",
+        );
+        let identity = cp.intern_external_callable(&partial, ExternalCallableKind::Member);
+
+        partial.visibility = crate::types::Visibility::Protected;
+        let reinterned = cp.intern_external_callable(&partial, ExternalCallableKind::Member);
+
+        assert_eq!(reinterned, identity);
+        assert_eq!(
+            cp.external_callable(identity)
+                .expect("interned callable")
+                .callable
+                .visibility,
+            crate::types::Visibility::Protected
+        );
+    }
+
+    #[test]
     fn suspend_receiver_function_metadata_matches_its_function_interface_erasure() {
         let Ty::Fun(metadata) = Ty::fun_with_shape(
             vec![Ty::obj("kotlin/sequences/SequenceScope")],
