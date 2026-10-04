@@ -41,7 +41,7 @@ pub struct BackendCallableFact {
     /// Declaration visibility. A protected member stays callable from a subclass, and a nested
     /// class of that subclass reaches it through an accessor rather than a public invoke.
     pub visibility: crate::types::Visibility,
-    /// Exact semantic package published for a top-level function or extension.
+    /// Exact semantic declaration package, independent of the physical realization kind.
     pub declaration_package: Option<TypeName>,
     pub kind: ExternalCallableKind,
     pub owner_is_interface: bool,

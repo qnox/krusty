@@ -62,14 +62,6 @@ impl Classpath {
         );
         let mut stored = callable.clone();
         stored.external_identity = Some(identity);
-        assert!(
-            declaration_package.is_none()
-                || matches!(
-                    kind,
-                    ExternalCallableKind::TopLevel | ExternalCallableKind::Extension
-                ),
-            "only a package declaration can publish a declaration package"
-        );
         callables.push(ExternalCallableRealization {
             callable: stored,
             kind,
@@ -244,13 +236,6 @@ impl Classpath {
         let stored = callables
             .get_mut(identity.raw() as usize)
             .expect("a declaration package names an interned external callable");
-        assert!(
-            matches!(
-                stored.kind,
-                ExternalCallableKind::TopLevel | ExternalCallableKind::Extension
-            ),
-            "only a package declaration can publish a declaration package"
-        );
         match stored.declaration_package {
             Some(existing) => assert_eq!(
                 existing, package,
@@ -323,7 +308,7 @@ mod tests {
     }
 
     #[test]
-    fn top_level_package_is_published_independently_of_the_physical_facade() {
+    fn declaration_package_is_independent_of_the_physical_realization_kind() {
         let cp = Classpath::new(vec![]);
         let callable = LibraryCallable::library(
             type_name("fixture/physical/FacadeKt"),
@@ -335,8 +320,13 @@ mod tests {
         );
         let package = type_name("fixture/semantic");
 
-        let identity =
-            cp.intern_external_callable(&callable, ExternalCallableKind::TopLevel, Some(package));
+        // A package property or mapped builtin can reuse a storage/member realization. The
+        // declaration namespace remains semantic and must not be inferred from that physical kind.
+        let identity = cp.intern_external_callable(
+            &callable,
+            ExternalCallableKind::StaticFieldRead,
+            Some(package),
+        );
 
         assert_eq!(
             cp.external_callable(identity).unwrap().declaration_package,
