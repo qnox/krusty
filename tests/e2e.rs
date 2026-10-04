@@ -1407,6 +1407,8 @@ mod suspend_under_try_e2e;
 mod suspend_value_class_delegation_e2e;
 #[path = "suspend_value_class_results_e2e.rs"]
 mod suspend_value_class_results_e2e;
+#[path = "unit_expression_body_return_line_e2e.rs"]
+mod unit_expression_body_return_line_e2e;
 #[path = "unsigned_operations_e2e.rs"]
 mod unsigned_operations_e2e;
 #[path = "value_class_bound_reference_receiver_e2e.rs"]

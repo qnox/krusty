@@ -11985,7 +11985,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`IrFile::fallthrough_return_line`), which the emitter writes BEFORE the returned `Unit` is
   loaded. kotlinc's `nop` after that mark always shares its line with the load or the `return`
   and is cleaned up, so it is not written. An expression-bodied local function ends in a return
-  of its own and gets no mark. Test: `tests/fallthrough_close_line_e2e.rs`.
+  of its own and gets no closing-line mark (see the next entry). Test:
+  `tests/fallthrough_close_line_e2e.rs`.
+
+- **A `Unit` expression body's `return` carries the expression's END line.** fir2ir's
+  `ExpressionBodyTransformer` builds the `IrReturn` of `fun f() = expression` at the expression's
+  end offset, and `ExpressionCodegen.visitReturn` marks that line after the value has been
+  evaluated, just before the `return` instruction. A non-`Unit` body already did; a `Unit` one
+  (`fun f(n: Int) = deliver {⏎ sink(n)⏎ }`, a call whose arguments span lines, an `if` whose
+  branches do) now does too, for declared, member and local functions. Lowering records the mark
+  through `UnitReturnLine::ExpressionEnd` on the appended `return`
+  (`IrFile::implicit_return_end_line`); a lambda keeps `UnitReturnLine::ClosingBrace`. A body on one line
+  already has that line in effect, so no entry is added. Test:
+  `tests/unit_expression_body_return_line_e2e.rs`.
 
 - **Backend temporaries are entered and left on the frame's stack, as kotlinc's `enterTemp` and
   `leaveTemp` move `FrameMapBase.currentSize`.** Leaving the newest entry, keyed or not, hands its
