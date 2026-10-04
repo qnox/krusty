@@ -24,18 +24,63 @@ fn callable_candidates(
 }
 
 fn function_candidates(
+    ir: &IrFile,
     callables: &CheckedBackendCallables,
     target: ResolvedFunctionOverrideTarget,
 ) -> Vec<OverriddenCallRealization> {
-    match target {
-        ResolvedFunctionOverrideTarget::External(target) => callable_candidates(callables, target),
-        // A source override has its own declaration spelling. kotlinc does not replace a call to
-        // that declaration with an ancestor builtin's JVM spelling (`SmartSet.size` remains
-        // `getSize()`); only an already-selected dependency declaration may publish an alternate
-        // call-site realization. Rewalking source override edges here would change the selected
-        // declaration after checking.
-        ResolvedFunctionOverrideTarget::Module(_) => Vec::new(),
+    let mut candidates = Vec::new();
+    let mut pending = vec![target];
+    let mut seen = std::collections::HashSet::new();
+    while let Some(current) = pending.pop() {
+        if !seen.insert(current) {
+            continue;
+        }
+        match current {
+            ResolvedFunctionOverrideTarget::External(target) => {
+                candidates.extend(callable_candidates(callables, target));
+            }
+            ResolvedFunctionOverrideTarget::Module(_) => {
+                pending.extend(
+                    ir.function_overrides
+                        .values()
+                        .flatten()
+                        .filter(|edge| edge.implementation == current)
+                        .map(|edge| edge.overridden),
+                );
+            }
+        }
     }
+    candidates
+}
+
+fn property_getter_candidates(
+    ir: &IrFile,
+    callables: &CheckedBackendCallables,
+    target: crate::fir::PropertyId,
+) -> Vec<OverriddenCallRealization> {
+    let mut candidates = Vec::new();
+    let mut pending = vec![crate::fir::ResolvedPropertyOverrideTarget::Module(target)];
+    let mut seen = std::collections::HashSet::new();
+    while let Some(current) = pending.pop() {
+        if !seen.insert(current) {
+            continue;
+        }
+        match current {
+            crate::fir::ResolvedPropertyOverrideTarget::External(getter) => {
+                candidates.extend(callable_candidates(callables, getter));
+            }
+            crate::fir::ResolvedPropertyOverrideTarget::Module(_) => {
+                pending.extend(
+                    ir.property_overrides
+                        .values()
+                        .flatten()
+                        .filter(|edge| edge.implementation == current)
+                        .map(|edge| edge.overridden),
+                );
+            }
+        }
+    }
+    candidates
 }
 
 fn select(
@@ -65,30 +110,19 @@ pub(super) fn realize(
         let id = u32::try_from(raw).expect("too many common IR expressions");
         let (plan_expression, owner, candidates) = match expression {
             IrExpr::Call {
-                callee:
-                    Callee::Virtual {
-                        owner,
-                        module_target,
-                        target,
-                        ..
-                    },
+                callee: Callee::Virtual { owner, target, .. },
                 ..
             } => {
-                // `module_target` is the exact declaration the checker selected. A source
-                // override may still carry an external ancestor target for bridge/dispatch
-                // bookkeeping, but that ancestor does not replace the selected declaration's
-                // call-site ABI.
-                let candidates = match (module_target, target) {
-                    (Some(_), _) => Vec::new(),
-                    (None, Some(IrVirtualTarget::Function(target))) => {
-                        function_candidates(callables, *target)
+                let candidates = match target {
+                    Some(IrVirtualTarget::Function(target)) => {
+                        function_candidates(ir, callables, *target)
                     }
-                    (
-                        None,
-                        Some(IrVirtualTarget::PropertyGetter(_))
-                        | Some(IrVirtualTarget::PropertySetter(_))
-                        | None,
-                    ) => Vec::new(),
+                    Some(IrVirtualTarget::PropertyGetter(target)) => {
+                        property_getter_candidates(ir, callables, *target)
+                    }
+                    // Every JVM special property is read-only; an overriding source setter has no
+                    // overridden declaration whose getter policy could apply to it.
+                    Some(IrVirtualTarget::PropertySetter(_)) | None => Vec::new(),
                 };
                 (id, *owner, candidates)
             }
