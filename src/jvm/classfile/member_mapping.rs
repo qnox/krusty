@@ -1,11 +1,13 @@
-//! Which member references the class's own code names, as opposed to code copied from an inline
-//! function's compiled body.
+//! Which member references and class constants the class's own code names, as opposed to code
+//! copied from an inline function's compiled body.
 //!
-//! kotlinc lists a nested class in `InnerClasses` when its type mapper maps a signature naming it
-//! while generating the class. The instructions its inliner copies from a compiled inline function
-//! (`Continuation.resume`'s `Result.Companion` read) never pass through that mapper, so a nested
-//! class only such code names gets no row. A member reference interned while copying is recorded
-//! as copied; one the class's own code interns is recorded as mapped.
+//! kotlinc lists a nested class in `InnerClasses` when its type mapper maps a signature or class
+//! naming it while generating the class. The instructions its inliner copies from a compiled inline
+//! function (`Continuation.resume`'s `Result.Companion` read, a `checkcast` to a nested class) never
+//! pass through that mapper, and neither do the ones its coroutine transformer adds with raw ASM (a
+//! spilled local's `checkcast` on restore), so a nested class only such code names gets no row. A
+//! reference interned while copying is recorded as copied; one the class's own code interns is
+//! recorded as mapped.
 
 use std::collections::HashSet;
 
@@ -17,6 +19,10 @@ pub(super) struct MappedMembers {
     copying: bool,
     copied: HashSet<u16>,
     mapped: HashSet<u16>,
+    /// Class constants copying created; one that existed before (the class's own name, its
+    /// supertypes) was not created by the copy.
+    copied_classes: HashSet<u16>,
+    mapped_classes: HashSet<u16>,
 }
 
 impl MappedMembers {
@@ -39,9 +45,33 @@ impl MappedMembers {
     pub(super) fn copied_only(&self, index: u16) -> bool {
         self.copied.contains(&index) && !self.mapped.contains(&index)
     }
+
+    /// Whether only copied code names the class constant at `index`.
+    pub(super) fn copied_only_class(&self, index: u16) -> bool {
+        self.copied_classes.contains(&index) && !self.mapped_classes.contains(&index)
+    }
 }
 
 impl ClassWriter {
+    /// Constant-pool index of a `Class` entry, for `new`, `checkcast` and the like.
+    pub fn class_ref(&mut self, internal: &str) -> u16 {
+        let created = !self.cp.has_class(internal);
+        let index = self.cp.class(internal);
+        if !self.members.copying {
+            self.members.mapped_classes.insert(index);
+        } else if created {
+            self.members.copied_classes.insert(index);
+        }
+        index
+    }
+
+    /// Whether the class's own code, or a declaration, names `internal` as a class constant.
+    pub(super) fn names_class(&self, internal: &str) -> bool {
+        self.cp
+            .class_index(internal)
+            .is_some_and(|index| !self.members.copied_only_class(index))
+    }
+
     pub fn methodref(&mut self, class: &str, name: &str, desc: &str) -> u16 {
         let index = self.cp.methodref(class, name, desc);
         self.members.record(index)
@@ -117,5 +147,21 @@ mod tests {
         assert!(writer.members.copied_only(copied));
         assert!(!writer.members.copied_only(shared));
         assert_eq!(writer.copied_only_name_and_types().len(), 1);
+    }
+
+    /// A class constant copied code creates is not named by the class until its own code interns
+    /// it; one that existed before the copy, such as a supertype, stays named.
+    #[test]
+    fn a_class_constant_is_copied_only_when_the_copy_created_it() {
+        let mut writer = ClassWriter::new("T", "S$Base");
+        writer.copying(|writer| {
+            writer.class_ref("H$Item");
+            writer.class_ref("S$Base");
+        });
+        assert!(!writer.names_class("H$Item"));
+        assert!(writer.names_class("S$Base"));
+
+        writer.class_ref("H$Item");
+        assert!(writer.names_class("H$Item"));
     }
 }
