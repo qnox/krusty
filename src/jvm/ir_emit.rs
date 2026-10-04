@@ -94,6 +94,7 @@ mod initializer_lines;
 mod inline_body_emission;
 mod inline_call;
 mod inline_frame_marker;
+mod inline_lambda_aliases;
 mod inline_parameters;
 mod instance_field_names;
 use instance_field_names::instance_field_jvm_name;
@@ -6083,6 +6084,8 @@ struct Emitter<'a> {
     /// krusty would otherwise need. Pushed/popped around the branchy RHS in `emit_binop`.
     /// Open source locals, in declaration order.
     open_locals: Vec<block_scope::OpenLocal>,
+    /// The current lambda body's captures that are literal lambdas it only invokes.
+    inline_lambda_aliases: HashMap<u32, inline_lambda_aliases::InlineLambdaAlias>,
     /// Current block nesting depth; the function body is depth 1.
     block_depth: usize,
     /// The source line of the statement currently being emitted, when it has one. An operand that
@@ -6182,6 +6185,7 @@ impl<'a> Emitter<'a> {
             ret,
             loop_stack: Vec::new(),
             open_locals: Vec::new(),
+            inline_lambda_aliases: HashMap::new(),
             block_depth: 0,
             statement_line: None,
             comparison_line: None,
@@ -6303,7 +6307,6 @@ impl<'a> Emitter<'a> {
                     return false;
                 }
                 let physical_impl_params = jvm_function_params(self.ir, impl_fn);
-                let cap_tys = physical_impl_params[..n_cap].to_vec();
                 let lam_tys = physical_impl_params[n_cap..].to_vec();
                 let semantic_signature = self
                     .ir
@@ -6333,25 +6336,15 @@ impl<'a> Emitter<'a> {
                     .get(&inline_body)
                     .copied()
                     .unwrap_or(impl_f.ret);
-                // Each capture binds to the caller's actual slot (a mutable capture writes through).
-                let mut cap_slots: Vec<(u16, Ty)> = Vec::with_capacity(captures.len());
-                for (k, &cap) in captures.iter().enumerate() {
-                    let slot = if let IrExpr::GetValue(v) = self.ir.expr(cap) {
-                        let Some(&(slot, _)) = self.slots.get(v) else {
-                            return false;
-                        };
-                        slot
-                    } else {
-                        // Left with the rest of the call's frame when the splice finishes.
-                        let slot = self
-                            .frame
-                            .enter_temp(TempRole::LambdaCapture, cap_tys[k])
-                            .slot();
-                        capture_materializations.push((i, cap, slot, cap_tys[k]));
-                        slot
-                    };
-                    cap_slots.push((slot, cap_tys[k]));
-                }
+                // Each capture binds to the caller's actual slot (a mutable capture writes through);
+                // a materialized one is left with the rest of the call's frame when it finishes.
+                let Some(cap_bindings) = self.bind_spliced_captures(a, &mut |emitter, cap, ty| {
+                    let slot = emitter.frame.enter_temp(TempRole::LambdaCapture, ty).slot();
+                    capture_materializations.push((i, cap, slot, ty));
+                    slot
+                }) else {
+                    return false;
+                };
                 // This lambda's own locals start where the host's frame is free at the invoke, not
                 // above every host local. `None` only when the body could not be decoded, in which
                 // case the splice below declines too.
@@ -6362,11 +6355,7 @@ impl<'a> Emitter<'a> {
                 // Above the host's frame, and above every slot this lambda's own captures occupy:
                 // a capture is live for the whole body that reads it, so a parameter placed on one
                 // overwrites the value the body was given.
-                let capture_ceiling = cap_slots
-                    .iter()
-                    .map(|&(slot, ty)| slot + slot_words(ty))
-                    .max()
-                    .unwrap_or(0);
+                let capture_ceiling = cap_bindings.ceiling();
                 let lambda_slot_base = spliced_frame
                     .as_ref()
                     .and_then(|frame| frame.lambda_bases.get(ordinal).copied())
@@ -6399,7 +6388,7 @@ impl<'a> Emitter<'a> {
                     scratch.set_stack(arity as u16);
                     let mut lam_locals_declared: Vec<(u16, u16, String, String)> = Vec::new();
                     let mut lambda_slot = lambda_slot_base;
-                    let mut param_slots: Vec<(u16, Ty)> = cap_slots.clone();
+                    let mut param_slots: Vec<(u16, Ty)> = cap_bindings.slots.clone();
                     param_slots.extend(std::iter::repeat_n((0u16, Ty::Error), arity));
                     for j in (0..arity).rev() {
                         // A value class the implementation takes boxed, the inline body takes unboxed.
@@ -6456,8 +6445,12 @@ impl<'a> Emitter<'a> {
                             ),
                         }
                     }
-                    let body_ret =
-                        self.emit_fn_body_inline(inline_body, &param_slots, &mut scratch);
+                    let body_ret = self.emit_fn_body_inline_with_aliases(
+                        inline_body,
+                        &param_slots,
+                        cap_bindings.aliases.clone(),
+                        &mut scratch,
+                    );
                     // The erased `invoke` result is `Object`. Coerce from the BODY's value type, not
                     // the contextual lambda declaration return: a block accepted as `() -> Any?` can
                     // still produce a primitive `Boolean`/`Int` here.

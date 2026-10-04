@@ -6,6 +6,7 @@ use crate::ir::{IrExpr, IrFile};
 use crate::jvm::classfile::CodeBuilder;
 use crate::types::Ty;
 
+use super::inline_lambda_aliases::InlineLambdaAlias;
 use super::local_variable_representation::slot_type;
 use super::Emitter;
 
@@ -48,7 +49,20 @@ impl Emitter<'_> {
         param_slots: &[(u16, Ty)],
         code: &mut CodeBuilder,
     ) -> Ty {
-        self.in_inline_body_scope(inline_body, param_slots, |emitter| {
+        self.emit_fn_body_inline_with_aliases(inline_body, param_slots, HashMap::new(), code)
+    }
+
+    /// [`Self::emit_fn_body_inline`] for a body some of whose captures are literal lambdas it
+    /// only invokes: `aliases` maps each such capture to the literal, whose body each invocation
+    /// places in turn. An aliased capture has no slot.
+    pub(super) fn emit_fn_body_inline_with_aliases(
+        &mut self,
+        inline_body: u32,
+        param_slots: &[(u16, Ty)],
+        aliases: HashMap<u32, InlineLambdaAlias>,
+        code: &mut CodeBuilder,
+    ) -> Ty {
+        self.in_inline_body_scope(inline_body, param_slots, aliases, |emitter| {
             let result = emitter.value_ty(inline_body);
             emitter.emit_value(inline_body, code);
             result
@@ -62,7 +76,7 @@ impl Emitter<'_> {
         inline_body: u32,
         param_slots: &[(u16, Ty)],
     ) -> Ty {
-        self.in_inline_body_scope(inline_body, param_slots, |emitter| {
+        self.in_inline_body_scope(inline_body, param_slots, HashMap::new(), |emitter| {
             emitter.value_ty(inline_body)
         })
     }
@@ -71,6 +85,7 @@ impl Emitter<'_> {
         &mut self,
         inline_body: u32,
         param_slots: &[(u16, Ty)],
+        aliases: HashMap<u32, InlineLambdaAlias>,
         within: impl FnOnce(&mut Self) -> R,
     ) -> R {
         let saved_slots = std::mem::take(&mut self.slots);
@@ -82,9 +97,13 @@ impl Emitter<'_> {
             collect_body_var_types(self.ir, std::iter::once(inline_body)),
         );
         for (index, &(slot, ty)) in param_slots.iter().enumerate() {
-            self.slots.insert(index as u32, (slot, ty));
+            if !aliases.contains_key(&(index as u32)) {
+                self.slots.insert(index as u32, (slot, ty));
+            }
         }
+        let saved_aliases = std::mem::replace(&mut self.inline_lambda_aliases, aliases);
         let result = within(self);
+        self.inline_lambda_aliases = saved_aliases;
         self.constructor_initializer_class = saved_initializer_class;
         self.slots = saved_slots;
         self.var_types = saved_var_types;

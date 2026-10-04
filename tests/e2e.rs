@@ -1039,6 +1039,8 @@ mod inline_end_branch_e2e;
 mod inline_lambda_as_value_e2e;
 #[path = "inline_lambda_caller_loop_jump_e2e.rs"]
 mod inline_lambda_caller_loop_jump_e2e;
+#[path = "inline_lambda_captured_literal_e2e.rs"]
+mod inline_lambda_captured_literal_e2e;
 #[path = "inline_lambda_companion_initializer_e2e.rs"]
 mod inline_lambda_companion_initializer_e2e;
 #[path = "inline_lambda_expansion_e2e.rs"]
