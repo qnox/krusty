@@ -13,7 +13,6 @@ coroutines/tailCallOptimizations/crossinline.kt
 extensionFunctions/kt475.kt
 functions/functionNtoString.kt
 functions/functionNtoStringGeneric.kt
-inference/capturedSelfInsideIntersection.kt
 inference/overrideDefaultProperty.kt
 inference/overrideGenericDefaultMethod.kt
 inference/pcla/pclaRootIsTrySyntheticCallWithDelegate.kt

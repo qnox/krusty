@@ -1581,43 +1581,60 @@ enum class Choice {
     let mut diagnostics = DiagSink::new();
     let file = crate::frontend::parse_source_with_detected_features(source_text, &mut diagnostics);
     assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
-    let mut ids = DeclarationIds::default();
-    let mut names = LookupNames::default();
-    let stubs = extract_file_stubs(&file, SourceFileId::from_raw(0), &mut ids, &mut names);
-    let entry = stubs
+    let sources = [SourceInput::kotlin(source_text).with_file_stem("Choice")];
+    let headers = inventory_parsed_source_headers(&sources, std::slice::from_ref(&file));
+    let entry = headers
+        .stubs
         .iter()
         .find(|stub| {
             stub.kind == DeclarationKind::EnumEntry
-                && stub.lookup_name.and_then(|name| names.get(name)) == Some("ONE")
+                && stub
+                    .lookup_name
+                    .and_then(|name| headers.lookup_names.get(name))
+                    == Some("ONE")
         })
         .expect("enum entry stub");
-    let inner = stubs
+    let inner = headers
+        .stubs
         .iter()
         .find(|stub| {
             stub.kind == DeclarationKind::Classifier
-                && stub
-                    .lookup_name
-                    .and_then(|name| names.get(name))
-                    .and_then(|name| name.rsplit('.').next())
-                    == Some("Inner")
+                && headers
+                    .declarations
+                    .anchor(stub.id)
+                    .is_some_and(|anchor| anchor.owner == Some(entry.id))
         })
         .unwrap_or_else(|| {
             panic!(
                 "hoisted inner classifier stub: {:?}",
-                stubs
+                headers
+                    .stubs
                     .iter()
                     .map(|stub| (
                         stub.kind,
-                        stub.lookup_name.and_then(|name| names.get(name)),
-                        ids.anchor(stub.id),
+                        stub.lookup_name
+                            .and_then(|name| headers.lookup_names.get(name)),
+                        headers.declarations.anchor(stub.id),
                     ))
                     .collect::<Vec<_>>()
             )
         });
     assert_eq!(
-        ids.anchor(inner.id).and_then(|anchor| anchor.owner),
+        headers
+            .declarations
+            .anchor(inner.id)
+            .and_then(|anchor| anchor.owner),
         Some(entry.id)
     );
+    let HeaderDeclarationKind::Classifier { source_name, .. } = headers
+        .syntax
+        .declaration(inner.id)
+        .expect("hoisted classifier header")
+        .kind
+    else {
+        panic!("inner declaration must retain a classifier header")
+    };
+    assert_eq!(headers.lookup_names.get(source_name), Some("Inner"));
 }
 
 #[test]

@@ -26,8 +26,11 @@ fn erased_classifier(ty: Ty) -> Option<TypeName> {
     Some(super::jvm_class_map::to_jvm_type_name(classifier))
 }
 
-fn reified_parameters(parameters: &[IrTypeParameter]) -> HashMap<String, ReifiedParameter> {
-    let erasures = super::generic_erasure::parameter_erasures(parameters);
+fn reified_parameters(
+    parameters: &[IrTypeParameter],
+    enclosing: &[IrTypeParameter],
+) -> HashMap<String, ReifiedParameter> {
+    let erasures = super::generic_erasure::parameter_erasures_with(parameters, enclosing);
     parameters
         .iter()
         .filter(|parameter| parameter.reified)
@@ -156,9 +159,15 @@ pub(super) fn splice_arguments(
 }
 
 fn collect_reified_parameters(ir: &IrFile) -> HashMap<String, ReifiedParameter> {
+    let signatures = ir
+        .signatures
+        .iter()
+        .map(|(&function, signature)| (function, signature.type_params.clone()))
+        .collect::<Vec<_>>();
     let mut parameters = HashMap::new();
-    for signature in ir.signatures.values() {
-        for (identity, parameter) in reified_parameters(&signature.type_params) {
+    for (function, type_params) in signatures {
+        let enclosing = super::generic_erasure::bound_type_parameters(ir, function);
+        for (identity, parameter) in reified_parameters(&type_params, &enclosing) {
             if let Some(previous) = parameters.insert(identity, parameter.clone()) {
                 assert_eq!(
                     previous, parameter,

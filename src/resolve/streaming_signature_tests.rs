@@ -5511,7 +5511,9 @@ fn nested_generic_member_signature_uses_its_published_type_parameter_identity() 
         import kotlin.reflect.KClass
 
         interface GraphQlTester {
-            interface Entity<D, S : Entity<D, S>>
+            interface Entity<D, S : Entity<D, S>> {
+                fun <T : S> isEqualTo(expected: Any?): T
+            }
             interface Path {
                 fun <E : Any> entity(entityType: KClass<E>): Entity<E, *>
             }
@@ -5543,6 +5545,52 @@ fn nested_generic_member_signature_uses_its_published_type_parameter_identity() 
         .expect("nested generic member signature must finalize in Pass 1")
         .module
         .index();
+    let entity_classifier = (0..index.declaration_count())
+        .map(|raw| crate::fir::DeclarationId::from_raw(raw as u32))
+        .find(|declaration| {
+            index.classifier_header(*declaration).is_some_and(|header| {
+                header.classifier == crate::types::type_name("GraphQlTester$Entity")
+            })
+        })
+        .expect("stable GraphQlTester.Entity declaration");
+    let self_parameter = index
+        .type_parameter(entity_classifier, 1)
+        .expect("Entity must publish its S type parameter");
+    let self_header = index
+        .type_parameter_header(self_parameter)
+        .expect("S must retain its semantic bounds");
+    assert_eq!(self_header.bounds.len(), 1);
+    assert_eq!(
+        self_header.bounds[0].ty.get().obj_internal(),
+        index
+            .classifier_header(entity_classifier)
+            .map(|header| header.classifier),
+        "the recursive classifier bound must retain Entity's exact identity"
+    );
+    let self_semantic = index
+        .type_parameter_semantic_name(self_parameter)
+        .expect("S must retain its semantic identity");
+    let is_equal_to = (0..index.declaration_count())
+        .map(|raw| crate::fir::DeclarationId::from_raw(raw as u32))
+        .find(|declaration| {
+            index.declaration_name(*declaration) == Some("isEqualTo")
+                && index
+                    .declaration_header(*declaration)
+                    .is_some_and(|header| header.owner == Some(entity_classifier))
+        })
+        .expect("Entity.isEqualTo must retain its stable declaration");
+    let method_parameter = index
+        .type_parameter(is_equal_to, 0)
+        .expect("isEqualTo must publish T");
+    let method_header = index
+        .type_parameter_header(method_parameter)
+        .expect("T must retain its semantic bound");
+    assert_eq!(method_header.bounds.len(), 1);
+    assert_eq!(
+        method_header.bounds[0].ty.get().ty_param_name(),
+        Some(self_semantic),
+        "the method bound must name Entity.S by its exact semantic identity"
+    );
     let entity = (0..index.declaration_count())
         .map(|raw| crate::fir::DeclarationId::from_raw(raw as u32))
         .find(|declaration| {

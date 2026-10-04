@@ -5371,9 +5371,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   forwarder's target uses. The JVM bridge pass erases what the edge says and never reopens the
   dependency provider. Taking the physical descriptor instead would be too early: a semantic
   value-class parameter (`Continuation.resumeWith(Result<T>)`) is erased by the value-class pass
-  later, and a bridge made from its descriptor would duplicate the method. Tests:
+  later, and a bridge made from its descriptor would duplicate the method.   Tests:
   `tests/superclass_bridge_e2e.rs`, `tests/suspend_class_implements_interface_e2e.rs`,
   `src/fir/index_tests.rs::a_dependency_override_edge_carries_the_declarations_own_signature`.
+- **A method type parameter erases through a classifier type parameter's primary bound.**
+  `fun <T : S> isEqualTo(expected: Any?): T` on `Entity<D, S : Entity<D, S>>` has JVM descriptor
+  `(Ljava/lang/Object;)LEntity;`. The streamed classifier header resolves its self F-bound to the
+  classifier's stable identity, and common IR carries that exact declaration into the backend. The
+  call site and declaration therefore erase `T` through the same `S` fact, including when `S` is
+  declared on an enclosing classifier (an inner class sees its outer class's parameters, and a
+  method parameter shadows one with the same identity). An override that tightens `T` publishes
+  that descriptor as a bridge beside its specialized method. A chain declared on the method itself
+  (`<T : S, S : Mark>`) erases through the same rule. A cycle has no class bound and erases to
+  `Any`. Tests: `tests/type_parameter_bound_erasure_e2e.rs`. Box:
+  `inference/capturedSelfInsideIntersection.kt`.
 - **A bridge names its parameters after the declaration it overrides.** kotlinc's `BridgeLowering`
   copies the bridge's value parameters from the overridden function, so the bridge's
   `LocalVariableTable` carries the overridden declaration's names, not the override's:
