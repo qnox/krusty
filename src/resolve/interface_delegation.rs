@@ -99,15 +99,19 @@ fn hierarchy_names(source: &dyn SymbolSource, root: Ty) -> Option<Vec<String>> {
     Some(names)
 }
 
-fn interface_owners(source: &dyn SymbolSource, root: Ty) -> Option<HashSet<TypeName>> {
-    let mut owners = HashSet::new();
+fn interface_hierarchy(source: &dyn SymbolSource, root: Ty) -> Option<Vec<Ty>> {
+    let mut interfaces = Vec::new();
     let mut queue = VecDeque::from([root]);
+    let mut seen = HashSet::new();
     while let Some(current) = queue.pop_front() {
         let owner = current.kotlin_class_internal()?;
-        if !owners.insert(owner) {
+        if !seen.insert(owner) {
             continue;
         }
-        source.classifier(owner)?;
+        let declaration = source.classifier(owner)?;
+        if declaration.is_interface() {
+            interfaces.push(current);
+        }
         queue.extend(
             crate::symbol_resolver::direct_supertypes(source, current)
                 .into_iter()
@@ -119,7 +123,14 @@ fn interface_owners(source: &dyn SymbolSource, root: Ty) -> Option<HashSet<TypeN
                 }),
         );
     }
-    Some(owners)
+    Some(interfaces)
+}
+
+fn interface_owners(source: &dyn SymbolSource, root: Ty) -> Option<HashSet<TypeName>> {
+    interface_hierarchy(source, root)?
+        .into_iter()
+        .map(|interface| interface.kotlin_class_internal())
+        .collect()
 }
 
 fn is_delegated_function(function: &FunctionInfo, interface_owners: &HashSet<TypeName>) -> bool {
@@ -805,28 +816,39 @@ fn delegation_members(
                 delegated_forwarder_parameter_identities(&primary.parameter_identities);
             let type_parameters = delegated_type_parameters(function.generic_sig.as_ref())?;
             let mut overridden = vec![primary];
-            for obligation in own_callables.functions().iter().filter(|obligation| {
-                obligation.visibility != crate::libraries::Visibility::Private
-                    && obligation.callable.owner_is_interface
-                    && function_slot(obligation) == slot
-                    && applied_function_result(source, index, own, obligation).is_some_and(
-                        |result| {
-                            crate::symbol_resolver::resolution_subtype(
-                                source,
-                                call.result.get(),
-                                result,
-                            )
-                        },
-                    )
-            }) {
-                let obligation = delegated_function_declaration(source, index, own, obligation)?;
-                if overridden
-                    .iter()
-                    .any(|known| known.target == obligation.target)
-                {
-                    continue;
+            // `members_in_hierarchy(own, name)` is an override view and deliberately coalesces
+            // identical slots. A generated forwarder still implements every exact interface
+            // declaration in that slot, so enumerate direct declarations from each applied
+            // interface occurrence and retain their stable identities independently.
+            for interface in interface_hierarchy(source, own)? {
+                let owner = interface.kotlin_class_internal()?;
+                let declarations =
+                    crate::symbol_resolver::members_in_hierarchy(source, interface, &name);
+                for obligation in declarations.functions().iter().filter(|obligation| {
+                    obligation.callable.owner == owner
+                        && obligation.receiver_rank == 0
+                        && obligation.visibility != crate::libraries::Visibility::Private
+                        && function_slot(obligation) == slot
+                        && applied_function_result(source, index, own, obligation).is_some_and(
+                            |result| {
+                                crate::symbol_resolver::resolution_subtype(
+                                    source,
+                                    call.result.get(),
+                                    result,
+                                )
+                            },
+                        )
+                }) {
+                    let obligation =
+                        delegated_function_declaration(source, index, own, obligation)?;
+                    if overridden
+                        .iter()
+                        .any(|known| known.target == obligation.target)
+                    {
+                        continue;
+                    }
+                    overridden.push(obligation);
                 }
-                overridden.push(obligation);
             }
             members.push(ResolvedDelegatedMember::Function(
                 ResolvedDelegatedFunction {

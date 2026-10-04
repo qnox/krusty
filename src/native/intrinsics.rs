@@ -105,12 +105,6 @@ fn classifier_matches(owner: TypeName, kotlin: &str) -> bool {
     jvm.iter().any(|candidate| owner.matches(candidate))
 }
 
-fn classifier_matches_any(owner: TypeName, kotlin: &[&str]) -> bool {
-    kotlin
-        .iter()
-        .any(|candidate| classifier_matches(owner, candidate))
-}
-
 /// Is this `kotlin.Any` — the root class, under either spelling the provider may hand over?
 ///
 /// The root declares no state and no constructor to run, so a `super()` reaching it is nothing to

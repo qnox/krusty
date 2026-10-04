@@ -1,11 +1,19 @@
 use crate::ir::IrExpr;
 use crate::types::Ty;
 
-use super::tests::lower_single_source;
+use super::tests::lower_single_source_with_platform;
 
 #[test]
 fn inline_default_catches_use_each_calls_reified_type() {
-    let ir = lower_single_source(
+    let platform: Box<dyn crate::libraries::SemanticPlatform> = Box::new(
+        crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(crate::toolchain::classpath_jars_for(
+                "// WITH_STDLIB",
+            )),
+        ))
+        .expect("JVM provider initialization"),
+    );
+    let ir = lower_single_source_with_platform(
         "open class ParentFailure : Throwable()\n\
          class ChildFailure : ParentFailure()\n\
          inline fun <reified E : Throwable> defaultCatch(\n\
@@ -19,6 +27,7 @@ fn inline_default_catches_use_each_calls_reified_type() {
          ): String = result\n\
          fun box(): String = defaultCatch<ParentFailure>() + defaultCatch<ChildFailure>()\n",
         "InlineDefaultCatch",
+        platform,
     );
 
     let default_catches = ir

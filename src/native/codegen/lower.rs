@@ -1762,26 +1762,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 producer,
                 completion,
             } => self.bottom_value(producer, completion.diverges_when_discarded()),
-            IrExpr::NotNullAssert { operand, .. } => {
-                // `x!!` yields `x` or fails. The check is the runtime's so the failure reads the
-                // same whatever produced the null, and so the generator emits no control flow for
-                // what is, on every path that matters, a value passing straight through.
-                let ty = self.type_of(operand);
-                let value = self.reference(operand)?;
-                if self.terminated {
-                    return Ok(None);
-                }
-                let checked = self
-                    .runtime_call("kt_not_null", &[any()], any(), &[value])?
-                    .expect("`kt_not_null` returns its argument");
-                // `x!!` on a nullable primitive is the unboxing Kotlin means by it.
-                match ty.map(|ty| ty.non_null()) {
-                    Some(ty) if carrier(ty) != Carrier::Ref => {
-                        self.convert(checked, Some(any()), ty)
-                    }
-                    _ => Ok(Some(checked)),
-                }
-            }
+            IrExpr::NotNullAssert { operand, .. } => self.not_null_assert(operand),
             IrExpr::New {
                 internal,
                 args,

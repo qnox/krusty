@@ -206,6 +206,38 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         Ok((!self.terminated).then_some(value))
     }
 
+    /// Realize `x!!`: evaluate the receiver once, reject `null`, and otherwise pass its value
+    /// through. A nullable primitive is unboxed after the check.
+    ///
+    /// An asserted nullable substitution of an erased generic number is one boundary, not a
+    /// stored wrapper followed by an assertion. It consumes the physical reference before the
+    /// declaration coercion can check it as that wrapper; after the null check Kotlin reads it
+    /// through `Number.toX`.
+    pub(super) fn not_null_assert(&mut self, operand: u32) -> Result<Option<Value>, Unsupported> {
+        let ty = self.type_of(operand);
+        let (value, primitive) = match self.asserted_declaration_number(operand) {
+            Some((produced, primitive)) => (self.reference(produced)?, Some(primitive)),
+            None => (self.reference(operand)?, None),
+        };
+        if self.terminated {
+            return Ok(None);
+        }
+        let checked = self
+            .runtime_call("kt_not_null", &[any()], any(), &[value])?
+            .expect("`kt_not_null` returns its argument");
+        if self.terminated {
+            return Ok(None);
+        }
+        if let Some(primitive) = primitive {
+            return self.number_result(checked, primitive);
+        }
+        // `x!!` on a nullable primitive is the unboxing Kotlin means by it.
+        match ty.map(Ty::non_null) {
+            Some(ty) if carrier(ty) != Carrier::Ref => self.convert(checked, Some(any()), ty),
+            _ => Ok(Some(checked)),
+        }
+    }
+
     /// The descriptor a CAST to `ty` must be checked against, or `None` when the cast is a
     /// representation change rather than a question about an object.
     ///
@@ -297,16 +329,30 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         declaration_result: bool,
     ) -> Result<Option<Value>, Unsupported> {
         // This exact coercion was placed between a call's declared result and the substitution
-        // selected at the call site. A bare type parameter physically returns a reference, and
-        // Kotlin checks that reference against the selected concrete result before adapting its
-        // representation. The common-IR marker is the authority: an ordinary implicit coercion is
-        // still only a representation change and must not acquire cast semantics here.
+        // selected at the call site. A bare type parameter physically returns a reference, but
+        // the operation that reads it depends on the selected result. Kotlin discards a `Unit`
+        // result, reads a non-null number through `Number.toX`, and checks every other concrete
+        // result against its own runtime type before adapting the representation. A nullable
+        // primitive remains in that last group: storing `f<T>()` into `Int?` checks the `Integer`
+        // wrapper rather than accepting an arbitrary `Number`.
+        //
+        // The common-IR marker is the authority: an ordinary implicit coercion is still only a
+        // representation change and must not acquire any of these declaration-boundary semantics.
         if declaration_result
             && op == IrTypeOp::ImplicitCoercion
             && self
                 .declared_call_result(arg)
                 .is_some_and(|declared| matches!(declared.non_null(), Ty::TyParam(..)))
         {
+            if type_operand == Ty::Unit {
+                return self.coerce(arg, type_operand);
+            }
+            if !type_operand.is_nullable() && type_operand.is_numeric() {
+                let Some(value) = self.receiver(arg)? else {
+                    return Ok(None);
+                };
+                return self.number_result(value, type_operand);
+            }
             return self.type_operation(IrTypeOp::Cast, arg, type_operand, false);
         }
         match op {
@@ -485,6 +531,74 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 _ => return None,
             }
         }
+    }
+
+    /// The erased call result beneath `f<T>()!!` when the selected nullable substitution is a
+    /// numeric primitive. The assertion consumes the call's reference directly: the intermediate
+    /// nullable wrapper was never a stored or explicitly cast value, so checking it as (for
+    /// example) `Integer` would reject the `Long` that Kotlin's following `Number.intValue`
+    /// accepts.
+    pub(super) fn asserted_declaration_number(&self, expression: u32) -> Option<(u32, Ty)> {
+        if !self
+            .file
+            .ir
+            .declaration_result_coercions
+            .contains(&expression)
+        {
+            return None;
+        }
+        let IrExpr::TypeOp {
+            op: IrTypeOp::ImplicitCoercion,
+            arg,
+            type_operand,
+        } = self.file.ir.expr(expression)
+        else {
+            return None;
+        };
+        let primitive = type_operand.nullable_primitive()?;
+        if !primitive.is_numeric()
+            || !self
+                .declared_call_result(*arg)
+                .is_some_and(|declared| matches!(declared.non_null(), Ty::TyParam(..)))
+        {
+            return None;
+        }
+        Some((*arg, primitive))
+    }
+
+    /// Read an erased reference as a non-null Kotlin number. The cast to `Number` is observable:
+    /// an unchecked generic result can hold a string, which must raise `ClassCastException`
+    /// rather than reaching the runtime conversion as an impossible descriptor.
+    pub(super) fn number_result(
+        &mut self,
+        value: Value,
+        target: Ty,
+    ) -> Result<Option<Value>, Unsupported> {
+        debug_assert!(target.is_numeric() && !target.is_nullable());
+        let descriptor = self
+            .file
+            .type_descriptor(Ty::obj("kotlin/Number"))?
+            .expect("the native runtime defines kotlin.Number");
+        let descriptor = self.data_address(descriptor);
+        let Some(number) = self.runtime_call(
+            "kt_cast_non_null",
+            &[any(), any()],
+            any(),
+            &[value, descriptor],
+        )?
+        else {
+            return Ok(None);
+        };
+        if self.terminated {
+            return Ok(None);
+        }
+        let suffix = scalar_suffix(target).expect("a numeric primitive has a scalar suffix");
+        self.runtime_call(
+            &format!("kt_number_to_{suffix}"),
+            &[any()],
+            target,
+            &[number],
+        )
     }
 
     /// `value as T` for an erased `T`: `null` raises the NullPointerException naming `T`, and
