@@ -8241,7 +8241,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`Spelled::annotations`) like an alias abbreviation. An application written WITH arguments
   (`@Bin(3) Item`) is left out until the metadata writer encodes annotation argument values, since
   a record without them would name a different annotation. `@NoInfer` is no longer special-cased:
-  it is one more recorded type-use annotation.
+  it is one more recorded type-use annotation. A `typealias` right-hand side is a declared
+  occurrence too: `typealias Marked = @Kept Item` records `@Kept` on the alias's `underlying_type`
+  and `expanded_type`, and `typealias Tagged = @Kept Cargo` records it on the alias reference, its
+  abbreviation, and the expansion alike. A USE of the alias inherits the right-hand side's
+  annotations on its expanded type, ahead of the use's own (`x: @Mark Marked` expands to
+  `@Kept @Mark Item`), while the use's abbreviation records only what the use wrote.
   Tests: `tests/type_use_annotation_metadata_e2e.rs`.
 
 - **A qualified `typealias` spelling denotes its TARGET, not the alias.** `app.Cargo` and `Cargo`

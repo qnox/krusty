@@ -87,3 +87,41 @@ fn a_supertype_annotation_is_recorded() {
     );
     assert_identical("DerivedUse", &src, "app/Derived");
 }
+
+/// A typealias's own right-hand side is a declared type occurrence: its annotations are recorded on
+/// both `TypeAlias.underlying_type` and `expanded_type`, at whatever depth they were written.
+#[test]
+fn a_typealias_right_hand_side_annotation_is_recorded() {
+    let src = format!(
+        "{PRELUDE}\n\
+         typealias Marked = @Kept Item\n\
+         typealias Nested = Holder<@Kept Item>\n"
+    );
+    assert_identical("AliasUse", &src, "app/AliasUseKt");
+}
+
+/// An annotated right-hand side that itself names another alias.
+#[test]
+fn a_typealias_right_hand_side_annotation_on_an_alias_reference_is_recorded() {
+    let src = format!(
+        "{PRELUDE}\n\
+         typealias Cargo = Item\n\
+         typealias Tagged = @Kept Cargo\n\
+         typealias Wrapped = Holder<@Mark Cargo>\n"
+    );
+    assert_identical("AliasChainUse", &src, "app/AliasChainUseKt");
+}
+
+/// A use of an alias inherits its right-hand side's annotations on the EXPANDED type, ahead of the
+/// use's own; the abbreviation records only what the use wrote.
+#[test]
+fn a_use_of_an_annotated_typealias_inherits_its_annotations() {
+    let src = format!(
+        "{PRELUDE}\n\
+         typealias Marked = @Kept Item\n\
+         typealias Nested = Holder<@Kept Item>\n\
+         typealias Tagged = @Mark Marked\n\
+         fun pass(marked: Marked, nested: Nested, tagged: Tagged): @Mark Marked = marked\n"
+    );
+    assert_identical("AliasPassUse", &src, "app/AliasPassUseKt");
+}

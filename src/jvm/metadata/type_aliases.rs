@@ -198,7 +198,7 @@ fn parse_type_alias_decoded(
             alias: None,
             alias_args: Vec::new(),
             args: parse_type_argument_spellings(type_body, records, d2),
-            annotations: Vec::new(),
+            ..crate::spelling::Spelled::default()
         })
         .unwrap_or_default();
     Some(MetaTypeAlias {
@@ -263,7 +263,7 @@ fn parse_argument_spelling(
                     alias: parse_type_alias_name(inner, records, d2),
                     alias_args: Vec::new(),
                     args: parse_type_argument_spellings(inner, records, d2),
-                    annotations: Vec::new(),
+                    ..crate::spelling::Spelled::default()
                 };
             }
             (_, wire) => {

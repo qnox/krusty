@@ -53,18 +53,27 @@ pub struct Spelled {
     /// left out until the metadata writer encodes annotation argument values: a record naming the
     /// class with its arguments dropped would describe a different annotation.
     pub annotations: Vec<TypeName>,
+    /// At a node that named an alias: the annotations the alias's own right-hand side recorded on
+    /// its root, which the EXPANDED type inherits ahead of this occurrence's own [`Self::annotations`]
+    /// (`typealias Marked = @Kept Item` makes every `Marked` occurrence an annotated `Item`). The
+    /// abbreviation names only what this occurrence wrote.
+    pub expansion_annotations: Vec<TypeName>,
 }
+
+/// The spelling of a node that names no alias and records no annotation.
+const EMPTY: Spelled = Spelled {
+    definitely_non_null: false,
+    alias: None,
+    alias_args: Vec::new(),
+    args: Vec::new(),
+    annotations: Vec::new(),
+    expansion_annotations: Vec::new(),
+};
 
 impl Spelled {
     /// The "nothing was spelled as an alias" spelling — usable as a `&'static` argument at the many
     /// encode sites whose types cannot carry an alias (synthesized members, builtin classifiers).
-    pub const NONE: &'static Spelled = &Spelled {
-        definitely_non_null: false,
-        alias: None,
-        alias_args: Vec::new(),
-        args: Vec::new(),
-        annotations: Vec::new(),
-    };
+    pub const NONE: &'static Spelled = &EMPTY;
 
     /// Whether this node and everything below it is free of alias spellings — the fast path that
     /// lets the encoder skip the parallel walk entirely.
@@ -72,6 +81,7 @@ impl Spelled {
         !self.definitely_non_null
             && self.alias.is_none()
             && self.annotations.is_empty()
+            && self.expansion_annotations.is_empty()
             && self.args.iter().all(Spelled::is_none)
     }
 
@@ -92,7 +102,7 @@ impl Spelled {
             alias: None,
             alias_args: Vec::new(),
             args: vec![self.clone()],
-            annotations: Vec::new(),
+            ..Spelled::default()
         }
     }
 
@@ -108,7 +118,8 @@ impl Spelled {
     pub(crate) fn storage_payload_bytes(&self) -> usize {
         self.alias_args.len() * std::mem::size_of::<(Ty, Spelled)>()
             + self.args.len() * std::mem::size_of::<Spelled>()
-            + self.annotations.len() * std::mem::size_of::<TypeName>()
+            + (self.annotations.len() + self.expansion_annotations.len())
+                * std::mem::size_of::<TypeName>()
             + self
                 .alias_args
                 .iter()
@@ -183,28 +194,10 @@ pub struct DeclaredSpellings {
 impl DeclaredSpellings {
     /// The empty record, for the many builder paths whose declaration spelled no alias.
     pub const NONE: &'static DeclaredSpellings = &DeclaredSpellings {
-        ret: Spelled {
-            definitely_non_null: false,
-            alias: None,
-            alias_args: Vec::new(),
-            args: Vec::new(),
-            annotations: Vec::new(),
-        },
+        ret: EMPTY,
         params: Vec::new(),
-        receiver: Spelled {
-            definitely_non_null: false,
-            alias: None,
-            alias_args: Vec::new(),
-            args: Vec::new(),
-            annotations: Vec::new(),
-        },
-        superclass: Spelled {
-            definitely_non_null: false,
-            alias: None,
-            alias_args: Vec::new(),
-            args: Vec::new(),
-            annotations: Vec::new(),
-        },
+        receiver: EMPTY,
+        superclass: EMPTY,
         type_param_bounds: Vec::new(),
         supertypes: Vec::new(),
     };

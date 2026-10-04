@@ -826,6 +826,11 @@ pub(crate) fn encode_alias_reference(
         message.field_varint(3, 1);
     }
     message.field_varint(12, alias_id as u64); // Type.type_alias_name = 12
+                                               // The reference records only what this occurrence wrote, never what the alias's own right-hand
+                                               // side applies to its expansion.
+    for &annotation in &spelled.annotations {
+        message.field_message(100, &encode_annotation(strings, annotation));
+    }
     Ok(Some(message))
 }
 
@@ -869,10 +874,12 @@ pub(crate) fn encode_annotation(strings: &mut StringTable<'_>, classifier: TypeN
     annotation
 }
 
-/// Append the source annotations `@Metadata` records on this type occurrence as `Type.annotation`
-/// (extension field 100), in source order. See [`Spelled::annotations`].
+/// Append the source annotations `@Metadata` records on this (expanded) type occurrence as
+/// `Type.annotation` (extension field 100): those an alias named here applies to its expansion,
+/// then the occurrence's own, each in source order. See [`Spelled::expansion_annotations`].
 fn add_type_annotations(message: &mut Pb, strings: &mut StringTable<'_>, spelled: &Spelled) {
-    for &annotation in &spelled.annotations {
+    let inherited = spelled.expansion_annotations.iter();
+    for &annotation in inherited.chain(&spelled.annotations) {
         message.field_message(100, &encode_annotation(strings, annotation));
     }
 }

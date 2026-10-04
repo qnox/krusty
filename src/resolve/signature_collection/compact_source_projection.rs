@@ -153,38 +153,6 @@ pub(in crate::resolve) fn projected_enclosing_classifier_identity(
     }
 }
 
-pub(in crate::resolve) fn resolve_source_alias_expansion(
-    target: &TypeRef,
-    formals: &[String],
-    visible_aliases: &[(String, Vec<String>, TypeRef)],
-    names: &ClassNames,
-    known_spellings: &HashMap<TypeName, (crate::spelling::Spelled, Vec<String>, Ty)>,
-    diags: &mut DiagSink,
-) -> Option<(Ty, crate::spelling::Spelled)> {
-    let symbolic =
-        TParams::symbolic_from_decl_with(formals, &[], &|candidate| names.get_class(candidate));
-    let mut target_spellings = HashMap::new();
-    let expanded_target =
-        crate::parser::expanded_type_alias_target(visible_aliases, target, &mut target_spellings);
-    let expansion = ty_of_ref(&expanded_target, names, &symbolic, diags);
-    if expansion == Ty::Error {
-        return None;
-    }
-    // Annotations written inside an alias's right-hand side are not carried into its expansion.
-    let spellings = crate::spelling::SourceSpellings {
-        aliases: &target_spellings,
-        annotations: &crate::spelling::RecordedTypeAnnotations::default(),
-    };
-    let spelling = spelling_of_ref(
-        &expanded_target,
-        names,
-        &symbolic,
-        known_spellings,
-        spellings,
-    );
-    Some((expansion, spelling))
-}
-
 pub(in crate::resolve) fn compact_classifier_identity(
     headers: &crate::fir::StreamedHeaderModule,
     stub: &crate::fir::DeclarationStub,
