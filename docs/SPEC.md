@@ -13043,9 +13043,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   interface, rebuilds `KClass` with `Reflection.getOrCreateKotlinClass`, and compares those:
   `Int::class` and `Integer::class` are equal. `hashCode` hashes the stored `Class` through
   `Object.hashCode`, so those two instances hash differently. A Kotlin read of the member
-  invokes the `Class`-returning method and rebuilds the `KClass`. Metadata records the Kotlin
-  type `kotlin.reflect.KClass` and the JVM getter descriptor `()Ljava/lang/Class;`. Tests:
-  `tests/annotation_kclass_member_e2e.rs`,
+  invokes the `Class`-returning method and rebuilds the `KClass`, including a read from another
+  source file of the same module, where the declaring class is not in the file being emitted.
+  Metadata records the Kotlin type `kotlin.reflect.KClass` and the JVM getter descriptor
+  `()Ljava/lang/Class;`. Tests: `tests/annotation_kclass_member_e2e.rs`,
+  `tests/annotation_cross_file_defaults_e2e.rs`,
   `tests/annotation_emission_e2e.rs::an_instantiated_kclass_annotation_reads_its_member`.
 
 - **A missing context argument names its parameter, and a loop's `hasNext` belongs to its iterator.**

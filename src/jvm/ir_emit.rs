@@ -7743,10 +7743,14 @@ impl<'a> Emitter<'a> {
             // expression. Its call boundary instead uses the most specific declaration fact: a JVM
             // value-class realization when present, otherwise the semantic declaration type. Without
             // that split a generic `getA(): Object` can be called as `getA(): A`, or a mangled
-            // `getId-…(): String` as `getId-…(): Id`; both are invalid descriptors.
+            // `getId-…(): String` as `getId-…(): Id`; both are invalid descriptors. An annotation
+            // member declared `KClass` is the exception that returns `java.lang.Class`.
             descriptor: method_descriptor(
                 &[],
-                ir_ty_to_jvm(&stored_value_ty(*physical.unwrap_or(operation.ty))),
+                ir_ty_to_jvm(&self.annotation_member_read_ty(
+                    operation.owner,
+                    stored_value_ty(*physical.unwrap_or(operation.ty)),
+                )),
             ),
             is_static: false,
             // Resolution carries source-module shape because a sibling class is not in `bodies`.
@@ -7756,6 +7760,20 @@ impl<'a> Emitter<'a> {
             static_receiver: None,
         };
         self.emit_realized_property_read(&operation, access, code)
+    }
+
+    /// JVM result of a property read planned without the declaring class file. Annotation members
+    /// declared `KClass` return `java.lang.Class`; every other property keeps its semantic type.
+    fn annotation_member_read_ty(&self, owner: TypeName, ty: Ty) -> Ty {
+        if self
+            .classifiers
+            .classifier(owner)
+            .is_some_and(|classifier| classifier.is_annotation())
+        {
+            crate::jvm::annotation_kclass::annotation_member_jvm_type(ty)
+        } else {
+            ty
+        }
     }
 
     /// Realize `IrExpr::PropertyWrite` — the write analogue of [`Self::emit_property_read`], and the same
