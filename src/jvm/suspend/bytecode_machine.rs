@@ -19,7 +19,7 @@
 use std::collections::HashSet;
 
 use super::cps::{
-    calls_an_inline_function, spliced_inline_suspensions, TransformedMachine, TransformedSuspension,
+    spliced_inline_suspensions, TransformedMachine, TransformedSuspension,
 };
 use super::emission_facts::{ContinuationMetadata, MachineOutputs};
 use super::spill_layout::{suspension_points_in_order, SpillLayout};
@@ -260,7 +260,7 @@ pub(super) fn eligible_points(
     // `@DebugMetadata`. A named function with no suspension point has none of them, as kotlinc's
     // transformer returns before building them; a suspend lambda's `invokeSuspend` always has its
     // machine.
-    let machine_declines: [(&dyn Fn() -> bool, &str); 6] = [
+    let machine_declines: [(&dyn Fn() -> bool, &str); 5] = [
         (
             &|| !route.context.null_out_dead_spills,
             "no spill clean-up in the runtime",
@@ -281,9 +281,6 @@ pub(super) fn eligible_points(
             &|| ir.jvm_suspend_impl_bodies.contains_key(&fid),
             "an interface body",
         ),
-        // Spliced inline bodies are a later step: the splice does not mark the call's own line
-        // yet, which the transformer's `@DebugMetadata` reads off the body.
-        (&|| splices_inline_code(ir, body), "splices an inline body"),
     ];
     let machine_declines: &[(&dyn Fn() -> bool, &str)] =
         if points.is_empty() && subject == Subject::NamedFunction {
@@ -331,23 +328,6 @@ pub(super) fn eligible_points(
         return None;
     }
     Some(points)
-}
-
-/// Whether the body calls an inline function, whose body the emitter splices into this one,
-/// outside a `suspendCoroutineUninterceptedOrReturn` block: the block is one suspension point at
-/// its own line, whatever it splices.
-fn splices_inline_code(ir: &IrFile, expression: ExprId) -> bool {
-    if ir.is_unintercepted_suspension(expression) {
-        return false;
-    }
-    if calls_an_inline_function(ir, expression) {
-        return true;
-    }
-    let mut found = false;
-    for_each_child(&ir.exprs, expression, &mut |child| {
-        found = found || splices_inline_code(ir, child);
-    });
-    found
 }
 
 /// Whether the body reads its own continuation outside a `suspendCoroutineUninterceptedOrReturn`

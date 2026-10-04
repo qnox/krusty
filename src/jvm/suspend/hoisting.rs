@@ -1614,7 +1614,7 @@ fn hoisted_value_ty(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{IrIntrinsicSuspensionKind, IrIntrinsicSuspensionPoint};
+    use crate::ir::IrIntrinsicSuspensionPoint;
 
     #[test]
     fn a_shared_operand_is_hoisted_independently_at_each_use() {
@@ -1624,7 +1624,6 @@ mod tests {
             suspension,
             IrIntrinsicSuspensionPoint {
                 result: Ty::String,
-                kind: IrIntrinsicSuspensionKind::Safe,
             },
         );
         let shared = ir.add_expr(IrExpr::EnumValueOf {
@@ -1688,7 +1687,6 @@ mod tests {
                 suspension,
                 IrIntrinsicSuspensionPoint {
                     result: Ty::String,
-                    kind: IrIntrinsicSuspensionKind::Safe,
                 },
             );
             let expression = match shape {

@@ -48,7 +48,7 @@ mod function_scope;
 mod inline_copies;
 mod suspension_points;
 pub use suspension_points::{
-    IrIntrinsicSuspensionKind, IrIntrinsicSuspensionPoint, IrValueClassSuspendResult,
+    IrIntrinsicSuspensionPoint, IrValueClassSuspendResult,
 };
 mod intrinsic;
 mod jvm_static_realization;

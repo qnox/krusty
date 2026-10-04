@@ -30,6 +30,38 @@ pub(super) struct GeneratedLineMarks {
 }
 
 impl IrFile {
+    /// The call a lowered `{ val t = operand…; call(t…) }` evaluates once its stored operands are
+    /// bound, through the coercion of its result, when every statement binds an operand of it.
+    pub(crate) fn call_after_operand_bindings(&self, lowered: ExprId) -> Option<ExprId> {
+        let super::IrExpr::Block {
+            stmts,
+            value: Some(mut value),
+        } = self.expr(lowered)
+        else {
+            return None;
+        };
+        if stmts.is_empty()
+            || !stmts
+                .iter()
+                .all(|statement| self.call_operand_bindings.contains(statement))
+        {
+            return None;
+        }
+        while let super::IrExpr::TypeOp {
+            op: super::IrTypeOp::ImplicitCoercion,
+            arg,
+            ..
+        } = self.expr(value)
+        {
+            value = *arg;
+        }
+        matches!(
+            self.expr(value),
+            super::IrExpr::Call { .. } | super::IrExpr::MethodCall { .. }
+        )
+        .then_some(value)
+    }
+
     pub(crate) fn mark_implicit_return_end_line(&mut self, returned: ExprId, line: u32) {
         self.generated_lines
             .implicit_return_ends

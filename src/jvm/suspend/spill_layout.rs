@@ -185,7 +185,7 @@ impl SpillLayout {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{IrIntrinsicSuspensionKind, IrIntrinsicSuspensionPoint};
+    use crate::ir::IrIntrinsicSuspensionPoint;
 
     #[test]
     fn suspension_points_follow_the_final_body_order() {
@@ -197,7 +197,6 @@ mod tests {
                 point,
                 IrIntrinsicSuspensionPoint {
                     result: Ty::Unit,
-                    kind: IrIntrinsicSuspensionKind::Safe,
                 },
             );
         }
