@@ -767,6 +767,37 @@ pub(super) fn realize(
                         interface: owner_is_jvm_interface(&property),
                         operation: Some(raw as ExprId),
                     })
+                } else if property.owner_kind == Some(IrClassifierKind::Annotation) {
+                    if extension_receiver.is_some() || !context_arguments.is_empty() {
+                        return Err(ModuleRealizationTarget::Property(target));
+                    }
+                    let owner = property
+                        .owner
+                        .ok_or(ModuleRealizationTarget::Property(target))?;
+                    let receiver =
+                        dispatch_receiver.ok_or(ModuleRealizationTarget::Property(target))?;
+                    let stored = crate::jvm::annotation_kclass::annotation_member_jvm_type(
+                        crate::jvm::method_descriptors::jvm_declared_ty(&property.ty),
+                    );
+                    property_realizations.record_physical(
+                        raw as ExprId,
+                        PropertyAccess::Accessor {
+                            owner,
+                            name: property.name.clone(),
+                            descriptor: crate::jvm::names::method_descriptor(&[], stored),
+                            is_static: false,
+                            is_interface: true,
+                            static_receiver: None,
+                        },
+                    );
+                    Some(IrExpr::PropertyRead {
+                        receiver: Some(receiver),
+                        owner,
+                        name: property.name.clone(),
+                        ty: property.ty,
+                        interface: true,
+                        operation: Some(raw as ExprId),
+                    })
                 } else {
                     let (call, parameters) = realize_property(
                         &property,

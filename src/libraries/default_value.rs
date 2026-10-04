@@ -21,8 +21,11 @@ pub enum DefaultValue {
         classifier: TypeName,
         name: String,
     },
-    /// An unbound class literal (`B::class`).
-    KClass(TypeName),
+    /// An unbound class literal (`B::class`, `Int::class`, or `Array<String>::class`).
+    ///
+    /// The full semantic type is the literal's identity. Restricting this to an object classifier
+    /// loses primitive and array literals before a backend can choose their representation.
+    KClass(Ty),
     /// A closed array: `arrayOf`, a primitive array factory, or a collection literal.
     Array {
         array_type: Ty,

@@ -250,10 +250,7 @@ fn parameter_slot(
 }
 
 fn class_literal(classifier: ResolvedTy) -> Option<DefaultValue> {
-    let Ty::Obj(name, _) = classifier.get() else {
-        return None;
-    };
-    Some(DefaultValue::KClass(name))
+    Some(DefaultValue::KClass(classifier.get()))
 }
 
 fn constant_value(constant: FirConstant) -> DefaultValue {

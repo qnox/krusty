@@ -515,7 +515,7 @@ pub enum FirAnnotationDefaultValue {
         classifier: TypeName,
         name: Box<str>,
     },
-    KClass(TypeName),
+    KClass(Ty),
     Array {
         array_type: Ty,
         elements: Vec<Self>,

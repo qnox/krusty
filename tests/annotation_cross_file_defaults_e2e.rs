@@ -21,6 +21,8 @@ annotation class C(
     val i: Int = 42,
     val b: B = B(),
     val kClass: KClass<*> = B::class,
+    val primitiveClass: KClass<*> = Int::class,
+    val arrayClass: KClass<*> = Array<String>::class,
     val kClassArray: Array<KClass<*>> = [E::class, A::class],
     val e: E = E.B,
     val aS: Array<String> = arrayOf("a", "b"),
@@ -42,6 +44,8 @@ fun box(): String {
     if (c.i != 42) return "i"
     if (c.b.a != A()) return "nested"
     if (c.kClass != B::class) return "kclass"
+    if (c.primitiveClass != Int::class) return "primitive-kclass"
+    if (c.arrayClass != Array<String>::class) return "array-kclass"
     if (c.kClassArray.size != 2) return "kclass-size"
     if (c.kClassArray[0] != E::class || c.kClassArray[1] != A::class) return "kclass-array"
     if (c.e != E.B) return "enum"

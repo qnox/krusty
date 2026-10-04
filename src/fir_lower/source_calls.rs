@@ -1294,9 +1294,9 @@ impl BodyLowering<'_> {
             }
             FirAnnotationDefaultValue::KClass(classifier) => {
                 Some(self.ir.add_expr(IrExpr::KClassLiteral {
-                    classifier: Some(Ty::obj_name(*classifier)),
+                    classifier: Some(*classifier),
                     value: None,
-                    type_argument: false,
+                    type_argument: classifier.ty_param_name().is_some(),
                 }))
             }
             FirAnnotationDefaultValue::Array {
