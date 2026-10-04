@@ -5288,9 +5288,18 @@ pub(crate) fn finalized_streamed_signature_index(
         .then(|| stable_function(table, headers, &classifier_types, stub.id))
         .flatten()
         .and_then(|(signature, _)| signature.generic_sig.as_ref());
+        let declaration_spelling = match declaration.kind {
+            crate::fir::HeaderDeclarationKind::Classifier { source_name, .. } => {
+                headers.lookup_names.get(source_name)
+            }
+            _ => stub
+                .lookup_name
+                .and_then(|name| headers.lookup_names.get(name)),
+        };
         let symbolic = type_parameter_publication::symbolic(
             &index,
             stub.id,
+            declaration_spelling,
             &declared_names,
             &declared_bounds,
             table,

@@ -649,14 +649,22 @@ fn property_implementation(
 /// Bridge-signature erasure: a type parameter becomes its bound's storage type, a nullable keeps its
 /// wrapper. This is the shape a descriptor is written from, so it defines when two signatures COLLIDE.
 pub(super) fn bridge_erasure(ty: Ty) -> Ty {
+    bridge_erasure_visiting(ty, &mut std::collections::HashSet::new())
+}
+
+fn bridge_erasure_visiting(ty: Ty, visiting: &mut std::collections::HashSet<&'static str>) -> Ty {
     match ty {
-        // JVM method descriptors erase a type parameter whose first bound is another type
-        // parameter to Object. The generic Signature still records `T : S`; recursively erasing
-        // through `S` here would invent `Entity` for `<T : S, S : Entity<...>>`, disagreeing with
-        // the descriptor the emitter (and kotlinc) actually publishes.
-        Ty::TyParam(_, bound) if matches!(*bound, Ty::TyParam(..)) => Ty::obj("kotlin/Any"),
-        Ty::TyParam(_, bound) => stored_value_ty(bridge_erasure(*bound)),
-        Ty::Nullable(inner) => Ty::nullable(bridge_erasure(*inner)),
+        // `<T : S>` where `S : Entity` erases to `Entity`, whether `S` is declared on the method
+        // or on the enclosing classifier. A cycle (`T : S`, `S : T`) has no class bound.
+        Ty::TyParam(name, bound) => {
+            if !visiting.insert(name) {
+                return Ty::obj("kotlin/Any");
+            }
+            let erased = stored_value_ty(bridge_erasure_visiting(*bound, visiting));
+            visiting.remove(name);
+            erased
+        }
+        Ty::Nullable(inner) => Ty::nullable(bridge_erasure_visiting(*inner, visiting)),
         Ty::Obj(internal, _) if internal == crate::types::TypeName::ROOT => Ty::obj("kotlin/Any"),
         other => other,
     }
@@ -668,12 +676,20 @@ mod tests {
     use crate::types::Ty;
 
     #[test]
-    fn dependent_type_parameter_erases_to_object_for_bridge_descriptors() {
+    fn dependent_type_parameter_erases_to_its_class_bound_for_bridge_descriptors() {
         let owner = Ty::ty_param("S", Ty::obj("sample/Entity"));
         let method = Ty::ty_param("T", owner);
 
-        assert_eq!(bridge_erasure(method), Ty::obj("kotlin/Any"));
+        assert_eq!(bridge_erasure(method), Ty::obj("sample/Entity"));
         assert_eq!(bridge_erasure(owner), Ty::obj("sample/Entity"));
+    }
+
+    #[test]
+    fn a_repeated_type_parameter_name_stops_before_the_carried_class_bound() {
+        let parameter = Ty::ty_param("T", Ty::obj("sample/Entity"));
+        let repeated = Ty::ty_param("T", parameter);
+
+        assert_eq!(bridge_erasure(repeated), Ty::obj("kotlin/Any"));
     }
 
     #[test]

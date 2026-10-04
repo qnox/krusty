@@ -565,6 +565,14 @@ fn copy_function_implementation_facts(
             }
         }
     }
+    copy_map!(callable_bound_type_parameters);
+    if let Some(parameters) = ir.callable_bound_type_parameters.get_mut(&target) {
+        for parameter in parameters {
+            for (bound, _) in &mut parameter.bounds {
+                *bound = ty_subst_keep_unbound(*bound, bindings);
+            }
+        }
+    }
     copy_map!(suspend_declared_sigs);
     if let Some((parameters, result)) = ir.suspend_declared_sigs.get_mut(&target) {
         for parameter in parameters.iter_mut() {
@@ -683,6 +691,16 @@ mod tests {
         ir.fn_decl_lines.insert(source, 4);
         ir.inline_fns.insert(source);
         ir.signatures.insert(source, signature(parameter));
+        ir.callable_bound_type_parameters.insert(
+            source,
+            vec![IrTypeParameter {
+                name: "C".to_string(),
+                semantic_name: "C".to_string(),
+                bounds: vec![(parameter, false)],
+                variance: Default::default(),
+                reified: false,
+            }],
+        );
         ir.record_lambda_type_parameters(source, vec![signature(parameter).type_params[0].clone()]);
         let class = ir.add_class(blank_class("Holder"));
         ir.classes[class as usize].methods.push(source);
@@ -741,6 +759,14 @@ mod tests {
         assert_eq!(ir.signatures[&source].ret, Some(parameter));
         assert_eq!(ir.signatures[&first].params, vec![specialized]);
         assert_eq!(ir.signatures[&first].ret, Some(specialized));
+        assert_eq!(
+            ir.callable_bound_type_parameters[&source][0].bounds[0].0,
+            parameter
+        );
+        assert_eq!(
+            ir.callable_bound_type_parameters[&first][0].bounds[0].0,
+            specialized
+        );
         assert_eq!(ir.lambda_type_parameters(first).len(), 1);
         assert_eq!(
             ir.lambda_type_parameters(first)[0].bounds[0].0,
