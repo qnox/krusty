@@ -10,8 +10,10 @@ use crate::ir::{ExprId, IrConst, IrExpr, IrFile};
 use crate::types::Ty;
 
 /// Return nodes remain ordinary common IR in a materialized callable. This sparse checked fact is
-/// consumed when its private inline-template copy crosses the callable boundary. Nested callable
-/// bodies are independent templates, so only their capture operands belong to this traversal.
+/// consumed when its private inline-template copy crosses the callable boundary. A nested lambda's
+/// inline template is spliced inside this body wherever it is inlined, so a return it still carries
+/// (one its own boundary already moved a frame nearer) crosses this boundary too; its separately
+/// materialized implementation is not part of this body.
 pub(super) fn reachable_checked_returns(ir: &IrFile, root: ExprId) -> Vec<(ExprId, u32)> {
     fn visit(
         ir: &IrFile,
@@ -24,12 +26,6 @@ pub(super) fn reachable_checked_returns(ir: &IrFile, root: ExprId) -> Vec<(ExprI
         }
         if let Some(depth) = ir.checked_return_depths.get(&expression).copied() {
             out.push((expression, depth));
-        }
-        if let IrExpr::Lambda { captures, .. } = ir.expr(expression) {
-            for &capture in captures {
-                visit(ir, capture, seen, out);
-            }
-            return;
         }
         let mut children = Vec::new();
         crate::ir::for_each_child(&ir.exprs, expression, &mut |child| children.push(child));
