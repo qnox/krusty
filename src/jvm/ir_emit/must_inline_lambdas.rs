@@ -56,8 +56,56 @@ pub fn mark_must_inline_lambdas(ir: &mut IrFile) {
             }
         }
     }
+    // A lambda whose body breaks out of, or continues, a loop of its caller is legal only as an
+    // argument an inline call inlines: its body has no standalone method to live in, as kotlinc
+    // never writes one. A call that keeps such a lambda as a value is rescued and fails closed.
+    dead.extend(ir.exprs.iter().filter_map(|expression| match expression {
+        IrExpr::Lambda {
+            impl_fn,
+            inline_body: Some(body),
+            ..
+        } if !spliced_as_a_call.contains(impl_fn) && jumps_out_of_caller_loop(ir, *body) => {
+            Some(*impl_fn)
+        }
+        _ => None,
+    }));
     for fid in dead {
         ir.inline_only_fns.insert(fid);
         ir.must_inline_lambdas.insert(fid);
     }
+}
+
+/// Whether `body` holds a `break` or `continue` whose loop is not inside `body`.
+fn jumps_out_of_caller_loop(ir: &IrFile, body: u32) -> bool {
+    fn escapes(ir: &IrFile, expression: u32, loops: &mut Vec<Option<String>>) -> bool {
+        match ir.expr(expression) {
+            IrExpr::Break { label } | IrExpr::Continue { label } => match label {
+                None => loops.is_empty(),
+                Some(label) => !loops
+                    .iter()
+                    .any(|enclosing| enclosing.as_deref() == Some(label.as_str())),
+            },
+            IrExpr::While { label, .. } => {
+                loops.push(label.clone());
+                let escaped = children_escape(ir, expression, loops);
+                loops.pop();
+                escaped
+            }
+            IrExpr::Checked(crate::ir::IrCheckedOperation::RangeLoop { label, .. }) => {
+                loops.push(Some(label.clone()));
+                let escaped = children_escape(ir, expression, loops);
+                loops.pop();
+                escaped
+            }
+            _ => children_escape(ir, expression, loops),
+        }
+    }
+    fn children_escape(ir: &IrFile, expression: u32, loops: &mut Vec<Option<String>>) -> bool {
+        let mut escaped = false;
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| {
+            escaped = escaped || escapes(ir, child, loops);
+        });
+        escaped
+    }
+    escapes(ir, body, &mut Vec::new())
 }
