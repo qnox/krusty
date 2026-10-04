@@ -189,5 +189,5 @@ pub(super) fn emit_enum_entry_subclass(
     {
         cw.set_kotlin_metadata(m.k, &m.mv, m.xi, &m.d1, &m.d2);
     }
-    cw.finish()
+    env.run.finish_class(cw)
 }

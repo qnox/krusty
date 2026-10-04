@@ -370,9 +370,6 @@ impl Emitter<'_> {
             crate::trace_compiler!("splice", "unified inliner declines {shape:?}");
             return None;
         }
-        if inliner::requires_empty_stack_on_entry(&callee) && code.stack_height() != 0 {
-            return None;
-        }
         let physical = parse_descriptor_params(target.splice_desc)?;
         if physical.len() != args.len() {
             return None;
@@ -671,7 +668,27 @@ impl Emitter<'_> {
             in_place,
             origins: &origins,
         };
+        // kotlinc's `inlineCall`: a body with a loop or a try/catch (`requiresEmptyStackOnEntry`)
+        // is bracketed by `beforeInlineCall`/`afterInlineCall`, and FixStack saves whatever the
+        // caller already pushed into locals there, when the class is written. kotlinc brackets
+        // every such body; around an empty stack FixStack only removes the markers, so they are
+        // written where there is something to save.
+        let spills_operands =
+            inliner::requires_empty_stack_on_entry(callee) && code.stack_height() != 0;
+        if spills_operands {
+            crate::trace_compiler!(
+                "splice",
+                "{}.{} saves {} operand word(s) around its body",
+                target.owner,
+                target.name,
+                code.stack_height()
+            );
+            code.inline_call_marker(true);
+        }
         self.write_inlined_node(&inlined, placement, code);
+        if spills_operands {
+            code.inline_call_marker(false);
+        }
         // kotlinc's `markLineNumberAfterInlineIfNeeded`: inside a condition the caller's line is
         // marked again for the jump that follows; elsewhere it is forgotten, so the next mark of
         // any line is written.

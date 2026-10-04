@@ -183,8 +183,9 @@ impl ClassWriter {
     }
 
     /// Replace method `index` with its transformed body, then run kotlinc's optimizer over it, as
-    /// kotlinc's visitor chain hands the transformer's method on.
-    fn install_transformed(
+    /// kotlinc's visitor chain hands the transformer's method on. A body whose inline calls saved
+    /// the operand stack (see [`super::inline_call_stacks`]) is installed the same way.
+    pub(super) fn install_transformed(
         &mut self,
         index: usize,
         access: u16,

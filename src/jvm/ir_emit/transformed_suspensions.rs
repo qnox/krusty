@@ -290,6 +290,7 @@ pub(super) type TransformedCoroutines = RefCell<HashMap<String, CoroutineOutcome
 
 impl EmitRun {
     /// Write `class`, transforming the coroutines its methods asked for, and keep what they found.
+    /// A method whose saved operand stack cannot be normalized fails the compile.
     pub(super) fn finish_class(&self, class: ClassWriter) -> Vec<u8> {
         // A failed method can stop before restoring a valid operand stack. The whole emit pass is
         // discarded once this flag is observed, so do not ask the frame computer to analyze that
@@ -297,9 +298,12 @@ impl EmitRun {
         if self.emission_failed() {
             return Vec::new();
         }
-        let (bytes, coroutines) = class.finish_with_coroutines();
-        self.record_transformed_coroutines(coroutines);
-        bytes
+        let finished = class.finish_with_coroutines();
+        for failure in finished.failures {
+            self.set_emit_error(failure);
+        }
+        self.record_transformed_coroutines(finished.coroutines);
+        finished.bytes
     }
 
     /// Keep what the transformation of a finished class found. A body it could not transform

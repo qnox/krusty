@@ -18,6 +18,7 @@ pub(crate) enum SuspendMarker {
     FakeContinuation = 3,
     BeforeFakeContinuationConstructorCall = 4,
     AfterFakeContinuationConstructorCall = 5,
+    BeforeInlineSuspend = 6,
     BeforeUnboxInlineClass = 8,
     AfterUnboxInlineClass = 9,
     SuspendLambdaParameter = 10,
