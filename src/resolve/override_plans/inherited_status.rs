@@ -92,15 +92,20 @@ struct VisibilityStatus {
 }
 
 /// A Java declaration with no access modifier is package-private; Kotlin has no such visibility
-/// for its own declarations, so an override of it defaults to `public`.
+/// for its own declarations, so an override of it takes `protected`, the visibility kotlinc
+/// normalizes package-private to (`JavaVisibilities.PackageVisibility.normalize()`).
 fn inheritable_visibility(visibility: Visibility) -> Visibility {
     match visibility {
-        Visibility::PackagePrivate => Visibility::Public,
+        Visibility::PackagePrivate => Visibility::Protected,
         visibility => visibility,
     }
 }
 
 /// Permissiveness order, most permissive first: `public` > `internal` > `protected` > `private`.
+/// kotlinc instead reports `internal` and `protected` as incomparable (`Visibilities.compare`
+/// returns null). The choice is unreachable here: both live only on class members, a class has a
+/// single superclass, and interface members are always public, so one override can never face an
+/// internal and a protected overridden declaration at once.
 fn permissiveness(visibility: Visibility) -> u8 {
     match visibility {
         Visibility::Public | Visibility::PackagePrivate => 0,
@@ -322,6 +327,14 @@ fn publish_inherited_visibilities(
             .declaration_header(declaration)
             .is_some_and(|header| header.visibility != status.effective)
         {
+            crate::trace_compiler!(
+                "override",
+                "inherited visibility corrects declaration={declaration:?} from {:?} to {:?}",
+                index
+                    .declaration_header(declaration)
+                    .map(|header| header.visibility),
+                status.effective,
+            );
             index.publish_inherited_visibility(declaration, status.effective);
             inherited.push((declaration, status.effective));
         }

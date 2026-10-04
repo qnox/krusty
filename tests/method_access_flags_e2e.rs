@@ -219,6 +219,114 @@ fn override_without_modifier_keeps_overridden_visibility_like_kotlinc() {
     );
 }
 
+/// A Kotlin subclass in the same package as a Java class whose member is package-private: kotlinc
+/// normalizes the inherited package-private visibility to `protected`
+/// (`JavaVisibilities.PackageVisibility.normalize()`), on the JVM access flags and in `@Metadata`
+/// alike.
+const JAVA_PACKAGE_PRIVATE_OVERRIDE: &str = "package j\n\
+class Derived : Base() {\n\
+    override fun plain() {}\n\
+}\n";
+
+#[test]
+fn java_package_private_override_inherits_protected_like_kotlinc() {
+    let Some((java, _)) = common::javac_compile(
+        &[(
+            "Base.java".to_string(),
+            "package j; public class Base { void plain() {} }".to_string(),
+        )],
+        &[],
+    ) else {
+        return;
+    };
+    let comparison = common::compare_with_kotlinc_plugin_jdk_cp(
+        "Derived",
+        JAVA_PACKAGE_PRIVATE_OVERRIDE,
+        "j/Derived",
+        std::slice::from_ref(&java),
+        "1.8",
+        &[],
+    )
+    .expect("reference kotlinc and javap are provisioned");
+    assert_eq!(
+        method_flags(&comparison.krusty_bytes),
+        method_flags(&comparison.reference_bytes),
+        "j/Derived: methods"
+    );
+    assert_eq!(
+        common::raw_kotlin_metadata(&comparison.krusty_bytes),
+        common::raw_kotlin_metadata(&comparison.reference_bytes),
+        "j/Derived: @Metadata"
+    );
+}
+
+/// A body-local classifier's override also keeps the overridden member's visibility: the local
+/// class's override plan is published when its declaring body is checked, after the members were
+/// predeclared, and `finalize_inherited_statuses` re-reads the corrected header once every body
+/// has been.
+const LOCAL_OVERRIDE_VISIBILITY: &str = "open class Base {\n\
+    protected open fun f(): Int = 1\n\
+}\n\
+fun box(): String {\n\
+    class Local : Base() {\n\
+        override fun f(): Int = 2\n\
+        fun g(): Int = f()\n\
+    }\n\
+    return if (Local().g() == 2) \"OK\" else \"fail\"\n\
+}\n";
+
+#[test]
+fn local_override_members_run() {
+    common::expect_box_ok_with_stdlib(LOCAL_OVERRIDE_VISIBILITY, "LocalOverrideVisibility");
+}
+
+#[test]
+fn local_override_keeps_overridden_visibility_like_kotlinc() {
+    assert_method_flags_match_kotlinc(
+        "LocalOverrideVisibility",
+        LOCAL_OVERRIDE_VISIBILITY,
+        &[
+            "Base",
+            "LocalOverrideVisibilityKt",
+            "LocalOverrideVisibilityKt$box$Local",
+        ],
+    );
+}
+
+/// An override of an `internal` member keeps `internal` and so stays JVM-public, as kotlinc's
+/// does. kotlinc mangles the member's JVM name (`f$main`) and records the mangled name in the
+/// `@Metadata` `jvm_signature` extension where krusty keeps the declared name — a pre-existing
+/// mangling gap, visible for a declared `internal` member alike — so only each method's descriptor
+/// and access flags are compared. The cross-module access rejection is covered by
+/// `diagnostics_language_parity_e2e::internal_override_visibility_access_matches_kotlinc_across_modules`.
+const INTERNAL_OVERRIDE: &str = "open class Base {\n\
+    internal open fun f(): Int = 1\n\
+}\n\
+class Derived : Base() {\n\
+    override fun f(): Int = 2\n\
+}\n\
+fun box(): String = if (Derived().f() == 2) \"OK\" else \"fail\"\n";
+
+#[test]
+fn internal_override_members_run() {
+    common::expect_box_ok_with_stdlib(INTERNAL_OVERRIDE, "InternalOverride");
+}
+
+#[test]
+fn internal_override_stays_jvm_public_like_kotlinc() {
+    assert_methods_match_kotlinc(
+        "InternalOverride",
+        INTERNAL_OVERRIDE,
+        &["Base", "Derived", "InternalOverrideKt"],
+        |bytes| {
+            method_flags(bytes)
+                .into_iter()
+                .map(|(_, descriptor, flags)| (descriptor, flags))
+                .collect()
+        },
+    );
+}
+
 fn assert_method_flags_match_kotlinc(name: &str, src: &str, classes: &[&str]) {
     assert_methods_match_kotlinc(name, src, classes, method_flags);
 }

@@ -1551,6 +1551,20 @@ pub(crate) fn publish_checked_local_override_plans(
     // A local classifier's plan is published once, by the first body that checks it (a default
     // argument's object is checked for each function that carries the default); its statuses go
     // with that first publication.
+    crate::trace_compiler!(
+        "override",
+        "local override plans classifiers={:?} plans={:?}",
+        classifiers,
+        plans
+            .iter()
+            .map(|(classifier, properties, functions)| (
+                classifier,
+                properties.len(),
+                functions.len(),
+                index.has_function_override_plan(*classifier),
+            ))
+            .collect::<Vec<_>>(),
+    );
     let unpublished = plans
         .iter()
         .map(|(classifier, properties, functions)| {

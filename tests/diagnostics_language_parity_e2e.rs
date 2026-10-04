@@ -116,3 +116,103 @@ fn inherited_override_visibility_access_matches_kotlinc() {
         ["cannot access 'fun plain(): Int': it is protected in 'Simple'."],
     );
 }
+
+#[test]
+fn internal_override_visibility_access_matches_kotlinc_across_modules() {
+    // An override written without a visibility modifier keeps the overridden member's `internal`,
+    // so a dependent module cannot call it. Both compilers reject at the callee with the same
+    // position; krusty's message renders the callee name only where kotlinc renders the full
+    // signature — a pre-existing wording gap of the internal member-access diagnostic (the
+    // protected path renders the full form), pinned here so a wording fix flips one assertion.
+    let lib = "open class Base {\n\
+               \x20   internal open fun f(): Int = 1\n\
+               }\n\
+               class Derived : Base() {\n\
+               \x20   override fun f(): Int = 2\n\
+               }\n";
+    let Some(library) = common::kotlinc_lib_out(&[("Lib.kt", lib)]) else {
+        return;
+    };
+    let classpath = [library, common::stdlib_jar()];
+    let result = common::compiler_diagnostics(
+        &[("Use.kt", "fun use(): Int = Derived().f()\n")],
+        &classpath,
+    );
+    assert_ne!(result.krusty_code, 0, "krusty silently accepted source");
+    assert_ne!(
+        result.reference_code, 0,
+        "kotlinc unexpectedly accepted source"
+    );
+    let mut krusty_errors = errors(&result.krusty_stderr);
+    krusty_errors.extend(errors(&result.krusty_stdout));
+    let kotlinc_errors = errors(&result.reference_stderr);
+    assert_eq!(
+        krusty_errors
+            .iter()
+            .map(|error| (error.line, error.column))
+            .collect::<Vec<_>>(),
+        kotlinc_errors
+            .iter()
+            .map(|error| (error.line, error.column))
+            .collect::<Vec<_>>(),
+    );
+    assert_eq!(
+        kotlinc_errors
+            .iter()
+            .map(|error| error.message.as_str())
+            .collect::<Vec<_>>(),
+        ["cannot access 'fun f(): Int': it is internal in 'Derived'."],
+    );
+    assert_eq!(
+        krusty_errors
+            .iter()
+            .map(|error| error.message.as_str())
+            .collect::<Vec<_>>(),
+        ["cannot access 'f': it is internal in 'Derived'"],
+    );
+}
+
+#[test]
+#[ignore = "a local classifier's override plan is published when its declaring body finishes \
+            checking, so the enclosing body's own access checks precede the inherited-visibility \
+            correction; krusty still accepts the call"]
+fn local_override_visibility_access_matches_kotlinc() {
+    // kotlinc rejects the enclosing function's read of the local class's inherited-`protected`
+    // override; the emitted class itself already carries the inherited visibility (see
+    // `method_access_flags_e2e::local_override_keeps_overridden_visibility_like_kotlinc`).
+    let source = "open class Base {\n\
+                  \x20   protected open fun f(): Int = 1\n\
+                  }\n\
+                  fun box(): String {\n\
+                  \x20   class Local : Base() {\n\
+                  \x20       override fun f(): Int = 2\n\
+                  \x20   }\n\
+                  \x20   val touched = Local().f()\n\
+                  \x20   return if (touched == 2) \"OK\" else \"fail\"\n\
+                  }\n";
+    let stdlib = common::stdlib_jar();
+    let result = common::compiler_diagnostics(
+        &[("LocalOverrideAccess.kt", source)],
+        std::slice::from_ref(&stdlib),
+    );
+    assert_ne!(result.krusty_code, 0, "krusty silently accepted source");
+    assert_ne!(
+        result.reference_code, 0,
+        "kotlinc unexpectedly accepted source"
+    );
+    let mut krusty_errors = errors(&result.krusty_stderr);
+    krusty_errors.extend(errors(&result.krusty_stdout));
+    let kotlinc_errors = errors(&result.reference_stderr);
+    assert_eq!(krusty_errors, kotlinc_errors);
+    assert_eq!(
+        kotlinc_errors
+            .iter()
+            .map(|error| (error.line, error.column, error.message.as_str()))
+            .collect::<Vec<_>>(),
+        [(
+            8,
+            27,
+            "cannot access 'fun f(): Int': it is protected in file."
+        )],
+    );
+}
