@@ -294,6 +294,39 @@ fn java_parameters_names_an_enum_secondary_constructors_prefix() {
     );
 }
 
+/// A lambda or local function lifted out of a value class's static member, accessor or
+/// `constructor-impl` reflects its captured receiver under the name of the value that static
+/// realizes it as (`$arg0`, `$tmp0`, `$tmp0_$this`), synthetic like every captured parameter, and
+/// the member's own carrier `arg0` is synthetic too. kotlinc flags every captured parameter of a
+/// lifted callable synthetic, an ordinary class's `this$0` and a captured value or extension
+/// receiver included.
+#[test]
+fn java_parameters_names_a_value_class_receiver_capture() {
+    assert_parameter_parity(
+        "JavaParametersValueCapture",
+        "package demo\n\
+         @JvmInline value class Tag(val raw: String)\n\
+         @JvmInline value class Held(val raw: String) {\n\
+         \x20 init { val f = { this as Any }; f() }\n\
+         \x20 constructor(t: Tag, u: Tag) : this(u.raw) { val g = { this as Any }; g() }\n\
+         \x20 fun m(): () -> Any = { this }\n\
+         \x20 val p: () -> Any get() = { this }\n\
+         \x20 fun local(): Any {\n\
+         \x20\x20 fun loc(): Any = this\n\
+         \x20\x20 return loc()\n\
+         \x20 }\n\
+         }\n\
+         class Plain { fun m(): () -> Any = { this } }\n\
+         fun top(t: Tag): () -> Any = { t }\n\
+         fun Tag.ext(): () -> Any = { this }\n",
+        &[
+            "demo/Held",
+            "demo/Plain",
+            "demo/JavaParametersValueCaptureKt",
+        ],
+    );
+}
+
 #[test]
 fn method_parameters_remain_opt_in() {
     let jdk = common::jdk_modules();
