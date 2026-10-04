@@ -590,9 +590,21 @@ impl Checker<'_> {
         }
     }
 
+    /// The markers the compiler arguments opt in to. Each `-opt-in` spelling is only lookup input:
+    /// it binds once, from the root package, to a classifier identity.
+    fn command_line_opt_ins(&self) -> &[TypeName] {
+        self.command_line_opt_ins.get_or_init(|| {
+            let resolver = self.resolver();
+            self.file
+                .opted_in_markers
+                .iter()
+                .filter_map(|spelling| resolver.fully_qualified_classifier(spelling))
+                .collect()
+        })
+    }
+
     fn report_opt_in_requirements(&mut self, span: Span, requirements: &[OptInRequirement]) {
         for requirement in requirements {
-            let marker = kotlin_qualified_name(requirement.marker);
             // kotlinc's factories: `OPT_IN_USAGE` warns and `OPT_IN_USAGE_ERROR` rejects.
             let diagnostic = if requirement.warning {
                 "OPT_IN_USAGE"
@@ -600,11 +612,12 @@ impl Checker<'_> {
                 "OPT_IN_USAGE_ERROR"
             };
             if self.lexically_opted_in(requirement.marker)
-                || self.file.opted_in_markers.contains(&marker)
+                || self.command_line_opt_ins().contains(&requirement.marker)
                 || self.suppresses_diagnostic(diagnostic)
             {
                 continue;
             }
+            let marker = kotlin_qualified_name(requirement.marker);
             let message =
                 match requirement
                     .message

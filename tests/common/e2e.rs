@@ -133,10 +133,19 @@ pub struct CompilerError {
 /// Extract every rendered compiler error in emission order. The scratch-directory prefixes differ
 /// between invocations, so the stable source filename is the location boundary compared by tests.
 pub fn compiler_errors(output: &str) -> Vec<CompilerError> {
+    rendered_diagnostics(output, "error:")
+}
+
+/// Every rendered compiler warning in emission order, located like [`compiler_errors`].
+pub fn compiler_warnings(output: &str) -> Vec<CompilerError> {
+    rendered_diagnostics(output, "warning:")
+}
+
+fn rendered_diagnostics(output: &str, severity: &str) -> Vec<CompilerError> {
     output
         .lines()
         .filter_map(|rendered| {
-            let (location, message) = rendered.split_once("error:")?;
+            let (location, message) = rendered.split_once(severity)?;
             let location = location.trim().trim_end_matches(':');
             let mut fields = location.rsplitn(3, ':');
             let column = fields.next()?.trim().parse().ok()?;

@@ -36111,6 +36111,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         resolved_type_tys: HashMap::new(),
         unresolved_type_segments: HashMap::new(),
         active_lexical_policies: Vec::new(),
+        command_line_opt_ins: std::cell::OnceCell::new(),
         resolved_type_bounds: HashMap::new(),
         resolved_declaration_types: HashMap::new(),
         resolved_declaration_type_parameters: HashMap::new(),
@@ -38697,6 +38698,8 @@ struct Checker<'a> {
     /// Lexical policies (`@Suppress`, opt-in acceptance) inherited from annotated enclosing
     /// declarations, statements and expressions.
     active_lexical_policies: Vec<LexicalPolicy>,
+    /// The markers `-opt-in` names, resolved once from their fully qualified spellings.
+    command_line_opt_ins: std::cell::OnceCell<Vec<TypeName>>,
     resolved_type_bounds: HashMap<(u32, u32), (Ty, bool)>,
     resolved_declaration_types: HashMap<(u32, u32), Ty>,
     resolved_declaration_type_parameters: HashMap<u32, Vec<String>>,

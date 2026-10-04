@@ -132,19 +132,29 @@ fun use() {
 #[test]
 fn compiler_opt_in_accepts_the_marker() {
     let src = format!(
-        "// OPT_IN: A\n{}",
+        "// OPT_IN: A, Outer.Nested\n{}",
         source(
-            "@A fun a() = 1
+            "class Outer {
+    @RequiresOptIn
+    annotation class Nested
+}
+
+@A fun a() = 1
 @B fun b() = 2
+@Outer.Nested fun nested() = 3
 
 fun use() {
     a()
     b()
+    nested()
 }
 "
         )
     );
-    common::assert_errors_match_kotlinc(&[("main.kt", &src)], &["-opt-in=A".to_string()]);
+    common::assert_errors_match_kotlinc(
+        &[("main.kt", &src)],
+        &["-opt-in=A".to_string(), "-opt-in=Outer.Nested".to_string()],
+    );
 }
 
 #[test]
@@ -174,23 +184,18 @@ fun use() = careful()
         "{}{}",
         result.krusty_stdout, result.krusty_stderr
     );
+    let reference = common::compiler_warnings(&result.reference_stderr);
     assert_eq!(
-        warnings(&result.krusty_stderr),
-        warnings(&result.reference_stderr)
+        reference,
+        [common::CompilerError {
+            file: "main.kt".to_string(),
+            line: 12,
+            column: 13,
+            message: "be careful".to_string(),
+        }]
     );
-    assert_eq!(warnings(&result.reference_stderr).len(), 1);
-}
-
-/// Every rendered warning as `file:line:column: message`, in emission order.
-fn warnings(output: &str) -> Vec<String> {
-    output
-        .lines()
-        .filter_map(|line| {
-            let (location, message) = line.split_once(": warning: ")?;
-            let file = location.rsplit('/').next()?;
-            Some(format!("{file}: {message}"))
-        })
-        .collect()
+    assert_eq!(common::compiler_warnings(&result.krusty_stderr), reference);
+    assert_eq!(common::compiler_errors(&result.krusty_stderr), []);
 }
 
 #[test]

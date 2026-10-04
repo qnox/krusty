@@ -10562,7 +10562,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   a call's written or inferred type arguments report at the callee. The use is accepted when the
   marker or `@OptIn(Marker::class)` annotates an enclosing declaration, statement or expression,
   the file (`@file:OptIn`), or the compiler gets `-opt-in=Marker` (a test writes
-  `// OPT_IN: Marker`). The message is `this declaration needs opt-in. Its usage must be marked
+  `// OPT_IN: Marker`), whose fully qualified name binds from the root package to the marker's
+  identity (`-opt-in=Outer.Nested` names a nested marker). `@Suppress("OPT_IN_USAGE_ERROR")` and
+  `OPT_IN_USAGE` silence the report. The message is `this declaration needs opt-in. Its usage must be marked
   with '@M' or '@OptIn(M::class)'` (`should` for a `WARNING`-level marker, which warns), or the
   marker's `message` with its first letter lowercased. As in kotlinc, warnings are not printed when
   the compilation has errors. Uses through a type alias are not checked yet. Verified against
