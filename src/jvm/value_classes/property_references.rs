@@ -118,15 +118,22 @@ pub(super) fn realize(
         // mangling: `getTopLevel()I` keeps its plain name while a member's `getZ-a_XrcN0()I` does
         // not. Its SETTER still mangles — a value-class PARAMETER always does — which is why the
         // two accessors of the same property do not agree on it.
-        if !realization.accessor_names_are_physical {
-            reference.getter_name = vc_mangle(
+        let physical_getter_name = if realization.accessor_names_are_physical {
+            reference.getter_name.clone()
+        } else {
+            vc_mangle(
                 &realization.declared_getter_name,
                 &[],
                 &reference.prop_ty,
                 callable_under,
                 top_level,
                 false,
-            );
+            )
+        };
+        // A private member bridge remains the physical call target. Its declaration's realized
+        // name is nevertheless the property identity Kotlin reflection reports.
+        if realization.accessor_role != PropertyAccessorRole::AccessBridge {
+            reference.getter_name.clone_from(&physical_getter_name);
         }
         // The accessor exchanges the value class's erased CARRIER, never the boxed object. A
         // member or top-level property has no written descriptor, so the one the emitter would
@@ -152,19 +159,26 @@ pub(super) fn realize(
             }
             (None, None) => {}
         }
+        if let Some((name, descriptor)) = realization.reflection_getter.as_mut() {
+            name.clone_from(&physical_getter_name);
+            *descriptor = erase_descriptor(descriptor, callable_under);
+        }
         if !realization.accessor_names_are_physical {
             if let (true, Some(declared_setter)) = (
                 reference.setter_name.is_some(),
                 realization.declared_setter_name.as_deref(),
             ) {
-                reference.setter_name = Some(vc_mangle(
+                let physical_setter_name = vc_mangle(
                     declared_setter,
                     std::slice::from_ref(&reference.prop_ty),
                     &Ty::Unit,
                     callable_under,
                     top_level,
                     false,
-                ));
+                );
+                if realization.accessor_role != PropertyAccessorRole::AccessBridge {
+                    reference.setter_name = Some(physical_setter_name);
+                }
             }
         }
         match (
@@ -282,8 +296,13 @@ pub(super) fn realize(
             .physical_getter_ret
             .map(|physical| desc(&physical))
             .unwrap_or_else(|| desc(&erase(&reference.prop_ty, callable_under)));
+        let getter_descriptor = format!("({}){physical_ret}", desc(&carrier));
+        if let Some((name, descriptor)) = realization.reflection_getter.as_mut() {
+            name.clone_from(&getter);
+            descriptor.clone_from(&getter_descriptor);
+        }
         reference.getter_name = getter;
-        reference.getter_descriptor = Some(format!("({}){physical_ret}", desc(&carrier)));
+        reference.getter_descriptor = Some(getter_descriptor);
         if let (Some(setter), Some(declared_setter)) = (
             reference.setter_name.as_mut(),
             realization.declared_setter_name.as_deref(),
@@ -472,10 +491,9 @@ mod tests {
     #[test]
     fn an_access_bridge_is_named_after_the_accessor_the_selection_recorded() {
         let (mut ir, under, mut realizations, reference) = reference_to("readTally");
-        realizations
-            .get_mut(reference)
-            .expect("the realization")
-            .accessor_role = PropertyAccessorRole::AccessBridge;
+        let realization = realizations.get_mut(reference).expect("the realization");
+        realization.accessor_role = PropertyAccessorRole::AccessBridge;
+        realization.reflection_getter = Some(("readTally".to_owned(), "()I".to_owned()));
         assert!(realize(&mut ir, &under, &mut realizations));
         assert_eq!(
             ir.classes[0]
@@ -492,6 +510,15 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![0],
             "the bridge is planned for the recorded accessor itself",
+        );
+        assert_eq!(
+            realizations
+                .get(reference)
+                .expect("the realization")
+                .reflection_getter
+                .as_ref(),
+            Some(&("readTally-impl".to_owned(), "(I)I".to_owned())),
+            "reflection names the realized declaration, not its access bridge",
         );
     }
 
