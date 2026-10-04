@@ -1056,13 +1056,14 @@ impl BodyFirChecker<'_> {
     }
 
     fn bind_local(&mut self, name: &str, ty: ResolvedTy) -> LocalValueId {
-        self.bind_local_with_lateinit(name, ty, false)
+        self.bind_variable(name, ty, false, false)
     }
 
-    fn bind_local_with_lateinit(
+    fn bind_variable(
         &mut self,
         name: &str,
         ty: ResolvedTy,
+        mutable: bool,
         lateinit: bool,
     ) -> LocalValueId {
         let local = self.allocate_local();
@@ -1075,6 +1076,7 @@ impl BodyFirChecker<'_> {
                 LocalBinding {
                     value: local,
                     ty,
+                    mutable,
                     lateinit,
                 },
             );
@@ -2533,6 +2535,7 @@ impl BodyFirChecker<'_> {
                     LocalBinding {
                         value: variable,
                         ty: variable_ty,
+                        mutable: false,
                         lateinit: false,
                     },
                 )),
@@ -2595,7 +2598,7 @@ impl BodyFirChecker<'_> {
                 let conversion =
                     self.selected_value_conversion(*init, initializer, local_ty, origin)?;
                 FirStatementKind::Local {
-                    target: self.bind_local(name, local_ty),
+                    target: self.bind_variable(name, local_ty, *is_var, false),
                     ty: local_ty,
                     mutable: *is_var,
                     lateinit: false,
@@ -2610,7 +2613,7 @@ impl BodyFirChecker<'_> {
                 })?;
                 let local_ty = self.resolved_type(ty.span, local_ty)?;
                 FirStatementKind::Local {
-                    target: self.bind_local_with_lateinit(name, local_ty, true),
+                    target: self.bind_variable(name, local_ty, true, true),
                     ty: local_ty,
                     mutable: true,
                     lateinit: true,
@@ -2789,7 +2792,10 @@ impl BodyFirChecker<'_> {
                 } else {
                     selector
                 };
-                let expression = if let Some(declaration) = receiver_binding {
+                let expression = if let Some(assignments::CompoundMemberReceiver::Snapshot(
+                    declaration,
+                )) = receiver_binding
+                {
                     self.body.add_expr(FirExpr {
                         origin,
                         ty: ResolvedTy::new(Ty::Unit).expect("Unit is a publishable FIR type"),
@@ -3333,6 +3339,7 @@ impl BodyFirChecker<'_> {
                         LocalBinding {
                             value: variable,
                             ty: variable_ty,
+                            mutable: false,
                             lateinit: false,
                         },
                     )),

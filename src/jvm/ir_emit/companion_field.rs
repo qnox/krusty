@@ -2,6 +2,22 @@
 
 use super::*;
 
+/// `static final` plus the companion object's own visibility, as kotlinc writes the outer class's
+/// `Companion` field: a `private companion object` keeps its field private, a protected one
+/// protected. An interface field is always public.
+pub(super) fn companion_field_access(ir: &IrFile, class: &IrClass, companion: TypeName) -> u16 {
+    const STATIC_FINAL: u16 = 0x0018;
+    if class.is_interface {
+        return STATIC_FINAL | 0x0001;
+    }
+    STATIC_FINAL
+        | match ir.class_visibilities.get(&companion) {
+            Some(crate::types::Visibility::Private) => 0x0002,
+            Some(crate::types::Visibility::Protected) => 0x0004,
+            _ => 0x0001,
+        }
+}
+
 pub(super) fn add_companion_field(cw: &mut ClassWriter, class: &IrClass) {
     let Some(companion) = class.companion_class else {
         return;
