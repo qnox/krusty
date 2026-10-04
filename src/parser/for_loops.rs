@@ -71,7 +71,6 @@ impl Parser<'_> {
         } else {
             None
         };
-        let destructured = destructure.is_some();
         let name = match &destructure {
             Some(_) => format!("$dest${}", start.lo),
             None => {
@@ -134,7 +133,7 @@ impl Parser<'_> {
             }
             self.expect(TokenKind::RParen, "')'");
             let body = self.parse_loop_body();
-            let body = self.desugar_destructure_body(&name, destructure, body);
+            let (body, destructured) = self.desugar_destructure_body(&name, destructure, body);
             // Iterate over `rstart`: the checker decides whether it is a counted progression.
             return self.finish_loop(
                 Stmt::ForEach {
@@ -196,7 +195,7 @@ impl Parser<'_> {
             let iterable = self.parse_for_trailing_infix(base);
             self.expect(TokenKind::RParen, "')'");
             let body = self.parse_loop_body();
-            let body = self.desugar_destructure_body(&name, destructure, body);
+            let (body, destructured) = self.desugar_destructure_body(&name, destructure, body);
             return self.finish_loop(
                 Stmt::ForEach {
                     name,
@@ -210,7 +209,7 @@ impl Parser<'_> {
         }
         self.expect(TokenKind::RParen, "')'");
         let body = self.parse_loop_body();
-        let body = self.desugar_destructure_body(&name, destructure, body);
+        let (body, destructured) = self.desugar_destructure_body(&name, destructure, body);
         self.finish_loop(
             Stmt::For {
                 name,
@@ -227,25 +226,32 @@ impl Parser<'_> {
         )
     }
 
-    /// Finish a `for` statement, recording whether its variable is a destructuring pattern.
-    fn finish_loop(&mut self, statement: Stmt, start: Span, destructured: bool) -> StmtId {
+    /// Finish a `for` statement, recording the destructuring statement its body opens with when
+    /// its variable is a destructuring pattern.
+    fn finish_loop(
+        &mut self,
+        statement: Stmt,
+        start: Span,
+        destructured: Option<StmtId>,
+    ) -> StmtId {
         let statement = self.finish_stmt(statement, start);
-        if destructured {
-            self.file.destructuring.loops.insert(statement);
+        if let Some(destructure) = destructured {
+            self.file.destructuring.loops.insert(statement, destructure);
         }
         statement
     }
 
     /// For a destructuring `for ((a, b) in …)`, prepend `val (a, b) = <temp>` to the loop body so the
-    /// component names are bound from the synthetic loop variable. A no-op when not destructuring.
+    /// component names are bound from the synthetic loop variable, and return that statement with
+    /// the body. A no-op when not destructuring.
     fn desugar_destructure_body(
         &mut self,
         temp: &str,
         destructure: Option<DestructureEntries>,
         body: ExprId,
-    ) -> ExprId {
+    ) -> (ExprId, Option<StmtId>) {
         let Some((entries, source_props, entry_types)) = destructure else {
-            return body;
+            return (body, None);
         };
         let sp = self.file.expr_spans[body.0 as usize];
         let temp_expr = self.file.add_expr(Expr::Name(temp.to_string()), sp);
@@ -268,7 +274,7 @@ impl Parser<'_> {
                 .entry_types
                 .insert(dstmt.0, entry_types);
         }
-        match self.file.expr(body).clone() {
+        let body = match self.file.expr(body).clone() {
             Expr::Block { stmts, trailing } => {
                 let mut s2 = vec![dstmt];
                 s2.extend(stmts);
@@ -287,6 +293,7 @@ impl Parser<'_> {
                 },
                 sp,
             ),
-        }
+        };
+        (body, Some(dstmt))
     }
 }

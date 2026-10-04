@@ -26,6 +26,7 @@
 
 mod header;
 mod loop_shape;
+mod with_index;
 
 use crate::ir::{
     Callee, ExprId, IrBindingStability, IrCheckedOperation, IrConst, IrExpr, IrFile,
@@ -74,6 +75,7 @@ pub(crate) fn realize(ir: &mut IrFile, policy: CountedLoopPolicy) {
             unsigned_compare,
             body,
             label,
+            with_index,
         }) = ir.exprs[expression].clone()
         else {
             continue;
@@ -95,6 +97,7 @@ pub(crate) fn realize(ir: &mut IrFile, policy: CountedLoopPolicy) {
             source,
             body,
             label,
+            with_index,
         });
         next_slot = Some(realizer.next_slot);
         let inlined_calls = std::mem::take(&mut realizer.inlined_calls);
@@ -112,6 +115,7 @@ struct CountedLoop {
     source: IrProgressionSource,
     body: ExprId,
     label: String,
+    with_index: Option<crate::ir::IrLoopIndex>,
 }
 
 /// A header operand and whether its value can change while the loop runs

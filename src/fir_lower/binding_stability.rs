@@ -64,15 +64,14 @@ pub(super) fn inventory(body: &FirBody) -> HashMap<crate::fir::LocalValueId, IrB
                     }
                 }
             }
-            FirStatementKind::Loop { header, .. } => match header {
-                FirLoopHeader::Range { variable, .. }
-                | FirLoopHeader::Progression { variable, .. }
-                | FirLoopHeader::Iterable { variable, .. }
-                | FirLoopHeader::Iterator { variable, .. } => {
-                    record(*variable, IrBindingStability::Stable);
+            FirStatementKind::Loop { header, .. } => {
+                if let Some(variable) = loop_variable(header) {
+                    record(variable, IrBindingStability::Stable);
                 }
-                FirLoopHeader::While { .. } | FirLoopHeader::DoWhile { .. } => {}
-            },
+                if let FirLoopHeader::WithIndex(with_index) = header {
+                    record(with_index.index, IrBindingStability::Mutable);
+                }
+            }
             _ => {}
         }
     }
@@ -89,6 +88,18 @@ pub(super) fn inventory(body: &FirBody) -> HashMap<crate::fir::LocalValueId, IrB
     }
 
     bindings
+}
+
+/// The variable a loop declares for each element it reads.
+fn loop_variable(header: &FirLoopHeader) -> Option<crate::fir::LocalValueId> {
+    match header {
+        FirLoopHeader::Range { variable, .. }
+        | FirLoopHeader::Progression { variable, .. }
+        | FirLoopHeader::Iterable { variable, .. }
+        | FirLoopHeader::Iterator { variable, .. } => Some(*variable),
+        FirLoopHeader::WithIndex(with_index) => loop_variable(&with_index.nested),
+        FirLoopHeader::While { .. } | FirLoopHeader::DoWhile { .. } => None,
+    }
 }
 
 impl BodyLowering<'_> {

@@ -1042,7 +1042,12 @@ pub(super) fn compact(file: &mut File) {
             .collect();
     file.destructuring.loops = std::mem::take(&mut file.destructuring.loops)
         .into_iter()
-        .filter_map(|old| statements.get(&old).copied())
+        .filter_map(|(old, destructure)| {
+            Some((
+                statements.get(&old).copied()?,
+                statements.get(&destructure).copied()?,
+            ))
+        })
         .collect();
     file.local_class_nested = std::mem::take(&mut file.local_class_nested)
         .into_iter()

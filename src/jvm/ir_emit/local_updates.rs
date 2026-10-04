@@ -5,9 +5,16 @@ use crate::types::Ty;
 
 /// Recognize an `Int` local's small constant self-update, which the JVM represents directly as
 /// `iinc`. Prefix and postfix increments in statement position carry an identity coercion around
-/// the same checked arithmetic as `+= 1`; that semantic wrapper does not change the update.
-pub(super) fn iinc_delta(ir: &IrFile, var: u32, value: u32, local_ty: Ty) -> Option<i8> {
-    if local_ty != Ty::Int {
+/// the same checked arithmetic as `+= 1`; that semantic wrapper does not change the update. A
+/// lowering's plain update (`IrFile::plain_updates`) is not a source increment and stays one.
+pub(super) fn iinc_delta(
+    ir: &IrFile,
+    update: u32,
+    var: u32,
+    value: u32,
+    local_ty: Ty,
+) -> Option<i8> {
+    if local_ty != Ty::Int || ir.plain_updates.contains(&update) {
         return None;
     }
 

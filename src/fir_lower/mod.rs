@@ -21,6 +21,7 @@ mod builtin_operation_tests;
 mod call_result_tests;
 #[cfg(test)]
 mod call_target_tests;
+mod char_sequence_loops;
 mod checked;
 mod checked_arguments;
 mod classifier_references;
@@ -75,6 +76,7 @@ mod type_operations;
 mod when_expressions;
 #[cfg(test)]
 mod when_result_type_tests;
+mod with_index_loops;
 
 pub use error::*;
 pub use sink::*;

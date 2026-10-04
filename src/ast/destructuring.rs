@@ -33,9 +33,9 @@ pub struct DestructuringSyntax {
     /// Destructuring statements prepended for lambda parameters. Their component calls have no
     /// source line of their own in kotlinc debug information.
     pub lambda_parameters: HashSet<StmtId>,
-    /// Loops whose variable is a destructuring pattern and whose body consumes the synthetic loop
-    /// variable through a prepended destructuring statement.
-    pub loops: HashSet<StmtId>,
+    /// Loops whose variable is a destructuring pattern, each with the destructuring statement
+    /// prepended to its body, the only consumer of the synthetic loop variable.
+    pub loops: HashMap<StmtId, StmtId>,
     /// Square-bracket destructures parsed while `NameBasedDestructuring` is disabled. Retaining the
     /// opening bracket span lets the frontend report the language-version diagnostic after module
     /// admission without discarding declarations later in the file.

@@ -182,6 +182,7 @@ fn shift_value_indices_shifts_lambda_captures_not_inline_body() {
         unsigned_compare: None,
         body: outer,
         label: String::new(),
+        with_index: None,
     }));
     let block = f.add_expr(IrExpr::Block {
         stmts: vec![lam, range],
@@ -630,6 +631,7 @@ fn a_checked_range_declaration_reserves_its_value_slot() {
         unsigned_compare: None,
         body,
         label: "loop".to_string(),
+        with_index: None,
     }));
 
     assert_eq!(ir.next_value_slot(), 8);
