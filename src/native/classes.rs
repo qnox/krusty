@@ -1760,7 +1760,9 @@ mod tests {
                     type_param_variances: Box::new([]),
                     value_underlying: None,
                     value_underlying_property: None,
-                    role: Some(crate::types::ClassifierRole::FunctionOfArity(self.arity)),
+                    role: Some(crate::types::ClassifierRole::FunctionOfArity(
+                        u8::try_from(self.arity).expect("fixture function arity fits the role"),
+                    )),
                 })
             })
         }
