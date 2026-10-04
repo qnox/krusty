@@ -19,6 +19,7 @@
 
 use super::super::is_suspension_point;
 use crate::ir::{for_each_child, Callee, ExprId, IrExpr, IrFile};
+use crate::jvm::placed_lambda_captures::is_placed_capture;
 use crate::libraries::InlineKind;
 use std::collections::HashSet;
 
@@ -106,8 +107,13 @@ pub(crate) fn spliced_return_crosses_finally(ir: &IrFile, body: ExprId) -> bool 
                 inline_body,
                 ..
             } => {
-                for &capture in captures {
-                    stack.push((capture, inlined, false, crosses_finally));
+                for (position, &capture) in captures.iter().enumerate() {
+                    // A placed capture runs wherever the spliced body invokes it, which may be
+                    // inside a `try` of that body: count every finalizer the body holds.
+                    let placed = spliceable && is_placed_capture(ir, at, position);
+                    let crosses = crosses_finally
+                        || (placed && inline_body.is_some_and(|inner| holds_a_finally(ir, inner)));
+                    stack.push((capture, inlined, placed, crosses));
                 }
                 if let (true, Some(&inner)) = (spliceable, inline_body.as_ref()) {
                     stack.push((inner, true, false, crosses_finally));
@@ -191,6 +197,28 @@ pub(crate) fn suspends_in_a_value_try(
             _ => {}
         }
         for_each_child(&ir.exprs, at, &mut |child| stack.push((child, spliced)));
+    }
+    false
+}
+
+/// Whether `body` holds a `try` with a `finally`, closure boundaries included.
+fn holds_a_finally(ir: &IrFile, body: ExprId) -> bool {
+    let mut stack = vec![body];
+    let mut seen = HashSet::new();
+    while let Some(at) = stack.pop() {
+        if !seen.insert(at) {
+            continue;
+        }
+        if matches!(
+            &ir.exprs[at as usize],
+            IrExpr::Try {
+                finally: Some(_),
+                ..
+            }
+        ) {
+            return true;
+        }
+        for_each_child(&ir.exprs, at, &mut |child| stack.push(child));
     }
     false
 }
@@ -288,8 +316,9 @@ fn collect(
         if !found.is_empty() && !out.contains(impl_fn) {
             out.push(*impl_fn);
         }
-        for &capture in captures {
-            collect(ir, capture, suspend_set, false, seen, out);
+        for (position, &capture) in captures.iter().enumerate() {
+            let placed = is_placed_capture(ir, expression, position);
+            collect(ir, capture, suspend_set, placed, seen, out);
         }
         collect(ir, *inline_body, suspend_set, false, seen, out);
         return;
@@ -354,9 +383,20 @@ fn walk(
         ..
     } = &ir.exprs[expression as usize]
     {
-        // The captures are evaluated by THIS frame, whatever the lambda is.
-        for &capture in captures {
-            walk(ir, capture, suspend_set, inlined, false, every, seen, found);
+        // The captures are evaluated by THIS frame, whatever the lambda is. A literal lambda the
+        // spliced body only invokes is placed at each invocation, so its body runs here too.
+        for (position, &capture) in captures.iter().enumerate() {
+            let placed = spliceable && is_placed_capture(ir, expression, position);
+            walk(
+                ir,
+                capture,
+                suspend_set,
+                inlined,
+                placed,
+                every,
+                seen,
+                found,
+            );
         }
         // A spliced body runs in this frame; a real closure's does not — and only the operand of an
         // inline call is spliced, however the lowering filled `inline_body` in.

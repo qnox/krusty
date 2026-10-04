@@ -46,23 +46,6 @@ impl CaptureBindings {
     }
 }
 
-/// Whether every read of value `index` in `body`, a lambda body numbering its own values, invokes
-/// it. Nested lambda bodies number their own values; only their captures read this body's.
-fn only_invoked(ir: &IrFile, body: ExprId, index: u32) -> bool {
-    let mut pending = vec![body];
-    while let Some(expression) = pending.pop() {
-        match ir.expr(expression) {
-            IrExpr::GetValue(value) if *value == index => return false,
-            IrExpr::InvokeFunction { func, args, .. } if matches!(ir.expr(*func), IrExpr::GetValue(value) if *value == index) => {
-                pending.extend(args.iter().copied())
-            }
-            IrExpr::Lambda { captures, .. } => pending.extend(captures.iter().copied()),
-            _ => crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child)),
-        }
-    }
-    true
-}
-
 impl Emitter<'_> {
     /// Bind the captures of the literal lambda `lambda`, whose body is spliced into this frame. A
     /// caller local is read where it lives; a literal inline lambda the body only invokes is bound
@@ -74,10 +57,7 @@ impl Emitter<'_> {
         materialize: &mut dyn FnMut(&mut Self, ExprId, Ty) -> u16,
     ) -> Option<CaptureBindings> {
         let IrExpr::Lambda {
-            impl_fn,
-            captures,
-            inline_body,
-            ..
+            impl_fn, captures, ..
         } = self.ir.expr(lambda).clone()
         else {
             return None;
@@ -86,15 +66,7 @@ impl Emitter<'_> {
         let mut bindings = CaptureBindings::default();
         for (position, &capture) in captures.iter().enumerate() {
             let ty = *physical.get(position)?;
-            let aliased = matches!(
-                self.ir.expr(capture),
-                IrExpr::Lambda {
-                    inline_body: Some(_),
-                    ..
-                }
-            ) && inline_body
-                .is_some_and(|body| only_invoked(self.ir, body, position as u32));
-            if aliased {
+            if crate::jvm::placed_lambda_captures::is_placed_capture(self.ir, lambda, position) {
                 let nested = self.bind_spliced_captures(capture, materialize)?;
                 bindings.aliases.insert(
                     position as u32,
