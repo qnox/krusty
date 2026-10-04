@@ -39,6 +39,7 @@ mod alias_constructor_application;
 mod annotation_applications;
 mod anonymous_extension_functions;
 mod anonymous_object_capture;
+mod dependency_annotation_defaults;
 use anonymous_object_capture::{
     record_anonymous_construction_captures, AnonymousCaptureCandidate,
     SelectedLocalCallableCaptures,
@@ -26651,6 +26652,7 @@ val result = object { fun value(): String = captured }
             retention: None,
             annotation_targets: None,
             mapped_collection: None,
+            annotation_element_defaults: Vec::new(),
         }
     }
 
@@ -29503,6 +29505,7 @@ fun box(): String {
                     retention: None,
                     annotation_targets: None,
                     mapped_collection: None,
+                    annotation_element_defaults: Vec::new(),
                 }));
             }
             [
@@ -29667,6 +29670,7 @@ fun box(): String {
                     retention: None,
                     annotation_targets: None,
                     mapped_collection: None,
+                    annotation_element_defaults: Vec::new(),
                 })
             })
         }
@@ -51441,7 +51445,7 @@ impl<'a> Checker<'a> {
                 receiver: Some(_),
                 name,
             } if name == "class" => {
-                AnnotationValue::Class(self.class_literal_targets.get(&e).copied()?)
+                AnnotationValue::Class(Ty::obj_name(self.class_literal_targets.get(&e).copied()?))
             }
             Expr::Call { args, .. } => match self.expr_lowers.get(&e) {
                 Some(ExprLowering::CompilerSynthetic(
@@ -70555,21 +70559,14 @@ impl<'a> Checker<'a> {
             return Ok(LibraryConstructorSelection::NoMatch);
         };
         let annotation = if classifier.is_annotation() {
-            let Some(application) = classifier.annotation_application() else {
+            let Some(construction) = dependency_annotation_defaults::dependency_construction(
+                self.libraries,
+                classifier,
+                &member,
+            ) else {
                 return Ok(LibraryConstructorSelection::NoMatch);
             };
-            let parameters = application.parameters;
-            if parameters.names.len() != parameters.types.len()
-                || parameters.names.len() != member.params.len()
-            {
-                return Ok(LibraryConstructorSelection::NoMatch);
-            }
-            let mut defaults = member.default_values.clone();
-            defaults.resize(parameters.names.len(), None);
-            Some(ResolvedAnnotationConstruction {
-                members: parameters.names.into_iter().zip(parameters.types).collect(),
-                defaults,
-            })
+            Some(construction)
         } else {
             None
         };

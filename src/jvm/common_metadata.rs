@@ -527,6 +527,7 @@ fn annotation_type(declaration: semantic::KotlinClass) -> LibraryType {
         retention: Some("SOURCE".to_string()),
         annotation_targets: None,
         mapped_collection: None,
+        annotation_element_defaults: Vec::new(),
     }
 }
 

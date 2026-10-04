@@ -306,7 +306,7 @@ impl PluginContext {
             .and_then(|annotation| annotation.values.first())
             .map(|(_, value)| value)?;
         match value {
-            crate::ir::AnnoValue::Class(classifier) => Some(*classifier),
+            crate::ir::AnnoValue::Class(ty) => ty.kotlin_class_internal(),
             _ => None,
         }
     }
@@ -324,7 +324,7 @@ impl PluginContext {
             .and_then(|annotation| annotation.values.first())
             .map(|(_, value)| value)?;
         match value {
-            crate::ir::AnnoValue::Class(classifier) => Some(*classifier),
+            crate::ir::AnnoValue::Class(ty) => ty.kotlin_class_internal(),
             _ => None,
         }
     }
@@ -411,7 +411,7 @@ impl PluginContext {
 
 fn annotation_value_mentions_class(value: &crate::ir::AnnoValue, canonical_type: TypeName) -> bool {
     match value {
-        crate::ir::AnnoValue::Class(classifier) => *classifier == canonical_type,
+        crate::ir::AnnoValue::Class(ty) => ty.kotlin_class_internal() == Some(canonical_type),
         crate::ir::AnnoValue::Annotation(annotation) => annotation
             .values
             .iter()
@@ -656,7 +656,9 @@ fn external_serializers(
                     .iter()
                     .filter(|(name, _)| name == "with")
                     .find_map(|(_, value)| match value {
-                        crate::types::AnnotationValue::Class(serializer) => Some(*serializer),
+                        crate::types::AnnotationValue::Class(serializer) => {
+                            serializer.kotlin_class_internal()
+                        }
                         _ => None,
                     })
             });
@@ -1060,9 +1062,9 @@ mod tests {
             "kotlinx/serialization/UseContextualSerialization",
             vec![(
                 "forClasses".to_string(),
-                crate::ir::AnnoValue::Array(vec![crate::ir::AnnoValue::Class(
-                    crate::types::type_name("demo/External"),
-                )]),
+                crate::ir::AnnoValue::Array(vec![crate::ir::AnnoValue::Class(Ty::obj(
+                    "demo/External",
+                ))]),
             )],
         )]);
 
@@ -1127,7 +1129,7 @@ mod tests {
                     annotation: crate::types::type_name(serialization::SERIALIZABLE_FQ),
                     arguments: vec![(
                         "with".to_owned(),
-                        crate::types::AnnotationValue::Class(serializer),
+                        crate::types::AnnotationValue::Class(Ty::obj_name(serializer)),
                     )],
                     facts: Default::default(),
                 }],

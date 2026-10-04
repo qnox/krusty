@@ -326,7 +326,7 @@ fn abi_annotation_value(value: &krusty::types::AnnotationValue) -> AbiAnnotation
             ty: ty.render(),
             entry: entry.clone(),
         },
-        AnnotationValue::Class(ty) => AbiAnnotationValue::Class(ty.render()),
+        AnnotationValue::Class(ty) => AbiAnnotationValue::Class(abi_annotation_class(*ty)),
         AnnotationValue::Annotation { internal, values } => {
             AbiAnnotationValue::Annotation(Box::new(AbiAnnotation {
                 name: internal.render(),
@@ -340,6 +340,28 @@ fn abi_annotation_value(value: &krusty::types::AnnotationValue) -> AbiAnnotation
             AbiAnnotationValue::Array(values.iter().map(abi_annotation_value).collect())
         }
     }
+}
+
+/// Serialize a checked class-literal type without collapsing an array to its classifier.
+///
+/// `[` cannot begin a Kotlin internal name, so prefixing one marker per `kotlin.Array` dimension
+/// is an unambiguous, stable boundary representation. Specialized arrays retain their own
+/// classifier (`kotlin/IntArray`), keeping them distinct from boxed `Array<Int>`. The semantic
+/// model has already rejected shapes without a concrete classifier before publishing a value.
+fn abi_annotation_class(mut ty: krusty::types::Ty) -> String {
+    let mut out = String::new();
+    while ty.obj_internal() == Some(krusty::types::wk::array()) {
+        out.push('[');
+        ty = ty
+            .array_elem()
+            .expect("kotlin.Array class literal retains its element type");
+    }
+    out.push_str(
+        &ty.kotlin_class_internal()
+            .expect("a checked annotation class literal has a classifier")
+            .render(),
+    );
+    out
 }
 
 fn absorb_constant(hasher: &mut Hasher, value: &AbiConstant) {
@@ -429,6 +451,31 @@ fn typed_value(hasher: &mut Hasher, kind: &str, bytes: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn annotation_class_serialization_preserves_array_shape() {
+        let target = krusty::types::Ty::obj("sample/Target");
+        assert_eq!(abi_annotation_class(target), "sample/Target");
+        assert_eq!(
+            abi_annotation_class(krusty::types::Ty::array(target)),
+            "[sample/Target"
+        );
+        assert_eq!(
+            abi_annotation_class(krusty::types::Ty::array(krusty::types::Ty::array(target))),
+            "[[sample/Target"
+        );
+        assert_eq!(
+            abi_annotation_class(krusty::types::Ty::array(krusty::types::Ty::Int)),
+            "kotlin/IntArray"
+        );
+        assert_eq!(
+            abi_annotation_class(krusty::types::Ty::obj_args_name(
+                krusty::types::wk::array(),
+                &[krusty::types::Ty::Int],
+            )),
+            "[kotlin/Int"
+        );
+    }
 
     fn method(name: &str, descriptor: &str) -> AbiMember {
         AbiMember {

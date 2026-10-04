@@ -1,6 +1,6 @@
 //! Retained annotation applications on IR declarations and the constants they encode.
 
-use super::{IrConst, TypeName};
+use super::{IrConst, Ty, TypeName};
 
 /// Backend-agnostic retention fact resolved by the frontend.
 pub type AnnoRetention = crate::types::AnnotationRetention;
@@ -13,8 +13,9 @@ pub enum AnnoValue {
     Const(IrConst),
     /// An enum constant `(enum_type_internal, const_name)` — tag `e`.
     Enum(TypeName, String),
-    /// A class literal `T::class` `(type_internal)` — tag `c` (its type descriptor).
-    Class(TypeName),
+    /// A class literal `T::class` — tag `c` (its exact type descriptor). The semantic type keeps
+    /// array dimensions and component identity until the backend encoding boundary.
+    Class(Ty),
     /// A nested annotation instance `A(...)` — tag `@`.
     Annotation(AppliedAnnotation),
     /// An array `[…]` — tag `[`.

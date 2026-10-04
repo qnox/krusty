@@ -37,7 +37,7 @@ fn annotation_value(value: &crate::types::AnnotationValue) -> crate::ir::AnnoVal
         AnnotationValue::Enum(internal, constant) => {
             crate::ir::AnnoValue::Enum(*internal, constant.clone())
         }
-        AnnotationValue::Class(internal) => crate::ir::AnnoValue::Class(*internal),
+        AnnotationValue::Class(ty) => crate::ir::AnnoValue::Class(*ty),
         AnnotationValue::Annotation { internal, values } => {
             crate::ir::AnnoValue::Annotation(crate::ir::AppliedAnnotation {
                 internal: *internal,

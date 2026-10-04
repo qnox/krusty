@@ -755,7 +755,7 @@ impl Resolver<'_> {
             w.add_method_sig(acc, &m.name, &desc, &code, sig.as_deref());
         }
         if m.has_annotation_default {
-            w.mark_annotation_default(&m.name, &desc);
+            w.mark_unevaluated_annotation_default(&m.name, &desc);
         }
         Some(())
     }
@@ -840,6 +840,14 @@ mod tests {
                 .method("reloadable", "()Z")
                 .unwrap()
                 .has_annotation_default
+        );
+        // The header does not evaluate `true`: the stub states that a default exists, not a value.
+        assert_eq!(
+            class.annotation_element_defaults,
+            [(
+                Box::from("reloadable"),
+                crate::libraries::AnnotationElementDefault::Unevaluated
+            )]
         );
     }
 

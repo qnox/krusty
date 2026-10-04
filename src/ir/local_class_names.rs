@@ -384,9 +384,8 @@ fn expression(expression: &mut IrExpr, names: &HashMap<TypeName, TypeName>) {
 
 fn annotation_value(value: &mut super::AnnoValue, names: &HashMap<TypeName, TypeName>) {
     match value {
-        super::AnnoValue::Enum(classifier, _) | super::AnnoValue::Class(classifier) => {
-            name(classifier, names)
-        }
+        super::AnnoValue::Enum(classifier, _) => name(classifier, names),
+        super::AnnoValue::Class(classifier) => *classifier = ty(*classifier, names),
         super::AnnoValue::Annotation(annotation) => annotation_application(annotation, names),
         super::AnnoValue::Array(values) => values
             .iter_mut()
@@ -790,8 +789,9 @@ impl super::IrFile {
                 *member = ty(*member, names);
             }
             construction
-                .enclosing_class
+                .scopes
                 .iter_mut()
+                .flatten()
                 .for_each(|value| name(value, names));
         }
         for aliases in self.class_type_aliases.values_mut() {

@@ -132,7 +132,7 @@ impl ClassWriter {
             param_anns: Vec::new(),
             visible_param_anns,
             user_invisible_param_anns,
-            annotation_default: false,
+            annotation_default: None,
             method_parameters: Vec::new(),
         };
         let Some(node) = &method.code else {

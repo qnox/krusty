@@ -52,6 +52,8 @@ mod annotation_emission_e2e;
 mod annotation_impl_class_e2e;
 #[path = "annotation_instance_class_rows_e2e.rs"]
 mod annotation_instance_class_rows_e2e;
+#[path = "annotation_instance_defaults_e2e.rs"]
+mod annotation_instance_defaults_e2e;
 #[path = "annotation_instantiation_e2e.rs"]
 mod annotation_instantiation_e2e;
 #[path = "annotation_kclass_member_e2e.rs"]

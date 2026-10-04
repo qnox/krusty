@@ -25,25 +25,31 @@ pub(crate) fn lower_annotation_constructions(ir: &mut IrFile, facade: &str) {
         .collect::<HashMap<_, _>>();
     let mut lexical_owners = HashMap::<TypeName, Option<TypeName>>::new();
     for site in sites.values() {
-        let candidate_rank = site
-            .enclosing_class
-            .and_then(|owner| class_order.get(&owner).copied())
-            .unwrap_or(usize::MAX);
-        let current_rank = lexical_owners
-            .get(&site.interface)
-            .copied()
-            .flatten()
-            .and_then(|owner| class_order.get(&owner).copied())
-            .unwrap_or(usize::MAX);
-        if !lexical_owners.contains_key(&site.interface) || candidate_rank < current_rank {
-            lexical_owners.insert(site.interface, site.enclosing_class);
+        for &scope in &site.scopes {
+            let candidate_rank = scope
+                .and_then(|owner| class_order.get(&owner).copied())
+                .unwrap_or(usize::MAX);
+            let current_rank = lexical_owners
+                .get(&site.interface)
+                .copied()
+                .flatten()
+                .and_then(|owner| class_order.get(&owner).copied())
+                .unwrap_or(usize::MAX);
+            if !lexical_owners.contains_key(&site.interface) || candidate_rank < current_rank {
+                lexical_owners.insert(site.interface, scope);
+            }
         }
     }
 
     let mut implementations = HashMap::<TypeName, TypeName>::new();
     let mut generated = Vec::new();
     for expression in 0..ir.exprs.len() as u32 {
-        let Some(site) = sites.get(&expression) else {
+        // A construction evaluated nowhere in this source (inside an annotation declaration's
+        // default no construction here uses) is no allocation: kotlinc generates nothing for it.
+        let Some(site) = sites
+            .get(&expression)
+            .filter(|site| !site.scopes.is_empty())
+        else {
             continue;
         };
         let implementation = *implementations.entry(site.interface).or_insert_with(|| {
@@ -76,11 +82,16 @@ pub(crate) fn lower_annotation_constructions(ir: &mut IrFile, facade: &str) {
                 &site.members,
                 enclosure,
             ));
-            if site.defaults.iter().any(Option::is_some) {
-                ir.insert_class_ctor_defaults_name(implementation, site.defaults.clone());
-            }
             implementation
         });
+        // The implementation's default stub evaluates the declaration defaults. A construction
+        // that supplies every element (a nested default value) carries none, so the first site
+        // that does supplies them.
+        if site.defaults.iter().any(Option::is_some)
+            && ir.class_ctor_defaults_name(implementation).is_none()
+        {
+            ir.insert_class_ctor_defaults_name(implementation, site.defaults.clone());
+        }
 
         let IrExpr::New {
             internal,
@@ -220,7 +231,7 @@ mod tests {
                 interface,
                 members: vec![("value".into(), Ty::String)],
                 defaults: vec![None],
-                enclosing_class: None,
+                scopes: vec![None],
             },
         );
 
