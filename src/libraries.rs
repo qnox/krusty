@@ -409,6 +409,25 @@ pub enum PrimitiveUnaryIntrinsic {
     Negate,
 }
 
+/// The stable identity of a declaration a compiler plugin's frontend plan calls without source
+/// syntax. Plugins receive it from the resolver and hand it back unchanged in their plan; checked
+/// FIR lowers the call to exactly this declaration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PluginCallableTarget {
+    /// A callable of the current module, including one a frontend plugin contributed.
+    Module(crate::fir::CallableId),
+    /// A dependency callable.
+    External(crate::fir::ExternalCallableId),
+}
+
+impl PluginCallableTarget {
+    /// A module target with an arbitrary identity, for tests of selection logic that never lower it.
+    #[cfg(test)]
+    pub(crate) fn module_for_test(raw: u32) -> Self {
+        Self::Module(crate::fir::CallableId::from_raw(raw))
+    }
+}
+
 /// Opaque compiler-plugin implementation identity attached to one declared callable.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub struct PluginExpressionDeclaration {

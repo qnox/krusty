@@ -499,6 +499,8 @@ mod tests {
                 visibility: crate::types::Visibility::Public,
                 flags: crate::fir::DeclarationFlags::default()
                     .with(crate::fir::DeclarationFlags::COMPANION, true)
+                    // A companion object is a singleton, generated or written.
+                    .with(crate::fir::DeclarationFlags::SINGLETON, true)
                     .with(crate::fir::DeclarationFlags::COMPILER_GENERATED, true),
             });
         }

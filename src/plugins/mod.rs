@@ -44,6 +44,59 @@ pub struct PluginExpressionPlan {
     /// Checker-selected source operands in target-parameter order with their selected parameter
     /// types. Lowering evaluates/coerces exactly this list and performs no argument remapping.
     pub operands: Vec<(crate::ast::ExprId, Ty)>,
+    /// Operands the plugin composes from frontend-selected declarations rather than from source
+    /// syntax. They follow `operands`, in order.
+    pub synthesized: Vec<PluginSynthesizedOperand>,
+}
+
+/// A value a plugin plan composes without source syntax. Every callable it names was selected in
+/// the frontend from a declaration's full semantic signature, so lowering realizes the exact
+/// declaration and no later phase looks a member up by name.
+#[derive(Clone, Debug)]
+pub enum PluginSynthesizedOperand {
+    /// A call of a selected member on a singleton receiver.
+    SingletonCall {
+        /// The singleton classifier whose value is the dispatch receiver.
+        receiver: TypeName,
+        target: FrontendCallableTarget,
+        /// Call-site parameter types, parallel to `arguments`.
+        params: Vec<Ty>,
+        /// Call-site result type.
+        ret: Ty,
+        arguments: Vec<PluginSynthesizedOperand>,
+    },
+    /// A nested plugin operation over synthesized operands, specialized by the named plugin.
+    Operation {
+        plugin: &'static str,
+        operation: &'static str,
+        data: Vec<TypeName>,
+        types: Vec<Ty>,
+        result: Ty,
+        operands: Vec<PluginSynthesizedOperand>,
+    },
+}
+
+/// The stable identity of a declaration selected for a plugin plan.
+pub use crate::libraries::PluginCallableTarget as FrontendCallableTarget;
+
+/// One callable the resolver publishes for plugin planning, with its declaration-owned signature:
+/// parameter and result types as declared, before any call-site substitution.
+#[derive(Clone, Debug)]
+pub struct FrontendDeclaredCallable {
+    pub name: String,
+    pub params: Vec<Ty>,
+    pub ret: Ty,
+    pub target: FrontendCallableTarget,
+}
+
+/// The singleton through which a classifier's static-like members are called — its companion
+/// object, or the classifier itself when it is an `object` — and the members a plugin asked for.
+#[derive(Clone, Debug)]
+pub struct FrontendSingletonMembers {
+    pub receiver: TypeName,
+    /// Whether `receiver` is the classifier itself (an `object`) rather than its companion.
+    pub receiver_is_classifier: bool,
+    pub callables: Vec<FrontendDeclaredCallable>,
 }
 
 /// One already-selected call projected into the plugin contract. Declaration identity, overload,
@@ -73,6 +126,11 @@ pub struct FrontendExpressionContext {
     pub calls: Vec<FrontendSelectedCall>,
     /// Qualified annotation identities for source and dependency classifiers named by these calls.
     pub classifier_annotations: HashMap<TypeName, Vec<TypeName>>,
+    /// For each classifier named by these calls, the singleton members whose names the enabled
+    /// plugins requested through [`IrPlugin::frontend_singleton_member_names`], as declared.
+    pub singleton_members: HashMap<TypeName, FrontendSingletonMembers>,
+    /// Own type-parameter count of each classifier named by these calls.
+    pub classifier_type_parameters: HashMap<TypeName, usize>,
 }
 
 impl FrontendExpressionContext {
@@ -166,10 +224,6 @@ pub struct PluginContext {
     /// serializer for what this file declares; for everything else only the declaration's facts
     /// say where the serializer is.
     external_serializers: std::collections::HashMap<TypeName, serialization::ExternalSerializer>,
-    /// Types this compilation does NOT declare whose companion carries the provider-confirmed
-    /// `serializer(KSerializer…)` accessor — the one kotlinc's `serializer<T>()` intrinsic calls.
-    companion_serializer_accessors:
-        std::collections::HashMap<TypeName, serialization::CompanionSerializerAccessor>,
     /// Serializer classes the ACTIVE runtime actually provides. A builtin mapping is only usable
     /// when the artifact on the classpath carries that class: `InstantSerializer` ships in newer
     /// kotlinx.serialization cores but not in supported older ones, and emitting a reference to a
@@ -184,7 +238,6 @@ impl Default for PluginContext {
             serial_info_annotations: std::collections::HashSet::new(),
             target_type_descriptor: no_target_type_descriptor,
             external_serializers: std::collections::HashMap::new(),
-            companion_serializer_accessors: std::collections::HashMap::new(),
             runtime_serializers: std::collections::HashSet::new(),
         }
     }
@@ -197,7 +250,6 @@ impl Clone for PluginContext {
             serial_info_annotations: self.serial_info_annotations.clone(),
             target_type_descriptor: self.target_type_descriptor,
             external_serializers: self.external_serializers.clone(),
-            companion_serializer_accessors: self.companion_serializer_accessors.clone(),
             runtime_serializers: self.runtime_serializers.clone(),
         }
     }
@@ -234,15 +286,6 @@ impl PluginContext {
         self
     }
 
-    /// Record the companion `serializer(…)` accessor of each external type that declares one.
-    pub(crate) fn with_companion_serializer_accessors(
-        mut self,
-        accessors: std::collections::HashMap<TypeName, serialization::CompanionSerializerAccessor>,
-    ) -> Self {
-        self.companion_serializer_accessors = accessors;
-        self
-    }
-
     /// Record which serializer classes the active runtime provides.
     pub(crate) fn with_runtime_serializers(
         mut self,
@@ -265,14 +308,6 @@ impl PluginContext {
         classifier: TypeName,
     ) -> Option<&serialization::ExternalSerializer> {
         self.external_serializers.get(&classifier)
-    }
-
-    /// The companion `serializer(…)` accessor of `classifier`, a type this file does not declare.
-    pub(crate) fn companion_serializer_accessor(
-        &self,
-        classifier: TypeName,
-    ) -> Option<&serialization::CompanionSerializerAccessor> {
-        self.companion_serializer_accessors.get(&classifier)
     }
 
     /// `ClassId`s carrying the exact resolved annotation identity.
@@ -483,6 +518,13 @@ pub trait IrPlugin {
     ) {
     }
 
+    /// Member names the plugin's expression planning selects on a classifier's singleton (its
+    /// companion, or the `object` itself). The resolver publishes those declarations, with their
+    /// stable identities and declared signatures, in [`FrontendExpressionContext::singleton_members`].
+    fn frontend_singleton_member_names(&self) -> &'static [&'static str] {
+        &[]
+    }
+
     /// Report a source class the plugin rejects, as kotlinc's plugin checkers do. This runs in the
     /// frontend, so a rejected class never reaches backend generation.
     fn check_frontend_class(
@@ -534,11 +576,9 @@ pub fn run_enabled(
     }
     record_external_value_classes(ir, classifiers);
     let external = external_serializers(ir, classifiers);
-    let accessors = companion_serializer_accessors(ir, classifiers);
     let ctx = ctx
         .with_serial_info_annotations(serial_info_annotations(ir, classifiers))
         .with_external_serializers(external)
-        .with_companion_serializer_accessors(accessors)
         .with_runtime_serializers(runtime_serializers(classifiers));
     plugins.host(module_name).run(ir, &ctx);
 }
@@ -750,35 +790,6 @@ fn external_serializers(
         .collect()
 }
 
-/// The companion `serializer(KSerializer…)` accessor of each external candidate that declares one,
-/// as kotlinc's `getSerializerGetterFunction` finds it: on the classifier's companion, taking one
-/// `KSerializer` per type parameter of the classifier and returning one. The provider confirms the
-/// callable; neither the companion nor the method is inferred from a spelling.
-fn companion_serializer_accessors(
-    ir: &IrFile,
-    classifiers: &dyn crate::types::ClassifierFactSource,
-) -> std::collections::HashMap<TypeName, serialization::CompanionSerializerAccessor> {
-    external_classifier_candidates(ir)
-        .filter_map(|classifier| {
-            let declaration = classifiers.classifier_declaration(classifier)?;
-            let (field, companion) = declaration
-                .companion
-                .or_else(|| classifiers.serialization_companion(classifier))?;
-            let type_parameters = declaration.own_type_parameter_count;
-            classifiers
-                .has_serialization_serializer_accessor(companion, type_parameters)
-                .then_some((
-                    classifier,
-                    serialization::CompanionSerializerAccessor {
-                        field,
-                        companion,
-                        type_parameters,
-                    },
-                ))
-        })
-        .collect()
-}
-
 fn external_classifier_candidates(ir: &IrFile) -> impl Iterator<Item = TypeName> + '_ {
     let declared: std::collections::HashSet<TypeName> =
         ir.classes.iter().map(|class| class.fq_name_id()).collect();
@@ -889,6 +900,19 @@ impl PluginHost {
             plugin.check_frontend_class(ctx, &mut diagnostics);
         }
         diagnostics
+    }
+
+    /// Every singleton member name the registered plugins plan with.
+    pub fn frontend_singleton_member_names(&self) -> Vec<&'static str> {
+        let mut names = Vec::new();
+        for plugin in &self.plugins {
+            for name in plugin.frontend_singleton_member_names() {
+                if !names.contains(name) {
+                    names.push(*name);
+                }
+            }
+        }
+        names
     }
 
     pub fn plan_frontend_expressions(

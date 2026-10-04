@@ -101,9 +101,21 @@ pub(super) fn plan_plugin_expressions(
         .collect::<Vec<_>>();
     let classifier_annotations =
         plugin_expression_annotations::classifier_annotations_for_calls(annotation_inputs, &calls);
+    let member_names = host.frontend_singleton_member_names();
+    let (singleton_members, classifier_type_parameters) = if member_names.is_empty() {
+        Default::default()
+    } else {
+        super::plugin_singleton_members::singleton_members_for_classifiers(
+            annotation_inputs,
+            &plugin_expression_annotations::named_classifiers(&calls),
+            &member_names,
+        )
+    };
     let context = crate::plugins::FrontendExpressionContext {
         calls,
         classifier_annotations,
+        singleton_members,
+        classifier_type_parameters,
     };
     for (expression, plan) in host.plan_frontend_expressions(&context) {
         let previous = info

@@ -131,6 +131,7 @@ mod override_plans;
 mod plugin_class_checks;
 mod plugin_expression_annotations;
 mod plugin_expression_planning;
+mod plugin_singleton_members;
 mod postponed_applicability;
 mod postponed_constraints;
 mod postponed_diagnostics;
