@@ -135,6 +135,23 @@ impl DeclarationAnnotations {
     }
 }
 
+/// Annotations written on one property's accessors (`@A get()`, `@A set(v)`) and on its setter's
+/// value parameter (`set(@A v)`).
+#[derive(Clone, Debug, Default)]
+pub struct AccessorAnnotations {
+    pub getter: DeclarationAnnotations,
+    pub setter: DeclarationAnnotations,
+    pub setter_parameter: DeclarationAnnotations,
+}
+
+impl AccessorAnnotations {
+    pub fn declares_annotations(&self) -> bool {
+        self.getter.declares_annotations()
+            || self.setter.declares_annotations()
+            || self.setter_parameter.declares_annotations()
+    }
+}
+
 /// An applied annotation (`@Anno(...)`) to encode into a `RuntimeVisibleAnnotations` attribute.
 #[derive(Clone, Debug)]
 pub struct AppliedAnnotation {

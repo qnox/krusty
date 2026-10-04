@@ -78,11 +78,14 @@ pub(super) fn emit(
                 "Lorg/jetbrains/annotations/NotNull;"
             }
         });
-        cw.reserve_method_pool(
+        let annotations = &property.accessor_annotations.getter;
+        cw.reserve_method_pool_with_annotations(
             &getter,
             &getter_desc,
             sig.as_deref(),
             &getter_ann.into_iter().collect::<Vec<_>>(),
+            annotations,
+            &[],
         );
         let mut g = CodeBuilder::new(1);
         let physical_name = instance_field_jvm_name(ir, c, field);
@@ -116,6 +119,7 @@ pub(super) fn emit(
         g.link();
         let access = default_accessor_access(property.visibility, overridable);
         cw.add_method_sig(access, &getter, &getter_desc, &g, sig.as_deref());
+        super::function_annotations::emit_declared(cw, annotations, &getter, &getter_desc);
         seed_accessor_locals(c, fq_name, cw);
     }
     if matches!(side, PropertyAccessorSide::Setter) && property.is_var {
@@ -134,11 +138,14 @@ pub(super) fn emit(
                         "Lorg/jetbrains/annotations/NotNull;"
                     }
                 });
-            cw.reserve_method_pool(
+            let annotations = &property.accessor_annotations.setter;
+            cw.reserve_method_pool_with_annotations(
                 &setter,
                 &setter_desc,
                 sig.as_deref(),
                 &setter_ann.into_iter().collect::<Vec<_>>(),
+                annotations,
+                &[],
             );
             // `<set-?>` is the setter value parameter's JVM debug name even when no non-null guard
             // uses it as a String constant. Its UTF8 belongs to this method's header/debug window,
@@ -181,6 +188,7 @@ pub(super) fn emit(
             st.link();
             let access = default_accessor_access(property.setter_visibility, overridable);
             cw.add_method_sig(access, &setter, &setter_desc, &st, sig.as_deref());
+            super::function_annotations::emit_declared(cw, annotations, &setter, &setter_desc);
             seed_accessor_locals(c, fq_name, cw);
         }
     }

@@ -1386,6 +1386,8 @@ pub struct PropDecl {
     /// An explicit getter return type (`get(): T`). Kept apart from the property's annotation so
     /// the checker can validate that both declarations agree.
     pub getter_ty: Option<TypeRef>,
+    /// Annotations written directly on the getter (`@A get()`, `@A get`).
+    pub getter_annotations: Vec<AccessorAnnotation>,
     /// `true` when the custom getter body references `field` — the property then has a real backing
     /// field even without an initializer (assignable once in a constructor), per Kotlin semantics.
     pub getter_reads_field: bool,
@@ -1448,6 +1450,19 @@ pub struct PropAccessor {
     pub visibility: Option<Visibility>,
     /// The setter carries the semantic `inline` modifier and must retain checked FIR for call sites.
     pub is_inline: bool,
+    /// Annotations written directly on the setter (`@A set(v)`, `@A set`).
+    pub annotations: Vec<AccessorAnnotation>,
+    /// Annotations on the setter's value parameter (`set(@A v)`).
+    pub param_annotations: Vec<AccessorAnnotation>,
+}
+
+/// One annotation written on a property accessor or a setter's value parameter. `at` is the
+/// offset of its `@`, where kotlinc anchors a diagnostic about the application as a whole.
+#[derive(Clone, Debug)]
+pub struct AccessorAnnotation {
+    pub at: u32,
+    pub annotation: AnnotationRef,
+    pub arguments: Vec<ExprId>,
 }
 
 #[derive(Clone, Debug)]

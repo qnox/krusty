@@ -514,6 +514,7 @@ fn materialize_delegation(
                     getter_jvm_name: None,
                     setter_jvm_name: None,
                     needs_access_bridge: false,
+                    accessor_annotations: Default::default(),
                 });
             }
         }

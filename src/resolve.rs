@@ -34,6 +34,7 @@ use scope::{ContextReceiver, ContextReceiverKind, ContextValue, FlowExclusion, N
 
 mod abstract_obligations;
 mod access_control;
+mod accessor_annotations;
 mod actualization_names;
 mod alias_constructor_application;
 mod annotation_applications;
@@ -52252,6 +52253,7 @@ impl<'a> Checker<'a> {
             .is_none_or(|selected| selected.contains(&p.span));
         let suppression_depth =
             self.push_declaration_suppressions(scope, &p.annotations, &p.annotation_args);
+        self.check_accessor_annotations(scope, p);
         // An extension property's own generic type parameters (`val <T> Array<T>.length: Int`)
         // scope over its receiver, declared type, and accessor bodies — bind them (erased) so
         // `T` resolves rather than reading as an unresolved reference.
@@ -53157,6 +53159,7 @@ impl<'a> Checker<'a> {
                 &property.annotations,
                 &property.annotation_args,
             );
+            self.check_accessor_annotations(scope, property);
         }
         for parameter in &cl.props {
             self.check_annotation_applications_in_declaration_scope(
@@ -71525,20 +71528,6 @@ impl<'a> Checker<'a> {
             );
         }
         depth
-    }
-
-    fn check_annotation_applications_in_declaration_scope(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        annotations: &[AnnotationRef],
-        arguments: &[Vec<ExprId>],
-    ) {
-        let suppression_depth = self.push_declaration_suppressions(scope, annotations, arguments);
-        for (annotation, arguments) in annotations.iter().zip(arguments) {
-            self.check_annotation_application(scope, annotation, arguments);
-        }
-        self.active_statement_suppressions
-            .truncate(suppression_depth);
     }
 
     /// Check the annotation-bearing portion of a function declaration on its already-established

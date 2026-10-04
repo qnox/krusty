@@ -1410,6 +1410,11 @@ pub fn facade_package_metadata_from_ir(
                 setter_visibility: declaration.setter_visibility,
                 companion,
                 delegate_field: delegate_field(ir, declaration),
+                accessor_annotations: ir
+                    .accessor_annotations
+                    .get(&declaration.property)
+                    .map(crate::metadata::AccessorMetadataAnnotations::of)
+                    .unwrap_or_default(),
             }
         })
         .collect::<Vec<_>>();

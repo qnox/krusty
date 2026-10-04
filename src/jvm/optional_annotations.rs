@@ -253,16 +253,12 @@ fn declared_targets(declaration: &semantic::KotlinClass) -> crate::types::Annota
         semantic::AnnotationArgument::Array(elements) => elements.as_slice(),
         single => std::slice::from_ref(single),
     };
-    let allows = |name: &str| {
-        entries.iter().any(|element| {
-            matches!(element, semantic::AnnotationArgument::Enum { entry, .. } if entry == name)
-        })
-    };
-    crate::types::AnnotationTargets {
-        value_parameter: allows("VALUE_PARAMETER"),
-        property: allows("PROPERTY"),
-        field: allows("FIELD"),
-    }
+    crate::types::AnnotationTargets::kotlin(entries.iter().filter_map(|element| match element {
+        semantic::AnnotationArgument::Enum { entry, .. } => {
+            crate::types::KotlinTarget::from_entry(entry)
+        }
+        _ => None,
+    }))
 }
 
 #[cfg(test)]
@@ -270,7 +266,7 @@ mod tests {
     use std::collections::HashSet;
 
     use crate::jvm::classpath::Classpath;
-    use crate::types::{type_name, AnnotationTargets};
+    use crate::types::{type_name, AnnotationTargets, KotlinTarget};
 
     /// The stdlib publishes its JS- and Native-only optional annotations through
     /// `META-INF/kotlin-stdlib.kotlin_module`, with their declared retention and targets.
@@ -319,11 +315,12 @@ mod tests {
             (js_static.retention.as_deref(), js_static.annotation_targets),
             (
                 Some("CLASS"),
-                Some(AnnotationTargets {
-                    value_parameter: false,
-                    property: true,
-                    field: false,
-                })
+                Some(AnnotationTargets::kotlin([
+                    KotlinTarget::Function,
+                    KotlinTarget::Property,
+                    KotlinTarget::PropertyGetter,
+                    KotlinTarget::PropertySetter,
+                ]))
             )
         );
     }

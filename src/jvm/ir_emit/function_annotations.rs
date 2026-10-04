@@ -33,9 +33,18 @@ pub(super) fn emit_recorded(
     name: &str,
     descriptor: &str,
 ) {
-    let Some(annotations) = ir.function_annotations.get(&function) else {
-        return;
-    };
+    if let Some(annotations) = ir.function_annotations.get(&function) {
+        emit_declared(cw, annotations, name, descriptor);
+    }
+}
+
+/// Write a method's declared annotations, with the attributes `@Deprecated` implies.
+pub(super) fn emit_declared(
+    cw: &mut ClassWriter,
+    annotations: &crate::ir::DeclarationAnnotations,
+    name: &str,
+    descriptor: &str,
+) {
     cw.set_method_annotations(name, descriptor, annotations);
     if annotations.deprecated() {
         cw.mark_method_deprecated(name, descriptor);

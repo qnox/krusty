@@ -204,10 +204,9 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                 table
                     .annotation_retentions
                     .insert(annotation_identity, retention);
-                // `@Target(AnnotationTarget.X, …)` decides where an application written with no use-site
-                // prefix lands. Only the three declaration sites a PROPERTY application can take are
-                // modeled; an annotation class that declares no `@Target` is applicable everywhere and is
-                // left out of the map entirely.
+                // `@Target(AnnotationTarget.X, …)` lists the declarations an application may sit on, in
+                // declared order. An annotation class that declares no `@Target` takes the default
+                // set and is left out of the map entirely.
                 let declared_targets = class
                     .annotations
                     .iter()
@@ -216,11 +215,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                         table
                             .resolved_annotation(file_index as u32, annotation)
                             .filter(|name| name.matches("kotlin/annotation/Target"))?;
-                        let mut targets = crate::types::AnnotationTargets {
-                            value_parameter: false,
-                            property: false,
-                            field: false,
-                        };
+                        let mut targets = Vec::new();
                         for &argument in arguments {
                             // `@Target` takes a `vararg` of enum entries. The NAMED form spells the
                             // same list as an array literal or `arrayOf`, so both flatten here.
@@ -233,15 +228,10 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                 let Expr::Member { name, .. } = file.expr(entry) else {
                                     continue;
                                 };
-                                match name.as_str() {
-                                    "VALUE_PARAMETER" => targets.value_parameter = true,
-                                    "PROPERTY" => targets.property = true,
-                                    "FIELD" => targets.field = true,
-                                    _ => {}
-                                }
+                                targets.extend(crate::types::KotlinTarget::from_entry(name));
                             }
                         }
-                        Some(targets)
+                        Some(crate::types::AnnotationTargets::kotlin(targets))
                     });
                 if let Some(targets) = declared_targets {
                     table

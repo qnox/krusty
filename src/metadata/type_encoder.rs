@@ -856,8 +856,8 @@ fn encode_abbreviation(
     Ok(())
 }
 
-/// A metadata `Annotation` message — `id` (f1), the annotation class's string-table entry. Used for
-/// `ValueParameter.annotation` (f7), which records a parameter's `@Anno` uses.
+/// A metadata `Annotation` message with no arguments — `id` (f1), the annotation class's
+/// string-table entry — for a compiler-written type annotation such as `@NoInfer`.
 pub(crate) fn encode_annotation(strings: &mut StringTable<'_>, classifier: TypeName) -> Pb {
     let mut annotation = Pb::new();
     annotation.field_varint(1, strings.class_id(classifier) as u64);

@@ -5576,26 +5576,18 @@ fn classpath_annotation_targets(
     ci: &crate::jvm::classreader::ClassInfo,
 ) -> crate::types::AnnotationTargets {
     if !ci.kotlin_targets.is_empty() {
-        return crate::types::AnnotationTargets {
-            value_parameter: ci.kotlin_targets.iter().any(|t| t == "VALUE_PARAMETER"),
-            property: ci.kotlin_targets.iter().any(|t| t == "PROPERTY"),
-            field: ci.kotlin_targets.iter().any(|t| t == "FIELD"),
-        };
+        return crate::types::AnnotationTargets::kotlin(
+            ci.kotlin_targets
+                .iter()
+                .filter_map(|entry| crate::types::KotlinTarget::from_entry(entry)),
+        );
     }
     // A Kotlin annotation is identified by its own `@Metadata`; without a declared `@Target` it is
     // applicable everywhere.
     if ci.meta.class_kind.is_some() {
         return crate::types::AnnotationTargets::DEFAULT;
     }
-    // Java. An `@interface` with no `@Target` is applicable in every declaration context.
-    let java_target = |name: &str| {
-        ci.java_targets.is_empty() || ci.java_targets.iter().any(|entry| entry == name)
-    };
-    crate::types::AnnotationTargets {
-        value_parameter: java_target("PARAMETER"),
-        property: false,
-        field: java_target("FIELD"),
-    }
+    crate::types::AnnotationTargets::java(&ci.java_targets)
 }
 
 #[cfg(test)]

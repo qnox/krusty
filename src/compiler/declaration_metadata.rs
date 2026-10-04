@@ -107,6 +107,27 @@ fn checked_annotations<'a>(
     )
 }
 
+/// The checked annotations written on `property`'s accessors and on its setter's value parameter.
+pub(super) fn accessor_annotations(
+    property: &ast::PropDecl,
+    info: &TypeInfo,
+) -> crate::ir::AccessorAnnotations {
+    let site = |entries: &[ast::AccessorAnnotation]| {
+        let annotations = entries
+            .iter()
+            .map(|entry| entry.annotation.clone())
+            .collect::<Vec<_>>();
+        declaration_annotations(&annotations, info)
+    };
+    let setter = property.setter.as_ref();
+    crate::ir::AccessorAnnotations {
+        getter: site(&property.getter_annotations),
+        setter: setter.map_or_else(Default::default, |setter| site(&setter.annotations)),
+        setter_parameter: setter
+            .map_or_else(Default::default, |setter| site(&setter.param_annotations)),
+    }
+}
+
 pub(super) fn value_parameter_annotations(
     declared: &[ast::AnnotationRef],
     info: &TypeInfo,

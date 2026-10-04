@@ -10,12 +10,28 @@
 use super::*;
 
 impl Checker<'_> {
+    /// Check a declaration's applications under the declaration's own `@Suppress`.
+    pub(super) fn check_annotation_applications_in_declaration_scope(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        annotations: &[AnnotationRef],
+        arguments: &[Vec<ExprId>],
+    ) {
+        let suppression_depth = self.push_declaration_suppressions(scope, annotations, arguments);
+        for (annotation, arguments) in annotations.iter().zip(arguments) {
+            self.check_annotation_application(scope, annotation, arguments);
+        }
+        self.active_statement_suppressions
+            .truncate(suppression_depth);
+    }
+
+    /// Check one application and return the annotation class it names, once resolved.
     pub(super) fn check_annotation_application(
         &mut self,
         scope: &CheckerScope<'_>,
         annotation: &AnnotationRef,
         arguments: &[ExprId],
-    ) {
+    ) -> Option<TypeName> {
         if arguments
             .iter()
             .any(|argument| self.file.expr_span(*argument).is_none())
@@ -32,7 +48,7 @@ impl Checker<'_> {
                 "a complete pass reached released annotation syntax; fragment={:?}",
                 self.fragment
             );
-            return;
+            return None;
         }
         let internal = if self.fragment.is_classifier_annotations() {
             // Pass 1 already bound this exact occurrence. Metadata publication consumes that
@@ -43,7 +59,7 @@ impl Checker<'_> {
                 .legacy_symbols()
                 .and_then(|symbols| symbols.resolved_annotation(self.file_index, annotation))
             else {
-                return;
+                return None;
             };
             internal
         } else {
@@ -59,9 +75,7 @@ impl Checker<'_> {
                 fun_context_count: 0,
             };
             let ty = self.type_ref_ty_reported(scope, &reference);
-            let Some(internal) = ty.kotlin_class_internal() else {
-                return;
-            };
+            let internal = ty.kotlin_class_internal()?;
             internal
         };
         if !self.file.is_common
@@ -75,27 +89,28 @@ impl Checker<'_> {
                  module sources."
                     .to_string(),
             );
-            return;
+            return Some(internal);
         }
         let Some(shape) = self.annotation_shape(internal) else {
             self.diags.error(
                 annotation.span,
                 "resolved annotation has no semantic element declaration".to_string(),
             );
-            return;
+            return Some(internal);
         };
         if !self.check_annotation_arguments(scope, annotation.span, &shape, arguments, None) {
-            return;
+            return Some(internal);
         }
         let Some(applied) = self.fold_annotation_application(internal, arguments) else {
             self.diags.error(
                 annotation.span,
                 "annotation argument is not a supported compile-time constant".to_string(),
             );
-            return;
+            return Some(internal);
         };
         self.applied_annotations
             .insert((annotation.span.lo, annotation.span.hi), applied);
+        Some(internal)
     }
 
     /// A classifier's own annotations are resolved where the classifier is declared: a nested

@@ -6380,10 +6380,31 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   A platform source is rejected at the annotation's type reference with `declaration
   annotated with '@OptionalExpectation' can only be used in common module sources.` (identical
   on 2.4.0, 2.4.10 and 2.4.20). Annotation classifiers are no longer inferred from the common
-  stdlib KLIB. Open gap: annotations written on a property ACCESSOR (`@A get()`) are skipped by
-  the parser for every annotation class, so accessor uses are neither checked nor flagged.
-  Tests: `optional_expectation_annotation_e2e`, `jvm::optional_annotations` and
+  stdlib KLIB. An accessor use (`@JsStatic get()`, `@JsStatic set(v)`) follows the same rules:
+  common output is byte-identical and a platform source gets the same diagnostic. Tests: `optional_expectation_annotation_e2e`, `jvm::optional_annotations` and
   `metadata::decode::module_mapping` unit tests.
+
+- **Annotations on property accessors are declaration annotations of the getter, the setter and
+  the setter's value parameter.** The parser keeps `@A get`, `@A set` and `set(@A v)` (with the
+  `@` offset of each application). The checker resolves each through the ordinary scope/import
+  rules to a qualified identity, checks its arguments, and checks the annotation class's
+  `@Target` against `getter`, `setter` or `value parameter`; the property's own `@Suppress` covers
+  them. A mismatch is kotlinc's WRONG_ANNOTATION_TARGET at the `@`: `this annotation is not
+  applicable to target 'getter'. Applicable targets: <list>`, the Kotlin `@Target` entries in
+  declared order without duplicates, or for a Java `@Target` the union of each `ElementType`'s
+  Kotlin targets in Kotlin target order followed by `expression` (identical on 2.4.0, 2.4.10 and
+  2.4.20). Retained applications are written on the getter/setter method (and the setter's
+  parameter) by retention, for member, top-level and companion properties, declared or default
+  accessors alike. `@Metadata` sets `HAS_ANNOTATIONS` on the accessor's flags word
+  (`getter_flags` f7, `setter_flags` f8) and on the setter value parameter, and writes the records
+  to `Property.getter_annotation` (f15), `setter_annotation` (f16) and the value parameter's
+  `annotation` (f7), with arguments. A setter falls off the end of its body into its implicit
+  `return`, which is marked on the body's last line (a block's closing `}`, an expression body's
+  last line), as kotlinc does. Known gaps, independent of annotations: a written accessor with no
+  body (`get` on its own line) keeps the property's line instead of its own; `@JvmName` on an
+  accessor does not rename it; use-site targets (`@get:A`) are not part of this path. Tests:
+  `property_accessor_annotation_e2e`, `expression_line_marks_e2e` (setter fall-through),
+  `types::annotation_targets` unit tests.
 
 - **`expect`/`actual` requires the multiplatform feature, and an `expect` declaration may not carry
   a body.** Two independent checks, both syntactic and both measured against the reference

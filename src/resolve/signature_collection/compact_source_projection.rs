@@ -392,24 +392,13 @@ pub(in crate::resolve) fn collect_compact_annotation_policies(
                     .resolved_annotations
                     .get(&(source, application.annotation.lo, application.annotation.hi))
                     .filter(|name| name.matches("kotlin/annotation/Target"))?;
-                let mut targets = crate::types::AnnotationTargets {
-                    value_parameter: false,
-                    property: false,
-                    field: false,
-                };
-                for argument in headers
-                    .annotation_policy_arguments(application.arguments)
-                    .iter()
-                    .filter_map(|argument| headers.lookup_names.get(*argument))
-                {
-                    match argument {
-                        "VALUE_PARAMETER" => targets.value_parameter = true,
-                        "PROPERTY" => targets.property = true,
-                        "FIELD" => targets.field = true,
-                        _ => {}
-                    }
-                }
-                Some(targets)
+                Some(crate::types::AnnotationTargets::kotlin(
+                    headers
+                        .annotation_policy_arguments(application.arguments)
+                        .iter()
+                        .filter_map(|argument| headers.lookup_names.get(*argument))
+                        .filter_map(crate::types::KotlinTarget::from_entry),
+                ))
             });
         if let Some(targets) = declared_targets {
             table.annotation_targets.insert(annotation, targets);

@@ -346,6 +346,22 @@ impl Checker<'_> {
             });
     }
 
+    /// The targets `internal` declares, whether this module or a library declares the class.
+    pub(super) fn declared_annotation_targets(
+        &self,
+        internal: TypeName,
+    ) -> Option<crate::types::AnnotationTargets> {
+        if self.module.annotation_retention(internal).is_some() {
+            return Some(self.module.annotation_targets(internal));
+        }
+        Some(
+            self.resolver()
+                .classifier(internal)?
+                .annotation_targets
+                .unwrap_or(crate::types::AnnotationTargets::DEFAULT),
+        )
+    }
+
     pub(super) fn fold_annotation_application(
         &mut self,
         internal: TypeName,
@@ -364,13 +380,7 @@ impl Checker<'_> {
                 Some(_) => return None,
             })
         })?;
-        let targets = if module_retention.is_some() {
-            self.module.annotation_targets(internal)
-        } else {
-            classifier
-                .annotation_targets
-                .unwrap_or(crate::types::AnnotationTargets::DEFAULT)
-        };
+        let targets = self.declared_annotation_targets(internal)?;
         Some(crate::types::AppliedAnnotation {
             internal,
             values,

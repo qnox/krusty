@@ -82,8 +82,8 @@ mod when_facts;
 pub use crate::enclosing_declarations::EnclosingDeclaration;
 pub use crate::types::EqualityMode;
 pub use annotations::{
-    AnnoRetention, AnnoValue, AppliedAnnotation, DeclarationAnnotations, FieldAnnotations,
-    PropertyAnnotations, RetainedAnnotation,
+    AccessorAnnotations, AnnoRetention, AnnoValue, AppliedAnnotation, DeclarationAnnotations,
+    FieldAnnotations, PropertyAnnotations, RetainedAnnotation,
 };
 pub use bindings::IrBindingStability;
 pub(crate) use bottom_values::complete_bottom_value;
@@ -2063,6 +2063,10 @@ pub struct IrFile {
     /// `@Metadata` both read it, so it must not be folded into either representation. Retention stays
     /// SEMANTIC here — the JVM split into visible/invisible attributes belongs to the emitter.
     pub fn_param_annotations: std::collections::HashMap<u32, Vec<DeclarationAnnotations>>,
+    /// Annotations written on a source property's accessors, by property. A declared accessor's
+    /// also land in [`Self::function_annotations`]; a default one exists only in a backend.
+    pub accessor_annotations:
+        std::collections::HashMap<crate::fir::PropertyId, AccessorAnnotations>,
     /// Per declared function, whether each PHYSICAL source parameter carries Kotlin's semantic
     /// `@NoInfer` type-use marker. Extension receivers occupy their physical slot with `false`;
     /// metadata projection removes that slot again. This is inference policy, not a JVM fact.
