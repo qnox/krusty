@@ -80,8 +80,10 @@ pub(crate) fn semantic_call_role(
     }
     (declaration.owner == crate::types::wk::comparable()
         && declaration.name == "compareTo"
-        && declaration.params.len() == 1
-        && declaration.ret == Ty::Int)
+        && matches!(declaration.params, [Ty::TyParam(..)])
+        && declaration.ret == Ty::Int
+        && declaration.is_operator
+        && !declaration.is_infix)
         .then_some(SemanticCallRole::KotlinComparableCompareTo)
 }
 
@@ -129,6 +131,29 @@ mod tests {
             )),
             None,
             "the signature without the exact builtin owner has no role"
+        );
+
+        let parameter = Ty::ty_param("T", Ty::obj_name(any));
+        let mut comparable = declaration(
+            crate::types::wk::comparable(),
+            "compareTo",
+            &[parameter],
+            Ty::Int,
+        );
+        comparable.is_operator = true;
+        assert_eq!(
+            semantic_call_role(comparable),
+            Some(SemanticCallRole::KotlinComparableCompareTo)
+        );
+        assert_eq!(
+            semantic_call_role(declaration(
+                crate::types::wk::comparable(),
+                "compareTo",
+                &[Ty::String],
+                Ty::Int,
+            )),
+            None,
+            "the Comparable owner and spelling do not replace its generic declaration signature"
         );
     }
 }
