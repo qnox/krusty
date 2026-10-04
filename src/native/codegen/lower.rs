@@ -1709,7 +1709,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 }) {
                     // The operand precedes kotlinc's reified-operation marker and therefore keeps
                     // any side effect or exception it produces before the marker's own failure.
-                    self.expression(arg)?;
+                    let _ = self.expression(arg)?;
                     if self.terminated {
                         return Ok(None);
                     }

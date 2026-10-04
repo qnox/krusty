@@ -730,7 +730,11 @@ impl BodyLowering<'_, '_, '_> {
     }
 
     /// Build the named exception around a message and throw it, leaving the builder terminated.
-    fn raise(&mut self, descriptor: &str, message: Value) -> Result<Option<Value>, Unsupported> {
+    pub(super) fn raise(
+        &mut self,
+        descriptor: &str,
+        message: Value,
+    ) -> Result<Option<Value>, Unsupported> {
         let descriptor = self.file.import_data(descriptor)?;
         let descriptor = self.data_address(descriptor);
         let thrown = self.runtime_call(
