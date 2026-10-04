@@ -199,6 +199,26 @@ fun use() = careful()
 }
 
 #[test]
+fn in_process_compilation_keeps_warnings_without_treating_them_as_errors() {
+    let src = source(
+        "@Careful fun preview() = 1
+
+fun box(): String { preview(); return \"OK\" }
+",
+    );
+    let classpath = [common::stdlib_jar()];
+    assert!(
+        common::compile_in_process(&src, "InProcessWarning", &classpath, None).is_some(),
+        "a warning must not reject an in-process compilation"
+    );
+    assert_eq!(
+        common::compile_in_process_diagnostics(&src, "InProcessWarning", &classpath, None),
+        ["be careful"],
+        "the diagnostic helper must not hide a successful compilation's warning"
+    );
+}
+
+#[test]
 fn suppressing_the_opt_in_diagnostic_accepts_the_use() {
     let src = format!(
         "@file:Suppress(\"OPT_IN_USAGE_ERROR\")\n{}",
