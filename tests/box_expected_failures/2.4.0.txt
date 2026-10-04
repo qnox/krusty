@@ -11,11 +11,8 @@ functions/functionNtoString.kt
 functions/functionNtoStringGeneric.kt
 multiplatform/k2/defaultArguments/bothInExpectAndActual.kt
 multiplatform/k2/defaultArguments/bothInExpectAndActual2.kt
-multiplatform/k2/kt66970.kt
 reflection/functions/genericOverriddenFunction.kt
-reflection/functions/typeParameterInReturnType.kt
 reflection/properties/genericOverriddenProperty.kt
 reflection/typeOf/intersectionType.kt
-reflection/typeOf/reifiedAsNestedArgument.kt
 reflection/typeOf/typeAliasedType.kt
 typeErasure/funWithReifiedTypeParameterContextParameterAndExtensionReceiverInsideClass.kt

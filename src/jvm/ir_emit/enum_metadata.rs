@@ -14,11 +14,13 @@ pub(super) fn entries(class: &IrClass) -> Vec<EnumEntryMeta<'_>> {
         .iter()
         .map(|entry| EnumEntryMeta {
             name: &entry.name,
-            annotations: class
-                .field_annotations
-                .iter()
-                .find(|annotations| annotations.field == entry.name)
-                .map(|annotations| &annotations.annotations),
+            annotations: crate::metadata::MetadataAnnotations::of_optional(
+                class
+                    .field_annotations
+                    .iter()
+                    .find(|annotations| annotations.field == entry.name)
+                    .map(|annotations| &annotations.annotations),
+            ),
         })
         .collect()
 }

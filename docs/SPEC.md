@@ -2270,6 +2270,36 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     there and guards at the caller's declared type instead (`collectionAssignGetMultiIndex.kt`). This
     is the same modeling gap as an inferred `val a = System.getenv("P")`, which krusty annotates
     `@Nullable` where kotlinc annotates nothing.
+- **A Java result an overridden Kotlin declaration fixes not-null is ENHANCED, and guarded like a
+  platform value.** kotlinc enhances a Java member's signature with the nullability of the declarations
+  it overrides (`FirSignatureEnhancement.enhanceReturnType`, qualifiers from
+  `AbstractSignatureParts.computeIndexedQualifiers` / `computeQualifiersForOverride`): a flexible result
+  (`T!`) overriding a result that is not marked nullable becomes the rigid `T` carrying
+  `EnhancedNullability`. `StringBuilder.toString()` (over `Any.toString(): String`) returns `String`,
+  `ArrayList<String>.get(0)` (over `List<E>.get(): E`) returns `String`, and `ArrayList.iterator()`
+  returns `MutableIterator<E>` whose `E` is enhanced too. `Fir2IrImplicitCastInserter.insertSpecialCast`
+  guards a value whose type is flexible OR enhanced wherever the expected type does not accept null,
+  so every position the platform entry above guards also guards an enhanced value. In addition, an
+  enhanced value is guarded where a declaration's type is INFERRED from it, because the declaration's
+  type drops the attribute: `val s = sb.toString()`, `fun f() = sb.toString()`, and the iterator and
+  element a `for` loop over a Java collection stores (`iterator(...)`, `next(...)`). A conditional keeps
+  the attribute, so a declared result still guards the branch that produced the value. A primitive
+  enhanced result (`ArrayList<Int>.get`) is checked on the reference the call produced, then unboxed
+  through `Number`.
+
+  The override relation is a fact of the member family, so the core hierarchy decides it
+  (`src/symbol_resolver/member_hierarchy/result_enhancement.rs`): the provider publishes only that a Java
+  result is flexible, and a family member whose result is not nullable and not flexible fixes it
+  not-null. A JDK method of a MAPPED builtin classifier (`java.lang.Throwable` for `kotlin.Throwable`,
+  `java.lang.annotation.Annotation`) is not a Java declaration in Kotlin's scope — kotlinc's
+  `JvmMappedScope` shows the builtin it overrides — so it takes that declaration's rigid result without
+  the attribute and is not guarded (`ClassCastException().toString()`). A `@NotNull` Java result is
+  enhanced on its own. Not yet modeled: the attribute travelling through generic inference
+  (`id(sb.toString())`, `sb.toString().also { }`) and through an inferred lambda result, the
+  message-less `checkNotNull` kotlinc puts on an inferred local initialized by an enhanced conditional,
+  type-argument enhancement outside a `for` loop, enhanced Java PROPERTY reads (`map.keys`), and
+  `NULLABLE` enhancement (`HashMap.get` stays `V!`).
+  Tests: `tests/enhanced_result_null_check_e2e.rs` (per-method differential vs kotlinc and a run).
 - `try { … } catch (e: E) { … }` (no `finally`): the body value (and each catch value) is stored into a
   result temp and loaded at the merge, like kotlinc. The protected region covers the body + result
   store; each catch is an exception-table handler whose StackMapTable frame has the caught exception on
@@ -3268,6 +3298,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   stays intact and erases to `Object`. This is representation of an already-selected declaration.
   Test: `star_projected_member_and_extension_references_use_their_declared_bounds` in
   `tests/reference_adaptation_e2e.rs`.
+- **A generic callable reference is reflected by the declaration's erased JVM signature.**
+  `fun <T> foo(x: T): T` referenced as `KFunction1<Int, Int>` still names
+  `foo(Ljava/lang/Object;)Ljava/lang/Object;`. A primary bound is that erasure:
+  `fun <T : CharSequence> foo(x: T): T` names
+  `foo(Ljava/lang/CharSequence;)Ljava/lang/CharSequence;`. The use-site `Int` or `String` is
+  the adapter's calling convention (box, invoke the erased method, unbox); kotlin-reflect looks
+  the declaration up by the signature it was compiled as, then reports the declaration type
+  parameter (`returnType` is `T`). A companion-associated extension omits the receiver that
+  only names its static scope (`companion fun C.answer(value: Int)` reflects `answer(Int)`,
+  not `answer(C, Int)`). The omitted receiver is the parameter whose identity says it is the
+  extension receiver; a companion declaration whose parameter identities do not match its
+  parameters is a lowering error, not a signature that keeps the receiver. Test:
+  `tests/callable_ref_generic_signature_e2e.rs`. Corpus:
+  `reflection/functions/typeParameterInReturnType.kt`.
 - **Dead-code elimination after a diverging statement.** Statements following a `return`/`break`/
   `continue` or an expression of type `Nothing` (a `throw`, or a call that never returns) in the same
   block are unreachable; krusty drops them (and a trailing block value), matching kotlinc. Emitting them
@@ -6311,6 +6355,36 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   same-file). Tests: `mpp_expect_actual_e2e`; corpus `multiplatform/` 75 PASS / 0 FAIL
   (box total 2744 → 2825).
 
+- **`@OptionalExpectation` annotation classes come from a library's `.kotlin_module`.** A JVM
+  library carries no class file for an optional annotation that has no JVM actual
+  (`kotlin.js.JsStatic`, `kotlin.native.CName`, …); kotlinc writes the `expect annotation class`
+  into field 16 (`optional_annotation_class`) of the library's `META-INF/*.kotlin_module`, and its
+  `OptionalAnnotationClassesProvider` reads it from every direct child of `META-INF` with that
+  extension. krusty decodes the same section (`metadata::decode::module_mapping`: the version
+  header, the flags word from 1.4, then the module message with its own string and qualified-name
+  tables; class annotations from field 25, else builtins extension 150), keeps a class only when it
+  is an `expect annotation class` annotated with `kotlin.OptionalExpectation`, ranks the result
+  below class files, and lets a later classpath module win a duplicate class id. A malformed module
+  is a platform-initialization error, not a silent skip. The class's own `@Retention` and
+  `@Target` are decoded from the same record (`kotlin.js.JsStatic` is BINARY, property-targeted).
+  Common sources resolve and apply the annotation. Like kotlinc, which removes the application
+  from IR together with its `expect` class, nothing in the class file names it and `@Metadata`
+  writes no annotation record for it, but the declaration's `hasAnnotations` flag is still set
+  for a non-SOURCE retention (kotlinc derives that flag from FIR before the removal): the
+  checker records `AnnotationSemanticFacts::optional_expectation`, and common lowering keeps
+  only that fact in `DeclarationAnnotations`. Every owner hands `@Metadata` one
+  `metadata::MetadataAnnotations` (the declared-annotations fact plus the records), so the flag
+  is never reconstructed from the retained records. Its package (`kotlin.native`) resolves even
+  where no class file lives in it. Byte-identical to kotlinc for a member and a top-level
+  function, a property, a class, a primary and a secondary constructor, and a value parameter.
+  A platform source is rejected at the annotation's type reference with `declaration
+  annotated with '@OptionalExpectation' can only be used in common module sources.` (identical
+  on 2.4.0, 2.4.10 and 2.4.20). Annotation classifiers are no longer inferred from the common
+  stdlib KLIB. Open gap: annotations written on a property ACCESSOR (`@A get()`) are skipped by
+  the parser for every annotation class, so accessor uses are neither checked nor flagged.
+  Tests: `optional_expectation_annotation_e2e`, `jvm::optional_annotations` and
+  `metadata::decode::module_mapping` unit tests.
+
 - **`expect`/`actual` requires the multiplatform feature, and an `expect` declaration may not carry
   a body.** Two independent checks, both syntactic and both measured against the reference
   compiler. (1) Without `+MultiPlatformProjects`, every `expect`/`actual` MODIFIER is an error
@@ -8917,9 +8991,23 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/local_object_type_of_e2e.rs`. Corpus: `reflection/typeOf/localClass.kt`.
   A generic top-level extension property's accessors are generic methods and carry a `Signature`
   (`<P:Ljava/lang/Object;>(TP;)Lkotlin/reflect/KType;`), as kotlinc emits.
+  An anonymous object created inside an inline function is copied at each call that fixes a reified
+  type its members use. A property initializer is one of those members: `typeOf<T>()` stays an
+  external call until the JVM realizes it, and the reified substitution is what selects the copy.
+  The copy is taken before the constructor's initializer block and the accessor functions exist, so
+  the initializer expression itself is copied onto the class's specialization record, separate from
+  the constructor body. A later inline expansion sees that
+  specialized type and copies the class again. `inline fun <reified T> foo() = object { val x =
+  typeOf<T>() }.x` inlined as `foo<List<T>>()` from `inline fun <reified T> bar`, and then as
+  `bar<Int>()`, therefore realizes `typeOf<List<Int>>()`. The same holds for an object written
+  directly in `bar` (`typeOf<List<T>>()`) and for the direct call. The declaration class keeps the
+  reified parameter. A read of that property in the inlined caller (`object { val x = typeOf<T>()
+  }.x`) names the copy, not the declaration class. Tests:
+  `fir_lower::inlining::escaping_reified_object` (the call-site substitution) and
+  `tests/reified_object_type_of_e2e.rs` (those three results against kotlinc).
   Not yet: a reified member inline function (it is called rather than inlined, `typeOf` or not), a
-  reified parameter inside an anonymous object or lambda class regenerated per call site, a reified
-  argument inferred as an intersection type, and a use-site projection written in a typealias
+  reified parameter inside a lambda class regenerated per call site, a reified argument inferred as
+  an intersection type, and a use-site projection written in a typealias
   (`typealias T<Y> = MutableMap<in Y, …>` loses its `in`).
 - **A Java member's flexible return keeps the caller's type arguments.** A Java generic class
   applied to the enclosing declaration's own type parameters (`Shelf<X, Y>` inside `fun <X, Y>`,
@@ -9437,7 +9525,28 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `O$o2$1`, `O$loc$L`, `O$inLam$1$1`, `O$inLoc$lf$1`), where an ordinary class's instance is
   `this$0` passed as `$receiver`. The class's recorded enclosure is followed through lifted
   callables to the declaration it is written in, and the backend spells the capture with the rule
-  a lambda class uses. Tests:
+  a lambda class uses. A value-class member's or accessor's own extension receiver is likewise a
+  parameter of its static (`$this$mext`), so a lambda class, suspend lambda, anonymous object or
+  local class written there captures it as a value: its field and its constructor parameter are
+  both `$this_mext` (`W$mext$1`, `W$pe$1`, `W$msus$1`, `W$mo$1`, `W$extObj$1`, `W$mlc$LL`), where
+  an ordinary class's member extension (`Plain$pext$1`) and a local extension function
+  (`W$m$loc$1`), which is lifted rather than lowered to a static, still pass it as `$receiver`.
+  Checked FIR and common IR record whether a captured extension receiver belongs to a local
+  function or to the declaration itself (`CapturedCallableOwner`); the resolver marks a local
+  function's receiver declaration while it checks that function. A suspend lambda's class is no
+  source class, so an object it declares (`W$su$1$1`) captures what the lambda captured, `$arg0`:
+  the backend follows the lambda class's enclosure to the declaration it is written in. With
+  `-java-parameters` a suspend lambda's class reflects its constructor's captures (synthetic,
+  under their field names) and `$completion`, `create`'s `value` and `$completion`, and the
+  typed `invoke`'s `p1`, `p2`, … (the overridden `FunctionN.invoke`'s parameters, the
+  continuation included), like kotlinc. The class's realization records each member's parameter
+  identities (each capture's own captured identity, the completion, `create`'s value, the
+  `FunctionN.invoke` values by ordinal); the `LocalVariableTable` and `MethodParameters` each
+  format that record, never the other's rows or a descriptor position, and a record that does not
+  match the descriptor's arity is an internal error. Not yet matched: an object or lambda written in a
+  method of a local class or object inside a value-class member (`W$inObj$1$get$o$1`,
+  `W$inObjLam$1$get$f$1`), which kotlinc gives the static's `$arg0` value. Tests:
+  `src/jvm/suspend/cps/member_parameters.rs`,
   `tests/value_class_receiver_capture_debug_names_e2e.rs`,
   `tests/value_class_mangled_lambda_names_e2e.rs`, `tests/java_parameters_attribute_e2e.rs`.
 - **A value-class default of a primary constructor is lowered like the constructor's other code.**

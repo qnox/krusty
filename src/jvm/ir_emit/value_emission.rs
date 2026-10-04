@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use crate::ir::{Callee, IrExpr};
+use crate::ir::{Callee, IrExpr, NullCheck};
 use crate::jvm::classfile::CodeBuilder;
 use crate::jvm::names::{method_descriptor, type_descriptor};
 use crate::jvm::value_classes::instance_representation;
@@ -1729,7 +1729,7 @@ impl super::Emitter<'_> {
                 };
                 code.aload(slot);
             }
-            IrExpr::NotNullAssert { operand, message } => {
+            IrExpr::NotNullAssert { operand, check } => {
                 self.emit_value(*operand, code);
                 // Flow typing can prove a stable nullable scalar non-null before a later, redundant
                 // `!!`. Its checked FIR assertion remains visible, but the selected smart-cast
@@ -1744,8 +1744,8 @@ impl super::Emitter<'_> {
                 // A platform value narrowed to a declared non-null type names the checked expression
                 // in its failure (`getenv(...) must not be null`); `x!!` has no such name and uses the
                 // one-argument form. Both consume the duplicate and leave the value in place.
-                let m = match message {
-                    Some(message) => {
+                let m = match check {
+                    NullCheck::Named(message) => {
                         code.push_string(message, self.cw);
                         self.cw.methodref(
                             "kotlin/jvm/internal/Intrinsics",
@@ -1753,13 +1753,18 @@ impl super::Emitter<'_> {
                             "(Ljava/lang/Object;Ljava/lang/String;)V",
                         )
                     }
-                    None => self.cw.methodref(
+                    NullCheck::Source | NullCheck::Unnamed => self.cw.methodref(
                         "kotlin/jvm/internal/Intrinsics",
                         "checkNotNull",
                         "(Ljava/lang/Object;)V",
                     ),
                 };
-                code.invokestatic(m, if message.is_some() { 2 } else { 1 }, 0);
+                let arguments = if matches!(check, NullCheck::Named(_)) {
+                    2
+                } else {
+                    1
+                };
+                code.invokestatic(m, arguments, 0);
             }
             IrExpr::LateinitCheck { operand, name } => {
                 // A `lateinit var` local read: throw `UninitializedPropertyAccessException` while the slot

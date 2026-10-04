@@ -4119,10 +4119,13 @@ cases that call `typeOf`, 50 pass now; before this, one did. The semantics are i
 Remaining:
 - Six `typeErasure/*InsideClass` cases. A reified MEMBER inline function is called, not inlined, so it
   throws whatever its body does. That is not specific to `typeOf`.
-- Reified parameters in anonymous objects regenerated per call site (`reifiedAsNestedArgument`).
+- Reified `typeOf` in an anonymous object's property initializer is specialized at the inline
+  call, including when another inline function passes the outer reified parameter
+  (`reifiedAsNestedArgument`). An anonymous object that captures a `crossinline` lambda is copied
+  per call as well (`localClass`): a capture-free lambda is inlined into the copy, and `typeOf`
+  names that copy.
   Same-module `object` members (`reified/capture.kt`, `reified/innerObject.kt`) are copied at the
-  inline call. An anonymous object that captures a `crossinline` lambda is copied per call as well
-  (`localClass`): a capture-free lambda is inlined into the copy, and `typeOf` names that copy.
+  inline call.
 - Reified intersection-type arguments (`intersectionType`,
   `reifiedTypeArgumentWithIntersectionTypeAsTypeArgument`).
 - Typealias use-site projections (`typeAliasedType`).

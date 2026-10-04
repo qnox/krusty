@@ -433,7 +433,14 @@ fn compile_multifile(
                 }
                 java_classes = classes;
             }
-            None => return compile_kotlin_first(src, &blocks, &java_blocks, cp_jars, jdk_modules),
+            None => {
+                let sources = UnitSources {
+                    kotlin: &blocks,
+                    common: 0,
+                    java: &java_blocks,
+                };
+                return compile_kotlin_first(src, sources, cp_jars, jdk_modules);
+            }
         }
     }
 
@@ -460,22 +467,14 @@ fn compile_multifile(
 /// ship. Header installation or javac failure means the corpus case failed to compile.
 fn compile_kotlin_first(
     src: &str,
-    blocks: &[(String, String)],
-    java_blocks: &[(String, String)],
+    sources: UnitSources<'_>,
     cp_jars: &[std::path::PathBuf],
     jdk_modules: Option<&std::path::Path>,
 ) -> Option<Vec<(String, Vec<u8>)>> {
+    let java_blocks = sources.java;
     let features = krusty::features::LangFeatures::from_source(src);
-    let kotlin_classes = compile_blocks_mixed(
-        blocks,
-        java_blocks,
-        cp_jars,
-        &[],
-        jdk_modules,
-        &features,
-        None,
-        &[],
-    )?;
+    let kotlin_classes =
+        compile_blocks_mixed(sources, cp_jars, &[], jdk_modules, &features, None, &[])?;
 
     static UID: AtomicU64 = AtomicU64::new(0);
     let uid = UID.fetch_add(1, Ordering::Relaxed);
@@ -514,8 +513,11 @@ fn compile_blocks(
     overlay: &[(String, Vec<u8>)],
 ) -> Option<Vec<(String, Vec<u8>)>> {
     compile_blocks_mixed(
-        blocks,
-        &[],
+        UnitSources {
+            kotlin: blocks,
+            common: 0,
+            java: &[],
+        },
         cp_jars,
         friend_paths,
         jdk_modules,
@@ -525,9 +527,17 @@ fn compile_blocks(
     )
 }
 
+/// One krusty compilation unit's sources. The first `common` Kotlin blocks are common (`dependsOn`)
+/// sources, exactly as `krusty::conformance::module_units` orders a unit's chain.
+#[derive(Clone, Copy)]
+struct UnitSources<'a> {
+    kotlin: &'a [(String, String)],
+    common: usize,
+    java: &'a [(String, String)],
+}
+
 fn compile_blocks_mixed(
-    blocks: &[(String, String)],
-    java_blocks: &[(String, String)],
+    sources: UnitSources<'_>,
     cp_jars: &[std::path::PathBuf],
     friend_paths: &[std::path::PathBuf],
     jdk_modules: Option<&std::path::Path>,
@@ -535,6 +545,11 @@ fn compile_blocks_mixed(
     progress: Option<&dyn Fn(&str)>,
     overlay: &[(String, Vec<u8>)],
 ) -> Option<Vec<(String, Vec<u8>)>> {
+    let UnitSources {
+        kotlin: blocks,
+        java: java_blocks,
+        ..
+    } = sources;
     let report = |phase: &str| {
         if let Some(progress) = progress {
             progress(phase);
@@ -560,7 +575,15 @@ fn compile_blocks_mixed(
         .collect();
     let mut inputs = blocks
         .iter()
-        .map(|(stem, content)| krusty::source::SourceInput::kotlin(content).with_file_stem(stem))
+        .enumerate()
+        .map(|(index, (stem, content))| {
+            let input = krusty::source::SourceInput::kotlin(content).with_file_stem(stem);
+            if index < sources.common {
+                input.common()
+            } else {
+                input
+            }
+        })
         .collect::<Vec<_>>();
     inputs.extend(
         java_blocks
@@ -654,6 +677,13 @@ fn compile_module_test(
             break;
         }
         let (files, java_files) = (&m.files, &m.java_files);
+        // The unit's `dependsOn` chain sources come first and are common sources, as in kotlinc's
+        // `-Xcommon-sources` compilation of one platform module.
+        let kotlin_only = UnitSources {
+            kotlin: files,
+            common: m.common_file_count,
+            java: &[],
+        };
         let report = |phase: &str| progress(&format!("module {}: {phase}", m.name));
         // A source-less unit (an empty hmpp intermediate built standalone) emits nothing; it still
         // gets a (created, empty) classpath dir so dependents resolve it.
@@ -670,8 +700,8 @@ fn compile_module_test(
         // only deps/JDK); when that fails — the Java references THIS module's Kotlin — fall back to
         // the Kotlin-first stub pipeline, exactly like the single-module path.
         let classes = if java_files.is_empty() {
-            compile_blocks(
-                files,
+            compile_blocks_mixed(
+                kotlin_only,
                 &cp,
                 &friend_paths,
                 jdk_modules,
@@ -694,8 +724,8 @@ fn compile_module_test(
                         // top-level functions resolve through the package catalog, which only
                         // directory/jar entries contribute to — an overlaid dependency module
                         // loses them (measured: -95 box passes).
-                        compile_blocks(
-                            files,
+                        compile_blocks_mixed(
+                            kotlin_only,
                             &cp,
                             &friend_paths,
                             jdk_modules,
@@ -709,7 +739,15 @@ fn compile_module_test(
                         k
                     })
                 }
-                None => compile_kotlin_first(src, files, java_files, &cp, jdk_modules),
+                None => compile_kotlin_first(
+                    src,
+                    UnitSources {
+                        java: java_files,
+                        ..kotlin_only
+                    },
+                    &cp,
+                    jdk_modules,
+                ),
             }
         };
         let Some(classes) = classes else {

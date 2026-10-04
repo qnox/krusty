@@ -949,9 +949,9 @@ fn hoist_expr(
             };
             e
         }
-        IrExpr::NotNullAssert { operand, message } => {
+        IrExpr::NotNullAssert { operand, check } => {
             let operand = hoist_expr(ir, operand, suspend_set, orig_rets, value_types, prelude);
-            ir.exprs[e as usize] = IrExpr::NotNullAssert { operand, message };
+            ir.exprs[e as usize] = IrExpr::NotNullAssert { operand, check };
             e
         }
         IrExpr::LateinitCheck { operand, name } => {

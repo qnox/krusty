@@ -125,7 +125,7 @@ fn secondary_constructor_default_flags_round_trip() {
         sig_name: None,
         vararg_index: None,
         flags: krusty::metadata::class_builder::SECONDARY_CTOR_FLAGS,
-        annotations: &[],
+        annotations: &krusty::metadata::NO_ANNOTATIONS,
     }];
     let (d1, d2) = build_class(
         type_name("sample/Secondary"),
@@ -258,7 +258,7 @@ fn inner_member_metadata_maps_captured_and_own_type_parameters_to_distinct_ids()
         vararg_index: None,
         jvm_sig: None,
         jvm_sig_name: None,
-        annotations: Vec::new(),
+        annotations: Default::default(),
         param_annotations: Vec::new(),
         no_infer_params: Vec::new(),
     }];
@@ -324,7 +324,7 @@ fn nested_inner_metadata_numbers_captures_from_outermost_to_innermost() {
         vararg_index: None,
         jvm_sig: None,
         jvm_sig_name: None,
-        annotations: Vec::new(),
+        annotations: Default::default(),
         param_annotations: Vec::new(),
         no_infer_params: Vec::new(),
     }];
@@ -418,7 +418,7 @@ fn package_value_param_defaults_round_trip() {
     // module can omit `b` (the reader's `metadata_param_defaults` drives classpath default-omission).
     let funcs = vec![PkgFnMeta {
         spellings: krusty::spelling::DeclaredSpellings::default(),
-        annotations: Vec::new(),
+        annotations: Default::default(),
         decl_order: 0,
         jvm_name: None,
         name: "host".to_string(),
@@ -473,7 +473,7 @@ fn package_function_type_parameter_bound_round_trips() {
     let t = Ty::ty_param("T", Ty::obj("kotlin/CharSequence"));
     let funcs = vec![PkgFnMeta {
         spellings: krusty::spelling::DeclaredSpellings::default(),
-        annotations: Vec::new(),
+        annotations: Default::default(),
         decl_order: 0,
         jvm_name: None,
         name: "identity".to_string(),
@@ -527,7 +527,7 @@ fn package_extension_receiver_round_trips() {
     // `builder.composable("x")` call.
     let funcs = vec![PkgFnMeta {
         spellings: krusty::spelling::DeclaredSpellings::default(),
-        annotations: Vec::new(),
+        annotations: Default::default(),
         decl_order: 0,
         jvm_name: None,
         name: "composable".to_string(),
@@ -590,7 +590,7 @@ fn package_receiver_function_type_param_round_trips() {
     // dependent recognizes a lambda passed to `builder` binds `this` to NGB (drives classpath lambda_recv).
     let funcs = vec![PkgFnMeta {
         spellings: krusty::spelling::DeclaredSpellings::default(),
-        annotations: Vec::new(),
+        annotations: Default::default(),
         decl_order: 0,
         jvm_name: None,
         name: "NavHost".to_string(),

@@ -190,6 +190,8 @@ mod callable_ref_e2e;
 mod callable_ref_equality_e2e;
 #[path = "callable_ref_extension_e2e.rs"]
 mod callable_ref_extension_e2e;
+#[path = "callable_ref_generic_signature_e2e.rs"]
+mod callable_ref_generic_signature_e2e;
 #[path = "callable_ref_to_inferred_member_e2e.rs"]
 mod callable_ref_to_inferred_member_e2e;
 #[path = "callable_ref_unresolved_e2e.rs"]
@@ -689,6 +691,8 @@ mod empty_locals_e2e;
 mod empty_loop_body_e2e;
 #[path = "engine_declaration_types_e2e.rs"]
 mod engine_declaration_types_e2e;
+#[path = "enhanced_result_null_check_e2e.rs"]
+mod enhanced_result_null_check_e2e;
 #[path = "enum_body_property_e2e.rs"]
 mod enum_body_property_e2e;
 #[path = "enum_class_signature_e2e.rs"]
@@ -1385,6 +1389,8 @@ mod nullable_double_type_param_equality_e2e;
 mod nullable_uint_property_e2e;
 #[path = "open_end_range_membership_e2e.rs"]
 mod open_end_range_membership_e2e;
+#[path = "optional_expectation_annotation_e2e.rs"]
+mod optional_expectation_annotation_e2e;
 #[path = "primitive_hash_code_e2e.rs"]
 mod primitive_hash_code_e2e;
 #[path = "result_generic_override_argument_e2e.rs"]
@@ -2560,6 +2566,8 @@ mod unsigned_vararg_e2e;
 
 #[path = "reified_nullable_instance_check_e2e.rs"]
 mod reified_nullable_instance_check_e2e;
+#[path = "reified_object_type_of_e2e.rs"]
+mod reified_object_type_of_e2e;
 
 #[path = "discarded_inline_result_temporary_e2e.rs"]
 mod discarded_inline_result_temporary_e2e;
