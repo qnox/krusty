@@ -5,90 +5,11 @@ use crate::resolve::implicit_rungs::ImplicitRung;
 
 mod cast_narrowing;
 mod constructor_expectations;
+mod declaration_result;
 mod scoped_constraint_frames;
 
 pub(super) use constructor_expectations::ReceiverLevelCall;
-
-/// Remove solver-local projection captures from an inferred declaration result. A capture is
-/// readable through its upper bound at the result root; inside a generic argument it is exposed as
-/// a star projection so the published signature does not claim an invariant type that callers
-/// could never name.
-fn denotable_signature_result(
-    ty: Ty,
-    denotable_parameters: &std::collections::HashSet<String>,
-) -> Ty {
-    fn result(
-        ty: Ty,
-        denotable: &std::collections::HashSet<String>,
-        visiting: &mut std::collections::HashSet<&'static str>,
-    ) -> Ty {
-        match ty {
-            // `Null` is the solver's literal-only bottom marker. A declaration inferred from that
-            // expression publishes Kotlin's denotable `Nothing?`; the literal marker must never
-            // cross into checked declaration headers, metadata, common lowering, or a backend.
-            Ty::Null => Ty::nullable(Ty::Nothing),
-            Ty::TyParam(name, bound) if !denotable.contains(name) => {
-                if !visiting.insert(name) {
-                    return Ty::nullable(Ty::obj("kotlin/Any"));
-                }
-                let approximated = result(bound.projection_read_ty(), denotable, visiting);
-                visiting.remove(name);
-                approximated
-            }
-            Ty::TyParam(..) => ty,
-            Ty::Obj(owner, arguments) if !arguments.is_empty() => Ty::obj_args_name(
-                owner,
-                &arguments
-                    .iter()
-                    .map(|argument| match *argument {
-                        Ty::TyParam(name, bound) if !denotable.contains(name) => {
-                            Ty::star_projection(result(
-                                bound.projection_read_ty(),
-                                denotable,
-                                visiting,
-                            ))
-                        }
-                        Ty::InProjection(inner) => {
-                            Ty::in_projection(result(*inner, denotable, visiting))
-                        }
-                        Ty::OutProjection(inner) => {
-                            Ty::out_projection(result(*inner, denotable, visiting))
-                        }
-                        Ty::StarProjection(inner) => {
-                            Ty::star_projection(result(*inner, denotable, visiting))
-                        }
-                        argument => result(argument, denotable, visiting),
-                    })
-                    .collect::<Vec<_>>(),
-            ),
-            Ty::Fun(signature) => Ty::fun_with_shape(
-                signature
-                    .params
-                    .iter()
-                    .map(|parameter| result(*parameter, denotable, visiting))
-                    .collect(),
-                result(signature.ret, denotable, visiting),
-                signature.context_count,
-                signature.has_receiver,
-                signature.suspend,
-            ),
-            Ty::Nullable(inner) => Ty::nullable(result(*inner, denotable, visiting)),
-            Ty::PlatformNullable(inner) => {
-                Ty::platform_nullable(result(*inner, denotable, visiting))
-            }
-            Ty::InProjection(inner) => Ty::in_projection(result(*inner, denotable, visiting)),
-            Ty::OutProjection(inner) => Ty::out_projection(result(*inner, denotable, visiting)),
-            Ty::StarProjection(inner) => Ty::star_projection(result(*inner, denotable, visiting)),
-            _ => ty,
-        }
-    }
-
-    result(
-        ty,
-        denotable_parameters,
-        &mut std::collections::HashSet::new(),
-    )
-}
+use declaration_result::denotable_signature_result;
 
 /// Select the language-defined SAM construction for a classifier call. Qualified and unqualified
 /// classifier spellings share this path; the qualifier affects only how the classifier was found,
@@ -1009,6 +930,15 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             .get(&declaration)
             .cloned()
             .ok_or_else(Self::failure)
+    }
+
+    fn record_inferred_result(
+        &self,
+        declaration: crate::fir::DeclarationId,
+        root_call: crate::fir::OriginId,
+        result: crate::fir::ResolvedTy,
+    ) {
+        self.record_inferred_result_spelling(declaration, root_call, result);
     }
 
     fn approximate_declaration_result(
@@ -2665,12 +2595,11 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     &resolved_type_arguments,
                 )
                 .ok_or_else(Self::failure)?;
-                if let Some((formals, expansion)) = source_alias.as_ref() {
+                if let Some(alias) = source_alias.as_ref() {
                     return self
                         .apply_source_alias_constructor_result(
-                            scope,
-                            formals,
-                            *expansion,
+                            (scope, origin),
+                            alias,
                             result,
                             Some(actual),
                             expected.map(crate::fir::ResolvedTy::get),
@@ -2688,12 +2617,11 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     &resolved_type_arguments,
                     expected.map(crate::fir::ResolvedTy::get),
                 )?;
-                if let Some((formals, expansion)) = source_alias.as_ref() {
+                if let Some(alias) = source_alias.as_ref() {
                     return self
                         .apply_source_alias_constructor_result(
-                            scope,
-                            formals,
-                            *expansion,
+                            (scope, origin),
+                            alias,
                             result.get(),
                             None,
                             expected.map(crate::fir::ResolvedTy::get),
@@ -2790,7 +2718,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             if let Some(internal) = sam_interface {
                 let target = self
                     .applied_source_alias_expansion(scope, spelling, &resolved_type_arguments)
-                    .map_or_else(|| Ty::obj_name(internal), |(_, expansion)| expansion);
+                    .map_or_else(|| Ty::obj_name(internal), |(_, _, expansion)| expansion);
                 let sam = crate::symbol_resolver::semantic_sam_signature(&source, target)
                     .expect("the SAM signature was just selected");
                 let shape = Ty::fun_with_shape(

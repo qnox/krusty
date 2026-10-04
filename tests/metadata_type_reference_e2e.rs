@@ -138,3 +138,38 @@ fn a_plain_string_reuses_an_equal_class_id() {
         "Root_class_named_functionKt",
     );
 }
+
+/// A declaration inferred from a constructor call through a `typealias` records the alias as the
+/// result's abbreviation, as a declared type would: library aliases (`StringBuilder`, generic
+/// `HashMap`) and a source alias whose expansion repeats its parameter.
+#[test]
+fn an_inferred_alias_constructor_result_keeps_its_abbreviation() {
+    const SRC: &str = "package app\n\
+        \n\
+        class PBox<A, B>(val a: A, val b: B)\n\
+        typealias Same<T> = PBox<T, T>\n\
+        \n\
+        val log = StringBuilder()\n\
+        var table = HashMap<String, MutableList<Int>>()\n\
+        fun pair() = Same(1, 2)\n\
+        \n\
+        class Holder {\n\
+        \x20   val items = ArrayList<String>()\n\
+        \x20   val pair = Same<String>(\"a\", \"b\")\n\
+        }\n";
+    assert_identical(
+        "inferred_alias_package",
+        SRC,
+        "app/Inferred_alias_packageKt",
+    );
+    assert_identical("inferred_alias_class", SRC, "app/Holder");
+}
+
+/// The same constructor named without its alias (`java.lang.StringBuilder()`) has nothing to
+/// abbreviate.
+#[test]
+fn an_inferred_unaliased_constructor_result_has_no_abbreviation() {
+    const SRC: &str = "val log = java.lang.StringBuilder()\n\
+        val plain = java.util.ArrayList<String>()\n";
+    assert_identical("inferred_unaliased", SRC, "Inferred_unaliasedKt");
+}

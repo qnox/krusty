@@ -815,6 +815,10 @@ pub trait SignatureSemantics {
         Ok(result)
     }
 
+    /// The declaration's published `result` is the value of the call selected at `root_call`.
+    /// Metadata-only: an implementation may keep that call's alias spelling for the result.
+    fn record_inferred_result(&self, _: DeclarationId, _root_call: OriginId, _: ResolvedTy) {}
+
     fn classifier_type(
         &self,
         declaration: DeclarationId,
@@ -1875,30 +1879,6 @@ impl ResolvedModuleIndex {
         assert!(
             self.contracts.insert(declaration, contract).is_none(),
             "a source contract may be published only once"
-        );
-    }
-
-    pub fn declaration_spellings(
-        &self,
-        declaration: DeclarationId,
-    ) -> Option<&crate::spelling::DeclaredSpellings> {
-        self.declaration_spellings.get(&declaration)
-    }
-
-    pub(crate) fn publish_declaration_spellings(
-        &mut self,
-        declaration: DeclarationId,
-        spellings: crate::spelling::DeclaredSpellings,
-    ) {
-        assert!(
-            self.declaration_headers.contains_key(&declaration),
-            "declaration spellings require a published semantic header"
-        );
-        assert!(
-            self.declaration_spellings
-                .insert(declaration, spellings)
-                .is_none(),
-            "a declaration may publish source spellings only once"
         );
     }
 

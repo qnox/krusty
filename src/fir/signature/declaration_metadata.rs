@@ -3,6 +3,61 @@
 use super::*;
 
 impl ResolvedModuleIndex {
+    pub fn declaration_spellings(
+        &self,
+        declaration: DeclarationId,
+    ) -> Option<&crate::spelling::DeclaredSpellings> {
+        self.declaration_spellings.get(&declaration)
+    }
+
+    /// Publish the source spellings of a declaration's declared types. An inferred result's
+    /// spelling, published by signature solving beforehand, fills the result slot the source left
+    /// unspelled.
+    pub(crate) fn publish_declaration_spellings(
+        &mut self,
+        declaration: DeclarationId,
+        mut spellings: crate::spelling::DeclaredSpellings,
+    ) {
+        assert!(
+            self.declaration_headers.contains_key(&declaration),
+            "declaration spellings require a published semantic header"
+        );
+        if let Some(inferred) = self.declaration_spellings.remove(&declaration) {
+            let only_result = crate::spelling::DeclaredSpellings {
+                ret: crate::spelling::Spelled::default(),
+                ..inferred.clone()
+            };
+            assert!(
+                spellings.ret.is_none() && only_result.is_none(),
+                "a declaration may publish source spellings only once"
+            );
+            spellings.ret = inferred.ret;
+        }
+        self.declaration_spellings.insert(declaration, spellings);
+    }
+
+    /// Publish the alias spelling of an inferred declaration result (`val sb = StringBuilder()`).
+    pub(crate) fn publish_inferred_result_spelling(
+        &mut self,
+        declaration: DeclarationId,
+        ret: crate::spelling::Spelled,
+    ) {
+        assert!(
+            self.declaration_headers.contains_key(&declaration),
+            "declaration spellings require a published semantic header"
+        );
+        let spellings = crate::spelling::DeclaredSpellings {
+            ret,
+            ..crate::spelling::DeclaredSpellings::default()
+        };
+        assert!(
+            self.declaration_spellings
+                .insert(declaration, spellings)
+                .is_none(),
+            "an inferred result publishes its spelling once, before the declared spellings"
+        );
+    }
+
     pub fn declaration_annotations(&self, declaration: DeclarationId) -> &[TypeName] {
         self.declaration_annotations
             .get(&declaration)

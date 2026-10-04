@@ -1576,9 +1576,10 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
             Ok(ty)
         }
 
+        let root = result;
         let result = evaluate_expression(
             self.semantics,
-            result,
+            root,
             graph,
             demand,
             &mut HashMap::new(),
@@ -1587,6 +1588,10 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
         let result = self
             .semantics
             .approximate_declaration_result(declaration, result)?;
+        if let Some(root_call) = call_selection_origin(graph, root) {
+            self.semantics
+                .record_inferred_result(declaration, root_call, result);
+        }
         let parameters = self.semantics.declaration_parameters(declaration);
         if parameters.is_err() {
             crate::trace_compiler!(

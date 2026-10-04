@@ -193,3 +193,48 @@ pub(super) fn compact_classifier_parents(
     }
     Some((superclass, interfaces, resolved_source_supertypes))
 }
+
+/// Revalidate the completed semantic parent graph after body-local aliases have been expanded.
+/// The transitional collector cannot resolve a statement-local alias and therefore cannot see a
+/// cycle expressed through one; conversely, its unresolved spelling must not cause a valid compact
+/// edge to be discarded. Returning the exact cyclic compact edges lets publication distinguish
+/// those two cases without retaining alias syntax beyond Pass 1.
+pub(super) fn compact_classifier_cycle_edges(
+    table: &crate::resolve::SymbolTable,
+    classifier_types: &std::collections::HashMap<crate::fir::DeclarationId, TypeName>,
+    resolved: &std::collections::HashMap<crate::fir::DeclarationId, (Option<Ty>, Vec<Ty>)>,
+) -> HashSet<(crate::fir::DeclarationId, TypeName)> {
+    let mut graph = super::super::supertype_graph(table);
+    for (declaration, (superclass, interfaces)) in resolved {
+        let Some(owner) = classifier_types.get(declaration).copied() else {
+            continue;
+        };
+        let parents = superclass
+            .iter()
+            .chain(interfaces)
+            .filter_map(|parent| parent.non_null().kotlin_class_internal())
+            .collect::<Vec<_>>();
+        graph.entry(owner).or_default().extend(parents);
+    }
+    let (component_of, cyclic_components) = super::super::supertype_components(&graph);
+    let mut rejected = HashSet::new();
+    for (declaration, (superclass, interfaces)) in resolved {
+        let Some(component) = classifier_types
+            .get(declaration)
+            .and_then(|owner| component_of.get(owner))
+            .copied()
+            .filter(|component| cyclic_components.contains(component))
+        else {
+            continue;
+        };
+        for parent in superclass.iter().chain(interfaces) {
+            let Some(parent) = parent.non_null().kotlin_class_internal() else {
+                continue;
+            };
+            if component_of.get(&parent).copied() == Some(component) {
+                rejected.insert((*declaration, parent));
+            }
+        }
+    }
+    rejected
+}

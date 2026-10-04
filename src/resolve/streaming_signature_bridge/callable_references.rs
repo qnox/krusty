@@ -148,8 +148,8 @@ impl ProductionSignatureSemantics<'_> {
         scope: crate::fir::SignatureScope,
         spelling: &str,
         explicit_type_arguments: &[Ty],
-    ) -> Option<(Vec<String>, Ty)> {
-        let (_, formals, expansion) = self.signature_source_alias_expansion(scope, spelling)?;
+    ) -> Option<(crate::types::TypeName, Vec<String>, Ty)> {
+        let (alias, formals, expansion) = self.signature_source_alias_expansion(scope, spelling)?;
         if !explicit_type_arguments.is_empty() && explicit_type_arguments.len() != formals.len() {
             return None;
         }
@@ -158,21 +158,20 @@ impl ProductionSignatureSemantics<'_> {
             .cloned()
             .zip(explicit_type_arguments.iter().copied())
             .collect::<crate::symbol_resolver::GSigBinds>();
-        Some((
-            formals,
-            crate::symbol_resolver::ty_subst_keep_unbound(expansion, &bindings),
-        ))
+        let expansion = crate::symbol_resolver::ty_subst_keep_unbound(expansion, &bindings);
+        Some((alias, formals, expansion))
     }
 
     pub(super) fn apply_source_alias_constructor_result(
         &self,
-        scope: crate::fir::SignatureScope,
-        formals: &[String],
-        expansion: Ty,
+        (scope, origin): (crate::fir::SignatureScope, crate::fir::OriginId),
+        alias: &(crate::types::TypeName, Vec<String>, Ty),
         underlying_result: Ty,
         argument: Option<Ty>,
         expected: Option<Ty>,
     ) -> Option<crate::fir::ResolvedTy> {
+        let (_, formals, expansion) = alias;
+        let expansion = *expansion;
         let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
         let source = crate::symbol_source::CompositeSource::new(vec![
             &module as &dyn crate::symbol_source::SymbolSource,
@@ -202,10 +201,9 @@ impl ProductionSignatureSemantics<'_> {
         }) {
             return None;
         }
-        crate::fir::ResolvedTy::new(crate::symbol_resolver::ty_subst_keep_unbound(
-            expansion, &bindings,
-        ))
-        .ok()
+        let result = crate::symbol_resolver::ty_subst_keep_unbound(expansion, &bindings);
+        self.record_alias_constructor_result(origin, alias.0, result);
+        crate::fir::ResolvedTy::new(result).ok()
     }
 
     pub(super) fn classifier_constructor_reference(
@@ -224,7 +222,7 @@ impl ProductionSignatureSemantics<'_> {
             expected.get(),
         );
         let (alias_formals, expansion) = match alias {
-            Some(alias) => alias,
+            Some((_, formals, expansion)) => (formals, expansion),
             None => {
                 let classifier = self
                     .with_resolver(scope, |resolver| {

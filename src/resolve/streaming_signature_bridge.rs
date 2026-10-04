@@ -25,6 +25,7 @@ mod demanded_source_call;
 mod diagnostics;
 mod file_import_scopes;
 mod header_projection;
+mod inferred_result_spellings;
 mod integer_constants;
 mod local_signatures;
 mod lookups;
@@ -98,6 +99,7 @@ struct ProductionSignatureSemantics<'a> {
     source_contracts:
         RefCell<HashMap<crate::fir::DeclarationId, std::sync::Arc<crate::contracts::Contract>>>,
     file_import_scopes: file_import_scopes::FileImportScopes,
+    inferred_result_spellings: RefCell<inferred_result_spellings::InferredResultSpellings>,
 }
 
 struct SelectedCallContract {
@@ -3097,51 +3099,6 @@ fn semantic_type_with_classifier_captures(table: &SymbolTable, ty: Ty) -> Ty {
     }
 }
 
-/// Revalidate the completed semantic parent graph after body-local aliases have been expanded.
-/// The transitional collector cannot resolve a statement-local alias and therefore cannot see a
-/// cycle expressed through one; conversely, its unresolved spelling must not cause a valid compact
-/// edge to be discarded. Returning the exact cyclic compact edges lets publication distinguish
-/// those two cases without retaining alias syntax beyond Pass 1.
-fn compact_classifier_cycle_edges(
-    table: &SymbolTable,
-    classifier_types: &HashMap<crate::fir::DeclarationId, TypeName>,
-    resolved: &HashMap<crate::fir::DeclarationId, (Option<Ty>, Vec<Ty>)>,
-) -> HashSet<(crate::fir::DeclarationId, TypeName)> {
-    let mut graph = super::supertype_graph(table);
-    for (declaration, (superclass, interfaces)) in resolved {
-        let Some(owner) = classifier_types.get(declaration).copied() else {
-            continue;
-        };
-        let parents = superclass
-            .iter()
-            .chain(interfaces)
-            .filter_map(|parent| parent.non_null().kotlin_class_internal())
-            .collect::<Vec<_>>();
-        graph.entry(owner).or_default().extend(parents);
-    }
-    let (component_of, cyclic_components) = super::supertype_components(&graph);
-    let mut rejected = HashSet::new();
-    for (declaration, (superclass, interfaces)) in resolved {
-        let Some(component) = classifier_types
-            .get(declaration)
-            .and_then(|owner| component_of.get(owner))
-            .copied()
-            .filter(|component| cyclic_components.contains(component))
-        else {
-            continue;
-        };
-        for parent in superclass.iter().chain(interfaces) {
-            let Some(parent) = parent.non_null().kotlin_class_internal() else {
-                continue;
-            };
-            if component_of.get(&parent).copied() == Some(component) {
-                rejected.insert((*declaration, parent));
-            }
-        }
-    }
-    rejected
-}
-
 /// Reapply a compact header's star-projection syntax to a provisionally resolved legacy type.
 ///
 /// The legacy collector has no classifier-shape input while resolving a `TypeRef`, so it represents
@@ -4068,6 +4025,7 @@ pub(crate) fn finalized_streamed_signature_index(
         selected_call_contracts: RefCell::new(HashMap::new()),
         source_contracts: RefCell::new(HashMap::new()),
         file_import_scopes: file_import_scopes::FileImportScopes::default(),
+        inferred_result_spellings: RefCell::default(),
     };
     for stub in &headers.stubs {
         if suppressed_generated_callables.contains(&stub.id) {
@@ -4668,8 +4626,11 @@ pub(crate) fn finalized_streamed_signature_index(
         };
         resolved_classifier_parents.insert(declaration, (superclass, resolved_supertypes));
     }
-    let compact_cycle_edges =
-        compact_classifier_cycle_edges(table, &classifier_types, &resolved_classifier_parents);
+    let compact_cycle_edges = classifier_parents::compact_classifier_cycle_edges(
+        table,
+        &classifier_types,
+        &resolved_classifier_parents,
+    );
     failed.sort_by_key(|declaration| declaration.raw());
     failed.dedup();
     for diagnostic in explicit_type_semantics
@@ -4729,6 +4690,7 @@ pub(crate) fn finalized_streamed_signature_index(
         selected_call_contracts: RefCell::new(HashMap::new()),
         source_contracts: RefCell::new(HashMap::new()),
         file_import_scopes: file_import_scopes::FileImportScopes::default(),
+        inferred_result_spellings: RefCell::default(),
     };
     // A source contract shapes the solver's own block evaluation (`ensure(x)` and then `x.p`),
     // so resolve it once before solving. Publication and failure accounting consume this same
@@ -4757,6 +4719,7 @@ pub(crate) fn finalized_streamed_signature_index(
         }
     }
     let (mut index, mut finalization_failures) = solver.finalize_recovering(&evaluator);
+    let inferred_spellings = semantics.inferred_result_spellings.take();
     finalization_failures.extend(auxiliary_failures);
     finalization_failures.sort_by_key(|(declaration, _)| declaration.raw());
     finalization_failures.dedup_by_key(|(declaration, _)| *declaration);
@@ -6275,6 +6238,11 @@ pub(crate) fn finalized_streamed_signature_index(
             );
         }
     }
+    inferred_result_spellings::publish_inferred_result_spellings(
+        &mut index,
+        headers,
+        inferred_spellings,
+    );
     failed.sort_by_key(|declaration| declaration.raw());
     failed.dedup();
     StreamedSignatureIndex {
