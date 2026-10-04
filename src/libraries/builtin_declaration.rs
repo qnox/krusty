@@ -134,10 +134,11 @@ mod tests {
         );
 
         let parameter = Ty::ty_param("T", Ty::obj_name(any));
+        let parameters = [parameter];
         let mut comparable = declaration(
             crate::types::wk::comparable(),
             "compareTo",
-            &[parameter],
+            &parameters,
             Ty::Int,
         );
         comparable.is_operator = true;
