@@ -9102,6 +9102,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   consumer (`Any?`, or a generic parameter) hands that box on unchanged: the checked coercion from
   `T` to `R<Int>` would unbox it and the consumer would box it again, and kotlinc emits neither
   call. Reading `c.a` as `R<Int>` still unboxes once. Tests: `tests/value_class_generic_carrier_e2e.rs`.
+- **A return to a reference supertype is a value-class boundary.** A function declared to return
+  `Any`, `Any?`, or an interface a value class implements hands each returned value, a guard
+  `return` as much as the tail, through a reference slot, exactly as an `Any` parameter or local
+  takes it. A carrier (a value-class parameter, local, or call result) is boxed: `fun f(t: Tag): Any
+  = t` returns `Tag.box-impl(t)`. A value that already is the box is returned unchanged:
+  `fun f(s: Shelf<Tag>): Any = s[0]`, `= s.get(0)`, `list[0]`, and `map[key]` as `Any?` are the
+  generic call followed directly by `areturn`, with no `checkcast`, `unbox-impl`, or `box-impl`, as
+  in kotlinc. The checked coercion from the generic result to `Tag` (or `Tag?`) would unbox it and
+  the return would box it again, so the pair is dropped, null-safe forms included. A lambda whose
+  result is `Any` (`val f: () -> Any = { s[0] }`) returns through the same boundary. Tests:
+  `tests/value_class_reference_return_e2e.rs`.
 - **A value-class default of a primary constructor is lowered like the constructor's other code.**
   `class Test(val x: S, val y: S = S("K"))` fills an omitted `y` in its synthetic
   `<init>(String, String, int, DefaultConstructorMarker)`. The default expression runs over the
