@@ -374,9 +374,9 @@ pub(crate) fn lower_suspend(
         // body's own locals exist. The conjunction is the whole gate: this claims only functions
         // that would otherwise be emitted with no continuation to pass.
         // A member's continuation re-enters the method on the receiver it kept, so the call it makes
-        // has to reach exactly this body: an OPEN method would re-dispatch to an override, and a
-        // private one is not callable from the continuation class. Those keep the diagnostic they
-        // have today.
+        // has to reach exactly this body: an overridable member's body moves to the static
+        // `$suspendImpl` the continuation calls, and a private one is not callable from the
+        // continuation class, so it keeps the diagnostic it has today.
         //
         // A function that ALSO has suspensions of its own is taken whole: one method has one
         // dispatch, so the two kinds cannot be split between the IR machine and this one. The IR
@@ -1312,12 +1312,14 @@ fn normalize_value_when(ir: &mut IrFile, expression: ExprId) -> Option<ExprId> {
 /// deliberately skipped; only their capture expressions still belong to the enclosing function.
 /// Whether emission may own this function's coroutine machine.
 ///
-/// A static function always may. An instance method may when the continuation can call it back and
-/// be sure of reaching this very body: `invokevirtual` on an OPEN method would land in an override,
-/// and a private method is not accessible from the continuation class at all.
+/// A static function always may, and so may a member whose body moves to its static
+/// `$suspendImpl`: an interface member with a body or an overridable class member, whose
+/// continuation re-enters that static. Any other instance method may when the continuation can
+/// call it back and be sure of reaching this very body: a private method is not accessible from
+/// the continuation class at all.
 fn machine_eligible(ir: &IrFile, fid: u32) -> bool {
     let function = &ir.functions[fid as usize];
-    if function.is_static {
+    if function.is_static || crate::jvm::suspend_impls::moves_to_suspend_impl(ir, fid) {
         return true;
     }
     let owner_is_interface = function.dispatch_receiver.is_some_and(|receiver| {
