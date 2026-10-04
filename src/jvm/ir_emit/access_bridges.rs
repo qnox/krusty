@@ -633,21 +633,16 @@ pub(super) fn cross_owner_member_calls(
                 {
                     if let IrExpr::Call {
                         callee: Callee::Virtual { .. },
-                        dispatch_receiver: Some(receiver),
+                        dispatch_receiver: Some(_),
                         ..
                     } = ir.expr(expression)
                     {
-                        let bridge_owner = protected_bridge_owner(
-                            ir,
-                            expression,
-                            Some(*receiver),
-                            owner,
-                            dependency.owner,
-                        )
-                        .or_else(|| {
-                            caller.and_then(|caller| {
-                                enclosing_protected_subclass(ir, caller, dependency.owner)
-                            })
+                        // A dependency member's protected accessor belongs to the lexical source
+                        // subclass. The receiver's realized JVM type may be the dependency owner,
+                        // and expression-owner spellings may name the anonymous caller; neither is
+                        // an alternate source of subclass identity.
+                        let bridge_owner = caller.and_then(|caller| {
+                            enclosing_protected_subclass(ir, caller, dependency.owner)
                         });
                         if let Some(bridge_owner) = bridge_owner {
                             crate::trace_compiler!(
