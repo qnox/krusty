@@ -476,7 +476,7 @@ impl Emitter<'_> {
             let checked_platform_value = matches!(
                 self.ir.expr(arg),
                 IrExpr::NotNullAssert {
-                    message: Some(_),
+                    check: crate::ir::NullCheck::Named(_),
                     ..
                 }
             );

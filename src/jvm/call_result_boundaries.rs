@@ -170,7 +170,7 @@ fn fold_asserted_number_unbox(ir: &mut IrFile) {
             }
             let IrExpr::NotNullAssert {
                 operand: inner,
-                message: None,
+                check: crate::ir::NullCheck::Source,
             } = &ir.exprs[assertion as usize]
             else {
                 return None;
@@ -219,7 +219,7 @@ fn check_enhanced_result_before_unbox(ir: &mut IrFile) {
         .filter_map(|index| {
             let IrExpr::NotNullAssert {
                 operand: coercion,
-                message: Some(_),
+                check: crate::ir::NullCheck::Named(_),
             } = &ir.exprs[index]
             else {
                 return None;

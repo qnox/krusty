@@ -739,10 +739,28 @@ impl BodyFirChecker<'_> {
                 self.guard_platform_conditional(source, value, target)?;
                 Ok(value)
             }
+            // A block produces its value through its trailing expression, past its statements. A
+            // conditional there is guarded branch by branch; any other unchecked Java value is
+            // guarded around the whole block, which kotlinc's check cannot name.
             Expr::Block {
-                stmts,
                 trailing: Some(trailing),
-            } if stmts.is_empty() => {
+                ..
+            } => {
+                if !matches!(
+                    self.file.expr(trailing),
+                    Expr::If { .. } | Expr::When { .. } | Expr::Elvis { .. }
+                ) {
+                    if !self.info.produces_unchecked_java_value(trailing) {
+                        return Ok(value);
+                    }
+                    let cause = self.expression_origin(source)?;
+                    let conversion = self.platform_narrowing_conversion(None, cause, target);
+                    return Ok(self.body.add_expr(crate::fir::FirExpr {
+                        origin: cause,
+                        ty: target,
+                        kind: FirExprKind::ImplicitConversion { value, conversion },
+                    }));
+                }
                 let result = match &self
                     .body
                     .expr(value)
@@ -750,9 +768,9 @@ impl BodyFirChecker<'_> {
                     .kind
                 {
                     FirExprKind::Block {
-                        statements,
                         result: Some(result),
-                    } if statements.is_empty() => *result,
+                        ..
+                    } => *result,
                     _ => return Ok(value),
                 };
                 let guarded = self.guard_platform_branch(trailing, result, target)?;
@@ -767,6 +785,7 @@ impl BodyFirChecker<'_> {
                 Ok(value)
             }
             Expr::Block { .. } => Ok(value),
+            _ if !self.info.produces_unchecked_java_value(source) => Ok(value),
             _ => {
                 let cause = self.expression_origin(source)?;
                 let Some(conversion) = self.platform_producer_conversion(source, cause, target)
@@ -789,16 +808,25 @@ impl BodyFirChecker<'_> {
         target: ResolvedTy,
     ) -> Option<FirConversion> {
         let message = self.platform_narrowing_message(source)?;
+        Some(self.platform_narrowing_conversion(Some(message), cause, target))
+    }
+
+    fn platform_narrowing_conversion(
+        &mut self,
+        message: Option<Box<str>>,
+        cause: OriginId,
+        target: ResolvedTy,
+    ) -> FirConversion {
         let narrowing = self
             .body
             .add_platform_narrowing(FirPlatformNarrowing { message });
-        Some(FirConversion {
+        FirConversion {
             origin: cause,
             kind: FirConversionKind::PlatformNarrowing {
                 narrowing,
                 to: target,
             },
-        })
+        }
     }
 
     /// kotlinc names the platform value by the callable that produced it. A call, including an

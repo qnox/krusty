@@ -611,15 +611,14 @@ impl BodyLowering<'_> {
         let Some(check) = call.result_check else {
             return Ok(result);
         };
-        let message = self
+        let check = self
             .body
             .platform_narrowing(check)
-            .ok_or(FirLoweringFailure::UnsupportedIntrinsicCall)?
-            .message
-            .to_string();
+            .map(super::expression::platform_null_check)
+            .ok_or(FirLoweringFailure::UnsupportedIntrinsicCall)?;
         Ok(self.ir.add_expr(IrExpr::NotNullAssert {
             operand: result,
-            message: Some(message),
+            check,
         }))
     }
 

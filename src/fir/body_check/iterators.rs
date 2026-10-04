@@ -116,7 +116,9 @@ impl BodyFirChecker<'_> {
         let message = format!("{}(...)", member.member.name).into_boxed_str();
         Some(
             self.body
-                .add_platform_narrowing(crate::fir::FirPlatformNarrowing { message }),
+                .add_platform_narrowing(crate::fir::FirPlatformNarrowing {
+                    message: Some(message),
+                }),
         )
     }
 

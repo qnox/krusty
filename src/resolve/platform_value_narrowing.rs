@@ -5,11 +5,12 @@
 //! declared expected type does not accept `null`. The recorded positions become
 //! `Intrinsics.checkNotNullExpressionValue` on the JVM.
 
-use super::{Checker, PlatformNarrowing, ResolvedCall};
+use super::{Checker, PlatformNarrowing, ResolvedCall, TypeInfo};
 use crate::ast::{Expr, ExprId};
 use crate::libraries::ResultEnhancement;
 use crate::symbol_resolver::ResolvedMember;
 use crate::types::Ty;
+use std::collections::HashMap;
 
 impl Checker<'_> {
     /// Record that `e`'s PLATFORM type is committed to a declared non-null `expected` here.
@@ -83,25 +84,16 @@ impl Checker<'_> {
         self.has_enhanced_call_result(e)
     }
 
+    /// A branch produces its value through its trailing expression, past any statements and
+    /// nested blocks before it.
     fn branch_has_enhanced_result(&self, branch: ExprId) -> bool {
-        match self.file.expr(branch) {
-            Expr::Block {
-                stmts,
-                trailing: Some(trailing),
-            } if stmts.is_empty() => self.has_enhanced_result(*trailing),
-            Expr::Block { .. } => false,
-            _ => self.has_enhanced_result(branch),
-        }
+        self.has_enhanced_result(super::conditional_branch::branch_value_expression(
+            self.file, branch,
+        ))
     }
 
     fn has_enhanced_call_result(&self, e: ExprId) -> bool {
-        let call_sig = match self.resolved_calls.get(&e) {
-            Some(ResolvedCall::Member(member)) => &member.member.call_sig,
-            Some(ResolvedCall::Companion(member)) => &member.call_sig,
-            Some(ResolvedCall::TopLevel(call)) => &call.call_sig,
-            _ => return false,
-        };
-        call_sig.result_enhancement == ResultEnhancement::NotNull
+        enhanced_call_result(&self.resolved_calls, e)
     }
 
     /// The selected member's value parameters as the member DECLARES them for this receiver: the
@@ -140,4 +132,27 @@ impl Checker<'_> {
             })
             .collect()
     }
+}
+
+impl TypeInfo {
+    /// Whether `e` itself produces a value Java never checked: a flexible `T!` or a call result
+    /// enhanced to not-null.
+    ///
+    /// A conditional committed to a declared type is guarded branch by branch, and kotlinc's
+    /// implicit cast lands only where a branch's own value is such a value: a sibling branch that
+    /// produces a Kotlin `String` stays unchecked.
+    pub(crate) fn produces_unchecked_java_value(&self, e: ExprId) -> bool {
+        matches!(self.expr_types[e.0 as usize], Ty::PlatformNullable(_))
+            || enhanced_call_result(&self.resolved_calls, e)
+    }
+}
+
+fn enhanced_call_result(resolved_calls: &HashMap<ExprId, ResolvedCall>, e: ExprId) -> bool {
+    let call_sig = match resolved_calls.get(&e) {
+        Some(ResolvedCall::Member(member)) => &member.member.call_sig,
+        Some(ResolvedCall::Companion(member)) => &member.call_sig,
+        Some(ResolvedCall::TopLevel(call)) => &call.call_sig,
+        _ => return false,
+    };
+    call_sig.result_enhancement == ResultEnhancement::NotNull
 }

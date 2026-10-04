@@ -4,7 +4,8 @@
 //! `iterator()` override `List<E>.get(): E` and `MutableIterable<E>.iterator()`. Unlike a flexible
 //! value, an enhanced one is also checked where a declaration takes its type from it: an inferred
 //! local, an inferred function result, and the iterator and element a `for` loop stores. A declared
-//! result checks the branch of a conditional that produces the value.
+//! result checks each branch of a conditional that produces such a value, and only those; a braced
+//! branch is checked around its block, with no name in the failure.
 
 use super::common;
 
@@ -26,6 +27,46 @@ fun inferredResult() = build().toString()
 fun declaredResult(): String = build().toString()
 
 fun declaredConditional(flag: Boolean): String = if (flag) build().toString() else "fail"
+
+fun kotlinText(): String = "OK"
+
+fun bracedSingle(flag: Boolean): String = if (flag) { build().toString() } else "fail"
+
+fun nestedWithoutStatements(flag: Boolean): String = if (flag) {
+    if (flag) build().toString() else "inner"
+} else "fail"
+
+fun kotlinBranches(first: Boolean, second: Boolean): String = if (first) {
+    build().append("")
+    kotlinText()
+} else if (second) kotlinText() else build().toString()
+
+fun declaredBlock(flag: Boolean): String = if (flag) {
+    build().append("")
+    build().toString()
+} else "fail"
+
+fun declaredNestedBlock(flag: Boolean): String = if (flag) {
+    build().append("")
+    if (flag) {
+        build().append("")
+        build().toString()
+    } else "inner"
+} else "fail"
+
+fun declaredWhenBlocks(choice: Int): String = when (choice) {
+    0 -> {
+        build().append("")
+        build().toString()
+    }
+    1 -> {
+        if (choice > 0) {
+            build().append("")
+            build().toString()
+        } else "inner"
+    }
+    else -> "fail"
+}
 
 fun primitiveElement(): Int {
     val list = ArrayList<Int>()
@@ -57,6 +98,15 @@ fun box(): String {
     if (inferredResult() != "OK") return "inferredResult"
     if (declaredResult() != "OK") return "declaredResult"
     if (declaredConditional(true) != "OK") return "declaredConditional"
+    if (bracedSingle(true) != "OK") return "bracedSingle"
+    if (nestedWithoutStatements(true) != "OK") return "nestedWithoutStatements"
+    if (kotlinBranches(true, false) != "OK") return "kotlinBranches first"
+    if (kotlinBranches(false, true) != "OK") return "kotlinBranches second"
+    if (kotlinBranches(false, false) != "OK") return "kotlinBranches last"
+    if (declaredBlock(true) != "OK") return "declaredBlock"
+    if (declaredNestedBlock(true) != "OK") return "declaredNestedBlock"
+    if (declaredWhenBlocks(0) != "OK") return "declaredWhenBlocks 0"
+    if (declaredWhenBlocks(1) != "OK") return "declaredWhenBlocks 1"
     if (primitiveElement() != 2) return "primitiveElement"
     if (loopElements() != 2) return "loopElements"
     val list = ArrayList<String?>()
@@ -78,6 +128,12 @@ fn enhanced_java_results_are_checked_like_kotlinc() {
         "inferredResult",
         "declaredResult",
         "declaredConditional",
+        "bracedSingle",
+        "nestedWithoutStatements",
+        "kotlinBranches",
+        "declaredBlock",
+        "declaredNestedBlock",
+        "declaredWhenBlocks",
         "primitiveElement",
         "loopElements",
         "nullableElements",
