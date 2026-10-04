@@ -1197,7 +1197,7 @@ mod tests {
         owner: &str,
         rank: u32,
         params: Vec<Ty>,
-        role: Option<crate::libraries::SemanticCallRole>,
+        role: Option<crate::types::SemanticCallRole>,
     ) -> crate::libraries::FunctionInfo {
         let mut callable = crate::libraries::LibraryCallable::library(
             crate::types::type_name(owner),
@@ -1219,7 +1219,7 @@ mod tests {
 
     #[test]
     fn an_override_inherits_its_declarations_semantic_role() {
-        use crate::libraries::SemanticCallRole::KotlinAnyToString;
+        use crate::types::SemanticCallRole::KotlinAnyToString;
 
         let mut functions = FunctionSet {
             overloads: vec![
@@ -1241,7 +1241,7 @@ mod tests {
 
     #[test]
     fn a_different_overload_does_not_borrow_an_inherited_role() {
-        use crate::libraries::SemanticCallRole::KotlinAnyToString;
+        use crate::types::SemanticCallRole::KotlinAnyToString;
 
         let mut functions = FunctionSet {
             overloads: vec![

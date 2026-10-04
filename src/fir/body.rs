@@ -299,7 +299,7 @@ pub enum FirCallTarget {
         /// Semantic declaration role inherited through the selected override family. This belongs
         /// to the checked call, not to its provider-owned physical realization: a nearer override
         /// may inherit the role without changing its stable dependency identity.
-        semantic_role: Option<crate::libraries::SemanticCallRole>,
+        semantic_role: Option<crate::types::SemanticCallRole>,
         suspend: bool,
         can_inline: bool,
         inline_plan: Option<Box<FirInlineBodyPlan>>,
@@ -825,7 +825,7 @@ pub enum FirCallableReferenceTarget {
         /// Semantic declaration role of the selected callable, including one inherited by an
         /// override. The generated adapter call preserves the same checked identity as a direct
         /// call and must not reconstruct it from owner or name spellings.
-        semantic_role: Option<crate::libraries::SemanticCallRole>,
+        semantic_role: Option<crate::types::SemanticCallRole>,
         /// The declaration itself is `suspend`; a suspend-converted reference to an ordinary
         /// function is not.
         suspend: bool,

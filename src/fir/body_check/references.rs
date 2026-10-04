@@ -1412,7 +1412,7 @@ struct ExternalReferenceDeclaration<'a> {
     declaration: Option<ExternalCallableId>,
     default_provider: Option<ExternalCallableId>,
     compiler_intrinsic: Option<crate::libraries::CompilerIntrinsic>,
-    semantic_role: Option<crate::libraries::SemanticCallRole>,
+    semantic_role: Option<crate::types::SemanticCallRole>,
     /// The receiver type a member or extension is referenced on.
     receiver: Option<Ty>,
     /// The provider's declared receiver and result, before call-site substitution.

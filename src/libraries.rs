@@ -31,7 +31,7 @@ pub use property_producer::PropertyProducer;
 
 use crate::types::InlineParameterModifier;
 pub use crate::types::Visibility;
-use crate::types::{Ty, TypeName, TypeNameList};
+use crate::types::{SemanticCallRole, Ty, TypeName, TypeNameList};
 pub(crate) use array_factories::kotlin_array_factory_kind;
 pub use compiler_intrinsic::CompilerIntrinsic;
 pub(crate) use core_builtins::add_core_builtin_declarations;
@@ -228,14 +228,6 @@ pub enum MemberRealization {
     /// not an instance method on the receiver. The selected provider supplies the construction plan;
     /// lowering never infers this from a callable name.
     RangeConstruction { open_end: bool },
-}
-
-/// Semantic role attached by a declaration provider after exact callable selection. A target may
-/// consume it when the selected language member has no ordinary dispatch on a chosen representation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SemanticCallRole {
-    KotlinAnyHashCode,
-    KotlinAnyToString,
 }
 
 /// Neutral result required by the JVM's type-safe collection protocol for one exact declaration.

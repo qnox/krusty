@@ -5018,10 +5018,10 @@ impl JvmLibraries {
                         let semantic_role = if inherits_any_member && params.is_empty() {
                             match m.name.as_str() {
                                 "hashCode" => {
-                                    Some(crate::libraries::SemanticCallRole::KotlinAnyHashCode)
+                                    Some(crate::types::SemanticCallRole::KotlinAnyHashCode)
                                 }
                                 "toString" => {
-                                    Some(crate::libraries::SemanticCallRole::KotlinAnyToString)
+                                    Some(crate::types::SemanticCallRole::KotlinAnyToString)
                                 }
                                 _ => None,
                             }

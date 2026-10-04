@@ -2309,7 +2309,7 @@ pub struct IrFile {
     pub ext_call_source_receiver: std::collections::HashMap<u32, Ty>,
     /// Exact provider-selected language-member roles retained on their call expressions. This is
     /// declaration identity data, not a spelling-based backend lookup.
-    pub semantic_call_roles: std::collections::HashMap<ExprId, crate::libraries::SemanticCallRole>,
+    pub semantic_call_roles: std::collections::HashMap<ExprId, crate::types::SemanticCallRole>,
     /// Member call or property access `ExprId` → the classifier its dispatch receiver statically
     /// has, after smart casts: the class the member was selected through, whether this module or a
     /// dependency declares it. A type-parameter receiver records nothing. What a target names for

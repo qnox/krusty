@@ -17,14 +17,13 @@ use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 
 use crate::fir::{ExternalCallableId, ExternalPropertyId};
-pub use crate::libraries::{
-    CompilerIntrinsic as BackendCompilerIntrinsic, SemanticCallRole as BackendSemanticCallRole,
-};
+pub use crate::libraries::CompilerIntrinsic as BackendCompilerIntrinsic;
 use crate::libraries::{
     DefaultCallRealization, ExternalCallableKind, GenericSig, InlineKind, MemberRealization,
     NonvirtualCallRealization,
 };
 use crate::symbol_source::SymbolSource;
+pub use crate::types::SemanticCallRole as BackendSemanticCallRole;
 use crate::types::{InlineParameterModifier, Ty, TypeName};
 
 /// What the provider normalized for one selected dependency callable, copied without

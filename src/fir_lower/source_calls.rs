@@ -101,7 +101,7 @@ pub(super) struct ExternalCallRequest<'a> {
     pub(super) result: ResolvedTy,
     pub(super) declared_result: Option<ResolvedTy>,
     pub(super) overridden_results: &'a [ResolvedTy],
-    pub(super) semantic_role: Option<crate::libraries::SemanticCallRole>,
+    pub(super) semantic_role: Option<crate::types::SemanticCallRole>,
     pub(super) suspend: bool,
     pub(super) can_inline: bool,
     pub(super) inline_plan: Option<&'a crate::fir::FirInlineBodyPlan>,
