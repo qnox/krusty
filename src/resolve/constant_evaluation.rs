@@ -173,20 +173,23 @@ impl Evaluator<'_> {
                     value: LibConst::Str(output.finish()),
                 })
             }
-            Expr::Call { callee, args }
-                if args.is_empty()
-                    && self
-                        .context
-                        .resolved_calls
-                        .get(&expression)
-                        .and_then(ResolvedCall::compiler_intrinsic)
-                        == Some(CompilerIntrinsic::NumericConversion) =>
-            {
+            Expr::Call { callee, args } if args.is_empty() => {
+                let intrinsic = self
+                    .context
+                    .resolved_calls
+                    .get(&expression)
+                    .and_then(ResolvedCall::compiler_intrinsic)?;
                 let Expr::Member { receiver, .. } = self.context.file.expr(*callee) else {
                     return None;
                 };
                 let operand = self.evaluate(*receiver, None, depth + 1)?;
-                evaluate_numeric_conversion(operand, ty)
+                match intrinsic {
+                    CompilerIntrinsic::NumericConversion => {
+                        evaluate_numeric_conversion(operand, ty)
+                    }
+                    CompilerIntrinsic::PrimitiveBitNot => evaluate_bit_not(operand, ty),
+                    _ => None,
+                }
             }
             Expr::Call { callee, args } if args.len() == 1 => {
                 let intrinsic = self
@@ -273,6 +276,24 @@ fn evaluate_primitive_intrinsic(
     ty: Ty,
 ) -> Option<LibraryConst> {
     let value = match (ty.non_null(), intrinsic) {
+        (Ty::Int | Ty::Boolean, CompilerIntrinsic::PrimitiveBitAnd) => {
+            LibConst::Int(constant_i32(&receiver)? & constant_i32(&argument)?)
+        }
+        (Ty::Int | Ty::Boolean, CompilerIntrinsic::PrimitiveBitOr) => {
+            LibConst::Int(constant_i32(&receiver)? | constant_i32(&argument)?)
+        }
+        (Ty::Int | Ty::Boolean, CompilerIntrinsic::PrimitiveBitXor) => {
+            LibConst::Int(constant_i32(&receiver)? ^ constant_i32(&argument)?)
+        }
+        (Ty::Long, CompilerIntrinsic::PrimitiveBitAnd) => {
+            LibConst::Long(constant_i64(&receiver)? & constant_i64(&argument)?)
+        }
+        (Ty::Long, CompilerIntrinsic::PrimitiveBitOr) => {
+            LibConst::Long(constant_i64(&receiver)? | constant_i64(&argument)?)
+        }
+        (Ty::Long, CompilerIntrinsic::PrimitiveBitXor) => {
+            LibConst::Long(constant_i64(&receiver)? ^ constant_i64(&argument)?)
+        }
         (Ty::Int, CompilerIntrinsic::PrimitiveShiftLeft) => {
             LibConst::Int(constant_i32(&receiver)?.wrapping_shl(constant_i32(&argument)? as u32))
         }
@@ -291,6 +312,15 @@ fn evaluate_primitive_intrinsic(
         (Ty::Long, CompilerIntrinsic::PrimitiveUnsignedShiftRight) => LibConst::Long(
             (constant_i64(&receiver)? as u64).wrapping_shr(constant_i32(&argument)? as u32) as i64,
         ),
+        _ => return None,
+    };
+    Some(LibraryConst { ty, value })
+}
+
+fn evaluate_bit_not(operand: LibraryConst, ty: Ty) -> Option<LibraryConst> {
+    let value = match ty.non_null() {
+        Ty::Int => LibConst::Int(!constant_i32(&operand)?),
+        Ty::Long => LibConst::Long(!constant_i64(&operand)?),
         _ => return None,
     };
     Some(LibraryConst { ty, value })

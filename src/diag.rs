@@ -136,6 +136,22 @@ impl DiagSink {
         self.error_kind(span, DiagnosticKind::Compiler, msg);
     }
 
+    /// Report a diagnostic that does not fail the compilation.
+    pub fn warning(&mut self, span: Span, msg: impl Into<String>) {
+        if !self.accepts(span) {
+            return;
+        }
+        self.diags.push(Diagnostic {
+            span,
+            editor_span: None,
+            severity: Severity::Warning,
+            kind: DiagnosticKind::Compiler,
+            msg: msg.into(),
+            identity: None,
+            file: self.current_file,
+        });
+    }
+
     pub fn error_kind(&mut self, span: Span, kind: DiagnosticKind, msg: impl Into<String>) {
         if !self.accepts(span) {
             return;

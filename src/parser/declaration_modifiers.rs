@@ -1,8 +1,17 @@
 //! Source locations retained for declaration modifiers with modifier-owned diagnostics.
 
 use super::{Parser, TokenKind};
-use crate::ast::{AnnotationRef, ExprId};
+use crate::ast::{AnnotationRef, DeclarationPrefix, ExprId};
 use crate::diag::Span;
+use crate::types::Visibility;
+
+/// The modifier list of the declaration being parsed, accumulated across its `skip_decl_prefix`
+/// runs (a context clause or `companion` may separate them) until the declaration records it.
+#[derive(Default)]
+pub(super) struct PrefixInProgress {
+    first_modifier: Option<Span>,
+    visibility: Option<Visibility>,
+}
 
 impl Parser<'_> {
     /// Consume leading annotations (`@Foo`, `@file:Bar(...)`) and soft modifiers (`public`, `open`,
@@ -126,6 +135,16 @@ impl Parser<'_> {
                         self.file.multiplatform_modifiers.push((text.clone(), span));
                     }
                 }
+                self.note_declaration_prefix_token(self.t[self.i].span);
+                let prefix = &mut self.declaration_prefix;
+                if matches!(
+                    text.as_str(),
+                    "public" | "protected" | "internal" | "private"
+                ) {
+                    prefix
+                        .visibility
+                        .get_or_insert(Visibility::from_modifier(&text));
+                }
                 mods.push(text);
                 self.bump();
             } else {
@@ -148,6 +167,103 @@ impl Parser<'_> {
         self.pending_annotation_args = annotation_args;
         modifiers
     }
+}
+
+impl Parser<'_> {
+    /// Start a declaration whose modifier list [`Parser::record_declaration_prefix`] will keep.
+    pub(super) fn begin_declaration_prefix(&mut self) {
+        self.declaration_prefix = PrefixInProgress::default();
+    }
+
+    /// Note a token of the modifier list being consumed; the first one starts the list as kotlinc
+    /// reports it. Annotations are not noted: a report about the modifiers starts after them.
+    pub(super) fn note_declaration_prefix_token(&mut self, token: Span) {
+        self.declaration_prefix.first_modifier.get_or_insert(token);
+    }
+
+    /// Keep the modifier list consumed since [`Parser::begin_declaration_prefix`] for the
+    /// declaration starting at `start`, positioned on the token after that list. A classifier's
+    /// kind words (`data`, `enum`, `annotation`, `companion`, `fun interface`) are not modifiers to
+    /// the parser, so its keyword and name are found past them; each is a key the declaration can
+    /// find its prefix by.
+    pub(super) fn record_declaration_prefix(&mut self, start: u32) {
+        let prefix = std::mem::take(&mut self.declaration_prefix);
+        let after = self.tok().span;
+        let mut keys = vec![start, after.lo];
+        let mut index = self.i;
+        while self.t.get(index).is_some_and(|token| {
+            ["data", "enum", "annotation", "companion"]
+                .iter()
+                .any(|word| self.token_keyword_text(*token, word))
+                || (token.kind == TokenKind::KwFun
+                    && self
+                        .t
+                        .get(index + 1)
+                        .is_some_and(|next| self.token_keyword_text(*next, "interface")))
+        }) {
+            index += 1;
+        }
+        if let Some(keyword) = self.t.get(index).filter(|token| {
+            token.kind == TokenKind::KwClass
+                || self.token_keyword_text(**token, "object")
+                || self.token_keyword_text(**token, "interface")
+        }) {
+            keys.push(keyword.span.lo);
+            if let Some(name) = self.t.get(index + 1).filter(|t| t.kind == TokenKind::Ident) {
+                keys.push(name.span.lo);
+            }
+        }
+        self.file.declaration_prefixes.record(
+            &keys,
+            DeclarationPrefix {
+                start: prefix.first_modifier.unwrap_or(after),
+                visibility: prefix.visibility,
+            },
+        );
+    }
+}
+
+/// The function flags a modifier list declares.
+pub(super) fn function_flags(modifiers: &[String]) -> crate::ast::FdFlags {
+    let mut flags = crate::ast::FdFlags::default();
+    let mut is_final = false;
+    let mut is_open = false;
+    for modifier in modifiers {
+        flags = match modifier.as_str() {
+            "inline" => flags.with_is_inline(true),
+            "final" => {
+                is_final = true;
+                flags.with_is_final(true)
+            }
+            "open" => {
+                is_open = true;
+                flags
+            }
+            "override" => {
+                is_open = true;
+                flags.with_is_override(true)
+            }
+            "abstract" => flags.with_is_abstract(true),
+            "suspend" => flags.with_is_suspend(true),
+            "tailrec" => flags.with_is_tailrec(true),
+            "operator" => flags.with_is_operator(true),
+            "infix" => flags.with_is_infix(true),
+            "companion" => flags.with_is_companion_extension(true),
+            "external" => flags.with_is_external(true),
+            "actual" => flags.with_is_actual(true),
+            _ => flags,
+        };
+    }
+    flags.with_is_open(is_open && !is_final)
+}
+
+/// The visibility a modifier list declares; a declaration that writes none is `public`.
+pub(super) fn visibility_of(modifiers: &[String]) -> Visibility {
+    modifiers
+        .iter()
+        .find(|m| matches!(m.as_str(), "private" | "protected" | "internal" | "public"))
+        .map(|m| Visibility::from_modifier(m))
+        .unwrap_or_default()
 }
 
 /// Return the source span of `modifier` when it was present in the parsed modifier set.

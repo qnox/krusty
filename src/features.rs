@@ -63,6 +63,7 @@ const OBSERVED_FEATURES: &[(&str, Option<(u16, u16)>)] = &[
     ("MultiDollarInterpolation", Some((2, 2))),
     ("MultiPlatformProjects", None),
     ("NameBasedDestructuring", Some((2, 5))),
+    ("NestedTypeAliases", Some((2, 4))),
     ("PrioritizedEnumEntries", Some((2, 1))),
     ("UnitConversionsOnArbitraryExpressions", None),
     ("WhenGuards", Some((2, 2))),
@@ -129,7 +130,26 @@ impl LangFeatures {
                     _ => {}
                 }
             }
+            // `// EXPLICIT_API_MODE: STRICT|WARNING` — kotlinc's `-Xexplicit-api` analysis mode,
+            // carried the same way.
+            if let Some(rest) = l.strip_prefix("// EXPLICIT_API_MODE:") {
+                self.apply_explicit_api_mode(&rest.trim().to_ascii_lowercase());
+            }
         }
+    }
+
+    /// Select kotlinc's explicit API mode (`strict`, `warning`, or `disable`), an analysis mode
+    /// rather than a language feature. Returns `false` for any other spelling.
+    pub fn apply_explicit_api_mode(&mut self, mode: &str) -> bool {
+        self.disable("ExplicitApiStrict");
+        self.disable("ExplicitApiWarning");
+        match mode {
+            "strict" => self.enable("ExplicitApiStrict"),
+            "warning" => self.enable("ExplicitApiWarning"),
+            "disable" => {}
+            _ => return false,
+        }
+        true
     }
 
     /// Collect every `// LANGUAGE:` directive in a source file.
@@ -184,6 +204,7 @@ const FEATURE_ALIASES: &[(&str, &str)] = &[
     ),
     ("-Xexplicit-backing-fields", "ExplicitBackingFields"),
     ("-Xmulti-dollar-interpolation", "MultiDollarInterpolation"),
+    ("-Xnested-type-aliases", "NestedTypeAliases"),
 ];
 
 fn feature_alias(arg: &str) -> Option<&'static str> {

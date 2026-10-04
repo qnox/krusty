@@ -370,6 +370,7 @@ private val ALLOWED_FREE_FLAGS = setOf(
     "-Xconsistent-data-class-copy-visibility",
     "-Xexplicit-backing-fields",
     "-Xmulti-dollar-interpolation",
+    "-Xnested-type-aliases",
     "-Xskip-prerelease-check",
     "-Xsuppress-version-warnings",
     "-Xdont-warn-on-error-suppression",
@@ -378,6 +379,8 @@ private val ALLOWED_FREE_FLAGS = setOf(
 )
 
 private val NAME_DESTRUCTURING_MODES = setOf("only-syntax", "name-mismatch", "complete", "disable")
+
+private val EXPLICIT_API_MODES = setOf("strict", "warning", "disable")
 
 private val JVM_DEFAULT_MODES = setOf("enable", "no-compatibility", "disable")
 private val JVM_DEFAULT_LEGACY_MODES = setOf("all", "all-compatibility", "disable")
@@ -430,6 +433,9 @@ private fun validateFreeArguments(input: List<String>): ArrayList<String> {
             argument.startsWith("-Xwarning-level=") -> argument
             argument.startsWith("-Xlambdas=") && argument.substringAfter('=') in setOf("indy", "class") -> "-Xlambdas"
             argument.startsWith("-Xsam-conversions=") && argument.substringAfter('=') in setOf("indy", "class") -> "-Xsam-conversions"
+            // KGP's `explicitApi()` and `explicitApiWarning()` arrive as this free argument.
+            argument.startsWith("-Xexplicit-api=") &&
+                argument.substringAfter('=') in EXPLICIT_API_MODES -> "-Xexplicit-api"
             argument == "-Xname-based-destructuring" -> "-Xname-based-destructuring"
             argument.startsWith("-Xname-based-destructuring=") &&
                 argument.substringAfter('=') in NAME_DESTRUCTURING_MODES -> "-Xname-based-destructuring"

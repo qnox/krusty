@@ -51,6 +51,7 @@ impl Parser<'_> {
         }
         let context_span = self.tok().span;
         self.pending_context_span = Some(context_span);
+        self.note_declaration_prefix_token(context_span);
         self.bump(); // 'context'
         let named_parameters = self.context_clause_has_named_parameters(self.i);
         if named_parameters {
