@@ -339,20 +339,22 @@ impl<'a> FileLowering<'a> {
     /// no type a program can name here declares them — a local property reference is a
     /// `KProperty<*>`, and Kotlin gives it no receiver to read through.
     ///
-    /// One type per NAME, for the same reason a property reference is one type per property: two
-    /// references to the same local property are the same declaration and compare equal.
+    /// One type per checked declaration identity: two references to the same local property are
+    /// equal, while unrelated same-named locals remain distinct.
     pub(super) fn declare_local_property_references(&mut self) -> Result<(), Unsupported> {
-        let mut emitted: HashMap<Box<str>, ReferenceItems> = HashMap::new();
+        let mut emitted: HashMap<crate::fir::LocalDelegatedPropertyId, ReferenceItems> =
+            HashMap::new();
         for index in 0..self.ir.exprs.len() {
             let IrExpr::LocalPropertyReference(reference) = &self.ir.exprs[index] else {
                 continue;
             };
             let name = reference.name.clone();
-            let items = match emitted.get(&name) {
+            let declaration = reference.declaration;
+            let items = match emitted.get(&declaration) {
                 Some(items) => *items,
                 None => {
                     let items = self.define_local_reference(emitted.len(), &name)?;
-                    emitted.insert(name, items);
+                    emitted.insert(declaration, items);
                     items
                 }
             };
@@ -382,6 +384,14 @@ impl<'a> FileLowering<'a> {
         vtable.push(unreachable);
         vtable.push(name);
         let any_type = self.import_data("kt_type_any")?;
+        // A local delegated property's metadata is a KProperty, but not a KProperty0: Kotlin does
+        // not expose a callable `get()` for a local declaration. Keep the exact common reflection
+        // supertypes so casts and generic convention parameters recognize the object without
+        // inventing an accessor surface it does not have.
+        let interfaces = ["kt_type_kcallable", "kt_type_kproperty"]
+            .into_iter()
+            .map(|symbol| self.import_data(symbol))
+            .collect::<Result<Vec<_>, _>>()?;
         self.define_type_descriptor(
             descriptor,
             &base,
@@ -391,7 +401,7 @@ impl<'a> FileLowering<'a> {
                 reference_offsets: &[],
                 vtable: &vtable,
                 superclass: any_type,
-                interfaces: &[],
+                interfaces: &interfaces,
                 reference_target: None,
                 walk: super::objects::WalkMembers::default(),
                 qualified_name: None,

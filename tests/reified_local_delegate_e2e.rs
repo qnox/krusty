@@ -262,6 +262,7 @@ fun box(): String {
 fn inline_delegate_reflection_identity_stays_with_its_declaration() {
     let source = format!("{REFLECTION_DECLARATION}{REFLECTION_CALLER}");
     common::expect_box_same_as_kotlinc(&source, "DeclarationDelegateReflection");
+    common::expect_native_box(&source, "DeclarationDelegateReflectionNative", "OK");
 }
 
 #[test]
