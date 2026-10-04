@@ -29,6 +29,7 @@ fn external_call_keeps_checked_type_substitutions_until_provider_realization() {
                 can_inline: true,
                 inline_plan: None,
                 extension_receiver_parameter: None,
+                semantic_role: Some(crate::types::SemanticCallRole::KotlinAnyToString),
             },
             dispatch_receiver: None,
             extension_receiver: None,
@@ -53,6 +54,10 @@ fn external_call_keeps_checked_type_substitutions_until_provider_realization() {
 
     let mut ir = IrFile::default();
     let lowered = lower_body(body, &ResolvedModuleIndex::default(), &mut ir).unwrap();
+    assert_eq!(
+        ir.semantic_call_roles.get(&lowered.roots[0]),
+        Some(&crate::types::SemanticCallRole::KotlinAnyToString)
+    );
     assert!(matches!(
         ir.expr(lowered.roots[0]),
         IrExpr::Call {

@@ -31,7 +31,7 @@ pub use property_producer::PropertyProducer;
 
 use crate::types::InlineParameterModifier;
 pub use crate::types::Visibility;
-use crate::types::{Ty, TypeName, TypeNameList};
+use crate::types::{SemanticCallRole, Ty, TypeName, TypeNameList};
 pub(crate) use array_factories::kotlin_array_factory_kind;
 pub use compiler_intrinsic::CompilerIntrinsic;
 pub(crate) use core_builtins::add_core_builtin_declarations;
@@ -230,14 +230,6 @@ pub enum MemberRealization {
     RangeConstruction { open_end: bool },
 }
 
-/// Semantic role attached by a declaration provider after exact callable selection. A target may
-/// consume it when the selected language member has no ordinary dispatch on a chosen representation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SemanticCallRole {
-    KotlinAnyHashCode,
-    KotlinAnyToString,
-}
-
 /// Neutral result required by the JVM's type-safe collection protocol for one exact declaration.
 /// A JVM declaration provider assigns this role while the decoded Kotlin builtin identity and its
 /// physical realization are still together; later phases carry it without recognizing a name.
@@ -261,6 +253,9 @@ pub struct LibraryMember {
     pub external_default_provider: Option<crate::fir::ExternalCallableId>,
     /// Semantic property owning this member when it is being used as an accessor.
     pub external_property_identity: Option<crate::fir::ExternalPropertyId>,
+    /// Exact language-level role retained from the selected declaration. Providers assign this at
+    /// their boundary; checked FIR carries it without re-identifying the member from its spelling.
+    pub semantic_role: Option<SemanticCallRole>,
     /// Exact singleton instance that dispatches this selected object member. This is a semantic
     /// call-shape fact: checked FIR materializes the value as its dispatch receiver, while lowering
     /// only consumes that receiver and the already-selected callable identity.
@@ -751,6 +746,7 @@ impl LibraryMember {
             external_identity: None,
             external_default_provider: None,
             external_property_identity: None,
+            semantic_role: None,
             singleton_dispatch: None,
             name,
             owner: None,
@@ -2037,6 +2033,7 @@ impl FunctionInfo {
         member.plugin_expression = self.callable.plugin_expression;
         member.external_identity = self.callable.external_identity;
         member.external_property_identity = self.callable.external_property_identity;
+        member.semantic_role = self.callable.semantic_role;
         member.singleton_dispatch = self.callable.singleton_dispatch.clone();
         member.stable_declaration = self.stable_declaration;
         member.source_member = self.source_member;

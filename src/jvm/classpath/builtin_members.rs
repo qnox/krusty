@@ -125,6 +125,7 @@ impl Classpath {
                         external_identity: None,
                         external_default_provider: None,
                         external_property_identity: None,
+                        semantic_role: None,
                         singleton_dispatch: None,
                         name: m.name.clone(),
                         owner: Some(owner),

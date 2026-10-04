@@ -988,6 +988,7 @@ pub(super) fn delegated_call_with_dispatch(
             parameters,
             result,
             declared_result,
+            semantic_role,
             suspend,
             inline_plan: _,
             extension_receiver_parameter,
@@ -1049,6 +1050,9 @@ pub(super) fn delegated_call_with_dispatch(
             if let Some(declared_result) = declared_result {
                 ir.call_declared_ret
                     .insert(expression, declared_result.get());
+            }
+            if let Some(role) = semantic_role {
+                ir.semantic_call_roles.insert(expression, *role);
             }
             if *suspend {
                 ir.suspend_calls.insert(expression, result.get());

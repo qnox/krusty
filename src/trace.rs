@@ -33,6 +33,7 @@
 //! - `bytecode` — bytecode rewrites of a finished method (`jvm/classfile/method_rewrite.rs`).
 //! - `slots` — local-slot releases that break the frame's stack discipline
 //!   (`jvm/ir_emit/frame_map.rs`).
+//! - `native` — native lowering decisions (`native/codegen/lower.rs`).
 
 /// The canonical trace categories (see the module docs). Listed here so the set is discoverable in one
 /// place; `KRUSTY_TRACE=all` enables every category regardless.
@@ -51,6 +52,7 @@ pub const CATEGORIES: &[&str] = &[
     "cache",
     "bytecode",
     "slots",
+    "native",
 ];
 
 #[cfg(feature = "trace")]

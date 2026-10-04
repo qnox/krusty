@@ -400,110 +400,27 @@ impl Emitter<'_> {
     /// A cast target as kotlinc's IR renderer spells it in
     /// `null cannot be cast to non-null type …`.
     fn rendered_cast_target(&self, ty: Ty) -> String {
-        self.rendered_cast_type(ty, RootPackage::Unqualified)
+        self.rendered_cast_type(ty, false)
     }
 
     /// A reified cast target as kotlinc's inliner spells it in the same message, where a class in
     /// the root package reads `<root>.Token`.
     pub(super) fn rendered_inlined_cast_target(&self, ty: Ty) -> String {
-        self.rendered_cast_type(ty, RootPackage::Qualified)
+        self.rendered_cast_type(ty, true)
     }
 
-    fn rendered_cast_type(&self, ty: Ty, root: RootPackage) -> String {
-        let arguments = |arguments: &mut dyn Iterator<Item = Ty>| {
-            let rendered: Vec<String> = arguments
-                .map(|argument| self.rendered_cast_type(argument, root))
-                .collect();
-            if rendered.is_empty() {
-                String::new()
-            } else {
-                format!("<{}>", rendered.join(", "))
-            }
-        };
-        match ty {
-            Ty::Unit => "kotlin.Unit".to_string(),
-            Ty::Nothing => "kotlin.Nothing".to_string(),
-            Ty::Null => "kotlin.Nothing?".to_string(),
-            Ty::Error => "<error>".to_string(),
-            Ty::Pending => "<pending>".to_string(),
-            Ty::Obj(name, types) => format!(
-                "{}{}{}",
-                if root == RootPackage::Qualified && name.package_matches("") {
-                    "<root>."
-                } else {
-                    ""
-                },
-                name.render().replace(['/', '$'], "."),
-                arguments(&mut types.iter().copied())
-            ),
-            Ty::Nullable(inner) => format!("{}?", self.rendered_cast_type(*inner, root)),
-            Ty::PlatformNullable(inner) => self.rendered_cast_type(*inner, root),
-            Ty::InProjection(inner) => format!("in {}", self.rendered_cast_type(*inner, root)),
-            Ty::OutProjection(inner) => format!("out {}", self.rendered_cast_type(*inner, root)),
-            Ty::StarProjection(_) => "*".to_string(),
-            Ty::DefinitelyNotNull(inner) => {
-                format!("{} & Any", self.rendered_cast_type(*inner, root))
-            }
-            Ty::Intersection(parts) => parts
-                .iter()
-                .map(|part| self.rendered_cast_type(*part, root))
-                .collect::<Vec<_>>()
-                .join(" & "),
-            Ty::TyParam(name, _) => self.rendered_type_parameter(name),
-            Ty::Fun(signature) => format!(
-                "{}{}{}",
-                if signature.suspend {
-                    "kotlin.coroutines.SuspendFunction"
-                } else {
-                    "kotlin.Function"
-                },
-                signature.params.len(),
-                arguments(&mut signature.params.iter().copied().chain([signature.ret]))
-            ),
-        }
-    }
-
-    /// Render one declaration-owned type parameter through its recorded semantic identity. The
-    /// opaque identity is only compared; its coordinates are never parsed back into an owner.
-    fn rendered_type_parameter(&self, identity: &str) -> String {
-        let source = crate::types::type_parameter_source_name(identity);
-        if let Some((&function, _)) = self
-            .ir
-            .signatures
-            .iter()
-            .filter(|(_, signature)| {
-                signature
-                    .type_params
-                    .iter()
-                    .any(|parameter| parameter.semantic_name == identity)
-            })
-            .min_by_key(|(function, _)| *function)
-        {
-            let declaration = &self.ir.functions[function as usize];
-            let owner = declaration.dispatch_receiver.unwrap_or_else(|| {
-                self.ir
-                    .foreign_template_facade(function)
-                    .unwrap_or_else(|| crate::types::type_name(&self.facade))
-            });
-            let name = self
-                .ir
-                .vc_declared_sigs
-                .get(&function)
-                .map_or(declaration.name.as_str(), |(name, _, _)| name.as_str());
-            return format!(
-                "{source} of {}.{name}",
-                owner.render().replace(['/', '$'], ".")
-            );
-        }
-        if let Some((owner, _)) = self.ir.class_signatures().find(|(_, signature)| {
-            signature
-                .type_params
-                .iter()
-                .any(|parameter| parameter.semantic_name == identity)
-        }) {
-            return format!("{source} of {}", owner.render().replace(['/', '$'], "."));
-        }
-        source.to_string()
+    fn rendered_cast_type(&self, ty: Ty, qualify_root_classifier: bool) -> String {
+        self.ir.rendered_cast_target(
+            ty,
+            &|function| {
+                Some(
+                    self.ir
+                        .foreign_template_facade(function)
+                        .unwrap_or_else(|| crate::types::type_name(&self.facade)),
+                )
+            },
+            qualify_root_classifier,
+        )
     }
 
     fn emit_implicit_coercion(
@@ -631,11 +548,4 @@ impl Emitter<'_> {
         self.emit_value(operand, code);
         (physical, semantic)
     }
-}
-
-/// Whether a cast message qualifies a root-package class with `<root>.`, as kotlinc's inliner does.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum RootPackage {
-    Unqualified,
-    Qualified,
 }

@@ -931,7 +931,7 @@ pub(super) fn realize(
                             inline: callable.inline,
                         };
                     } else if let Some((owner, descriptor)) = (semantic_role
-                        == Some(crate::libraries::SemanticCallRole::KotlinAnyHashCode))
+                        == Some(crate::types::SemanticCallRole::KotlinAnyHashCode))
                     .then(|| ir.ext_call_source_receiver.get(&expression).copied())
                     .flatten()
                     .and_then(primitive_hash_code)

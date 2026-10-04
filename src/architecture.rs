@@ -417,6 +417,81 @@ mod tests {
     }
 
     #[test]
+    fn native_facade_has_no_crate_dependencies() {
+        assert_allowed_crate_modules("src/native/mod.rs", &[]);
+    }
+
+    #[test]
+    fn the_native_runtime_sources_are_target_text_only() {
+        // `runtime.rs` carries the runtime's C headers. It has no business knowing what a Kotlin
+        // type or a compiler IR is.
+        assert_allowed_crate_modules("src/native/runtime.rs", &[]);
+    }
+
+    #[test]
+    fn the_class_model_uses_only_ir_contract_dependencies() {
+        assert_allowed_crate_modules("src/native/intrinsics.rs", &["types"]);
+    }
+
+    #[test]
+    fn the_code_generator_uses_only_ir_contract_dependencies() {
+        // The facade receives the closed backend handoff. It neither retains a provider nor reaches
+        // back into frontend state while emitting.
+        assert_allowed_crate_modules("src/native/codegen/mod.rs", &["backend", "diag"]);
+        // `fir` names only the opaque checked property/callable ids already carried by IR. `backend`
+        // supplies their frozen facts; it is not a provider or another lookup surface.
+        assert_allowed_crate_modules(
+            "src/native/codegen/lower.rs",
+            &["backend", "fir", "ir", "types"],
+        );
+        for path in rust_files_under("src/native/codegen") {
+            let text = fs::read_to_string(&path).expect("read native code generator source");
+            for forbidden in [
+                "SemanticPlatform",
+                ".external_callable(",
+                ".external_property(",
+            ] {
+                assert!(
+                    !text.contains(forbidden),
+                    "{} crosses the checked backend handoff through `{forbidden}`",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_linker_knows_nothing_about_kotlin() {
+        // Objects in, an executable out. A linker that imported the IR or the type system would be
+        // a linker that had started making language decisions.
+        assert_allowed_crate_modules("src/native/linker/mod.rs", &[]);
+        assert_allowed_crate_modules("src/native/linker/elf.rs", &[]);
+        assert_allowed_crate_modules("src/native/prebuilt.rs", &[]);
+    }
+
+    #[test]
+    fn jvm_spellings_of_kotlin_builtins_stay_in_one_place() {
+        // `kotlin.String` reaches the backend spelled `java/lang/String`, and a top-level function
+        // reaches it owned by a file facade. Both are artifacts of reading signatures out of a JVM
+        // jar, and both are normalized in `intrinsics.rs`. A second file learning to recognize
+        // those spellings is how a temporary bridge becomes permanent.
+        for path in rust_files_under("src/native") {
+            if path.ends_with("intrinsics.rs") {
+                continue;
+            }
+            let text = fs::read_to_string(&path).expect("read native source");
+            for forbidden in ["java/lang", "java/util", "Kt\""] {
+                assert!(
+                    !text.contains(forbidden),
+                    "{} spells a JVM provider detail (`{forbidden}`); normalize it in \
+                     src/native/intrinsics.rs instead",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn fir_lower_facade_uses_only_common_lowering_dependencies() {
         assert_allowed_crate_modules("src/fir_lower/mod.rs", &["fir", "ir", "types"]);
     }
@@ -424,7 +499,7 @@ mod tests {
     #[test]
     fn checked_fir_lowering_uses_only_closed_semantic_handoff_dependencies() {
         for path in rust_files_under("src/fir_lower") {
-            if path.ends_with("tests.rs") {
+            if is_test_module(&path) {
                 continue;
             }
             // `wide_stack` is infrastructure, not a semantic dependency: a `stacker` wrapper and
@@ -454,7 +529,7 @@ mod tests {
     #[test]
     fn checked_fir_lowering_has_no_symbol_selection_entry_points() {
         for path in rust_files_under("src/fir_lower") {
-            if path.ends_with("tests.rs") {
+            if is_test_module(&path) {
                 continue;
             }
             let text = fs::read_to_string(&path).expect("read checked FIR lowerer");
@@ -474,6 +549,13 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn is_test_module(path: &Path) -> bool {
+        path.file_name().is_some_and(|name| name == "tests.rs")
+            || path
+                .components()
+                .any(|component| component.as_os_str() == "tests")
     }
 
     #[test]
@@ -637,6 +719,7 @@ mod tests {
             "tests",
             &[
                 "ast",
+                "backend",
                 "compiler",
                 "conformance",
                 "dhat",
@@ -652,6 +735,7 @@ mod tests {
                 "language_settings",
                 "language_version",
                 "lexer",
+                "native",
                 "libraries",
                 "metadata",
                 "parser",
@@ -810,6 +894,15 @@ mod tests {
         }
     }
 
+    /// The tracing macro is not a dependency in the sense these budgets are about.
+    ///
+    /// A budget says which parts of the compiler a file may KNOW about — which layer's concepts it
+    /// is allowed to reason in. `trace_compiler!` carries no concepts: it is off by default, where
+    /// it compiles to nothing at all, and `CLAUDE.md` names it as THE way to emit diagnostics from
+    /// compiler code. Counting it would mean every file that ever traces has to widen its budget to
+    /// say so, which tells a reader nothing and makes the real entries harder to see.
+    const CROSS_CUTTING: &[&str] = &["trace_compiler"];
+
     fn collect_path_module(path: &syn::Path, modules: &mut BTreeSet<String>, roots: &[&str]) {
         let mut segments = path.segments.iter();
         if segments
@@ -817,7 +910,10 @@ mod tests {
             .is_some_and(|segment| is_crate_root(segment, roots))
         {
             if let Some(module) = segments.next() {
-                modules.insert(module.ident.to_string());
+                let module = module.ident.to_string();
+                if !CROSS_CUTTING.contains(&module.as_str()) {
+                    modules.insert(module);
+                }
             }
         }
     }
