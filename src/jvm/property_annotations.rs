@@ -12,12 +12,18 @@ use crate::ir::{IrExpr, IrFile, IrFunction};
 use crate::names::property_getter_name;
 use crate::types::Ty;
 
-/// Add one marker method per annotated property, right after that property's getter (kotlinc's
-/// member order), and attach the property's annotations to it.
+/// Add one marker method per property with retained annotations, right after that property's getter
+/// (kotlinc's member order), and attach the property's annotations to it.
 pub fn synthesize_property_annotation_markers(ir: &mut IrFile) {
     for class_index in 0..ir.classes.len() {
         let annotated = std::mem::take(&mut ir.classes[class_index].property_annotations);
+        let mut erased_only = Vec::new();
         for property in annotated {
+            // Nothing survives into the class file; `@Metadata` still reads the erased fact.
+            if property.annotations.is_empty() {
+                erased_only.push(property);
+                continue;
+            }
             let getter = property_getter_name(&property.property);
             let marker_name = format!("{getter}$annotations");
             // A plugin may already have synthesized this property's marker (the serialization plugin
@@ -71,5 +77,6 @@ pub fn synthesize_property_annotation_markers(ir: &mut IrFile) {
                 None => methods.push(marker),
             }
         }
+        ir.classes[class_index].property_annotations = erased_only;
     }
 }

@@ -1330,14 +1330,13 @@ mod tests {
             )
         );
         assert_eq!(frontend_census_error(&blocks, &[], 1, &cp, &features), None);
-        let platform_error = frontend_census_error(&blocks, &[], 0, &cp, &features);
-        assert!(
-            platform_error
-                .as_deref()
-                .is_some_and(|error| {
-                    error.contains("unresolved reference") && error.contains("JsStatic")
-                }),
-            "a target-less optional expectation must not leak into an ordinary JVM source: {platform_error:?}"
+        assert_eq!(
+            frontend_census_error(&blocks, &[], 0, &cp, &features).as_deref(),
+            Some(
+                "check: Rejected: Common:1:36: declaration annotated with '@OptionalExpectation' \
+                 can only be used in common module sources."
+            ),
+            "an optional expectation is rejected in an ordinary JVM source"
         );
     }
 

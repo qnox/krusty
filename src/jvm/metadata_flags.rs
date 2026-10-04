@@ -113,7 +113,15 @@ pub(super) fn function_flags(ir: &IrFile, fid: u32, f: &crate::ir::IrFunction) -
     } else {
         0
     };
-    (visibility << 1)
+    // `hasAnnotations` (bit 0) for an application that left no record: an `@OptionalExpectation`
+    // this platform erased. Retained annotations set the bit where their records are written.
+    let erased_annotations = u64::from(
+        ir.function_annotations
+            .get(&fid)
+            .is_some_and(crate::ir::DeclarationAnnotations::has_erased_optional_expectations),
+    );
+    erased_annotations
+        | (visibility << 1)
         | (modality << 4)
         | member_kind
         | operator

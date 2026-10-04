@@ -100,6 +100,7 @@ pub(super) fn push_property_metadata(
                 field_name: None,
                 annotations: Vec::new(),
                 field_annotations: Vec::new(),
+                erased_annotations: false,
                 synthetic_method: None,
                 moved_from_interface_companion: false,
                 companion: true,

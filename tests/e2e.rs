@@ -1381,6 +1381,8 @@ mod nullable_double_type_param_equality_e2e;
 mod nullable_uint_property_e2e;
 #[path = "open_end_range_membership_e2e.rs"]
 mod open_end_range_membership_e2e;
+#[path = "optional_expectation_annotation_e2e.rs"]
+mod optional_expectation_annotation_e2e;
 #[path = "primitive_hash_code_e2e.rs"]
 mod primitive_hash_code_e2e;
 #[path = "result_generic_override_argument_e2e.rs"]

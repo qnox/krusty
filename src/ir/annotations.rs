@@ -51,33 +51,78 @@ pub struct PropertyAnnotations {
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct DeclarationAnnotations(Vec<RetainedAnnotation>);
+pub struct DeclarationAnnotations {
+    retained: Vec<RetainedAnnotation>,
+    /// The declaration also carried non-SOURCE `@OptionalExpectation` applications with no actual
+    /// on this platform. kotlinc removes them from IR with their `expect` classes, so no class
+    /// file or metadata record names them, yet the declaration's metadata flags still report
+    /// `hasAnnotations` (kotlinc derives that flag from FIR, before the removal).
+    erased_optional_expectations: bool,
+}
 
 impl DeclarationAnnotations {
     pub fn new(annotations: Vec<RetainedAnnotation>) -> Self {
-        Self(annotations)
+        Self {
+            retained: annotations,
+            erased_optional_expectations: false,
+        }
+    }
+
+    /// Partition checked applications for one declaration: SOURCE retention is dropped, an
+    /// optional expectation leaves only the [`Self::has_erased_optional_expectations`] fact, and
+    /// every other application is retained.
+    pub fn from_checked<'a>(
+        applications: impl IntoIterator<Item = (&'a crate::types::AppliedAnnotation, AppliedAnnotation)>,
+    ) -> Self {
+        let mut annotations = Self::default();
+        for (checked, annotation) in applications {
+            if checked.retention == crate::types::AnnotationRetention::Source {
+                continue;
+            }
+            if checked.facts.optional_expectation {
+                annotations.erased_optional_expectations = true;
+                continue;
+            }
+            annotations.retained.push(RetainedAnnotation {
+                retention: checked.retention,
+                annotation,
+                facts: checked.facts,
+            });
+        }
+        annotations
+    }
+
+    /// Whether the declaration carried an erased optional expectation (see the field).
+    pub fn has_erased_optional_expectations(&self) -> bool {
+        self.erased_optional_expectations
+    }
+
+    /// Whether this declaration's metadata reports annotations: a retained application or an
+    /// erased optional expectation.
+    pub fn declares_annotations(&self) -> bool {
+        !self.retained.is_empty() || self.erased_optional_expectations
     }
 
     pub fn iter(&self) -> std::slice::Iter<'_, RetainedAnnotation> {
-        self.0.iter()
+        self.retained.iter()
     }
 
     pub(super) fn iter_mut(&mut self) -> std::slice::IterMut<'_, RetainedAnnotation> {
-        self.0.iter_mut()
+        self.retained.iter_mut()
     }
 
     /// Applied annotation payloads in declaration order, independent of the physical retention
     /// partition a backend may later require.
     pub fn applications(&self) -> impl Iterator<Item = &AppliedAnnotation> {
-        self.0.iter().map(|retained| &retained.annotation)
+        self.retained.iter().map(|retained| &retained.annotation)
     }
 
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.retained.is_empty()
     }
 
     pub fn len(&self) -> usize {
-        self.0.len()
+        self.retained.len()
     }
 
     /// Whether these annotations include `@kotlin.Deprecated` at any level. kotlinc additionally

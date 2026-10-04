@@ -484,6 +484,7 @@ pub(super) fn build_class_metadata_with_facts(
                     // which the value-class pass may have mangled with the getter's).
                     annotations: property_marker_annotations(ir, c, &property.name),
                     field_annotations: property_backing_field_annotations(c, &property.name),
+                    erased_annotations: property_has_erased_annotations(c, &property.name),
                     synthetic_method: property_marker_signature(ir, c, &property.name),
                     // kotlinc marks an interface companion's `@JvmField` property record: the
                     // backing field was MOVED onto the interface itself.
@@ -529,6 +530,7 @@ pub(super) fn build_class_metadata_with_facts(
                 field_name: None,
                 annotations: property_marker_annotations(ir, c, &prop.name),
                 field_annotations: property_backing_field_annotations(c, &prop.name),
+                erased_annotations: property_has_erased_annotations(c, &prop.name),
                 synthetic_method: property_marker_signature(ir, c, &prop.name),
                 moved_from_interface_companion: false,
                 companion: false,
@@ -588,6 +590,7 @@ pub(super) fn build_class_metadata_with_facts(
             field_name: ext_delegate.map(|field| instance_field_jvm_name(ir, c, field)),
             annotations: property_marker_annotations(ir, c, &ext.name),
             field_annotations: Vec::new(),
+            erased_annotations: property_has_erased_annotations(c, &ext.name),
             synthetic_method: property_marker_signature(ir, c, &ext.name),
             moved_from_interface_companion: false,
             companion: false,
@@ -1426,5 +1429,16 @@ pub(super) fn build_class_metadata_with_facts(
         xi: 48,
         d1,
         d2,
+    })
+}
+
+/// Whether the property's declaration or backing field carried an optional expectation this
+/// platform erased: it has no class-file trace, but `@Metadata` still reports `hasAnnotations`.
+fn property_has_erased_annotations(c: &crate::ir::IrClass, property: &str) -> bool {
+    c.property_annotations.iter().any(|annotations| {
+        annotations.property == property
+            && annotations.annotations.has_erased_optional_expectations()
+    }) || c.field_annotations.iter().any(|annotations| {
+        annotations.field == property && annotations.annotations.has_erased_optional_expectations()
     })
 }

@@ -85,6 +85,9 @@ pub struct PropMeta {
     /// Annotations that landed on the BACKING FIELD (`@Target(FIELD)`) — recorded separately (f34),
     /// because the reader must not attribute a field annotation to the property.
     pub field_annotations: Vec<crate::ir::AppliedAnnotation>,
+    /// The property or its backing field carried an `@OptionalExpectation` this platform erased:
+    /// nothing above records it, but `Property.flags` still reports `hasAnnotations`.
+    pub erased_annotations: bool,
     /// `(name, descriptor)` of the `get<Name>$annotations()` marker method carrying
     /// [`Self::annotations`] — `JvmPropertySignature.syntheticMethod` (f2). `None` when the property
     /// has no property-targeted annotation.
@@ -1067,7 +1070,8 @@ pub fn build_class(
         // `HAS_ANNOTATIONS` (bit 0) follows from the property's applied annotations, on EITHER use
         // site: kotlinc sets it for a field-targeted annotation too, and keeps it at metadata
         // versions where the records below are gated off.
-        let annotated = !p.annotations.is_empty() || !p.field_annotations.is_empty();
+        let annotated =
+            !p.annotations.is_empty() || !p.field_annotations.is_empty() || p.erased_annotations;
         let pflags = property_flags(p) | u64::from(annotated);
         // An accessor's flags word is emitted when it differs from the DEFAULT one, which kotlinc
         // derives from the PROPERTY (its `hasAnnotations` bit included). An annotated property whose
@@ -1663,6 +1667,7 @@ mod tests {
                 field_name: None,
                 annotations: Vec::new(),
                 field_annotations: Vec::new(),
+                erased_annotations: false,
                 synthetic_method: None,
                 moved_from_interface_companion: false,
                 companion: false,
@@ -1739,6 +1744,7 @@ mod tests {
                 field_name: None,
                 annotations: Vec::new(),
                 field_annotations: Vec::new(),
+                erased_annotations: false,
                 synthetic_method: None,
                 moved_from_interface_companion: false,
                 companion: false,
@@ -1800,6 +1806,7 @@ mod tests {
                 field_name: None,
                 annotations: Vec::new(),
                 field_annotations: Vec::new(),
+                erased_annotations: false,
                 synthetic_method: None,
                 moved_from_interface_companion: false,
                 companion: false,
@@ -1992,6 +1999,7 @@ mod tests {
                 field_name: None,
                 annotations: Vec::new(),
                 field_annotations: Vec::new(),
+                erased_annotations: false,
                 synthetic_method: None,
                 moved_from_interface_companion: false,
                 companion: false,
@@ -2019,6 +2027,7 @@ mod tests {
                 field_name: None,
                 annotations: Vec::new(),
                 field_annotations: Vec::new(),
+                erased_annotations: false,
                 synthetic_method: None,
                 moved_from_interface_companion: false,
                 companion: false,
@@ -2095,6 +2104,7 @@ mod tests {
                 field_name: None,
                 annotations: Vec::new(),
                 field_annotations: Vec::new(),
+                erased_annotations: false,
                 synthetic_method: None,
                 moved_from_interface_companion: false,
                 companion: false,
@@ -2250,6 +2260,7 @@ mod tests {
                 field_name: None,
                 annotations: Vec::new(),
                 field_annotations: Vec::new(),
+                erased_annotations: false,
                 synthetic_method: None,
                 moved_from_interface_companion: false,
                 companion: false,
@@ -2313,6 +2324,7 @@ mod tests {
                 field_name: None,
                 annotations: Vec::new(),
                 field_annotations: Vec::new(),
+                erased_annotations: false,
                 synthetic_method: None,
                 moved_from_interface_companion: false,
                 companion: false,
@@ -2384,6 +2396,7 @@ mod tests {
                     field_name: None,
                     annotations: Vec::new(),
                     field_annotations: Vec::new(),
+                    erased_annotations: false,
                     synthetic_method: None,
                     moved_from_interface_companion: false,
                     companion: false,
@@ -2415,6 +2428,7 @@ mod tests {
                     field_name: None,
                     annotations: Vec::new(),
                     field_annotations: Vec::new(),
+                    erased_annotations: false,
                     synthetic_method: None,
                     moved_from_interface_companion: false,
                     companion: false,
