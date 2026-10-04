@@ -13,8 +13,6 @@ coroutines/tailCallOptimizations/crossinline.kt
 extensionFunctions/kt475.kt
 functions/functionNtoString.kt
 functions/functionNtoStringGeneric.kt
-inference/overrideDefaultProperty.kt
-inference/overrideGenericDefaultMethod.kt
 innerNested/nestedInPackage.kt
 multiplatform/k2/defaultArguments/bothInExpectAndActual.kt
 multiplatform/k2/defaultArguments/bothInExpectAndActual2.kt

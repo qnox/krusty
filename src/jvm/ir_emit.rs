@@ -5001,7 +5001,10 @@ fn standalone_method_is_elided(ir: &IrFile, fid: u32, env: &EmitEnv) -> bool {
 /// body lives on that interface's `$DefaultImpls` holder.
 ///
 /// kotlinc emits `public <ret> f(args) { return I$DefaultImpls.f(this, args); }`. A member the class
-/// declares itself is left alone — it already overrides the abstract interface method.
+/// declares itself is left alone — it already overrides the abstract interface method. A member a
+/// superclass already realizes is left alone too: the superclass method is that implementation,
+/// whether it is a real override or a forwarder to the same interface declaration. A subclass that
+/// inherits a more specific interface override still forwards to that declaration.
 /// How an implementing class's compatibility forwarder reaches the inherited interface body.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ForwarderDispatch {
@@ -5049,6 +5052,11 @@ fn emit_default_impls_forwarders(
         interface_hierarchy::derives_from(symbols, candidate, ancestor)
     };
     let closure = interface_hierarchy::sorted_closure(symbols, c.interfaces.iter_ids().collect());
+    let superclass_interfaces = ir
+        .superclass_interfaces
+        .get(&c.fq_name)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
 
     let method_key = |name: &str, params: &[Ty]| {
         (
@@ -5252,6 +5260,13 @@ fn emit_default_impls_forwarders(
             // The nearest declaration wins even when it is abstract: an abstract redeclaration
             // suppresses a farther ancestor's body rather than exposing it as a fake override.
             if !selected.insert(key.clone()) {
+                continue;
+            }
+            // Common resolution records which exact interface declarations arrive through the
+            // direct superclass. Another compatibility forwarder would hide that inherited
+            // implementation. A more-specific directly declared interface has a different
+            // identity and therefore still receives its own forwarder.
+            if superclass_interfaces.contains(&interface) {
                 continue;
             }
             if member.is_abstract()
