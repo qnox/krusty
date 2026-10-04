@@ -13,10 +13,15 @@
 //! Every lambda numbers what it contains on its own, local functions nested in it included, and
 //! spells a lambda among them as the bare number: `one$lambda$0$0`, `one$lambda$0$lf$1`. A local
 //! function does not: a lambda in `loc` takes the enclosing count, `one$loc$lambda$2`.
+//!
+//! kotlinc renames a function whose signature mentions a value class before it lifts anything out
+//! of it, so its JVM name is the outermost segment: `lamP_txdesME$lambda$0` in `lamP-txdesME`,
+//! `m_impl$lambda$0` in a value-class member, `constructor_impl$lambda$0` in a value class's `init`
+//! block. The sequence is that name's, so `o(Tag)` numbers apart from an overload `o(Int)`.
 
 use std::collections::{HashMap, HashSet};
 
-use crate::ir::{IrFile, IrLiftingSequence};
+use crate::ir::{IrEnclosure, IrFile, IrLiftingSequence};
 
 /// Number every lifting sequence of the file and record kotlinc's lifted name of each function
 /// lowered from a lambda or local function. A callable inside one that is not lifted (the body of a
@@ -32,13 +37,16 @@ pub(crate) fn number(
         .filter_map(|(_, (sequence, site))| site.path.last().map(|step| (sequence, step.position)))
         .collect::<HashSet<_>>();
     let mut segments = HashMap::<(&IrLiftingSequence, u32), String>::new();
+    let mut containers = HashMap::<(&IrLiftingSequence, u32), String>::new();
     for (sequence, entries) in &ir.lifting_sequences {
-        let mut scopes = HashMap::<Option<u32>, (u32, HashSet<&str>)>::new();
+        let mut scopes = HashMap::<(String, Option<u32>), (u32, HashSet<&str>)>::new();
         for (&position, entry) in entries {
+            let container = container_segment(ir, entry.container, &sequence.container);
+            containers.insert((sequence, position), container.clone());
             if !entry.lifted {
                 continue;
             }
-            let (next, used) = scopes.entry(entry.scope).or_default();
+            let (next, used) = scopes.entry((container, entry.scope)).or_default();
             let segment = match entry.kind {
                 crate::lifting_provenance::LiftingCallableKind::Lambda
                 | crate::lifting_provenance::LiftingCallableKind::LocalDelegatedPropertyAccessor => {
@@ -72,7 +80,14 @@ pub(crate) fn number(
         .filter_map(|(&function, (sequence, site))| {
             let (mut name, start) = match helper_access.lambda_path_start(function) {
                 Some(start) => ("invoke".to_owned(), start),
-                None => (container_segment(&site.container), 0),
+                None => (
+                    site.path
+                        .first()
+                        .and_then(|step| containers.get(&(sequence, step.position)))
+                        .cloned()
+                        .unwrap_or_else(|| segment_spelling(&site.container)),
+                    0,
+                ),
             };
             for step in &site.path[start..] {
                 name.push('$');
@@ -142,9 +157,25 @@ pub(crate) fn realize(
     }
 }
 
-/// The outermost declaration's name as the first segment: kotlinc replaces the characters a
-/// special name carries (`<init>`, `<get-x>`, `x$delegate`) with `_`.
-fn container_segment(container: &str) -> String {
+/// The outermost declaration's name as the first segment: the JVM name the value-class pass gave
+/// `container`'s function, else the source `name`.
+fn container_segment(ir: &IrFile, container: Option<IrEnclosure>, name: &str) -> String {
+    let function = match container {
+        Some(IrEnclosure::Function(function)) => Some(function),
+        Some(IrEnclosure::PropertyAccessor { property, setter }) => {
+            super::ir_emit::enclosure::realized_property_accessor(ir, property, setter)
+        }
+        _ => None,
+    };
+    let renamed = function
+        .filter(|function| ir.value_class_renamed_functions.contains(function))
+        .map(|function| ir.functions[function as usize].name.as_str());
+    segment_spelling(renamed.unwrap_or(name))
+}
+
+/// kotlinc replaces the characters a special or mangled name carries (`<init>`, `<get-x>`,
+/// `x$delegate`, `f-txdesME`) with `_`.
+fn segment_spelling(container: &str) -> String {
     container
         .chars()
         .map(|c| {
@@ -176,7 +207,7 @@ fn unnamed_segment(scope: Option<u32>, inline_delegate: bool, next: &mut u32) ->
 
 #[cfg(test)]
 mod tests {
-    use super::{container_segment, unnamed_segment};
+    use super::{segment_spelling, unnamed_segment};
 
     #[test]
     fn ordinary_unnamed_callables_and_inline_delegates_keep_distinct_segments() {
@@ -190,9 +221,10 @@ mod tests {
 
     #[test]
     fn special_container_names_take_underscores() {
-        assert_eq!(container_segment("<init>"), "_init_");
-        assert_eq!(container_segment("<get-top>"), "_get_top_");
-        assert_eq!(container_segment("lz$delegate"), "lz_delegate");
-        assert_eq!(container_segment("outer"), "outer");
+        assert_eq!(segment_spelling("<init>"), "_init_");
+        assert_eq!(segment_spelling("<get-top>"), "_get_top_");
+        assert_eq!(segment_spelling("lz$delegate"), "lz_delegate");
+        assert_eq!(segment_spelling("sus-47cE-Rs"), "sus_47cE_Rs");
+        assert_eq!(segment_spelling("outer"), "outer");
     }
 }

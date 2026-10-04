@@ -35,10 +35,22 @@ pub(in crate::jvm) fn property_accessor_function(
     property: crate::fir::PropertyId,
     is_setter: bool,
 ) -> crate::ir::FunId {
-    let layout = ir.local_property_layouts.get(&property).unwrap_or_else(|| {
-        panic!("property accessor enclosure has no finalized property realization")
-    });
-    match layout {
+    assert!(
+        ir.local_property_layouts.contains_key(&property),
+        "property accessor enclosure has no finalized property realization"
+    );
+    realized_property_accessor(ir, property, is_setter)
+        .unwrap_or_else(|| panic!("source accessor enclosure has no emitted accessor"))
+}
+
+/// [`property_accessor_function`] for a caller that has no use for a property its file does not
+/// realize, or an accessor that is not emitted.
+pub(in crate::jvm) fn realized_property_accessor(
+    ir: &IrFile,
+    property: crate::fir::PropertyId,
+    is_setter: bool,
+) -> Option<crate::ir::FunId> {
+    match ir.local_property_layouts.get(&property)? {
         crate::ir::IrLocalPropertyLayout::TopLevelStorage { getter, setter, .. }
         | crate::ir::IrLocalPropertyLayout::Member { getter, setter, .. } => {
             if is_setter {
@@ -56,7 +68,6 @@ pub(in crate::jvm) fn property_accessor_function(
             }
         }
     }
-    .unwrap_or_else(|| panic!("source accessor enclosure has no emitted accessor"))
 }
 
 fn scope_enclosure(
