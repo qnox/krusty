@@ -128,7 +128,7 @@ pub(super) fn function(
     parameters
 }
 
-fn constructor_prefix(class: &IrClass, count: usize) -> Vec<MethodParameter> {
+fn constructor_prefix(ir: &IrFile, class: &IrClass, count: usize) -> Vec<MethodParameter> {
     assert!(
         count <= class.ctor_args.len(),
         "constructor prefix exceeds its arguments"
@@ -152,7 +152,7 @@ fn constructor_prefix(class: &IrClass, count: usize) -> Vec<MethodParameter> {
             let name = argument
                 .capture
                 .as_ref()
-                .map(crate::jvm::capture_names::capture_name)
+                .map(|capture| crate::jvm::capture_names::class_capture(ir, class, capture).field)
                 .or_else(|| {
                     let field = argument.field_index?;
                     Some(class.fields.get(field as usize)?.name.clone())
@@ -174,6 +174,7 @@ fn generated_constructor_flags(role: IrGeneratedParameterRole) -> u16 {
 }
 
 pub(super) fn primary_constructor(
+    ir: &IrFile,
     class: &IrClass,
     physical_parameters: &[Ty],
 ) -> Vec<MethodParameter> {
@@ -186,7 +187,7 @@ pub(super) fn primary_constructor(
         "primary constructor identities must match its physical JVM parameters"
     );
     let prefix = class.constructor_prefix_count as usize;
-    let mut parameters = constructor_prefix(class, prefix);
+    let mut parameters = constructor_prefix(ir, class, prefix);
     let projected = crate::jvm::parameter_names::constructor_method_parameters(&class.ctor_args);
     parameters.extend(projected[prefix..].iter().cloned().map(|name| (name, 0)));
     parameters
@@ -196,10 +197,11 @@ pub(super) fn primary_constructor(
 /// JVM `MethodParameters` attribute was requested. Synthetic marker accessors still need these for
 /// their `LocalVariableTable`; omitting that table must not be used as a substitute for identities.
 pub(super) fn primary_constructor_identities(
+    ir: &IrFile,
     class: &IrClass,
     physical_parameters: &[Ty],
 ) -> Vec<Option<String>> {
-    let identities = crate::jvm::parameter_names::constructor_local_variables(&class.ctor_args);
+    let identities = crate::jvm::parameter_names::constructor_local_variables(ir, class);
     assert_eq!(identities.len(), physical_parameters.len());
     identities
 }
@@ -241,6 +243,7 @@ impl OwnerConstructorPrefix {
 }
 
 pub(super) fn secondary_constructor(
+    ir: &IrFile,
     class: &IrClass,
     constructor: &IrSecondaryCtor,
     owner_prefix: &OwnerConstructorPrefix,
@@ -255,7 +258,11 @@ pub(super) fn secondary_constructor(
         "secondary constructor identities must match its physical JVM parameters"
     );
     let mut parameters = owner_prefix.parameters.clone();
-    parameters.extend(constructor_prefix(class, constructor.prefix_params.len()));
+    parameters.extend(constructor_prefix(
+        ir,
+        class,
+        constructor.prefix_params.len(),
+    ));
     parameters.extend(
         constructor
             .named_params
@@ -270,6 +277,7 @@ pub(super) fn secondary_constructor(
 /// `MethodParameters`, but an emitted marker accessor must still use the identities common IR
 /// recorded instead of inventing `pN` names or silently dropping its debug locals.
 pub(super) fn secondary_constructor_identities(
+    ir: &IrFile,
     class: &IrClass,
     constructor: &IrSecondaryCtor,
     owner_prefix: &OwnerConstructorPrefix,
@@ -281,7 +289,11 @@ pub(super) fn secondary_constructor_identities(
         "secondary constructor identities must match its physical JVM parameters"
     );
     let mut parameters = owner_prefix.parameters.clone();
-    parameters.extend(constructor_prefix(class, constructor.prefix_params.len()));
+    parameters.extend(constructor_prefix(
+        ir,
+        class,
+        constructor.prefix_params.len(),
+    ));
     parameters.extend(
         constructor
             .named_params
