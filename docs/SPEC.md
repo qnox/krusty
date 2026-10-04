@@ -4045,6 +4045,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `java_charsequence_get_realization_is_an_operator`,
   `tests/classpath_number_conversion_e2e.rs`.
 
+- **An exact override family may publish a special JVM call-site name.** Kotlin builtins
+  such as `Collection.size`, `Map.keys`, `MutableList.removeAt`, `CharSequence.get`, and
+  `Number.toByte` have target spellings that differ from their source names
+  (`MethodSignatureMapper.mapOverriddenSpecialBuiltinIfNeeded`,
+  compiler/ir/backend.jvm/.../mapping/MethodSignatureMapper.kt:411-422, backed by
+  `getOverriddenBuiltinWithDifferentJvmName`,
+  core/descriptors.jvm/.../specialBuiltinMembers.kt:88-102). The provider joins each exact decoded
+  dependency declaration to its target-policy realization while both identities are available.
+  A selected source override reaches that policy only through its exact frontend override edges;
+  emission never recovers it from an owner/member spelling. Thus `SmartSet.size` calls
+  `SmartSet.size()I`, `MyList.removeAt` calls `remove(I)Object`, and a covariant
+  `keys: HashSet<K>` calls `keySet()Set` then narrows the result. Super calls, writes, plain
+  `fun getSize()`, and Java bean getters retain their declared ABI. Tests:
+  `tests/special_builtin_call_sites_e2e.rs`.
+
 - **Unchecked cast to a type parameter (`x as T`).** kotlinc erases the target to the type parameter's
   upper bound — `Object` for an unbounded `<T>` (no `checkcast` emitted), the bound's class for `<T :
   CharSequence>` (a `checkcast`). A non-null bound (`<T : Any>`, `<T : Foo>`) null-checks first
@@ -7381,6 +7396,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/member_extension_property_e2e.rs::protected_member_extension_property_read_in_declaring_class`,
   `::protected_member_extension_property_read_in_subclass`,
   `::protected_member_extension_property_read_from_unrelated_class_is_rejected`.
+- **A protected classpath member called from a nested class uses the subclass's `access$<name>`.**
+  Kotlin lets a subclass call a protected member of a classpath supertype. The JVM allows that
+  call from the subclass's own method, including across packages. A nested or anonymous class is
+  a separate class file and is not that subclass, so `invokevirtual` of the protected method from
+  it is an `IllegalAccessError` when the packages differ. The subclass declares
+  `public static final synthetic access$<name>(Subclass, …)`, whose body `invokevirtual`s the
+  member, and the nested class calls that accessor. Parameters the dependency does not name are
+  `p0`, `p1`, …. A call in the subclass's own method stays a direct `invokevirtual`. A caller in
+  the member's package needs no accessor. Tests:
+  `tests/classpath_protected_nested_access_e2e.rs`. Box `coroutines/generate.kt`.
 - **A value class's private member reached from its companion calls `access$<name>-impl`.** The member
   is realized as a `private static <name>-impl` over the carrier, so the companion's call is already
   static when the backend sees it; value-class lowering records the exact function each such call

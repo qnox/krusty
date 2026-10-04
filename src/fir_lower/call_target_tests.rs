@@ -172,16 +172,22 @@ class Forwarding(source: Source) : Source by source
         [
             (
                 "getCursor".to_owned(),
-                Some(IrVirtualTarget::PropertyGetter(cursor))
+                Some(IrVirtualTarget::PropertyGetter(
+                    crate::fir::ResolvedPropertyOverrideTarget::Module(cursor),
+                ))
             ),
             (
                 "getSize".to_owned(),
-                Some(IrVirtualTarget::PropertyGetter(size))
+                Some(IrVirtualTarget::PropertyGetter(
+                    crate::fir::ResolvedPropertyOverrideTarget::Module(size),
+                ))
             ),
             ("read".to_owned(), function(read)),
             (
                 "setCursor".to_owned(),
-                Some(IrVirtualTarget::PropertySetter(cursor))
+                Some(IrVirtualTarget::PropertySetter(
+                    crate::fir::ResolvedPropertyOverrideTarget::Module(cursor),
+                ))
             ),
         ]
     );

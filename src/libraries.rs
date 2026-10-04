@@ -18,7 +18,10 @@ mod inline_body;
 pub(crate) mod physical_parameter_plan;
 mod platform_contract;
 mod property_producer;
-pub use call_realization::{DefaultCallRealization, NonvirtualCallRealization};
+pub use call_realization::{
+    DefaultCallRealization, NonvirtualCallRealization, OverriddenCallKind,
+    OverriddenCallRealization,
+};
 pub(crate) use classifier_callables::constructor_generic_signature;
 pub use classifier_callables::BoundInnerConstructor;
 pub use classifier_declaration::{AliasExpansion, ClassifierDeclaration};
@@ -298,8 +301,9 @@ pub struct LibraryMember {
     /// Structural expansion decoded from this exact member's inline body.
     pub inline_body_plan: Option<Box<InlineBodyPlan>>,
     /// The member's Kotlin visibility, from its bytecode access flags/`@Metadata`. A `Protected` member
-    /// is surfaced (not dropped) so a subclass can reach an inherited classpath member; the emit is
-    /// identical to a public one. `Public` by default.
+    /// is surfaced (not dropped) so a subclass can reach an inherited classpath member. A call in
+    /// that subclass's own method is an ordinary invoke; a nested class in another package reaches
+    /// it through the subclass's `access$` bridge. `Public` by default.
     pub visibility: Visibility,
     /// Source call-shape (parameter names + default flags + `required`, lambda parameter types) — the same
     /// facts `CallSig` carries for functions. Lets a resolver member query drive a NAMED-argument member
@@ -490,6 +494,10 @@ pub enum ExternalCallableKind {
 pub struct ExternalCallableRealization {
     pub callable: LibraryCallable,
     pub kind: ExternalCallableKind,
+    /// Provider-published identities parallel to the callable's semantic source parameters. The
+    /// physical parameter plan joins them to ABI-only slots such as a suspend continuation.
+    /// A backend formats these for debug/metadata surfaces; it never reconstructs them from arity.
+    pub parameter_identities: Box<[crate::fir::ResolvedParameterIdentity]>,
 }
 
 /// A provider's realization of one normalized Kotlin property. FIR carries only its opaque
@@ -961,6 +969,11 @@ pub struct LibraryCallable {
     /// property accessors and functions expose the same provider-normalized modality; physical JVM
     /// access flags are only one input at a provider boundary.
     pub is_abstract: bool,
+    /// Declaration visibility copied from the member this callable was normalized from. `Public`
+    /// when the constructor did not have a member. A protected member stays an ordinary invoke
+    /// from the subclass itself; a nested class in another package reaches it through the
+    /// subclass's `access$` bridge.
+    pub visibility: Visibility,
     /// [`owner`](Self::owner) is an INTERFACE, so the call dispatches with `invokeinterface`. Carried on
     /// the selected callable because the owner's own declaration may not be re-readable at the call
     /// site: a mapped builtin's JVM owner (`java/util/List`) has no class file when no JDK is on the
@@ -1071,6 +1084,10 @@ pub struct LibraryCallable {
     /// Exact nonvirtual target selected by the provider (see [`LibraryMember::nonvirtual_realization`]):
     /// present only when the ordinary physical descriptor is not the legal nonvirtual entry point.
     pub nonvirtual_realization: Option<Box<NonvirtualCallRealization>>,
+    /// Target call-site realizations supplied by declarations this callable may override. These
+    /// candidates are provider-normalized facts; a backend selects one only through the checked
+    /// override/target identities carried by IR.
+    pub overridden_call_realizations: Box<[OverriddenCallRealization]>,
 }
 
 /// How a resolved function relates to the call's receiver — drives Kotlin overload precedence (a member

@@ -9,7 +9,6 @@ bridges/internalMethodOverrideInOtherModule.kt
 bridges/internalMethodOverrideMultipleInheritance.kt
 compileKotlinAgainstKotlin/inlineClasses/privateCompanionObjectValInDifferentModule.kt
 compileKotlinAgainstKotlin/inlineClasses/privateTopLevelValInDifferentModule.kt
-coroutines/generate.kt
 coroutines/tailCallOptimizations/crossinline.kt
 extensionFunctions/kt475.kt
 functions/functionNtoString.kt

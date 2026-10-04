@@ -2040,6 +2040,13 @@ pub struct IrFile {
     /// survives physical virtual/property realization so a backend can implement access bridges
     /// without owner/name lookup.
     pub(crate) module_member_accesses: std::collections::HashMap<ExprId, IrModuleMemberAccess>,
+    /// JVM-realized protected dependency calls, keyed by the physical call operation. JVM
+    /// emission turns one whose caller is outside the subclass into that subclass's `access$`
+    /// bridge. This is populated only by the JVM external-call realization boundary.
+    pub(crate) jvm_protected_dependency_calls: std::collections::HashMap<
+        ExprId,
+        crate::jvm::protected_dependency_calls::ProtectedDependencyCall,
+    >,
     /// Private methods a synthesized callable-reference class calls; each gets one access bridge.
     pub function_reference_access_bridges: std::collections::HashSet<u32>,
     /// Lambda impls pre-marked `inline_only` by `mark_must_inline_lambdas` (a must-inline callee's
@@ -2312,6 +2319,11 @@ pub struct IrFile {
     /// identically in the JVM descriptor. Only concrete declared receivers are recorded (a `Var` receiver
     /// is `None` at the source and never inserted).
     pub ext_call_source_receiver: std::collections::HashMap<u32, Ty>,
+    /// JVM call expression → exact physical realization inherited through its checked override
+    /// target. A JVM planning pass selects this from provider-published candidates and stable
+    /// function/property override identities; emission never scans source/member spellings.
+    pub(crate) jvm_overridden_call_realizations:
+        std::collections::HashMap<ExprId, crate::libraries::OverriddenCallRealization>,
     /// Exact provider-selected language-member roles retained on their call expressions. This is
     /// declaration identity data, not a spelling-based backend lookup.
     pub semantic_call_roles: std::collections::HashMap<ExprId, crate::types::SemanticCallRole>,

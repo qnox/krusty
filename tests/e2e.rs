@@ -342,6 +342,8 @@ mod classpath_properties_query_e2e;
 mod classpath_property_mutable_collection_e2e;
 #[path = "classpath_protected_member_e2e.rs"]
 mod classpath_protected_member_e2e;
+#[path = "classpath_protected_nested_access_e2e.rs"]
+mod classpath_protected_nested_access_e2e;
 #[path = "classpath_provide_delegate_e2e.rs"]
 mod classpath_provide_delegate_e2e;
 #[path = "classpath_qualified_nested_named_ctor_e2e.rs"]
@@ -2461,5 +2463,7 @@ mod unsigned_vararg_e2e;
 #[path = "reified_nullable_instance_check_e2e.rs"]
 mod reified_nullable_instance_check_e2e;
 
+#[path = "special_builtin_call_sites_e2e.rs"]
+mod special_builtin_call_sites_e2e;
 #[path = "type_intrinsics_e2e.rs"]
 mod type_intrinsics_e2e;

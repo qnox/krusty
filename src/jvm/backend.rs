@@ -28,6 +28,8 @@ pub enum SkipReason {
     SuperCalls,
     /// A checked declaration argument no longer matched its selected JVM parameter boundary.
     CallArguments(String),
+    /// A selected overridden call could not be joined to its checked dispatch classifier facts.
+    MemberDispatch(crate::types::TypeName),
 }
 
 /// What the plugin pass of [`run_backend_passes`] runs: the native plugins the frontend ran for this
@@ -329,6 +331,8 @@ fn run_backend_passes_after_plugins(
         lambda_modes,
         &facts.specialized_suspend_lambda_classes,
     );
+    crate::jvm::overridden_calls::realize(ir, classifiers, callables, &facts.property_realizations)
+        .map_err(|missing| SkipReason::MemberDispatch(missing.0))?;
     // Every type the emitter will test or cast against is final now: carry each referenced
     // classifier's checked role into the IR, where type operations read it.
     ir.publish_classifier_roles(classifiers);
@@ -969,13 +973,26 @@ fn report_backend_pass_failure(reason: SkipReason, diags: &mut DiagSink) {
             diags.error(crate::diag::Span::new(0, 0), detail);
             return;
         }
+        SkipReason::MemberDispatch(classifier) => {
+            diags.error(
+                crate::diag::Span::new(0, 0),
+                format!(
+                    "internal error: missing JVM dispatch classifier fact for {}",
+                    classifier.render()
+                ),
+            );
+            return;
+        }
         _ => {}
     }
     let what = match reason {
         SkipReason::ValueClasses => "value-class",
         SkipReason::Suspend => "suspend-function",
         SkipReason::Bridges => "bridge-method",
-        SkipReason::DefaultCalls | SkipReason::SuperCalls | SkipReason::CallArguments(_) => {
+        SkipReason::DefaultCalls
+        | SkipReason::SuperCalls
+        | SkipReason::CallArguments(_)
+        | SkipReason::MemberDispatch(_) => {
             unreachable!()
         }
     };

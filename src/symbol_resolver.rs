@@ -7987,6 +7987,7 @@ mod tests {
             suspend: false,
             is_abstract: false,
             owner_is_interface: false,
+            visibility: crate::types::Visibility::Public,
             member_realization: crate::libraries::MemberRealization::Dispatch,
             inline: crate::libraries::InlineKind::None,
             default_call: true,
@@ -8005,6 +8006,7 @@ mod tests {
             singleton_dispatch: None,
             default_realization: None,
             nonvirtual_realization: None,
+            overridden_call_realizations: Box::new([]),
             declared_ret: None,
             overridden_results: Box::new([]),
         };

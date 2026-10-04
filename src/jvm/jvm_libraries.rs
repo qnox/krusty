@@ -7,6 +7,7 @@ mod builtin_classifier_shapes;
 mod builtins_customizer;
 mod catalog_presence;
 mod classifier_facts;
+mod dependency_registration;
 mod generic_signatures;
 mod inline_body_plan;
 mod inline_capability;
@@ -3216,98 +3217,6 @@ impl JvmLibraries {
         self.cp.has_package(parent, name) || EmptySymbolSource.package_exists(parent, name)
     }
 
-    fn register_external_callable(&self, callable: &mut LibraryCallable, kind: FnKind) {
-        if !matches!(callable.origin, crate::libraries::Origin::Library) {
-            return;
-        }
-        if let Some(plan) = callable.inline_body_plan.as_deref_mut() {
-            self.register_inline_body_plan_dependencies(plan);
-        }
-        if let Some(identity) = callable.external_identity {
-            self.cp.enrich_external_callable(identity, callable);
-            return;
-        }
-        let kind = match kind {
-            FnKind::TopLevel => super::classpath::ExternalCallableKind::TopLevel,
-            FnKind::Extension => super::classpath::ExternalCallableKind::Extension,
-            FnKind::Member => super::classpath::ExternalCallableKind::Member,
-        };
-        callable.external_identity = Some(self.cp.intern_external_callable(callable, kind));
-    }
-
-    fn register_external_inline_member(&self, member: &mut LibraryMember) {
-        self.register_external_inline_callable(member, FnKind::Member);
-    }
-
-    /// Inline-plan caches are shared by immutable classpath composition, while callable identities
-    /// are local to one `Classpath` instance. Always re-home a cached dependency through the
-    /// consuming classpath's physical declaration key before the plan crosses the provider boundary.
-    fn register_external_inline_dependency_callable(
-        &self,
-        callable: &mut LibraryCallable,
-        kind: FnKind,
-    ) {
-        callable.external_identity = None;
-        self.register_external_callable(callable, kind);
-    }
-
-    fn register_external_inline_callable(&self, member: &mut LibraryMember, kind: FnKind) {
-        let Some(owner) = member.owner else {
-            return;
-        };
-        let mut callable = FunctionInfo::classifier_member(kind, owner, member.clone()).callable;
-        self.register_external_inline_dependency_callable(&mut callable, kind);
-        member.external_identity = callable.external_identity;
-    }
-
-    fn register_external_property(&self, property: &mut PropertyInfo) {
-        let kind = match property.kind {
-            PropKind::TopLevel => FnKind::TopLevel,
-            PropKind::Extension => FnKind::Extension,
-            PropKind::Member | PropKind::MemberExtension => FnKind::Member,
-        };
-        self.register_external_callable(&mut property.getter, kind);
-        if let Some(setter) = &mut property.setter {
-            self.register_external_callable(setter, kind);
-        }
-        let Some(getter) = property.getter.external_identity else {
-            return;
-        };
-        let setter = property
-            .setter
-            .as_ref()
-            .and_then(|setter| setter.external_identity);
-        let identity = self.cp.intern_external_property(
-            &property.name,
-            getter,
-            setter,
-            property.compile_time_constant.clone(),
-        );
-        property.getter.external_property_identity = Some(identity);
-        if let Some(setter) = &mut property.setter {
-            setter.external_property_identity = Some(identity);
-        }
-    }
-
-    fn register_external_callables(
-        &self,
-        callables: crate::libraries::Callables,
-    ) -> crate::libraries::Callables {
-        let (mut functions, mut properties) = callables.into_parts();
-        for function in &mut functions.overloads {
-            function.callable.inline_modifiers = function
-                .call_sig
-                .inline_modifiers
-                .clone()
-                .into_boxed_slice();
-            self.register_external_callable(&mut function.callable, function.kind);
-        }
-        for property in &mut properties.overloads {
-            self.register_external_property(property);
-        }
-        crate::libraries::Callables::from_parts(functions, properties)
-    }
-
     fn register_external_classifier(
         &self,
         owner: TypeName,
@@ -5070,6 +4979,18 @@ impl JvmLibraries {
                             )
                         };
                         let mut callable = callable;
+                        // `scope_name` is the provider-normalized Kotlin declaration name. A raw
+                        // Java method may carry only its physical spelling on `m`; attach the
+                        // inherited-call policy here while both views still name the same exact
+                        // declaration. Later phases consume only the external identity and this
+                        // typed candidate set.
+                        callable.overridden_call_realizations =
+                            super::mapped_builtin_declarations::overridden_call_realizations_for_declaration(
+                                scope_name,
+                                &callable.descriptor,
+                                super::mapped_builtin_declarations::MappedBuiltinMemberKind::Function,
+                            )
+                            .into_boxed_slice();
                         // `params` is the call-site-specialized Kotlin declaration shape; the
                         // classfile descriptor remains the physical ABI. In particular, an
                         // object-erased value-class parameter (`Result<T>` -> `Object`) must not be

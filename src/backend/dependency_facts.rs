@@ -38,6 +38,9 @@ pub struct BackendCallableFact {
     /// Target owner selected by the provider. This is a physical realization fact (a facade or a
     /// mapped platform class), not the declaration's semantic Kotlin owner.
     pub physical_owner: TypeName,
+    /// Declaration visibility. A protected member stays callable from a subclass, and a nested
+    /// class of that subclass reaches it through an accessor rather than a public invoke.
+    pub visibility: crate::types::Visibility,
     pub kind: ExternalCallableKind,
     pub owner_is_interface: bool,
     pub compiler_intrinsic: Option<BackendCompilerIntrinsic>,
@@ -45,6 +48,10 @@ pub struct BackendCallableFact {
     pub member_realization: MemberRealization,
     pub params: Vec<Ty>,
     pub physical_params: Vec<Ty>,
+    /// Exact identities parallel to the callable's semantic source parameters, published by the
+    /// selected declaration's provider. `physical_parameter_plan` joins them to ABI-only slots.
+    /// A backend may format the resulting identities but must not invent them from arity.
+    pub parameter_identities: Box<[crate::fir::ResolvedParameterIdentity]>,
     /// Exact physical slot roles published by the provider while it aligned metadata with the
     /// classfile declaration. Backends consume this frozen plan; they do not reconstruct roles
     /// from arity or descriptor spelling.
@@ -58,6 +65,7 @@ pub struct BackendCallableFact {
     pub inline_modifiers: Box<[InlineParameterModifier]>,
     pub default_realization: Option<Box<DefaultCallRealization>>,
     pub nonvirtual_realization: Option<Box<NonvirtualCallRealization>>,
+    pub overridden_call_realizations: Box<[crate::libraries::OverriddenCallRealization]>,
     pub generic_sig: Option<Box<GenericSig>>,
 }
 
@@ -204,12 +212,14 @@ impl CheckedBackendCallables {
             Entry::Vacant(slot) => {
                 let realization =
                     provider(identity).ok_or(DependencyFactError::UnknownCallable(identity))?;
+                let parameter_identities = realization.parameter_identities;
                 let callable = realization.callable;
                 slot.insert(BackendCallableFact {
                     name: callable.name,
                     physical_name: callable.physical_name,
                     reflection_name: callable.reflection_name,
                     physical_owner: callable.owner,
+                    visibility: callable.visibility,
                     kind: realization.kind,
                     owner_is_interface: callable.owner_is_interface,
                     compiler_intrinsic: callable.compiler_intrinsic,
@@ -217,6 +227,7 @@ impl CheckedBackendCallables {
                     member_realization: callable.member_realization,
                     params: callable.params,
                     physical_params: callable.physical_params,
+                    parameter_identities,
                     physical_parameter_plan: callable.physical_parameter_plan,
                     physical_ret: callable.physical_ret,
                     descriptor: callable.descriptor,
@@ -227,6 +238,7 @@ impl CheckedBackendCallables {
                     inline_modifiers: callable.inline_modifiers,
                     default_realization: callable.default_realization,
                     nonvirtual_realization: callable.nonvirtual_realization,
+                    overridden_call_realizations: callable.overridden_call_realizations,
                     generic_sig: callable.generic_sig,
                 })
             }
