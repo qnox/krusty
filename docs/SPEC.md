@@ -1673,8 +1673,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   an abstract method:
   * `enable` (kotlinc's own default since 2.2; legacy `-Xjvm-default=all-compatibility`) — default
     methods on the interface plus synthetic `access$<name>$jd` bridges; an `<Iface>$DefaultImpls`
-    holder whose statics forward to those bridges; forwarder overrides on every implementing class;
-    `@Metadata` `jvmClassFlags` (`Class` extension field 104) = 3.
+    holder whose statics forward to those bridges; a forwarder on a class that does not already
+    inherit that interface declaration from a superclass; `@Metadata` `jvmClassFlags` (`Class`
+    extension field 104) = 3.
   * `no-compatibility` (legacy `-Xjvm-default=all`, what intellij-community builds with) — default
     methods only. NO `$DefaultImpls` class anywhere, no class forwarders, `jvmClassFlags` = 1, and a
     compiler-version requirement for 1.4.0 in the class metadata.
@@ -1697,9 +1698,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   re-emitted `checkNotNullParameter` guards with the line entry at the post-guard pc, the promoted
   generic signature, `@NotNull`/`@Nullable` annotations, and `$this`-first locals), a `$default`
   holder copy that is a thin synthetic forward to the interface's own stub, and an `ACC_BRIDGE`
-  forwarder override on every implementing class — an `invokespecial` that must NAME a direct
-  superinterface (the first declared one through which the winning declaration is inherited;
-  measured on the diamond). A sub-interface REPUBLISHES the surface for every inherited default it
+  forwarder on a class whose most specific interface declaration of the member is not already the
+  one its superclasses inherit. A superclass override (`override val test = super.test + 1`) and a
+  superclass that only forwards the same default both keep the method off the subclass
+  (`class Diamond : Mid, Override()` and `class Relist : Base, Inherits()`). A subclass that adds
+  a more specific interface override still forwards to that override
+  (`class More : Specific, Inherits()` where `Specific` overrides `Base`). The forwarder is an
+  `invokespecial` that must NAME a direct superinterface (the first declared one through which the
+  winning declaration is inherited; measured on the diamond). A sub-interface REPUBLISHES the surface for every inherited default it
   does not redeclare, even when it declares nothing itself; a member inherited from a
   `disable`-compiled dependency gets a holder forward straight to that dependency's holder (behind
   a `checkcast`, without `@Deprecated` or an `access$…$jd` bridge), exactly as measured. Kotlin-ness
@@ -1732,7 +1738,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `// JVM_DEFAULT_MODE:` directive pins; every recognized mode runs, including multi-module
   `disable`. Tests: `tests/jvm_default_mode_e2e.rs` (differential class sets, public method
   realization and holder bytes vs kotlinc, emitted `jvmClassFlags`, behavior parity, and cross-module
-  consumption) and the `-jvm-default` parsing tests in `crates/krusty-cli/src/cli.rs`.
+  consumption), `tests/interface_default_superclass_e2e.rs` (a subclass keeps a superclass
+  override or the same default, and still forwards a more specific interface override), and the
+  `-jvm-default` parsing tests in `crates/krusty-cli/src/cli.rs`.
 - Language level 2.4, kotlinc 2.4.20's default, enables every feature krusty models whose
   `sinceVersion` is at most 2.4. Explicit backing fields and `when` guards are in that set, so
   `val items: List<String> field = mutableListOf()` and `is A if v.ok ->` compile with no `-X`

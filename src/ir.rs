@@ -1605,6 +1605,10 @@ pub struct IrFile {
     /// Common lowering copies it from the stable FIR index; target passes may inspect target-specific
     /// representation rules but must not reconstruct semantic inheritance through frontend lookup.
     pub classifier_hierarchies: std::collections::HashMap<TypeName, Vec<IrAppliedClassifier>>,
+    /// Exact interface identities reached through each source classifier's direct superclass.
+    /// Common resolution records the path distinction before flattening the complete hierarchy;
+    /// target emitters consume it without reopening a classifier provider.
+    pub superclass_interfaces: std::collections::HashMap<TypeName, Vec<TypeName>>,
     /// Exact semantic property-override edges copied from stable FIR. A target backend may erase
     /// these types and materialize representation bridges, but it must not search declarations.
     pub property_overrides: std::collections::HashMap<TypeName, Vec<IrPropertyOverride>>,

@@ -31,6 +31,38 @@ fn duplicate_classifier_identity_is_ambiguous_without_losing_forward_identities(
 }
 
 #[test]
+fn superclass_interface_paths_are_published_by_exact_identity() {
+    let mut diagnostics = DiagSink::new();
+    let analysis = crate::frontend::analyze_source_set_with_features(
+        &[SourceInput::kotlin(
+            "package sample\ninterface AncestorContract\ninterface DirectContract\nopen class Parent : AncestorContract\nclass Child : Parent(), DirectContract\n",
+        )
+        .with_file_stem("SuperclassInterfacePaths")],
+        Box::new(EmptySymbolSource),
+        &LangFeatures::new(),
+        &mut diagnostics,
+    );
+    assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+    let index = analysis
+        .streamed
+        .as_ref()
+        .expect("Pass 1 must finalize")
+        .module
+        .index();
+    let child = (0..index.declaration_count())
+        .map(|raw| DeclarationId::from_raw(raw as u32))
+        .find(|declaration| index.declaration_name(*declaration) == Some("Child"))
+        .expect("Child declaration");
+
+    assert_eq!(
+        index
+            .superclass_interfaces(child)
+            .expect("override planning must publish superclass path provenance"),
+        [crate::types::type_name("sample/AncestorContract")]
+    );
+}
+
+#[test]
 fn member_source_order_interleaves_functions_and_properties() {
     let mut diagnostics = DiagSink::new();
     let analysis = crate::frontend::analyze_source_set_with_features(
