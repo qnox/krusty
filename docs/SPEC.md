@@ -5361,13 +5361,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `src/fir/index_tests.rs::a_dependency_override_edge_carries_the_declarations_own_signature`.
 - **A method type parameter erases through a classifier type parameter's primary bound.**
   `fun <T : S> isEqualTo(expected: Any?): T` on `Entity<D, S : Entity<D, S>>` has JVM descriptor
-  `(Ljava/lang/Object;)LEntity;`. The call site already erased `T` through `S`; the declaration
-  does the same, including when `S` is declared on an enclosing classifier (an inner class sees
-  its outer class's parameters, and a method parameter shadows one with the same identity). An
-  override that tightens `T` to a subtype publishes that descriptor as a bridge beside its
-  specialized method. A chain declared on the method itself (`<T : S, S : Mark>`) erases through
-  the same rule. A cycle has no class bound and erases to `Any`. Tests:
-  `tests/type_parameter_bound_erasure_e2e.rs`. Box:
+  `(Ljava/lang/Object;)LEntity;`. The call site already erased `T` through `S`, and the declaration
+  does the same. A self-referential classifier bound can be recorded as `Any` while the occurrence
+  still carries `Entity`; the descriptor uses that carried class. An enclosing classifier's
+  parameters are part of the lookup: an inner class sees its outer class's parameters, and a
+  method parameter shadows one with the same identity. An override that tightens `T` publishes
+  that descriptor as a bridge beside its specialized method. A chain declared on the method
+  (`<T : S, S : Mark>`) uses the same rule. A repeated type-parameter name has no class bound and
+  erases to `Any`. Tests: `tests/type_parameter_bound_erasure_e2e.rs`. Box:
   `inference/capturedSelfInsideIntersection.kt`.
 - **A bridge names its parameters after the declaration it overrides.** kotlinc's `BridgeLowering`
   copies the bridge's value parameters from the overridden function, so the bridge's
