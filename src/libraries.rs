@@ -233,6 +233,20 @@ pub enum MemberRealization {
     RangeConstruction { open_end: bool },
 }
 
+impl MemberRealization {
+    /// The compiler operation carried by this exact provider realization, if any.
+    ///
+    /// Classifier declarations use `MemberRealization` while normalized callable candidates use
+    /// `LibraryCallable::compiler_intrinsic`. Keeping the projection here makes either direction of
+    /// that provider-boundary conversion preserve the same typed declaration fact.
+    pub const fn compiler_intrinsic(self) -> Option<CompilerIntrinsic> {
+        match self {
+            Self::Intrinsic(intrinsic) => Some(intrinsic),
+            Self::Dispatch | Self::Direct { .. } | Self::RangeConstruction { .. } => None,
+        }
+    }
+}
+
 /// Neutral result required by the JVM's type-safe collection protocol for one exact declaration.
 /// A JVM declaration provider assigns this role while the decoded Kotlin builtin identity and its
 /// physical realization are still together; later phases carry it without recognizing a name.
