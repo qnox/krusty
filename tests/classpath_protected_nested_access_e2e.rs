@@ -19,8 +19,7 @@ class Host : Base() {\n\
     fun own(): String = secret()\n\
 \n\
     fun go(): String {\n\
-        val probe = object : Runnable {\n\
-            override fun run() {}\n\
+        val probe = object {\n\
             fun read(): String = secret() + step(1)\n\
         }\n\
         return probe.read()\n\

@@ -187,6 +187,99 @@ fn protected_bridge_owner(
         })
 }
 
+/// The source class that encloses `caller` and may call protected `target`.
+///
+/// A nested class does not carry the receiver's classifier on every classpath call, and it is not
+/// itself a subclass. The class it is declared in is, when that class extends the member's owner
+/// and lives in another package.
+fn enclosing_protected_subclass(
+    ir: &IrFile,
+    caller: &str,
+    target: crate::types::TypeName,
+) -> Option<crate::types::TypeName> {
+    let mut current = ir
+        .classes
+        .iter()
+        .find(|class| class.fq_name.matches(caller))?
+        .fq_name;
+    let mut seen = std::collections::HashSet::new();
+    while seen.insert(current) {
+        let next = enclosing_class(ir, current, target)?;
+        if next != target
+            && !next.matches(caller)
+            && next.namespace() != target.namespace()
+            && extends_target(ir, next, target)
+        {
+            return Some(next);
+        }
+        current = next;
+    }
+    None
+}
+
+fn enclosing_class(
+    ir: &IrFile,
+    class: crate::types::TypeName,
+    target: crate::types::TypeName,
+) -> Option<crate::types::TypeName> {
+    let declared = ir
+        .classes
+        .iter()
+        .find(|candidate| candidate.fq_name == class)?;
+    match declared.enclosure? {
+        crate::ir::IrEnclosure::Function(function) | crate::ir::IrEnclosure::Lambda(function) => {
+            let owners = ir.class_method_owners.get(&function)?;
+            owners
+                .iter()
+                .find_map(|&owner| {
+                    let owner = ir.classes.get(owner as usize)?;
+                    (owner.fq_name != class && extends_target(ir, owner.fq_name, target))
+                        .then_some(owner.fq_name)
+                })
+                .or_else(|| {
+                    owners.iter().find_map(|&owner| {
+                        let owner = ir.classes.get(owner as usize)?;
+                        (owner.fq_name != class).then_some(owner.fq_name)
+                    })
+                })
+        }
+        crate::ir::IrEnclosure::ClassInitializer(owner)
+        | crate::ir::IrEnclosure::Constructor { class: owner, .. }
+        | crate::ir::IrEnclosure::Classifier(owner) => {
+            ir.classes.get(owner as usize).map(|owner| owner.fq_name)
+        }
+        crate::ir::IrEnclosure::PropertyAccessor { .. } | crate::ir::IrEnclosure::File => None,
+    }
+}
+
+fn extends_target(
+    ir: &IrFile,
+    class: crate::types::TypeName,
+    target: crate::types::TypeName,
+) -> bool {
+    let mut current = class;
+    let mut seen = std::collections::HashSet::new();
+    while seen.insert(current) {
+        let Some(declared) = ir
+            .classes
+            .iter()
+            .find(|candidate| candidate.fq_name == current)
+        else {
+            return false;
+        };
+        if declared.superclass == target
+            || declared
+                .interfaces
+                .iter_ids()
+                .any(|interface| interface == target)
+        {
+            return true;
+        }
+        current = declared.superclass;
+    }
+    false
+}
+
 /// The local-variable names of a protected property accessor's parameters: the setter's value is
 /// named as its declaration names it.
 fn protected_property_parameter_names(
@@ -543,13 +636,15 @@ pub(super) fn cross_owner_member_calls(
                         ..
                     } = ir.expr(expression)
                     {
-                        if let Some(bridge_owner) = protected_bridge_owner(
+                        let bridge_owner = protected_bridge_owner(
                             ir,
                             expression,
                             Some(*receiver),
                             owner,
                             dependency.owner,
-                        ) {
+                        )
+                        .or_else(|| enclosing_protected_subclass(ir, owner, dependency.owner));
+                        if let Some(bridge_owner) = bridge_owner {
                             crate::trace_compiler!(
                                 "emit",
                                 "protected dependency bridge expression={expression} owner={} target_owner={}",

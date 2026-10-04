@@ -5165,6 +5165,7 @@ impl JvmLibraries {
                                 super::mapped_builtin_declarations::MappedBuiltinMemberKind::Function,
                             )
                             .into_boxed_slice();
+                        callable.visibility = m.visibility;
                         // `params` is the call-site-specialized Kotlin declaration shape; the
                         // classfile descriptor remains the physical ABI. In particular, an
                         // object-erased value-class parameter (`Result<T>` -> `Object`) must not be

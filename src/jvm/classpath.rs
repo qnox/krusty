@@ -2030,6 +2030,15 @@ impl Classpath {
         if stored.callable.inline_modifiers.is_empty() && !callable.inline_modifiers.is_empty() {
             stored.callable.inline_modifiers = callable.inline_modifiers.clone();
         }
+        // Spelling-indexed construction can intern the physical method before classifier
+        // publication copies the declaration's visibility. Public is the incomplete default;
+        // a later protected, private, or package-private view of the same method is the
+        // declaration.
+        if stored.callable.visibility == crate::types::Visibility::Public
+            && callable.visibility != crate::types::Visibility::Public
+        {
+            stored.callable.visibility = callable.visibility;
+        }
     }
 
     /// Attach the declaration's exact physical parameter identities after callable selection has
