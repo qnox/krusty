@@ -62,10 +62,17 @@ pub(crate) fn compile(
         |files, symbols| krusty::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diags,
     );
+    let recursive_type_of = language_settings.features.has("JvmSupportRecursiveTypeOf")
+        || sources.iter().any(|(_, source)| {
+            let mut features = krusty::features::LangFeatures::new();
+            features.apply_source_directives(source);
+            features.has("JvmSupportRecursiveTypeOf")
+        });
     let backend = krusty::jvm::JvmBackend::new(cp)
         .with_class_major(class_major)
         .with_annotations_in_metadata(language_settings.features.has("AnnotationsInMetadata"))
-        .with_metadata_version(metadata_version);
+        .with_metadata_version(metadata_version)
+        .with_recursive_type_of(recursive_type_of);
     let outputs = krusty::compiler::emit_analyzed(analysis, &stems, &backend, "main", &mut diags);
     let classes = outputs
         .into_iter()

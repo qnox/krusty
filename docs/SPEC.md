@@ -8870,13 +8870,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     container is the declaring class's `KClass`, a `FunctionReferenceImpl` for a function, or a
     `PropertyReferenceNImpl` signed by the getter for a property. A top-level function's owner is
     the facade of the file that declares it, which for an inline function from another file is not
-    the file being compiled. A recursive bound or a `suspend` function type is an error, as in
-    kotlinc.
+    the file being compiled. A `suspend` function type is an error, as in kotlinc. A non-reified
+    parameter whose bounds reach itself (`T : Comparable<T>`, including a mutual cycle) is an
+    error unless `JvmSupportRecursiveTypeOf` is enabled (`// LANGUAGE:` or
+    `-XXLanguage:+JvmSupportRecursiveTypeOf`). With the flag, `typeParameter` is stored in a local
+    before `setUpperBounds`, and every later use — the bound and the type that names the parameter —
+    loads that local and calls `typeOf(KClassifier)` instead of building the parameter again. A
+    parameter that only mentions some other self-recursive parameter (`U : List<T>`) keeps the
+    ordinary `dup` sequence. The printed type is `kotlin.collections.List<T>` and the parameter's
+    upper bounds are `[kotlin.Comparable<T>]`.
   - A type parameter's bound may name a parameter of an enclosing declaration (`inner class
     D<Y : X>`, `val <Y> B<Y>.p where Y : X`), and keeps it as a type parameter; it used to erase to
     `Any`, which also changed the generic `Signature` attribute (`<Y:TX;>`).
   Tests: `tests/type_of_e2e.rs` (cross-checked against the reference compiler with kotlin-reflect)
-  and `jvm::type_of::tests`; the corpus's `reflection/typeOf`, `ktype` and `typeErasure` cases.
+  and `jvm::type_of::tests`; the corpus's `reflection/typeOf`, `ktype` and `typeErasure` cases,
+  including `reflection/typeOf/nonReifiedTypeParameters/recursiveBound{With,Without}Inline.kt`.
   A generic top-level extension property's accessors are generic methods and carry a `Signature`
   (`<P:Ljava/lang/Object;>(TP;)Lkotlin/reflect/KType;`), as kotlinc emits.
   Not yet: a reified member inline function (it is called rather than inlined, `typeOf` or not), a

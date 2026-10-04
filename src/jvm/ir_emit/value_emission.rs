@@ -718,8 +718,20 @@ impl super::Emitter<'_> {
                         let parameters =
                             super::super::type_of::TypeParameters::new(self.ir, &self.facade);
                         let mut instructions = Vec::new();
-                        match super::super::type_of::generate(*ty, &parameters, &mut instructions) {
-                            Ok(()) => super::super::type_of::encode(&instructions, code, self.cw),
+                        match super::super::type_of::generate(
+                            *ty,
+                            &parameters,
+                            self.recursive_type_of,
+                            &mut instructions,
+                        ) {
+                            Ok(()) => {
+                                super::super::type_of::encode(
+                                    &instructions,
+                                    code,
+                                    self.cw,
+                                    self.frame.size(),
+                                );
+                            }
                             Err(error) => self.run.set_emit_error(error.to_string()),
                         }
                     }
@@ -909,6 +921,7 @@ impl super::Emitter<'_> {
                         self.ir,
                         e,
                         &self.facade,
+                        self.recursive_type_of,
                         &|ty| self.rendered_inlined_cast_target(ty),
                     );
                     // `@InlineOnly`/non-public inline functions must splice. Public inline functions have

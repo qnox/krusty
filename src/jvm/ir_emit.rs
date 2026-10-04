@@ -490,6 +490,9 @@ pub(super) struct EmitEnv<'a> {
     /// The `@kotlin.Metadata` `mv` stamp this emission writes (`-language-version`, or
     /// [`DEFAULT_METADATA_VERSION`]).
     metadata_version: [i32; 3],
+    /// `JvmSupportRecursiveTypeOf`: a non-reified type parameter whose bounds reach itself can be
+    /// described by `typeOf`.
+    recursive_type_of: bool,
 }
 
 /// `-Xlambdas` / `-Xsam-conversions`: how a lambda and a SAM conversion are realized on the JVM.
@@ -687,6 +690,9 @@ pub struct EmitOptions {
     /// Whether the finalized source-language feature set enables declaration annotation records in
     /// Kotlin metadata. Kept separate from `metadata_version`: the latter is only an output stamp.
     pub annotations_in_metadata: bool,
+    /// `LanguageFeature.JvmSupportRecursiveTypeOf`. Off unless a directive or `-XXLanguage` enables
+    /// it; kotlinc rejects a recursive `typeOf` bound without the flag.
+    pub recursive_type_of: bool,
 }
 
 /// The `mv` krusty writes without `-language-version`: kotlinc's default-language-version stamp.
@@ -722,6 +728,12 @@ impl EmitOptions {
         self
     }
 
+    /// Select `JvmSupportRecursiveTypeOf`, keeping every other field as configured.
+    pub fn with_recursive_type_of(mut self, enabled: bool) -> Self {
+        self.recursive_type_of = enabled;
+        self
+    }
+
     /// Select the independently configured lambda strategies, keeping every other field unchanged.
     pub fn with_lambda_modes(mut self, modes: LambdaModes) -> Self {
         self.lambda_modes = modes;
@@ -744,6 +756,7 @@ impl Default for EmitOptions {
             value_classes: std::rc::Rc::default(),
             metadata_version: None,
             annotations_in_metadata: true,
+            recursive_type_of: false,
         }
     }
 }
@@ -1498,6 +1511,7 @@ pub(crate) fn emit_all_with_checked_classifiers(
         lambda_modes: opts.lambda_modes,
         java_parameters: opts.java_parameters,
         metadata_version: opts.metadata_version(),
+        recursive_type_of: opts.recursive_type_of,
         property_realizations: facts.property_realizations,
         property_reference_realizations: facts.property_reference_realizations,
         sam_wrapper_realizations: facts.sam_wrapper_realizations,
@@ -6348,6 +6362,8 @@ struct Emitter<'a> {
     checked_parameters: HashSet<u32>,
     /// Every local slot this method's code uses is entered in, and left from, this frame.
     frame: frame_map::FrameMap,
+    /// `JvmSupportRecursiveTypeOf` for this emission.
+    recursive_type_of: bool,
     /// Where `IrExpr::CurrentContinuation` reads the continuation from, for a function whose
     /// coroutine machine this emission owns. `None` for every other function.
     continuation_slot: Option<u16>,
@@ -6480,6 +6496,7 @@ impl<'a> Emitter<'a> {
             value_stores: non_null_operands::ValueStores::collect(ir, &roots),
             checked_parameters: HashSet::new(),
             frame: frame_map::FrameMap::default(),
+            recursive_type_of: env.recursive_type_of,
             continuation_slot: None,
             machine_suspensions: HashSet::new(),
             transformed_suspensions: Default::default(),

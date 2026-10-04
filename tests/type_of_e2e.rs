@@ -101,6 +101,38 @@ fun box(): String {
     );
 }
 
+/// `+JvmSupportRecursiveTypeOf` stores a self-recursive parameter and reloads it for its bound and
+/// for the type that names it. Without the flag the same source is rejected.
+#[test]
+fn type_of_recursive_bound_prints_the_parameter() {
+    const MAIN: &str = r#"
+// LANGUAGE: +JvmSupportRecursiveTypeOf
+import kotlin.reflect.KTypeParameter
+import kotlin.reflect.typeOf
+
+fun <T : Comparable<T>> listed(): String {
+    val parameter = typeOf<List<T>>().arguments.single().type!!.classifier as KTypeParameter
+    return typeOf<List<T>>().toString() + " " + parameter.upperBounds
+}
+
+fun <T : Comparable<U>, U : Comparable<T>> paired(): String = typeOf<Pair<T, U>>().toString()
+
+class Box<T : Comparable<T>> {
+    fun ktype(): String = typeOf<List<T>>().toString()
+}
+
+fun box(): String {
+    val listed = listed<Int>()
+    if (listed != "kotlin.collections.List<T> [kotlin.Comparable<T>]") return listed
+    if (paired<Int, Int>() != "kotlin.Pair<T, U>") return paired<Int, Int>()
+    val classType = Box<Int>().ktype()
+    if (classType != "kotlin.collections.List<T>") return classType
+    return "OK"
+}
+"#;
+    assert_eq!(run(&[("main.kt", MAIN)]).expect("recursive typeOf"), "OK");
+}
+
 /// kotlinc's `generateTypeOfArguments` reads `KTypeProjection.star` and calls the class's static
 /// `invariant`/`contravariant`/`covariant`, never the companion, so the facade names no
 /// `KTypeProjection$Companion` and lists no row for it.
