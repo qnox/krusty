@@ -1189,12 +1189,13 @@ fn kotlin_codegen_box_conformance() {
         return;
     };
     let java = format!("{java_home}/bin/java");
-    // The JDK bootclasspath as an explicit `-classpath` entry: the running JDK's `lib/modules`
-    // jimage, so JDK types (`StringBuilder`, …) resolve like any classpath type.
-    let jdk_modules: Option<std::path::PathBuf> = {
-        let p = Path::new(&java_home).join("lib").join("modules");
-        p.is_file().then_some(p)
-    };
+    // The JDK bootclasspath as an explicit `-classpath` entry, selected per test like JetBrains'
+    // runner: the corpus checkout's mock `rt.jar` unless the test declares `// FULL_JDK`, which
+    // selects the running JDK's `lib/modules` jimage. Tests always run on the real JVM.
+    let jdk_roots = krusty::conformance::BoxJdkRoots::new(
+        krusty::toolchain::box_mock_jdk_rt_jar(&box_dir).unwrap_or_else(|error| panic!("{error}")),
+        Some(Path::new(&java_home).join("lib").join("modules")).filter(|p| p.is_file()),
+    );
     // Locate a real kotlin-stdlib jar (drop-in `-classpath`), used for `// WITH_STDLIB` tests at
     // compile time and on the JVM at runtime. No bespoke env var.
     eprintln!("box setup: locate Kotlin runtime jars");
@@ -1406,14 +1407,16 @@ fn kotlin_codegen_box_conformance() {
                     mark_box_case_phase(&active, tid, file, "compile");
                     // A `// FILE:` multi-file test, OR a `// WITH_COROUTINES` test (which needs the
                     // generated `helpers` source compiled alongside it), goes through the multi-block path.
+                    let jdk = jdk_roots.select(&src);
+                    let jdk_modules = jdk.classpath_root();
                     let compiled = if src.contains("// MODULE:") {
-                        compile_module_test(&src, &compile_cp, jdk_modules.as_deref(), &|phase| {
+                        compile_module_test(&src, &compile_cp, jdk_modules, &|phase| {
                             mark_box_case_phase(&active, tid, file, phase)
                         })
                     } else if src.contains("// FILE:") || src.contains("// WITH_COROUTINES") {
-                        compile_multifile(&src, &stem, &compile_cp, jdk_modules.as_deref())
+                        compile_multifile(&src, &stem, &compile_cp, jdk_modules)
                     } else {
-                        compile_source(&src, &stem, &compile_cp, jdk_modules.as_deref(), &|phase| {
+                        compile_source(&src, &stem, &compile_cp, jdk_modules, &|phase| {
                             mark_box_case_phase(&active, tid, file, phase)
                         })
                     };
@@ -1437,7 +1440,7 @@ fn kotlin_codegen_box_conformance() {
                         }
                     }
                     if byte_diff_on {
-                        let outcome = byte_diff_file(&src, &stem, &compile_cp, &classes);
+                        let outcome = byte_diff_file(&src, &stem, &compile_cp, jdk, &classes);
                         byte_diffs.lock().unwrap().push((file.clone(), outcome));
                     }
                     let box_class = match find_box_class(&classes) {
@@ -1872,7 +1875,10 @@ fn reference_compile(
     src: &str,
     stem: &str,
     cp_jars: &[PathBuf],
+    jdk: krusty::conformance::BoxJdk<'_>,
 ) -> Result<std::collections::BTreeMap<String, Vec<u8>>, String> {
+    // The same JDK selection krusty compiled the test against.
+    let classpath_args = jdk.kotlinc_args(cp_jars)?;
     let mut key_material: Vec<u8> = Vec::new();
     let push = |k: &mut Vec<u8>, part: &[u8]| {
         k.extend_from_slice(&(part.len() as u64).to_le_bytes());
@@ -1882,8 +1888,8 @@ fn reference_compile(
     push(&mut key_material, src.as_bytes());
     push(&mut key_material, stem.as_bytes());
     push(&mut key_material, COROUTINE_HELPERS.as_bytes());
-    for j in cp_jars {
-        push(&mut key_material, j.to_string_lossy().as_bytes());
+    for arg in &classpath_args {
+        push(&mut key_material, arg.as_bytes());
     }
     if let Some(jar) = common::kotlin_compiler_jar() {
         push(&mut key_material, jar.to_string_lossy().as_bytes());
@@ -1922,18 +1928,17 @@ fn reference_compile(
         "krusty_refc_{key:016x}_{}_{seq}",
         std::process::id()
     ));
-    let result = reference_compile_in(&work, &blocks, src, cp_jars, &cache, key, seq);
+    let result = reference_compile_in(&work, &blocks, src, &classpath_args, &cache, key, seq);
     let _ = fs::remove_dir_all(&work);
     result
 }
 
 /// The work-dir-scoped body of [`reference_compile`] — the caller removes `work` unconditionally.
-#[allow(clippy::too_many_arguments)]
 fn reference_compile_in(
     work: &Path,
     blocks: &[(String, String)],
     src: &str,
-    cp_jars: &[PathBuf],
+    classpath_args: &[String],
     cache: &Path,
     key: u64,
     seq: u64,
@@ -1941,15 +1946,7 @@ fn reference_compile_in(
     let out_dir = work.join("out");
     fs::create_dir_all(&out_dir).map_err(|e| e.to_string())?;
     let mut args: Vec<String> = vec!["-d".into(), out_dir.to_string_lossy().into_owned()];
-    if !cp_jars.is_empty() {
-        let joined = cp_jars
-            .iter()
-            .map(|p| p.to_string_lossy().into_owned())
-            .collect::<Vec<_>>()
-            .join(":");
-        args.push("-cp".into());
-        args.push(joined);
-    }
+    args.extend_from_slice(classpath_args);
     args.extend(common::language_directives::kotlinc_args(src));
     for (i, (name, content)) in blocks.iter().enumerate() {
         // The FILE NAME decides kotlinc's file-facade class name (`arrayElement.kt` →
@@ -2067,6 +2064,7 @@ fn byte_diff_file(
     src: &str,
     stem: &str,
     cp_jars: &[PathBuf],
+    jdk: krusty::conformance::BoxJdk<'_>,
     classes: &[(String, Vec<u8>)],
 ) -> ByteDiff {
     if src.contains("// MODULE:") {
@@ -2075,7 +2073,7 @@ fn byte_diff_file(
     if !krusty::conformance::split_files(src).1.is_empty() {
         return ByteDiff::NotDiffed("mixed-java");
     }
-    match reference_compile(src, stem, cp_jars) {
+    match reference_compile(src, stem, cp_jars, jdk) {
         Err(e) => ByteDiff::RefFail(e),
         Ok(ref_classes) => match compare_class_sets(classes, &ref_classes) {
             Ok(()) => ByteDiff::Identical,
@@ -2160,7 +2158,12 @@ fun callableNamedClass(): Any {
         &[],
     )
     .expect("the production JVM path must compile the local-class naming fixture");
-    let reference = match reference_compile(source, stem, &classpath) {
+    let reference = match reference_compile(
+        source,
+        stem,
+        &classpath,
+        krusty::conformance::BoxJdk::Full { root: None },
+    ) {
         Ok(reference) => reference,
         Err(error) if error == "kotlinc unavailable" => return,
         Err(error) => panic!("reference compiler rejected local-class naming fixture: {error}"),

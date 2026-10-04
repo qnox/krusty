@@ -70,7 +70,9 @@ jobs:
             target/cache/box-corpus
             target/cache/ser-corpus
             target/cache/ksp-corpus
-          key: kotlin-toolchain-${{ hashFiles('kotlin-versions') }}
+          # The box corpus checkout now also carries the mock JDK its tests compile against. A key
+          # hit is never re-saved, so an entry from before that requirement must not be reused.
+          key: kotlin-toolchain-mock-jdk-${{ hashFiles('kotlin-versions') }}
       - name: select recorded-byte cache version
         id: recorded-version
         run: echo "version=$(just max-version)" >> "$GITHUB_OUTPUT"
@@ -144,7 +146,7 @@ jobs:
             target/cache/kotlin-native
             target/cache/kotlinc
             target/cache/box-corpus
-          key: klib-semantics-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('kotlin-versions') }}
+          key: klib-semantics-mock-jdk-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('kotlin-versions') }}
       - name: decode the Kotlin/Native stdlib through common metadata
         run: just klib-semantics
 
@@ -214,9 +216,9 @@ jobs:
             target/cache/ser-corpus/${{ matrix.version }}
             target/cache/ksp-toolchain
             target/cache/krusty-deps
-          # Do not reuse the former box-only immutable cache: it can never acquire the newly
-          # required serialization/KSP inputs.
-          key: kotlin-conformance-all-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}
+          # Do not reuse an older immutable cache: a key hit is never re-saved, so an entry can never
+          # acquire a newly required input (serialization/KSP corpora, the box tests' mock JDK).
+          key: kotlin-conformance-mock-jdk-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}
       # One archive per Kotlin version. A restored entry is replayed; a missing test compiles with
       # that lane's kotlinc. Master saves newly observed recordings under the exact version/commit.
       - name: restore recorded kotlinc bytes (${{ matrix.version }})

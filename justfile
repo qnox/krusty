@@ -160,7 +160,7 @@ conformance-one VERSION:
     export CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}"
     export KRUSTY_LANGUAGE_VERSION="$v"
     export KRUSTY_KOTLINC="$kc"
-    export KRUSTY_KOTLIN_BOX_DIR="${KRUSTY_KOTLIN_BOX_DIR:-$PWD/target/cache/box-corpus/$v/compiler/testData/codegen/box}"
+    export KRUSTY_KOTLIN_BOX_DIR="${KRUSTY_KOTLIN_BOX_DIR:-$(just box-corpus "$v")}"
     bin="$(just conformance-bin)"
     just conformance-run "$bin" "$v"
     conf_threads="$(nproc 2>/dev/null || sysctl -n hw.ncpu)"; [ "$conf_threads" -gt 4 ] && conf_threads=4
@@ -275,27 +275,50 @@ klib-semantics VERSION=`just max-version`:
 # print the path to compiler/testData/codegen/box. Blobless + sparse clone of just that directory at
 # the matching tag — small and idempotent (no-op once present, cheap to cache). Mirrors `kotlinc`:
 # the conformance test FAILS (not skips) without it, so the harness provisions it rather than
-# silently skipping.
+# silently skipping. The same checkout carries JetBrains' mock JDK,
+# which every box test without `// FULL_JDK` compiles against; a cache that predates it gains it
+# through `sparse-checkout add` instead of counting as complete.
 box-corpus VERSION=`just max-version`:
     #!/usr/bin/env bash
     set -euo pipefail
     ver="{{VERSION}}"
     root="$PWD/target/cache/box-corpus/$ver"
     box="$root/compiler/testData/codegen/box"
-    if [ -d "$box" ]; then echo "$box"; exit 0; fi
-    echo "cloning Kotlin codegen/box corpus (v${ver})…" >&2
-    rm -rf "$root"
     # Git hooks export repository-local GIT_* variables. Without clearing them, `git -C "$root"`
     # still operates on the outer krusty worktree and can replace its sparse-checkout definition.
     while read -r name; do unset "$name"; done < <(git rev-parse --local-env-vars)
-    git clone --depth 1 --filter=blob:none --sparse --branch "v${ver}" \
-        https://github.com/JetBrains/kotlin.git "$root" >&2 \
-        || { echo "failed to clone JetBrains/kotlin v${ver}" >&2; rm -rf "$root"; exit 1; }
-    # Keep cone mode: a fresh sparse clone checks out the repository-root files that cone mode
-    # owns. Switching to non-cone while excluding them can leave those paths in place and abort the
-    # update before the requested corpus directory is materialized.
-    git -C "$root" sparse-checkout set compiler/testData/codegen/box >&2
+    # The mock JDK's directory at this tag (KtTestUtil.findMockJdkRtJar): JetBrains moved it from
+    # compiler/testData/mockJDK to third-party/mockJDKs/mockJDK. Exactly one exists per tag.
+    mock_dir_at_tag() {
+        local dirs
+        dirs="$(git -C "$root" ls-tree -d --name-only HEAD \
+            third-party/mockJDKs/mockJDK/jre/lib compiler/testData/mockJDK/jre/lib)"
+        [ "$(printf '%s\n' "$dirs" | grep -c .)" -eq 1 ] \
+            || { echo "expected exactly one mock JDK directory at v${ver}, found: ${dirs:-none}" >&2; exit 1; }
+        printf '%s\n' "$dirs"
+    }
+    if [ -d "$root/.git" ] && [ -d "$box" ]; then
+        mock_dir="$(mock_dir_at_tag)"
+        if [ -f "$root/$mock_dir/rt.jar" ]; then echo "$box"; exit 0; fi
+        # A cache provisioned before the mock JDK was needed: extend it rather than accept it.
+        echo "adding the mock JDK to the Kotlin codegen/box corpus (v${ver})…" >&2
+        git -C "$root" sparse-checkout add "$mock_dir" >&2 \
+            || { echo "failed to add $mock_dir to the v${ver} corpus checkout" >&2; exit 1; }
+    else
+        echo "cloning Kotlin codegen/box corpus (v${ver})…" >&2
+        rm -rf "$root"
+        git clone --depth 1 --filter=blob:none --sparse --branch "v${ver}" \
+            https://github.com/JetBrains/kotlin.git "$root" >&2 \
+            || { echo "failed to clone JetBrains/kotlin v${ver}" >&2; rm -rf "$root"; exit 1; }
+        mock_dir="$(mock_dir_at_tag)"
+        # Keep cone mode: a fresh sparse clone checks out the repository-root files that cone mode
+        # owns. Switching to non-cone while excluding them can leave those paths in place and abort
+        # the update before the requested corpus directory is materialized.
+        git -C "$root" sparse-checkout set compiler/testData/codegen/box "$mock_dir" >&2
+    fi
     [ -d "$box" ] || { echo "box dir missing after sparse checkout: $box" >&2; exit 1; }
+    [ -f "$root/$mock_dir/rt.jar" ] \
+        || { echo "mock JDK missing after sparse checkout: $root/$mock_dir/rt.jar" >&2; exit 1; }
     echo "$box"
 
 # Provision the kotlinx.serialization compiler-plugin box corpus (plugins/kotlinx-serialization/

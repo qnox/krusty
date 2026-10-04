@@ -11,7 +11,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::{
-    directive, inject_support_module, module_units, split_files, split_modules, SourceBlock,
+    directive, inject_support_module, module_units, split_files, split_modules, BoxJdk, SourceBlock,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -86,17 +86,31 @@ fn write_sources(
     ))
 }
 
+/// One compilation unit the oracle hands to the reference compiler.
+struct ReferenceUnit<'a> {
+    module_name: &'a str,
+    kotlin: &'a [SourceBlock],
+    java: &'a [SourceBlock],
+    common_file_count: usize,
+    classpath: &'a [PathBuf],
+    friend_paths: &'a [PathBuf],
+}
+
 fn compile_unit(
     kotlinc: &Path,
     root: &Path,
-    module_name: &str,
-    kotlin: &[SourceBlock],
-    java: &[SourceBlock],
-    common_file_count: usize,
-    classpath: &[PathBuf],
-    friend_paths: &[PathBuf],
+    unit: &ReferenceUnit<'_>,
+    jdk: BoxJdk<'_>,
     language_args: &[String],
 ) -> ReferenceJvmAcceptance {
+    let ReferenceUnit {
+        module_name,
+        kotlin,
+        java,
+        common_file_count,
+        classpath,
+        friend_paths,
+    } = *unit;
     let source_root = root.join("sources");
     let output = root.join("classes");
     if let Err(error) = std::fs::create_dir_all(&output) {
@@ -128,19 +142,12 @@ fn compile_unit(
         .arg(&output)
         .arg("-module-name")
         .arg(module_name)
-        .arg("-Xjdk-release=8")
         .args(language_args);
-    if !classpath.is_empty() {
-        let classpath = match std::env::join_paths(classpath) {
-            Ok(classpath) => classpath,
-            Err(error) => {
-                return ReferenceJvmAcceptance::Unavailable(format!(
-                    "invalid reference JVM classpath: {error}"
-                ))
-            }
-        };
-        command.arg("-classpath").arg(classpath);
-    }
+    // The same JDK the gate and the survey compile this test against.
+    match jdk.kotlinc_args(classpath) {
+        Ok(args) => command.args(args),
+        Err(error) => return ReferenceJvmAcceptance::Unavailable(error),
+    };
     if !friend_paths.is_empty() {
         let friends = match std::env::join_paths(friend_paths) {
             Ok(friends) => friends,
@@ -181,11 +188,12 @@ fn compile_unit(
 /// Ask the pinned ordinary Kotlin/JVM compiler whether it accepts the prepared codegen-test source.
 ///
 /// `coroutine_helpers` is the same generated support source the production harness injects. The
-/// caller supplies the exact directive-selected classpath used for krusty's compilation.
+/// caller supplies the exact directive-selected classpath and JDK used for krusty's compilation.
 pub fn reference_jvm_acceptance(
     src: &str,
     fallback_stem: &str,
     classpath: &[PathBuf],
+    jdk: BoxJdk<'_>,
     coroutine_helpers: &str,
 ) -> ReferenceJvmAcceptance {
     let Some(kotlinc) = crate::toolchain::kotlinc_path() else {
@@ -226,12 +234,15 @@ pub fn reference_jvm_acceptance(
             let result = compile_unit(
                 &kotlinc,
                 &unit_root,
-                &unit.name,
-                &unit.files,
-                &unit.java_files,
-                unit.common_file_count,
-                &unit_classpath,
-                &friends,
+                &ReferenceUnit {
+                    module_name: &unit.name,
+                    kotlin: &unit.files,
+                    java: &unit.java_files,
+                    common_file_count: unit.common_file_count,
+                    classpath: &unit_classpath,
+                    friend_paths: &friends,
+                },
+                jdk,
                 &args,
             );
             if result != ReferenceJvmAcceptance::Accepted {
@@ -256,12 +267,15 @@ pub fn reference_jvm_acceptance(
     compile_unit(
         &kotlinc,
         &scratch.0.join("main"),
-        "main",
-        &kotlin,
-        &java,
-        0,
-        classpath,
-        &[],
+        &ReferenceUnit {
+            module_name: "main",
+            kotlin: &kotlin,
+            java: &java,
+            common_file_count: 0,
+            classpath,
+            friend_paths: &[],
+        },
+        jdk,
         &args,
     )
 }

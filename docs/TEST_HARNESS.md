@@ -110,6 +110,18 @@ turning those tests into passing skips. Each leg uses the same configurable proc
 deadline as the local harness, including its spawned compiler and runner JVMs. A release publishes
 only after every combined leg passes and matches both exact box outcome manifests.
 
+### Box-test JDK
+
+Box tests compile against the JDK JetBrains' runner gives them (`JvmEnvironmentConfigurator`): the
+Java 7 mock `rt.jar` with no ambient JDK, unless the test declares `// FULL_JDK`, which selects the
+running JDK's `lib/modules`. Tests always run on the real JVM. `krusty::conformance::BoxJdkRoots`
+owns that selection for the gate, the survey, the reference-compiler oracle (`-no-jdk -classpath
+<mock rt.jar>`), and byte-diff mode. `just box-corpus` checks the mock JDK out of the corpus
+checkout at the same tag (`third-party/mockJDKs/mockJDK` from 2.4.20, `compiler/testData/mockJDK`
+before) and extends an older cache that lacks it; a run without it fails instead of compiling
+against another JDK. A mock-JDK run cannot see divergences that only appear against a modern JDK
+surface, so those need their own repository tests.
+
 ## Box Outcome Manifests
 
 `tests/box_expected_failures/<version>.txt` names, one path per line relative to
@@ -466,3 +478,6 @@ KRUSTY_KOTLIN_BOX_DIR=/path/to/compiler/testData/codegen/box \
 KRUSTY_KOTLIN_STDLIB=/path/to/kotlin-stdlib.jar \
 ./run-tests.sh
 ```
+
+A `KRUSTY_KOTLIN_BOX_DIR` override must be the `compiler/testData/codegen/box` directory of a
+JetBrains checkout that also holds that tag's mock JDK.
