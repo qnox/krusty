@@ -342,9 +342,11 @@ impl BodyLowering<'_, '_, '_> {
                         // by UTF-16 unit. A file that declares a `Comparable` of its own keeps
                         // declining: an object of the program's could stand behind that type and
                         // the runtime has no order for it.
-                        if super::super::super::intrinsics::is_comparable_compare_to(
-                            owner, &name, params,
-                        ) && !self.file.declares_its_own_comparable
+                        if realization.semantic_role
+                            == Some(
+                                crate::backend::BackendSemanticCallRole::KotlinComparableCompareTo,
+                            )
+                            && !self.file.declares_its_own_comparable
                         {
                             let operands =
                                 vec![self.reference(receiver)?, self.reference(args[0])?];

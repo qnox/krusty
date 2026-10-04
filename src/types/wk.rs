@@ -28,6 +28,7 @@ names! {
     continuation => "kotlin/coroutines/Continuation",
     function_root => "kotlin/Function",
     any => "kotlin/Any",
+    comparable => "kotlin/Comparable",
     array => "kotlin/Array",
     string => "kotlin/String",
     unit => "kotlin/Unit",

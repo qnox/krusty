@@ -7,4 +7,6 @@ pub enum SemanticCallRole {
     KotlinAnyEquals,
     KotlinAnyHashCode,
     KotlinAnyToString,
+    /// The single comparison operation declared by `kotlin.Comparable`.
+    KotlinComparableCompareTo,
 }

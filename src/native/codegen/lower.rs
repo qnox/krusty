@@ -393,7 +393,8 @@ fn declares_its_own_comparable(ir: &IrFile) -> bool {
         matches!(
             edge.overridden,
             crate::fir::ResolvedFunctionOverrideTarget::External(_)
-        ) && edge.name == "compareTo"
+        ) && edge.overridden_semantic_role
+            == Some(crate::types::SemanticCallRole::KotlinComparableCompareTo)
     })
 }
 

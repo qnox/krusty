@@ -61,7 +61,13 @@ pub(super) fn runtime_member_role(
             Some(RuntimeMemberRole::ToString)
         }
         (_, Some(BackendSemanticCallRole::KotlinAnyHashCode)) => Some(RuntimeMemberRole::HashCode),
-        (_, Some(BackendSemanticCallRole::KotlinAnyEquals)) => None,
+        (
+            _,
+            Some(
+                BackendSemanticCallRole::KotlinAnyEquals
+                | BackendSemanticCallRole::KotlinComparableCompareTo,
+            ),
+        ) => None,
         _ => None,
     }
 }

@@ -5032,6 +5032,12 @@ impl JvmLibraries {
                                 }
                                 _ => None,
                             }
+                        } else if builtin_cn == crate::types::wk::comparable()
+                            && m.name == "compareTo"
+                            && params.len() == 1
+                            && ret == Ty::Int
+                        {
+                            Some(crate::types::SemanticCallRole::KotlinComparableCompareTo)
                         } else {
                             None
                         };

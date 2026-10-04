@@ -342,6 +342,7 @@ fn any_slot(role: Option<crate::types::SemanticCallRole>) -> Option<u32> {
         Some(crate::types::SemanticCallRole::KotlinAnyEquals) => Some(0),
         Some(crate::types::SemanticCallRole::KotlinAnyHashCode) => Some(1),
         Some(crate::types::SemanticCallRole::KotlinAnyToString) => Some(2),
+        Some(crate::types::SemanticCallRole::KotlinComparableCompareTo) => None,
         None => None,
     }
 }
