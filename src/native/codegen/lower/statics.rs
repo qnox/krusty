@@ -162,46 +162,40 @@ pub(super) enum TopLevel {
 }
 
 impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
-    /// The declared name of a checked property.
-    pub(super) fn checked_property_name(
+    /// Resolve a checked top-level property to what realizes it.
+    pub(super) fn top_level(
         &self,
         target: &crate::fir::PropertyId,
-    ) -> Result<String, Unsupported> {
-        self.file
-            .ir
-            .checked_properties
-            .get(target)
-            .map(|property| property.name.clone())
-            .ok_or_else(|| "a property with no checked declaration".to_string())
-    }
-
-    /// Resolve a checked top-level property to what realizes it.
-    pub(super) fn top_level(&self, name: &str, setter: bool) -> Result<TopLevel, Unsupported> {
-        let accessor = if setter {
-            crate::names::property_setter_name(name)
-        } else {
-            crate::names::property_getter_name(name)
-        };
-        let arity = usize::from(setter);
-        let written = self.file.ir.functions.iter().position(|function| {
-            function.name == accessor
-                && function.dispatch_receiver.is_none()
-                && function.params.len() == arity
-        });
-        if let Some(index) = written {
-            return Ok(TopLevel::Accessor(index as u32));
-        }
-        let stored = self
-            .file
-            .ir
-            .statics
-            .iter()
-            .position(|declaration| declaration.is_facade_owned() && declaration.name == name);
-        match stored {
-            Some(index) => Ok(TopLevel::Slot(index as u32)),
-            None => Err(format!(
-                "a top-level property with neither storage nor an accessor (`{name}`)"
-            )),
+        setter: bool,
+    ) -> Result<TopLevel, Unsupported> {
+        match self.file.ir.local_property_layouts.get(target) {
+            Some(IrLocalPropertyLayout::TopLevelStorage {
+                storage,
+                getter,
+                setter: property_setter,
+                ..
+            }) => Ok(match if setter { *property_setter } else { *getter } {
+                Some(accessor) => TopLevel::Accessor(accessor),
+                None => TopLevel::Slot(*storage),
+            }),
+            Some(IrLocalPropertyLayout::TopLevelAccessor {
+                getter,
+                setter: property_setter,
+                ..
+            }) => {
+                let accessor = if setter {
+                    property_setter
+                        .ok_or_else(|| "a read-only top-level property was written".to_string())?
+                } else {
+                    *getter
+                };
+                Ok(TopLevel::Accessor(accessor))
+            }
+            Some(
+                IrLocalPropertyLayout::Member { .. }
+                | IrLocalPropertyLayout::MemberExtension { .. },
+            ) => Err("a member property reached top-level realization".to_string()),
+            None => Err("a top-level property with no recorded realization".to_string()),
         }
     }
 
@@ -218,15 +212,22 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         Ok(self.builder.inst_results(call).first().copied())
     }
 
-    pub(super) fn top_level_read(&mut self, name: &str) -> Result<Option<Value>, Unsupported> {
-        match self.top_level(name, false)? {
+    pub(super) fn top_level_read(
+        &mut self,
+        target: &crate::fir::PropertyId,
+    ) -> Result<Option<Value>, Unsupported> {
+        match self.top_level(target, false)? {
             TopLevel::Slot(index) => self.static_read(index),
             TopLevel::Accessor(function) => self.accessor_call(function, &[]),
         }
     }
 
-    pub(super) fn top_level_write(&mut self, name: &str, value: u32) -> Result<(), Unsupported> {
-        match self.top_level(name, true)? {
+    pub(super) fn top_level_write(
+        &mut self,
+        target: &crate::fir::PropertyId,
+        value: u32,
+    ) -> Result<(), Unsupported> {
+        match self.top_level(target, true)? {
             TopLevel::Slot(index) => self.static_write(index, value),
             TopLevel::Accessor(function) => {
                 let ty = self.file.ir.functions[function as usize].params[0];

@@ -1420,8 +1420,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                         self.property_write(class, index, dispatch_receiver, value)?
                     }
                     Err(reason) if reason == objects::TOP_LEVEL => {
-                        let name = self.checked_property_name(&target)?;
-                        self.top_level_write(&name, value)?;
+                        self.top_level_write(&target, value)?;
                     }
                     Err(reason) => return Err(reason),
                 }
@@ -1895,10 +1894,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 }
                 match self.checked_property(&target) {
                     Ok((class, index)) => self.property_read(class, index, dispatch_receiver),
-                    Err(reason) if reason == objects::TOP_LEVEL => {
-                        let name = self.checked_property_name(&target)?;
-                        self.top_level_read(&name)
-                    }
+                    Err(reason) if reason == objects::TOP_LEVEL => self.top_level_read(&target),
                     Err(reason) => Err(reason),
                 }
             }

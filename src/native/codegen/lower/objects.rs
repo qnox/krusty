@@ -2528,19 +2528,19 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         &self,
         target: &crate::fir::PropertyId,
     ) -> Result<(ClassId, usize), Unsupported> {
-        let Some(property) = self.file.ir.checked_properties.get(target) else {
-            return Err("a property with no checked declaration".to_string());
-        };
-        let Some(class) = property.class else {
-            // A top-level property: not a class member at all, so it has no (class, index).
-            return Err(TOP_LEVEL.to_string());
-        };
-        let index = self.file.ir.classes[class as usize]
-            .properties
-            .iter()
-            .position(|candidate| candidate.name == property.name)
-            .ok_or_else(|| format!("an undeclared property (`{}`)", property.name))?;
-        Ok((class, index))
+        match self.file.ir.local_property_layouts.get(target) {
+            Some(crate::ir::IrLocalPropertyLayout::Member {
+                class, property, ..
+            }) => Ok((*class, *property as usize)),
+            Some(
+                crate::ir::IrLocalPropertyLayout::TopLevelStorage { .. }
+                | crate::ir::IrLocalPropertyLayout::TopLevelAccessor { .. },
+            ) => Err(TOP_LEVEL.to_string()),
+            Some(crate::ir::IrLocalPropertyLayout::MemberExtension { .. }) => {
+                Err("a member-extension property reached ordinary member storage".to_string())
+            }
+            None => Err("a property with no recorded realization".to_string()),
+        }
     }
 
     pub(super) fn property_read(
