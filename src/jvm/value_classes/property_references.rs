@@ -27,18 +27,26 @@ fn facade_storage_is_carrier_erased(
     realization.facade_storage && erase(&reference.prop_ty, under) != reference.prop_ty
 }
 
-/// Whether the selected getter physically hands back something OTHER than `value_class`'s carrier.
+/// Whether a dependency getter physically hands back something OTHER than `value_class`'s carrier.
 ///
 /// A specialized generic property (`Pair<UInt, _>::first`) has semantic type `UInt`, but its
 /// selected declaration still exposes `getFirst(): Object`. That object is already the boxed value
-/// and the declaration is not value-class-mangled, so no realization applies to it. The answer
-/// comes from the physical return the selection RECORDED; reading it back out of a rendered
-/// descriptor would make a rendering the authority over a declaration.
-fn getter_bypasses_the_carrier(
+/// and the declaration is not value-class-mangled, so no realization applies to it. A source
+/// accessor is different: its recorded return and descriptor are still pre-realization inputs and
+/// this pass is what projects them to the carrier. Treating that semantic return as already
+/// physical leaves private/extension bridges on the boxed descriptor and makes their reflection
+/// identity disagree with an ordinary reference to the same declaration.
+///
+/// The dependency answer comes from the physical return the provider RECORDED; reading it back out
+/// of a rendered descriptor would make a rendering the authority over a declaration.
+fn dependency_getter_bypasses_the_carrier(
     realization: &PropertyReferenceRealization,
     value_class: TypeName,
     under: &Under,
 ) -> bool {
+    if !realization.accessor_names_are_physical {
+        return false;
+    }
     let Some(physical) = realization.physical_getter_ret else {
         return false;
     };
@@ -84,7 +92,9 @@ pub(super) fn realize(
         else {
             continue;
         };
-        if !top_level && getter_bypasses_the_carrier(realization, value_class, callable_under) {
+        if !top_level
+            && dependency_getter_bypasses_the_carrier(realization, value_class, callable_under)
+        {
             continue;
         }
         if !carrier_erased {
@@ -483,6 +493,28 @@ mod tests {
                 .expect("the reference")
                 .getter_name,
             "getTally-impl",
+        );
+    }
+
+    /// A source accessor's descriptor is an input to this pass, even when a private/extension
+    /// bridge made that descriptor explicit. Only a provider's already-physical dependency
+    /// accessor may prove that the selected declaration returns a box instead of the carrier.
+    #[test]
+    fn only_a_dependency_physical_return_can_bypass_carrier_realization() {
+        let (_, mut under, mut realizations, reference) = reference_to("readTally");
+        let token = crate::types::type_name("Token");
+        under.insert(token, Ty::Int);
+        let realization = realizations.get_mut(reference).expect("the realization");
+        realization.physical_getter_ret = Some(Ty::obj_name(token));
+
+        assert!(
+            !dependency_getter_bypasses_the_carrier(realization, token, &under),
+            "a source return is still awaiting value-class realization",
+        );
+        realization.accessor_names_are_physical = true;
+        assert!(
+            dependency_getter_bypasses_the_carrier(realization, token, &under),
+            "a provider's Object return is the dependency declaration's final ABI",
         );
     }
 
