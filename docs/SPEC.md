@@ -12414,6 +12414,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   of the function the lambda was inlined into. (`tests/inline_capture_splice_e2e.rs`; corpus
   `coroutines/nonLocalReturnFromInlineLambdaDeep.kt`.)
 
+- **A suspending value `try` that is a spliced lambda's whole body keeps its result coercion per
+  arm.** `items.mapNotNull { item -> try { Out(source.fetch(item)) } catch (e: Exception) { Out(0) }
+  }` is valid Kotlin (kotlinc 2.4.10 accepts it): the lambda's result is `R?`, so lowering wraps the
+  whole body block in the `Out -> Out?` coercion. The spliced value-`try` desugar moves that coercion
+  onto the block's tail `try` and from there onto each arm, exactly as it does for an expression
+  body, so the suspension is bound to a typed local and the emit-time coroutine machine takes the
+  function. The same holds for a call on a suspension's result (`fetch(item).collect { … }`), a
+  primitive result boxed by the coercion (`try { fetch(item) + 1 } catch … { 0 }`), and a
+  repository-owned inline function in a library. A value `try` nested deeper in an expression
+  (`Out(try { … } catch …)`) is still declined. (`tests/spliced_coerced_value_try_e2e.rs`.)
+
 - **`+EagerLambdaAnalysis`: a shared lambda argument discriminates overload candidates.** Ported from
   kotlinc FIR `EagerLambdaResolution` (`runEagerLambdaAnalysisAndFilterOutInapplicableCandidates`,
   run by `ConeOverloadConflictResolver` after override filtering). kotlinc 2.4.0, 2.4.10 and 2.4.20

@@ -431,6 +431,11 @@ pub(crate) fn lower_suspend(
                     return false;
                 }
                 let declined = cps::suspends_in_a_value_try(ir, b, &suspend_set);
+                crate::trace_compiler!(
+                    "suspend",
+                    "spliced value-try decline fid={fid} name={} declined={declined}",
+                    ir.functions[fid as usize].name
+                );
                 match declined {
                     true => Vec::new(),
                     false => cps::frame_suspensions(ir, b, &suspend_set),
