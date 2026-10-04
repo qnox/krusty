@@ -1730,8 +1730,9 @@ fn remap_expression_facts(
             *member = ty(*member, names);
         }
         construction
-            .enclosing_class
+            .scopes
             .iter_mut()
+            .flatten()
             .for_each(|value| name(value, names));
     }
     if let Some(classifier) = ir.callable_reference_names.get_mut(&expression) {
@@ -1823,8 +1824,8 @@ mod tests {
     use super::*;
     use crate::ir::{
         IrCallableReference, IrConst, IrDeclarationArgumentBoundary, IrModuleMemberAccess,
-        IrProgressionSource, IrRuntimeFunction, IrSamTarget, IrValueClassTypeOperation,
-        IrValueClassTypeRole,
+        IrProgressionSource, IrRuntimeFunction, IrSamMethod, IrSamTarget,
+        IrValueClassTypeOperation, IrValueClassTypeRole,
     };
 
     fn resolved(value: Ty) -> crate::fir::ResolvedTy {
@@ -1873,7 +1874,7 @@ mod tests {
             sam: Some(IrSamTarget {
                 classifier: source,
                 method: "apply".to_string(),
-                method_target: crate::fir::FirSamMethod::FunctionTypeInvoke,
+                method_target: IrSamMethod::FunctionTypeInvoke,
                 parameters: vec![source_ty],
                 result: source_ty,
                 declared_parameters: vec![source_ty],
