@@ -255,6 +255,25 @@ fun box(): String = J().name()
     assert_eq!(run_kotlin_first(kotlin, &[("J", java)]), "OK");
 }
 
+/// A Java source annotation element declared with a `default` may be omitted where Kotlin applies
+/// the annotation. The source header does not evaluate the default; it records only that one exists.
+#[test]
+fn a_java_source_annotation_element_with_a_default_may_be_omitted() {
+    let kotlin = r#"
+@Marker(name = "tagged")
+class Tagged
+
+@Marker(name = "weighed", weight = 7)
+class Weighed
+
+fun box(): String = "OK"
+"#;
+    let java = "import java.lang.annotation.*;\n\
+        @Retention(RetentionPolicy.RUNTIME)\n\
+        public @interface Marker { String name(); int weight() default 3; }";
+    assert_eq!(run_kotlin_first(kotlin, &[("Marker", java)]), "OK");
+}
+
 /// A bounded type variable erases to its leftmost bound (JLS §4.6). The Kotlin call is emitted
 /// against the header krusty reads from the Java source, then runs against javac's class, so a
 /// header that erased `T` to `Object` fails with `NoSuchMethodError`.

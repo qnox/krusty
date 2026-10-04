@@ -841,6 +841,14 @@ mod tests {
                 .unwrap()
                 .has_annotation_default
         );
+        // The header does not evaluate `true`: the stub states that a default exists, not a value.
+        assert_eq!(
+            class.annotation_element_defaults,
+            [(
+                Box::from("reloadable"),
+                crate::libraries::AnnotationElementDefault::Unevaluated
+            )]
+        );
     }
 
     #[test]
