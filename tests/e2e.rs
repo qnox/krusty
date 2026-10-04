@@ -190,6 +190,8 @@ mod callable_ref_e2e;
 mod callable_ref_equality_e2e;
 #[path = "callable_ref_extension_e2e.rs"]
 mod callable_ref_extension_e2e;
+#[path = "callable_ref_generic_signature_e2e.rs"]
+mod callable_ref_generic_signature_e2e;
 #[path = "callable_ref_to_inferred_member_e2e.rs"]
 mod callable_ref_to_inferred_member_e2e;
 #[path = "callable_ref_unresolved_e2e.rs"]
@@ -689,6 +691,8 @@ mod empty_locals_e2e;
 mod empty_loop_body_e2e;
 #[path = "engine_declaration_types_e2e.rs"]
 mod engine_declaration_types_e2e;
+#[path = "enhanced_result_null_check_e2e.rs"]
+mod enhanced_result_null_check_e2e;
 #[path = "enum_body_property_e2e.rs"]
 mod enum_body_property_e2e;
 #[path = "enum_class_signature_e2e.rs"]
@@ -1033,6 +1037,8 @@ mod inline_value_class_lambda_e2e;
 mod inline_vc_suspend_coverage_e2e;
 #[path = "inlined_code_inner_classes_e2e.rs"]
 mod inlined_code_inner_classes_e2e;
+#[path = "inlined_lambda_stack_spill_e2e.rs"]
+mod inlined_lambda_stack_spill_e2e;
 #[path = "inner_class_construction_e2e.rs"]
 mod inner_class_construction_e2e;
 #[path = "inner_class_constructor_e2e.rs"]
@@ -1151,6 +1157,8 @@ mod klib_container_e2e;
 mod klib_semantic_e2e;
 #[path = "kotlin_fun_java_sam_param_e2e.rs"]
 mod kotlin_fun_java_sam_param_e2e;
+#[path = "kotlin_native_provisioning_e2e.rs"]
+mod kotlin_native_provisioning_e2e;
 #[path = "krusty_dep_dir_e2e.rs"]
 mod krusty_dep_dir_e2e;
 #[path = "krusty_roundtrip_class_metadata_e2e.rs"]
@@ -1371,6 +1379,8 @@ mod mpp_requires_the_feature_e2e;
 mod nested_class_annotation_scope_e2e;
 #[path = "nested_receiver_lambda_captures_e2e.rs"]
 mod nested_receiver_lambda_captures_e2e;
+#[path = "nested_type_parameter_bound_e2e.rs"]
+mod nested_type_parameter_bound_e2e;
 #[path = "nothing_type_argument_signature_e2e.rs"]
 mod nothing_type_argument_signature_e2e;
 #[path = "nullable_double_type_param_equality_e2e.rs"]
@@ -1379,6 +1389,8 @@ mod nullable_double_type_param_equality_e2e;
 mod nullable_uint_property_e2e;
 #[path = "open_end_range_membership_e2e.rs"]
 mod open_end_range_membership_e2e;
+#[path = "optional_expectation_annotation_e2e.rs"]
+mod optional_expectation_annotation_e2e;
 #[path = "primitive_hash_code_e2e.rs"]
 mod primitive_hash_code_e2e;
 #[path = "result_generic_override_argument_e2e.rs"]
@@ -2554,7 +2566,11 @@ mod unsigned_vararg_e2e;
 
 #[path = "reified_nullable_instance_check_e2e.rs"]
 mod reified_nullable_instance_check_e2e;
+#[path = "reified_object_type_of_e2e.rs"]
+mod reified_object_type_of_e2e;
 
+#[path = "discarded_inline_result_temporary_e2e.rs"]
+mod discarded_inline_result_temporary_e2e;
 #[path = "special_builtin_call_sites_e2e.rs"]
 mod special_builtin_call_sites_e2e;
 #[path = "type_intrinsics_e2e.rs"]

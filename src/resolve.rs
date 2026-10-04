@@ -95,6 +95,7 @@ mod enum_entry_method_owner;
 mod explicit_backing_fields;
 mod explicit_property_write;
 mod expression_getter;
+mod extension_receiver_uses;
 mod finalized_projection;
 mod for_loop_iteration;
 mod function_exit;
@@ -128,6 +129,7 @@ mod operator_calls;
 use operator_calls::{range_operator, ResolvedInRangeComparison};
 mod overload_diagnostics;
 mod override_plans;
+mod platform_value_narrowing;
 mod plugin_class_checks;
 mod plugin_expression_annotations;
 mod plugin_expression_planning;
@@ -5256,24 +5258,46 @@ fn classifier_from_imports<S: SymbolSource + ?Sized>(
     levels: &[crate::symbol_resolver::ClassifierImportLevel],
     source: &S,
 ) -> InheritedNestedClassifier {
+    match imported_classifier_selection(name, explicit, levels, source) {
+        crate::symbol_resolver::CandidateSelectionWithTies::Selected(classifier) => {
+            InheritedNestedClassifier::Found(classifier)
+        }
+        crate::symbol_resolver::CandidateSelectionWithTies::Ambiguous(_) => {
+            InheritedNestedClassifier::Ambiguous
+        }
+        crate::symbol_resolver::CandidateSelectionWithTies::None => {
+            InheritedNestedClassifier::NotFound
+        }
+    }
+}
+
+/// The classifier the imports bind `name` to: an explicit import, else the nearest import level
+/// that has any candidate, keeping every candidate of an ambiguous level.
+fn imported_classifier_selection<S: SymbolSource + ?Sized>(
+    name: &str,
+    explicit: &HashMap<String, String>,
+    levels: &[crate::symbol_resolver::ClassifierImportLevel],
+    source: &S,
+) -> crate::symbol_resolver::CandidateSelectionWithTies<TypeName> {
+    use crate::symbol_resolver::CandidateSelectionWithTies;
     if let Some(fq) = explicit.get(name) {
         // Imports share syntax but not namespaces. An explicit import of a callable named `Foo`
         // must not erase a same-file classifier `Foo`; it contributes to classifier lookup only
         // when the imported path actually resolves to a classifier.
         if let Ok(classifier) = classifier_path(fq, source, None) {
-            return InheritedNestedClassifier::Found(classifier);
+            return CandidateSelectionWithTies::Selected(classifier);
         }
     }
     for level in levels {
         let hits =
             crate::symbol_resolver::classifier_candidates_at_import_level(source, name, level);
-        match hits.len() {
-            0 => continue,
-            1 => return InheritedNestedClassifier::Found(hits[0]),
-            _ => return InheritedNestedClassifier::Ambiguous,
+        match hits.as_slice() {
+            [] => continue,
+            [classifier] => return CandidateSelectionWithTies::Selected(*classifier),
+            _ => return CandidateSelectionWithTies::Ambiguous(hits),
         }
     }
-    InheritedNestedClassifier::NotFound
+    CandidateSelectionWithTies::None
 }
 
 /// Map a single JVM field descriptor to a krusty `Ty` (the v0 supported set).
@@ -18299,7 +18323,7 @@ impl<'a> Checker<'a> {
                                     scope,
                                     identity,
                                     extension_declaration,
-                                    receiver.class_receiver,
+                                    receiver.class_receiver.then_some(receiver.ty),
                                 )),
                                 receiver_capture: self.implicit_receiver_capture_id(
                                     receiver.class_receiver,
@@ -24291,6 +24315,9 @@ impl<'a> Checker<'a> {
             },
             None => it,
         };
+        if declared.is_none() {
+            self.narrow_enhanced_value(bind, init);
+        }
         crate::trace_compiler!(
             "resolve",
             "local declaration name={name} declared={declared:?} initializer={it:?} binding={bind:?}"
@@ -25350,6 +25377,8 @@ impl<'a> Checker<'a> {
     /// functions are lifted to private static methods; captures become leading parameters.
     fn check_local_fun(&mut self, scope: &CheckerScope<'_>, f: &FunDecl, stmt_id: StmtId) {
         let enclosing_return_frame = self.lambda_returns.enter_function(Some(f.name.clone()));
+        self.local_function_receivers
+            .extend(f.receiver.as_ref().map(|receiver| receiver.span));
         let suppression_depth =
             self.push_declaration_suppressions(scope, &f.annotations, &f.annotation_args);
         for (annotation, arguments) in f.annotations.iter().zip(&f.annotation_args) {
@@ -25893,6 +25922,22 @@ fn inaccessible_classifier_message(
         ClassifierAccess::Public => "public",
     };
     format!("cannot access '{name}': it is {kind}")
+}
+
+/// kotlinc's `OVERLOAD_RESOLUTION_AMBIGUITY` for a classifier name: each equally visible
+/// classifier rendered as its declaration header, in candidate order.
+fn ambiguous_classifier_message<Shape: std::ops::Deref<Target = crate::libraries::LibraryType>>(
+    candidates: &[TypeName],
+    shape: impl Fn(TypeName) -> Option<Shape>,
+) -> String {
+    let mut message = "overload resolution ambiguity between candidates:".to_string();
+    for &candidate in candidates {
+        if let Some(shape) = shape(candidate) {
+            message.push('\n');
+            message.push_str(&classifier_access_display_from_shape(candidate, &shape));
+        }
+    }
+    message
 }
 
 fn classifier_access_display_from_shape(
@@ -36090,6 +36135,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         classifier_header_owner: None,
         exact_anonymous_class_roots: std::collections::HashSet::new(),
         extension_receiver_labels: Vec::new(),
+        local_function_receivers: std::collections::HashSet::new(),
         field_ty: None,
         field_receiver_identity: None,
         in_script_body: false,
@@ -38643,7 +38689,7 @@ struct Checker<'a> {
     /// See [`TypeInfo::when_subject_numeric_equalities`].
     when_subject_numeric_equalities: HashMap<ExprId, when_flow::WhenSubjectNumericEquality>,
     resolved_type_tys: HashMap<(u32, u32), Ty>,
-    unresolved_type_segments: HashMap<(u32, u32), String>,
+    unresolved_type_segments: HashMap<(u32, u32), crate::symbol_resolver::ClassifierMiss>,
     /// Transient diagnostic directives inherited from annotated enclosing statements.
     active_statement_suppressions: Vec<String>,
     resolved_type_bounds: HashMap<(u32, u32), (Ty, bool)>,
@@ -38712,6 +38758,8 @@ struct Checker<'a> {
     /// exact roots, never evidence of lexical parents; those come only from `lexical_class_context`.
     exact_anonymous_class_roots: std::collections::HashSet<TypeName>,
     extension_receiver_labels: Vec<(usize, Span)>,
+    /// Receiver declarations of the local extension functions checked so far, by span.
+    local_function_receivers: std::collections::HashSet<Span>,
     /// The backing-field type while checking a property accessor body — makes the `field`
     /// soft-keyword resolve to the property's backing field. `None` outside an accessor.
     field_ty: Option<Ty>,
@@ -44235,16 +44283,6 @@ impl<'a> Checker<'a> {
         self.implicit_receiver_types(scope)
     }
 
-    fn mark_extension_receiver_used(&mut self, expression: ExprId, receiver: ImplicitReceiver) {
-        if !self.suppress_receiver_capture_accounting {
-            self.implicit_receiver_identity_uses
-                .record(receiver.identity);
-        }
-        if let Some(span) = receiver.extension_receiver {
-            self.mark_extension_receiver_span_used(expression, span);
-        }
-    }
-
     /// Preserve the receiver selected while resolving a BARE member access and account for a
     /// receiver-lambda capture in one operation. Lowering cannot safely repeat this lookup: an enclosing
     /// class receiver may be represented by a synthetic field rather than a local `this` slot, and
@@ -44316,61 +44354,8 @@ impl<'a> Checker<'a> {
             .record(receiver.identity);
     }
 
-    fn mark_extension_receiver_stmt_used(&mut self, statement: StmtId, receiver: ImplicitReceiver) {
-        self.implicit_receiver_identity_uses
-            .record(receiver.identity);
-        if let Some(span) = receiver.extension_receiver {
-            self.mark_extension_receiver_stmt_span_used(statement, span);
-        }
-    }
-
-    fn mark_extension_receiver_span_used(&mut self, expression: ExprId, span: Span) {
-        let uses = &mut self.extension_receiver_expr_uses[expression.0 as usize];
-        if !uses.contains(&span) {
-            uses.push(span);
-        }
-        self.implicit_receiver_identity_uses.record_extension(span);
-    }
-
-    fn mark_extension_receiver_stmt_span_used(&mut self, statement: StmtId, span: Span) {
-        let uses = &mut self.extension_receiver_stmt_uses[statement.0 as usize];
-        if !uses.contains(&span) {
-            uses.push(span);
-        }
-        self.implicit_receiver_identity_uses.record_extension(span);
-    }
-
-    fn extension_receiver_use_count(&self, declaration: Span) -> usize {
-        self.extension_receiver_expr_uses
-            .iter()
-            .filter(|uses| uses.contains(&declaration))
-            .count()
-            + self
-                .extension_receiver_stmt_uses
-                .iter()
-                .filter(|uses| uses.contains(&declaration))
-                .count()
-    }
-
     fn implicit_receiver_identity_use_count(&self, identity: (usize, usize)) -> usize {
         self.implicit_receiver_identity_uses.count(identity)
-    }
-
-    fn mark_extension_receiver_label_used(&mut self, expression: ExprId, label_index: usize) {
-        if let Some(span) = self
-            .extension_receiver_labels
-            .iter()
-            .rev()
-            .find_map(|(index, span)| (*index == label_index).then_some(*span))
-        {
-            self.mark_extension_receiver_span_used(expression, span);
-        }
-    }
-
-    fn mark_current_extension_receiver_used(&mut self, expression: ExprId) {
-        if let Some(span) = self.this_extension_receiver {
-            self.mark_extension_receiver_span_used(expression, span);
-        }
     }
 
     fn mark_context_extension_receiver_used(
@@ -49572,15 +49557,12 @@ impl<'a> Checker<'a> {
             .scoped_source_alias_identity(scope, &spelling)
             .and_then(|identity| self.source_alias_expansion(identity))
             .and_then(|(_, expansion)| expansion.obj_internal());
-        let classifier =
-            alias_classifier.or_else(
-                || match self.select_classifier_binding(scope, &spelling).0 {
-                    InheritedNestedClassifier::Found(internal) => Some(internal),
-                    InheritedNestedClassifier::Ambiguous | InheritedNestedClassifier::NotFound => {
-                        None
-                    }
-                },
-            );
+        let classifier = alias_classifier.or_else(|| {
+            match self.select_type_classifier_binding(scope, &spelling).0 {
+                InheritedNestedClassifier::Found(internal) => Some(internal),
+                InheritedNestedClassifier::Ambiguous | InheritedNestedClassifier::NotFound => None,
+            }
+        });
         let declaration = match classifier {
             Some(classifier) => Ty::obj_name(classifier),
             None => {
@@ -49625,7 +49607,7 @@ impl<'a> Checker<'a> {
             // Never rediscover alias-ness from the spelling after a classifier has been selected:
             // a lower same-named alias may expand to that very classifier while still losing to it.
             let (selection, failed_segment, selected_alias) =
-                self.select_classifier_binding(scope, &r.name);
+                self.select_type_classifier_binding(scope, &r.name);
             match selection {
                 InheritedNestedClassifier::Found(internal) => {
                     if let Some(alias) = selected_alias {
@@ -58486,31 +58468,6 @@ impl<'a> Checker<'a> {
         Some((argument, ty))
     }
 
-    /// Record that `e`'s PLATFORM type is committed to a declared non-null `expected` here.
-    ///
-    /// A Java value arrives as `T!`, which is usable as both `T` and `T?`; a declared non-null type
-    /// is where the source picks the non-null bound and every later consumer — Kotlin call sites that
-    /// skip null handling, Java nullness checkers reading `@NotNull`, krusty's own smart casts — is
-    /// entitled to rely on it. kotlinc guards exactly this transition (see
-    /// [`TypeInfo::platform_narrowings`]), unboxing into a primitive included; positions that keep
-    /// the flexibility (`T?`, another `T!`) are left alone.
-    ///
-    /// The expression's RECORDED type is read rather than a caller-supplied one: lowering consumes
-    /// the same `expr_types` entry, so a caller that has already narrowed the type for a diagnostic
-    /// cannot make the two disagree.
-    fn narrow_platform_value(&mut self, expected: Ty, e: ExprId, position: PlatformNarrowing) {
-        if !matches!(self.expr_types[e.0 as usize], Ty::PlatformNullable(_)) {
-            return;
-        }
-        if matches!(expected, Ty::PlatformNullable(_) | Ty::Error)
-            || expected.is_nullable()
-            || !(expected.is_reference() || expected.is_jvm_scalar())
-        {
-            return;
-        }
-        self.platform_narrowings.insert(e, position);
-    }
-
     fn expect_assignable(&mut self, expected: Ty, actual: Ty, span: Span, ctx: &str) {
         if expected == Ty::Error || actual == Ty::Error {
             return;
@@ -62102,9 +62059,19 @@ impl<'a> Checker<'a> {
     /// Report the failed classifier binding recorded by [`Self::type_ref_ty`]. Unsupported shapes
     /// have no binding failure and continue to their shape-specific diagnostic.
     fn report_unresolved_type_ref(&mut self, r: &TypeRef) -> bool {
-        if let Some(segment) = self.unresolved_type_segments.get(&(r.span.lo, r.span.hi)) {
-            self.diags
-                .error(r.span, format!("unresolved reference '{segment}'."));
+        if let Some(miss) = self.unresolved_type_segments.get(&(r.span.lo, r.span.hi)) {
+            let message = match miss {
+                crate::symbol_resolver::ClassifierMiss::Unresolved(segment) => {
+                    format!("unresolved reference '{segment}'.")
+                }
+                crate::symbol_resolver::ClassifierMiss::Ambiguous(candidates) => {
+                    let resolver = self.resolver();
+                    ambiguous_classifier_message(candidates, |candidate| {
+                        resolver.classifier(candidate)
+                    })
+                }
+            };
+            self.diags.error(r.span, message);
             return true;
         }
         let nested = r
@@ -68341,6 +68308,8 @@ impl<'a> Checker<'a> {
         for (&parameter, &ty) in shape.parameter_indices.iter().zip(&visible_params) {
             semantic_params[parameter] = ty;
         }
+        let declared_params =
+            self.declared_member_params(&selected, &shape.parameter_indices, &visible_params);
         if !self.expect_selected_call_args(
             scope,
             CallArgs {
@@ -68349,7 +68318,7 @@ impl<'a> Checker<'a> {
                 arg_tys: &arg_tys,
             },
             &visible_params,
-            &visible_params,
+            &declared_params,
             &shape.call_sig,
             None,
         ) {

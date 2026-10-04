@@ -388,6 +388,115 @@ fn java_parameters_names_an_anonymous_objects_value_class_receiver() {
     );
 }
 
+/// A value-class member's extension receiver is a parameter of the member's static, so the class
+/// of a lambda, suspend lambda, anonymous object or local class written there reflects it as a
+/// captured value, synthetic, under its field name `$this_mext`; so does an ordinary class's or a
+/// local function's, though their constructors' local-variable tables call it `$receiver`. A suspend
+/// lambda's class reflects its constructor's captures and `$completion`, `create`'s `value` and
+/// `$completion`, and the typed `invoke`'s `p1`, `p2`, … like kotlinc.
+#[test]
+fn java_parameters_names_a_value_class_member_extension_receiver_capture() {
+    assert_parameter_parity(
+        "JavaParametersMemberExtension",
+        "package demo\n\
+         interface Box { fun get(k: Int): Any }\n\
+         class Two(val first: Any, val second: Any)\n\
+         @JvmInline value class Tag(val raw: String)\n\
+         @JvmInline value class Held(val raw: String) {\n\
+         \x20 fun Tag.mext(): () -> Held = { Held(raw + this.raw) }\n\
+         \x20 fun Tag.msus(): suspend () -> Two = { Two(this, this@Held) }\n\
+         \x20 fun Tag.mo(): Box = object : Box { override fun get(k: Int): Any = this@mo }\n\
+         \x20 fun Tag.mlc(): Box { class L : Box { override fun get(k: Int): Any = this@mlc }; return L() }\n\
+         \x20 fun m(): Any {\n\
+         \x20\x20 fun Tag.loc(): () -> Held = { Held(this.raw) }\n\
+         \x20\x20 return Tag(raw).loc()\n\
+         \x20 }\n\
+         \x20 fun su(): suspend () -> Box = { object : Box { override fun get(k: Int): Any = this@Held } }\n\
+         }\n\
+         class Plain(val raw: String) {\n\
+         \x20 fun Tag.pext(): () -> Held = { Held(raw + this.raw) }\n\
+         }\n\
+         fun ps(x: Int): suspend (Int) -> Two = { y -> Two(x, y) }\n\
+         fun pair(): suspend (Int, Long) -> Long = { a, b -> a + b }\n",
+        &[
+            "demo/Held$mext$1",
+            "demo/Held$msus$1",
+            "demo/Held$mo$1",
+            "demo/Held$mlc$L",
+            "demo/Held$m$loc$1",
+            "demo/Held$su$1",
+            "demo/Held$su$1$1",
+            "demo/Plain$pext$1",
+            "demo/JavaParametersMemberExtensionKt$ps$1",
+            "demo/JavaParametersMemberExtensionKt$pair$1",
+        ],
+    );
+}
+
+/// An object written in a member of an anonymous object or local class inside a value-class member
+/// reflects the value class's instance as the static's value it captures, `$arg0`, synthetic,
+/// ahead of the enclosing class's instance `this$0` when it captures that too.
+#[test]
+fn java_parameters_names_a_nested_objects_value_class_receiver() {
+    assert_parameter_parity(
+        "JavaParametersNestedObjectCapture",
+        "package demo\n\
+         interface Box { fun get(k: Int): Any }\n\
+         @JvmInline value class Held(val raw: String) {\n\
+         \x20 fun inObj(): Box = object : Box {\n\
+         \x20\x20 override fun get(k: Int): Any {\n\
+         \x20\x20\x20 val o = object : Box { override fun get(k: Int): Any = this@Held }\n\
+         \x20\x20\x20 return o.get(k)\n\
+         \x20\x20 }\n\
+         \x20 }\n\
+         \x20 fun inLocal(): Box {\n\
+         \x20\x20 class L(val n: Int) : Box {\n\
+         \x20\x20\x20 override fun get(k: Int): Any {\n\
+         \x20\x20\x20\x20 val o = object : Box { override fun get(k: Int): Any = this@Held.raw + this@L.n }\n\
+         \x20\x20\x20\x20 return o.get(k)\n\
+         \x20\x20\x20 }\n\
+         \x20\x20 }\n\
+         \x20\x20 return L(1)\n\
+         \x20 }\n\
+         }\n",
+        &[
+            "demo/Held$inObj$1",
+            "demo/Held$inObj$1$get$o$1",
+            "demo/Held$inLocal$L",
+            "demo/Held$inLocal$L$get$o$1",
+        ],
+    );
+}
+
+/// kotlinc's value-class lowering moves a member's dispatch receiver into the static's carrier
+/// `arg0`, flagged synthetic, and its extension receiver into an ordinary parameter `$this$name`,
+/// flagged mandated: a member function's and a property accessor's alike. An extension receiver
+/// that stays one has no flag: an ordinary class's member extension and a top-level extension.
+#[test]
+fn java_parameters_flags_a_value_class_static_members_extension_receiver_mandated() {
+    assert_parameter_parity(
+        "JavaParametersMovedExtensionReceiver",
+        "package demo\n\
+         @JvmInline value class Tag(val raw: String)\n\
+         @JvmInline value class Held(val raw: String) {\n\
+         \x20 fun Tag.mext(x: Int): Int = x\n\
+         \x20 var String.pp: Int\n\
+         \x20\x20 get() = length\n\
+         \x20\x20 set(v) {}\n\
+         \x20 fun String.withDefault(x: Int = 1): Int = x\n\
+         }\n\
+         class Plain(val raw: String) {\n\
+         \x20 fun Tag.pmext(x: Int): Int = x\n\
+         }\n\
+         fun Tag.top(x: Int): Int = x\n",
+        &[
+            "demo/Held",
+            "demo/Plain",
+            "demo/JavaParametersMovedExtensionReceiverKt",
+        ],
+    );
+}
+
 #[test]
 fn method_parameters_remain_opt_in() {
     let jdk = common::jdk_modules();

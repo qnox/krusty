@@ -772,9 +772,16 @@ fn lower_captured_receiver(
     receiver: &crate::fir::FirCapturedReceiver,
 ) -> crate::ir::IrCapturedReceiver {
     match receiver {
-        crate::fir::FirCapturedReceiver::Enclosing => crate::ir::IrCapturedReceiver::Enclosing,
-        crate::fir::FirCapturedReceiver::Callable(label) => {
-            crate::ir::IrCapturedReceiver::Callable(label.clone())
+        crate::fir::FirCapturedReceiver::Enclosing { classifier } => {
+            crate::ir::IrCapturedReceiver::Enclosing {
+                classifier: *classifier,
+            }
+        }
+        crate::fir::FirCapturedReceiver::Callable { label, owner } => {
+            crate::ir::IrCapturedReceiver::Callable {
+                label: label.clone(),
+                owner: *owner,
+            }
         }
         crate::fir::FirCapturedReceiver::Lambda(label) => {
             crate::ir::IrCapturedReceiver::Lambda(label.clone())

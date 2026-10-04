@@ -4,6 +4,7 @@ use crate::ir::{
     IrClass, IrFile, IrGeneratedParameterRole, IrParameterIdentity, IrParameterRole,
     IrSecondaryCtor,
 };
+use crate::jvm::suspend::cps::{SuspendLambdaMember, SuspendLambdaParameters};
 use crate::types::{Ty, TypeName};
 
 pub(super) type MethodParameter = (Option<String>, u16);
@@ -105,20 +106,14 @@ pub(super) fn function(
     let projected_names =
         crate::jvm::parameter_names::function_method_parameters(ir, function, physical_parameters)
             .expect("published MethodParameters identities have JVM projections");
+    let value_class_static = ir.jvm_value_class_receiver_impls.contains(&function);
     let mut parameters = identities
         .into_iter()
         .enumerate()
         .map(|(index, identity)| {
             (
                 projected_names[index].clone(),
-                u16::from(matches!(
-                    identity.role,
-                    IrParameterRole::Generated(
-                        IrGeneratedParameterRole::HolderReceiver
-                            | IrGeneratedParameterRole::ValueClassCarrier
-                    ) | IrParameterRole::CapturedValue { .. }
-                        | IrParameterRole::CapturedReceiver { .. }
-                )) * SYNTHETIC,
+                function_parameter_flags(identity.role, value_class_static),
             )
         })
         .collect::<Vec<_>>();
@@ -126,6 +121,22 @@ pub(super) fn function(
         parameters.insert(0, parameter("$this", SYNTHETIC));
     }
     parameters
+}
+
+/// kotlinc flags a compiler-generated receiver or capture `SYNTHETIC`. A value-class member lowered
+/// to a static moves its dispatch receiver into the carrier (`arg0`, synthetic) and its extension
+/// receiver into an ordinary parameter, which it flags `MANDATED` (`$this$mext`); an extension
+/// receiver that stays one, of an ordinary class's member or a top-level function, has no flag.
+fn function_parameter_flags(role: IrParameterRole, value_class_static: bool) -> u16 {
+    match role {
+        IrParameterRole::Generated(
+            IrGeneratedParameterRole::HolderReceiver | IrGeneratedParameterRole::ValueClassCarrier,
+        )
+        | IrParameterRole::CapturedValue { .. }
+        | IrParameterRole::CapturedReceiver { .. } => SYNTHETIC,
+        IrParameterRole::ExtensionReceiver if value_class_static => MANDATED,
+        _ => 0,
+    }
 }
 
 fn constructor_prefix(ir: &IrFile, class: &IrClass, count: usize) -> Vec<MethodParameter> {
@@ -368,4 +379,38 @@ pub(super) fn continuation_constructor(class: &IrClass) -> Vec<MethodParameter> 
 
 pub(super) fn continuation_invoke_suspend() -> [MethodParameter; 1] {
     [parameter("$result", 0)]
+}
+
+/// `MethodParameters` of a suspend lambda class's generated `member`, formatted from the
+/// parameter identities its realization recorded and checked against `physical_parameters`: a
+/// captured value or receiver under the name of the field it initializes, synthetic; the
+/// completion, `create`'s value and the typed `invoke`'s `FunctionN` values as their roles spell
+/// them.
+pub(super) fn suspend_lambda_member(
+    ir: &IrFile,
+    parameters: &SuspendLambdaParameters,
+    member: SuspendLambdaMember,
+    physical_parameters: &[Ty],
+) -> Vec<MethodParameter> {
+    parameters
+        .physical(member, physical_parameters.len())
+        .iter()
+        .map(|identity| match identity.role {
+            IrParameterRole::CapturedValue { .. } | IrParameterRole::CapturedReceiver { .. } => {
+                let names =
+                    crate::jvm::capture_names::suspend_lambda_capture(ir, parameters, identity);
+                parameter(names.field, SYNTHETIC)
+            }
+            IrParameterRole::Generated(
+                IrGeneratedParameterRole::Continuation
+                | IrGeneratedParameterRole::SuspendLambdaCreateValue
+                | IrGeneratedParameterRole::FunctionInvokeValue { .. },
+            ) => parameter(
+                crate::jvm::parameter_names::method_parameter(identity, "")
+                    .expect("a suspend lambda's generated parameter role has a JVM name"),
+                0,
+            ),
+            role => panic!("a suspend lambda's {member:?} declares no {role:?} parameter"),
+        })
+        .collect()
 }
