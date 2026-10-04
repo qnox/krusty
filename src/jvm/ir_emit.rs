@@ -3762,29 +3762,32 @@ fn emit_interface_class(
                 interface_compatibility::emit_holder_forward(
                     di,
                     c.fq_name,
-                    &f.name,
-                    &physical_params,
-                    &semantic_params,
-                    &parameter_names,
-                    &method_parameter_names,
-                    &guards,
-                    jvm_declared_ty(&env.override_results.physical_result(ir, fid)),
-                    semantic_ret,
-                    signature.as_deref(),
-                    // A property accessor has no `fn_decl_lines` entry — its line lives on the
-                    // property declaration it realizes.
-                    ir.fn_decl_lines.get(&fid).copied().unwrap_or_else(|| {
-                        c.properties
-                            .iter()
-                            .find(|property| {
-                                let (getter, setter) = accessor_jvm_names(c, &property.name);
-                                getter == f.name || setter == f.name
-                            })
-                            .map(|property| property.decl_line)
-                            .unwrap_or(0)
-                    }),
-                    opts.java_parameters,
-                    JdHolderTarget::AccessBridge,
+                    interface_compatibility::HolderForward {
+                        member_name: &f.name,
+                        param_tys: &physical_params,
+                        semantic_params: &semantic_params,
+                        local_variable_names: &parameter_names,
+                        method_parameter_names: &method_parameter_names,
+                        guards: &guards,
+                        ret: jvm_declared_ty(&env.override_results.physical_result(ir, fid)),
+                        semantic_ret,
+                        signature: signature.as_deref(),
+                        // A property accessor has no `fn_decl_lines` entry — its line lives on the
+                        // property declaration it realizes.
+                        decl_line: ir.fn_decl_lines.get(&fid).copied().unwrap_or_else(|| {
+                            c.properties
+                                .iter()
+                                .find(|property| {
+                                    let (getter, setter) = accessor_jvm_names(c, &property.name);
+                                    getter == f.name || setter == f.name
+                                })
+                                .map(|property| property.decl_line)
+                                .unwrap_or(0)
+                        }),
+                        java_parameters: opts.java_parameters,
+                        varargs: method_access::varargs_access(ir, fid),
+                        target: JdHolderTarget::AccessBridge,
+                    },
                 );
             }
         } else {
@@ -3899,10 +3902,13 @@ fn emit_interface_class(
             &mut cw,
             c.fq_name,
             c.decl_line,
-            &f.name,
-            &physical_params,
-            &parameter_names,
-            jvm_declared_ty(&env.override_results.physical_result(ir, fid)),
+            JdAccessBridgeMember {
+                name: &f.name,
+                param_tys: &physical_params,
+                parameter_names: &parameter_names,
+                ret: jvm_declared_ty(&env.override_results.physical_result(ir, fid)),
+                varargs: method_access::varargs_access(ir, fid),
+            },
         );
     }
     if enable_compat {
@@ -5176,6 +5182,17 @@ fn jd_declared_param_tys(ir: &IrFile, fid: u32) -> Vec<Ty> {
         .collect()
 }
 
+/// The bridged member's shape: its declared name, physical parameter list with the parameter
+/// identities the bridge's debug info mirrors, its physical return, and its own `ACC_VARARGS`
+/// when the last physical parameter is the declared `vararg`.
+struct JdAccessBridgeMember<'a> {
+    name: &'a str,
+    param_tys: &'a [Ty],
+    parameter_names: &'a [Option<String>],
+    ret: Ty,
+    varargs: u16,
+}
+
 /// The `access$<name>$jd` bridge kotlinc puts on an `enable`-mode interface for each of its
 /// non-private default methods: a `public static synthetic` whose body makes the NON-VIRTUAL call
 /// (`invokespecial` on the interface's own method) that the `$DefaultImpls` forward and legacy
@@ -5185,11 +5202,15 @@ fn emit_jd_access_bridge(
     cw: &mut ClassWriter,
     interface: crate::types::TypeName,
     decl_line: u32,
-    member_name: &str,
-    param_tys: &[Ty],
-    parameter_names: &[Option<String>],
-    ret: Ty,
+    member: JdAccessBridgeMember<'_>,
 ) {
+    let JdAccessBridgeMember {
+        name: member_name,
+        param_tys,
+        parameter_names,
+        ret,
+        varargs,
+    } = member;
     assert_eq!(
         parameter_names.len(),
         param_tys.len(),
@@ -5217,7 +5238,11 @@ fn emit_jd_access_bridge(
     let target = cw.interface_methodref(&fq, member_name, &member_desc);
     code.invokespecial(target, argument_words as i32, slot_words(ret) as i32);
     emit_return(ret, &mut code);
-    finish_code::<0x1009>(cw, &name, &bridge_desc, &mut code, argument_words); // PUBLIC | STATIC | SYNTHETIC
+    // PUBLIC | STATIC | SYNTHETIC, plus the member's own ACC_VARARGS when its last physical
+    // parameter is the declared `vararg` — kotlinc keeps the bridge element-form callable.
+    code.ensure_locals(argument_words);
+    code.link();
+    cw.add_method_sig(0x1009 | varargs, &name, &bridge_desc, &code, None);
     let mut locals = vec![("$this".to_string(), format!("L{fq};"), 0)];
     let mut slot = 1u16;
     for (index, parameter) in param_tys.iter().enumerate() {

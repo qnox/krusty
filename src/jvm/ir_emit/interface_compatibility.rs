@@ -57,6 +57,7 @@ pub(super) fn emit_inherited_default_surface(
                            assertion_names: &[Option<String>],
                            physical_ret: Ty,
                            semantic_ret: Ty,
+                           varargs: u16,
                            is_abstract: bool,
                            visibility: crate::types::Visibility,
                            realization: crate::libraries::MemberRealization,
@@ -90,10 +91,13 @@ pub(super) fn emit_inherited_default_surface(
                     cw,
                     c.fq_name,
                     c.decl_line,
-                    name,
-                    param_tys,
-                    local_variable_names,
-                    physical_ret,
+                    super::JdAccessBridgeMember {
+                        name,
+                        param_tys,
+                        parameter_names: local_variable_names,
+                        ret: physical_ret,
+                        varargs,
+                    },
                 );
             }
             let di = default_impls.get_or_insert_with(|| {
@@ -137,23 +141,26 @@ pub(super) fn emit_inherited_default_surface(
             emit_holder_forward(
                 di,
                 c.fq_name,
-                name,
-                param_tys,
-                semantic_params,
-                local_variable_names,
-                method_parameter_names,
-                &guards,
-                physical_ret,
-                semantic_ret,
-                // The promoted generic signature of an inherited member is not reconstructed here
-                // (the declaring classifier's formals are not this interface's); a generic
-                // inherited surface keeps descriptor-only shape. Recorded in docs/SPEC.md.
-                None,
-                // kotlinc gives an inherited member's holder forwarder no line: it has no source
-                // in this interface.
-                0,
-                opts.java_parameters,
-                target,
+                HolderForward {
+                    member_name: name,
+                    param_tys,
+                    semantic_params,
+                    local_variable_names,
+                    method_parameter_names,
+                    guards: &guards,
+                    ret: physical_ret,
+                    semantic_ret,
+                    // The promoted generic signature of an inherited member is not reconstructed here
+                    // (the declaring classifier's formals are not this interface's); a generic
+                    // inherited surface keeps descriptor-only shape. Recorded in docs/SPEC.md.
+                    signature: None,
+                    // kotlinc gives an inherited member's holder forwarder no line: it has no source
+                    // in this interface.
+                    decl_line: 0,
+                    java_parameters: opts.java_parameters,
+                    varargs,
+                    target,
+                },
             );
         };
         for member in &shape.surface {
@@ -196,6 +203,13 @@ pub(super) fn emit_inherited_default_surface(
                 semantic_params.push(Ty::obj("kotlin/coroutines/Continuation"));
                 semantic_ret = Ty::nullable(Ty::obj("java/lang/Object"));
             }
+            // A suspend member's trailing continuation, not its vararg array, is the last physical
+            // parameter, so only a non-suspend vararg member keeps ACC_VARARGS on this surface.
+            let varargs = if member.vararg && !member.suspend() {
+                crate::jvm::classfile::ACC_VARARGS
+            } else {
+                0
+            };
             surface(
                 &name,
                 &param_tys,
@@ -205,6 +219,7 @@ pub(super) fn emit_inherited_default_surface(
                 &assertion_names,
                 physical_ret,
                 semantic_ret,
+                varargs,
                 member.is_abstract(),
                 member.visibility,
                 member.realization,
@@ -216,24 +231,47 @@ pub(super) fn emit_inherited_default_surface(
     }
 }
 
+/// One receiver-first `$DefaultImpls` forward's member shape: the declared member's physical and
+/// semantic parameter lists, its parameter identities under each publication (`LocalVariableTable`,
+/// `MethodParameters`, nullability-guard labels), and where the forward sends its call.
+pub(super) struct HolderForward<'a> {
+    pub member_name: &'a str,
+    pub param_tys: &'a [Ty],
+    pub semantic_params: &'a [Ty],
+    pub local_variable_names: &'a [Option<String>],
+    pub method_parameter_names: &'a [Option<String>],
+    pub guards: &'a [Option<String>],
+    pub ret: Ty,
+    pub semantic_ret: Ty,
+    pub signature: Option<&'a str>,
+    pub decl_line: u32,
+    pub java_parameters: bool,
+    /// The member's own `ACC_VARARGS` when its last physical parameter is the declared `vararg`.
+    pub varargs: u16,
+    pub target: JdHolderTarget<'a>,
+}
+
 /// Emit one receiver-first `$DefaultImpls` forward to an interface bridge or dependency holder.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn emit_holder_forward(
     cw: &mut ClassWriter,
     interface: crate::types::TypeName,
-    member_name: &str,
-    param_tys: &[Ty],
-    semantic_params: &[Ty],
-    local_variable_names: &[Option<String>],
-    method_parameter_names: &[Option<String>],
-    guards: &[Option<String>],
-    ret: Ty,
-    semantic_ret: Ty,
-    signature: Option<&str>,
-    decl_line: u32,
-    java_parameters: bool,
-    target: JdHolderTarget<'_>,
+    forward: HolderForward<'_>,
 ) {
+    let HolderForward {
+        member_name,
+        param_tys,
+        semantic_params,
+        local_variable_names,
+        method_parameter_names,
+        guards,
+        ret,
+        semantic_ret,
+        signature,
+        decl_line,
+        java_parameters,
+        varargs,
+        target,
+    } = forward;
     assert_eq!(
         local_variable_names.len(),
         param_tys.len(),
@@ -317,7 +355,7 @@ pub(super) fn emit_holder_forward(
     emit_return(ret, &mut code);
     code.ensure_locals(argument_words);
     code.link();
-    cw.add_method_sig(0x0009, member_name, &desc, &code, signature);
+    cw.add_method_sig(0x0009 | varargs, member_name, &desc, &code, signature);
     cw.set_method_parameters(member_name, &desc, &method_parameters);
 
     let mut locals = vec![("$this".to_string(), format!("L{fq};"), 0)];

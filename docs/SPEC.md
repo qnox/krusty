@@ -2389,6 +2389,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **Classpath Java varargs (`T...`)**: the class reader carries `ACC_VARARGS` into `CallSig::vararg`.
   The shared call-argument lowerer then packs trailing elements into the final array parameter for
   both static and instance calls. An ordinary array parameter remains fixed-arity.
+- **`ACC_VARARGS` follows the declared `vararg` onto every emitted method shape.** kotlinc sets the
+  flag whenever the method's last physical parameter is the declared `vararg`, and that includes the
+  shapes krusty emitted with a hardcoded flag word: a body-less (abstract) declaration, the
+  jvm-default `access$…$jd` bridge, and the `$DefaultImpls` forwarder — both the declared one and the
+  surface a sub-interface republishes for an inherited default it does not redeclare. All of them now
+  take the bit from the recorded vararg fact: `ir.fn_varargs` for a declared member (a suspend
+  member's trailing continuation keeps the bit off), `BackendMemberFact.vararg` for the republished
+  surface, computed at the provider boundary from the declaration's call shape — never inferred from
+  an array-typed last parameter. Tests: `tests/method_access_flags_e2e.rs`
+  (`abstract_vararg_method_flags_match_kotlinc`, `abstract_vararg_members_run`).
 - Range expressions as **values**: `a..b` and `a..<b` are the only true range *operators* (parsed at a
   precedence tighter than infix functions, looser than additive). `a..b` over `Int`/`Long`/`Char`
   constructs the matching stdlib range object via `new IntRange/LongRange/CharRange(II/JJ/CC)` (kotlinc's
