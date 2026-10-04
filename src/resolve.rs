@@ -59299,7 +59299,10 @@ impl<'a> Checker<'a> {
     ) -> Vec<Ty> {
         let mut types = Vec::new();
         if let Some(function) = self.expression_function_value_type(scope, expression, nominal) {
-            types.push(function.non_null());
+            // Preserve the exact value type. A successful non-null cast records its own non-null
+            // flow constituent; ordinary nullable function values must not acquire that proof just
+            // because a functional expected type asks for their callable shape.
+            types.push(function);
         }
         // A cast expression is the target. Facts proved about its operand belong to a later read
         // of that stable path; using them here would invoke the pre-cast suspend signature.
