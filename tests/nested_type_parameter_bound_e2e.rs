@@ -211,13 +211,15 @@ import incomplete.*
 class Holder<T : ImportedRoot.Leaf>(val value: T)
 
 fun box(): String {
-    val leaf = ImportedRoot.Leaf()
+    val leaf = complete.ImportedRoot.Leaf()
     return if (Holder(leaf).value === leaf) "OK" else "wrong"
 }
 "#;
 
 /// Star imports are one precedence rung, but only complete type paths participate in that rung's
-/// ambiguity. An imported root without `Leaf` cannot make `ImportedRoot.Leaf` ambiguous.
+/// ambiguity. An imported root without `Leaf` cannot make the type `ImportedRoot.Leaf` ambiguous.
+/// The expression `ImportedRoot.Leaf()` is still rejected by kotlinc 2.4.20 (its root qualifier is
+/// ambiguous), so the value is built through the package-qualified path.
 #[test]
 fn an_incomplete_star_import_root_does_not_hide_the_complete_path() {
     let sources = [
