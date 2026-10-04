@@ -5280,8 +5280,6 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         )
             -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
-        // The delegated-property signature boundary is one responsibility and lives in its own
-        // module; this is the trait's entry into it.
         self.select_delegate_signature(scope, delegate, expected, site, demand)
     }
     fn least_upper_bound(
