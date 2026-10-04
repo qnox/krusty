@@ -49613,15 +49613,12 @@ impl<'a> Checker<'a> {
             .scoped_source_alias_identity(scope, &spelling)
             .and_then(|identity| self.source_alias_expansion(identity))
             .and_then(|(_, expansion)| expansion.obj_internal());
-        let classifier =
-            alias_classifier.or_else(
-                || match self.select_classifier_binding(scope, &spelling).0 {
-                    InheritedNestedClassifier::Found(internal) => Some(internal),
-                    InheritedNestedClassifier::Ambiguous | InheritedNestedClassifier::NotFound => {
-                        None
-                    }
-                },
-            );
+        let classifier = alias_classifier.or_else(|| {
+            match self.select_type_classifier_binding(scope, &spelling).0 {
+                InheritedNestedClassifier::Found(internal) => Some(internal),
+                InheritedNestedClassifier::Ambiguous | InheritedNestedClassifier::NotFound => None,
+            }
+        });
         let declaration = match classifier {
             Some(classifier) => Ty::obj_name(classifier),
             None => {
@@ -49666,7 +49663,7 @@ impl<'a> Checker<'a> {
             // Never rediscover alias-ness from the spelling after a classifier has been selected:
             // a lower same-named alias may expand to that very classifier while still losing to it.
             let (selection, failed_segment, selected_alias) =
-                self.select_classifier_binding(scope, &r.name);
+                self.select_type_classifier_binding(scope, &r.name);
             match selection {
                 InheritedNestedClassifier::Found(internal) => {
                     if let Some(alias) = selected_alias {

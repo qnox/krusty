@@ -142,3 +142,51 @@ fn an_ambiguous_imported_bound_is_rejected_like_kotlinc() {
         &[],
     );
 }
+
+const SHADOWED_OWNER: &str = r#"package p
+
+class A {
+    class B
+}
+"#;
+
+const SHADOWING: &str = r#"package u
+
+import p.A
+
+class Outer {
+    class A
+    fun <T : A.B> pick(t: T): T = t
+    fun take(b: A.B): A.B = b
+    class Holder<T : A.B>(val t: T)
+}
+
+fun box(): String {
+    val b = p.A.B()
+    if (Outer().pick(b) !== b) return "pick"
+    if (Outer().take(b) !== b) return "take"
+    if (Outer.Holder(b).t !== b) return "holder"
+    return "OK"
+}
+"#;
+
+/// A type reference binds among complete paths: the lexical `Outer.A` has no `B`, so `A.B` is
+/// the imported `p.A.B`, which kotlinc accepts (warning only that the bound is final).
+#[test]
+fn a_qualified_bound_reaches_past_a_nearer_root_without_the_suffix() {
+    let sources = [("Owner.kt", SHADOWED_OWNER), ("Shadowing.kt", SHADOWING)];
+    let result = common::compiler_diagnostics(&sources, &[]);
+    assert_eq!(result.reference_code, 0, "{}", result.reference_stderr);
+    assert_eq!(
+        result.krusty_code, 0,
+        "{}{}",
+        result.krusty_stdout, result.krusty_stderr
+    );
+    assert_eq!(common::compiler_errors(&result.krusty_stderr), []);
+    assert_eq!(
+        common::compile_and_run_files_with_stdlib(&sources).expect("compile and run the module"),
+        "OK"
+    );
+    let classes = common::classes_against_kotlinc_module(&sources);
+    assert_eq!(classes.differences(), Vec::<String>::new());
+}
