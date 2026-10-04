@@ -8028,6 +8028,7 @@ mod tests {
             overridden_call_realizations: Box::new([]),
             declared_ret: None,
             overridden_results: Box::new([]),
+            annotations: Vec::new(),
         };
         FunctionInfo {
             ret: crate::libraries::ReturnInfo::new(false, Some(Ty::UInt)),
