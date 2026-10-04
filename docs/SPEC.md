@@ -840,6 +840,29 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   reaches the JVM `<init>` access flags (protected/private; `internal` stays JVM-public, the
   boundary lives in metadata alone), including the all-defaults convenience `<init>()`, which
   mirrors the primary's visibility exactly as kotlinc emits it.
+- **An override without a visibility modifier keeps the overridden member's visibility.** krusty
+  recorded the parser's `public` default, so `class Simple : Counter() { override fun countTime… }`
+  over a `protected abstract` member emitted `public` (and accepted external calls kotlinc
+  rejects). The parser now records whether a declaration wrote a visibility keyword
+  (`FunDecl`/`PropDecl`/constructor `PropParam.has_visibility_modifier`, carried on the FIR
+  declaration as `DeclarationFlags::HAS_VISIBILITY_MODIFIER`), each override edge carries the
+  overridden declaration's provider-recorded visibility (`overridden_visibility`), and the
+  inherited-status pass resolves the effective visibility over the frozen edge graph: an explicit
+  modifier wins (kotlinc accepts a WIDENING `public override` of a protected member; narrowing is
+  the reference compiler's error, not modeled), otherwise the override takes the most permissive
+  visibility among the declarations it overrides, transitively down the chain (`public` >
+  `internal` > `protected` > `private`; a Java package-private overridden member inherits as
+  `public`). The result restricts the FIR declaration header before any body is checked or lowered
+  (`ResolvedModuleIndex::publish_inherited_visibility`) and the projected module signatures
+  (`publish_inherited_visibilities_to_symbols` inside a module-mutation bracket), so access
+  checks, access-bridge synthesis, JVM access flags, and `@Metadata` all see the same visibility.
+  The same pass also fixed a declared `protected abstract` member's JVM flags: abstract-method
+  emission hardcoded `ACC_PUBLIC | ACC_ABSTRACT` and now derives the word from the recorded
+  visibility (`method_access::abstract_method_access`). Tests:
+  `method_access_flags_e2e::override_without_modifier_keeps_overridden_visibility_like_kotlinc`
+  (functions, properties, enum-entry body, constructor property parameter, multiple inheritance
+  taking the most permissive visibility) and
+  `diagnostics_language_parity_e2e::inherited_override_visibility_access_matches_kotlinc`.
 - **Companion member properties — accessors + records.** A companion property's backing field is a
   static on the OUTER class; kotlinc realizes the property as `public final` INSTANCE accessors on
   `C$Companion` (via `access$…$cp` bridges over its private fields) and records it on the

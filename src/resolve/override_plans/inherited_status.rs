@@ -10,6 +10,12 @@
 //! Status resolution also carries the `operator` and `infix` modifiers down an override chain: a
 //! function overriding one that has either modifier has it too, whatever it declares, and so does
 //! an override of that override.
+//!
+//! Visibility follows the same graph: an override written WITHOUT a visibility modifier keeps the
+//! most permissive visibility among the declarations it overrides, transitively, instead of
+//! defaulting to `public`. An explicit modifier always wins, so `public override` of a protected
+//! member stays public (kotlinc accepts the widening) and `protected override` of a public member
+//! stays protected.
 
 use std::collections::HashMap;
 use std::hash::Hash;
@@ -19,7 +25,7 @@ use crate::fir::{
     ResolvedFunctionOverrideTarget, ResolvedModuleIndex, ResolvedPropertyOverride,
     ResolvedPropertyOverrideTarget,
 };
-use crate::types::ReturnValueStatus;
+use crate::types::{ReturnValueStatus, Visibility};
 
 /// A resolved declaration status and what one override edge says about its overridden declaration.
 trait Status: Copy + Default {
@@ -77,6 +83,57 @@ impl Status for InheritedCallableStatus {
     }
 }
 
+/// An override's visibility resolution: the modifier it wrote, if any, and the visibility it
+/// effectively has once inheritance is resolved.
+#[derive(Clone, Copy, Default)]
+struct VisibilityStatus {
+    explicit: Option<Visibility>,
+    effective: Visibility,
+}
+
+/// A Java declaration with no access modifier is package-private; Kotlin has no such visibility
+/// for its own declarations, so an override of it defaults to `public`.
+fn inheritable_visibility(visibility: Visibility) -> Visibility {
+    match visibility {
+        Visibility::PackagePrivate => Visibility::Public,
+        visibility => visibility,
+    }
+}
+
+/// Permissiveness order, most permissive first: `public` > `internal` > `protected` > `private`.
+fn permissiveness(visibility: Visibility) -> u8 {
+    match visibility {
+        Visibility::Public | Visibility::PackagePrivate => 0,
+        Visibility::Internal => 1,
+        Visibility::Protected => 2,
+        Visibility::Private => 3,
+    }
+}
+
+impl Status for VisibilityStatus {
+    /// An overridden declaration's effective visibility.
+    type Edge = Visibility;
+
+    fn as_edge(self) -> Self::Edge {
+        self.effective
+    }
+
+    fn inherit(own: Self, overridden: &[Self::Edge]) -> Self {
+        let effective = own.explicit.unwrap_or_else(|| {
+            overridden
+                .iter()
+                .copied()
+                .map(inheritable_visibility)
+                .min_by_key(|visibility| permissiveness(*visibility))
+                .unwrap_or_default()
+        });
+        VisibilityStatus {
+            explicit: own.explicit,
+            effective,
+        }
+    }
+}
+
 /// What one override edge names as its overridden declaration.
 #[derive(Clone, Copy)]
 enum Overridden<Id, Edge> {
@@ -94,7 +151,7 @@ pub(super) struct ClassifierEdges<'a> {
 pub(super) fn publish_inherited_statuses(
     index: &mut ResolvedModuleIndex,
     classifiers: &[ClassifierEdges<'_>],
-) {
+) -> Vec<(DeclarationId, Visibility)> {
     let functions = own_edges(
         index,
         classifiers,
@@ -166,6 +223,123 @@ pub(super) fn publish_inherited_statuses(
     for (property, status) in properties {
         index.publish_property_return_value_status(property, status);
     }
+    publish_inherited_visibilities(index, classifiers)
+}
+
+/// Resolve every override's effective visibility and restrict the headers of modifier-less
+/// overrides to it. Returns the declarations whose recorded visibility changed, so a caller still
+/// holding a projected copy of the signatures (the module symbol table) can follow.
+fn publish_inherited_visibilities(
+    index: &mut ResolvedModuleIndex,
+    classifiers: &[ClassifierEdges<'_>],
+) -> Vec<(DeclarationId, Visibility)> {
+    let own_status = |index: &ResolvedModuleIndex, declaration: DeclarationId| {
+        index
+            .declaration_header(declaration)
+            .map_or_else(VisibilityStatus::default, |header| VisibilityStatus {
+                explicit: header
+                    .flags
+                    .has(DeclarationFlags::HAS_VISIBILITY_MODIFIER)
+                    .then_some(header.visibility),
+                effective: header.visibility,
+            })
+    };
+    let functions = own_edges(
+        index,
+        classifiers,
+        |classifier| classifier.functions,
+        |index, edge| match edge.implementation {
+            ResolvedFunctionOverrideTarget::Module(callable) => index
+                .callable(callable)
+                .map(|header| (callable, header.declaration)),
+            ResolvedFunctionOverrideTarget::External(_) => None,
+        },
+        |edge| match edge.overridden {
+            ResolvedFunctionOverrideTarget::Module(callable) => Overridden::Module(callable),
+            ResolvedFunctionOverrideTarget::External(_) => {
+                Overridden::External(edge.overridden_visibility)
+            }
+        },
+        |edge| edge.depth,
+    );
+    let properties = own_edges(
+        index,
+        classifiers,
+        |classifier| classifier.properties,
+        |index, edge| match edge.implementation {
+            ResolvedPropertyOverrideTarget::Module(property) => index
+                .property(property)
+                .map(|header| (property, header.declaration)),
+            ResolvedPropertyOverrideTarget::External(_) => None,
+        },
+        |edge| match edge.overridden {
+            ResolvedPropertyOverrideTarget::Module(property) => Overridden::Module(property),
+            ResolvedPropertyOverrideTarget::External(_) => {
+                Overridden::External(edge.overridden_visibility)
+            }
+        },
+        |edge| edge.depth,
+    );
+    let functions = derive(
+        &functions,
+        |callable| {
+            index
+                .callable(callable)
+                .map_or_else(VisibilityStatus::default, |header| {
+                    own_status(index, header.declaration)
+                })
+        },
+        |callable| {
+            index
+                .callable(callable)
+                .map_or_else(VisibilityStatus::default, |header| {
+                    own_status(index, header.declaration)
+                })
+        },
+    );
+    let properties = derive(
+        &properties,
+        |property| {
+            index
+                .property(property)
+                .map_or_else(VisibilityStatus::default, |header| {
+                    own_status(index, header.declaration)
+                })
+        },
+        |property| {
+            index
+                .property(property)
+                .map_or_else(VisibilityStatus::default, |header| {
+                    own_status(index, header.declaration)
+                })
+        },
+    );
+    let apply = |index: &mut ResolvedModuleIndex,
+                 declaration: DeclarationId,
+                 status: VisibilityStatus,
+                 inherited: &mut Vec<(DeclarationId, Visibility)>| {
+        if index
+            .declaration_header(declaration)
+            .is_some_and(|header| header.visibility != status.effective)
+        {
+            index.publish_inherited_visibility(declaration, status.effective);
+            inherited.push((declaration, status.effective));
+        }
+    };
+    let mut inherited = Vec::new();
+    for (callable, status) in functions {
+        let Some(declaration) = index.callable(callable).map(|header| header.declaration) else {
+            continue;
+        };
+        apply(index, declaration, status, &mut inherited);
+    }
+    for (property, status) in properties {
+        let Some(declaration) = index.property(property).map(|header| header.declaration) else {
+            continue;
+        };
+        apply(index, declaration, status, &mut inherited);
+    }
+    inherited
 }
 
 /// One implementation's override edges in nearest-first order, per implementation.

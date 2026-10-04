@@ -1284,7 +1284,7 @@ where
             &mut symbols,
         );
         crate::resolve::publish_stable_declaration_metadata(&mut index, &symbols);
-        crate::resolve::publish_override_plans(&mut index, &symbols);
+        crate::resolve::publish_override_plans(&mut index, &mut symbols);
         crate::resolve::function_type_parameters::publish_function_type_parameters(
             &mut index, &symbols,
         );

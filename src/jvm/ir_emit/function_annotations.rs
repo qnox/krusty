@@ -2,7 +2,8 @@
 
 use super::*;
 
-/// Add one public abstract declaration and apply its generic signature and source annotations.
+/// Add one abstract declaration with the member's own visibility and apply its generic signature
+/// and source annotations.
 pub(super) fn add_abstract(
     ir: &IrFile,
     cw: &mut ClassWriter,
@@ -13,7 +14,7 @@ pub(super) fn add_abstract(
     let declaration = &ir.functions[function as usize];
     let descriptor = declared_method_desc(ir, override_results, function);
     cw.add_abstract_method_sig(
-        0x0001 | 0x0400,
+        method_access::abstract_method_access(ir, function),
         &declaration.name,
         &descriptor,
         declared_method_signature(formatter, ir, override_results, function).as_deref(),

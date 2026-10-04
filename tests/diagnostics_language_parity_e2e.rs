@@ -79,3 +79,40 @@ fn prohibited_script_returns_match_kotlinc() {
         );
     }
 }
+
+#[test]
+fn inherited_override_visibility_access_matches_kotlinc() {
+    // An override written without a visibility modifier keeps the overridden member's visibility:
+    // `plain` is protected in `Simple`, so the external call is rejected with the protected-member
+    // diagnostic naming the subclass that now declares it.
+    let source = "open class Base {\n\
+                  \x20   protected open fun plain(): Int = 1\n\
+                  }\n\
+                  class Simple : Base() {\n\
+                  \x20   override fun plain(): Int = 2\n\
+                  }\n\
+                  fun use(): Int = Simple().plain()\n";
+    let stdlib = common::stdlib_jar();
+    let result = common::compiler_diagnostics(
+        &[("InheritedOverrideVisibility.kt", source)],
+        std::slice::from_ref(&stdlib),
+    );
+    assert_ne!(result.krusty_code, 0, "krusty silently accepted source");
+    assert_ne!(
+        result.reference_code, 0,
+        "kotlinc unexpectedly accepted source"
+    );
+    let mut krusty_errors = errors(&result.krusty_stderr);
+    krusty_errors.extend(errors(&result.krusty_stdout));
+    let mut kotlinc_errors = errors(&result.reference_stderr);
+    krusty_errors.sort_by_key(|error| (error.line, error.column));
+    kotlinc_errors.sort_by_key(|error| (error.line, error.column));
+    assert_eq!(krusty_errors, kotlinc_errors);
+    assert_eq!(
+        krusty_errors
+            .iter()
+            .map(|error| error.message.as_str())
+            .collect::<Vec<_>>(),
+        ["cannot access 'fun plain(): Int': it is protected in 'Simple'."],
+    );
+}

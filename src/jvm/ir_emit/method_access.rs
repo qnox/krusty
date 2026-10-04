@@ -2,8 +2,8 @@
 
 use crate::ir::IrFile;
 use crate::jvm::classfile::{
-    ACC_BRIDGE, ACC_FINAL, ACC_PRIVATE, ACC_PROTECTED, ACC_PUBLIC, ACC_STATIC, ACC_SYNTHETIC,
-    ACC_VARARGS,
+    ACC_ABSTRACT, ACC_BRIDGE, ACC_FINAL, ACC_PRIVATE, ACC_PROTECTED, ACC_PUBLIC, ACC_STATIC,
+    ACC_SYNTHETIC, ACC_VARARGS,
 };
 
 use super::{IrExpr, LambdaMode, LambdaModes};
@@ -15,6 +15,13 @@ fn jvm_visibility(visibility: crate::types::Visibility) -> u16 {
         crate::types::Visibility::Internal | crate::types::Visibility::Public => ACC_PUBLIC,
         crate::types::Visibility::PackagePrivate => 0,
     }
+}
+
+/// The access word of a body-less (abstract) method declaration, following kotlinc's
+/// `calculateMethodFlags`: the member's own visibility and `ACC_ABSTRACT`, never `ACC_FINAL`.
+/// Interface members record `public`, so their flags are unchanged.
+pub(super) fn abstract_method_access(ir: &IrFile, fid: u32) -> u16 {
+    jvm_visibility(ir.method_visibility(fid)) | ACC_ABSTRACT
 }
 
 /// The access word of the method emitted for `fid`. `holder_static` is an interface member's body

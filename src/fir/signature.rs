@@ -1994,6 +1994,22 @@ impl ResolvedModuleIndex {
             .contains(&declaration)
     }
 
+    /// Restrict a modifier-less override to the visibility it inherits from the declarations it
+    /// overrides. Override edges — and with them the overridden declarations' visibilities — exist
+    /// only after signature finalization, so the header starts at the parser's `public` default and
+    /// is corrected here, before any body is checked against or lowered from it.
+    pub(crate) fn publish_inherited_visibility(
+        &mut self,
+        declaration: DeclarationId,
+        visibility: Visibility,
+    ) {
+        let header = self
+            .declaration_headers
+            .get_mut(&declaration)
+            .expect("inherited visibility requires a finalized declaration header");
+        header.visibility = visibility;
+    }
+
     pub(crate) fn publish_visibility_suppression(
         &mut self,
         declaration: DeclarationId,

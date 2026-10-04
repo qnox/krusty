@@ -121,6 +121,104 @@ fn vararg_method_flags_match_kotlinc() {
     assert_method_flags_match_kotlinc("Varargs", VARARGS, &["Crate", "Tier", "Shelf", "VarargsKt"]);
 }
 
+/// Visibility of overriding members: an override with NO visibility modifier keeps the overridden
+/// member's visibility (transitively down an override chain, and the most permissive one when it
+/// overrides several members), an explicit modifier wins, and a declared `protected abstract`
+/// member stays protected. Covers functions, properties, an enum-entry body, and a constructor
+/// property parameter.
+const OVERRIDE_VISIBILITY: &str = "abstract class Counter {\n\
+    protected abstract fun <T> countTime(block: () -> T): T\n\
+    protected abstract fun plain(): Int\n\
+    protected open fun openMeth(): Int = 1\n\
+}\n\
+abstract class Middle : Counter() {\n\
+    abstract override fun plain(): Int\n\
+}\n\
+class Simple : Middle() {\n\
+    override fun <T> countTime(block: () -> T): T = block()\n\
+    override fun plain(): Int = 2\n\
+    override fun openMeth(): Int = 3\n\
+    fun callAll(): Int = countTime { 1 } + plain() + openMeth()\n\
+}\n\
+open class Widened {\n\
+    protected open fun keep(): Int = 1\n\
+}\n\
+class Explicit : Widened() {\n\
+    public override fun keep(): Int = 4\n\
+}\n\
+interface Iface { fun m(): Int }\n\
+class Impl : Iface { override fun m(): Int = 6 }\n\
+open class BothBase { protected open fun f(): Int = 1 }\n\
+interface BothIface { fun f(): Int }\n\
+class Both : BothBase(), BothIface { override fun f(): Int = 7 }\n\
+open class PropBase {\n\
+    protected open val p: Int = 1\n\
+    protected open var q: Int = 2\n\
+}\n\
+class PropDerived : PropBase() {\n\
+    override val p: Int = 3\n\
+    override var q: Int = 4\n\
+    fun sum(): Int = p + q\n\
+}\n\
+enum class Mode {\n\
+    SLOW { override fun rate(): Int = 12 };\n\
+    protected abstract fun rate(): Int\n\
+    fun base(): Int = rate()\n\
+}\n\
+open class ParamBase { protected open val x: Int = 1 }\n\
+class ParamDerived(override val x: Int) : ParamBase() {\n\
+    fun read(): Int = x\n\
+}\n\
+fun box(): String {\n\
+    val total = Simple().callAll() + Explicit().keep() + Impl().m() +\n\
+        Both().f() + PropDerived().sum() + Mode.SLOW.base() + ParamDerived(8).read()\n\
+    return if (total == 50) \"OK\" else \"fail: \" + total\n\
+}\n";
+
+#[test]
+fn override_visibility_members_run() {
+    common::expect_box_ok_with_stdlib(OVERRIDE_VISIBILITY, "OverrideVisibility");
+}
+
+#[test]
+fn override_without_modifier_keeps_overridden_visibility_like_kotlinc() {
+    assert_method_flags_match_kotlinc(
+        "OverrideVisibility",
+        OVERRIDE_VISIBILITY,
+        &[
+            "Counter",
+            "Middle",
+            "Simple",
+            "Widened",
+            "Explicit",
+            "Iface",
+            "Impl",
+            "BothBase",
+            "BothIface",
+            "Both",
+            "PropBase",
+            "PropDerived",
+            "ParamBase",
+            "ParamDerived",
+        ],
+    );
+    // The enum and its entry subclass take the same assertion on every declared member row. Their
+    // CONSTRUCTOR rows are left out: kotlinc routes entry construction through a synthetic
+    // `DefaultConstructorMarker` constructor krusty does not emit, a pre-existing enum-entry shape
+    // gap unrelated to member visibility.
+    assert_methods_match_kotlinc(
+        "OverrideVisibility",
+        OVERRIDE_VISIBILITY,
+        &["Mode", "Mode$SLOW"],
+        |bytes| {
+            method_flags(bytes)
+                .into_iter()
+                .filter(|(name, _, _)| !name.starts_with('<'))
+                .collect()
+        },
+    );
+}
+
 fn assert_method_flags_match_kotlinc(name: &str, src: &str, classes: &[&str]) {
     assert_methods_match_kotlinc(name, src, classes, method_flags);
 }
