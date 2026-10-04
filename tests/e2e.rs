@@ -1351,6 +1351,8 @@ mod module_override_boxed_result_e2e;
 mod mpp_expect_actual_e2e;
 #[path = "mpp_requires_the_feature_e2e.rs"]
 mod mpp_requires_the_feature_e2e;
+#[path = "nested_class_annotation_scope_e2e.rs"]
+mod nested_class_annotation_scope_e2e;
 #[path = "nested_receiver_lambda_captures_e2e.rs"]
 mod nested_receiver_lambda_captures_e2e;
 #[path = "nothing_type_argument_signature_e2e.rs"]

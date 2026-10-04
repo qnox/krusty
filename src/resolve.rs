@@ -53155,9 +53155,7 @@ impl<'a> Checker<'a> {
                     .insert(declaration, classifier);
             }
         }
-        for (annotation, arguments) in cl.annotations.iter().zip(&cl.annotation_args) {
-            self.check_annotation_application(scope, annotation, arguments);
-        }
+        self.check_classifier_own_annotations(scope, cl, current_owner);
         for entry in &cl.enum_entries {
             self.check_annotation_applications_in_declaration_scope(
                 scope,

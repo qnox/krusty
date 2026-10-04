@@ -10371,6 +10371,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   companion's own header does not see its nested classifiers, and a supertype's companion
   contributes none. Verified against kotlinc 2.4.20.
   (`tests/companion_nested_classifier_scope_e2e.rs`.)
+- **A classifier's own annotations resolve where the classifier is declared.** `@Dsl class Inner`
+  inside `Builder` binds `Builder.Dsl`, a nested classifier of `Builder`'s companion, or one of any
+  enclosing classifier; the annotated classifier's own nested declarations are not in scope for its
+  annotations (`@Own class C { annotation class Own }` is an unresolved reference). Verified against
+  kotlinc 2.4.20. (`tests/nested_class_annotation_scope_e2e.rs`.)
 
 ## 8. Success criteria for the PoC
 
