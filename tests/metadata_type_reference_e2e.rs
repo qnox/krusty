@@ -132,5 +132,9 @@ fn a_plain_string_reuses_an_equal_class_id() {
     const SRC: &str = "class Payload(val v: Int)\n\
         fun make(c: Payload): Payload = c\n\
         fun Payload(): Payload = Payload(0)\n";
-    assert_identical("root_class_named_function", SRC, "Root_class_named_functionKt");
+    assert_identical(
+        "root_class_named_function",
+        SRC,
+        "Root_class_named_functionKt",
+    );
 }
