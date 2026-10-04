@@ -160,15 +160,9 @@ fn function_local_variable(
     identity: &IrParameterIdentity,
 ) -> Option<String> {
     if let IrParameterRole::CapturedReceiver { ordinal } = identity.role {
-        let origins = &ir
-            .fn_params
-            .get(&function)
-            .expect("a lifted callable publishes its parameters")
-            .captured_receivers;
-        return Some(super::capture_names::lifted_receiver_name(
-            origins,
-            ordinal as usize,
-        ));
+        let (name, _) = super::capture_names::lifted_receiver(ir, function, ordinal as usize)
+            .expect("a lifted callable publishes the origin of each captured receiver");
+        return Some(name);
     }
     if matches!(identity.role, IrParameterRole::ExtensionReceiver) {
         // Only a source lambda's implementation takes an extension receiver among the functions

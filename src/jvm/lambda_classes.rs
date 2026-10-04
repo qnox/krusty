@@ -493,14 +493,7 @@ fn captures(ir: &IrFile, fid: FunId, body: ExprId, site: &Site) -> Option<Vec<Ca
                     (format!("${}", identity.source_name.as_ref()?), false)
                 }
                 IrParameterRole::CapturedReceiver { ordinal } => {
-                    let receiver = parameter_info.captured_receivers.get(ordinal as usize)?;
-                    (
-                        crate::jvm::capture_names::lifted_receiver_name(
-                            &parameter_info.captured_receivers,
-                            ordinal as usize,
-                        ),
-                        crate::jvm::capture_names::uses_receiver_constructor_parameter(receiver),
-                    )
+                    crate::jvm::capture_names::lifted_receiver(ir, fid, ordinal as usize)?
                 }
                 _ => return None,
             };
