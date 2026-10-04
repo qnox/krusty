@@ -11,7 +11,6 @@ compileKotlinAgainstKotlin/inlineClasses/privateCompanionObjectValInDifferentMod
 compileKotlinAgainstKotlin/inlineClasses/privateTopLevelValInDifferentModule.kt
 coroutines/functionReference_Function_SuspendFunction_casts.kt
 coroutines/generate.kt
-coroutines/inlineClasses/direct/boxReturnValueOfSuspendFunctionReference.kt
 coroutines/tailCallOptimizations/crossinline.kt
 extensionFunctions/kt475.kt
 fullValueClasses/basicSyntax.kt
