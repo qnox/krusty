@@ -11,7 +11,7 @@
 
 use std::collections::HashSet;
 
-use super::{ClassWriter, Const};
+use super::{ClassWriter, Const, ConstPool};
 
 /// The member references interned while copying compiled code, and those interned otherwise.
 #[derive(Default)]
@@ -55,14 +55,7 @@ impl MappedMembers {
 impl ClassWriter {
     /// Constant-pool index of a `Class` entry, for `new`, `checkcast` and the like.
     pub fn class_ref(&mut self, internal: &str) -> u16 {
-        let created = !self.cp.has_class(internal);
-        let index = self.cp.class(internal);
-        if !self.members.copying {
-            self.members.mapped_classes.insert(index);
-        } else if created {
-            self.members.copied_classes.insert(index);
-        }
-        index
+        self.with_class_origin(internal, |pool| pool.class(internal))
     }
 
     /// Whether the class's own code, or a declaration, names `internal` as a class constant.
@@ -73,18 +66,44 @@ impl ClassWriter {
     }
 
     pub fn methodref(&mut self, class: &str, name: &str, desc: &str) -> u16 {
-        let index = self.cp.methodref(class, name, desc);
+        let index = self.with_class_origin(class, |pool| pool.methodref(class, name, desc));
         self.members.record(index)
     }
 
     pub fn interface_methodref(&mut self, class: &str, name: &str, desc: &str) -> u16 {
-        let index = self.cp.interface_methodref(class, name, desc);
+        let index =
+            self.with_class_origin(class, |pool| pool.interface_methodref(class, name, desc));
         self.members.record(index)
     }
 
     pub fn fieldref(&mut self, class: &str, name: &str, desc: &str) -> u16 {
-        let index = self.cp.fieldref(class, name, desc);
+        let index = self.with_class_origin(class, |pool| pool.fieldref(class, name, desc));
         self.members.record(index)
+    }
+
+    /// Run `intern`, which interns `class`'s `CONSTANT_Class` (itself or as a member's owner), and
+    /// record that class constant's origin: the class's own code maps it, while copied code
+    /// creates it only if no entry existed before.
+    fn with_class_origin(
+        &mut self,
+        class: &str,
+        intern: impl FnOnce(&mut ConstPool) -> u16,
+    ) -> u16 {
+        // The pool interns the physical classfile name (`kotlin/Double$Companion` is
+        // `kotlin/jvm/internal/DoubleCompanionObject`), so the origin is that entry's.
+        let physical = crate::jvm::names::classfile_internal_name(class);
+        let created = !self.cp.has_class(&physical);
+        let index = intern(&mut self.cp);
+        let class = self
+            .cp
+            .class_index(&physical)
+            .expect("interning a class constant or a member of the class adds its class entry");
+        if !self.members.copying {
+            self.members.mapped_classes.insert(class);
+        } else if created {
+            self.members.copied_classes.insert(class);
+        }
+        index
     }
 
     /// Run `copy`, which writes instructions copied from a compiled inline function's body, with
@@ -163,5 +182,27 @@ mod tests {
 
         writer.class_ref("H$Item");
         assert!(writer.names_class("H$Item"));
+    }
+
+    /// A member reference interns its owner's class constant, so a copied call on a nested owner
+    /// names no class until the class's own code references that owner, through a member or not.
+    #[test]
+    fn a_copied_member_reference_creates_its_owner_as_copied() {
+        let mut writer = ClassWriter::new("T", "java/lang/Object");
+        writer.copying(|writer| {
+            writer.methodref("H$Item", "touch", "()V");
+            writer.interface_methodref("H$Shape", "area", "()I");
+            writer.fieldref("H$Slot", "value", "I");
+            writer.class_ref("H$Item");
+        });
+        for owner in ["H$Item", "H$Shape", "H$Slot"] {
+            assert!(!writer.names_class(owner), "{owner}");
+        }
+
+        writer.fieldref("H$Item", "size", "I");
+        writer.class_ref("H$Shape");
+        assert!(writer.names_class("H$Item"));
+        assert!(writer.names_class("H$Shape"));
+        assert!(!writer.names_class("H$Slot"));
     }
 }

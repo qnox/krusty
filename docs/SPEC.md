@@ -5725,8 +5725,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   from a classpath inline body is copied, and so is every expression common lowering copied from
   a same-module inline function's own body (a lambda argument the caller passes is the caller's
   code). A reference or `NameAndType` descriptor that only copied code uses mentions no class.
-  A class constant copied code creates (an inline body's `checkcast Holder$Item`) names no class
-  either; one that existed before the copy, such as a supertype, still does.
+  A class constant copied code creates names no class either, whether the copy creates it directly
+  (an inline body's `checkcast Holder$Item`) or as the owner of a member it references (a copied
+  `Tally$Counter.next()` call); one that existed before the copy, such as a supertype, still does,
+  and the class's own later reference to it, directly or through a member, names it again.
   The coroutine transformer rewrites a generated method with raw ASM, so its body is re-encoded as
   copied code: a reference the class's own code made stays mapped, a `Continuation.resume` read of
   `Result.Companion` stays copied, and the transformer's own `checkcast` restoring a spilled
@@ -5734,7 +5736,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   kotlinc generates it from the class that owns the function.
   Tests: `tests/inlined_code_inner_classes_e2e.rs`,
   `src/jvm/classfile/member_mapping.rs::tests::a_reference_is_copied_only_until_the_class_names_it_itself`,
-  `src/jvm/classfile/member_mapping.rs::tests::a_class_constant_is_copied_only_when_the_copy_created_it`.
+  `src/jvm/classfile/member_mapping.rs::tests::a_class_constant_is_copied_only_when_the_copy_created_it`,
+  `src/jvm/classfile/member_mapping.rs::tests::a_copied_member_reference_creates_its_owner_as_copied`.
 - **An enum entry's body class is a package-private nested class of its enum.** `FIRST { ... }`
   compiles to `Mode$FIRST`, and both the enum and the entry class list it in `InnerClasses` as
   `static final` with no visibility flag, whatever the enum's own visibility, matching the

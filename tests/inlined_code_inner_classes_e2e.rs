@@ -62,3 +62,16 @@ fn a_transformed_suspend_body_keeps_copied_references_unmapped() {
         &["Machine", "OwnMachine"],
     );
 }
+
+/// A copied call names its nested owner only as the member reference's class: `Counter`'s
+/// expansion of `bump` lists no `Tally$Counter`, while `OwnCounter`'s own call keeps the row.
+#[test]
+fn a_copied_call_on_a_nested_owner_gives_no_row() {
+    let source = "object Tally {\n\
+                  \x20   object Counter { @JvmStatic fun next(): Int = 1 }\n\
+                  }\n\
+                  inline fun bump(): Int = Tally.Counter.next()\n\
+                  class Counter { fun use(): Int = bump() }\n\
+                  class OwnCounter { fun use(): Int = Tally.Counter.next() }\n";
+    common::assert_same_inner_classes("InlineOwner", source, &[], &["Counter", "OwnCounter"]);
+}
