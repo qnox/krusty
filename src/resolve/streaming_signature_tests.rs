@@ -5548,7 +5548,9 @@ fn nested_generic_member_signature_uses_its_published_type_parameter_identity() 
     let entity_classifier = (0..index.declaration_count())
         .map(|raw| crate::fir::DeclarationId::from_raw(raw as u32))
         .find(|declaration| {
-            index.declaration_name(*declaration) == Some("Entity")
+            index
+                .declaration_name(*declaration)
+                .is_some_and(|name| name.rsplit('.').next() == Some("Entity"))
                 && index
                     .classifier_header(*declaration)
                     .is_some_and(|header| header.classifier.matches("GraphQlTester$Entity"))
