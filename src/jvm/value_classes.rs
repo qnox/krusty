@@ -789,8 +789,7 @@ pub(crate) fn lower_value_classes(
     // `(fid, param idx, boxed value-class Ty)` for DEFAULTED nullable-underlying value-class params —
     // the base method unboxes them (below), but its `$default` stub + call site keep them boxed.
     let mut default_boxed: Vec<(u32, usize, Ty)> = Vec::new();
-    // `(fid, declared name, declared params, declared ret)` — collected while `ir.functions` is borrowed
-    // mutably, moved into `ir.vc_declared_sigs` once the loop releases it.
+    // `(fid, declared name, params, ret)`, moved into `ir.vc_declared_sigs` after the loop below.
     let mut declared_sigs: Vec<(u32, String, Vec<Ty>, Ty)> = Vec::new();
     // `(fid, param slot, value class, erased underlying)` for a REFERENCE-underlying lambda own-param
     // kept boxed: the body was lowered against the erased convention (the slot IS the underlying), so
@@ -1331,6 +1330,7 @@ pub(crate) fn lower_value_classes(
         }
     }
     function_references::realize(ir, &callable_under, &renamed_functions);
+    synth_members::record_renamed_functions(ir, &realized_members, &renamed_functions);
     let interface_entries = interface_entries::materialize(
         ir,
         &lowered_value_members,

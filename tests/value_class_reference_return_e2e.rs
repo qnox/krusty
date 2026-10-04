@@ -44,6 +44,7 @@ const METHODS: &[&str] = &[
     " local-",
     " getFirst(",
     " lambda$lambda$0(",
+    " captured_txdesME$lambda$0(",
 ];
 
 #[test]

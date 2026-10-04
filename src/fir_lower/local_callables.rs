@@ -1551,6 +1551,7 @@ pub(super) fn record_lifting_sites(
     let Some(source_order) = index.source_order(declaration) else {
         return;
     };
+    let container = super::root_enclosure(index, ir, declaration);
     let mut sites = Vec::new();
     body.collect_lifting_sites(&mut sites);
     for site in sites {
@@ -1578,6 +1579,7 @@ pub(super) fn record_lifting_sites(
                 name: step.name.clone(),
                 lifted: site.lifted,
                 scope,
+                container,
             },
         );
     }

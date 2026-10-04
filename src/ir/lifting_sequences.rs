@@ -18,4 +18,8 @@ pub(crate) struct IrLiftingEntry {
     /// The position of the innermost lambda this entry is nested in, whose own numbering it takes
     /// part in; `None` for one numbered by the sequence itself.
     pub scope: Option<u32>,
+    /// The declaration whose body writes this entry. Overloads that share the sequence's source
+    /// name are distinct containers; a target whose ABI renames one of them names and numbers its
+    /// lifted callables after that realization.
+    pub container: Option<super::IrEnclosure>,
 }

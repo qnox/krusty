@@ -26,24 +26,57 @@ pub(super) struct SynthesizedValueMembers {
 
 /// A declaration written in a value class's constructor (a local class, a lambda's class) is
 /// enclosed by the static `constructor-impl` realizing that constructor, as kotlinc's
-/// `EnclosingMethod` names it: the instance constructor does not exist on the JVM.
+/// `EnclosingMethod` names it: the instance constructor does not exist on the JVM. A callable lifted
+/// out of a constructor or an `init` block is likewise contained by that `constructor-impl`, whose
+/// name kotlinc gives it (`constructor_impl$lambda$0`).
 pub(super) fn enclose_in_constructor_impls(ir: &mut IrFile, realized: &SynthesizedValueMembers) {
     let names = ir
         .classes
         .iter()
         .map(|class| class.fq_name)
         .collect::<Vec<_>>();
+    let constructor_impl = |enclosure: Option<crate::ir::IrEnclosure>| match enclosure? {
+        crate::ir::IrEnclosure::Constructor { class, ordinal } => realized
+            .constructor_impls
+            .get(&(names[class as usize], ordinal))
+            .copied(),
+        crate::ir::IrEnclosure::ClassInitializer(class) => realized
+            .constructor_impls
+            .get(&(names[class as usize], 0))
+            .copied(),
+        _ => None,
+    };
     for declaration in &mut ir.classes {
-        if let Some(crate::ir::IrEnclosure::Constructor { class, ordinal }) = declaration.enclosure
-        {
-            if let Some(&function) = realized
-                .constructor_impls
-                .get(&(names[class as usize], ordinal))
-            {
+        if let Some(crate::ir::IrEnclosure::Constructor { .. }) = declaration.enclosure {
+            if let Some(function) = constructor_impl(declaration.enclosure) {
                 declaration.enclosure = Some(crate::ir::IrEnclosure::Function(function));
             }
         }
     }
+    for entry in ir
+        .lifting_sequences
+        .values_mut()
+        .flat_map(|entries| entries.values_mut())
+    {
+        if let Some(function) = constructor_impl(entry.container) {
+            entry.container = Some(crate::ir::IrEnclosure::Function(function));
+        }
+    }
+}
+
+/// Record every function whose JVM name the value-class pass chose: one it mangled or renamed
+/// `-impl`, a static accessor implementation, and each `constructor-impl`.
+pub(super) fn record_renamed_functions(
+    ir: &mut IrFile,
+    realized: &SynthesizedValueMembers,
+    renamed: &HashSet<u32>,
+) {
+    ir.value_class_renamed_functions.extend(
+        renamed
+            .iter()
+            .chain(&realized.accessors)
+            .chain(realized.constructor_impls.values()),
+    );
 }
 
 /// Synthesize a value class's unboxed-support members directly in the IR (a JVM concern, so it lives in

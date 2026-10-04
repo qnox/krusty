@@ -66,7 +66,7 @@ use field_nullability::{
 };
 mod discarding;
 mod diverging_value_type;
-mod enclosure;
+pub(super) mod enclosure;
 mod enum_entry_subclass;
 mod enum_metadata;
 mod enum_reflection_call;
