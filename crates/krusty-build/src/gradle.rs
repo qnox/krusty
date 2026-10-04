@@ -993,17 +993,39 @@ mod tests {
             1,
             "{output}"
         );
-        for expected in [
-            "krusty: task ':buildSrc:compileKotlin' is left to kotlinc: its project applies kotlin-dsl",
-            "krusty: task ':buildSrc:compileTestKotlin' is left to kotlinc: its project applies kotlin-dsl",
-            "krusty: task ':buildSrc:compilePluginsBlocks' is left to kotlinc: it belongs to no source set",
+        // Gradle 7's kotlin-dsl compiles plugins blocks with its own task type; from Gradle 8 on,
+        // `compilePluginsBlocks` is a KotlinJvmCompile without a source set.
+        let gradle = std::env::var("KRUSTY_GRADLE_VERSION").unwrap_or_else(|_| "8.14.3".into());
+        let sourceless_compiles = usize::from(!gradle.starts_with("7."));
+        for (expected, count) in [
+            (
+                "krusty: task ':buildSrc:compileKotlin' is left to kotlinc: its project applies kotlin-dsl",
+                1,
+            ),
+            (
+                "krusty: task ':buildSrc:compileTestKotlin' is left to kotlinc: its project applies kotlin-dsl",
+                1,
+            ),
+            (
+                "krusty: task ':buildSrc:compilePluginsBlocks' is left to kotlinc: it belongs to no source set",
+                sourceless_compiles,
+            ),
         ] {
             assert_eq!(
                 output.lines().filter(|line| line.trim() == expected).count(),
-                1,
+                count,
                 "{expected}\n{output}"
             );
         }
+        assert_eq!(
+            output
+                .lines()
+                // The fixture's wrapper enables the build cache, so a repeat may be FROM-CACHE.
+                .filter(|line| line.starts_with("> Task :buildSrc:compilePluginsBlocks"))
+                .count(),
+            1,
+            "{output}"
+        );
         assert!(
             output
                 .lines()

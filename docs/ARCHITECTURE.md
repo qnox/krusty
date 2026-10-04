@@ -84,7 +84,7 @@ mutate private action lists. `.kts` files are not compilation inputs.
 
 Two kinds of `KotlinJvmCompile` stay with kotlinc, and the plugin logs each one at configuration
 (`krusty: task '…' is left to kotlinc: …`). A task with no `sourceSetName` belongs to no source-set
-compilation: Gradle's `kotlin-dsl` registers `compilePluginsBlocks`, which compiles the `plugins {}`
+compilation: from Gradle 8, `kotlin-dsl` registers `compilePluginsBlocks` as one; it compiles the `plugins {}`
 blocks extracted from precompiled script plugins as scripts, with no Java sibling or classes output.
 Every compile of a project applying `kotlin-dsl` (`org.gradle.kotlin.kotlin-dsl.base`, so `buildSrc`
 and convention-plugin builds) also stays: its precompiled script plugins are `.gradle.kts` scripts,
