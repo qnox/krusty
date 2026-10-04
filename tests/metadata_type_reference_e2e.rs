@@ -113,3 +113,24 @@ fn a_context_function_keeps_the_compatibility_type_list() {
         }\n";
     assert_identical("generic_context_function", SRC, "app/Holder");
 }
+
+/// kotlinc's string table keys plain strings and class ids in ONE map, by the class's
+/// `pkg/Outer.Inner` name: a root-package alias reference reuses the alias's own name string
+/// (`Cargo`) instead of interning `LCargo;`.
+#[test]
+fn a_class_id_reuses_an_equal_plain_string() {
+    const SRC: &str = "typealias Cargo = Payload\n\
+        class Payload\n\
+        fun declared(): Cargo = Payload()\n";
+    assert_identical("root_alias_reference", SRC, "Root_alias_referenceKt");
+}
+
+/// The converse: a plain string equal to an earlier class name (`fun Payload()` after the class
+/// `Payload` was named) reuses that class id's index.
+#[test]
+fn a_plain_string_reuses_an_equal_class_id() {
+    const SRC: &str = "class Payload(val v: Int)\n\
+        fun make(c: Payload): Payload = c\n\
+        fun Payload(): Payload = Payload(0)\n";
+    assert_identical("root_class_named_function", SRC, "Root_class_named_functionKt");
+}
