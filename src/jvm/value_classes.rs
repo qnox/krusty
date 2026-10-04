@@ -2259,7 +2259,8 @@ pub(crate) fn lower_value_classes(
                     SemanticCallRole::KotlinAnyHashCode => ("hashCode-impl", "I"),
                     SemanticCallRole::KotlinAnyToString => ("toString-impl", "Ljava/lang/String;"),
                     SemanticCallRole::KotlinAnyEquals
-                    | SemanticCallRole::KotlinComparableCompareTo => {
+                    | SemanticCallRole::KotlinComparableCompareTo
+                    | SemanticCallRole::KotlinFunctionInvoke => {
                         unreachable!("excluded by the guard")
                     }
                 };

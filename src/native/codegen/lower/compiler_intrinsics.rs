@@ -65,7 +65,8 @@ pub(super) fn runtime_member_role(
             _,
             Some(
                 BackendSemanticCallRole::KotlinAnyEquals
-                | BackendSemanticCallRole::KotlinComparableCompareTo,
+                | BackendSemanticCallRole::KotlinComparableCompareTo
+                | BackendSemanticCallRole::KotlinFunctionInvoke,
             ),
         ) => None,
         _ => None,

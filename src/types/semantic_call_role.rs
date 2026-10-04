@@ -9,4 +9,6 @@ pub enum SemanticCallRole {
     KotlinAnyToString,
     /// The single comparison operation declared by `kotlin.Comparable`.
     KotlinComparableCompareTo,
+    /// The invocation operation declared by a compiler-provided Kotlin function classifier.
+    KotlinFunctionInvoke,
 }

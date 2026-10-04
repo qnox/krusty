@@ -342,7 +342,10 @@ fn any_slot(role: Option<crate::types::SemanticCallRole>) -> Option<u32> {
         Some(crate::types::SemanticCallRole::KotlinAnyEquals) => Some(0),
         Some(crate::types::SemanticCallRole::KotlinAnyHashCode) => Some(1),
         Some(crate::types::SemanticCallRole::KotlinAnyToString) => Some(2),
-        Some(crate::types::SemanticCallRole::KotlinComparableCompareTo) => None,
+        Some(
+            crate::types::SemanticCallRole::KotlinComparableCompareTo
+            | crate::types::SemanticCallRole::KotlinFunctionInvoke,
+        ) => None,
         None => None,
     }
 }
@@ -954,9 +957,9 @@ fn layout_class(
             .into_iter()
             .flatten()
             .filter(|edge| {
-                edge.name == "invoke"
+                edge.overridden_semantic_role
+                    == Some(crate::types::SemanticCallRole::KotlinFunctionInvoke)
                     && matches!(edge.overridden, ResolvedFunctionOverrideTarget::External(_))
-                    && is_function_classifier(classifiers, edge.overridden_owner)
             })
             .map(|edge| edge.overridden_owner)
             .collect::<std::collections::HashSet<_>>();
@@ -1053,16 +1056,15 @@ fn layout_class(
         // Read once, because both the fixed slot below and the stand-in that covers a representation
         // mismatch are the same question about the same exact edge.
         let invoke_edge = override_edges.find(|edge| {
-            edge.name == "invoke" && is_function_classifier(classifiers, edge.overridden_owner)
+            edge.overridden_semantic_role
+                == Some(crate::types::SemanticCallRole::KotlinFunctionInvoke)
         });
         let replaces = match any_replaces {
             Some(slot) => Some(slot),
             // `invoke` on a class implementing a FUNCTION TYPE takes the one other fixed slot this
             // target has: the runtime names it (`KT_SLOT_INVOKE`) and every caller through a
             // function type reads it, a lambda's body included.
-            None => {
-                invoke_edge.and_then(|edge| external_invoke_slot(ir, classifiers, edge, function))
-            }
+            None => invoke_edge.and_then(|edge| external_invoke_slot(edge, function)),
         };
         // Whether the FUNCTION SLOT needs a stand-in for this method: it is an `invoke` over a
         // function type that could not take the slot outright, because it does not carry
@@ -1564,33 +1566,15 @@ fn overridden_property_slot(
 const FUNCTION_SLOT: u32 = 3;
 
 fn external_invoke_slot(
-    ir: &IrFile,
-    classifiers: &dyn crate::backend::BackendClassifierSource,
     edge: &crate::ir::IrFunctionOverride,
     function: &IrFunction,
 ) -> Option<u32> {
-    let _ = ir;
-    if edge.name != "invoke" {
-        return None;
-    }
-    if !is_function_classifier(classifiers, edge.overridden_owner) {
+    if edge.overridden_semantic_role != Some(crate::types::SemanticCallRole::KotlinFunctionInvoke) {
         return None;
     }
     let reference = |ty: Ty| c_kind(ty) == CKind::Ref;
     (function.params.iter().copied().all(reference) && reference(function.ret))
         .then_some(FUNCTION_SLOT)
-}
-
-fn is_function_classifier(
-    classifiers: &dyn crate::backend::BackendClassifierSource,
-    classifier: TypeName,
-) -> bool {
-    matches!(
-        classifiers
-            .classifier(classifier)
-            .and_then(|fact| fact.role),
-        Some(crate::types::ClassifierRole::FunctionOfArity(_))
-    )
 }
 
 /// Implementation method → the method it overrides, for the methods `class` declares. Both ends
