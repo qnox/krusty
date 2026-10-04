@@ -19,8 +19,8 @@ mod deserialize_body;
 pub(super) mod element_serializer;
 mod enum_serializer;
 mod external_serializer;
-pub(crate) use external_serializer::generated_external_serializer;
 pub use external_serializer::ExternalSerializer;
+pub(crate) use external_serializer::{custom_class_serializer, generated_external_serializer};
 mod generated_classifier;
 mod generated_members;
 mod plugin_release;
@@ -856,16 +856,58 @@ fn build_polymorphic_serializer(ir: &mut IrFile, classifier: TypeName) -> ExprId
 impl SerializationPlugin {
     /// Add `static serializer(): KSerializer<C>` returning the explicit serializer `X` from
     /// `@Serializable(with = X::class)`. An `object` serializer (`object Other : KSerializer<…>`) is its
-    /// `INSTANCE`; a class serializer (`ContextualSerializer`/`PolymorphicSerializer`, single `KClass`
-    /// ctor) is `new X(Reflection.getOrCreateKotlinClass(C.class))`.
+    /// `INSTANCE`; a file-declared serializer class taking one `KSerializer` per type parameter is
+    /// `new X(typeSerial0, …)`; another class serializer (`ContextualSerializer`/
+    /// `PolymorphicSerializer`, single `KClass` ctor) is
+    /// `new X(Reflection.getOrCreateKotlinClass(C.class))`.
     fn add_custom_serializer_accessor(
         ir: &mut IrFile,
         class_id: u32,
         class_fq: &str,
         custom: TypeName,
     ) {
+        let frontend_owner = if ir.classes[class_id as usize].is_object {
+            type_name(class_fq)
+        } else {
+            type_name(&companion_fq(class_fq))
+        };
+        // A serializer CLASS this file declares with one `KSerializer` constructor parameter per
+        // type parameter is constructed from the frontend accessor's own `typeSerialN` operands,
+        // exactly as kotlinc's accessor does (`new X(typeSerial0)`). The accessor is a member of
+        // its owner, so slot 0 is the receiver and the declared operands start at 1.
+        let constructed = frontend_serializer_accessor(ir, frontend_owner).and_then(|accessor| {
+            let arity = ir.functions[accessor as usize].params.len();
+            let serializer = ir
+                .classes
+                .iter()
+                .position(|class| class.fq_name_id() == custom && !class.is_object)?;
+            element_serializer::takes_one_serializer_per_type_parameter(
+                ir,
+                serializer as u32,
+                arity,
+            )
+            .then_some(arity)
+        });
         // An OBJECT serializer has no public constructor — return its singleton `INSTANCE`.
-        let inst = if let Some(oid) = ir
+        let inst = if let Some(arity) = constructed {
+            let args = (0..arity)
+                .map(|parameter| ir.add_expr(IrExpr::GetValue(parameter as u32 + 1)))
+                .collect();
+            let construction = ir.add_expr(IrExpr::New {
+                internal: custom,
+                args,
+                ctor_params: None,
+                ctor_desc: None,
+                external_target: None,
+                defaults: Box::new([]),
+                default_prefix_count: 0,
+            });
+            ir.add_expr(IrExpr::TypeOp {
+                op: IrTypeOp::Cast,
+                arg: construction,
+                type_operand: kserializer_of(class_ty(class_fq)),
+            })
+        } else if let Some(oid) = ir
             .classes
             .iter()
             .position(|c| c.fq_name_id() == custom && c.is_object)
@@ -894,11 +936,6 @@ impl SerializationPlugin {
             stmts: vec![ret],
             value: None,
         });
-        let frontend_owner = if ir.classes[class_id as usize].is_object {
-            type_name(class_fq)
-        } else {
-            type_name(&companion_fq(class_fq))
-        };
         if complete_frontend_serializer_accessor(ir, frontend_owner, body).is_some() {
             return;
         }

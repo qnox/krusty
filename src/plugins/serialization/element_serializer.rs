@@ -438,32 +438,17 @@ pub(super) fn element_serializer_plan_in(
                 .iter()
                 .position(|class| class.fq_name_id() == custom)
             {
-                let serializer = &ir.classes[serializer_id];
                 let readable_arguments = type_args
                     .iter()
                     .map(readable_type_argument)
                     .collect::<Option<Vec<_>>>()?;
-                // Each constructor parameter must be `KSerializer<P>` for a distinct DECLARED type
-                // parameter. Inspect the resolved `TyParam` identity carried by the type; the strings
-                // in `IrClass::type_params` are source labels and are deliberately used only for the
-                // declaration count, never to recover identity from spelling.
-                let mut parameter_type_parameters = std::collections::HashSet::new();
-                let parameters_match = serializer.constructor_prefix_count == 0
-                    && serializer.captured_type_params.is_empty()
-                    && !readable_arguments.is_empty()
-                    && serializer.type_params.len() == readable_arguments.len()
-                    && serializer.ctor_args.len() == readable_arguments.len()
-                    && serializer.ctor_args.iter().all(|parameter| {
-                        let declared = parameter.declared_ty.unwrap_or(parameter.ty).non_null();
-                        let Ty::Obj(classifier, [argument]) = declared else {
-                            return false;
-                        };
-                        classifier == type_name(KSERIALIZER_FQ)
-                            && argument
-                                .ty_param_name()
-                                .is_some_and(|identity| parameter_type_parameters.insert(identity))
-                    });
-                if parameters_match {
+                if !readable_arguments.is_empty()
+                    && takes_one_serializer_per_type_parameter(
+                        ir,
+                        serializer_id as ClassId,
+                        readable_arguments.len(),
+                    )
+                {
                     let arguments = readable_arguments
                         .iter()
                         .map(|argument| type_argument_serializer_plan(ir, ctx, argument, scope))
@@ -480,9 +465,9 @@ pub(super) fn element_serializer_plan_in(
     // off the classpath, which is exactly what kotlinc emits
     // (`getstatic dep/Inner$$serializer.INSTANCE`). Deriving one here is impossible — the plugin only
     // generates serializers for what this file declares.
-    // A provider-confirmed non-generic object is reachable through `INSTANCE`. A generic custom
-    // serializer class needs an ordinary checked constructor call; this post-check plugin cannot
-    // reconstruct overload selection from classifier arity, so that shape remains underivable.
+    // A provider-confirmed non-generic object is reachable through `INSTANCE`. A custom serializer
+    // CLASS is never constructed here: kotlinc reaches it through the served classifier's
+    // generated companion `serializer(…)`, which the external map records as `Companion`.
     match ctx.external_serializer(fq_name) {
         Some(&ExternalSerializer::Singleton(serializer)) if type_args.is_empty() => {
             return Some(ElementSerializerPlan::ExternalSingleton(serializer));
@@ -530,6 +515,36 @@ pub(super) fn element_serializer_plan_in(
         return Some(ElementSerializerPlan::Builtin(builtin.serializer));
     }
     None
+}
+
+/// Whether the file-declared serializer class `serializer` has exactly the constructor kotlinc's
+/// plugin calls to build it for a classifier with `arity` type parameters: one `KSerializer<P>` per
+/// distinct declared type parameter `P`, and nothing else. Any other constructor shape is not that
+/// contract, and a caller must not construct the class with serializer operands.
+pub(super) fn takes_one_serializer_per_type_parameter(
+    ir: &IrFile,
+    serializer: ClassId,
+    arity: usize,
+) -> bool {
+    let serializer = &ir.classes[serializer as usize];
+    // Inspect the resolved `TyParam` identity carried by each parameter type; the strings in
+    // `IrClass::type_params` are source labels and are deliberately used only for the declaration
+    // count, never to recover identity from spelling.
+    let mut parameter_type_parameters = std::collections::HashSet::new();
+    serializer.constructor_prefix_count == 0
+        && serializer.captured_type_params.is_empty()
+        && serializer.type_params.len() == arity
+        && serializer.ctor_args.len() == arity
+        && serializer.ctor_args.iter().all(|parameter| {
+            let declared = parameter.declared_ty.unwrap_or(parameter.ty).non_null();
+            let Ty::Obj(classifier, [argument]) = declared else {
+                return false;
+            };
+            classifier == type_name(KSERIALIZER_FQ)
+                && argument
+                    .ty_param_name()
+                    .is_some_and(|identity| parameter_type_parameters.insert(identity))
+        })
 }
 
 /// Select a serializer passed as one generic serializer factory's type argument. A nullable

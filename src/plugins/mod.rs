@@ -666,6 +666,16 @@ fn external_serializers(
                 (Some(custom), _) if classifiers.classifier_is_object(custom) == Some(true) => {
                     serialization::ExternalSerializer::Singleton(custom)
                 }
+                // A serializer CLASS is reached through the classifier's generated companion
+                // `serializer(…)`, which constructs it; the accessor check below confirms the
+                // provider published that exact accessor.
+                (Some(custom), _) if classifiers.classifier_is_object(custom) == Some(false) => {
+                    let mut declaration = classifiers.classifier_declaration(classifier)?;
+                    if declaration.companion.is_none() {
+                        declaration.companion = classifiers.serialization_companion(classifier);
+                    }
+                    serialization::custom_class_serializer(&declaration)?
+                }
                 (Some(_), _) => return None,
                 // What the declaration's compilation generated depends on its kind; a classifier
                 // whose facts cannot name it has no entry, and an element of it is underivable.
