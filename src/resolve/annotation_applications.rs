@@ -54,14 +54,9 @@ impl Checker<'_> {
             // Pass 1 already bound this exact occurrence. Metadata publication consumes that
             // identity directly: resolving its spelling again after actualization could resurrect
             // a target-excluded optional-expect annotation or select a different scope rung.
-            let Some(internal) = self
-                .module
+            self.module
                 .legacy_symbols()
-                .and_then(|symbols| symbols.resolved_annotation(self.file_index, annotation))
-            else {
-                return None;
-            };
-            internal
+                .and_then(|symbols| symbols.resolved_annotation(self.file_index, annotation))?
         } else {
             // Resolve the application in its owning lexical scope. Pass 1's declaration-header
             // inventory and Pass 2's body checking use the same scope rules.
@@ -75,8 +70,7 @@ impl Checker<'_> {
                 fun_context_count: 0,
             };
             let ty = self.type_ref_ty_reported(scope, &reference);
-            let internal = ty.kotlin_class_internal()?;
-            internal
+            ty.kotlin_class_internal()?
         };
         if !self.file.is_common
             && self.is_optional_expectation_classifier(internal)
