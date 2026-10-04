@@ -3698,12 +3698,16 @@ pub(crate) fn lower_value_classes(
                 // result crosses directly: `X(null)` is that carrier's null, and the result type is not
                 // itself nullable. A nullable result keeps its ordinary erasure.
                 if let Some(body) = ir.functions[fid].body {
-                    match suspend_result_representation(
-                        &orig_rets[fid],
-                        &under,
-                        force_boxed_suspend_returns.contains(&(fid as u32)),
-                    ) {
-                        Some(crate::ir::IrValueClassSuspendResult::Boxed { .. }) => {
+                    // The recorded return is the carrier for a declaration and the box for a
+                    // callable-reference adapter. Recomputing from the declared type alone would
+                    // hand the adapter's `invoke` the carrier.
+                    let representation = ir
+                        .value_class_suspend_returns
+                        .get(&(fid as u32))
+                        .copied()
+                        .expect("suspend value-class result representation was not recorded");
+                    match representation {
+                        crate::ir::IrValueClassSuspendResult::Boxed { .. } => {
                             ir.functions[fid].ret = boxed_value_ty(x);
                             restore_boxed_suspension_tails(ir, body, &boxed_suspension_unboxes);
                             box_ref_tail(
@@ -3720,7 +3724,7 @@ pub(crate) fn lower_value_classes(
                                 },
                             );
                         }
-                        Some(crate::ir::IrValueClassSuspendResult::Carrier { carrier, .. }) => {
+                        crate::ir::IrValueClassSuspendResult::Carrier { carrier, .. } => {
                             ir.functions[fid].ret = carrier;
                             // A safe coroutine primitive produces `T` through the generic
                             // `SafeContinuation<T>` slot, so a value-class `T` is boxed even when this
@@ -3742,7 +3746,6 @@ pub(crate) fn lower_value_classes(
                                 null_slot,
                             );
                         }
-                        None => unreachable!("the return was already identified as a value class"),
                     }
                 }
             } else if under.contains_key(&x) {

@@ -3,8 +3,10 @@
 //! kotlinc returns a non-null value-class result unboxed when its carrier is a reference, a
 //! nullable reference included, and no declaration it overrides returns another classifier. A
 //! scalar carrier, and a nullable value class whose ordinary erasure is the box, cross boxed. A
-//! call receives what its callee returns, so a call to a callee that returns a type parameter
-//! receives the box and unboxes it, whatever the call's own result type.
+//! callable reference's adapter is a function value's `invoke`, so it returns the box even when
+//! the referenced declaration returns the carrier. A call receives what its callee returns, so a
+//! call to a callee that returns a type parameter receives the box and unboxes it, whatever the
+//! call's own result type.
 
 use super::{erase, is_ref, nullable_is_boxed, Under};
 use crate::fir::ResolvedFunctionOverrideTarget;
@@ -21,8 +23,11 @@ pub(super) fn record_suspend_results(
     suspend_functions: &HashSet<u32>,
 ) -> HashSet<u32> {
     let forced = force_boxed_results(ir, under, declared_results, suspend_functions);
-    // A suspend lambda's `invoke` erases its result to `Object`, so its implementation returns the
-    // value class boxed, as every lambda does, unless its SAM method declares that very value class.
+    // A suspend lambda's `invoke`, and a callable reference's adapter, erase their result to
+    // `Object`. Both return the value class boxed, as every function value does, unless a lambda's
+    // SAM method declares that very value class. Reference realization has already replaced each
+    // `CallableReference` with its carrier: the adapter is that carrier's local target, or its own
+    // `invoke` when the adapter was moved onto the carrier.
     let lambdas = ir
         .exprs
         .iter()
@@ -32,13 +37,20 @@ pub(super) fn record_suspend_results(
         })
         .filter(|&function| !super::sam_declares_vc_return(ir, declared_results, function, under))
         .collect::<HashSet<_>>();
+    let references = ir
+        .classes
+        .iter()
+        .filter_map(|class| class.func_ref.as_ref())
+        .filter(|reference| reference.is_suspend)
+        .flat_map(|reference| reference.local_target.into_iter().chain(reference.invoke))
+        .collect::<HashSet<_>>();
     // This includes nullable value classes: `X<String>?` can use `String` itself as the nullable
     // carrier, whereas `X<Int>?` must remain the boxed `X` because an `int` cannot represent null.
     for &function in suspend_functions {
         if let Some(realization) = declared_results.get(function as usize).and_then(|result| {
             suspend_result_representation(result, under, forced.contains(&function))
         }) {
-            let realization = match lambdas.contains(&function) {
+            let realization = match lambdas.contains(&function) || references.contains(&function) {
                 true => boxed(realization),
                 false => realization,
             };
