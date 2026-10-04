@@ -1644,6 +1644,25 @@ impl super::Emitter<'_> {
                         &self.facade,
                         self.lambda_modes,
                     );
+                    let metadata = match sam {
+                        Some(_) => None,
+                        None => {
+                            let formatter = super::JvmSignatureFormatter::with_symbols(
+                                self.ir,
+                                self.classifiers,
+                                self.run,
+                            );
+                            match super::lambda_metadata::class_mode_lambda_metadata(
+                                self.ir, e, *impl_fn, n_cap, &formatter,
+                            ) {
+                                Ok(metadata) => Some(metadata),
+                                Err(error) => {
+                                    self.run.set_emit_error(error);
+                                    return;
+                                }
+                            }
+                        }
+                    };
                     self.run.lambda_classes.borrow_mut().push(LambdaClassPlan {
                         internal: internal.clone(),
                         iface: iface.clone(),
@@ -1658,6 +1677,7 @@ impl super::Emitter<'_> {
                         function_adapter,
                         identity,
                         owner_is_interface: impl_owner_is_interface,
+                        metadata,
                     });
                     let nullable = sam.as_ref().is_some_and(|target| target.nullable);
                     if nullable {

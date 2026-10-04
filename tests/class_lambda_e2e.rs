@@ -378,3 +378,85 @@ fun box(): String {
     let _ = std::fs::remove_dir_all(work);
     assert_eq!(outcome.as_deref(), Some("OK"), "delegate fixture must run");
 }
+
+/// A lambda class records the lambda's function in its `@Metadata` (`<anonymous>`, or `<no name
+/// provided>` for an anonymous function), which a lambda's `toString()` renders through
+/// kotlin-reflect: `(kotlin.Int) -> kotlin.Int`. Each class's header must equal kotlinc's.
+const METADATA_SOURCE: &str = r#"
+class Token(val n: Int)
+fun plain(): Any = { x: Int, t: Token -> x + t.n }
+fun extension(): Any = fun String.(s: String?): Long = 42L
+fun <T : Comparable<T>> generic(): Any = { t: T -> t }
+fun capturing(base: Token): Any = { y: Int -> base.n + y }
+fun unitResult(): Any = { -> }
+"#;
+
+const METADATA_LAMBDA_CLASSES: [&str; 5] = [
+    "MKt$plain$1",
+    "MKt$extension$1",
+    "MKt$generic$1",
+    "MKt$capturing$1",
+    "MKt$unitResult$1",
+];
+
+fn class_mode_metadata(
+    compile: impl FnOnce(&Path, &Path),
+) -> Vec<(
+    Option<Vec<(String, Vec<i32>)>>,
+    Option<(Vec<u8>, Vec<String>)>,
+)> {
+    let work = common::scratch_dir().expect("allocate class-lambda metadata fixture");
+    let source = work.join("M.kt");
+    let output = work.join("out");
+    std::fs::create_dir_all(&output).expect("create output");
+    std::fs::write(&source, METADATA_SOURCE).expect("write fixture");
+    compile(&source, &output);
+    let headers = METADATA_LAMBDA_CLASSES
+        .iter()
+        .map(|class| {
+            let bytes = std::fs::read(output.join(format!("{class}.class")))
+                .unwrap_or_else(|_| panic!("{class} was not emitted"));
+            (
+                common::kotlin_metadata::kotlin_metadata_ints(&bytes),
+                common::kotlin_metadata::raw_kotlin_metadata(&bytes),
+            )
+        })
+        .collect();
+    let _ = std::fs::remove_dir_all(work);
+    headers
+}
+
+#[test]
+fn class_lambda_metadata_matches_kotlinc() {
+    let reference = class_mode_metadata(|source, output| {
+        let args = vec![
+            "-d".to_string(),
+            output.to_string_lossy().into_owned(),
+            "-nowarn".to_string(),
+            "-Xlambdas=class".to_string(),
+            source.to_string_lossy().into_owned(),
+        ];
+        let (code, stderr) =
+            common::kotlinc_compile(&args).expect("reference compiler unavailable");
+        assert_eq!(code, 0, "kotlinc rejected the metadata fixture: {stderr}");
+    });
+    let ours = class_mode_metadata(|source, output| {
+        let stdlib = common::stdlib_jar();
+        let result = std::process::Command::new(common::krusty_binary())
+            .args(["-d", output.to_str().expect("UTF-8 output")])
+            .args(["-Xlambdas=class"])
+            .args(["-classpath", stdlib.to_str().expect("UTF-8 stdlib")])
+            .arg(source)
+            .output()
+            .expect("run krusty CLI");
+        assert!(
+            result.status.success(),
+            "krusty rejected the metadata fixture: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    });
+    for ((class, expected), emitted) in METADATA_LAMBDA_CLASSES.iter().zip(&reference).zip(&ours) {
+        assert!(expected.0.is_some(), "kotlinc {class} carries no @Metadata");
+        assert_eq!(emitted, expected, "{class}: @Metadata differs from kotlinc");
+    }
+}

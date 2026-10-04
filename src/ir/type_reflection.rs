@@ -135,7 +135,7 @@ impl IrFile {
         self.type_reflection
             .lambda_type_parameters
             .get(&lambda)
-            .expect("a suspend lambda records the type parameters its function type names")
+            .expect("a lambda records the type parameters its function type names")
     }
 
     pub fn class_signatures(&self) -> impl Iterator<Item = (TypeName, &IrGenericSig)> + '_ {

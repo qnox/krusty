@@ -333,8 +333,17 @@ pub fn jvm_default_mode(src: &str) -> crate::jvm::ir_emit::JvmDefaultMode {
 /// `// SAM_CONVERSIONS:` — the `-Xsam-conversions` strategy a test pins. Absent, the test runs
 /// under kotlinc's own default (`indy`). The corpus writes the value in uppercase.
 pub fn sam_conversion_mode(src: &str) -> crate::jvm::ir_emit::LambdaMode {
+    pinned_lambda_mode(src, "// SAM_CONVERSIONS:")
+}
+
+/// `// LAMBDAS:` — the `-Xlambdas` strategy a test pins, defaulting to kotlinc's `indy`.
+pub fn lambda_mode(src: &str) -> crate::jvm::ir_emit::LambdaMode {
+    pinned_lambda_mode(src, "// LAMBDAS:")
+}
+
+fn pinned_lambda_mode(src: &str, directive: &str) -> crate::jvm::ir_emit::LambdaMode {
     src.lines()
-        .filter_map(|line| line.trim().strip_prefix("// SAM_CONVERSIONS:"))
+        .filter_map(|line| line.trim().strip_prefix(directive))
         .filter_map(|mode| match mode.split_whitespace().next() {
             Some(value) if value.eq_ignore_ascii_case("class") => {
                 Some(crate::jvm::ir_emit::LambdaMode::Class)

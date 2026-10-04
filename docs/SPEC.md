@@ -1874,6 +1874,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `-Xlambdas=class -Xsam-conversions=class -jvm-target 1.6` compiles (that pairing is the point of
   the mode) and stamps major version 50. Tests: `tests/indy_lambda_parity_e2e.rs`,
   `tests/class_lambda_e2e.rs`.
+- **A `-Xlambdas=class` lambda class carries the lambda's function in its `@Metadata`.** kotlinc
+  writes a `k=3` header with LOCAL visibility whose `d1` is one `Function` named `<anonymous>`
+  (`<no name provided>` for an anonymous function): its receiver, value parameters, result and the
+  type parameters they name, as a suspend lambda's class records it. A lambda's `toString()` reads it
+  through kotlin-reflect (`(kotlin.Int) -> kotlin.Int`); without it the class's own name is printed.
+  kotlinc writes the same header on a `-Xsam-conversions=class` fun-interface lambda (`SKt$f$1
+  implements H`, `d2` ending in the SAM method `h`); krusty does not yet. The box harness honors `// LAMBDAS: CLASS`
+  as it does `// SAM_CONVERSIONS: CLASS`. Tests:
+  `tests/class_lambda_e2e.rs::class_lambda_metadata_matches_kotlinc`, box
+  `functions/functionNtoString.kt`, `functions/functionNtoStringGeneric.kt`.
 - **Lifted method names (kotlinc's `LocalDeclarationsLowering`).** A lambda or local function is
   lifted into a method named after the declarations around it, joined by `$`: the outermost
   declaration (a function's or property's name; `_init_` for constructors, `init` blocks, parameter

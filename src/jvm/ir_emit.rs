@@ -99,6 +99,7 @@ mod interface_hierarchy;
 mod intrinsic_probes;
 mod lambda_class;
 pub(super) mod lambda_class_names;
+mod lambda_metadata;
 mod local_updates;
 mod local_variable_representation;
 mod loop_emission;
@@ -403,6 +404,8 @@ struct LambdaClassPlan {
     /// constant, not a `Methodref` (`IncompatibleClassChangeError` otherwise).
     owner_is_interface: bool,
     identity: lambda_class_names::LambdaClassIdentity,
+    /// `d1` and `d2` of the class's `@Metadata`: the lambda's function, for a Kotlin function type.
+    metadata: Option<(Vec<String>, Vec<String>)>,
 }
 
 impl EmitRun {
@@ -2122,6 +2125,16 @@ fn build_lambda_class(plan: &LambdaClassPlan, opts: &EmitOptions) -> (String, Ve
         clinit.putstatic(field, 1);
         clinit.ret_void();
         cw.add_method(0x0008, "<clinit>", "()V", &clinit); // ACC_STATIC
+    }
+    if let Some((d1, d2)) = &plan.metadata {
+        // A lambda class is local to the scope it was written in.
+        cw.set_kotlin_metadata(
+            3,
+            &opts.metadata_version(),
+            metadata_policy::synthetic_class_xi(metadata_policy::SYNTHETIC_LOCAL),
+            d1,
+            d2,
+        );
     }
     (plan.internal.clone(), cw.finish())
 }

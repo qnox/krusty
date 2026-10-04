@@ -1443,15 +1443,15 @@ impl BodyLowering<'_> {
                         origin.class_provenance = provenance;
                     }
                 }
-                if suspend {
-                    let &IrExpr::Lambda { impl_fn, .. } = &self.ir.exprs[lambda as usize] else {
-                        unreachable!("a checked lambda lowers to a lambda")
-                    };
-                    let type_parameters =
-                        super::generics::named_type_parameters(self.index, expression.ty.get());
-                    self.ir
-                        .record_lambda_type_parameters(impl_fn, type_parameters);
-                }
+                // A target that writes the lambda's class describes its function in metadata,
+                // naming these type parameters.
+                let &IrExpr::Lambda { impl_fn, .. } = &self.ir.exprs[lambda as usize] else {
+                    unreachable!("a checked lambda lowers to a lambda")
+                };
+                let type_parameters =
+                    super::generics::named_type_parameters(self.index, expression.ty.get());
+                self.ir
+                    .record_lambda_type_parameters(impl_fn, type_parameters);
                 lambda
             }
         };

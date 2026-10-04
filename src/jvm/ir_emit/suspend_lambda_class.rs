@@ -218,7 +218,13 @@ pub(super) fn emit_suspend_lambda_class(
     emit_invoke(&mut cw, &formatter, &shape, &result);
     emit_bridge(&mut cw, &shape);
     // A lambda class is local to the scope it was written in.
-    let (d1, d2) = lambda_metadata(ir, lambda, &formatter);
+    let (d1, d2) = super::lambda_metadata::lambda_function_metadata(
+        ir,
+        lambda.function_type,
+        &lambda.metadata_names,
+        &lambda.type_parameters,
+        &formatter,
+    );
     cw.set_kotlin_metadata(
         3,
         &opts.metadata_version(),
@@ -227,49 +233,6 @@ pub(super) fn emit_suspend_lambda_class(
         &d2,
     );
     env.run.finish_class(cw)
-}
-
-/// The lambda's function, which kotlinc records in the class's `@Metadata` for reflection: its
-/// receiver, value parameters and result, without its context parameters.
-fn lambda_metadata(
-    ir: &IrFile,
-    lambda: &SuspendLambdaClass,
-    formatter: &JvmSignatureFormatter<'_>,
-) -> (Vec<String>, Vec<String>) {
-    let Ty::Fun(signature) = lambda.function_type.non_null() else {
-        unreachable!("a suspend lambda has a function type")
-    };
-    let own = &signature.params[signature.context_count..];
-    let (receiver, values) = match signature.has_receiver {
-        true => (Some(own[0]), &own[1..]),
-        false => (None, own),
-    };
-    assert_eq!(
-        values.len(),
-        lambda.metadata_names.len(),
-        "a suspend lambda names each value parameter of its function type"
-    );
-    let parameters: Vec<(&str, Ty)> = lambda
-        .metadata_names
-        .iter()
-        .map(String::as_str)
-        .zip(values.iter().copied())
-        .collect();
-    let local_classifiers = crate::jvm::local_classifiers::names(ir);
-    let enum_entry_bodies = crate::jvm::local_classifiers::enum_entry_bodies(ir);
-    let approximate_intersection = |ty| formatter.declaration_approximation(ty);
-    let (bytes, strings) = crate::metadata::lambda_function::build(
-        &crate::metadata::lambda_function::LambdaFunction {
-            receiver,
-            parameters: &parameters,
-            result: signature.ret,
-            type_parameters: &lambda.type_parameters,
-            local_classifiers: &local_classifiers,
-            enum_entry_bodies: &enum_entry_bodies,
-            intersection_approximation: &approximate_intersection,
-        },
-    );
-    (crate::metadata::encoding::bytes_to_strings(&bytes), strings)
 }
 
 /// `SuspendLambda` and the lambda's `FunctionN` over its parameters, its continuation and `Object`.
