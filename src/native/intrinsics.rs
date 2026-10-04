@@ -1300,6 +1300,7 @@ pub(super) fn runtime_member(
         return match (role, params) {
             (RuntimeMemberRole::ToString, []) => Some("kt_to_string"),
             (RuntimeMemberRole::HashCode, []) => Some("kt_hash_code"),
+            (RuntimeMemberRole::Equals, [_]) => Some("kt_equals"),
             _ => None,
         };
     }
@@ -1349,6 +1350,7 @@ pub(super) fn runtime_member(
 pub(super) enum RuntimeMemberRole {
     ToString,
     HashCode,
+    Equals,
 }
 
 #[cfg(test)]

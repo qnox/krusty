@@ -135,6 +135,17 @@ impl BodyLowering<'_, '_, '_> {
                     .reflection_name
                     .clone()
                     .unwrap_or_else(|| realization.name.clone());
+                let semantic_role = self
+                    .file
+                    .ir
+                    .semantic_call_roles
+                    .get(&site)
+                    .copied()
+                    .or(realization.semantic_role);
+                let runtime_member_role = compiler_intrinsics::runtime_member_role(
+                    realization.compiler_intrinsic,
+                    semantic_role,
+                );
                 match dispatch_receiver {
                     // A member: the receiver is the runtime function's first argument, and
                     // everything crosses as a reference.
@@ -149,7 +160,9 @@ impl BodyLowering<'_, '_, '_> {
                             .map(Ty::non_null)
                             .and_then(|ty| ty.obj_internal())
                         {
-                            if self.file.implements_dependency(internal) {
+                            if self.file.implements_dependency(internal)
+                                && runtime_member_role.is_none()
+                            {
                                 return Err(format!(
                                     "the member `{}.{name}` of a type this file implements itself",
                                     internal.render().replace('/', ".")
@@ -451,15 +464,7 @@ impl BodyLowering<'_, '_, '_> {
                             owner,
                             &name,
                             params,
-                            compiler_intrinsics::runtime_member_role(
-                                realization.compiler_intrinsic,
-                                self.file
-                                    .ir
-                                    .semantic_call_roles
-                                    .get(&site)
-                                    .copied()
-                                    .or(realization.semantic_role),
-                            ),
+                            runtime_member_role,
                         ) else {
                             return Err(format!(
                                 "the member `{}.{name}`",

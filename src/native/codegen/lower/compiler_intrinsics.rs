@@ -75,11 +75,11 @@ pub(super) fn runtime_member_role(
             Some(RuntimeMemberRole::ToString)
         }
         (_, Some(BackendSemanticCallRole::KotlinAnyHashCode)) => Some(RuntimeMemberRole::HashCode),
+        (_, Some(BackendSemanticCallRole::KotlinAnyEquals)) => Some(RuntimeMemberRole::Equals),
         (
             _,
             Some(
-                BackendSemanticCallRole::KotlinAnyEquals
-                | BackendSemanticCallRole::KotlinComparableCompareTo
+                BackendSemanticCallRole::KotlinComparableCompareTo
                 | BackendSemanticCallRole::KotlinFunctionInvoke
                 | BackendSemanticCallRole::KotlinCallableReferenceName
                 | BackendSemanticCallRole::KotlinPropertyReferenceGet(_)
@@ -104,6 +104,13 @@ mod tests {
                 Some(crate::backend::BackendSemanticCallRole::KotlinAnyToString),
             ),
             Some(crate::native::intrinsics::RuntimeMemberRole::ToString)
+        );
+        assert_eq!(
+            runtime_member_role(
+                None,
+                Some(crate::backend::BackendSemanticCallRole::KotlinAnyEquals),
+            ),
+            Some(crate::native::intrinsics::RuntimeMemberRole::Equals)
         );
     }
 }
