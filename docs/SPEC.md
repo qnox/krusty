@@ -8967,9 +8967,23 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   and `jvm::type_of::tests`; the corpus's `reflection/typeOf`, `ktype` and `typeErasure` cases.
   A generic top-level extension property's accessors are generic methods and carry a `Signature`
   (`<P:Ljava/lang/Object;>(TP;)Lkotlin/reflect/KType;`), as kotlinc emits.
+  An anonymous object created inside an inline function is copied at each call that fixes a reified
+  type its members use. A property initializer is one of those members: `typeOf<T>()` stays an
+  external call until the JVM realizes it, and the reified substitution is what selects the copy.
+  The copy is taken before the constructor's initializer block and the accessor functions exist, so
+  the initializer expression itself is copied onto the class's specialization record, separate from
+  the constructor body. A later inline expansion sees that
+  specialized type and copies the class again. `inline fun <reified T> foo() = object { val x =
+  typeOf<T>() }.x` inlined as `foo<List<T>>()` from `inline fun <reified T> bar`, and then as
+  `bar<Int>()`, therefore realizes `typeOf<List<Int>>()`. The same holds for an object written
+  directly in `bar` (`typeOf<List<T>>()`) and for the direct call. The declaration class keeps the
+  reified parameter. A read of that property in the inlined caller (`object { val x = typeOf<T>()
+  }.x`) names the copy, not the declaration class. Tests:
+  `fir_lower::inlining::escaping_reified_object` (the call-site substitution) and
+  `tests/reified_object_type_of_e2e.rs` (those three results against kotlinc).
   Not yet: a reified member inline function (it is called rather than inlined, `typeOf` or not), a
-  reified parameter inside an anonymous object or lambda class regenerated per call site, a reified
-  argument inferred as an intersection type, and a use-site projection written in a typealias
+  reified parameter inside a lambda class regenerated per call site, a reified argument inferred as
+  an intersection type, and a use-site projection written in a typealias
   (`typealias T<Y> = MutableMap<in Y, …>` loses its `in`).
 - **A Java member's flexible return keeps the caller's type arguments.** A Java generic class
   applied to the enclosing declaration's own type parameters (`Shelf<X, Y>` inside `fun <X, Y>`,
