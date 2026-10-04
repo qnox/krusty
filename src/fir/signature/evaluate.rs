@@ -1576,17 +1576,22 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
             Ok(ty)
         }
 
-        let result = evaluate_expression(
+        let mut memo = HashMap::new();
+        let evaluated = evaluate_expression(
             self.semantics,
             result,
             graph,
             demand,
-            &mut HashMap::new(),
+            &mut memo,
             &mut std::collections::HashSet::new(),
         )?;
-        let result = self
+        let approximated = self
             .semantics
-            .approximate_declaration_result(declaration, result)?;
+            .approximate_declaration_result(declaration, evaluated)?;
+        // An approximated result is a new type, which carries no abbreviation.
+        let result_abbreviation = (approximated == evaluated)
+            .then(|| result_abbreviation(self.semantics, graph, result, &memo))
+            .flatten();
         let parameters = self.semantics.declaration_parameters(declaration);
         if parameters.is_err() {
             crate::trace_compiler!(
@@ -1596,7 +1601,8 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
         }
         Ok(ResolvedSignature {
             parameters: parameters?,
-            result,
+            result: approximated,
+            result_abbreviation,
         })
     }
 
@@ -1611,6 +1617,39 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
 
 /// The selection origin of a call statement: the call itself, or the result of the sequence the
 /// extractor wraps around a call whose arguments carry local member effects.
+/// The abbreviation an evaluated expression's type carries. Like kotlinc's abbreviation type
+/// attribute it originates at a constructor call through a typealias and survives the operations
+/// that keep the classifier: nullability changes, a sequence's result, and a join whose result is
+/// exactly one of its operands' types (the first such operand's abbreviation, as kotlinc's common
+/// supertype keeps the first of equal types; `if (c) Cargo() else null` is a new nullable type and
+/// carries none).
+fn result_abbreviation<S: SignatureSemantics>(
+    semantics: &S,
+    graph: &SignatureGraph,
+    expression: SigExprId,
+    memo: &HashMap<SigExprId, ResolvedTy>,
+) -> Option<ResolvedTypeAbbreviation> {
+    match graph.expr(expression)? {
+        SigExpr::Call { target, .. } => {
+            semantics.call_result_abbreviation(graph.callable_selection(target)?.origin)
+        }
+        SigExpr::Sequence { result, .. } => result_abbreviation(semantics, graph, result, memo),
+        SigExpr::Nullable(base) | SigExpr::NonNullable(base) => {
+            result_abbreviation(semantics, graph, base, memo)
+        }
+        SigExpr::Join { operands, .. } => {
+            let joined = memo.get(&expression)?;
+            graph
+                .operands(operands)
+                .iter()
+                .copied()
+                .find(|operand| memo.get(operand) == Some(joined))
+                .and_then(|operand| result_abbreviation(semantics, graph, operand, memo))
+        }
+        _ => None,
+    }
+}
+
 fn call_selection_origin(graph: &SignatureGraph, expression: SigExprId) -> Option<OriginId> {
     match graph.expr(expression)? {
         SigExpr::Call { target, .. } => graph.callable_selection(target).map(|s| s.origin),

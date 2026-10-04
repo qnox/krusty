@@ -1684,6 +1684,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             "select_call spelling={spelling} expected={:?}",
             expected.map(crate::fir::ResolvedTy::get),
         );
+        self.selected_calls.forget_abbreviation(origin);
         let entry_candidates = self.enclosing_enum_entry_callables(scope, spelling);
         if !entry_candidates.is_empty() {
             let argument_types = arguments
@@ -2570,13 +2571,8 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     })
                 });
                 if let Some(contract) = contract {
-                    self.selected_call_contracts.borrow_mut().insert(
-                        origin,
-                        super::SelectedCallContract {
-                            contract,
-                            parameter_by_argument,
-                        },
-                    );
+                    self.selected_calls
+                        .record_contract(origin, contract, parameter_by_argument);
                 }
                 if let Some(source) = source {
                     if let Some(signature) =
@@ -2665,17 +2661,17 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     &resolved_type_arguments,
                 )
                 .ok_or_else(Self::failure)?;
-                if let Some((formals, expansion)) = source_alias.as_ref() {
-                    return self
-                        .apply_source_alias_constructor_result(
+                if let Some(alias) = source_alias.as_ref() {
+                    return self.record_alias_constructor_result(
+                        origin,
+                        self.apply_source_alias_constructor_result(
                             scope,
-                            formals,
-                            *expansion,
+                            alias,
                             result,
                             Some(actual),
                             expected.map(crate::fir::ResolvedTy::get),
-                        )
-                        .ok_or_else(Self::failure);
+                        ),
+                    );
                 }
                 crate::fir::ResolvedTy::new(result).map_err(|_| Self::failure())
             }
@@ -2688,17 +2684,17 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     &resolved_type_arguments,
                     expected.map(crate::fir::ResolvedTy::get),
                 )?;
-                if let Some((formals, expansion)) = source_alias.as_ref() {
-                    return self
-                        .apply_source_alias_constructor_result(
+                if let Some(alias) = source_alias.as_ref() {
+                    return self.record_alias_constructor_result(
+                        origin,
+                        self.apply_source_alias_constructor_result(
                             scope,
-                            formals,
-                            *expansion,
+                            alias,
                             result.get(),
                             None,
                             expected.map(crate::fir::ResolvedTy::get),
-                        )
-                        .ok_or_else(Self::failure);
+                        ),
+                    );
                 }
                 Ok(result)
             }
@@ -2790,7 +2786,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             if let Some(internal) = sam_interface {
                 let target = self
                     .applied_source_alias_expansion(scope, spelling, &resolved_type_arguments)
-                    .map_or_else(|| Ty::obj_name(internal), |(_, expansion)| expansion);
+                    .map_or_else(|| Ty::obj_name(internal), |alias| alias.expansion);
                 let sam = crate::symbol_resolver::semantic_sam_signature(&source, target)
                     .expect("the SAM signature was just selected");
                 let shape = Ty::fun_with_shape(
@@ -5323,45 +5319,15 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         argument: u32,
         condition: bool,
     ) -> bool {
-        use crate::contracts::{Condition, Effect, ParamRef, ReturnsValue};
-        fn proves(conclusion: &Condition, argument: u32, condition: bool) -> bool {
-            match conclusion {
-                Condition::IsNull {
-                    param: ParamRef::Param(index),
-                    negated: true,
-                } => !condition && *index == argument as usize,
-                // `returns() implies actual`: the boolean argument itself holds, and the
-                // extractor only takes this shape for an argument spelled `value != null`.
-                Condition::BoolParam(ParamRef::Param(index)) => {
-                    condition && *index == argument as usize
-                }
-                Condition::And(left, right) => {
-                    proves(left, argument, condition) || proves(right, argument, condition)
-                }
-                _ => false,
-            }
-        }
-        let contracts = self.selected_call_contracts.borrow();
-        let Some(selected) = contracts.get(&origin) else {
-            return false;
-        };
-        let Some(argument) = selected
-            .parameter_by_argument
-            .get(argument as usize)
-            .copied()
-            .flatten()
-        else {
-            return false;
-        };
-        selected.contract.effects.iter().any(|effect| {
-            matches!(
-                effect,
-                Effect::ConditionalReturns {
-                    returns: ReturnsValue::Any,
-                    conclusion,
-                } if proves(conclusion, argument, condition)
-            )
-        })
+        self.selected_calls
+            .proves_argument_non_null(origin, argument, condition)
+    }
+
+    fn call_result_abbreviation(
+        &self,
+        origin: crate::fir::OriginId,
+    ) -> Option<crate::fir::ResolvedTypeAbbreviation> {
+        self.selected_calls.abbreviation(origin)
     }
 
     fn substitute(
