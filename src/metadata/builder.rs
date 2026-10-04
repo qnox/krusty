@@ -370,7 +370,10 @@ fn annotation_value_pb(st: &mut StringTable<'_>, value: &crate::ir::AnnoValue) -
         AnnoValue::Class(ty) => {
             let mut represented = *ty;
             let mut dimensions = 0_u64;
-            while let Some(element) = represented.array_elem() {
+            while represented.obj_internal() == Some(crate::types::wk::array()) {
+                let element = represented
+                    .array_elem()
+                    .expect("kotlin.Array class literal retains its element type");
                 dimensions += 1;
                 represented = element;
             }
