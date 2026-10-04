@@ -182,9 +182,6 @@ fn run_backend_passes_after_plugins(
     let module_readable_value_classes = classifiers.module().metadata_readable_value_classes();
     // Plugins produce backend-neutral checked IR. Realize any semantic super dispatch they add at
     // the same JVM boundary as source super calls, never in the plugin itself or the emitter.
-    // Every body of the file is lowered, so each lifting sequence is whole: name its callables
-    // before any pass renders a debug name from them.
-    crate::jvm::lifted_names::number(ir, &facts.local_delegate_access);
     crate::jvm::module_calls::realize_super_calls(ir, callables)
         .map_err(|_| SkipReason::SuperCalls)?;
     crate::jvm::annotation_constructions::lower_annotation_constructions(ir, facade);
@@ -258,6 +255,10 @@ fn run_backend_passes_after_plugins(
         return Err(SkipReason::ValueClasses);
     }
     crate::jvm::parameter_assertions::finalize_after_value_class_lowering(ir);
+    // Every body of the file is lowered, so each lifting sequence is whole, and the value-class
+    // pass has named the functions kotlinc names their lifted callables after: name those callables
+    // before any pass renders a debug name from them.
+    crate::jvm::lifted_names::number(ir, &facts.local_delegate_access);
     // Generic erasure and value-class projection have now fixed every declaration parameter's JVM
     // carrier. Consume and retarget the exact call-owned adapters before default/suspend/inline
     // transforms clone or wrap those calls; the provenance is a one-shot representation contract.

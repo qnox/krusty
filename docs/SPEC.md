@@ -1862,6 +1862,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   lifted name and descriptor are already taken in the class it lands in (an enum entry's argument
   lambdas are placed in the enum rather than the entry class kotlinc uses, so they are numbered
   with the enum's) (`tests/lifted_callable_names_e2e.rs`).
+- **Lifted names in a value-class-renamed function.** kotlinc renames a function whose signature
+  mentions a value class before it lifts anything out of it, so the outermost segment is that JVM
+  name with `-` spelled `_`: `lamP_txdesME$lambda$0` in `lamP-txdesME`, `local_txdesME$inner`,
+  `sus_47cE_Rs$lambda$0` (a suspend function's hash covers its continuation), `getProp_txdesME`
+  for a mangled accessor, and in a value class `m_impl$lambda$0`, `getP_impl$lambda$0`, and
+  `constructor_impl$lambda$0` for its `init` block. The sequence is that name's: `o(Tag)` numbers
+  apart from `o(Int)` and `o(String)`, which still share `o`. An `internal` function's module
+  suffix applies later and does not reach the name (`intl_txdesME$lambda$0`). A top-level function that only returns a value
+  class is not renamed (`plain$lambda$0`). Classes declared in a renamed function (an anonymous
+  object, a local class, a lambda realized as a class) keep the source name (`MangledKt$anon$1`).
+  Common IR records the declaration each lifting entry belongs to; the JVM backend names the
+  sequences after value-class lowering, reading which functions that pass renamed
+  (`tests/value_class_mangled_lambda_names_e2e.rs`).
 - **Lifted captured receivers.** A lifted lambda or local function takes each implicit receiver it
   captures as a leading parameter. The Nth captured class instance is `this$N`. An extension
   receiver is `$` before the receiver's own name, with its `$` separators turned into `_`:

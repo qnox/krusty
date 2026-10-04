@@ -2160,6 +2160,10 @@ pub struct IrFile {
     /// before the CPS rewrite, so a function that is both `suspend` and value-class-typed reports the
     /// fully declared signature here rather than the half-lowered one.
     pub vc_declared_sigs: std::collections::HashMap<u32, (String, Vec<Ty>, Ty)>,
+    /// Each function whose JVM name the value-class pass chose (a `-<hash>` mangle, a member's
+    /// `-impl`, a constructor's `constructor-impl`). Only that pass writes it; kotlinc names the
+    /// callables it lifts out of such a function after this name.
+    pub(crate) value_class_renamed_functions: std::collections::HashSet<FunId>,
     /// Top-level source declaration id → its exact IR function id. Metadata emission uses this
     /// checked declaration handoff to find a value-class-rewritten physical realization; it must
     /// never reconstruct an overload by matching source names and arity.
