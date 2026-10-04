@@ -792,10 +792,14 @@ impl BodyFirChecker<'_> {
             _ if !self.info.produces_unchecked_java_value(source) => Ok(value),
             _ => {
                 let cause = self.expression_origin(source)?;
-                let Some(conversion) = self.platform_producer_conversion(source, cause, target)
-                else {
-                    return Ok(value);
-                };
+                let conversion = self
+                    .platform_producer_conversion(source, cause, target)
+                    .ok_or_else(|| {
+                        self.failure(
+                            self.file.expr_span(source),
+                            BodyCheckFailureKind::UnsupportedCallShape,
+                        )
+                    })?;
                 Ok(self.body.add_expr(crate::fir::FirExpr {
                     origin: cause,
                     ty: target,
