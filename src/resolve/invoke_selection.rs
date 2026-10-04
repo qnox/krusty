@@ -1352,7 +1352,8 @@ impl Checker<'_> {
         // A bare local call selects this function value from the binding and does not check the
         // callee expression. Leaving that cache entry as an error makes checked FIR keep the
         // declaration's storage type and reject the continuation-passing shape this call selected.
-        if matches!(semantic_receiver_ty, Ty::Fun(_)) && self.semantic_ty(receiver).mentions_error()
+        if matches!(semantic_receiver_ty, Ty::Fun(_))
+            && self.expr_types[receiver.0 as usize].mentions_error()
         {
             self.set(receiver, semantic_receiver_ty);
         }
