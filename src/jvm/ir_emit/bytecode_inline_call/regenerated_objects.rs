@@ -25,15 +25,18 @@ use crate::jvm::source_map::SourceMap;
 pub(in crate::jvm::ir_emit) struct RegenerationSite<'a> {
     pub method: String,
     pub descriptor: String,
+    /// The Kotlin function name the copies are numbered under. Empty when `special` is set.
     pub function: String,
+    /// A constructor or another JVM special method: copies are numbered under `$special`.
+    pub special: bool,
     pub symbols: &'a dyn BackendClassifierSource,
 }
 
 impl<'a> RegenerationSite<'a> {
     /// The site of the declared function `function`, emitted as its own method under `descriptor`.
     /// This stage regenerates objects only there: not in a `$DefaultImpls` copy (`own_method`
-    /// false), a constructor, an accessor, a lambda, a suspend function, or an inline function,
-    /// whose copies kotlinc names or writes differently.
+    /// false), an accessor, a lambda, a suspend function, or an inline function, whose copies
+    /// kotlinc names or writes differently. A constructor is [`Self::constructor`].
     pub(in crate::jvm::ir_emit) fn of_function(
         ir: &IrFile,
         function: u32,
@@ -52,8 +55,24 @@ impl<'a> RegenerationSite<'a> {
             method: name.clone(),
             descriptor: descriptor.to_string(),
             function: name.clone(),
+            special: false,
             symbols,
         })
+    }
+
+    /// The site of a constructor. kotlinc numbers its regenerated objects under `$special` and
+    /// points `EnclosingMethod` at `<init>` with `descriptor`.
+    pub(in crate::jvm::ir_emit) fn constructor(
+        descriptor: &str,
+        symbols: &'a dyn BackendClassifierSource,
+    ) -> RegenerationSite<'a> {
+        RegenerationSite {
+            method: "<init>".to_string(),
+            descriptor: descriptor.to_string(),
+            function: String::new(),
+            special: true,
+            symbols,
+        }
     }
 }
 
@@ -176,8 +195,9 @@ impl AnonymousObjects for CallObjects<'_> {
             scratch = generators.clone();
             &mut scratch
         };
+        let kotlin_name = (!site.special).then_some(site.function.as_str());
         let new_class = generators
-            .for_function(&self.owner, Some(&site.function))
+            .for_function(&self.owner, kotlin_name)
             .for_inlined_method(&self.callee)
             .next_object()
             .class()

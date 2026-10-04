@@ -3080,6 +3080,10 @@ fn emit_class(
                     .chain(c.init_body),
             );
             e.this_uninitialized = true;
+            e.regeneration_site = Some(bytecode_inline_call::RegenerationSite::constructor(
+                &ctor_desc,
+                env.signature_symbols,
+            ));
             e.record_locals = byte_parity;
             let receiver = e.frame.enter(FrameKey::Receiver, Ty::obj_name(c.fq_name));
             e.slots.insert(0, (receiver, Ty::obj_name(c.fq_name)));
