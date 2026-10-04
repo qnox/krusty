@@ -776,6 +776,54 @@ pub(super) struct SelectedMemberCall<'a> {
     pub(super) export_private_calls: bool,
 }
 
+/// The physical invocation shape the selected declaration needs.
+///
+/// Only [`MemberInvocation::Virtual`] dispatches on the call-site spelling, so only it may carry a
+/// call-site retarget (the special-builtin rename): every other shape names something derived from
+/// the DECLARED member — an `access$` bridge or the private accessor itself — and bridge bodies
+/// always forward to the declared name.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum MemberInvocation {
+    ProtectedBridge,
+    PrivateExtensionBridge,
+    DirectPrivateAccessor,
+    Virtual,
+}
+
+/// Select the [`MemberInvocation`] for an already-resolved member call. No lookup or overload
+/// selection happens here: `protected` reports the caller's recorded bridge, and the private
+/// shapes read the selected declaration's visibility.
+pub(super) fn select_member_invocation(
+    ir: &IrFile,
+    run: &EmitRun,
+    source_owner: Option<StaticOwner>,
+    expression: crate::ir::ExprId,
+    owner_identity: TypeName,
+    protected: bool,
+    export_private_calls: bool,
+) -> MemberInvocation {
+    let member_target = ir.jvm_member_targets.get(&expression).copied();
+    let private_extension_bridge = member_target.is_some_and(|function| {
+        (source_owner != Some(StaticOwner::Class(owner_identity)) || export_private_calls)
+            && run
+                .private_member_access_bridges
+                .borrow()
+                .contains(&function)
+    });
+    let same_owner_private = !private_extension_bridge
+        && source_owner == Some(StaticOwner::Class(owner_identity))
+        && member_target.is_some_and(|function| ir.method_visibility(function).is_private());
+    if protected {
+        MemberInvocation::ProtectedBridge
+    } else if private_extension_bridge {
+        MemberInvocation::PrivateExtensionBridge
+    } else if same_owner_private {
+        MemberInvocation::DirectPrivateAccessor
+    } else {
+        MemberInvocation::Virtual
+    }
+}
+
 /// Emit [`SelectedMemberCall`]. The exact selected declaration determines whether the physical
 /// invocation goes through its access bridge; descriptors and owners are built here too.
 pub(super) fn emit_selected_member_call(
@@ -786,37 +834,44 @@ pub(super) fn emit_selected_member_call(
     code: &mut CodeBuilder,
     call: &SelectedMemberCall<'_>,
 ) {
-    let member_target = ir.jvm_member_targets.get(&call.expression).copied();
-    let private_extension_bridge = member_target.is_some_and(|function| {
-        (source_owner != Some(StaticOwner::Class(call.owner_identity)) || call.export_private_calls)
-            && run
-                .private_member_access_bridges
-                .borrow()
-                .contains(&function)
-    });
-    let same_owner_private = !private_extension_bridge
-        && source_owner == Some(StaticOwner::Class(call.owner_identity))
-        && member_target.is_some_and(|function| ir.method_visibility(function).is_private());
-    if let Some(bridge) = call.protected {
-        emit_protected_member_invocation(cw, code, bridge, call);
-    } else if private_extension_bridge {
-        emit_private_member_extension_call(cw, code, call);
-    } else if same_owner_private {
-        emit_direct_private_accessor_call(cw, code, call);
-    } else if call.interface_owner {
-        let method = cw.interface_methodref(call.owner, call.name, call.descriptor);
-        code.invokeinterface(
-            method,
-            call.argument_words,
-            physical_call_result_words(call.result),
-        );
-    } else {
-        let method = cw.methodref(call.owner, call.name, call.descriptor);
-        code.invokevirtual(
-            method,
-            call.argument_words,
-            physical_call_result_words(call.result),
-        );
+    match select_member_invocation(
+        ir,
+        run,
+        source_owner,
+        call.expression,
+        call.owner_identity,
+        call.protected.is_some(),
+        call.export_private_calls,
+    ) {
+        MemberInvocation::ProtectedBridge => emit_protected_member_invocation(
+            cw,
+            code,
+            call.protected
+                .expect("a protected-bridge invocation carries its bridge"),
+            call,
+        ),
+        MemberInvocation::PrivateExtensionBridge => {
+            emit_private_member_extension_call(cw, code, call)
+        }
+        MemberInvocation::DirectPrivateAccessor => {
+            emit_direct_private_accessor_call(cw, code, call)
+        }
+        MemberInvocation::Virtual if call.interface_owner => {
+            let method = cw.interface_methodref(call.owner, call.name, call.descriptor);
+            code.invokeinterface(
+                method,
+                call.argument_words,
+                physical_call_result_words(call.result),
+            );
+        }
+        MemberInvocation::Virtual => {
+            let method = cw.methodref(call.owner, call.name, call.descriptor);
+            code.invokevirtual(
+                method,
+                call.argument_words,
+                physical_call_result_words(call.result),
+            );
+        }
     }
 }
 

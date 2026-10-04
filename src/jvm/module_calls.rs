@@ -1010,9 +1010,13 @@ fn realize_property(
                     interface: owner_is_jvm_interface(property),
                     module_target: None,
                     target: Some(if value.is_some() {
-                        crate::ir::IrVirtualTarget::PropertySetter(target)
+                        crate::ir::IrVirtualTarget::PropertySetter(
+                            crate::fir::ResolvedPropertyOverrideTarget::Module(target),
+                        )
                     } else {
-                        crate::ir::IrVirtualTarget::PropertyGetter(target)
+                        crate::ir::IrVirtualTarget::PropertyGetter(
+                            crate::fir::ResolvedPropertyOverrideTarget::Module(target),
+                        )
                     }),
                 },
                 dispatch_receiver: Some(dispatch_receiver.ok_or(failure)?),

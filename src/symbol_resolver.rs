@@ -8005,6 +8005,7 @@ mod tests {
             singleton_dispatch: None,
             default_realization: None,
             nonvirtual_realization: None,
+            overridden_call_realizations: Box::new([]),
             declared_ret: None,
             overridden_results: Box::new([]),
         };

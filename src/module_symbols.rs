@@ -977,6 +977,7 @@ fn fn_info(
         singleton_dispatch: None,
         default_realization: None,
         nonvirtual_realization: None,
+        overridden_call_realizations: Box::new([]),
         // A SOURCE callable's `ret` is already the declared type and its `physical_ret` is not yet
         // erased, so there is no carrier-vs-box question for the value-class pass to answer here — it
         // sees the declaration itself. The fact exists for callables read back from a class file.
@@ -1095,6 +1096,7 @@ fn source_callable(
         singleton_dispatch: None,
         default_realization: None,
         nonvirtual_realization: None,
+        overridden_call_realizations: Box::new([]),
         // See the note in the builder above: a source callable carries its declaration un-erased.
         declared_ret: None,
         overridden_results: Box::new([]),
