@@ -313,7 +313,7 @@ fn specialized_class(
     let covered = source_init
         .map(|body| expression_ids(ir, body))
         .unwrap_or_default();
-    let property_roots = checked_property_roots(ir, source)
+    let property_roots = property_roots(ir, source)
         .into_iter()
         .filter(|root| !covered.contains(root))
         .collect::<Vec<_>>();
@@ -397,7 +397,7 @@ fn expression_ids(ir: &crate::ir::IrFile, root: ExprId) -> HashSet<ExprId> {
     seen
 }
 
-fn checked_property_roots(ir: &crate::ir::IrFile, class: ClassId) -> Vec<ExprId> {
+fn property_roots(ir: &crate::ir::IrFile, class: ClassId) -> Vec<ExprId> {
     let mut roots = Vec::new();
     for property in ir.checked_properties.values() {
         if property.class != Some(class) {
@@ -406,6 +406,11 @@ fn checked_property_roots(ir: &crate::ir::IrFile, class: ClassId) -> Vec<ExprId>
         roots.extend(property.getter);
         roots.extend(property.setter);
         roots.extend(property.initializer);
+    }
+    // A copy taken before accessors exist keeps those roots on its specialization record.
+    // The next expansion clones that record; the copy has no checked-property entry of its own.
+    if let Some(record) = ir.specialized_anonymous_classes.get(&class) {
+        roots.extend(record.pending_property_roots.iter().copied());
     }
     roots.sort_unstable();
     roots.dedup();
@@ -1097,18 +1102,8 @@ fn class_uses_binding(
     roots.extend(class_decl.init_body);
     // Accessor functions are materialized after inlining. Their checked bodies are already
     // expressions on the property, and a reified operation there must still select the copy.
-    roots.extend(
-        ir.checked_properties
-            .values()
-            .filter(|property| property.class == Some(class))
-            .flat_map(|property| {
-                property
-                    .getter
-                    .into_iter()
-                    .chain(property.setter)
-                    .chain(property.initializer)
-            }),
-    );
+    // A class that is itself a copy keeps those bodies on its specialization record.
+    roots.extend(property_roots(ir, class));
     for root in roots {
         if dag_uses_binding(ir, root, bindings, seen) {
             return true;
