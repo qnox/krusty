@@ -1329,13 +1329,18 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                         evaluate_expression(semantics, result, graph, demand, memo, computing)
                     }
                     SigExpr::Delegate {
-                        delegate,
+                        delegate: delegate_expr,
                         expected,
                         scope,
                         site,
                     } => {
                         let delegate = evaluate_expression(
-                            semantics, delegate, graph, demand, memo, computing,
+                            semantics,
+                            delegate_expr,
+                            graph,
+                            demand,
+                            memo,
+                            computing,
                         )?;
                         let expected = expected
                             .map(|expected| {
@@ -1389,6 +1394,33 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                         let scope = graph
                             .scope(scope)
                             .expect("a delegated signature must retain its declaration scope");
+                        // A written property type fixes `getValue`'s result. Re-check the delegate
+                        // expression under the receiver type that produces that result, so a call
+                        // such as `delegateFor(x)` collects its argument constraints at
+                        // `SinkDelegate<String>` rather than at the unsolved formal.
+                        let delegate = match expected.and_then(|property_type| {
+                            semantics.delegate_expression_expectation(
+                                scope,
+                                delegate,
+                                property_type,
+                            )
+                        }) {
+                            Some(expectation) => {
+                                match evaluate_expression_with_expected(
+                                    semantics,
+                                    delegate_expr,
+                                    expectation,
+                                    graph,
+                                    demand,
+                                    memo,
+                                    computing,
+                                ) {
+                                    Some(Ok(refined)) => refined,
+                                    Some(Err(_)) | None => delegate,
+                                }
+                            }
+                            None => delegate,
+                        };
                         semantics.select_delegate(scope, delegate, expected, site, demand)
                     }
                     SigExpr::Join {

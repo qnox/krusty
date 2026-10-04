@@ -5284,6 +5284,16 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         // module; this is the trait's entry into it.
         self.select_delegate_signature(scope, delegate, expected, site, demand)
     }
+
+    fn delegate_expression_expectation(
+        &self,
+        scope: crate::fir::SignatureScope,
+        delegate: crate::fir::ResolvedTy,
+        property_type: crate::fir::ResolvedTy,
+    ) -> Option<crate::fir::ResolvedTy> {
+        self.expected_delegate_expression(scope, delegate, property_type)
+    }
+
     fn least_upper_bound(
         &self,
         scope: crate::fir::SignatureScope,
