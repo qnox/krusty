@@ -5543,6 +5543,29 @@ fn nested_generic_member_signature_uses_its_published_type_parameter_identity() 
         .expect("nested generic member signature must finalize in Pass 1")
         .module
         .index();
+    let entity_classifier = (0..index.declaration_count())
+        .map(|raw| crate::fir::DeclarationId::from_raw(raw as u32))
+        .find(|declaration| {
+            index.declaration_name(*declaration) == Some("Entity")
+                && index
+                    .classifier_header(*declaration)
+                    .is_some_and(|header| header.classifier.matches("GraphQlTester$Entity"))
+        })
+        .expect("stable GraphQlTester.Entity declaration");
+    let self_parameter = index
+        .type_parameter(entity_classifier, 1)
+        .expect("Entity must publish its S type parameter");
+    let self_header = index
+        .type_parameter_header(self_parameter)
+        .expect("S must retain its semantic bounds");
+    assert_eq!(self_header.bounds.len(), 1);
+    assert_eq!(
+        self_header.bounds[0].ty.get().obj_internal(),
+        index
+            .classifier_header(entity_classifier)
+            .map(|header| header.classifier),
+        "the recursive classifier bound must retain Entity's exact identity"
+    );
     let entity = (0..index.declaration_count())
         .map(|raw| crate::fir::DeclarationId::from_raw(raw as u32))
         .find(|declaration| {

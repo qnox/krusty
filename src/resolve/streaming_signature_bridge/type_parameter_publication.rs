@@ -58,10 +58,27 @@ pub(super) fn symbolic(
     declaration_start: u32,
 ) -> super::super::TParams {
     let enclosing = enclosing(index, declaration);
+    // A classifier is in scope recursively in its own header. The complete declaration inventory
+    // has already assigned its stable identity, but the module-wide spelling table deliberately
+    // does not give a nested classifier's simple name global meaning. Resolve only this declaration's
+    // own source spelling here, before the ordinary import/package table, so an F-bound such as
+    // `interface Entity<S : Entity<S>>` retains `Entity` rather than being approximated to `Any`.
+    // This is the compact-header counterpart of the self binding installed in the full signature
+    // collector's classifier-header scope.
+    let self_classifier = index
+        .classifier_header(declaration)
+        .map(|header| header.classifier);
+    let self_spelling = self_classifier.and_then(|_| index.declaration_name(declaration));
     super::super::TParams::symbolic_from_decl_enclosing(
         declared_names,
         declared_bounds,
-        &|name| table.class_names.get(name),
+        &|name| {
+            if self_spelling == Some(name) {
+                self_classifier
+            } else {
+                table.class_names.get(name)
+            }
+        },
         &|name| {
             // This declaration's own parameter shadows an enclosing parameter with the same name.
             (!declared_names.iter().any(|declared| declared == name))

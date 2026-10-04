@@ -65,34 +65,13 @@ fn resolve_primary_bound(
 /// occurrence's nullability on that bound (`T : Int?` maps as `Int?`, so `Integer`, not `int`; and
 /// `T : IC?` maps as the nullable value class), and a bare `T` is nullable when a bound along its
 /// chain is. A reference bound erases to the same class either way.
-fn is_any(ty: Ty) -> bool {
-    ty.non_null() == Ty::obj_name(wk::any())
-}
-
 fn physical_type(ty: Ty, erasures: &HashMap<String, Ty>) -> Ty {
     match ty {
-        Ty::TyParam(name, _) => {
-            // A classifier parameter such as `S : Entity<D, S>` can be recorded as `Any` while the
-            // occurrence still carries `Entity`. Erasing to the recorded `Any` would publish
-            // `Object` for a call that already uses the carried class.
-            let recorded = erasures.get(name).copied();
-            let erasure = match recorded {
-                Some(erasure) if !is_any(erasure) => Some(erasure),
-                recorded => {
-                    let carried = ty.erased_recv();
-                    if is_any(carried) {
-                        recorded
-                    } else {
-                        Some(carried)
-                    }
-                }
-            };
-            match erasure {
-                Some(erasure) if ty.upper_bound_admits_null() => Ty::nullable(erasure),
-                Some(erasure) => erasure,
-                None => ty,
-            }
-        }
+        Ty::TyParam(name, _) => match erasures.get(name).copied() {
+            Some(erasure) if ty.upper_bound_admits_null() => Ty::nullable(erasure),
+            Some(erasure) => erasure,
+            None => ty,
+        },
         Ty::Nullable(inner) if matches!(*inner, Ty::TyParam(..)) => {
             Ty::nullable(physical_type(*inner, erasures))
         }
@@ -224,19 +203,6 @@ mod tests {
         let erasures = parameter_erasures_with(&[method_parameter], &[class_parameter]);
 
         assert_eq!(erasures.get("T").copied(), Some(Ty::obj("sample/Entity")));
-    }
-
-    #[test]
-    fn an_occurrence_keeps_the_class_bound_missing_from_the_parameter_record() {
-        let class_parameter = parameter("S", Ty::obj_name(wk::any()));
-        let method_parameter = parameter("T", Ty::ty_param("S", Ty::obj("sample/Entity")));
-        let erasures = parameter_erasures_with(&[method_parameter], &[class_parameter]);
-        let occurrence = Ty::ty_param("T", Ty::ty_param("S", Ty::obj("sample/Entity")));
-
-        assert_eq!(
-            physical_type(occurrence, &erasures),
-            Ty::obj("sample/Entity")
-        );
     }
 
     #[test]
