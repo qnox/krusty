@@ -96,6 +96,7 @@ mod inline_call;
 mod inline_frame_marker;
 mod inline_lambda_aliases;
 mod inline_parameters;
+mod inline_return_frames;
 mod instance_field_names;
 use instance_field_names::instance_field_jvm_name;
 mod interface_compatibility;
@@ -6044,6 +6045,8 @@ struct Emitter<'a> {
     /// The suspensions of the function being emitted, by call expression, each with the value
     /// class box its resumption unboxes. Empty for every function whose machine the IR pass owns.
     machine_suspensions: HashMap<u32, Option<(TypeName, Ty)>>,
+    /// Where each inline-return frame emitted so far keeps its result, by the frame's label.
+    inline_return_frame_results: HashMap<String, (u16, Ty)>,
     /// The suspension points kotlinc's coroutine transformer takes, when it takes this function.
     transformed_suspensions: transformed_suspensions::TransformedSuspensions,
     /// The declarations that read a suspend lambda's parameters from their fields, in the
@@ -6174,6 +6177,7 @@ impl<'a> Emitter<'a> {
             frame: frame_map::FrameMap::default(),
             continuation_slot: None,
             machine_suspensions: HashMap::new(),
+            inline_return_frame_results: HashMap::new(),
             transformed_suspensions: Default::default(),
             suspend_lambda_parameter_reads: HashSet::new(),
             erased_invocations: HashSet::new(),
@@ -7066,6 +7070,9 @@ impl<'a> Emitter<'a> {
                 }
                 self.unassigned_values.remove(&var);
             }
+            IrExpr::SetFrameResult { frame, value } => {
+                self.emit_set_frame_result(&frame, value, code)
+            }
             IrExpr::SetField {
                 receiver,
                 class,
@@ -7749,9 +7756,9 @@ impl<'a> Emitter<'a> {
                 receiver.is_some_and(|receiver| self.emits_control_flow(receiver))
                     || self.emits_control_flow(*value)
             }
-            IrExpr::SetValue { value, .. } | IrExpr::SetStatic { value, .. } => {
-                self.emits_control_flow(*value)
-            }
+            IrExpr::SetValue { value, .. }
+            | IrExpr::SetStatic { value, .. }
+            | IrExpr::SetFrameResult { value, .. } => self.emits_control_flow(*value),
             IrExpr::TypeOp { arg, .. } | IrExpr::EnumValueOf { arg, .. } => {
                 self.emits_control_flow(*arg)
             }

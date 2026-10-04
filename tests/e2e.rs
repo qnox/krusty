@@ -1051,6 +1051,8 @@ mod inline_lambda_initializer_values_e2e;
 mod inline_lambda_local_delegate_e2e;
 #[path = "inline_lambda_local_table_order_e2e.rs"]
 mod inline_lambda_local_table_order_e2e;
+#[path = "inline_lambda_nested_frame_return_e2e.rs"]
+mod inline_lambda_nested_frame_return_e2e;
 #[path = "inline_lambda_nested_return_e2e.rs"]
 mod inline_lambda_nested_return_e2e;
 #[path = "inline_lambda_placed_capture_suspension_e2e.rs"]
