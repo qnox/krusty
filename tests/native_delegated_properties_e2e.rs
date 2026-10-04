@@ -4,17 +4,14 @@
 //! accessors, and nothing records that they implement `A.x` — there is no source declaration to
 //! carry the edge, so the interface's number found no implementation and the whole file declined.
 //!
-//! Kotlin has already decided they implement it: a class does not compile with an interface
-//! property left unimplemented, and it cannot declare a second property of that name beside the
-//! inherited one. So an interface in the class's hierarchy declaring the same name IS the member
-//! those accessors fill, and matching by name is reading the language's rule rather than guessing.
+//! Kotlin has already decided which exact interface declaration they implement. Resolution keeps
+//! that declaration identity on the generated accessors, so a backend never has to recover the
+//! relationship from the property's source spelling.
 //!
 //! Two more things the shape needed, both of which the missing edge had been hiding: a CALL to
-//! such an accessor has to name the same key the table holds — an abstract `val` in an interface
-//! carries no accessor id, so its accessor reaches the method list as an ordinary method and is
-//! tied back by name in both readings or in neither. And a class that supplies a property its
-//! SUPERCLASS already had takes that slot, because the base's accessor may be synthesized and so
-//! have no signature to match.
+//! such an accessor has to name the same stable property key the table holds. And a delegation
+//! forwarder that replaces a property its SUPERCLASS already had takes that exact slot through the
+//! checked override edge, even when the base's accessor is synthesized from a field.
 //!
 //! Every expectation is kotlinc's, taken by running the same program under it.
 
@@ -51,8 +48,8 @@ fn a_delegated_property_fills_the_interfaces_number() {
 ///
 /// `class E : B(), C by D()` — `B` implements `A.x` and the delegation supplies it again. kotlinc
 /// answers with the DELEGATE (KT-70417), which is what taking the base's slot makes true: the
-/// base's accessor is synthesized from its field and has no signature to match, so the inherited
-/// slot is found by the property's name instead.
+/// base's accessor is synthesized from its field and has no function identity of its own, so the
+/// frontend carries the base property identity to the generated accessor explicitly.
 #[test]
 fn a_delegation_beside_an_inherited_property_takes_the_inherited_slot() {
     let source = "interface A { var x: String }\n\
