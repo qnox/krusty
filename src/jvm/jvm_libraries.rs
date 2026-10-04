@@ -6083,7 +6083,14 @@ mod tests {
         let classifier = libraries
             .classifier_record(type_name("kotlin/reflect/KMutableProperty1"))
             .expect("KMutableProperty1 classifier");
-        assert_eq!(classifier.type_params, ["T", "V"]);
+        // Classpath parameters publish owner-qualified identities; the source spelling is
+        // recoverable but is not the identity.
+        let param_names: Vec<&str> = classifier
+            .type_params
+            .iter()
+            .map(|name| crate::types::type_parameter_source_name(name))
+            .collect();
+        assert_eq!(param_names, ["T", "V"]);
         assert!(
             classifier
                 .type_param_bounds
@@ -6103,7 +6110,7 @@ mod tests {
             })
             .expect("declared set(T, V)");
         assert!(
-            matches!(declared_set.semantic_params()[1], Ty::TyParam("V", bound) if bound.is_nullable()),
+            matches!(declared_set.semantic_params()[1], Ty::TyParam(name, bound) if crate::types::type_parameter_source_name(name) == "V" && bound.is_nullable()),
             "declared set value parameter: {:?}",
             declared_set.semantic_params()[1]
         );
