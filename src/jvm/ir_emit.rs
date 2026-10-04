@@ -49,6 +49,7 @@ mod constant_emission;
 mod constructor_accessors;
 mod constructor_defaults;
 mod constructor_initialization;
+mod constructor_signatures;
 use constructor_defaults::{constructor_default_masks, emit_constructor_default_arguments};
 mod companion_field;
 mod copied_code;
@@ -2761,7 +2762,9 @@ fn emit_class(
                 format!("(Lkotlin/coroutines/Continuation<-L{fq_name};>;)V")
             }
         })
-        .or_else(|| class_ctor_generic_sig(&signature_formatter, ir, c, &fq_name));
+        .or_else(|| {
+            constructor_signatures::primary_constructor_signature(&signature_formatter, ir, c)
+        });
     let value_param_ctor = ir.has_value_param_ctor(&fq_name);
     let ctor_access =
         method_access::primary_constructor_access(ir, c, is_continuation, value_param_ctor);
@@ -3952,14 +3955,8 @@ fn emit_enum_class(
         .chain(all_param_tys.iter().copied())
         .collect();
     let ctor_desc = method_descriptor(&ctor_params, Ty::Unit);
-    // The generic signature omits the enum ABI prefix and retains only source parameters.
-    let ctor_sig = format!(
-        "({})V",
-        all_param_tys
-            .iter()
-            .map(|ty| type_descriptor(*ty))
-            .collect::<String>()
-    );
+    let ctor_sig = constructor_signatures::enum_constructor_signature(&signature_formatter, ir, c)
+        .expect("an enum constructor always signs its source parameters");
     let ctor_parameters = if env.java_parameters {
         super::method_parameters::enum_constructor(c).to_vec()
     } else {
@@ -5949,82 +5946,6 @@ fn method_parameterized_sig(
     s.push(')');
     s.push_str(&formatter.method_ty(ret, Wildcards::Suppressed)?);
     (s != ir_method_desc(params, ret)).then_some(s)
-}
-
-/// The primary constructor's generic `Signature` — bare type-parameter params (`(TT;)V`) and
-/// parameterized concrete params (`(Ljava/util/List<Ljava/lang/String;>;)V`), others erased; `None` when
-/// none need generics. Shared by the pool seeder and the attribute emitter so both produce one string.
-fn class_ctor_generic_sig(
-    formatter: &JvmSignatureFormatter<'_>,
-    ir: &IrFile,
-    c: &crate::ir::IrClass,
-    fq_name: &str,
-) -> Option<String> {
-    let param_tys = class_ctor_jvm_tys(c);
-    let ftp = ir.field_signatures(fq_name);
-    let is_field: Vec<bool> = if c.ctor_args.is_empty() {
-        vec![true; param_tys.len()]
-    } else {
-        c.ctor_args.iter().map(|a| a.is_field).collect()
-    };
-    let mut sig = String::from("(");
-    let mut any = false;
-    let mut field_i = 0usize;
-    for (i, t) in param_tys.iter().enumerate() {
-        let declared_ty = c.ctor_args.get(i).and_then(|argument| argument.declared_ty);
-        let declared_type_parameter = declared_ty.and_then(|ty| match ty {
-            Ty::TyParam(name, _) => Some(name),
-            Ty::Nullable(inner) | Ty::PlatformNullable(inner) => match *inner {
-                Ty::TyParam(name, _) => Some(name),
-                _ => None,
-            },
-            _ => None,
-        });
-        if let Some(parameter) = declared_type_parameter {
-            sig.push_str(&format!(
-                "T{};",
-                crate::types::type_parameter_source_name(parameter)
-            ));
-            any = true;
-            if is_field.get(i).copied().unwrap_or(true) {
-                field_i += 1;
-            }
-            continue;
-        }
-        if let Some(parameterized) = declared_ty.and_then(|ty| {
-            // Constructor arguments are parameter positions even when they also declare a property.
-            parameterized_sig_at(formatter, &ty, Wildcards::Declared)
-        }) {
-            sig.push_str(&parameterized);
-            any = true;
-            if is_field.get(i).copied().unwrap_or(true) {
-                field_i += 1;
-            }
-            continue;
-        }
-        if is_field.get(i).copied().unwrap_or(true) {
-            let f = c.fields.get(field_i);
-            let fname = f.map(|f| f.name.as_str()).unwrap_or("");
-            if let Some((_, tp)) = ftp.and_then(|ftp| ftp.iter().find(|(fp, _)| fp == fname)) {
-                sig.push_str(&format!("T{tp};"));
-                any = true;
-            } else if let Some(ps) = f.and_then(|f| {
-                // A constructor parameter is a PARAMETER position, even though the same declaration
-                // also backs a field, whose own signature suppresses the wildcards.
-                parameterized_sig_at(formatter, &f.ty, Wildcards::Declared)
-            }) {
-                sig.push_str(&ps);
-                any = true;
-            } else {
-                sig.push_str(&type_descriptor(*t));
-            }
-            field_i += 1;
-        } else {
-            sig.push_str(&type_descriptor(*t));
-        }
-    }
-    sig.push_str(")V");
-    any.then_some(sig)
 }
 
 /// The shared `<T:bound…>` type-parameter DECLARATION section, or `""` when there are no own type
