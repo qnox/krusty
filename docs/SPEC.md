@@ -4697,6 +4697,23 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the body is read from (`MapsKt__MapsKt`), and that is the method the in-place read follows.
   Tests: `tests/reified_class_regeneration_e2e.rs`, `tests/classpath_reified_inline_toplevel_e2e.rs`.
 
+- **A lambda inlined into a classpath inline body runs on an empty operand stack.** kotlinc's
+  `MethodInliner` brackets each inlined lambda with `InlineMarker.beforeInlineCall` /
+  `afterInlineCall`, and the caller's `FixStackMethodTransformer` stores whatever the body left on
+  the stack under the lambda into fresh locals and reloads it under the lambda's result. stdlib
+  `map` is the common case: its inlined `mapTo` has the destination collection on the stack at the
+  `invoke`, so kotlinc spills it (`astore`, then `aload; swap` after the lambda). krusty inlined the
+  lambda over that stack; a lambda holding a `try` (a source `try`/`catch`, or a spliced
+  `runCatching`) then had a handler entered with only the exception while the normal path kept the
+  destination under it, and emission panicked (`an inlined body's stack was already followed:
+  Mismatch`). The unified inliner now keeps the markers around each expanded lambda, the emitter
+  writes them wherever there is something to save (the body's own operands or the caller's,
+  pushed before the inline call), and the same class-stage FixStack that saves operands around an
+  inline body normalizes them in the finished caller, so the save locals sit above every slot of
+  the method as in kotlinc. Until then the emitter and the frame computation follow the stack as
+  FixStack leaves it: empty inside a bracket, the saved values back under the lambda's result
+  after it. Tests: `tests/inlined_lambda_stack_spill_e2e.rs`,
+  `inliner::tests::a_lambda_invoked_over_a_stacked_value_is_bracketed_for_fix_stack`.
 - **A reified `catch (e: E)` uses the inline call's type argument as its JVM catch type.** The
   clause is checked as the reified parameter. Common IR stores only that semantic type. While the
   parameter is still unsubstituted, the JVM reified-operation pass records the declaration's

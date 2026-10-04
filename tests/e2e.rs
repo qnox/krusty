@@ -1033,6 +1033,8 @@ mod inline_value_class_lambda_e2e;
 mod inline_vc_suspend_coverage_e2e;
 #[path = "inlined_code_inner_classes_e2e.rs"]
 mod inlined_code_inner_classes_e2e;
+#[path = "inlined_lambda_stack_spill_e2e.rs"]
+mod inlined_lambda_stack_spill_e2e;
 #[path = "inner_class_construction_e2e.rs"]
 mod inner_class_construction_e2e;
 #[path = "inner_class_constructor_e2e.rs"]
