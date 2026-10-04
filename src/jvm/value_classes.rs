@@ -3694,8 +3694,9 @@ pub(crate) fn lower_value_classes(
             if under.contains_key(&x) && suspend_fids.contains(&(fid as u32)) {
                 // …EXCEPT a `suspend fun`: its CPS return is `Object`. The declaration-level suspension
                 // representation decides whether the carrier crosses directly or is wrapped in the value
-                // class. Besides scalar carriers, a null-capable carrier must be wrapped too: otherwise
-                // the raw `null` for `X(null)` is indistinguishable from a null result at the caller.
+                // class. A scalar carrier is wrapped. A null-capable reference carrier of a non-null
+                // result crosses directly: `X(null)` is that carrier's null, and the result type is not
+                // itself nullable. A nullable result keeps its ordinary erasure.
                 if let Some(body) = ir.functions[fid].body {
                     match suspend_result_representation(
                         &orig_rets[fid],

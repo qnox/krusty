@@ -284,6 +284,60 @@ fun box(): String {
 }
 "#;
 
+const NULLABLE_REFERENCE_CARRIER: &str = "@Suppress(\"RESULT_CLASS_IN_RETURN_TYPE\")\n\
+suspend fun make(): Result<String> = Result.success(\"OK\")\n\
+suspend fun read(): String = make().getOrThrow()\n\
+@JvmInline value class Wrap(val v: Any?)\n\
+suspend fun makeWrap(): Wrap = Wrap(\"OK\")\n\
+suspend fun readWrap(): String = makeWrap().v as String\n\
+@JvmInline value class Count(val n: Int)\n\
+suspend fun makeCount(): Count = Count(1)\n\
+suspend fun readCount(): Int = makeCount().n\n\
+@Suppress(\"RESULT_CLASS_IN_RETURN_TYPE\")\n\
+suspend fun makeNullable(): Result<String>? = Result.success(\"OK\")\n\
+suspend fun readNullable(): String = makeNullable()!!.getOrThrow()\n";
+
+/// A non-null `Result` and a value class over `Any?` return the carrier. The caller uses it on the
+/// fast path and unboxes only the box a real resume delivers. A scalar, and a nullable `Result?`,
+/// cross as the box on both paths.
+#[test]
+fn a_null_capable_reference_carrier_crosses_unboxed_until_resume() {
+    for method in [
+        "public static final java.lang.Object read(kotlin.coroutines.Continuation<? super java.lang.String>);",
+        "public static final java.lang.Object readWrap(kotlin.coroutines.Continuation<? super java.lang.String>);",
+        "public static final java.lang.Object readCount(kotlin.coroutines.Continuation<? super java.lang.Integer>);",
+        "public static final java.lang.Object readNullable(kotlin.coroutines.Continuation<? super java.lang.String>);",
+    ] {
+        expect_method_matches(NULLABLE_REFERENCE_CARRIER, "SuspendValueClassResultsKt", method);
+    }
+}
+
+const RESULT_SAM: &str = "import kotlin.coroutines.*\n\
+fun interface ResultProvider {\n\
+    suspend fun getResult(): Result<String>\n\
+}\n\
+var globalResult: String = \"<empty>\"\n\
+suspend fun run() {\n\
+    handleResult { Result.success(\"OK\") }\n\
+}\n\
+suspend fun handleResult(resultProvider: ResultProvider) {\n\
+    globalResult = resultProvider.getResult().getOrThrow()\n\
+}\n\
+fun builder(c: suspend () -> Unit) {\n\
+    c.startCoroutine(Continuation(EmptyCoroutineContext) { it.getOrThrow() })\n\
+}\n\
+fun box(): String {\n\
+    builder { run() }\n\
+    return globalResult\n\
+}\n";
+
+/// A fun-interface `suspend fun getResult(): Result<String>` that does not suspend returns
+/// `constructor-impl`. The caller must not unbox that carrier as a `kotlin.Result`.
+#[test]
+fn a_fun_interface_result_completes_with_its_carrier() {
+    common::expect_box_ok_with_stdlib(RESULT_SAM, "SuspendValueClassResults");
+}
+
 /// A value class resumed into a caller of `$default` unboxes it, and a suspend lambda hands its
 /// value-class result over boxed, as every lambda does, so its continuation does not box it again.
 #[test]

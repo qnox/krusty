@@ -701,14 +701,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `::compare_to_and_contains_cross_file_execute` and
   `::invoke_convention_cross_file_executes`).
 - **A suspend function's value-class result across a suspension.** A suspend function whose
-  declared result is a value class `X` over a non-null reference returns the carrier where it does
-  not suspend (`IrValueClassSuspendResult::Carrier`). Its continuation hands the value to its
-  completion typed `Any?`, so `invokeSuspend` boxes it after the `COROUTINE_SUSPENDED` check
+  declared result is a non-null value class `X` returns the carrier where it does not suspend when
+  that carrier is a reference, a nullable reference included (`Result<String>`, `X(val v: Any?)`,
+  `IrValueClassSuspendResult::Carrier`). `X(null)` is that carrier's null; the result type is not
+  itself nullable, so the two are not confused. Its continuation hands the value to its completion
+  typed `Any?`, so `invokeSuspend` boxes it after the `COROUTINE_SUSPENDED` check
   (`dup; getCOROUTINE_SUSPENDED; if_acmpne; areturn; checkcast carrier; X.box-impl; areturn`, a
   nullable carrier keeping `null`). A caller resumed with the value therefore unboxes it
-  (`checkcast X; unbox-impl`), and it cannot hand its own continuation to such a call: kotlinc builds
-  a state machine for `suspend fun test() = bar().s` and for `suspend fun g(): X = bar()`. A scalar
-  or null-capable carrier crosses as the box on both paths (`Boxed`). Following kotlinc's
+  (`checkcast X; unbox-impl`), and the fast path uses the carrier the call returned, skipping that
+  unbox. It cannot hand its own continuation to such a call: kotlinc builds a state machine for
+  `suspend fun test() = bar().s` and for `suspend fun g(): X = bar()`. A scalar carrier crosses as
+  the box on both paths (`Boxed`), and so does a nullable result whose ordinary erasure is the box
+  (`Result<String>?`, `X(val v: Int)?`). A nullable result over a non-null reference (`Name?`)
+  keeps the carrier, null included. Following kotlinc's
   `originalReturnTypeOfSuspendFunctionReturningUnboxedInlineClass`, a suspend override also returns
   the box when a declaration it overrides, in this module or a dependency, returns another
   classifier, a type parameter included (`override suspend fun generic(): X` over
