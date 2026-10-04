@@ -9457,7 +9457,28 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `O$o2$1`, `O$loc$L`, `O$inLam$1$1`, `O$inLoc$lf$1`), where an ordinary class's instance is
   `this$0` passed as `$receiver`. The class's recorded enclosure is followed through lifted
   callables to the declaration it is written in, and the backend spells the capture with the rule
-  a lambda class uses. Tests:
+  a lambda class uses. A value-class member's or accessor's own extension receiver is likewise a
+  parameter of its static (`$this$mext`), so a lambda class, suspend lambda, anonymous object or
+  local class written there captures it as a value: its field and its constructor parameter are
+  both `$this_mext` (`W$mext$1`, `W$pe$1`, `W$msus$1`, `W$mo$1`, `W$extObj$1`, `W$mlc$LL`), where
+  an ordinary class's member extension (`Plain$pext$1`) and a local extension function
+  (`W$m$loc$1`), which is lifted rather than lowered to a static, still pass it as `$receiver`.
+  Checked FIR and common IR record whether a captured extension receiver belongs to a local
+  function or to the declaration itself (`CapturedCallableOwner`); the resolver marks a local
+  function's receiver declaration while it checks that function. A suspend lambda's class is no
+  source class, so an object it declares (`W$su$1$1`) captures what the lambda captured, `$arg0`:
+  the backend follows the lambda class's enclosure to the declaration it is written in. With
+  `-java-parameters` a suspend lambda's class reflects its constructor's captures (synthetic,
+  under their field names) and `$completion`, `create`'s `value` and `$completion`, and the
+  typed `invoke`'s `p1`, `p2`, … (the overridden `FunctionN.invoke`'s parameters, the
+  continuation included), like kotlinc. The class's realization records each member's parameter
+  identities (each capture's own captured identity, the completion, `create`'s value, the
+  `FunctionN.invoke` values by ordinal); the `LocalVariableTable` and `MethodParameters` each
+  format that record, never the other's rows or a descriptor position, and a record that does not
+  match the descriptor's arity is an internal error. Not yet matched: an object or lambda written in a
+  method of a local class or object inside a value-class member (`W$inObj$1$get$o$1`,
+  `W$inObjLam$1$get$f$1`), which kotlinc gives the static's `$arg0` value. Tests:
+  `src/jvm/suspend/cps/member_parameters.rs`,
   `tests/value_class_receiver_capture_debug_names_e2e.rs`,
   `tests/value_class_mangled_lambda_names_e2e.rs`, `tests/java_parameters_attribute_e2e.rs`.
 - **A value-class default of a primary constructor is lowered like the constructor's other code.**

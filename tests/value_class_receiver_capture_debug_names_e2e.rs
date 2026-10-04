@@ -305,3 +305,91 @@ fn a_value_class_anonymous_object_stores_its_captured_receiver_like_kotlinc() {
         );
     }
 }
+
+/// kotlinc lowers a value class's member or accessor to a static before it lifts what the
+/// declaration contains, so the declaration's own extension receiver is an ordinary parameter of
+/// that static, `$this$mext`, which a lambda, suspend lambda, anonymous object or local class
+/// captures like any value: its field and constructor parameter are both `$this_mext`, where an
+/// ordinary class's member extension passes its field as `$receiver`. A local extension function is
+/// lifted, not lowered to a static, so its receiver stays a receiver, passed as `$receiver`. A
+/// suspend lambda is no source class: an object it declares captures what the lambda captured, the
+/// value-class static's `$arg0`.
+const MEMBER_EXTENSIONS: &str = "interface Box { fun get(): Any }\n\
+    class Two(val first: Any, val second: Any)\n\
+    @JvmInline value class Tag(val s: String)\n\
+    @JvmInline value class W(val s: String) {\n\
+    \x20   fun Tag.mext(): () -> W = { W(this.s + this@W.s) }\n\
+    \x20   val Tag.pe: () -> W get() = { W(this.s + this@W.s) }\n\
+    \x20   fun Tag.msus(): suspend () -> Two = { Two(this, this@W) }\n\
+    \x20   fun Tag.mo(): Box = object : Box { override fun get(): Any = this@mo }\n\
+    \x20   val Tag.extObj: Box get() = object : Box { override fun get(): Any = this@extObj }\n\
+    \x20   fun Tag.mlc(): Box {\n\
+    \x20       class LL : Box { override fun get(): Any = this@mlc }\n\
+    \x20       return LL()\n\
+    \x20   }\n\
+    \x20   fun Tag.inLoc(): Box {\n\
+    \x20       fun lf(): Box = object : Box { override fun get(): Any = this@inLoc }\n\
+    \x20       return lf()\n\
+    \x20   }\n\
+    \x20   fun m(): Any {\n\
+    \x20       fun Tag.loc(): () -> W = { W(this.s + this@W.s) }\n\
+    \x20       return Tag(\"\").loc()\n\
+    \x20   }\n\
+    \x20   fun su(): suspend () -> Box = { object : Box { override fun get(): Any = this@W } }\n\
+    \x20   fun Tag.esu(): suspend () -> Box = { object : Box { override fun get(): Any = this@esu } }\n\
+    }\n\
+    class Plain(val s: String) {\n\
+    \x20   fun Tag.pext(): () -> W = { W(this.s + this@Plain.s) }\n\
+    \x20   fun Tag.po(): Box = object : Box { override fun get(): Any = this@po }\n\
+    }\n";
+
+#[test]
+fn a_value_class_member_extension_receiver_capture_is_a_captured_value_like_kotlinc() {
+    let classes =
+        common::classes_against_kotlinc_module(&[("MemberExtensions.kt", MEMBER_EXTENSIONS)]);
+    for class in [
+        "W$mext$1",
+        "W$pe$1",
+        "W$mo$1",
+        "W$extObj$1",
+        "W$mlc$LL",
+        "W$inLoc$lf$1",
+        "W$m$loc$1",
+        "Plain$pext$1",
+        "Plain$po$1",
+    ] {
+        let (reference, krusty) = classes.class_listing(class);
+        assert_eq!(
+            krusty, reference,
+            "{class}: kotlinc's fields, code, debug tables and enclosing method"
+        );
+    }
+    // A suspend lambda's annotations are laid out from its own pool, and krusty orders the
+    // `InnerClasses` rows of an object declared in one apart from kotlinc; those classes are
+    // compared by their members and their constructor: the fields it stores and their
+    // local-variable rows.
+    for (class, constructor) in [
+        (
+            "W$msus$1",
+            "W$msus$1(java.lang.String, java.lang.String, kotlin.coroutines.Continuation<? super W$msus$1>);",
+        ),
+        ("W$su$1$1", "W$su$1$1(java.lang.String);"),
+        ("W$esu$1$1", "W$esu$1$1(java.lang.String);"),
+    ] {
+        let reference = classes
+            .reference
+            .get(class)
+            .unwrap_or_else(|| panic!("kotlinc writes {class}"));
+        let krusty = classes
+            .krusty
+            .get(class)
+            .unwrap_or_else(|| panic!("krusty writes {class}"));
+        assert_eq!(
+            common::member_table(krusty),
+            common::member_table(reference),
+            "{class}: kotlinc's fields and methods"
+        );
+        let (reference, krusty) = classes.method_listing(class, constructor);
+        assert_eq!(krusty, reference, "{class}: {constructor}");
+    }
+}

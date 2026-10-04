@@ -12,7 +12,7 @@ use super::{
 };
 use crate::ast::{DeclId, ExprId, File, StmtId};
 use crate::diag::Span;
-use crate::fir::FirCapturedReceiver;
+use crate::fir::{CapturedCallableOwner, FirCapturedReceiver};
 use crate::types::{CapturedContextKind, Ty};
 use std::collections::HashMap;
 
@@ -142,7 +142,15 @@ impl Checker<'_> {
             .find(|(_, candidate)| *candidate == declaration)
             .expect("an extension callable's receiver is labeled while its body is checked");
         let (label, _, _, _) = &self.this_labels[*index];
-        FirCapturedReceiver::Callable(label.clone().into_boxed_str())
+        let owner = if self.local_function_receivers.contains(&declaration) {
+            CapturedCallableOwner::LocalFunction
+        } else {
+            CapturedCallableOwner::Declaration
+        };
+        FirCapturedReceiver::Callable {
+            label: label.clone().into_boxed_str(),
+            owner,
+        }
     }
 }
 
