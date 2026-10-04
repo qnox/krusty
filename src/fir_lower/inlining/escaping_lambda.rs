@@ -400,6 +400,7 @@ fn remap_provenance(
                 },
             ),
         crate::ir::IrDebugLocalProvenance::InlineValue { .. }
+        | crate::ir::IrDebugLocalProvenance::InlineLambdaParameter { .. }
         | crate::ir::IrDebugLocalProvenance::FunctionFrameMarker => None,
     }
 }

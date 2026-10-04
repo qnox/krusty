@@ -1185,6 +1185,11 @@ mod tests {
             method: 15,
         });
         member.inline_body_plan = Some(Box::new(InlineBodyPlan::InvokeLambda {
+            frame: crate::libraries::InlineBodyFrame {
+                callee: "run".into(),
+                inline_only: true,
+                source: None,
+            },
             lambda_parameter: 0,
             arguments: Vec::new(),
             prologue: Vec::new(),

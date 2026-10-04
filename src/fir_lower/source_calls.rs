@@ -15,7 +15,7 @@ use crate::types::{Ty, TypeName};
 use super::checked_arguments::{
     materialize_checked_arguments, CheckedArgumentSlot, CheckedArgumentValue,
 };
-use super::inline_body::ExternalInlineCallRequest;
+use super::inline_body::{ExternalCollectionTransformPlan, ExternalInlineCallRequest};
 use super::{BodyLowering, FirLoweringFailure};
 
 #[derive(Clone, Copy)]
@@ -112,6 +112,9 @@ pub(super) struct ExternalCallRequest<'a> {
     pub(super) dispatch_class: Option<TypeName>,
     pub(super) extension_receiver: Option<ExprId>,
     pub(super) arguments: &'a [IrCheckedArgument],
+    /// Source line of the call, when the lowering site carries one. An inline-body expansion
+    /// attributes its frame to it; an ordinary dependency call does not consume it.
+    pub(super) source_line: Option<u32>,
 }
 
 pub(super) struct ModuleConstructorRequest<'a> {
@@ -380,6 +383,7 @@ impl BodyLowering<'_> {
             dispatch_class,
             extension_receiver,
             arguments,
+            source_line,
         } = request;
         // Preserve the checked SOURCE receiver across dependency realization. An extension records
         // its declaration receiver (a generic `T` deliberately records nothing); a member records
@@ -404,6 +408,7 @@ impl BodyLowering<'_> {
                 dispatch_receiver,
                 extension_receiver,
                 arguments,
+                source_line,
             })?;
             self.ir.inline_regions.insert(expanded);
             return Some(expanded);
@@ -495,24 +500,26 @@ impl BodyLowering<'_> {
     /// The checker attaches this plan only when the selected argument is a source lambda whose
     /// body suspends. Common lowering consumes that decision without inspecting callable or body
     /// semantics again.
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn external_inline_collection_transform(
         &mut self,
-        lambda_parameter: u32,
-        local_names: &crate::fir::FirInlineCollectionLocalNames,
-        traversal: &crate::fir::FirInlineIterationTraversal,
-        factory: ExternalCallableId,
-        factory_classifier: crate::types::TypeName,
-        factory_parameters: &[ResolvedTy],
-        capacity: Option<&crate::fir::FirInlineCollectionCapacity>,
-        append: &crate::fir::FirInlineCollectionAppend,
-        accumulator_ty: ResolvedTy,
+        plan: ExternalCollectionTransformPlan<'_>,
         receiver_ty: Option<ResolvedTy>,
         parameter_types: &[Ty],
         dispatch_receiver: Option<ExprId>,
         extension_receiver: Option<ExprId>,
         arguments: &[IrCheckedArgument],
     ) -> Option<ExprId> {
+        let ExternalCollectionTransformPlan {
+            lambda_parameter,
+            local_names,
+            traversal,
+            factory,
+            factory_classifier,
+            factory_parameters,
+            capacity,
+            append,
+            accumulator_ty,
+        } = plan;
         let (mut statements, receiver, args, defaults) =
             self.selected_semantic_operands(SelectedOperandRequest {
                 receiver_ty,

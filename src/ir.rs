@@ -1569,6 +1569,18 @@ pub struct IrSpecializedAnonymousClass {
     pub property_count: u32,
 }
 
+/// A line of an external inline declaration's own body, attributed at a lowered expression: the
+/// dependency's source file and the path its lines map under, the line there, and the call-site
+/// line the expansion answers to. A target maps it through the class's source map (the JVM
+/// records a JSR-045 range) rather than writing the raw number.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IrExternalFrameLine {
+    pub file: Box<str>,
+    pub path: Box<str>,
+    pub line: u32,
+    pub call_line: u32,
+}
+
 /// One lowered source file (`IrFile`) — its arenas. Index-based, bulk-freeable.
 #[derive(Default)]
 pub struct IrFile {
@@ -2044,6 +2056,25 @@ pub struct IrFile {
     /// for evaluation order. This is provenance, not a storage decision; a backend decides how
     /// that role participates in its own frame or register allocation.
     pub call_operand_bindings: std::collections::HashSet<ExprId>,
+    /// Inline lambda-argument markers whose store takes the target's synthetic inline line rather
+    /// than a source line. Common lowering flags the marker of an `@InlineOnly` expansion whose
+    /// lambda body starts on the call's own line; a target maps it to its synthetic-line
+    /// convention (the JVM records `fake.kt:1` in the class's source map).
+    pub inline_synthetic_lines: std::collections::HashSet<ExprId>,
+    /// Expressions that realize a call of an external inline function from its declaration plan
+    /// (the checked inline-body contract), as opposed to a same-module splice. kotlinc's inliner
+    /// owns the debug surface around such an expansion: it spills a pending operand-stack value
+    /// across it and resets the line in effect when it ends, so the enclosing call's line is
+    /// marked again at the next instruction.
+    pub external_inline_expansions: std::collections::HashSet<ExprId>,
+    /// Expressions whose line mark is a line of an external inline declaration's own body: the
+    /// frame's set-up statements (an iteration's loop prelude) and the close of a spliced lambda
+    /// frame. A target maps the line through the class's source map under the expanding call
+    /// rather than writing the raw number.
+    pub external_frame_lines: std::collections::HashMap<ExprId, IrExternalFrameLine>,
+    /// Blocks whose close ends an external inline declaration's frame: the frame's closing line
+    /// is marked on a `nop` before the frame's locals close, so their ranges extend past it.
+    pub external_frame_closes: std::collections::HashMap<ExprId, IrExternalFrameLine>,
     /// Function ids declared `operator` — `@Metadata` `Function.flags` bit 8, so a consumer admits
     /// the conventional call form (`recv(args)`, `a[i]`); the JVM method carries no such bit.
     pub operator_fns: std::collections::HashSet<u32>,

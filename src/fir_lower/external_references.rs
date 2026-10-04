@@ -193,6 +193,7 @@ impl BodyLowering<'_> {
                 .flatten(),
             extension_receiver,
             arguments: &arguments,
+            source_line: None,
         });
         self.next_temporary = enclosing_temporary;
         let call = call.ok_or(FirLoweringFailure::UnsupportedExternalCallableReference(

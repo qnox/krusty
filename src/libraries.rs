@@ -48,9 +48,10 @@ pub use compiler_intrinsic::CompilerIntrinsic;
 pub(crate) use core_builtins::add_core_builtin_declarations;
 pub use generic_signature::{GenericReturnPolicy, GenericSig};
 pub use inline_body::{
-    InlineBodyCall, InlineBodyCallReceiver, InlineBodyDefault, InlineBodyPlan, InlineBodyRecovery,
-    InlineBodyValue, InlineCollectionAppend, InlineCollectionCapacity, InlineCollectionLocalNames,
-    InlineIterationIndex, InlineIterationTraversal,
+    InlineBodyCall, InlineBodyCallReceiver, InlineBodyDefault, InlineBodyFrame, InlineBodyPlan,
+    InlineBodyRecovery, InlineBodySource, InlineBodyValue, InlineCollectionAppend,
+    InlineCollectionCapacity, InlineCollectionLocalNames, InlineIterationIndex,
+    InlineIterationTraversal,
 };
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};

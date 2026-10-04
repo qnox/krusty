@@ -30,11 +30,15 @@ impl Emitter<'_> {
         let terminal_target = self.terminal_statement_target.take();
         let marked_initializer = self.renders_initializer_boundary(block);
         self.mark_initializer_line(block, false, code);
-        self.emit_open_block(stmts, value, terminal_target, code);
+        let discard_after_close = self.emit_open_block(stmts, value, terminal_target, code);
         self.mark_initializer_line(block, true, code);
         if !self.ir.callable_scopes.contains(&block) {
+            self.close_external_inline_frame(block, code);
             self.close_scope_locals(code, marked_initializer);
             self.close_spliced_lambda_frame(block, code);
+        }
+        if let Some(discarded) = discard_after_close {
+            super::discard(self.value_ty(discarded), code);
         }
         self.block_depth -= 1;
         self.restore_slot_scope(saved);
@@ -79,12 +83,32 @@ impl Emitter<'_> {
         // A callable's own scope is its body. A value-returning lambda keeps those locals
         // open through the return, the same way a statement-position callable scope does.
         if !self.ir.callable_scopes.contains(&block) {
+            self.close_external_inline_frame(block, code);
             self.close_scope_locals(code, false);
         }
         self.close_spliced_lambda_frame(block, code);
         self.block_depth -= 1;
         self.restore_slot_scope(saved);
         self.statement_line = enclosing_statement_line;
+    }
+
+    /// Close the frame of an external inline declaration whose body lines map through the class's
+    /// source map: the frame's closing line on a `nop`, the way kotlinc's inliner ends the inline
+    /// interval. It runs before the frame's locals close so their ranges extend past the `nop`,
+    /// and after the expansion's last instruction so a loop exiting the frame lands on it.
+    fn close_external_inline_frame(&mut self, block: u32, code: &mut CodeBuilder) {
+        let Some(frame) = self.ir.external_frame_closes.get(&block).cloned() else {
+            return;
+        };
+        if code.is_dead() {
+            return;
+        }
+        // The expansion ran under the dependency's own lines: reset the line in effect so the
+        // closing mark is written even where it repeats the last one, as after an inlined body.
+        code.forget_line();
+        let line = self.map_external_frame_line(&frame);
+        code.mark_line(line);
+        code.nop();
     }
 
     /// Close the frame of a lambda body spliced into an inline call, once its locals are closed.
@@ -107,6 +131,9 @@ impl Emitter<'_> {
             return;
         }
         if let Some(&line) = self.ir.expr_source_lines.get(&block) {
+            // The spliced body ran under its own lines: kotlinc resets the line in effect after an
+            // inlined body, so the frame's closing mark is written even when it names that line.
+            code.forget_line();
             self.mark_expression_line(block, line, code);
         }
         code.nop();
@@ -115,17 +142,34 @@ impl Emitter<'_> {
     /// Emit one IR block while leaving its lexical slot scope open. The ordinary `Block` arm closes
     /// it immediately; a post-test loop closes it only after emitting the bottom condition, whose
     /// Kotlin scope includes declarations from the body.
+    ///
+    /// When the block opens a spliced lambda frame and its trailing value is a plain local read
+    /// (an inlined callee's `return this`), the read is left on the stack and its expression is
+    /// returned instead of being discarded here: the caller pops it once the frame's closing `nop`
+    /// stands between the read and the `pop`. kotlinc's inliner emits that read mechanically and
+    /// the padding it puts around the inline interval keeps the pair apart until after temporary
+    /// elimination — the second read is what keeps the callee's receiver local alive — and the
+    /// pop-backward step removes both.
     pub(super) fn emit_open_block(
         &mut self,
         stmts: Vec<u32>,
         value: Option<u32>,
         terminal_target: Option<Label>,
         code: &mut CodeBuilder,
-    ) {
+    ) -> Option<u32> {
         let enclosing_statement_line = self.statement_line;
         self.block_depth += 1;
         let mut dead = false;
         let last_statement = stmts.len().checked_sub(1);
+        let opens_lambda_frame = value.is_some_and(|value| {
+            matches!(self.ir.expr(value), IrExpr::GetValue(_))
+                && stmts.iter().any(|&statement| {
+                    matches!(
+                        self.ir.debug_local_provenance(statement),
+                        Some(IrDebugLocalProvenance::LambdaFrameMarker { .. })
+                    )
+                })
+        });
         self.note_inlined_only_cells(&stmts, value);
         for (index, statement) in stmts.into_iter().enumerate() {
             self.mark_statement_line(statement, code);
@@ -140,10 +184,16 @@ impl Emitter<'_> {
             }
             code.set_stack(base.max(0) as u16);
         }
+        let mut discard_after_frame_close = None;
         if !dead {
             if let Some(value) = value {
                 self.mark_statement_line(value, code);
-                self.emit_discarding(value, code);
+                if opens_lambda_frame {
+                    self.emit_value(value, code);
+                    discard_after_frame_close = Some(value);
+                } else {
+                    self.emit_discarding(value, code);
+                }
             }
         }
         self.terminal_statement_target = None;
@@ -151,6 +201,7 @@ impl Emitter<'_> {
         // Once it closes, an instruction consuming the block's value belongs to that enclosing
         // statement, not to the last branch/statement visited inside the block.
         self.statement_line = enclosing_statement_line;
+        discard_after_frame_close
     }
 
     pub(super) fn mark_statement_line(&mut self, statement: u32, code: &mut CodeBuilder) {
@@ -183,7 +234,8 @@ impl Emitter<'_> {
                     .explicit_end
                     .unwrap_or(end)
                     .saturating_sub(local.start);
-                local.record(Some(length), code);
+                let inline = local.record(Some(length), code, self.recorded_inline_entries);
+                self.recorded_inline_entries += usize::from(inline);
             } else {
                 i += 1;
             }
@@ -246,20 +298,35 @@ pub(super) struct OpenLocal {
     /// have been evaluated, rather than at its individual store.
     pub(super) inline_operand: bool,
     /// Where in the table the entry goes when it must precede entries recorded after it opened,
-    /// rather than follow them.
-    pub(super) table_position: Option<usize>,
+    /// rather than follow them: the table size and the number of inline-frame entries recorded
+    /// when it opened. The final position also counts the inline-frame entries recorded since —
+    /// a nested expansion's locals visit ahead of the marker of the frame that contains them —
+    /// while the frame's own plain locals still follow their marker.
+    pub(super) table_position: Option<(usize, usize)>,
+    /// Whether this entry belongs to an inline frame (a marker, an operand, or a copied local):
+    /// it counts toward where an enclosing frame's marker lands.
+    pub(super) inline_frame_entry: bool,
     /// Where the range ends when that is before its block does: a `do…while` body's local that the
     /// condition does not read ends where the condition starts.
     pub(super) explicit_end: Option<u16>,
 }
 
 impl OpenLocal {
-    /// Record the closed range in the method's `LocalVariableTable`.
-    pub(super) fn record(self, length: Option<u16>, code: &mut CodeBuilder) {
+    /// Record the closed range in the method's `LocalVariableTable`; `inline_entries` is how many
+    /// inline-frame entries the table already holds. Returns whether this entry is one itself.
+    pub(super) fn record(
+        self,
+        length: Option<u16>,
+        code: &mut CodeBuilder,
+        inline_entries: usize,
+    ) -> bool {
         let entry = (self.start, length, self.slot, self.name, self.descriptor);
         match self.table_position {
-            Some(position) => code.insert_local_entry(position, entry),
+            Some((entries, open_inline)) => {
+                code.insert_local_entry(entries + (inline_entries - open_inline), entry)
+            }
             None => code.add_local_entry(entry.0, entry.1, entry.2, &entry.3, &entry.4),
         }
+        self.inline_frame_entry
     }
 }

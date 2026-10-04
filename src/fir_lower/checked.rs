@@ -659,6 +659,7 @@ impl BodyLowering<'_> {
                     dispatch_class,
                     extension_receiver,
                     arguments: &arguments,
+                    source_line: Some(source_line),
                 })
                 .ok_or(FirLoweringFailure::UnsupportedExternalCall(*declaration))
             }
