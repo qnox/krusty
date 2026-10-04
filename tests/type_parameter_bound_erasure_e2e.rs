@@ -125,8 +125,8 @@ fn a_method_type_parameter_erases_through_its_class_bound() {
             (
                 "isEqualTo",
                 vec![
-                    "(Ljava/lang/Object;)Lapp/GraphQlTester$Entity;".to_string(),
                     "(Ljava/lang/Object;)Lapp/EntityImpl;".to_string(),
+                    "(Ljava/lang/Object;)Lapp/GraphQlTester$Entity;".to_string(),
                 ],
             ),
         ),
