@@ -3656,6 +3656,14 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         let (property, mut candidates, inaccessible) = match candidates {
             Ok(candidates) => candidates,
             Err(_failure) if unbound => {
+                if let Some(diagnostic) = self.prohibited_member_extension_reference(
+                    scope,
+                    receiver.get(),
+                    origin,
+                    spelling,
+                ) {
+                    return Err(diagnostic);
+                }
                 return Err(self.record_unresolved_reference(scope.owner, origin, spelling));
             }
             Err(failure) => return Err(failure),

@@ -473,6 +473,44 @@ impl ProductionSignatureSemantics<'_> {
             arguments,
         )
     }
+
+    /// A member extension is in scope for this unbound reference. The reference resolves, and
+    /// Kotlin prohibits it; reporting the name as unresolved would hide that diagnostic.
+    pub(super) fn prohibited_member_extension_reference(
+        &self,
+        scope: crate::fir::SignatureScope,
+        extension_receiver: Ty,
+        origin: crate::fir::OriginId,
+        name: &str,
+    ) -> Option<crate::fir::DiagnosticId> {
+        let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
+        let source = crate::symbol_source::CompositeSource::new(vec![
+            &module as &dyn crate::symbol_source::SymbolSource,
+            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
+        ]);
+        let receivers = self
+            .signature_dispatch_receivers(scope)
+            .into_iter()
+            .map(super::super::ImplicitReceiver::signature_receiver)
+            .collect::<Vec<_>>();
+        if super::super::member_extension_function_shapes_in(
+            &source,
+            &receivers,
+            extension_receiver,
+            name,
+        )
+        .is_empty()
+        {
+            return None;
+        }
+        Some(self.record_source_diagnostic(
+            scope.owner,
+            origin,
+            format!(
+                "'{name}' is a member and an extension at the same time. References to such elements are prohibited."
+            ),
+        ))
+    }
 }
 
 struct SignatureMemberSite<'site, 'data> {
