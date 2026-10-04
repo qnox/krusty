@@ -494,6 +494,9 @@ pub enum ExternalCallableKind {
 pub struct ExternalCallableRealization {
     pub callable: LibraryCallable,
     pub kind: ExternalCallableKind,
+    /// Provider-published semantic identities in the callable's physical source-parameter order.
+    /// A backend formats these for debug/metadata surfaces; it never reconstructs them from arity.
+    pub parameter_identities: Box<[crate::fir::ResolvedParameterIdentity]>,
 }
 
 /// A provider's realization of one normalized Kotlin property. FIR carries only its opaque

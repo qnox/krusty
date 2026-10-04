@@ -3282,9 +3282,53 @@ impl JvmLibraries {
                 super::mapped_builtin_declarations::MappedBuiltinMemberKind::Property,
             )
             .into_boxed_slice();
+        let mut getter_parameter_identities = property.context_parameter_identities.clone();
+        let extension = matches!(
+            property.kind,
+            PropKind::Extension | PropKind::MemberExtension
+        );
+        if extension && property.getter.params.len() == getter_parameter_identities.len() + 1 {
+            getter_parameter_identities.insert(
+                property.context_count,
+                crate::fir::ResolvedParameterIdentity::ExtensionReceiver,
+            );
+        }
+        assert_eq!(
+            property.getter.params.len(),
+            getter_parameter_identities.len(),
+            "a normalized dependency property getter publishes every parameter identity"
+        );
         self.register_external_callable(&mut property.getter, kind);
+        if let Some(identity) = property.getter.external_identity {
+            self.cp.publish_external_callable_parameter_identities(
+                identity,
+                getter_parameter_identities.into_boxed_slice(),
+            );
+        }
         if let Some(setter) = &mut property.setter {
+            let mut setter_parameter_identities = property.context_parameter_identities.clone();
+            if extension && setter.params.len() == setter_parameter_identities.len() + 2 {
+                setter_parameter_identities.insert(
+                    property.context_count,
+                    crate::fir::ResolvedParameterIdentity::ExtensionReceiver,
+                );
+            }
+            setter_parameter_identities.push(property.setter_parameter_name.as_deref().map_or(
+                crate::fir::ResolvedParameterIdentity::PropertySetterValue,
+                |name| crate::fir::ResolvedParameterIdentity::Source(name.into()),
+            ));
+            assert_eq!(
+                setter.params.len(),
+                setter_parameter_identities.len(),
+                "a normalized dependency property setter publishes every parameter identity"
+            );
             self.register_external_callable(setter, kind);
+            if let Some(identity) = setter.external_identity {
+                self.cp.publish_external_callable_parameter_identities(
+                    identity,
+                    setter_parameter_identities.into_boxed_slice(),
+                );
+            }
         }
         let Some(getter) = property.getter.external_identity else {
             return;
@@ -3316,7 +3360,30 @@ impl JvmLibraries {
                 .inline_modifiers
                 .clone()
                 .into_boxed_slice();
+            let parameter_identities = (function.visibility
+                == crate::types::Visibility::Protected)
+                .then(|| {
+                    function
+                        .call_sig
+                        .physical_parameter_identities(
+                            function.callable.params.len(),
+                            function.context_count,
+                            (function.is_extension()
+                                && function.callable.params.len()
+                                    == function.call_sig.parameter_identities.len() + 1)
+                                .then_some(function.context_count),
+                        )
+                        .expect(
+                            "a normalized protected dependency function publishes every parameter identity",
+                        )
+                });
             self.register_external_callable(&mut function.callable, function.kind);
+            if let (Some(identity), Some(parameter_identities)) =
+                (function.callable.external_identity, parameter_identities)
+            {
+                self.cp
+                    .publish_external_callable_parameter_identities(identity, parameter_identities);
+            }
         }
         for property in &mut properties.overloads {
             self.register_external_property(property);

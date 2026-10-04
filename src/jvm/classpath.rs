@@ -1916,6 +1916,7 @@ impl Classpath {
         callables.push(ExternalCallableRealization {
             callable: stored,
             kind,
+            parameter_identities: Box::new([]),
         });
         self.external_callable_ids
             .borrow_mut()
@@ -2028,6 +2029,24 @@ impl Classpath {
         }
         if stored.callable.inline_modifiers.is_empty() && !callable.inline_modifiers.is_empty() {
             stored.callable.inline_modifiers = callable.inline_modifiers.clone();
+        }
+    }
+
+    /// Attach the declaration's exact physical parameter identities after callable selection has
+    /// normalized context and extension-receiver slots. The physical callable identity may be
+    /// interned before its complete source facet is decoded, so this enriches that same identity;
+    /// it never searches by spelling.
+    pub(crate) fn publish_external_callable_parameter_identities(
+        &self,
+        identity: crate::fir::ExternalCallableId,
+        identities: Box<[crate::fir::ResolvedParameterIdentity]>,
+    ) {
+        let mut callables = self.external_callables.borrow_mut();
+        let Some(stored) = callables.get_mut(identity.raw() as usize) else {
+            return;
+        };
+        if stored.parameter_identities.is_empty() {
+            stored.parameter_identities = identities;
         }
     }
 

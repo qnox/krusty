@@ -561,9 +561,6 @@ pub(super) fn cross_owner_member_calls(
                                 .iter()
                                 .map(jvm_declared_ty)
                                 .collect::<Vec<_>>();
-                            let parameter_names = (0..parameters.len())
-                                .map(|index| Some(format!("p{index}")))
-                                .collect();
                             protected.insert(
                                 expression,
                                 ProtectedMemberAccessBridge {
@@ -572,7 +569,7 @@ pub(super) fn cross_owner_member_calls(
                                     target_parameters: parameters.clone(),
                                     bridge_parameters: parameters,
                                     result: jvm_declared_ty(&dependency.result),
-                                    parameter_names,
+                                    parameter_names: dependency.parameter_names.into_vec(),
                                 },
                             );
                         }

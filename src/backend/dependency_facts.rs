@@ -48,6 +48,9 @@ pub struct BackendCallableFact {
     pub member_realization: MemberRealization,
     pub params: Vec<Ty>,
     pub physical_params: Vec<Ty>,
+    /// Exact identities parallel to `physical_params`, published by the selected declaration's
+    /// provider. A backend may format them but must not invent positional names from arity.
+    pub parameter_identities: Box<[crate::fir::ResolvedParameterIdentity]>,
     /// Exact physical slot roles published by the provider while it aligned metadata with the
     /// classfile declaration. Backends consume this frozen plan; they do not reconstruct roles
     /// from arity or descriptor spelling.
@@ -208,6 +211,7 @@ impl CheckedBackendCallables {
             Entry::Vacant(slot) => {
                 let realization =
                     provider(identity).ok_or(DependencyFactError::UnknownCallable(identity))?;
+                let parameter_identities = realization.parameter_identities;
                 let callable = realization.callable;
                 slot.insert(BackendCallableFact {
                     name: callable.name,
@@ -222,6 +226,7 @@ impl CheckedBackendCallables {
                     member_realization: callable.member_realization,
                     params: callable.params,
                     physical_params: callable.physical_params,
+                    parameter_identities,
                     physical_parameter_plan: callable.physical_parameter_plan,
                     physical_ret: callable.physical_ret,
                     descriptor: callable.descriptor,

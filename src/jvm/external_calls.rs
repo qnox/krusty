@@ -1373,6 +1373,12 @@ fn record_protected_dependency_call(
             owner: callable.physical_owner,
             name: name.clone(),
             parameters: callable.physical_params.clone().into_boxed_slice(),
+            parameter_names: crate::jvm::parameter_names::dependency_access_bridge_local_variables(
+                &callable.parameter_identities,
+                &callable.params,
+                name,
+            )
+            .into_boxed_slice(),
             result: callable.physical_ret,
         },
     );

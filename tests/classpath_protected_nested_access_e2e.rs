@@ -48,6 +48,19 @@ const SAME: &str = "class Same : Near() {\n\
 \n\
 fun box(): String = Same().go()\n";
 
+const KOTLIN_BASE: &str = "package namedlib\n\
+open class NamedBase {\n\
+    protected fun step(named: Int): String = named.toString()\n\
+}\n";
+
+const NAMED_HOST: &str = "import namedlib.NamedBase\n\
+class NamedHost : NamedBase() {\n\
+    fun go(): String {\n\
+        val probe = object { fun read(): String = step(1) }\n\
+        return probe.read()\n\
+    }\n\
+}\n";
+
 fn instructions(
     comparison: &common::ReferenceComparison,
     marker: &str,
@@ -140,4 +153,18 @@ fn a_same_package_nested_class_calls_a_protected_member_directly() {
         common::expect_box_run(SAME, "Same", &classpath, Some(jdk.as_path())),
         "OK"
     );
+}
+
+#[test]
+fn a_dependency_parameter_identity_names_the_synthetic_access_bridge_local() {
+    let classes = common::classes_against_kotlinc_lib_target(
+        "NamedHost",
+        &[("NamedBase.kt", KOTLIN_BASE)],
+        NAMED_HOST,
+        Some(8),
+    )
+    .expect("the Kotlin dependency and both consumers compile");
+    let declaration = "public static final java.lang.String access$step(NamedHost, int);";
+    let (reference, krusty) = classes.method_listing("NamedHost", declaration);
+    assert_eq!(krusty, reference, "{declaration}");
 }

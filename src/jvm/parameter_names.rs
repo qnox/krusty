@@ -592,6 +592,30 @@ pub(super) fn resolved_local_variables(
         .collect()
 }
 
+/// Local-variable spellings for a synthetic accessor to one dependency declaration. Source and
+/// context identities keep their declaration spelling. An unnamed Java parameter takes its
+/// provider-published ordinal (`p0`, ...), and an extension receiver uses the accessor convention
+/// rather than the target method's `$this$<name>` spelling.
+pub(super) fn dependency_access_bridge_local_variables(
+    identities: &[crate::fir::ResolvedParameterIdentity],
+    semantic_types: &[crate::types::Ty],
+    function_name: &str,
+) -> Vec<Option<String>> {
+    resolved_local_variables(identities, semantic_types, function_name)
+        .into_iter()
+        .zip(identities)
+        .map(|(name, identity)| match identity {
+            crate::fir::ResolvedParameterIdentity::Unnamed { ordinal } => {
+                Some(format!("p{ordinal}"))
+            }
+            crate::fir::ResolvedParameterIdentity::ExtensionReceiver => {
+                Some("$receiver".to_string())
+            }
+            _ => name,
+        })
+        .collect()
+}
+
 fn resolved_anonymous_context_labels(
     identities: &[crate::fir::ResolvedParameterIdentity],
     semantic_types: &[crate::types::Ty],

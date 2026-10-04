@@ -12,5 +12,6 @@ pub(crate) struct ProtectedDependencyCall {
     pub(crate) owner: TypeName,
     pub(crate) name: String,
     pub(crate) parameters: Box<[Ty]>,
+    pub(crate) parameter_names: Box<[Option<String>]>,
     pub(crate) result: Ty,
 }
