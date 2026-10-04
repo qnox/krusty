@@ -258,7 +258,7 @@ fn emit_initialization(
 
 /// A captured value's field, as the constructor and `invoke` spell it.
 struct Capture {
-    names: crate::jvm::capture_names::LambdaCaptureNames,
+    names: crate::jvm::capture_names::CaptureNames,
     ty: Ty,
     descriptor: String,
     signature: Option<String>,

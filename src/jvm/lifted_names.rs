@@ -218,6 +218,19 @@ pub(super) fn root_container_at(ir: &IrFile, root: &IrLiftingRoot) -> Option<cra
     container_function(ir, entry.container?)
 }
 
+/// The function whose body a class declared in `enclosure` is written in, through every enclosing
+/// lambda and local function, as the target realized it: the [`root_container`] of a local
+/// function or suspend lambda, else the function or accessor itself. `None` for an enclosure that
+/// is no function body.
+pub(super) fn enclosure_root(ir: &IrFile, enclosure: IrEnclosure) -> Option<crate::ir::FunId> {
+    match enclosure {
+        IrEnclosure::Function(function) => Some(root_container(ir, function).unwrap_or(function)),
+        IrEnclosure::Lambda(lambda) => root_container(ir, lambda)
+            .or_else(|| enclosure_root(ir, *ir.lambda_enclosures.get(&lambda)?)),
+        _ => container_function(ir, enclosure),
+    }
+}
+
 /// kotlinc replaces the characters a special or mangled name carries (`<init>`, `<get-x>`,
 /// `x$delegate`, `f-txdesME`) with `_`.
 fn segment_spelling(container: &str) -> String {

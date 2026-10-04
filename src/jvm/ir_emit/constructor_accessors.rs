@@ -104,14 +104,14 @@ pub(super) fn emit_accessors(ir: &IrFile, class: &IrClass, owner: &str, cw: &mut
             .collect()
     };
     for ordinal in ordinals {
-        emit_accessor(class, ordinal, owner, cw);
+        emit_accessor(ir, class, ordinal, owner, cw);
     }
 }
 
-fn emit_accessor(class: &IrClass, ordinal: u32, owner: &str, cw: &mut ClassWriter) {
+fn emit_accessor(ir: &IrFile, class: &IrClass, ordinal: u32, owner: &str, cw: &mut ClassWriter) {
     let Some(secondary) = ordinal.checked_sub(1) else {
         let parameters = class_ctor_jvm_tys(class);
-        let identities = primary_constructor_identities(class, &parameters);
+        let identities = primary_constructor_identities(ir, class, &parameters);
         emit_ctor_marker_accessor(owner, &parameters, &identities, cw);
         return;
     };
@@ -121,6 +121,7 @@ fn emit_accessor(class: &IrClass, ordinal: u32, owner: &str, cw: &mut ClassWrite
         .chain(jvm_tys(&constructor.params))
         .collect::<Vec<_>>();
     let identities = secondary_constructor_identities(
+        ir,
         class,
         constructor,
         &OwnerConstructorPrefix::none(),

@@ -240,3 +240,68 @@ fn a_value_class_lambda_class_stores_its_captured_receiver_like_kotlinc() {
         );
     }
 }
+
+/// An anonymous object or local class written in a value class is lifted with the member's static
+/// too, so the receiver it captures is that static's value: its field, constructor parameter and
+/// local-variable row are `$arg0` in a member's or accessor's `-impl`, `$tmp0` in the primary
+/// `constructor-impl` and `$tmp0_$this` in a secondary one, also through an enclosing lambda or
+/// local function. An ordinary class's instance stays `this$0`, passed as `$receiver`.
+const OBJECTS: &str = "interface Box { fun get(): Any }\n\
+    @JvmInline value class Tag(val s: String)\n\
+    @JvmInline value class O(val s: String) {\n\
+    \x20   init {\n\
+    \x20       val o = object : Box { override fun get(): Any = this@O }\n\
+    \x20       o.get()\n\
+    \x20   }\n\
+    \x20   init {\n\
+    \x20       fun li(): Any = object : Box { override fun get(): Any = this@O }\n\
+    \x20       li()\n\
+    \x20   }\n\
+    \x20   constructor(t: Tag, u: Tag) : this(u.s) {\n\
+    \x20       val o2 = object : Box { override fun get(): Any = this@O }\n\
+    \x20       o2.get()\n\
+    \x20   }\n\
+    \x20   fun m(): Box = object : Box { override fun get(): Any = this@O }\n\
+    \x20   val p: Box get() = object : Box { override fun get(): Any = this@O }\n\
+    \x20   var q: Box\n\
+    \x20       get() = object : Box { override fun get(): Any = this@O }\n\
+    \x20       set(v) { object : Box { override fun get(): Any = this@O }.get() }\n\
+    \x20   fun mx(x: Int): Box = object : Box { override fun get(): Any = this@O.s + x }\n\
+    \x20   fun loc(): Box {\n\
+    \x20       class L : Box { override fun get(): Any = this@O }\n\
+    \x20       return L()\n\
+    \x20   }\n\
+    \x20   fun inLam(): () -> Box = { object : Box { override fun get(): Any = this@O } }\n\
+    \x20   fun inLoc(): Box {\n\
+    \x20       fun lf(): Box = object : Box { override fun get(): Any = this@O }\n\
+    \x20       return lf()\n\
+    \x20   }\n\
+    }\n\
+    class Plain(val s: String) {\n\
+    \x20   fun m(): Box = object : Box { override fun get(): Any = this@Plain }\n\
+    }\n";
+
+#[test]
+fn a_value_class_anonymous_object_stores_its_captured_receiver_like_kotlinc() {
+    let classes = common::classes_against_kotlinc_module(&[("Objects.kt", OBJECTS)]);
+    for class in [
+        "O$o$1",
+        "O$li$1",
+        "O$o2$1",
+        "O$m$1",
+        "O$p$1",
+        "O$q$1",
+        "O$q$2",
+        "O$mx$1",
+        "O$loc$L",
+        "O$inLam$1$1",
+        "O$inLoc$lf$1",
+        "Plain$m$1",
+    ] {
+        let (reference, krusty) = classes.class_listing(class);
+        assert_eq!(
+            krusty, reference,
+            "{class}: kotlinc's fields, code, debug tables and enclosing method"
+        );
+    }
+}
