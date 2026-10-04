@@ -5,7 +5,10 @@
 //! the constructor's `MethodParameters` entry and its `LocalVariableTable` row the same way (`$a`).
 //! Every class-file surface that names a capture goes through this module.
 
-use crate::ir::{FunId, IrCapturedReceiver, IrClass, IrConstructorCapture, IrFile};
+use crate::ir::{
+    FunId, IrCapturedReceiver, IrClass, IrConstructorCapture, IrFile, IrLambdaCapture,
+    IrLambdaClass,
+};
 use crate::jvm::anonymous_context_labels;
 use crate::types::CapturedContextKind;
 
@@ -45,36 +48,90 @@ pub(super) fn receiver_name(receiver: &IrCapturedReceiver, dispatch: usize) -> S
 /// A lifted callable's captured implicit receiver as kotlinc spells it: the parameter's name (also a
 /// lambda class's field), and whether a lambda class's constructor takes it as `$receiver`; `None`
 /// when `function` publishes no origin for that receiver.
-///
-/// kotlinc lowers a value class's members and constructors to statics before it lifts what they
-/// declare, so the enclosing instance such a callable captures is no dispatch receiver but the
-/// value the static realizes it as, `$`-prefixed like any captured value: a member's or accessor's
-/// carrier parameter (`$arg0`), or the temporary a `constructor-impl` holds it in.
 pub(super) fn lifted_receiver(
     ir: &IrFile,
     function: FunId,
     ordinal: usize,
 ) -> Option<(String, bool)> {
     let receivers = &ir.fn_params.get(&function)?.captured_receivers;
-    let receiver = receivers.get(ordinal)?;
-    if *receiver == IrCapturedReceiver::Enclosing {
-        if let Some(value) = value_class_receiver_value(ir, function) {
-            return Some((format!("${value}"), false));
-        }
-    }
-    Some((
-        lifted_receiver_name(receivers, ordinal),
-        uses_receiver_constructor_parameter(receiver),
-    ))
+    receivers.get(ordinal)?;
+    let container = super::lifted_names::root_container(ir, function);
+    Some(realized_receiver(ir, receivers, ordinal, container))
 }
 
-/// The name of the value a value-class static realizes its receiver as, when `function` is lifted
-/// out of one. kotlinc's `JvmInlineClassLowering` passes a member's receiver as the carrier
-/// parameter it names `arg0`, and holds a constructor's in the `constructor-impl`'s first
-/// temporary: `tmp0` for the primary constructor running the `init` blocks, `tmp0_$this` after
-/// the name hint a secondary constructor gives it.
-fn value_class_receiver_value(ir: &IrFile, function: FunId) -> Option<String> {
-    let container = super::lifted_names::root_container(ir, function)?;
+/// The field a lambda class stores its capture `field` in, and the constructor parameter that
+/// passes it: `$a` for a captured value; a captured receiver spelled as [`lifted_receiver`] spells
+/// it, from the lambda's own record of the receivers and of where it was lifted from.
+pub(super) fn lambda_class_capture(
+    ir: &IrFile,
+    lambda: &IrLambdaClass,
+    field: usize,
+) -> Option<LambdaCaptureNames> {
+    Some(match lambda.captures.get(field)? {
+        IrLambdaCapture::Value(name) => {
+            let name = format!("${name}");
+            LambdaCaptureNames {
+                parameter: name.clone(),
+                field: name,
+            }
+        }
+        &IrLambdaCapture::Receiver(ordinal) => {
+            let container = lambda
+                .lifting_root
+                .as_ref()
+                .and_then(|root| super::lifted_names::root_container_at(ir, root));
+            let (field, receiver) =
+                realized_receiver(ir, &lambda.captured_receivers, ordinal as usize, container);
+            LambdaCaptureNames {
+                parameter: if receiver {
+                    "$receiver".to_string()
+                } else {
+                    field.clone()
+                },
+                field,
+            }
+        }
+    })
+}
+
+/// A lambda class capture's field name and its constructor parameter's.
+pub(super) struct LambdaCaptureNames {
+    pub(super) field: String,
+    pub(super) parameter: String,
+}
+
+/// Receiver `ordinal` of `receivers`, captured by a callable lifted out of `container`.
+///
+/// kotlinc lowers a value class's members and constructors to statics before it lifts what they
+/// declare, so the enclosing instance such a callable captures is no dispatch receiver but the
+/// value the static realizes it as, `$`-prefixed like any captured value: a member's or accessor's
+/// carrier parameter (`$arg0`), or the temporary a `constructor-impl` holds it in.
+fn realized_receiver(
+    ir: &IrFile,
+    receivers: &[IrCapturedReceiver],
+    ordinal: usize,
+    container: Option<FunId>,
+) -> (String, bool) {
+    let receiver = &receivers[ordinal];
+    if *receiver == IrCapturedReceiver::Enclosing {
+        if let Some(value) =
+            container.and_then(|container| value_class_receiver_value(ir, container))
+        {
+            return (format!("${value}"), false);
+        }
+    }
+    (
+        lifted_receiver_name(receivers, ordinal),
+        uses_receiver_constructor_parameter(receiver),
+    )
+}
+
+/// The name of the value the value-class static `container` realizes its receiver as. kotlinc's
+/// `JvmInlineClassLowering` passes a member's receiver as the carrier parameter it names `arg0`,
+/// and holds a constructor's in the `constructor-impl`'s first temporary: `tmp0` for the primary
+/// constructor running the `init` blocks, `tmp0_$this` after the name hint a secondary
+/// constructor gives it.
+fn value_class_receiver_value(ir: &IrFile, container: FunId) -> Option<String> {
     if ir.jvm_value_class_receiver_impls.contains(&container) {
         let carrier = ir
             .function_parameter_identities(container)

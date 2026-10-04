@@ -9367,7 +9367,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   constructor lifts: the secondary's lambda is `constructor_impl$lambda$0`. An extension receiver keeps its own
   spelling (`$this_mext`, `$this_ext`). Common IR records only that the capture is the enclosing
   receiver and the lifted callable's outermost container; the JVM backend spells the name from the
-  value-class realization of that container. Tests:
+  value-class realization of that container. A lambda compiled to a class of its own (one
+  `LambdaMetafactory` cannot adapt, such as `fun mv(): () -> U = { this }`) stores the receiver in
+  a field of that name, in capture order among its other captures (`U$mx$1($x, $arg0)`), and its
+  constructor takes it under the same name instead of `$receiver`; with `-java-parameters` every
+  capture of such a constructor is reflected, synthetic, under its field's name (`this$0` and
+  `$this_ext` too, though the local-variable table calls those `$receiver`). The class is realized
+  before the value-class pass places the member's static, so it records what each field captures
+  and the lifting root it was lifted from, and the backend spells the fields at emission. Such a
+  class written in an `init` block is enclosed by the primary `constructor-impl`
+  (`EnclosingMethod`), like one written in a constructor. Tests:
   `tests/value_class_receiver_capture_debug_names_e2e.rs`,
   `tests/value_class_mangled_lambda_names_e2e.rs`, `tests/java_parameters_attribute_e2e.rs`.
 - **A value-class default of a primary constructor is lowered like the constructor's other code.**

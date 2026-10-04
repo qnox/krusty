@@ -367,6 +367,58 @@ impl ClassSets {
         code_listing(class, bytes)
     }
 
+    /// The whole `javap -v -p` listing of `class` from kotlinc and from krusty: its header, every
+    /// field and method with its code and debug tables, and the class attributes
+    /// (`EnclosingMethod`, `InnerClasses`, `Signature`, `@Metadata`). The constant pool, the
+    /// listing's file details and pool indices are left out: the two pools may be laid out
+    /// differently.
+    pub fn class_listing(&self, class: &str) -> (String, String) {
+        let listing = |bytes: Option<&Vec<u8>>| {
+            let bytes = bytes.unwrap_or_else(|| panic!("{class} was not written"));
+            let disassembly = disassemble_with(class, bytes, &["-v", "-p"]);
+            assert!(!disassembly.is_empty(), "javap disassembles {class}");
+            let mut lines = Vec::new();
+            let mut in_pool = false;
+            for line in disassembly.lines() {
+                if line.starts_with("Constant pool:") {
+                    in_pool = true;
+                } else if line == "{" {
+                    in_pool = false;
+                }
+                let file_detail = [
+                    "Classfile ",
+                    "Last modified",
+                    "SHA-256",
+                    "MD5",
+                    "Compiled from",
+                ]
+                .iter()
+                .any(|prefix| line.trim_start().starts_with(prefix));
+                if in_pool || file_detail {
+                    continue;
+                }
+                lines.push(
+                    line.split_whitespace()
+                        .map(|token| match token.strip_prefix('#') {
+                            Some(rest)
+                                if rest.trim_end_matches([',', ':']).parse::<u32>().is_ok() =>
+                            {
+                                "#"
+                            }
+                            _ => token,
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                );
+            }
+            lines.join("\n")
+        };
+        (
+            listing(self.reference.get(class)),
+            listing(self.krusty.get(class)),
+        )
+    }
+
     /// The `javap -c -p -l` block of the method `class` declares as `declaration` (javap's spelling,
     /// such as `public static final int f();`), from kotlinc and from krusty, with constant-pool
     /// indices erased as in [`Self::code_differences`].

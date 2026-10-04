@@ -107,8 +107,8 @@ pub use field_flags::IrfFlags;
 pub use fields::IrField;
 pub use function_scope::IrFunctionScope;
 pub use intrinsic::IrIntrinsic;
-pub use lambda_classes::{IrInvokeBridge, IrLambdaClass, IrSamWrapperClass};
-pub(crate) use lifting_sequences::{IrLiftingEntry, IrLiftingSequence};
+pub use lambda_classes::{IrInvokeBridge, IrLambdaCapture, IrLambdaClass, IrSamWrapperClass};
+pub(crate) use lifting_sequences::{IrLiftingEntry, IrLiftingRoot, IrLiftingSequence};
 pub(crate) use local_class_names::{IrLocalClassNameProvenance, IrLocalClassOwner};
 pub use local_property_references::IrLocalPropertyReference;
 pub use module_records::{
