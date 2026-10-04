@@ -105,10 +105,8 @@ pub struct FirSamConversion {
     /// is the selected interface method: a non-suspend value adapted to a suspend method keeps its
     /// own `FunctionN`.
     pub source_suspend: bool,
-    /// The method's primitive result replaces a non-primitive result it overrides.
-    pub overrides_non_primitive_result: bool,
-    /// Specialized semantic result contracts whose target bridges reach that primitive method.
-    pub overridden_non_primitive_results: Box<[ResolvedTy]>,
+    /// The distinct own results of the declarations the selected method overrides, unspecialized.
+    pub overridden_results: Box<[ResolvedTy]>,
     /// A nullable function value converts conditionally: `null` remains `null`; only a non-null
     /// function object is wrapped as the selected SAM classifier.
     pub nullable: bool,

@@ -1,5 +1,5 @@
-//! A primitive property overriding one whose type is not primitive returns the wrapper from its
-//! getter, as a function's result does (see `boxed_override_results_e2e.rs`): `override val level:
+//! A getter whose result maps to a JVM scalar where an overridden getter returns a reference
+//! returns the wrapper, as a function's result does (see `boxed_override_results_e2e.rs`): `override val level:
 //! Int` of `Gauge<T>.level: T` is `getLevel()Ljava/lang/Integer;` with a `getLevel()Object` bridge,
 //! and over `val count: Int?` it is `getCount()Ljava/lang/Integer;` with no bridge at all. A
 //! source-written getter, a `super` read, a delegation forwarder, a caller in another file and an
@@ -85,4 +85,39 @@ fn an_override_of_a_boxed_dependency_getter_matches_kotlinc() {
             .expect("reference kotlinc is provisioned");
     let differences = classes.differences();
     assert!(differences.is_empty(), "{}", differences.join("\n\n"));
+}
+
+const FUN_INTERFACES: &str = "interface Base { fun f(): Any }
+fun interface Child : Base { override fun f(): Int }
+fun wrap(h: () -> Int): Int = Child(h).f()
+fun lambda(): Int = Child { 2 }.f()
+";
+
+/// A fun interface's scalar result over a reference-returning overridden method is decided by the
+/// same JVM rule: the wrapper class around a function value returns the wrapper and bridges to the
+/// overridden slot exactly as kotlinc's does, and a lambda's class implements the boxed result.
+#[test]
+fn a_fun_interface_over_a_reference_result_returns_the_wrapper_like_kotlinc() {
+    let sources = [("FunInterfaces.kt", FUN_INTERFACES)];
+    let wrapper = common::ModuleClassPair::compile(&sources, "FunInterfacesKt$sam$Child$0");
+    assert!(
+        wrapper.krusty == wrapper.kotlinc,
+        "the function-value wrapper differs from kotlinc"
+    );
+    let implements_boxed_result = |bytes: &[u8]| {
+        krusty::jvm::classreader::parse_class(bytes)
+            .expect("the lambda class parses")
+            .methods
+            .iter()
+            .any(|method| method.name == "f" && method.descriptor == "()Ljava/lang/Integer;")
+    };
+    let lambda = common::ModuleClassPair::compile(&sources, "FunInterfacesKt$lambda$1");
+    assert!(
+        implements_boxed_result(&lambda.kotlinc),
+        "kotlinc's lambda class"
+    );
+    assert!(
+        implements_boxed_result(&lambda.krusty),
+        "krusty's lambda class"
+    );
 }

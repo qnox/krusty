@@ -53,8 +53,8 @@ pub(super) fn emit(
     let field_desc = type_descriptor(field_jt);
     let accessor_jt = declared_property_accessor_jvm(ir, property, field);
     let accessor_desc = type_descriptor(accessor_jt);
-    // A primitive overriding a non-primitive property returns the wrapper from its getter only; the
-    // setter keeps taking the primitive (see `jvm::override_results`).
+    // A scalar getter result over a reference-returning overridden getter is the wrapper; the
+    // setter keeps taking the scalar (see `jvm::override_results`).
     let boxed_getter = c
         .properties
         .iter()

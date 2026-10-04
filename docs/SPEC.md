@@ -9209,7 +9209,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   its carrier whatever it holds, since `X(null)` is a value. Tests:
   `tests/value_class_nullable_bridge_e2e.rs`. Corpus:
   `inlineClasses/boxReturnValueOnOverride/overrideNullableInlineClassWithNonNullNullableAnyNull`.
-- **A primitive override of a non-primitive result returns the wrapper.** kotlinc's signature
+- **A scalar result over a reference-returning overridden slot returns the wrapper.** kotlinc's signature
   mapper boxes a function's primitive result when any declaration it overrides, at any depth,
   returns something else: `echo(x: Int): Int` over `Echo<T>.echo(x: T): T` is
   `echo(I)Ljava/lang/Integer;`, and `invoke` of a `() -> Boolean` object is
@@ -9228,16 +9228,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   file does. A fun interface whose method returns the wrapper
   (`fun interface Child : Base { override fun f(): Int }` over `fun f(): Any`) is converted
   through a class of its own, never `invokedynamic`, as kotlinc does: the SAM selection publishes
-  the fact on the conversion (`FirSamConversion::overrides_non_primitive_result`, from the
-  overridden declarations of the selected method's slot, before the call specializes them). A
-  type parameter is one of those results: `fun interface Count : Echo<Int>` over
+  the overridden declarations' own results on the conversion (`FirSamConversion::overridden_results`,
+  from the selected method's slot, before the call specializes them, unclassified), and the JVM
+  backend asks the same scalar-over-reference question of them. A type parameter is one of those
+  results: `fun interface Count : Echo<Int>` over
   `interface Echo<T> { fun echo(x: T): T }` still returns the wrapper, because `T` erases to
   `Any` even when this call binds it to `Int`. A dependency's interface takes the same path
   (`sam/kt59858.kt`). Tests: `tests/local_override_boxed_result_e2e.rs`,
-  `fir::body_check::lambda_tests::sam_argument_records_a_primitive_result_over_a_non_primitive_one`,
+  `fir::body_check::lambda_tests::sam_argument_records_the_overridden_results`,
   `tests/module_override_boxed_result_e2e.rs`.
-- **A primitive property override of a non-primitive property returns the wrapper from its
-  getter.** The same rule applies to a getter's result: `override val level: Int` over
+- **A scalar getter result over a reference-returning overridden getter returns the wrapper.** The same rule applies to a getter's result: `override val level: Int` over
   `Gauge<T>.level: T` is `getLevel()Ljava/lang/Integer;` (`@NotNull`) with a `getLevel()Object`
   bridge, and over `val count: Int?` it is `getCount()Ljava/lang/Integer;` with no bridge, since
   the descriptors agree. A default getter boxes its field, a source-written getter and a

@@ -143,7 +143,7 @@ pub(super) fn attach_synth_debug_tables(
             .iter()
             .position(|property| property.backing_field == Some(field_index as u32));
         let declared_property = declared_index.map(|index| &c.properties[index]);
-        // A primitive overriding a non-primitive property returns the wrapper from its getter.
+        // A scalar getter result over a reference-returning overridden getter is the wrapper.
         let getter_result = if declared_index
             .is_some_and(|index| override_results.boxes_member_property(c.fq_name, index as u32))
         {

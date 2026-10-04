@@ -646,7 +646,7 @@ fn push_property_bridge(
 }
 
 /// The JVM results of the two getters a property override edge joins: the declared types, or their
-/// wrappers where a primitive overriding a non-primitive property boxes its getter result (see
+/// wrappers where a scalar getter result over a reference-returning overridden getter is boxed (see
 /// `jvm::override_results`). A setter keeps the declared types.
 #[derive(Clone, Copy)]
 struct PropertyGetterResults {

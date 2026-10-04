@@ -1,4 +1,4 @@
-//! The boxed result kotlinc gives a primitive override of a non-primitive declaration.
+//! The boxed result kotlinc gives a scalar result over a reference-returning overridden slot.
 //!
 //! kotlinc's JVM signature mapper boxes a function's primitive result when any declaration it
 //! overrides returns something else (`forceBoxedReturnTypeOnOverride`): `override fun next(): Int`
@@ -49,6 +49,26 @@ fn scalar_result(ty: Ty) -> bool {
 /// declares the override with the scalar's wrapper (`forceBoxedReturnTypeOnOverride`).
 pub(crate) fn scalar_over_reference(implementation: Ty, overridden: Ty) -> bool {
     scalar_result(implementation) && !scalar_result(overridden)
+}
+
+/// The overridden results of `target`'s method that its scalar result returns as the wrapper over:
+/// each one needs a bridge from its erased slot (see [`scalar_over_reference`]). A suspend method
+/// returns `Object` through its continuation contract instead.
+pub(crate) fn sam_results_boxed_over(
+    target: &crate::ir::IrSamTarget,
+) -> impl Iterator<Item = Ty> + '_ {
+    target
+        .overridden_results
+        .iter()
+        .copied()
+        .filter(move |&overridden| {
+            !target.suspend && scalar_over_reference(target.declared_result, overridden)
+        })
+}
+
+/// Whether the JVM result of `target`'s method is the wrapper of its scalar Kotlin result.
+pub(crate) fn boxes_sam_result(target: &crate::ir::IrSamTarget) -> bool {
+    sam_results_boxed_over(target).next().is_some()
 }
 
 /// The primitive Kotlin result of the selected dependency member when its exact class-file slot is
@@ -198,8 +218,8 @@ pub(super) fn realizes_overrides(ir: &IrFile, class: usize) -> bool {
             .contains_key(&u32::try_from(class).expect("class index"))
 }
 
-/// Choose the wrapper as the JVM result of every override whose primitive result replaces a
-/// non-primitive one. Common IR is read, never changed.
+/// Choose the wrapper as the JVM result of every override whose scalar result stands over a
+/// reference-returning overridden slot. Common IR is read, never changed.
 pub(super) fn box_primitive_override_results(
     ir: &IrFile,
     callables: &crate::backend::CheckedBackendCallables,

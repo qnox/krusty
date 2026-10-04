@@ -36,7 +36,7 @@ impl Emitter<'_> {
         // backing-field property may be read directly, and only from inside the declaring class.
         let declared_index = class.properties.iter().position(|p| p.name == name);
         let declared = declared_index.map(|index| &class.properties[index]);
-        // The getter of a primitive property overriding a non-primitive one returns the wrapper;
+        // A scalar getter result over a reference-returning overridden getter is the wrapper;
         // the read unboxes it (see `jvm::override_results`).
         let boxed_getter = declared_index.is_some_and(|index| {
             self.override_results

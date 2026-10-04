@@ -323,7 +323,7 @@ pub(super) fn build_class_metadata_with_facts(
                 .backing_field
                 .and_then(|index| c.fields.get(index as usize).map(|field| (index, field)));
             let (default_getter, default_setter) = accessor_jvm_names(c, &property.name);
-            // A getter's descriptor is its physical one: a primitive overriding a non-primitive
+            // A getter's descriptor is its physical one: a scalar getter result over a reference-returning overridden
             // property returns the wrapper (see `jvm::override_results`).
             let physical_getter = |fid: u32| {
                 let function = &ir.functions[fid as usize];

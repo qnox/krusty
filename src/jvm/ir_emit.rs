@@ -524,11 +524,7 @@ pub struct LambdaModes {
     pub sam_conversions: LambdaMode,
 }
 
-/// Whether the JVM result of `target`'s method is the wrapper of its primitive Kotlin result, as
-/// it is for a primitive override of a non-primitive result (see `jvm::override_results`).
-fn boxes_sam_result(target: &crate::ir::IrSamTarget) -> bool {
-    target.overrides_non_primitive_result && !target.suspend
-}
+use crate::jvm::override_results::boxes_sam_result;
 
 impl LambdaModes {
     /// How the closure of a lambda (or a conversion to `sam`) of `arity` parameters is realized. A

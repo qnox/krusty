@@ -220,7 +220,7 @@ fn run_backend_passes_after_plugins(
     // Bridges are a JVM realization of an override, derived here from the IR's own declarations and the
     // checker's supertype view. Runs BEFORE the barrier pass (which annotates existing bridges) and
     // before the value-class pass (which retargets them once mangled names are known).
-    // A primitive override of a non-primitive declaration returns the wrapper; its bridges follow.
+    // A scalar result over a reference-returning overridden slot is the wrapper; its bridges follow.
     // A bridge to a value-class override asks which dependency classes are value classes.
     if !crate::jvm::value_classes::record_referenced_value_classes(ir, classifiers) {
         return Err(SkipReason::ValueClasses);
