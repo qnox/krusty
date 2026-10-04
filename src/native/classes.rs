@@ -1507,7 +1507,8 @@ pub(super) fn local_property_target(
     owner: ClassId,
     property: usize,
 ) -> Option<ResolvedPropertyOverrideTarget> {
-    ir.local_property_layouts
+    if let Some(target) = ir
+        .local_property_layouts
         .iter()
         .find_map(|(identity, layout)| match layout {
             crate::ir::IrLocalPropertyLayout::Member {
@@ -1521,6 +1522,34 @@ pub(super) fn local_property_target(
             }
             _ => None,
         })
+    {
+        return Some(target);
+    }
+
+    // Interface delegation generates an accessor body and an `IrProperty`, but no new source
+    // property declaration: its exact declaration identity is the interface target carried by
+    // the override edge. Bind the generated property back through those accessor identities. A
+    // name is deliberately insufficient here — unrelated interfaces may declare the same one.
+    let declaration = ir.classes.get(owner as usize)?.properties.get(property)?;
+    let owner = ir.classes[owner as usize].fq_name_id();
+    let mut found = None;
+    for edge in ir.property_overrides.get(&owner).into_iter().flatten() {
+        let realizes_getter = declaration
+            .getter
+            .is_some_and(|getter| edge.implementation_getter == Some(getter));
+        let realizes_setter = declaration
+            .setter
+            .is_some_and(|setter| edge.implementation_setter == Some(setter));
+        if !realizes_getter && !realizes_setter {
+            continue;
+        }
+        assert!(
+            found.is_none_or(|target| target == edge.implementation),
+            "one generated property cannot realize two property declarations"
+        );
+        found = Some(edge.implementation);
+    }
+    found
 }
 
 /// The exact property accessor realized by one common-IR function, if any.
