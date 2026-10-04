@@ -2180,6 +2180,11 @@ pub struct IrFile {
     /// `FunId` → the backend-agnostic generic-signature SHAPE of a type-parameterized function. The JVM
     /// backend formats this into a `Signature` attribute; the IR itself holds no target descriptors.
     pub signatures: std::collections::HashMap<u32, IrGenericSig>,
+    /// Exact enclosing-class type-parameter declarations visible to a generic callable. Common
+    /// lowering records the classifier's finalized own/captured layout by function identity, so a
+    /// backend can select a physical bound without recovering lexical ownership from a class name.
+    pub(crate) callable_enclosing_type_parameters:
+        std::collections::HashMap<FunId, Vec<IrTypeParameter>>,
     /// Class MEMBERS whose semantic parameter/return types mention an ENCLOSING-CLASS type parameter
     /// (`open class Base<T> { open fun choose(value: T): T }`): fid → (semantic params, semantic ret).
     /// The erased [`IrFunction`] carries `Any`, and `signatures` only describes function-OWNED type

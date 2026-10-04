@@ -1,10 +1,11 @@
 //! A method type parameter bounded by a classifier type parameter erases through that
 //! parameter's primary bound.
 //!
-//! `Entity<D, S : Entity<D, S>>.isEqualTo` is `<T : S> T`, so its JVM descriptor returns `Entity`,
-//! and the override that tightens `T` to `EntityImpl` keeps a bridge of that same descriptor beside
-//! the specialized method. A method-local chain `<T : S, S : Mark>` and an inner class that names
-//! its outer class's parameter erase the same way.
+//! `GraphQlTester.Entity<D, S : Entity<D, S>>.isEqualTo` is `<T : S> T`, so its JVM descriptor
+//! returns `GraphQlTester.Entity`, and the override that tightens `T` to `EntityImpl` keeps a bridge
+//! of that same descriptor beside the specialized method. The star-projected call shape is the
+//! corpus regression. A method-local chain `<T : S, S : Mark>` and an inner class that names its
+//! outer class's parameter erase the same way.
 
 use super::common;
 use std::collections::HashMap;
@@ -14,12 +15,28 @@ const SRC: &str = r#"package app
 
 open class Mark
 
-interface Entity<D, S : Entity<D, S>> {
-    fun <T : S> isEqualTo(expected: Any?): T
+class Marker<T>
+
+interface GraphQlTester {
+    interface Entity<D, S : Entity<D, S>> {
+        fun <T : S> isEqualTo(expected: Any?): T
+    }
+
+    interface Path {
+        fun <E : Any> entity(marker: Marker<E>): Entity<E, *>
+    }
 }
 
-open class EntityImpl<D> : Entity<D, EntityImpl<D>> {
+open class EntityImpl<D> : GraphQlTester.Entity<D, EntityImpl<D>> {
     override fun <T : EntityImpl<D>> isEqualTo(expected: Any?): T = this as T
+}
+
+class PathImpl : GraphQlTester.Path {
+    override fun <E : Any> entity(marker: Marker<E>): GraphQlTester.Entity<E, *> = EntityImpl<E>()
+}
+
+fun <U : Any> GraphQlTester.Path.assertEqual(expected: U) {
+    entity(Marker<U>()).isEqualTo(expected)
 }
 
 interface Chain {
@@ -35,9 +52,10 @@ open class Outer<S : Mark> {
 class Sample : Mark()
 
 fun box(): String {
-    val entity: Entity<Int, EntityImpl<Int>> = EntityImpl()
+    val entity: GraphQlTester.Entity<Int, EntityImpl<Int>> = EntityImpl()
     val got: EntityImpl<Int> = entity.isEqualTo(1)
     if (got !== entity) return "interface"
+    PathImpl().assertEqual(1)
     val sample = Sample()
     val read = Outer<Sample>().Inner().read(sample)
     if (read !== sample) return "inner"
@@ -96,10 +114,10 @@ fn a_method_type_parameter_erases_through_its_class_bound() {
     write_classes(&krusty, &classes);
     let expected = HashMap::from([
         (
-            "app/Entity",
+            "app/GraphQlTester$Entity",
             (
                 "isEqualTo",
-                vec!["(Ljava/lang/Object;)Lapp/Entity;".to_string()],
+                vec!["(Ljava/lang/Object;)Lapp/GraphQlTester$Entity;".to_string()],
             ),
         ),
         (
@@ -107,7 +125,7 @@ fn a_method_type_parameter_erases_through_its_class_bound() {
             (
                 "isEqualTo",
                 vec![
-                    "(Ljava/lang/Object;)Lapp/Entity;".to_string(),
+                    "(Ljava/lang/Object;)Lapp/GraphQlTester$Entity;".to_string(),
                     "(Ljava/lang/Object;)Lapp/EntityImpl;".to_string(),
                 ],
             ),

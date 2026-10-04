@@ -171,6 +171,25 @@ pub(super) fn attach_callable_generic_facts(
     ir: &mut IrFile,
 ) {
     let parameters = declaration_type_parameters(index, declaration);
+    if !parameters.is_empty() {
+        if let Some(classifier) = index.enclosing_classifier(declaration) {
+            let enclosing = index
+                .classifier_type_arguments(classifier.declaration)
+                .into_iter()
+                .flatten()
+                .copied()
+                .map(|parameter| type_parameter(index, parameter))
+                .collect::<Vec<_>>();
+            if !enclosing.is_empty() {
+                assert!(
+                    ir.callable_enclosing_type_parameters
+                        .insert(function, enclosing)
+                        .is_none(),
+                    "one callable publishes its enclosing type-parameter layout once"
+                );
+            }
+        }
+    }
     let callable = index.callable_for_declaration(declaration);
     let extension_receiver = callable.and_then(|callable| callable.shape.extension_receiver);
     if !parameters.is_empty()

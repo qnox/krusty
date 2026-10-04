@@ -3,10 +3,10 @@
 //! Checked FIR and common IR retain a type parameter as its semantic identity plus the declaration's
 //! complete intersection of upper bounds. A JVM method descriptor instead needs one physical bound:
 //! the concrete class bound when present, otherwise the first interface bound, otherwise `Object`.
-//! A method type parameter may be bounded by a type parameter of the enclosing classifier; that
-//! classifier's parameters are part of the same lookup, with the method's own parameters shadowing
-//! them. Keeping this conversion here prevents common lowering from re-reading source bound order or
-//! committing a backend representation.
+//! A method type parameter may be bounded by a type parameter of the enclosing classifier. Common
+//! IR records that exact declaration layout on the callable; the backend does not reconstruct an
+//! owner from a JVM name. Keeping the conversion here prevents common lowering from committing a
+//! backend representation.
 
 use crate::ir::{IrFile, IrTypeParameter};
 use crate::types::{wk, Ty};
@@ -123,9 +123,8 @@ pub(super) fn parameter_erasures(parameters: &[IrTypeParameter]) -> HashMap<Stri
     parameter_erasures_with(parameters, &[])
 }
 
-/// Erase `parameters` the way [`parameter_erasures`] does, also walking `enclosing` when a bound
-/// names a type parameter of the surrounding classifier. A method parameter is searched first, so
-/// it shadows an enclosing parameter with the same semantic identity.
+/// Erase `parameters` the way [`parameter_erasures`] does, also consulting the exact `enclosing`
+/// declarations recorded by common lowering when a bound names a classifier type parameter.
 pub(super) fn parameter_erasures_with(
     parameters: &[IrTypeParameter],
     enclosing: &[IrTypeParameter],
@@ -143,27 +142,14 @@ pub(super) fn parameter_erasures_with(
     erasures
 }
 
-/// Type parameters of `function`'s classifier and of each classifier that one is nested in, nearest
-/// first. A method type parameter bounded by one of these (`fun <T : S>` on `Entity<S : Entity>`)
-/// erases through that parameter's primary bound.
+/// Exact type parameters of `function`'s enclosing classifier layout. This includes captured outer
+/// parameters for an `inner` classifier and excludes parameters of a static nested classifier's
+/// lexical owner.
 pub(super) fn enclosing_type_parameters(ir: &IrFile, function: u32) -> Vec<IrTypeParameter> {
-    let Some(function) = ir.functions.get(function as usize) else {
-        return Vec::new();
-    };
-    let Some(mut owner) = function.dispatch_receiver else {
-        return Vec::new();
-    };
-    let mut parameters = Vec::new();
-    loop {
-        if let Some(signature) = ir.class_signature_name(owner) {
-            parameters.extend(signature.type_params.iter().cloned());
-        }
-        match owner.nested_owner() {
-            Some(next) => owner = next,
-            None => break,
-        }
-    }
-    parameters
+    ir.callable_enclosing_type_parameters
+        .get(&function)
+        .cloned()
+        .unwrap_or_default()
 }
 
 pub(super) fn lower_function_type_parameters(ir: &mut IrFile) {

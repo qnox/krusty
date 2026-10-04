@@ -714,6 +714,11 @@ impl IrFile {
         {
             validate_generic_signature(signature)?;
         }
+        for parameters in self.callable_enclosing_type_parameters.values() {
+            for parameter in parameters {
+                validate_type_parameter(parameter)?;
+            }
+        }
         for (params, ret) in self.member_semantic_sigs.values() {
             reject_all("member semantic parameter", params.iter().copied())?;
             reject("member semantic result", *ret)?;
