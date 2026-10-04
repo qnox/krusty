@@ -358,70 +358,11 @@ mod tests {
     #[test]
     #[ignore = "downloads Gradle and the Kotlin Gradle plugin"]
     fn kotlin_compiler_slice_compiles_through_krusty() {
-        let gradle_bin = ensure_gradle();
-        let root = std::env::temp_dir().join(format!(
-            "krusty-kotlin-slice-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|duration| duration.as_nanos())
-                .unwrap_or(0)
-        ));
-        let _ = std::fs::remove_dir_all(&root);
-        let plugin_version =
-            std::env::var("KRUSTY_GRADLE_PLUGIN_VERSION").unwrap_or_else(|_| "0.0.1".into());
-        let kgp = std::env::var("KRUSTY_GRADLE_KGP_VERSION").unwrap_or_else(|_| "2.4.20".into());
-        write_compiler_slice(&root, &plugin_version, &kgp);
-        // Gradle resolves the project directory through symlinks (macOS /var → /private/var);
-        // the recorded invocations carry the resolved path, so the normalization root must too.
-        let root = root.canonicalize().expect("canonicalize slice root");
-        let log = root.join("krusty-invocations.txt");
-        let proxy = root.join("recording-krusty");
-        let actual = std::env::var_os("KRUSTY_GRADLE_TEST_BIN")
-            .map(PathBuf::from)
-            .expect("KRUSTY_GRADLE_TEST_BIN must name the built krusty CLI");
-        write_krusty_proxy(&proxy, &log, &actual);
-        let wrapper = root.join("gradlew");
-        std::fs::write(
-            &wrapper,
-            format!(
-                "#!/bin/sh\nexec '{}' --build-cache \"$@\"\n",
-                gradle_bin.display()
-            ),
-        )
-        .expect("write gradlew");
-        use std::os::unix::fs::PermissionsExt;
-        let executable = std::fs::Permissions::from_mode(0o755);
-        std::fs::set_permissions(&wrapper, executable.clone()).expect("chmod gradlew");
-        std::fs::set_permissions(&proxy, executable).expect("chmod recording krusty");
-
-        // Keep CI's mutable Gradle workspace cache outside Cargo's target directory. The Rust
-        // cache action archives target as build output and may prune non-Cargo files from it,
-        // leaving Kotlin DSL workspaces without their metadata on the next restore. Local runs
-        // retain the repository cache unless the harness supplies an isolated home.
-        let user_home = std::env::var_os("KRUSTY_GRADLE_USER_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/cache/gradle-user-home")
-            });
-        std::fs::create_dir_all(&user_home).expect("gradle user home");
-        std::env::set_var("GRADLE_USER_HOME", &user_home);
-
-        let plugin_project = std::env::var_os("KRUSTY_GRADLE_PLUGIN_PROJECT")
-            .map(PathBuf::from)
-            .unwrap_or_else(repository_plugin_project);
-        let build = || {
-            let build = GradleBuild::new(&root, repository_plugin_project(), &proxy)
-                .property("kotlinPluginVersion", &kgp)
-                .property("krustyPluginVersion", &plugin_version)
-                .configuration_cache(true)
-                .no_daemon(true);
-            if plugin_project.join("repository").is_dir() {
-                build.plugin_repository(plugin_project.join("repository"))
-            } else {
-                build
-            }
-        };
+        let fixture = IntegrationFixture::new("krusty-kotlin-slice", write_compiler_slice);
+        let root = fixture.root.clone();
+        let log = fixture.log.clone();
+        let kgp = fixture.kgp.clone();
+        let build = || fixture.build();
         let full_build_tasks = [
             ":core:util.runtime:classes",
             ":compiler:util:classes",
@@ -1027,6 +968,180 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A `buildSrc` applying Gradle's `kotlin-dsl` together with krusty. kotlin-dsl registers a
+    /// `compilePluginsBlocks` KotlinJvmCompile with no source set, compiles precompiled script
+    /// plugins as scripts and adds its own compiler plugins and arguments; every compile of that
+    /// project is left to kotlinc, visibly, while the consuming root project still compiles
+    /// through krusty and applies the precompiled script plugin.
+    #[test]
+    #[ignore = "downloads Gradle and the Kotlin Gradle plugin"]
+    fn kotlin_dsl_build_src_compiles_through_krusty() {
+        let fixture = IntegrationFixture::new("krusty-kotlin-dsl", write_kotlin_dsl_build);
+        let root = &fixture.root;
+        let tasks = [":greet", ":krustyCompile"];
+        let output = fixture
+            .build()
+            .tasks(tasks)
+            .run_output()
+            .unwrap_or_else(|error| panic!("{error}"));
+
+        assert_eq!(
+            output
+                .lines()
+                .filter(|line| line.trim() == "hello from a precompiled script plugin")
+                .count(),
+            1,
+            "{output}"
+        );
+        for expected in [
+            "krusty: task ':buildSrc:compileKotlin' is left to kotlinc: its project applies kotlin-dsl",
+            "krusty: task ':buildSrc:compileTestKotlin' is left to kotlinc: its project applies kotlin-dsl",
+            "krusty: task ':buildSrc:compilePluginsBlocks' is left to kotlinc: it belongs to no source set",
+        ] {
+            assert_eq!(
+                output.lines().filter(|line| line.trim() == expected).count(),
+                1,
+                "{expected}\n{output}"
+            );
+        }
+        assert!(
+            output
+                .lines()
+                .all(|line| !line.contains("buildSrc:compileKotlinWithKrusty")),
+            "{output}"
+        );
+        assert!(root
+            .join("buildSrc/build/classes/kotlin/main/fixture/Greeting.class")
+            .is_file());
+
+        // Only the root project's main compilation execs krusty; its test compilation has no
+        // sources, and buildSrc never reaches the compiler bridge.
+        let runs = invocations(&std::fs::read_to_string(&fixture.log).expect("invocation log"));
+        assert_eq!(runs.len(), 1, "{runs:?}");
+        assert_eq!(source_names(&runs[0]), ["App.kt"], "{runs:?}");
+        assert!(
+            runs[0]
+                .iter()
+                .all(|argument| !argument.contains("/buildSrc/")),
+            "{runs:?}"
+        );
+        assert!(root
+            .join("build/classes/kotlin/main/app/AppKt.class")
+            .is_file());
+
+        let _ = std::fs::remove_file(&fixture.log);
+        let reused = fixture
+            .build()
+            .tasks(tasks)
+            .run_output()
+            .unwrap_or_else(|error| panic!("unchanged rebuild: {error}"));
+        assert!(
+            !fixture.log.exists(),
+            "unchanged sources must not exec krusty"
+        );
+        assert_eq!(
+            reused
+                .lines()
+                .filter(|line| line.trim() == "Reusing configuration cache.")
+                .count(),
+            1,
+            "{reused}",
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A throwaway Gradle build whose krusty compiles go through a recording proxy of the CLI
+    /// named by `KRUSTY_GRADLE_TEST_BIN`.
+    struct IntegrationFixture {
+        root: PathBuf,
+        log: PathBuf,
+        proxy: PathBuf,
+        plugin_project: PathBuf,
+        plugin_version: String,
+        kgp: String,
+    }
+
+    impl IntegrationFixture {
+        fn new(prefix: &str, write: fn(&Path, &str, &str)) -> Self {
+            let gradle_bin = ensure_gradle();
+            let root = std::env::temp_dir().join(format!(
+                "{prefix}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|duration| duration.as_nanos())
+                    .unwrap_or(0)
+            ));
+            let _ = std::fs::remove_dir_all(&root);
+            let plugin_version =
+                std::env::var("KRUSTY_GRADLE_PLUGIN_VERSION").unwrap_or_else(|_| "0.0.1".into());
+            let kgp =
+                std::env::var("KRUSTY_GRADLE_KGP_VERSION").unwrap_or_else(|_| "2.4.20".into());
+            write(&root, &plugin_version, &kgp);
+            // Gradle resolves the project directory through symlinks (macOS /var → /private/var);
+            // the recorded invocations carry the resolved path, so the normalization root must too.
+            let root = root.canonicalize().expect("canonicalize fixture root");
+            let log = root.join("krusty-invocations.txt");
+            let proxy = root.join("recording-krusty");
+            let actual = std::env::var_os("KRUSTY_GRADLE_TEST_BIN")
+                .map(PathBuf::from)
+                .expect("KRUSTY_GRADLE_TEST_BIN must name the built krusty CLI");
+            write_krusty_proxy(&proxy, &log, &actual);
+            let wrapper = root.join("gradlew");
+            std::fs::write(
+                &wrapper,
+                format!(
+                    "#!/bin/sh\nexec '{}' --build-cache \"$@\"\n",
+                    gradle_bin.display()
+                ),
+            )
+            .expect("write gradlew");
+            use std::os::unix::fs::PermissionsExt;
+            let executable = std::fs::Permissions::from_mode(0o755);
+            std::fs::set_permissions(&wrapper, executable.clone()).expect("chmod gradlew");
+            std::fs::set_permissions(&proxy, executable).expect("chmod recording krusty");
+
+            // Keep CI's mutable Gradle workspace cache outside Cargo's target directory. The Rust
+            // cache action archives target as build output and may prune non-Cargo files from it,
+            // leaving Kotlin DSL workspaces without their metadata on the next restore. Local runs
+            // retain the repository cache unless the harness supplies an isolated home.
+            let user_home = std::env::var_os("KRUSTY_GRADLE_USER_HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| {
+                    Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .join("../../target/cache/gradle-user-home")
+                });
+            std::fs::create_dir_all(&user_home).expect("gradle user home");
+            std::env::set_var("GRADLE_USER_HOME", &user_home);
+
+            let plugin_project = std::env::var_os("KRUSTY_GRADLE_PLUGIN_PROJECT")
+                .map(PathBuf::from)
+                .unwrap_or_else(repository_plugin_project);
+            Self {
+                root,
+                log,
+                proxy,
+                plugin_project,
+                plugin_version,
+                kgp,
+            }
+        }
+
+        fn build(&self) -> GradleBuild {
+            let build = GradleBuild::new(&self.root, repository_plugin_project(), &self.proxy)
+                .property("kotlinPluginVersion", &self.kgp)
+                .property("krustyPluginVersion", &self.plugin_version)
+                .configuration_cache(true)
+                .no_daemon(true);
+            if self.plugin_project.join("repository").is_dir() {
+                build.plugin_repository(self.plugin_project.join("repository"))
+            } else {
+                build
+            }
+        }
+    }
+
     fn quoted_release_versions(text: &str) -> Vec<&str> {
         text.split('"')
             .skip(1)
@@ -1253,6 +1368,84 @@ exec 'ACTUAL' "$@"
             .expect("unzip");
         assert!(status.success() && bin.is_file(), "unpack gradle");
         bin
+    }
+
+    fn write_kotlin_dsl_build(root: &Path, plugin_version: &str, kgp_version: &str) {
+        let write = |rel: &str, body: &str| {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+            let body = body
+                .replace("PLUGIN_VERSION", plugin_version)
+                .replace("KGP_VERSION", kgp_version);
+            std::fs::write(path, body).expect("write");
+        };
+        let plugin_management = r#"
+pluginManagement {
+    repositories {
+        providers.gradleProperty("krusty.plugin.repository").orNull?.let {
+            maven { url = uri(it) }
+        }
+        gradlePluginPortal()
+        mavenCentral()
+    }
+}
+"#;
+        write(
+            "settings.gradle.kts",
+            &format!("{plugin_management}\nrootProject.name = \"kotlin-dsl-consumer\"\n"),
+        );
+        write(
+            "build.gradle.kts",
+            r#"
+plugins {
+    kotlin("jvm") version "KGP_VERSION"
+    id("krusty") version "PLUGIN_VERSION"
+    id("fixture.greeting")
+}
+
+repositories {
+    mavenCentral()
+}
+"#,
+        );
+        write(
+            "src/main/kotlin/app/App.kt",
+            "package app\nfun appMarker() = \"app\"\n",
+        );
+        // buildSrc keeps the Gradle-embedded Kotlin that kotlin-dsl selects; krusty is applied
+        // after it exactly as a consumer build would.
+        write("buildSrc/settings.gradle.kts", plugin_management);
+        write(
+            "buildSrc/build.gradle.kts",
+            r#"
+plugins {
+    `kotlin-dsl`
+    id("krusty") version "PLUGIN_VERSION"
+}
+
+repositories {
+    mavenCentral()
+}
+"#,
+        );
+        write(
+            "buildSrc/src/main/kotlin/fixture/Greeting.kt",
+            "package fixture\n\nobject Greeting {\n    const val TEXT = \"hello from a precompiled script plugin\"\n}\n",
+        );
+        write(
+            "buildSrc/src/main/kotlin/fixture.greeting.gradle.kts",
+            r#"
+plugins {
+    base
+}
+
+tasks.register("greet") {
+    doLast {
+        println(fixture.Greeting.TEXT)
+    }
+}
+"#,
+        );
     }
 
     fn write_compiler_slice(root: &Path, plugin_version: &str, kgp_version: &str) {
