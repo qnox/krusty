@@ -1097,14 +1097,6 @@ pub trait SignatureSemantics {
         None
     }
 
-    /// Copy the builder-constraint frame before a provisional delegate-expression check. Restoring
-    /// it drops bindings that check recorded before the written property type was known.
-    fn isolate_delegate_expression_constraints(&self) -> Box<dyn std::any::Any> {
-        Box::new(())
-    }
-
-    fn restore_delegate_expression_constraints(&self, _checkpoint: Box<dyn std::any::Any>) {}
-
     fn least_upper_bound(
         &self,
         scope: SignatureScope,

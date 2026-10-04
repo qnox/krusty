@@ -5294,23 +5294,6 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         self.expected_delegate_expression(scope, delegate, property_type)
     }
 
-    fn isolate_delegate_expression_constraints(&self) -> Box<dyn std::any::Any> {
-        Box::new(self.scoped_constraints.borrow().clone())
-    }
-
-    fn restore_delegate_expression_constraints(&self, checkpoint: Box<dyn std::any::Any>) {
-        let Some(saved) = checkpoint
-            .downcast::<std::collections::HashMap<
-                crate::fir::DeclarationId,
-                Vec<crate::symbol_resolver::GSigBinds>,
-            >>()
-            .ok()
-        else {
-            return;
-        };
-        *self.scoped_constraints.borrow_mut() = *saved;
-    }
-
     fn least_upper_bound(
         &self,
         scope: crate::fir::SignatureScope,
