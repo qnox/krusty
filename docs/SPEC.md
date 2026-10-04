@@ -9392,7 +9392,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   before the value-class pass places the member's static, so it records what each field captures
   and the lifting root it was lifted from, and the backend spells the fields at emission. Such a
   class written in an `init` block is enclosed by the primary `constructor-impl`
-  (`EnclosingMethod`), like one written in a constructor. Tests:
+  (`EnclosingMethod`), like one written in a constructor. An anonymous object or local class written
+  in a value-class member, accessor, constructor or `init` block, directly or through a lambda or
+  local function, captures the same value: its field, constructor parameter (local-variable row and
+  `-java-parameters` entry alike) are `$arg0`, `$tmp0` or `$tmp0_$this` (`O$m$1`, `O$o$1`,
+  `O$o2$1`, `O$loc$L`, `O$inLam$1$1`, `O$inLoc$lf$1`), where an ordinary class's instance is
+  `this$0` passed as `$receiver`. The class's recorded enclosure is followed through lifted
+  callables to the declaration it is written in, and the backend spells the capture with the rule
+  a lambda class uses. Tests:
   `tests/value_class_receiver_capture_debug_names_e2e.rs`,
   `tests/value_class_mangled_lambda_names_e2e.rs`, `tests/java_parameters_attribute_e2e.rs`.
 - **A value-class default of a primary constructor is lowered like the constructor's other code.**

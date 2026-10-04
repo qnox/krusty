@@ -3044,7 +3044,7 @@ fn emit_class(
             if is_continuation {
                 super::method_parameters::continuation_constructor(c)
             } else {
-                super::method_parameters::primary_constructor(c, &param_tys)
+                super::method_parameters::primary_constructor(ir, c, &param_tys)
             }
         } else {
             Vec::new()
@@ -3474,7 +3474,7 @@ fn emit_class(
     {
         let physical_parameters = class_ctor_jvm_tys(c);
         let parameter_identities =
-            crate::jvm::method_parameters::primary_constructor_identities(c, &physical_parameters);
+            super::method_parameters::primary_constructor_identities(ir, c, &physical_parameters);
         constructor_defaults::emit_ctor_marker_accessor(
             &fq_name,
             &physical_parameters,
@@ -4290,7 +4290,7 @@ fn emit_enum_class(
     // secondary — both are `(String, int)V` — and the class failed to load with a
     // `ClassFormatError: Duplicate method name "<init>"`. Its bytes are still built above so the
     // constant pool interns in kotlinc's order.
-    seed_enum_constructor_locals(c, &self_desc, &mut cw);
+    seed_enum_constructor_locals(ir, c, &self_desc, &mut cw);
     // The constructor's LocalVariableTable strings follow its body, and the property accessors
     // (`getTag`, its descriptor, its `@NotNull`) come next, each at its method visit.
     for (f, t) in c.fields[..n_params].iter().zip(&user_tys) {

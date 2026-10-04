@@ -9,7 +9,6 @@ use crate::ir::{
     IrParameterIdentity, IrParameterRole,
 };
 use crate::jvm::anonymous_context_labels;
-use crate::jvm::capture_names::capture_parameter_local;
 
 /// Name of a JVM `LocalVariableTable` entry, or `None` for a genuinely unnamed parameter.
 pub(super) fn local_variable(
@@ -419,10 +418,12 @@ pub(super) fn constructor_method_parameters(
 
 /// A primary constructor's LocalVariableTable names. kotlinc names a local or anonymous class's
 /// captured-value parameter like the field it stores into, and a captured receiver as
-/// [`capture_parameter_local`] says.
+/// [`super::capture_names::class_capture`] says.
 pub(super) fn constructor_local_variables(
-    arguments: &[crate::ir::IrCtorArg],
+    ir: &IrFile,
+    class: &crate::ir::IrClass,
 ) -> Vec<Option<String>> {
+    let arguments = &class.ctor_args;
     let identities = constructor_identities(arguments);
     let anonymous = if anonymous_context_parameters_are_locals() {
         constructor_anonymous_labels(arguments, &identities)
@@ -437,7 +438,7 @@ pub(super) fn constructor_local_variables(
             argument
                 .capture
                 .as_ref()
-                .map(capture_parameter_local)
+                .map(|capture| super::capture_names::class_capture(ir, class, capture).parameter)
                 .or(anonymous)
                 .or_else(|| local_variable(identity, "<init>"))
                 .or_else(|| {
