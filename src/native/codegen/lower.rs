@@ -181,7 +181,7 @@ pub fn lower_file(
         callables,
         runtime_symbols,
     } = input;
-    let class_model = model::build(ir, classifiers)?;
+    let class_model = model::build(ir)?;
 
     let isa = isa_for(target)?;
     let builder = ObjectBuilder::new(

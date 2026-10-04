@@ -364,10 +364,7 @@ pub(super) fn check_supported(class: &IrClass) -> Result<(), Unsupported> {
 }
 
 /// Build the layout and vtable of every class in `ir`, superclasses first.
-pub(super) fn build(
-    ir: &IrFile,
-    classifiers: &dyn crate::backend::BackendClassifierSource,
-) -> Result<ClassModel, Unsupported> {
+pub(super) fn build(ir: &IrFile) -> Result<ClassModel, Unsupported> {
     for class in &ir.classes {
         check_supported(class)?;
     }
@@ -386,7 +383,7 @@ pub(super) fn build(
                     .as_ref()
                     .expect("superclasses are laid out first")
             });
-            layout_class(ir, classifiers, id, superclass, parent)?
+            layout_class(ir, id, superclass, parent)?
         };
         layouts[id as usize] = Some(layout);
     }
@@ -864,7 +861,6 @@ fn round_up(value: u32, alignment: u32) -> u32 {
 
 fn layout_class(
     ir: &IrFile,
-    classifiers: &dyn crate::backend::BackendClassifierSource,
     id: ClassId,
     superclass: Option<ClassId>,
     parent: Option<&ClassLayout>,
@@ -1706,55 +1702,9 @@ fn same_representation(implementation: &IrFunction, overridden: &IrFunction) -> 
 mod tests {
     use super::*;
     use crate::ir::{IrField, IrProperty, IrfFlags};
-    use std::sync::Arc;
-
-    struct NoClassifiers;
-
-    impl crate::backend::BackendClassifierSource for NoClassifiers {
-        fn classifier(
-            &self,
-            _classifier: TypeName,
-        ) -> Option<std::sync::Arc<crate::backend::BackendClassifierFact>> {
-            None
-        }
-    }
-
-    struct FunctionClassifier {
-        owner: TypeName,
-        arity: usize,
-    }
-
-    impl crate::backend::BackendClassifierSource for FunctionClassifier {
-        fn classifier(
-            &self,
-            classifier: TypeName,
-        ) -> Option<Arc<crate::backend::BackendClassifierFact>> {
-            (classifier == self.owner).then(|| {
-                Arc::new(crate::backend::BackendClassifierFact {
-                    access: crate::libraries::ClassifierAccess::Public,
-                    is_kotlin: true,
-                    source: false,
-                    outer_instance: None,
-                    kind: crate::libraries::TypeKind::Interface,
-                    is_abstract: true,
-                    is_extensible: true,
-                    supertypes: Box::new([]),
-                    surface: Box::new([]),
-                    annotations: Box::new([]),
-                    own_type_parameter_count: 0,
-                    type_param_variances: Box::new([]),
-                    value_underlying: None,
-                    value_underlying_property: None,
-                    role: Some(crate::types::ClassifierRole::FunctionOfArity(
-                        u8::try_from(self.arity).expect("fixture function arity fits the role"),
-                    )),
-                })
-            })
-        }
-    }
 
     fn build(ir: &IrFile) -> Result<ClassModel, Unsupported> {
-        super::build(ir, &NoClassifiers)
+        super::build(ir)
     }
 
     fn function(name: &str, owner: &str, params: Vec<Ty>, ret: Ty, abstract_: bool) -> IrFunction {
@@ -2219,12 +2169,7 @@ mod tests {
 
     /// Record that `implementation` is a function classifier's `invoke`, as the frontend does: an
     /// edge to an external declaration whose provider publishes the exact classifier role.
-    fn record_invoke(
-        ir: &mut IrFile,
-        class: ClassId,
-        implementation: FunId,
-        arity: usize,
-    ) -> FunctionClassifier {
+    fn record_invoke(ir: &mut IrFile, class: ClassId, implementation: FunId, arity: usize) {
         use crate::fir::{CallableId, ExternalCallableId};
         let owner = ir.classes[class as usize].fq_name_id();
         let function_owner = crate::types::type_name(&format!("fixture/Callable{arity}"));
@@ -2241,7 +2186,9 @@ mod tests {
                     1,
                 )),
                 overridden_owner: function_owner,
-                overridden_semantic_role: None,
+                overridden_semantic_role: Some(
+                    crate::types::SemanticCallRole::KotlinFunctionInvoke,
+                ),
                 collection_barrier: None,
                 overridden_is_interface: true,
                 name: "invoke".to_string(),
@@ -2257,10 +2204,6 @@ mod tests {
                 has_kotlin_superclass_override: false,
                 depth: 1,
             });
-        FunctionClassifier {
-            owner: function_owner,
-            arity,
-        }
     }
 
     #[test]
@@ -2277,9 +2220,9 @@ mod tests {
             b,
             function("invoke", "B", vec![], Ty::String, false),
         );
-        let classifiers = record_invoke(&mut ir, b, invoke, 0);
+        record_invoke(&mut ir, b, invoke, 0);
 
-        let model = super::build(&ir, &classifiers).expect("layout");
+        let model = super::build(&ir).expect("layout");
         let foo_slot = model.slot(b, &SlotKey::Function(foo)).expect("foo's slot");
         assert_ne!(foo_slot, FUNCTION_SLOT);
         assert_eq!(
