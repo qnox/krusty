@@ -1120,7 +1120,9 @@ mod suspend_lambda_member_tests {
         let lambda = SuspendLambdaParameters::new(
             vec![captured, IrParameterIdentity::captured_receiver(0)],
             1,
-            vec![IrCapturedReceiver::Enclosing],
+            vec![IrCapturedReceiver::Enclosing {
+                classifier: crate::types::type_name("Outer"),
+            }],
             None,
         );
         let constructor = [Ty::Long, Ty::obj("Outer"), Ty::obj("Continuation")];

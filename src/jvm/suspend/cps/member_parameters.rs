@@ -202,7 +202,9 @@ mod tests {
         let lambda = SuspendLambdaParameters::new(
             vec![IrParameterIdentity::captured_receiver(0)],
             0,
-            vec![IrCapturedReceiver::Enclosing],
+            vec![IrCapturedReceiver::Enclosing {
+                classifier: crate::types::type_name("Outer"),
+            }],
             None,
         );
         local_variables(

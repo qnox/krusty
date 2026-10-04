@@ -381,7 +381,8 @@ fn forwarded_nested_anonymous_super_argument_reads_the_live_dispatch_receiver() 
                 object.captures.iter().find(|capture| {
                     matches!(
                         capture.receiver.as_ref(),
-                        Some(crate::fir::FirCapturedReceiver::Enclosing)
+                        Some(crate::fir::FirCapturedReceiver::Enclosing { classifier })
+                            if *classifier == crate::types::type_name("B")
                     )
                 })
             })

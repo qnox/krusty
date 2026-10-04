@@ -412,7 +412,12 @@ impl Checker<'_> {
                     self.implicit_receiver_capture_id(class_receiver, receiver_role);
                 (
                     ty,
-                    self.captured_receiver(scope, identity, extension, class_receiver),
+                    self.captured_receiver(
+                        scope,
+                        identity,
+                        extension,
+                        class_receiver.then_some(ty),
+                    ),
                     receiver_capture,
                     receiver_role,
                 )
@@ -712,7 +717,7 @@ impl Checker<'_> {
                         depth: 0,
                     },
                     receiver_label: None,
-                    receiver: Some(crate::fir::FirCapturedReceiver::Enclosing),
+                    receiver: Some(super::anonymous_object_capture::enclosing_instance(outer)),
                     semantic_receiver: Some(AnonymousObjectReceiverSource::EnclosingInstance {
                         current: true,
                         depth: 0,
