@@ -135,6 +135,7 @@ impl LibraryCallable {
         callable.default_realization = member.default_realization.clone();
         callable.external_default_provider = member.external_default_provider;
         callable.nonvirtual_realization = member.nonvirtual_realization.clone();
+        callable.visibility = member.visibility;
         callable
     }
 

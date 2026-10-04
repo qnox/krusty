@@ -3298,6 +3298,7 @@ impl JvmLibraries {
             getter_parameter_identities.len(),
             "a normalized dependency property getter publishes every parameter identity"
         );
+        property.getter.visibility = property.visibility;
         self.register_external_callable(&mut property.getter, kind);
         if let Some(identity) = property.getter.external_identity {
             self.cp.publish_external_callable_parameter_identities(
@@ -3306,6 +3307,7 @@ impl JvmLibraries {
             );
         }
         if let Some(setter) = &mut property.setter {
+            setter.visibility = property.setter_visibility;
             let mut setter_parameter_identities = property.context_parameter_identities.clone();
             if extension && setter.params.len() == setter_parameter_identities.len() + 2 {
                 setter_parameter_identities.insert(
@@ -3355,6 +3357,7 @@ impl JvmLibraries {
     ) -> crate::libraries::Callables {
         let (mut functions, mut properties) = callables.into_parts();
         for function in &mut functions.overloads {
+            function.callable.visibility = function.visibility;
             function.callable.inline_modifiers = function
                 .call_sig
                 .inline_modifiers
@@ -5165,7 +5168,6 @@ impl JvmLibraries {
                                 super::mapped_builtin_declarations::MappedBuiltinMemberKind::Function,
                             )
                             .into_boxed_slice();
-                        callable.visibility = m.visibility;
                         // `params` is the call-site-specialized Kotlin declaration shape; the
                         // classfile descriptor remains the physical ABI. In particular, an
                         // object-erased value-class parameter (`Result<T>` -> `Object`) must not be
