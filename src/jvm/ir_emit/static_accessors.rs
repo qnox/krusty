@@ -74,7 +74,7 @@ impl StaticAccessorPlan {
 pub(super) struct EmissionContext {
     pub(super) owner: StaticOwner,
     /// The class's index in the file's classes; `None` for the facade.
-    class: Option<usize>,
+    pub(super) class: Option<usize>,
     pub(super) roots: Vec<crate::ir::ExprId>,
 }
 

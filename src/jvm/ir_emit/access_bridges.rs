@@ -194,23 +194,19 @@ fn protected_bridge_owner(
 /// and lives in another package.
 fn enclosing_protected_subclass(
     ir: &IrFile,
-    caller: &str,
+    caller: crate::ir::ClassId,
     target: crate::types::TypeName,
 ) -> Option<crate::types::TypeName> {
-    let mut current = ir
-        .classes
-        .iter()
-        .find(|class| class.fq_name.matches(caller))?
-        .fq_name;
+    let mut current = caller;
     let mut seen = std::collections::HashSet::new();
     while seen.insert(current) {
         let next = enclosing_class(ir, current, target)?;
-        if next != target
-            && !next.matches(caller)
-            && next.namespace() != target.namespace()
+        let next_name = ir.classes.get(next as usize)?.fq_name;
+        if next_name != target
+            && next_name.namespace() != target.namespace()
             && extends_target(ir, next, target)
         {
-            return Some(next);
+            return Some(next_name);
         }
         current = next;
     }
@@ -219,52 +215,31 @@ fn enclosing_protected_subclass(
 
 fn enclosing_class(
     ir: &IrFile,
-    class: crate::types::TypeName,
+    class: crate::ir::ClassId,
     target: crate::types::TypeName,
-) -> Option<crate::types::TypeName> {
-    let declared = ir
-        .classes
-        .iter()
-        .find(|candidate| candidate.fq_name == class)?;
+) -> Option<crate::ir::ClassId> {
+    let declared = ir.classes.get(class as usize)?;
     match declared.enclosure? {
         crate::ir::IrEnclosure::Function(function) | crate::ir::IrEnclosure::Lambda(function) => {
             let owners = ir.class_method_owners.get(&function)?;
             owners
                 .iter()
-                .find_map(|&owner| {
-                    let owner = ir.classes.get(owner as usize)?;
-                    (owner.fq_name != class && extends_target(ir, owner.fq_name, target))
-                        .then_some(owner.fq_name)
-                })
-                .or_else(|| {
-                    owners.iter().find_map(|&owner| {
-                        let owner = ir.classes.get(owner as usize)?;
-                        (owner.fq_name != class).then_some(owner.fq_name)
-                    })
-                })
+                .copied()
+                .find(|&owner| owner != class && extends_target(ir, owner, target))
+                .or_else(|| owners.iter().copied().find(|&owner| owner != class))
         }
         crate::ir::IrEnclosure::ClassInitializer(owner)
         | crate::ir::IrEnclosure::Constructor { class: owner, .. }
-        | crate::ir::IrEnclosure::Classifier(owner) => {
-            ir.classes.get(owner as usize).map(|owner| owner.fq_name)
-        }
+        | crate::ir::IrEnclosure::Classifier(owner) => Some(owner),
         crate::ir::IrEnclosure::PropertyAccessor { .. } | crate::ir::IrEnclosure::File => None,
     }
 }
 
-fn extends_target(
-    ir: &IrFile,
-    class: crate::types::TypeName,
-    target: crate::types::TypeName,
-) -> bool {
+fn extends_target(ir: &IrFile, class: crate::ir::ClassId, target: crate::types::TypeName) -> bool {
     let mut current = class;
     let mut seen = std::collections::HashSet::new();
     while seen.insert(current) {
-        let Some(declared) = ir
-            .classes
-            .iter()
-            .find(|candidate| candidate.fq_name == current)
-        else {
+        let Some(declared) = ir.classes.get(current as usize) else {
             return false;
         };
         if declared.superclass == target
@@ -275,7 +250,10 @@ fn extends_target(
         {
             return true;
         }
-        current = declared.superclass;
+        let Some(superclass) = ir.class_id_by_name(declared.superclass) else {
+            return false;
+        };
+        current = superclass;
     }
     false
 }
@@ -318,7 +296,10 @@ pub(super) fn cross_owner_member_calls(
 ) -> MemberAccessBridges {
     let mut private = std::collections::HashSet::new();
     let mut protected = std::collections::HashMap::new();
-    let mut scan = |owner: &str, roots: Vec<crate::ir::ExprId>, export_private: bool| {
+    let mut scan = |owner: &str,
+                    caller: Option<crate::ir::ClassId>,
+                    roots: Vec<crate::ir::ExprId>,
+                    export_private: bool| {
         let mut seen = std::collections::HashSet::new();
         let mut stack = roots;
         while let Some(expression) = stack.pop() {
@@ -643,7 +624,11 @@ pub(super) fn cross_owner_member_calls(
                             owner,
                             dependency.owner,
                         )
-                        .or_else(|| enclosing_protected_subclass(ir, owner, dependency.owner));
+                        .or_else(|| {
+                            caller.and_then(|caller| {
+                                enclosing_protected_subclass(ir, caller, dependency.owner)
+                            })
+                        });
                         if let Some(bridge_owner) = bridge_owner {
                             crate::trace_compiler!(
                                 "emit",
@@ -680,6 +665,7 @@ pub(super) fn cross_owner_member_calls(
         for &root in &context.roots {
             scan(
                 &owner,
+                context.class.map(|class| class as crate::ir::ClassId),
                 vec![root],
                 static_accessors::non_private_inline_body(ir, root),
             );
