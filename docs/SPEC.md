@@ -7661,13 +7661,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   constructor-alias registration and classifier lookups are keyed by. Tests:
   `tests/feature_coverage_r_e2e.rs::typealias_in_signatures_and_bodies`,
   `tests/feature_coverage_x_e2e.rs::typealias_function_and_generic`.
-- **A typealias keeps variance written on its type parameters.** Substituting `Y` in
-  `typealias T3<X, Y> = MutableMap<in Y, X?>` used to replace the whole `in Y` node, so
-  `typeOf<T3<Int, String>>()` reported `MutableMap<String, Int?>` instead of
-  `MutableMap<in String, Int?>`. The occurrence's `in`/`out` stays with the substituted argument,
-  the same way its `?` already did. Test:
-  `a_typealias_keeps_variance_on_its_parameters` in `tests/typealias_projection_e2e.rs`. Corpus:
-  `reflection/typeOf/typeAliasedType.kt`.
+- **A typealias keeps variance on the resolved expansion, and composes it with the use site.**
+  `typealias T3<X, Y> = MutableMap<in Y, X?>` expands to `MutableMap<in Y, X?>`, so
+  `typeOf<T3<Int, String>>()` is `MutableMap<in String, Int?>`. Same-direction projections flatten
+  (`out` of `out X` is `out X`; `in` of `in X` is `in X`). A star argument stays a star. Opposite
+  directions stay nested and are rejected at the alias application:
+  `conflicting projection in type alias expansion in intermediate type 'Box<CONFLICTING-PROJECTION String>?.'`.
+  The parser keeps the written syntax; it does not OR projection flags while substituting. Tests:
+  `tests/typealias_projection_e2e.rs`. Corpus: `reflection/typeOf/typeAliasedType.kt`.
 - **Omitted typealias arguments on a constructor call are inferred, not written.** `LinkedHashMap(a)`
   calls the stdlib's `typealias LinkedHashMap<K, V> = java.util.LinkedHashMap<K, V>` without type
   arguments, so the alias's `K`/`V` are type variables of the call, decided by the value arguments and

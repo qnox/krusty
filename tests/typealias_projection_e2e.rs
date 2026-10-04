@@ -44,3 +44,33 @@ fn a_typealias_keeps_variance_on_its_parameters() {
     );
     assert_eq!(reference, "OK");
 }
+
+#[test]
+fn an_opposite_typealias_projection_is_rejected() {
+    // The conflict is reported on the application that composed it. A nullable use keeps `?`
+    // inside the type quotes; a nested alias does not add the outer use's `?`.
+    let source = r#"
+        class Box<T>
+        typealias OutAlias<T> = Box<out T>
+        typealias InAlias<T> = Box<in T>
+        typealias Wrap<T> = Box<T>
+        val a: OutAlias<in String>? = null
+        val b: InAlias<out String>? = null
+        val x: Wrap<OutAlias<in String>>? = null
+    "#;
+    common::assert_messages_match_kotlinc(source);
+}
+
+#[test]
+fn a_same_direction_typealias_projection_is_kept() {
+    let source = r#"
+        class Box<T>
+        typealias OutAlias<T> = Box<out T>
+        typealias InAlias<T> = Box<in T>
+        fun takeOut(x: OutAlias<out String>) = x
+        fun takeIn(x: InAlias<in String>) = x
+        fun takeStar(x: OutAlias<*>) = x
+        fun takeInv(x: OutAlias<String>) = x
+    "#;
+    common::assert_accepted_like_kotlinc(source);
+}

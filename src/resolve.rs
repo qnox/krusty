@@ -36,6 +36,7 @@ mod abstract_obligations;
 mod access_control;
 mod actualization_names;
 mod alias_constructor_application;
+mod alias_projection;
 mod annotation_applications;
 mod anonymous_extension_functions;
 mod anonymous_object_capture;
@@ -36061,6 +36062,8 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         signature_defaults_only: false,
         fragment: SourceFragmentMode::Complete,
         expr_types: vec![Ty::Error; file.expr_arena.len()],
+        type_ref_depth: 0,
+        alias_projection_conflict: false,
         #[cfg(feature = "trace")]
         expr_visits: vec![0; file.expr_arena.len()],
         #[cfg(feature = "trace")]
@@ -38635,6 +38638,13 @@ struct Checker<'a> {
     /// table has no notion of position, so the engine records the rejected read at its source span.
     demand_rejects: Option<&'a dyn Fn(&str, Span) -> bool>,
     expr_types: Vec<Ty>,
+    /// How many [`Self::type_ref_ty`] frames are active. An alias application reports a projection
+    /// conflict only from one of those frames, so a later constructor or import reuse of the same
+    /// expansion does not diagnose it again.
+    type_ref_depth: u32,
+    /// The active [`Self::type_ref_ty`] frame composed opposite declaration-site and use-site
+    /// projections. A nested reference reports its own conflict and restores this flag first.
+    alias_projection_conflict: bool,
     /// Trace-only duplicate-traversal detector. This is deliberately not a semantic cache: normal
     /// builds contain no field or branch, and trace builds report the caller bug to remove.
     #[cfg(feature = "trace")]
@@ -49649,6 +49659,34 @@ impl<'a> Checker<'a> {
 
     /// Resolve a syntactic type without erasing source nullability.
     fn type_ref_ty(&mut self, scope: &CheckerScope<'_>, r: &TypeRef) -> Ty {
+        let saved_conflict = self.alias_projection_conflict;
+        self.alias_projection_conflict = false;
+        self.type_ref_depth += 1;
+        let resolved = self.type_ref_ty_resolved(scope, r);
+        let introduced = self.alias_projection_conflict;
+        self.type_ref_depth -= 1;
+        self.alias_projection_conflict = saved_conflict;
+        if introduced {
+            self.diags.error(
+                r.span,
+                format!(
+                    "conflicting projection in type alias expansion in intermediate type '{}'.",
+                    resolved.source_name()
+                ),
+            );
+        }
+        resolved
+    }
+
+    fn type_ref_ty_resolved(&mut self, scope: &CheckerScope<'_>, r: &TypeRef) -> Ty {
+        // Same-file aliases are rewritten to their target syntax before checking. The written
+        // spelling is what carries use-site variance; composing it here restores `List<out T>`
+        // and reports an opposite projection on that application.
+        if let Some(spelled) = self.rewritten_alias_spelling(r) {
+            if let Some(resolved) = self.scoped_source_alias_ty(scope, &spelled) {
+                return self.publish_type_ref(scope, &spelled, resolved, None);
+            }
+        }
         let mut unresolved_segment = None;
         let scoped = if scope.tparam_contains(&r.name) {
             Some(scope.tparam_bound(&r.name))
@@ -49723,43 +49761,7 @@ impl<'a> Checker<'a> {
         } else {
             Ty::Error
         };
-        let base = if r.definitely_non_null() {
-            definitely_non_null_ty(base)
-        } else {
-            base
-        };
-        let resolved = if r.nullable() && base != Ty::Error {
-            Ty::nullable(base)
-        } else {
-            base
-        };
-        if resolved == Ty::Error {
-            if let Some(segment) = unresolved_segment {
-                self.unresolved_type_segments
-                    .insert((r.span.lo, r.span.hi), segment);
-            }
-        }
-        if !scope.tparam_contains(&r.name) {
-            if let Some(internal) = resolved.non_null().kotlin_class_internal() {
-                if !r.is_import() && !self.suppresses_diagnostic("INVISIBLE_REFERENCE") {
-                    if let Some(access) = self.resolver().inaccessible_classifier_access(internal) {
-                        self.diags.error_with_identity(
-                            r.span,
-                            DiagnosticIdentity::ClassifierAccess {
-                                reference: r.span,
-                                classifier: internal,
-                            },
-                            inaccessible_classifier_message(&r.name, access),
-                        );
-                    }
-                }
-            }
-        }
-        if resolved != Ty::Error && !r.is_import() {
-            self.resolved_type_tys
-                .insert((r.span.lo, r.span.hi), resolved);
-        }
-        resolved
+        self.publish_type_ref(scope, r, base, unresolved_segment)
     }
 
     /// Resolve and publish one body-local typealias on the classifier namespace rung where it is
@@ -50182,9 +50184,11 @@ impl<'a> Checker<'a> {
             .collect::<Vec<_>>();
         let bindings = formals
             .into_iter()
-            .zip(args)
+            .zip(args.iter().copied())
             .collect::<crate::symbol_resolver::GSigBinds>();
-        crate::symbol_resolver::ty_subst(expansion, &bindings)
+        let resolved = crate::symbol_resolver::ty_subst(expansion, &bindings);
+        self.note_introduced_projection_conflict(&args, resolved);
+        resolved
     }
 
     /// True if `t` names a `@JvmInline value class`, independent of which symbol provider owns it.
@@ -50212,6 +50216,9 @@ impl<'a> Checker<'a> {
 
     /// Resolve a type without emitting diagnostics (used for speculative smart-cast narrowing).
     fn type_ref_ty_silent(&self, scope: &CheckerScope<'_>, r: &TypeRef) -> Ty {
+        if let Some(resolved) = self.silent_rewritten_alias_ty(scope, r) {
+            return resolved;
+        }
         let lexical_alias = scope.type_alias(&r.name).and_then(|alias| {
             (alias.formals.len() == r.targs.len()).then(|| {
                 let arguments = r

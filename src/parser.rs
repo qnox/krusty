@@ -641,15 +641,9 @@ fn substitute_type_alias_parameters(ty: &mut TypeRef, params: &[String], args: &
     if ty.fun_params.is_empty() && ty.name != "<fun>" && ty.targs.is_empty() {
         if let Some(index) = params.iter().position(|param| *param == ty.name) {
             let nullable = ty.nullable();
-            let in_projection = ty.in_projection();
-            let out_projection = ty.out_projection();
             let span = ty.span;
             *ty = args[index].clone();
             ty.set_nullable(ty.nullable() || nullable);
-            ty.set_projection(
-                ty.in_projection() || in_projection,
-                ty.out_projection() || out_projection,
-            );
             ty.span = span;
             return;
         }

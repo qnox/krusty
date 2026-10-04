@@ -11,8 +11,9 @@ mod substitute;
 mod type_parameter_identity;
 
 pub(crate) use substitute::{
-    ty_canonicalize_params, ty_rename_params, ty_subst, ty_subst_all, ty_subst_applied_arguments,
-    ty_subst_applied_lookup, ty_subst_keep_unbound, ty_with_param_bounds,
+    projection_conflict_count, ty_canonicalize_params, ty_rename_params, ty_subst, ty_subst_all,
+    ty_subst_applied_arguments, ty_subst_applied_lookup, ty_subst_keep_unbound,
+    ty_with_param_bounds,
 };
 
 pub use crate::context_parameters::{CapturedContextKind, ContextParameterKind};
@@ -1631,14 +1632,26 @@ impl Ty {
                     inner.source_name_with_type_parameter_in(context, type_parameter)
                 )
             }
-            Ty::InProjection(inner) => format!(
-                "in {}",
-                inner.source_name_with_type_parameter_in(context, type_parameter)
-            ),
-            Ty::OutProjection(inner) => format!(
-                "out {}",
-                inner.source_name_with_type_parameter_in(context, type_parameter)
-            ),
+            Ty::InProjection(inner) => match *inner {
+                Ty::OutProjection(conflicting) => format!(
+                    "CONFLICTING-PROJECTION {}",
+                    conflicting.source_name_with_type_parameter_in(context, type_parameter)
+                ),
+                _ => format!(
+                    "in {}",
+                    inner.source_name_with_type_parameter_in(context, type_parameter)
+                ),
+            },
+            Ty::OutProjection(inner) => match *inner {
+                Ty::InProjection(conflicting) => format!(
+                    "CONFLICTING-PROJECTION {}",
+                    conflicting.source_name_with_type_parameter_in(context, type_parameter)
+                ),
+                _ => format!(
+                    "out {}",
+                    inner.source_name_with_type_parameter_in(context, type_parameter)
+                ),
+            },
             Ty::StarProjection(_) => "*".to_string(),
             Ty::DefinitelyNotNull(inner) => format!(
                 "{} & Any",
