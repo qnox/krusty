@@ -82,6 +82,17 @@ are not started. The replacement wiring runs at the end of project configuration
 registering a task from inside a task configuration callback. The plugin does not invoke krusty-build, inspect task implementation classes, or
 mutate private action lists. `.kts` files are not compilation inputs.
 
+Two kinds of `KotlinJvmCompile` stay with kotlinc, and the plugin logs each one at configuration
+(`krusty: task '…' is left to kotlinc: …`). A task with no `sourceSetName` belongs to no source-set
+compilation: from Gradle 8, `kotlin-dsl` registers `compilePluginsBlocks` as one; it compiles the `plugins {}`
+blocks extracted from precompiled script plugins as scripts, with no Java sibling or classes output.
+Every compile of a project applying `kotlin-dsl` (`org.gradle.kotlin.kotlin-dsl.base`, so `buildSrc`
+and convention-plugin builds) also stays: its precompiled script plugins are `.gradle.kts` scripts,
+its SAM-with-receiver and assignment compiler plugins change call resolution, and its compiler
+settings add arguments the adapter does not model. Replacing such a task would drop the scripts or
+reject the build, so neither is replaced and neither joins `krustyCompile`.
+(`kotlin_dsl_build_src_compiles_through_krusty` in `crates/krusty-build/src/gradle.rs`.)
+
 The adapter derives Kotlin semantics from `KotlinBasePlugin.pluginVersion`. It reads the experimental
 Build Tools API `compilerVersion` property behind the two exact KGP/BTA opt-ins only to reject an
 override which would make those semantics diverge; it does not use the experimental compiler path.

@@ -80,6 +80,8 @@ abstract class KrustyKotlinPlugin @Inject constructor(
 
 private const val AGGREGATE_TASK_PROPERTY = "krusty.aggregateTaskProvider"
 
+private const val KOTLIN_DSL_BASE_PLUGIN_ID = "org.gradle.kotlin.kotlin-dsl.base"
+
 private fun aggregateTask(root: Project): TaskProvider<Task> {
     val extra = root.extensions.extraProperties
     if (extra.has(AGGREGATE_TASK_PROPERTY)) {
@@ -100,8 +102,31 @@ private fun replaceKotlinJvmCompiles(
     aggregate: TaskProvider<Task>,
     supplementalCompilerPluginIds: ListProperty<String>,
 ) {
+    // Gradle's kotlin-dsl (applied through `kotlin-dsl` or `kotlin-dsl.base`) owns every Kotlin
+    // compilation of its project: precompiled script plugins are `.gradle.kts` scripts compiled
+    // against the Gradle script templates, the SAM-with-receiver and assignment compiler plugins
+    // change call resolution, and its compiler settings add arguments krusty does not model. A
+    // replacement would drop the scripts or reject the build, so kotlinc keeps those compiles.
+    val kotlinDsl = project.pluginManager.hasPlugin(KOTLIN_DSL_BASE_PLUGIN_ID)
     project.tasks.withType(KotlinJvmCompile::class.java).all {
         val kotlinTask = this
+        // A KotlinJvmCompile outside every source-set compilation is not a krusty compile either:
+        // kotlin-dsl's `compilePluginsBlocks` compiles the `plugins {}` blocks it extracts from
+        // precompiled script plugins as scripts, with no source set, Java sibling or classes output.
+        val sourceSetName = kotlinTask.sourceSetName.orNull
+        val kotlincReason = when {
+            sourceSetName == null -> "it belongs to no source set"
+            kotlinDsl -> "its project applies kotlin-dsl"
+            else -> null
+        }
+        if (kotlincReason != null) {
+            project.logger.lifecycle(
+                "krusty: {} is left to kotlinc: {}",
+                kotlinTask,
+                kotlincReason,
+            )
+            return@all
+        }
         val replacementName = "${kotlinTask.name}WithKrusty"
         val pluginVersion = project.provider {
             project.plugins.withType(KotlinBasePlugin::class.java).single().pluginVersion
@@ -147,13 +172,14 @@ private fun replaceKotlinJvmCompiles(
                 javaVersion.set(selectedJavaVersion)
                 kotlinJavaVersion.set(
                     kotlinTask.kotlinJavaToolchainProvider
-                        .map { it.javaVersion.get().majorVersion }
+                        .flatMap { it.javaVersion }
+                        .map { it.majorVersion }
                         .orElse(selectedJavaVersion),
                 )
             }
             java.sourceSets.configureEach {
                 val sourceSet = this
-                if (sourceSet.name == kotlinTask.sourceSetName.get()) {
+                if (sourceSet.name == sourceSetName) {
                     val javaCompile = project.tasks.named(sourceSet.compileJavaTaskName, JavaCompile::class.java)
                     replacement.configure {
                         javaSourceFiles.from(sourceSet.allJava)
