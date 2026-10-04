@@ -2051,11 +2051,16 @@ impl Classpath {
         identities: Box<[crate::fir::ResolvedParameterIdentity]>,
     ) {
         let mut callables = self.external_callables.borrow_mut();
-        let Some(stored) = callables.get_mut(identity.raw() as usize) else {
-            return;
-        };
+        let stored = callables
+            .get_mut(identity.raw() as usize)
+            .expect("parameter identities name an interned external callable");
         if stored.parameter_identities.is_empty() {
             stored.parameter_identities = identities;
+        } else {
+            assert_eq!(
+                stored.parameter_identities, identities,
+                "one external callable identity cannot publish conflicting parameter identities"
+            );
         }
     }
 
