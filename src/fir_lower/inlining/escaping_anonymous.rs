@@ -106,6 +106,137 @@ fn retarget(
             }
         }
     }
+    note_caller_property_uses(ir, root);
+    Ok(())
+}
+
+fn note_caller_property_uses(ir: &mut crate::ir::IrFile, root: ExprId) {
+    let mut pending = vec![root];
+    let mut seen = HashSet::new();
+    let mut uses = Vec::new();
+    while let Some(expression) = pending.pop() {
+        if !seen.insert(expression) {
+            continue;
+        }
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+        let receiver = match ir.expr(expression) {
+            IrExpr::Checked(
+                crate::ir::IrCheckedOperation::PropertyRead {
+                    dispatch_receiver, ..
+                }
+                | crate::ir::IrCheckedOperation::PropertyWrite {
+                    dispatch_receiver, ..
+                },
+            ) => *dispatch_receiver,
+            _ => None,
+        };
+        let Some(receiver) = receiver else {
+            continue;
+        };
+        let IrExpr::New { internal, .. } = ir.expr(receiver) else {
+            continue;
+        };
+        let Some(class) = ir.class_id_by_name(*internal) else {
+            continue;
+        };
+        if ir.specialized_anonymous_classes.contains_key(&class) {
+            uses.push((class, expression));
+        }
+    }
+    for (class, expression) in uses {
+        let Some(record) = ir.specialized_anonymous_classes.get_mut(&class) else {
+            continue;
+        };
+        if !record.caller_property_uses.contains(&expression) {
+            record.caller_property_uses.push(expression);
+        }
+    }
+}
+
+fn retarget_caller_property_uses(
+    ir: &mut crate::ir::IrFile,
+    copy_id: ClassId,
+    spec: &crate::ir::IrSpecializedAnonymousClass,
+    source_name: TypeName,
+) -> Result<(), super::super::FirLoweringFailure> {
+    for expression in spec.caller_property_uses.clone() {
+        retarget_caller_property_use(ir, expression, copy_id, source_name)?;
+    }
+    Ok(())
+}
+
+fn retarget_caller_property_use(
+    ir: &mut crate::ir::IrFile,
+    expression: ExprId,
+    copy_id: ClassId,
+    source_name: TypeName,
+) -> Result<(), super::super::FirLoweringFailure> {
+    let IrExpr::Checked(operation) = ir.expr(expression).clone() else {
+        return Ok(());
+    };
+    let (target, receiver, extension_receiver, context_arguments, value) = match operation {
+        crate::ir::IrCheckedOperation::PropertyRead {
+            target,
+            dispatch_receiver,
+            extension_receiver,
+            context_arguments,
+            ..
+        } => (
+            target,
+            dispatch_receiver,
+            extension_receiver,
+            context_arguments,
+            None,
+        ),
+        crate::ir::IrCheckedOperation::PropertyWrite {
+            target,
+            dispatch_receiver,
+            extension_receiver,
+            context_arguments,
+            value,
+            ..
+        } => (
+            target,
+            dispatch_receiver,
+            extension_receiver,
+            context_arguments,
+            Some(value),
+        ),
+        _ => return Ok(()),
+    };
+    if extension_receiver.is_some() || !context_arguments.is_empty() {
+        return Err(malformed(source_name));
+    }
+    let name = match ir.local_property_layouts.get(&target) {
+        Some(crate::ir::IrLocalPropertyLayout::Member { name, .. }) => name.clone(),
+        _ => return Err(malformed(source_name)),
+    };
+    let property = ir.classes[copy_id as usize]
+        .properties
+        .iter()
+        .find(|property| property.name == name)
+        .ok_or_else(|| malformed(source_name))?;
+    let ty = property.ty;
+    let owner = ir.classes[copy_id as usize].fq_name;
+    ir.exprs[expression as usize] = match value {
+        Some(value) => IrExpr::PropertyWrite {
+            receiver,
+            owner,
+            name,
+            value,
+            ty,
+            interface: false,
+            operation: Some(expression),
+        },
+        None => IrExpr::PropertyRead {
+            receiver,
+            owner,
+            name,
+            ty,
+            interface: false,
+            operation: Some(expression),
+        },
+    };
     Ok(())
 }
 
@@ -178,9 +309,31 @@ fn specialized_class(
     copy.enclosure = expansion.site.caller.or(copy.enclosure);
     copy.methods = cloned_methods.clone();
     remap_property_accessors(&mut copy, &cloned).map_err(|()| malformed(class_name))?;
+    let source_init = ir.classes[source as usize].init_body;
+    let covered = source_init
+        .map(|body| expression_ids(ir, body))
+        .unwrap_or_default();
+    let property_roots = property_roots(ir, source)
+        .into_iter()
+        .filter(|root| !covered.contains(root))
+        .collect::<Vec<_>>();
     let (init_body, init_owned) = clone_optional_body(ir, copy.init_body, expansion, class_name)?;
     copy.init_body = init_body;
     owned.extend(init_owned);
+    // Property initializers and accessor bodies are still checked expressions here. They stay on
+    // the specialization record, not in the constructor: accessor functions are assembled only
+    // after every inline expansion. A later expansion has to see the specialized reified type on
+    // this copy, or it will reuse the copy and leave the outer parameter unsubstituted.
+    let mut property_copies = Vec::new();
+    for root in property_roots {
+        let (cloned_root, cloned_owned) =
+            clone_optional_body(ir, Some(root), expansion, class_name)?;
+        let Some(cloned_root) = cloned_root else {
+            continue;
+        };
+        property_copies.push(cloned_root);
+        owned.extend(cloned_owned);
+    }
     let class_id = ir.add_class(copy);
     for method in &cloned_methods {
         ir.note_class_method(class_id, *method);
@@ -209,6 +362,8 @@ fn specialized_class(
             reified_bindings: expansion.reified_bindings.clone(),
             field_count,
             property_count,
+            caller_property_uses: Vec::new(),
+            pending_property_roots: property_copies,
         },
     );
     for method in ir.classes[class_id as usize].methods.clone() {
@@ -219,7 +374,47 @@ fn specialized_class(
     if let Some(body) = ir.classes[class_id as usize].init_body {
         retarget(ir, body, expansion, seen)?;
     }
+    let pending_roots = ir
+        .specialized_anonymous_classes
+        .get(&class_id)
+        .map(|record| record.pending_property_roots.clone())
+        .unwrap_or_default();
+    for root in pending_roots {
+        retarget(ir, root, expansion, seen)?;
+    }
     Ok(Some(placeholder))
+}
+
+fn expression_ids(ir: &crate::ir::IrFile, root: ExprId) -> HashSet<ExprId> {
+    let mut pending = vec![root];
+    let mut seen = HashSet::new();
+    while let Some(expression) = pending.pop() {
+        if !seen.insert(expression) {
+            continue;
+        }
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+    }
+    seen
+}
+
+fn property_roots(ir: &crate::ir::IrFile, class: ClassId) -> Vec<ExprId> {
+    let mut roots = Vec::new();
+    for property in ir.checked_properties.values() {
+        if property.class != Some(class) {
+            continue;
+        }
+        roots.extend(property.getter);
+        roots.extend(property.setter);
+        roots.extend(property.initializer);
+    }
+    // A copy taken before accessors exist keeps those roots on its specialization record.
+    // The next expansion clones that record; the copy has no checked-property entry of its own.
+    if let Some(record) = ir.specialized_anonymous_classes.get(&class) {
+        roots.extend(record.pending_property_roots.iter().copied());
+    }
+    roots.sort_unstable();
+    roots.dedup();
+    roots
 }
 
 fn clone_optional_body(
@@ -494,6 +689,7 @@ fn publish_one_copy(
     }
     publish_property_members(ir, source, source_name, copy_name, &clones)?;
     retarget_copied_property_calls(ir, copy_id, source, source_name, &clones)?;
+    retarget_caller_property_uses(ir, copy_id, &spec, source_name)?;
     specialize(
         ir,
         nested,
@@ -906,18 +1102,8 @@ fn class_uses_binding(
     roots.extend(class_decl.init_body);
     // Accessor functions are materialized after inlining. Their checked bodies are already
     // expressions on the property, and a reified operation there must still select the copy.
-    roots.extend(
-        ir.checked_properties
-            .values()
-            .filter(|property| property.class == Some(class))
-            .flat_map(|property| {
-                property
-                    .getter
-                    .into_iter()
-                    .chain(property.setter)
-                    .chain(property.initializer)
-            }),
-    );
+    // A class that is itself a copy keeps those bodies on its specialization record.
+    roots.extend(property_roots(ir, class));
     for root in roots {
         if dag_uses_binding(ir, root, bindings, seen) {
             return true;
@@ -939,7 +1125,9 @@ fn dag_uses_binding(
             continue;
         }
         crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
-        if node_uses_binding(ir.expr(expression), bindings) {
+        if node_uses_binding(ir.expr(expression), bindings)
+            || super::escaping_lambda::expression_facts_use_binding(ir, expression, bindings)
+        {
             return true;
         }
         if let IrExpr::New { internal, .. } = ir.expr(expression) {
