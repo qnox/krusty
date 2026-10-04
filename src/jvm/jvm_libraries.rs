@@ -672,6 +672,10 @@ impl JvmLibraries {
                 crate::libraries::builtin_top_level_realization::normalized_function_realization(
                     pkg, name, &function,
                 );
+            function.callable.semantic_role =
+                crate::libraries::builtin_top_level_realization::normalized_function_semantic_role(
+                    pkg, name, &function,
+                );
             overloads.push(function);
         }
         overloads
@@ -4429,6 +4433,12 @@ impl JvmLibraries {
                 {
                     overload.callable.compiler_intrinsic = Some(intrinsic);
                 }
+                overload.callable.semantic_role =
+                    crate::libraries::builtin_top_level_realization::normalized_function_semantic_role(
+                        package,
+                        name,
+                        overload,
+                    );
             }
             for property in &mut props {
                 if let Some(intrinsic) =

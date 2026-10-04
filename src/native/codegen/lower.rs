@@ -1775,9 +1775,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 target,
                 receiver: Some(receiver),
                 ..
-            }) if self.reference_property(target, receiver).is_some() => self
+            }) if self.reference_property_role(target).is_some() => self
                 .reference_property(target, receiver)
-                .expect("checked by the guard"),
+                .expect("the selected getter role was checked by the guard"),
             // `k.simpleName` / `k.qualifiedName`: the descriptor's own Kotlin name.
             IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
                 target,
@@ -1814,16 +1814,6 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 receiver: Some(receiver),
                 ..
             }) if self.is_text_length(target) => self.text_length(receiver),
-            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
-                target,
-                receiver: Some(receiver),
-                ..
-            }) if self.callable_reference_name(target, receiver).is_some() => {
-                let name = self
-                    .callable_reference_name(target, receiver)
-                    .expect("checked by the guard");
-                self.callable_name(receiver, &name)
-            }
             IrExpr::Checked(IrCheckedOperation::PropertyRead {
                 target,
                 dispatch_receiver,
@@ -2261,19 +2251,19 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             // `name` and `ordinal` belong to `kotlin.Enum`, a class no file declares, so the
             // checked property table has nothing to say about them; their types are the language's
             // and are stated where the read itself is recognized.
-            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead {
-                target, receiver, ..
-            }) => {
+            IrExpr::Checked(IrCheckedOperation::ExternalPropertyRead { target, .. }) => {
                 if self.is_text_length(*target) {
                     return Some(Ty::Int);
                 }
                 if self.class_name_accessor(*target).is_some() {
                     return Some(Ty::nullable(Ty::String));
                 }
-                if let Some(receiver) = receiver {
-                    if self.callable_reference_name(*target, *receiver).is_some() {
-                        return Some(Ty::String);
-                    }
+                if self.reference_property_role(*target).is_some() {
+                    return self
+                        .file
+                        .callables
+                        .property(*target)
+                        .map(|property| property.result);
                 }
                 match self.enum_member_name(*target) {
                     Some("name") => Ty::String,

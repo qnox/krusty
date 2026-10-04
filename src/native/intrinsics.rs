@@ -38,10 +38,6 @@ impl DeclarationOwner {
         self.package.is_some_and(|owner| owner.matches(package))
     }
 
-    fn package_is(self, package: TypeName) -> bool {
-        self.package == Some(package)
-    }
-
     fn classifier_matches(self, kotlin: &str) -> bool {
         classifier_matches(self.physical, kotlin)
     }
@@ -657,33 +653,6 @@ pub(super) fn scope_function(owner: DeclarationOwner, name: &str) -> Option<Scop
         "let" | "run" => Some(ScopeResult::BlockResult),
         _ => None,
     }
-}
-
-/// Whether a getter is `KCallable.name` — the one member of the reflection surface whose answer a
-/// program can have without any reflection metadata existing, because the declaration it names is
-/// written in the same file.
-pub(super) fn is_callable_name(owner: crate::types::TypeName, name: &str) -> bool {
-    name == "name"
-        && [
-            "kotlin/reflect/KCallable",
-            "kotlin/reflect/KFunction",
-            "kotlin/reflect/KProperty",
-        ]
-        .iter()
-        .any(|candidate| owner.matches(candidate))
-}
-
-/// Whether a declaration's owner is where the stdlib's delegate operators on a property reference
-/// live. `kotlin.getValue`/`kotlin.setValue` are top-level extensions of `KProperty0`/`KProperty1`,
-/// so a JVM provider presents them on the file facade `PropertyReferenceDelegates.kt` compiles to
-/// and a klib provider, which has no facades, presents them on the package itself.
-///
-/// The bare package `kotlin` is admitted even though `Lazy.getValue` is also a top-level `kotlin`
-/// declaration of that name, because the owner is not what tells them apart: only a call whose
-/// RECEIVER is one of the four property-reference types reaches these slots, and the caller checks
-/// that before asking anything else.
-pub(super) fn is_property_delegates_facade(owner: DeclarationOwner) -> bool {
-    owner.package_is(crate::types::wk::kotlin_package())
 }
 
 /// How a program iterates a receiver it could only type by an INTERFACE.
@@ -1416,26 +1385,6 @@ mod tests {
         assert!(package("kotlin/io").package_matches("kotlin/io"));
         assert!(package("kotlin/collections").package_matches("kotlin/collections"));
         assert!(package("kotlin").package_matches("kotlin"));
-    }
-
-    /// The delegate operators on a property reference, under either provider's spelling.
-    ///
-    /// The klib spelling is the bare package, which `Lazy.getValue` also answers to — the owner
-    /// does not separate them and is not asked to. Fourteen corpus cases delegated to a property
-    /// reference and were declined because only the JVM facade was admitted.
-    #[test]
-    fn the_reference_delegate_operators_are_found_under_either_spelling() {
-        assert!(is_property_delegates_facade(facade(
-            "kotlin/PropertyReferenceDelegatesKt"
-        )));
-        assert!(!is_property_delegates_facade(package("kotlin/properties")));
-        assert!(is_property_delegates_facade(package("kotlin")));
-        // A different package, and a CLASS in the right one, are both still no.
-        assert!(!is_property_delegates_facade(package("kotlin/collections")));
-        assert!(!is_property_delegates_facade(member("kotlin/Lazy")));
-        assert!(!is_property_delegates_facade(facade(
-            "kotlin/text/StringsKt"
-        )));
     }
 
     /// `x++` names the same operation whichever provider selected the declaration.

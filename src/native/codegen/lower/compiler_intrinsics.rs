@@ -80,7 +80,12 @@ pub(super) fn runtime_member_role(
             Some(
                 BackendSemanticCallRole::KotlinAnyEquals
                 | BackendSemanticCallRole::KotlinComparableCompareTo
-                | BackendSemanticCallRole::KotlinFunctionInvoke,
+                | BackendSemanticCallRole::KotlinFunctionInvoke
+                | BackendSemanticCallRole::KotlinCallableReferenceName
+                | BackendSemanticCallRole::KotlinPropertyReferenceGet(_)
+                | BackendSemanticCallRole::KotlinPropertyReferenceSet(_)
+                | BackendSemanticCallRole::KotlinPropertyReferenceDelegateGet(_)
+                | BackendSemanticCallRole::KotlinPropertyReferenceDelegateSet(_),
             ),
         ) => None,
         _ => None,

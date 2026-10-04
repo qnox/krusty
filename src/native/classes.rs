@@ -345,7 +345,12 @@ fn any_slot(role: Option<crate::types::SemanticCallRole>) -> Option<u32> {
         Some(crate::types::SemanticCallRole::KotlinAnyToString) => Some(2),
         Some(
             crate::types::SemanticCallRole::KotlinComparableCompareTo
-            | crate::types::SemanticCallRole::KotlinFunctionInvoke,
+            | crate::types::SemanticCallRole::KotlinFunctionInvoke
+            | crate::types::SemanticCallRole::KotlinCallableReferenceName
+            | crate::types::SemanticCallRole::KotlinPropertyReferenceGet(_)
+            | crate::types::SemanticCallRole::KotlinPropertyReferenceSet(_)
+            | crate::types::SemanticCallRole::KotlinPropertyReferenceDelegateGet(_)
+            | crate::types::SemanticCallRole::KotlinPropertyReferenceDelegateSet(_),
         ) => None,
         None => None,
     }

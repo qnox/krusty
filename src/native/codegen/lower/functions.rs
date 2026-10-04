@@ -544,7 +544,7 @@ impl<'a> FileLowering<'a> {
             .chain(self.model.interfaces[interface as usize].iter().copied())
             .map(|id| self.classes[id as usize].descriptor)
             .collect();
-        let kotlin_name = declaration.fq_name().replace(['/', '$'], ".");
+        let kotlin_name = target.classifier.render().replace(['/', '$'], ".");
         Ok((vtable, interfaces, kotlin_name))
     }
 
@@ -730,12 +730,8 @@ impl<'a> FileLowering<'a> {
 impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     /// Allocate a function value and fill in what it captured.
     pub(super) fn lambda(&mut self, site: u32) -> Result<Option<Value>, Unsupported> {
-        let Site {
-            impl_fn,
-            captures,
-            sam,
-            ..
-        } = closure_site(self.file.ir.expr(site)).expect("only a closure site reaches here")?;
+        let Site { captures, sam, .. } =
+            closure_site(self.file.ir.expr(site)).expect("only a closure site reaches here")?;
         // Converting a NULLABLE function value to a `fun interface` yields null when the value is
         // null — `isNull(nullableFun(true))` must answer true, not call `invoke` on a wrapper
         // around nothing. The checked lowering expresses such a conversion as a lambda whose one

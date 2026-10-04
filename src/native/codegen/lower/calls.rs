@@ -180,11 +180,13 @@ impl BodyLowering<'_, '_, '_> {
                                 return realized;
                             }
                         }
-                        if let Some(realized) = self.reference_member(&name, receiver, args, *ret) {
+                        if let Some(realized) =
+                            self.reference_member(realization.semantic_role, receiver, args, *ret)
+                        {
                             return realized;
                         }
                         if let Some(realized) =
-                            self.reference_delegate(owner, &name, receiver, args, *ret)
+                            self.reference_delegate(realization.semantic_role, receiver, args, *ret)
                         {
                             return realized;
                         }

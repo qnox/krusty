@@ -2261,7 +2261,12 @@ pub(crate) fn lower_value_classes(
                     SemanticCallRole::KotlinAnyToString => ("toString-impl", "Ljava/lang/String;"),
                     SemanticCallRole::KotlinAnyEquals
                     | SemanticCallRole::KotlinComparableCompareTo
-                    | SemanticCallRole::KotlinFunctionInvoke => {
+                    | SemanticCallRole::KotlinFunctionInvoke
+                    | SemanticCallRole::KotlinCallableReferenceName
+                    | SemanticCallRole::KotlinPropertyReferenceGet(_)
+                    | SemanticCallRole::KotlinPropertyReferenceSet(_)
+                    | SemanticCallRole::KotlinPropertyReferenceDelegateGet(_)
+                    | SemanticCallRole::KotlinPropertyReferenceDelegateSet(_) => {
                         unreachable!("excluded by the guard")
                     }
                 };

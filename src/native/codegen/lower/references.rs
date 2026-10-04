@@ -881,31 +881,29 @@ impl BodyLowering<'_, '_, '_> {
 
     /// A member of a property reference, answered through the object's own table.
     ///
-    /// Returns `None` when the receiver is not one of these objects, so the caller falls through to
-    /// the ordinary dependency-member path. The RECEIVER's type decides, never the call's owner:
-    /// `name` is declared on `KCallable`, which every callable reference wears.
+    /// Returns `None` unless the selected declaration's provider attached an exact reflection
+    /// operation role. Native maps that checked role to its object ABI; it never reclassifies the
+    /// receiver or callable spelling.
     pub(super) fn reference_member(
         &mut self,
-        name: &str,
+        role: Option<crate::types::SemanticCallRole>,
         receiver: u32,
         args: &[u32],
         ret: Ty,
     ) -> Option<Result<Option<Value>, Unsupported>> {
-        let ty = self.type_of(receiver)?;
-        // `KCallable` is the type a FUNCTION reference and a property reference share, and `name`
-        // is the only member it declares — so a read through it answers from the slot both tables
-        // put that member in, without either side having to say which of the two the value is.
-        // `get`/`set` are a property's own, so those stay on a type that names a property.
-        let named_by_the_type = name == "name" && args.is_empty() && is_callable(ty);
-        if !(is_property_reference(ty) || named_by_the_type) {
-            return None;
-        }
-        let slot = match (name, args.len()) {
-            ("get" | "invoke", 0 | 1) => GET,
-            ("set", 1 | 2) => SET,
-            // The PROPERTY's name. `get`/`set`/`invoke` above are methods and keep theirs; `name`
-            // is a property of `KCallable`, and `getName` was only the accessor it is realized as.
-            ("name", 0) => NAME,
+        use crate::types::SemanticCallRole;
+        let slot = match role {
+            Some(SemanticCallRole::KotlinCallableReferenceName) if args.is_empty() => NAME,
+            Some(SemanticCallRole::KotlinPropertyReferenceGet(arity))
+                if args.len() == usize::from(arity) =>
+            {
+                GET
+            }
+            Some(SemanticCallRole::KotlinPropertyReferenceSet(arity))
+                if args.len() == usize::from(arity) + 1 =>
+            {
+                SET
+            }
             _ => return None,
         };
         Some(self.reference_call(slot, receiver, args, ret))
@@ -943,53 +941,26 @@ impl BodyLowering<'_, '_, '_> {
         Ok(self.builder.inst_results(call).first().copied())
     }
 
-    /// `::foo.name`, for a reference the program wrote HERE.
-    ///
-    /// `KCallable.name` answers the declaration's own name, and a reference node names its
-    /// declaration — so the answer is known at compile time and no reflection metadata has to
-    /// exist for it. Returns `None` unless the property really is `KCallable.name` and the receiver
-    /// really is such a reference; anything else is somebody else's read.
-    pub(super) fn callable_reference_name(
+    pub(super) fn reference_property_role(
         &self,
         target: crate::fir::ExternalPropertyId,
-        receiver: u32,
-    ) -> Option<String> {
+    ) -> Option<crate::types::SemanticCallRole> {
         let property = self.file.callables.property(target)?;
-        if !super::super::super::intrinsics::is_callable_name(property.owner, &property.name) {
-            return None;
-        }
-        self.file.reference_declaration_name(receiver)
+        self.file.callables.callable(property.getter)?.semantic_role
     }
 
-    /// The name, with the receiver still EVALUATED: `(state++)::toString.name` answers a constant
-    /// and increments, and a program can see the second part.
-    pub(super) fn callable_name(
-        &mut self,
-        receiver: u32,
-        name: &str,
-    ) -> Result<Option<Value>, Unsupported> {
-        self.expression(receiver)?;
-        if self.terminated {
-            return Ok(None);
-        }
-        Ok(Some(self.string_literal(name.as_bytes())?))
-    }
-
-    /// `p.name` — a checked read of a dependency property whose receiver is a reference.
+    /// A checked read of a dependency property whose selected getter carries a reference role.
     ///
-    /// Returns `None` when the receiver is not one, so the caller falls through; the name is
-    /// resolved through the getter the read names, exactly as an explicit call to it would be.
+    /// Returns `None` when the getter has no such role, so the caller falls through to the ordinary
+    /// dependency-property path.
     pub(super) fn reference_property(
         &mut self,
         target: crate::fir::ExternalPropertyId,
         receiver: u32,
     ) -> Option<Result<Option<Value>, Unsupported>> {
-        let ty = self.type_of(receiver)?;
-        if !is_property_reference(ty) && !is_callable(ty) {
-            return None;
-        }
         let property = self.file.callables.property(target)?;
-        self.reference_member(&property.name, receiver, &[], property.result)
+        let role = self.file.callables.callable(property.getter)?.semantic_role;
+        self.reference_member(role, receiver, &[], property.result)
     }
 
     /// `p.getValue(thisRef, property)` and `p.setValue(thisRef, property, value)`.
@@ -997,31 +968,37 @@ impl BodyLowering<'_, '_, '_> {
     /// `val x by ::top` delegates to the property reference itself, through two stdlib operators
     /// that are `inline` one-liners: `getValue` is `get()` on a `KProperty0` and `get(thisRef)` on
     /// a `KProperty1`, and `setValue` the same for `set`. A dependency `inline` body is not here to
-    /// splice, so they are realized rather than inlined — which of the two a site means is the
-    /// RECEIVER's type, since that is what selected the overload in the first place.
+    /// splice, so they are realized rather than inlined. The selected declaration's role records
+    /// how many receivers cross the reference-object slot.
     ///
     /// `property` is the metadata object, which these operators ignore; it is still evaluated,
     /// because a program that can see the difference is entitled to.
     pub(super) fn reference_delegate(
         &mut self,
-        owner: super::super::super::intrinsics::DeclarationOwner,
-        name: &str,
+        role: Option<crate::types::SemanticCallRole>,
         receiver: u32,
         args: &[u32],
         ret: Ty,
     ) -> Option<Result<Option<Value>, Unsupported>> {
-        if !super::super::super::intrinsics::is_property_delegates_facade(owner) {
-            return None;
-        }
-        let takes_receiver = self.type_of(receiver).and_then(reference_receiver)?;
+        use crate::types::SemanticCallRole;
         // Which operands reach the slot: a `KProperty1` is handed `thisRef`, a `KProperty0` is not,
         // and the written value is always the last one.
-        let kept: Vec<usize> = match (name, args.len()) {
-            ("getValue", 2) => takes_receiver.then_some(0).into_iter().collect(),
-            ("setValue", 3) => takes_receiver.then_some(0).into_iter().chain([2]).collect(),
+        let (slot, kept): (u32, Vec<usize>) = match role {
+            Some(SemanticCallRole::KotlinPropertyReferenceDelegateGet(arity))
+                if args.len() == 2 && arity <= 1 =>
+            {
+                (GET, (arity == 1).then_some(0).into_iter().collect())
+            }
+            Some(SemanticCallRole::KotlinPropertyReferenceDelegateSet(arity))
+                if args.len() == 3 && arity <= 1 =>
+            {
+                (
+                    SET,
+                    (arity == 1).then_some(0).into_iter().chain([2]).collect(),
+                )
+            }
             _ => return None,
         };
-        let slot = if name == "setValue" { SET } else { GET };
         Some(self.delegate_call(slot, receiver, args, &kept, ret))
     }
 
@@ -1101,63 +1078,4 @@ impl BodyLowering<'_, '_, '_> {
         // here and is unboxed back at the call site.
         self.convert(answer, Some(any()), ret)
     }
-}
-
-/// Whether a reference of this type is HANDED the receiver its `get` reads through.
-///
-/// `KProperty1` is — it names a member and the call supplies the object — while a `KProperty0`
-/// carries its own or needs none. `None` for anything else, including the arity-less `KProperty`
-/// and `KCallable`: those say nothing about how many receivers a call passes, and a delegate
-/// operator's overload was selected on exactly that.
-fn reference_receiver(ty: Ty) -> Option<bool> {
-    let internal = ty.non_null().obj_internal()?;
-    [
-        ("kotlin/reflect/KProperty0", false),
-        ("kotlin/reflect/KProperty1", true),
-        ("kotlin/reflect/KMutableProperty0", false),
-        ("kotlin/reflect/KMutableProperty1", true),
-    ]
-    .iter()
-    .find(|(candidate, _)| internal.matches(candidate))
-    .map(|(_, takes)| *takes)
-}
-
-/// Whether a type is one of the reflection types a property reference wears.
-///
-/// Spelled out rather than matched by prefix: the set is closed — Kotlin declares these nine and no
-/// more — and a prefix would also claim any future or unrelated name that happens to begin the same
-/// way, which is how a member of something else ends up dispatched through these slots.
-/// Is this the type of a reference to a FUNCTION — one whose object carries the `name` member a
-/// property reference's does, at the same slot?
-///
-/// `KFunction` and its arities only. A `FunctionN` is the type of an ordinary lambda too, whose
-/// object has no such slot, and nothing that wears one of these is ever a lambda: a reflective
-/// reference is what Kotlin gives these types to.
-fn is_callable(ty: Ty) -> bool {
-    let Some(internal) = ty.non_null().obj_internal() else {
-        return false;
-    };
-    internal.matches("kotlin/reflect/KFunction")
-        || internal
-            .unsigned_suffix_after_prefix("kotlin/reflect/KFunction")
-            .is_some()
-}
-
-fn is_property_reference(ty: Ty) -> bool {
-    let Some(internal) = ty.non_null().obj_internal() else {
-        return false;
-    };
-    [
-        "kotlin/reflect/KCallable",
-        "kotlin/reflect/KProperty",
-        "kotlin/reflect/KProperty0",
-        "kotlin/reflect/KProperty1",
-        "kotlin/reflect/KProperty2",
-        "kotlin/reflect/KMutableProperty",
-        "kotlin/reflect/KMutableProperty0",
-        "kotlin/reflect/KMutableProperty1",
-        "kotlin/reflect/KMutableProperty2",
-    ]
-    .iter()
-    .any(|candidate| internal.matches(candidate))
 }
