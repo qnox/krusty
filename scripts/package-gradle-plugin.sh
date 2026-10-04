@@ -70,7 +70,8 @@ plugins {
 
 Plugin order is part of the supported boundary: apply Kotlin/JVM first, then krusty. Any supplemental
 Kotlin compiler plugin must be applied after krusty and is rejected because krusty cannot preserve
-its compiler semantics.
+its compiler semantics. Projects applying Gradle's \`kotlin-dsl\` (such as \`buildSrc\`) and Kotlin
+compile tasks outside any source set stay with kotlinc; the plugin logs each task it leaves.
 
 Compile with \`./gradlew -Pkrusty.binary=/path/to/krusty krustyCompile\`.
 The Kotlin/JVM plugin is an explicit consumer dependency and is not bundled here. This local-repo
