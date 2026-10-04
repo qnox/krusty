@@ -1083,20 +1083,6 @@ pub trait SignatureSemantics {
         demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
     ) -> Result<ResolvedTy, DiagnosticId>;
 
-    /// The delegate expression's expected type recovered from a written property type.
-    ///
-    /// `val y: String by delegateFor(x)` checks `delegateFor(x)` as `SinkDelegate<String>` when
-    /// `getValue` returns the type parameter of that receiver, so the argument constraint is
-    /// collected under that instantiation. The default is no extra expectation.
-    fn delegate_expression_expectation(
-        &self,
-        _scope: SignatureScope,
-        _delegate: ResolvedTy,
-        _property_type: ResolvedTy,
-    ) -> Option<ResolvedTy> {
-        None
-    }
-
     fn least_upper_bound(
         &self,
         scope: SignatureScope,

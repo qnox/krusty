@@ -2378,11 +2378,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   only from that condition — or not read at all — left `T` at `Any?`. kotlinc's builder inference
   still collects initializer constraints. Every initialized local is therefore a block effect:
   signature evaluation walks ordinary, typed and delegated initializers, while a declared
-  delegated-property type constrains the selected `getValue` result. When that result is a formal of
-  `getValue` and the receiver mentions the same formal, the delegate expression is checked again
-  under the receiver instantiation that produces the written property type (`val y: String by
-  delegateFor(x)` sees `SinkDelegate<String>`), so the call's argument constraints are collected
-  there. A failed effect does not reject
+  delegated-property type constrains the selected `getValue` result. A failed effect does not reject
   the enclosing result, the same way other statements behave. The `try`/`finally` around that call
   does not change the constraint; the box covers it. Tests:
   `tests/delegate_initializer_constraint_e2e.rs`; box:

@@ -9,55 +9,6 @@
 use super::*;
 
 impl ProductionSignatureSemantics<'_> {
-    /// `getValue` whose return is one of its own formals, and whose receiver mentions that formal,
-    /// tells the delegate expression which instantiation the written property type requires.
-    pub(super) fn expected_delegate_expression(
-        &self,
-        scope: crate::fir::SignatureScope,
-        delegate: crate::fir::ResolvedTy,
-        property_type: crate::fir::ResolvedTy,
-    ) -> Option<crate::fir::ResolvedTy> {
-        let expectations = self
-            .with_resolver(scope, |resolver| {
-                let mut found = Vec::new();
-                for candidate in resolver
-                    .receiver_callables(delegate.get(), "getValue")
-                    .functions()
-                {
-                    if !candidate.flags.operator {
-                        continue;
-                    }
-                    let Some(generic) = candidate.generic_sig.as_ref() else {
-                        continue;
-                    };
-                    let crate::types::Ty::TyParam(formal, _) = generic.ret.non_null() else {
-                        continue;
-                    };
-                    if !generic.formals.iter().any(|name| name == formal) {
-                        continue;
-                    }
-                    let Some(receiver) = generic.receiver.or(candidate.receiver) else {
-                        continue;
-                    };
-                    let mut bindings = std::collections::HashMap::new();
-                    bindings.insert((*formal).to_string(), property_type.get());
-                    let expected =
-                        crate::symbol_resolver::ty_subst_keep_unbound(receiver, &bindings);
-                    if expected != receiver {
-                        found.push(expected);
-                    }
-                }
-                Some(found)
-            })
-            .ok()?;
-        let mut expectations = expectations.into_iter();
-        let first = expectations.next()?;
-        if expectations.any(|other| other != first) {
-            return None;
-        }
-        crate::fir::ResolvedTy::new(first).ok()
-    }
-
     pub(super) fn select_delegate_signature(
         &self,
         scope: crate::fir::SignatureScope,
