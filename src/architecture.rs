@@ -499,7 +499,7 @@ mod tests {
     #[test]
     fn checked_fir_lowering_uses_only_closed_semantic_handoff_dependencies() {
         for path in rust_files_under("src/fir_lower") {
-            if path.ends_with("tests.rs") {
+            if is_test_module(&path) {
                 continue;
             }
             // `wide_stack` is infrastructure, not a semantic dependency: a `stacker` wrapper and
@@ -529,7 +529,7 @@ mod tests {
     #[test]
     fn checked_fir_lowering_has_no_symbol_selection_entry_points() {
         for path in rust_files_under("src/fir_lower") {
-            if path.ends_with("tests.rs") {
+            if is_test_module(&path) {
                 continue;
             }
             let text = fs::read_to_string(&path).expect("read checked FIR lowerer");
@@ -549,6 +549,13 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn is_test_module(path: &Path) -> bool {
+        path.file_name().is_some_and(|name| name == "tests.rs")
+            || path
+                .components()
+                .any(|component| component.as_os_str() == "tests")
     }
 
     #[test]
