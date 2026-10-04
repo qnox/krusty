@@ -166,7 +166,7 @@ fn element_value(ir: &IrFile, expression: ExprId, declared: Ty) -> Option<AnnoVa
             classifier: Some(classifier),
             value: None,
             type_argument: false,
-        } => AnnoValue::Class(classifier.kotlin_class_internal()?),
+        } => AnnoValue::Class(classifier.get()),
         IrExpr::Vararg {
             spreads, elements, ..
         } if !spreads.contains(&true) => {

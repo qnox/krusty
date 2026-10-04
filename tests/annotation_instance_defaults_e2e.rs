@@ -16,6 +16,8 @@ annotation class Tree(\n\
     val small: Byte = 7,\n\
     val leaf: Leaf = Leaf(),\n\
     val kind: KClass<*> = Leaf::class,\n\
+    val referenceArrayKind: KClass<*> = Array<String>::class,\n\
+    val primitiveArrayKind: KClass<*> = IntArray::class,\n\
     val kinds: Array<KClass<*>> = [Shade::class, Leaf::class],\n\
     val shade: Shade = Shade.DARK,\n\
     val names: Array<String> = [\"a\", \"b\"],\n\
@@ -29,6 +31,8 @@ fun box(): String {\n\
     if (tree.count != 42 || tree.small != seven) return \"numbers\"\n\
     if (tree.leaf != Leaf() || tree.leaf.tag != \"leaf\") return \"nested\"\n\
     if (tree.kind != Leaf::class) return \"class\"\n\
+    if (tree.referenceArrayKind != Array<String>::class) return \"reference array class\"\n\
+    if (tree.primitiveArrayKind != IntArray::class) return \"primitive array class\"\n\
     if (tree.kinds.size != 2 || tree.kinds[0] != Shade::class || tree.kinds[1] != Leaf::class) return \"classes\"\n\
     if (tree.shade != Shade.DARK) return \"enum\"\n\
     if (tree.names.size != 2 || tree.names[0] != \"a\" || tree.names[1] != \"b\") return \"names\"\n\

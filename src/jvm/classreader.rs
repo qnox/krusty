@@ -1181,10 +1181,10 @@ fn read_annotation_value(
             Ok(AnnotationValue::Enum(classifier, constant))
         }
         'c' => {
-            let classifier = cp_utf8(cp, reader.u2()?)
-                .and_then(class_literal_classifier)
+            let represented = cp_utf8(cp, reader.u2()?)
+                .and_then(class_literal_type)
                 .ok_or(ReadError::Truncated)?;
-            Ok(AnnotationValue::Class(classifier))
+            Ok(AnnotationValue::Class(represented))
         }
         '@' => {
             let nested = read_resolved_annotation(reader, cp)?;
@@ -1223,31 +1223,37 @@ fn descriptor_classifier(descriptor: &str) -> Option<TypeName> {
         })
 }
 
-fn class_literal_classifier(descriptor: &str) -> Option<TypeName> {
-    descriptor_classifier(descriptor).or_else(|| {
-        Some(crate::types::type_name(match descriptor {
-            "[B" => "kotlin/ByteArray",
-            "[C" => "kotlin/CharArray",
-            "[D" => "kotlin/DoubleArray",
-            "[F" => "kotlin/FloatArray",
-            "[I" => "kotlin/IntArray",
-            "[J" => "kotlin/LongArray",
-            "[S" => "kotlin/ShortArray",
-            "[Z" => "kotlin/BooleanArray",
-            _ if descriptor.starts_with('[') => "kotlin/Array",
-            _ => match descriptor.as_bytes().first()? {
-                b'B' => "kotlin/Byte",
-                b'C' => "kotlin/Char",
-                b'D' => "kotlin/Double",
-                b'F' => "kotlin/Float",
-                b'I' => "kotlin/Int",
-                b'J' => "kotlin/Long",
-                b'S' => "kotlin/Short",
-                b'Z' => "kotlin/Boolean",
-                b'V' => "kotlin/Unit",
-                _ => return None,
+fn class_literal_type(descriptor: &str) -> Option<crate::types::Ty> {
+    use crate::types::{wk, Ty};
+
+    if let Some(element_descriptor) = descriptor.strip_prefix('[') {
+        let element = class_literal_type(element_descriptor)?;
+        // A reference array keeps the boxed Kotlin element in `Array<T>` even when the mapped
+        // classifier is a scalar (`[Ljava/lang/Integer;` is `Array<Int>`, not `IntArray`).
+        return Some(
+            if element_descriptor.starts_with('L') || element_descriptor.starts_with('[') {
+                Ty::obj_args_name(wk::array(), &[element])
+            } else {
+                Ty::array(element)
             },
-        }))
+        );
+    }
+    if let Some(classifier) = descriptor_classifier(descriptor) {
+        return Some(
+            crate::types::builtin_semantic(classifier).unwrap_or_else(|| Ty::obj_name(classifier)),
+        );
+    }
+    Some(match descriptor.as_bytes() {
+        b"B" => Ty::Byte,
+        b"C" => Ty::Char,
+        b"D" => Ty::Double,
+        b"F" => Ty::Float,
+        b"I" => Ty::Int,
+        b"J" => Ty::Long,
+        b"S" => Ty::Short,
+        b"Z" => Ty::Boolean,
+        b"V" => Ty::Unit,
+        _ => return None,
     })
 }
 
@@ -1777,7 +1783,7 @@ mod tests {
                     values: vec![
                         (
                             "target".to_string(),
-                            crate::ir::AnnoValue::Class(crate::types::type_name("demo/Target")),
+                            crate::ir::AnnoValue::Class(crate::types::Ty::obj("demo/Target")),
                         ),
                         (
                             "label".to_string(),
@@ -1787,7 +1793,20 @@ mod tests {
                         ),
                         (
                             "builtin".to_string(),
-                            crate::ir::AnnoValue::Class(crate::types::type_name("kotlin/String")),
+                            crate::ir::AnnoValue::Class(crate::types::Ty::String),
+                        ),
+                        (
+                            "referenceArray".to_string(),
+                            crate::ir::AnnoValue::Class(crate::types::Ty::obj_args(
+                                "kotlin/Array",
+                                &[crate::types::Ty::String],
+                            )),
+                        ),
+                        (
+                            "primitiveArray".to_string(),
+                            crate::ir::AnnoValue::Class(crate::types::Ty::array(
+                                crate::types::Ty::Int,
+                            )),
                         ),
                     ],
                 },
@@ -1803,9 +1822,7 @@ mod tests {
                 arguments: vec![
                     (
                         "target".to_string(),
-                        crate::types::AnnotationValue::Class(crate::types::type_name(
-                            "demo/Target"
-                        )),
+                        crate::types::AnnotationValue::Class(crate::types::Ty::obj("demo/Target")),
                     ),
                     (
                         "label".to_string(),
@@ -1813,8 +1830,19 @@ mod tests {
                     ),
                     (
                         "builtin".to_string(),
-                        crate::types::AnnotationValue::Class(crate::types::type_name(
-                            "kotlin/String",
+                        crate::types::AnnotationValue::Class(crate::types::Ty::String),
+                    ),
+                    (
+                        "referenceArray".to_string(),
+                        crate::types::AnnotationValue::Class(crate::types::Ty::obj_args(
+                            "kotlin/Array",
+                            &[crate::types::Ty::String],
+                        )),
+                    ),
+                    (
+                        "primitiveArray".to_string(),
+                        crate::types::AnnotationValue::Class(crate::types::Ty::array(
+                            crate::types::Ty::Int,
                         )),
                     ),
                 ],

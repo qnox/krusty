@@ -51481,7 +51481,7 @@ impl<'a> Checker<'a> {
                 receiver: Some(_),
                 name,
             } if name == "class" => {
-                AnnotationValue::Class(self.class_literal_targets.get(&e).copied()?)
+                AnnotationValue::Class(Ty::obj_name(self.class_literal_targets.get(&e).copied()?))
             }
             Expr::Call { args, .. } => match self.expr_lowers.get(&e) {
                 Some(ExprLowering::CompilerSynthetic(

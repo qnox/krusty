@@ -384,9 +384,8 @@ fn expression(expression: &mut IrExpr, names: &HashMap<TypeName, TypeName>) {
 
 fn annotation_value(value: &mut super::AnnoValue, names: &HashMap<TypeName, TypeName>) {
     match value {
-        super::AnnoValue::Enum(classifier, _) | super::AnnoValue::Class(classifier) => {
-            name(classifier, names)
-        }
+        super::AnnoValue::Enum(classifier, _) => name(classifier, names),
+        super::AnnoValue::Class(classifier) => *classifier = ty(*classifier, names),
         super::AnnoValue::Annotation(annotation) => annotation_application(annotation, names),
         super::AnnoValue::Array(values) => values
             .iter_mut()

@@ -112,8 +112,9 @@ fn element_default(
                 classifier: *enum_classifier,
                 name: entry.clone(),
             }),
-        AnnotationValue::Class(target) => (classifier == Some(crate::types::wk::kclass()))
-            .then(|| DefaultValue::KClass(Ty::obj_name(*target))),
+        AnnotationValue::Class(target) => {
+            (classifier == Some(crate::types::wk::kclass())).then(|| DefaultValue::KClass(*target))
+        }
         AnnotationValue::Annotation { internal, values } => {
             if classifier != Some(*internal) {
                 return None;

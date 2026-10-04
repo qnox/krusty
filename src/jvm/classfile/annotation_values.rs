@@ -25,6 +25,21 @@ impl ClassWriter {
         utf8
     }
 
+    /// Intern the exact descriptor of a class-literal annotation value. Reference-array literals
+    /// also contribute their component classifier to `InnerClasses`; primitive arrays have no
+    /// classifier entry to record.
+    fn record_annotation_class_literal(&mut self, ty: crate::types::Ty) -> u16 {
+        let descriptor = crate::jvm::names::type_descriptor(ty);
+        let component = descriptor.trim_start_matches('[');
+        if let Some(internal) = component
+            .strip_prefix('L')
+            .and_then(|name| name.strip_suffix(';'))
+        {
+            self.annotation_class_refs.insert(internal.to_owned());
+        }
+        self.cp.utf8(&descriptor)
+    }
+
     pub(super) fn ev_int(&mut self, out: &mut Vec<u8>, v: i32) {
         out.push(b'I');
         let idx = self.cp.integer(v);
@@ -136,10 +151,9 @@ impl ClassWriter {
                 let ni = self.cp.utf8(name);
                 u2(out, ni);
             }
-            AnnoValue::Class(internal) => {
+            AnnoValue::Class(ty) => {
                 out.push(b'c');
-                let mapped = crate::jvm::jvm_class_map::to_jvm_type_name(*internal);
-                let ci = self.record_annotation_class(mapped);
+                let ci = self.record_annotation_class_literal(*ty);
                 u2(out, ci);
             }
             AnnoValue::Annotation(a) => {
@@ -242,7 +256,7 @@ fn annotation_values_record_physical_enum_class_and_nested_descriptors() {
             ),
             (
                 "token".to_string(),
-                AnnoValue::Class(crate::types::type_name("sample/anno6044/Token")),
+                AnnoValue::Class(crate::types::Ty::obj("sample/anno6044/Token")),
             ),
             (
                 "nested".to_string(),

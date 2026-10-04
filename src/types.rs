@@ -2109,7 +2109,10 @@ pub enum AnnotationValue {
     Char(u16),
     String(crate::kt_string::KtString),
     Enum(TypeName, String),
-    Class(TypeName),
+    /// The exact semantic type represented by a class literal. Arrays retain every dimension and
+    /// their component type; collapsing `Array<String>::class` to the `kotlin/Array` classifier
+    /// loses the class-file descriptor before lowering can encode it.
+    Class(Ty),
     Annotation {
         internal: TypeName,
         values: Vec<(String, AnnotationValue)>,
@@ -2126,7 +2129,7 @@ impl AnnotationValue {
 
 /// One resolved annotation application published as part of a classifier record. This is the
 /// provider-neutral semantic payload consumers may inspect: the annotation and every class-valued
-/// argument are stable identities, never descriptors or source spellings.
+/// argument are stable semantic types, never descriptors or source spellings.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResolvedAnnotation {
     pub annotation: TypeName,
