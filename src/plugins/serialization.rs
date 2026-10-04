@@ -854,6 +854,39 @@ fn build_polymorphic_serializer(ir: &mut IrFile, classifier: TypeName) -> ExprId
     )
 }
 
+/// The frontend-selected construction of `class_fq`'s `@Serializable(with = custom)` serializer
+/// class, or `None` when no source construction was selected (an object serializer, or a class
+/// serializer from the dependency/runtime class path).
+///
+/// A recorded construction is realized ONLY through the frontend-published accessor it was planned
+/// for, with the serializer it was selected for. A record without that accessor, or for another
+/// serializer, is an inconsistent lowering, not a reason to realize the serializer another way: it
+/// fails hard instead of falling back to the `new X(KClass)` convention.
+fn recorded_custom_serializer_construction<'ir>(
+    ir: &'ir IrFile,
+    class_fq: &str,
+    custom: TypeName,
+    frontend_owner: TypeName,
+) -> Option<&'ir crate::ir::IrCustomSerializerConstruction> {
+    let construction = ir
+        .custom_serializer_constructions
+        .get(&type_name(class_fq))?;
+    assert!(
+        construction.serializer == custom,
+        "the custom serializer construction recorded for {class_fq} selects {}, \
+         but its @Serializable(with = …) names {}",
+        construction.serializer.render(),
+        custom.render(),
+    );
+    assert!(
+        frontend_serializer_accessor(ir, frontend_owner).is_some(),
+        "the custom serializer construction recorded for {class_fq} has no frontend-published \
+         serializer() accessor on {}",
+        frontend_owner.render(),
+    );
+    Some(construction)
+}
+
 impl SerializationPlugin {
     /// Add `static serializer(): KSerializer<C>` returning the explicit serializer `X` from
     /// `@Serializable(with = X::class)`. An `object` serializer (`object Other : KSerializer<…>`) is its
@@ -875,12 +908,8 @@ impl SerializationPlugin {
         // The frontend selected and validated the serializer's primary constructor and mapped the
         // accessor's `typeSerialN` operands onto its parameters. The accessor is a member of its
         // owner, so slot 0 is the receiver and the declared operands start at 1.
-        let construction = ir
-            .custom_serializer_constructions
-            .get(&type_name(class_fq))
-            .filter(|construction| construction.serializer == custom)
-            .filter(|_| frontend_serializer_accessor(ir, frontend_owner).is_some())
-            .cloned();
+        let construction =
+            recorded_custom_serializer_construction(ir, class_fq, custom, frontend_owner).cloned();
         // An OBJECT serializer has no public constructor — return its singleton `INSTANCE`.
         let inst = if let Some(construction) = construction {
             let args = construction
@@ -2317,6 +2346,52 @@ mod tests {
         ir.exprs.iter().any(
             |e| matches!(e, IrExpr::ExternalStaticInstance { owner: o, .. } if o.matches(owner)),
         )
+    }
+
+    /// `@Serializable(with = TaggedSerializer::class) class Tagged<K, V>` whose frontend selected
+    /// `TaggedSerializer(KSerializer<V>, KSerializer<K>)` -- recorded, but with no
+    /// frontend-published `serializer()` accessor on `Tagged$Companion` to realize it through.
+    fn recorded_construction_without_accessor(serializer: &str) -> (IrFile, u32) {
+        let mut ir = IrFile::default();
+        let id = ir.add_class(synthetic_class("demo/Tagged"));
+        let kserializer = |p| Ty::obj_args(KSERIALIZER_FQ, &[Ty::obj(p)]);
+        ir.custom_serializer_constructions.insert(
+            type_name("demo/Tagged"),
+            crate::ir::IrCustomSerializerConstruction {
+                serializer: type_name(serializer),
+                parameters: vec![kserializer("V"), kserializer("K")].into(),
+                operands: vec![1, 0].into(),
+                target: crate::ir::IrConstructorTarget::UNRESTRICTED_PRIMARY,
+            },
+        );
+        (ir, id)
+    }
+
+    #[test]
+    #[should_panic(expected = "has no frontend-published serializer() accessor")]
+    fn a_recorded_custom_serializer_construction_requires_its_accessor() {
+        // Contract: a source serializer class's construction is realized only through the accessor
+        // the frontend planned it for. Without it the accessor must fail hard, never fall back to
+        // `new TaggedSerializer(KClass)` nor synthesize a second `serializer()`.
+        let (mut ir, id) = recorded_construction_without_accessor("demo/TaggedSerializer");
+        SerializationPlugin::add_custom_serializer_accessor(
+            &mut ir,
+            id,
+            "demo/Tagged",
+            type_name("demo/TaggedSerializer"),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "selects demo/OtherSerializer")]
+    fn a_recorded_custom_serializer_construction_must_select_the_named_serializer() {
+        let (mut ir, id) = recorded_construction_without_accessor("demo/OtherSerializer");
+        SerializationPlugin::add_custom_serializer_accessor(
+            &mut ir,
+            id,
+            "demo/Tagged",
+            type_name("demo/TaggedSerializer"),
+        );
     }
 
     #[test]
