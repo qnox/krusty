@@ -94,7 +94,7 @@ impl ClassWriter {
     /// constants for a rejected row changes byte identity, while omitting an annotation-only row
     /// changes the class structure.
     pub(super) fn retains_inner_class(&self, spec: &InnerClassSpec) -> bool {
-        self.retains_inner_class_with_presence(spec, self.cp.has_class(&spec.inner))
+        self.retains_inner_class_with_presence(spec, self.names_class(&spec.inner))
     }
 
     /// Evaluate the shared retention predicate against an explicit view of the constant pool.
@@ -183,8 +183,7 @@ impl ClassWriter {
                 if retained[index] {
                     continue;
                 }
-                let present =
-                    self.cp.has_class(&spec.inner) || seeded.contains(spec.inner.as_str());
+                let present = self.names_class(&spec.inner) || seeded.contains(spec.inner.as_str());
                 if self.retains_inner_class_with_presence(spec, present) {
                     retained[index] = true;
                     grew = true;

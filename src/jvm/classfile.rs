@@ -701,7 +701,7 @@ impl ClassWriter {
     }
 
     pub fn seed_class(&mut self, internal: &str) {
-        self.cp.class(internal);
+        self.class_ref(internal);
     }
 
     /// Intern a UTF-8 constant before natural first use.
@@ -753,7 +753,7 @@ impl ClassWriter {
 
     /// Add an implemented interface / extended interface by internal name.
     pub fn add_interface(&mut self, internal: &str) {
-        let c = self.cp.class(internal);
+        let c = self.class_ref(internal);
         self.interfaces.push(c);
     }
 
@@ -2783,13 +2783,6 @@ impl CodeBuilder {
     }
 }
 
-/// Constant-pool index of a `Class` entry, exposed for `new`.
-impl ClassWriter {
-    pub fn class_ref(&mut self, internal: &str) -> u16 {
-        self.cp.class(internal)
-    }
-}
-
 /// A class written by [`ClassWriter::finish_with_coroutines`].
 pub(crate) struct FinishedClass {
     /// The class file, empty when a method failed to be normalized.
@@ -2799,7 +2792,6 @@ pub(crate) struct FinishedClass {
     /// Each method whose saved operand stack could not be normalized, with the reason.
     pub failures: Vec<String>,
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
