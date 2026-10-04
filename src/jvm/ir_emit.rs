@@ -5001,7 +5001,10 @@ fn standalone_method_is_elided(ir: &IrFile, fid: u32, env: &EmitEnv) -> bool {
 /// body lives on that interface's `$DefaultImpls` holder.
 ///
 /// kotlinc emits `public <ret> f(args) { return I$DefaultImpls.f(this, args); }`. A member the class
-/// declares itself is left alone — it already overrides the abstract interface method.
+/// declares itself is left alone — it already overrides the abstract interface method. A member a
+/// superclass already realizes is left alone too: the superclass method is that implementation,
+/// whether it is a real override or a forwarder to the same interface declaration. A subclass that
+/// inherits a more specific interface override still forwards to that declaration.
 /// How an implementing class's compatibility forwarder reaches the inherited interface body.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ForwarderDispatch {
@@ -5034,6 +5037,25 @@ fn backend_member_jvm_name(ir: &IrFile, member: &crate::backend::BackendMemberFa
     )
 }
 
+fn forwarder_member_key(
+    ir: &IrFile,
+    member: &crate::backend::BackendMemberFact,
+    declared_in_module: bool,
+) -> (String, String) {
+    let types = crate::jvm::value_classes::forwarded_member_types(ir, member, declared_in_module);
+    let mut params = jvm_tys(&types.physical_params);
+    if member.suspend() {
+        params.push(Ty::obj("kotlin/coroutines/Continuation"));
+    }
+    (
+        backend_member_jvm_name(ir, member),
+        params
+            .iter()
+            .map(|parameter| crate::jvm::names::type_descriptor(*parameter))
+            .collect(),
+    )
+}
+
 fn emit_default_impls_forwarders(
     ir: &IrFile,
     c: &crate::ir::IrClass,
@@ -5048,7 +5070,10 @@ fn emit_default_impls_forwarders(
     let derives_from = |candidate: crate::types::TypeName, ancestor: crate::types::TypeName| {
         interface_hierarchy::derives_from(symbols, candidate, ancestor)
     };
-    let closure = interface_hierarchy::sorted_closure(symbols, c.interfaces.iter_ids().collect());
+    let hierarchy = interface_hierarchy::implemented_interfaces(ir, symbols, c);
+    let mut all_interfaces = hierarchy.own.clone();
+    all_interfaces.extend(hierarchy.inherited.iter().copied());
+    let closure = interface_hierarchy::sorted_closure(symbols, all_interfaces);
 
     let method_key = |name: &str, params: &[Ty]| {
         (
@@ -5221,6 +5246,14 @@ fn emit_default_impls_forwarders(
             });
         }
     };
+    let superclass_closure = interface_hierarchy::sorted_closure(symbols, hierarchy.inherited);
+    let mut superclass_winner = std::collections::HashMap::new();
+    for (interface, shape) in superclass_closure {
+        for member in &shape.surface {
+            let key = forwarder_member_key(ir, member, shape.source);
+            superclass_winner.entry(key).or_insert(interface);
+        }
+    }
     for (interface, shape) in closure {
         for member in &shape.surface {
             let types = crate::jvm::value_classes::forwarded_member_types(ir, member, shape.source);
@@ -5248,10 +5281,18 @@ fn emit_default_impls_forwarders(
                 semantic_ret = Ty::nullable(Ty::obj("java/lang/Object"));
             }
             let name = backend_member_jvm_name(ir, member);
-            let key = method_key(&name, &param_tys);
+            let key = forwarder_member_key(ir, member, shape.source);
+            debug_assert_eq!(key, method_key(&name, &param_tys));
             // The nearest declaration wins even when it is abstract: an abstract redeclaration
             // suppresses a farther ancestor's body rather than exposing it as a fake override.
             if !selected.insert(key.clone()) {
+                continue;
+            }
+            // A superclass already realizes this exact interface declaration, either with a real
+            // override or with its own forwarder. Another forwarder here would hide that method.
+            // The keys agree only when both closures selected the same declaring interface, so a
+            // subclass that adds a more specific override still forwards to it.
+            if superclass_winner.get(&key).copied() == Some(interface) {
                 continue;
             }
             if member.is_abstract()
