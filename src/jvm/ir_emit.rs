@@ -4796,7 +4796,7 @@ fn emit_enum_class(
     // The `EnclosingMethod` refs, then each retained row's outer-class ref and simple name, intern
     // at kotlinc's post-metadata window — the same step every other classifier path takes.
     cw.intern_post_metadata_attribute_refs();
-    cw.finish()
+    env.run.finish_class(cw)
 }
 
 /// Emit function `fid` as a method on `owner`. `instance` = an instance method (`this` in slot 0).

@@ -1420,25 +1420,40 @@ impl ClassWriter {
     }
 
     pub fn finish(self) -> Vec<u8> {
-        let (bytes, coroutines) = self.finish_with_coroutines();
+        let finished = self.finish_with_coroutines();
         assert!(
-            coroutines.is_empty(),
+            finished.coroutines.is_empty(),
             "a class with transformed coroutines is finished through `finish_with_coroutines`"
         );
-        bytes
+        assert!(
+            finished.failures.is_empty(),
+            "a class whose methods can fail to be written is finished through \
+             `finish_with_coroutines`: {:?}",
+            finished.failures
+        );
+        finished.bytes
     }
 
-    /// [`Self::finish`] for a class whose suspend functions the coroutine transformer rewrites:
-    /// the class, and what each transformation found, which its continuation class is built from.
-    pub(crate) fn finish_with_coroutines(
-        mut self,
-    ) -> (Vec<u8>, Vec<coroutine_transform::TransformedCoroutine>) {
+    /// [`Self::finish`] for a class whose suspend functions the coroutine transformer rewrites, or
+    /// whose inline calls saved the operand stack: the class, what each coroutine transformation
+    /// found (which its continuation class is built from), and each method that could not be
+    /// normalized. A class with such a failure is not written: its bytes are empty.
+    pub(crate) fn finish_with_coroutines(mut self) -> FinishedClass {
         // Every method's tables are final now: the coroutine transformer runs over the suspend
         // functions it was asked for, the operand stack is saved around the other methods' inline
         // calls, then kotlinc's bytecode rewrites run over the rest.
         let coroutines = self.transform_coroutines();
-        self.fix_inline_call_stacks();
-        (self.write(), coroutines)
+        let failures = self.fix_inline_call_stacks();
+        let bytes = if failures.is_empty() {
+            self.write()
+        } else {
+            Vec::new()
+        };
+        FinishedClass {
+            bytes,
+            coroutines,
+            failures,
+        }
     }
 
     fn write(mut self) -> Vec<u8> {
@@ -2773,6 +2788,16 @@ impl ClassWriter {
     pub fn class_ref(&mut self, internal: &str) -> u16 {
         self.cp.class(internal)
     }
+}
+
+/// A class written by [`ClassWriter::finish_with_coroutines`].
+pub(crate) struct FinishedClass {
+    /// The class file, empty when a method failed to be normalized.
+    pub bytes: Vec<u8>,
+    /// What the coroutine transformation of each requested method found.
+    pub coroutines: Vec<coroutine_transform::TransformedCoroutine>,
+    /// Each method whose saved operand stack could not be normalized, with the reason.
+    pub failures: Vec<String>,
 }
 
 #[cfg(test)]

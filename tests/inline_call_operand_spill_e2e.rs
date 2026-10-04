@@ -105,3 +105,41 @@ fn an_operand_saved_under_a_new_object_matches_kotlinc() {
         "InlineSpillConstructorKt",
     );
 }
+
+/// A reified inline body with a try/catch and no lambda, compiled by kotlinc as a dependency.
+const CATCHING_LIB: &str = "package lib\n\
+    \n\
+    inline fun <reified T> castOr(value: Any?, fallback: T): T =\n\
+    \x20   try { value as T } catch (e: ClassCastException) { fallback }\n";
+
+const CATCHING_MAIN: &str = "import lib.castOr\n\
+    \n\
+    class Box(val id: String, val size: Int)\n\
+    \n\
+    fun consume(n: Int, v: Int): Int = n + v\n\
+    \n\
+    fun pick(v: Any?): Int = consume(1, castOr(v, -1))\n\
+    \n\
+    fun boxed(id: String, v: Any?): Box = Box(id, castOr(v, 0))\n\
+    \n\
+    fun box(): String {\n\
+    \x20   val ok = pick(41) == 42 && pick(\"x\") == 0 &&\n\
+    \x20       boxed(\"a\", 7).size == 7 && boxed(\"b\", \"y\").size == 0\n\
+    \x20   return if (ok) \"OK\" else \"fail\"\n\
+    }\n";
+
+/// A handler body is never entered over the caller's operands as emitted: the handler would start
+/// without them. The call runs with the operands saved, whether by the operand sequencing ahead of
+/// the call or by FixStack around it.
+#[test]
+fn a_catching_reified_inline_body_after_a_pushed_argument_runs() {
+    assert_eq!(
+        common::expect_box_run_against_ref(
+            "inline_spill_catching_callee",
+            CATCHING_LIB,
+            CATCHING_MAIN
+        )
+        .as_deref(),
+        Some("OK")
+    );
+}
