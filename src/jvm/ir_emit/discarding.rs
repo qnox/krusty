@@ -112,6 +112,21 @@ impl Emitter<'_> {
                         return;
                     }
                 }
+                // The unnamed implicit check reads its temporary and consumes it: there is no
+                // duplicate to discard (`aload; invokestatic checkNotNull`).
+                IrExpr::NotNullAssert {
+                    operand,
+                    check: crate::ir::NullCheck::Unnamed,
+                } => {
+                    self.emit_value(*operand, code);
+                    let check = self.cw.methodref(
+                        "kotlin/jvm/internal/Intrinsics",
+                        "checkNotNull",
+                        "(Ljava/lang/Object;)V",
+                    );
+                    code.invokestatic(check, 1, 0);
+                    return;
+                }
                 _ => {}
             }
         }

@@ -241,14 +241,14 @@ fn tail_calls(ir: &IrFile, roots: &[ExprId], frame: &Frame, unit: bool) -> Vec<T
                     let arg = *arg;
                     self.visit_held(arg, tail, edge);
                 }
-                // A PLATFORM-NARROWING not-null assertion (message: Some) wraps the value without
+                // A PLATFORM-NARROWING not-null assertion (`NullCheck::Named`) wraps the value without
                 // consuming the tail position: a stepped call yields nothing to assert, and
                 // kotlinc likewise drops the check when it loops the call. An explicit source
-                // `!!` (message: None) is neither — kotlinc reports the call under it as not a
+                // `!!` (`NullCheck::Source`) is neither — kotlinc reports the call under it as not a
                 // tail call and runs the check on every frame, so it stays opaque here.
                 IrExpr::NotNullAssert {
                     operand,
-                    message: Some(_),
+                    check: crate::ir::NullCheck::Named(_),
                 } => {
                     let operand = *operand;
                     self.visit_held(operand, tail, edge);
@@ -1358,7 +1358,7 @@ mod tests {
         });
         let asserted = ir.add_expr(IrExpr::NotNullAssert {
             operand: call,
-            message: Some("step(n)".to_string()),
+            check: crate::ir::NullCheck::Named("step(n)".to_string()),
         });
         let returned = ir.add_expr(IrExpr::Return(Some(asserted)));
         ir.checked_return_depths.insert(returned, 0);
@@ -1395,7 +1395,7 @@ mod tests {
         );
     }
 
-    /// An EXPLICIT `!!` (`message: None`) is not transparent: kotlinc reports the call under it as
+    /// An EXPLICIT `!!` (`NullCheck::Source`) is not transparent: kotlinc reports the call under it as
     /// not a tail call and runs the check on every frame, so the sweep leaves the shape alone.
     #[test]
     fn a_self_call_under_an_explicit_bang_bang_is_left_alone() {
@@ -1408,7 +1408,7 @@ mod tests {
         });
         let asserted = ir.add_expr(IrExpr::NotNullAssert {
             operand: call,
-            message: None,
+            check: crate::ir::NullCheck::Source,
         });
         let returned = ir.add_expr(IrExpr::Return(Some(asserted)));
         ir.checked_return_depths.insert(returned, 0);

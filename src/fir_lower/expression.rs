@@ -499,7 +499,7 @@ impl BodyLowering<'_> {
                     FirTypeOperation::NotNullAssertion => {
                         let asserted = self.ir.add_expr(IrExpr::NotNullAssert {
                             operand,
-                            message: None,
+                            check: crate::ir::NullCheck::Source,
                         });
                         if operand_ty != target.get() {
                             self.ir.add_expr(IrExpr::TypeOp {
@@ -1647,14 +1647,16 @@ impl BodyLowering<'_> {
                 type_operand: to.get(),
             }),
             FirConversionKind::PlatformNarrowing { narrowing, to } => {
-                let message = self
+                let check = self
                     .body
                     .platform_narrowing(narrowing)
                     .ok_or(FirLoweringFailure::UnsupportedConversion {
                         origin: conversion_origin,
-                    })?
-                    .message
-                    .to_string();
+                    })
+                    .map(platform_null_check)?;
+                if check == crate::ir::NullCheck::Unnamed {
+                    return Ok(self.unnamed_null_check(expression, source_type, to.get()));
+                }
                 // A generic external call can already carry its checked result cast. Kotlin checks
                 // the value produced by the call and then casts that checked value; keep the
                 // frontend-selected assertion underneath that mechanical carrier conversion.
@@ -1667,10 +1669,7 @@ impl BodyLowering<'_> {
                     _ => None,
                 };
                 if let Some(operand) = cast_operand {
-                    let asserted = self.ir.add_expr(IrExpr::NotNullAssert {
-                        operand,
-                        message: Some(message),
-                    });
+                    let asserted = self.ir.add_expr(IrExpr::NotNullAssert { operand, check });
                     if let IrExpr::TypeOp { arg, .. } = &mut self.ir.exprs[expression as usize] {
                         *arg = asserted;
                     }
@@ -1678,7 +1677,7 @@ impl BodyLowering<'_> {
                 } else {
                     let asserted = self.ir.add_expr(IrExpr::NotNullAssert {
                         operand: expression,
-                        message: Some(message),
+                        check,
                     });
                     if source_type != to.get() {
                         self.ir.add_expr(IrExpr::TypeOp {
@@ -1761,6 +1760,35 @@ impl BodyLowering<'_> {
                     origin: conversion_origin,
                 })?,
             FirConversionKind::CoerceToUnit => self.unit_value_after_effect(expression),
+        })
+    }
+
+    /// kotlinc's implicit not-null cast over a value it cannot name keeps the value in a temporary,
+    /// checks the temporary, and yields it (`astore; aload; checkNotNull; aload`).
+    fn unnamed_null_check(&mut self, value: ExprId, source_type: Ty, target: Ty) -> ExprId {
+        let temporary = self.allocate_temporary();
+        let stored = self.ir.add_expr(IrExpr::Variable {
+            index: temporary,
+            ty: source_type,
+            init: Some(value),
+            named: false,
+        });
+        let checked = self.ir.add_expr(IrExpr::GetValue(temporary));
+        let check = self.ir.add_expr(IrExpr::NotNullAssert {
+            operand: checked,
+            check: crate::ir::NullCheck::Unnamed,
+        });
+        let mut result = self.ir.add_expr(IrExpr::GetValue(temporary));
+        if source_type != target {
+            result = self.ir.add_expr(IrExpr::TypeOp {
+                op: IrTypeOp::ImplicitCoercion,
+                arg: result,
+                type_operand: target,
+            });
+        }
+        self.ir.add_expr(IrExpr::Block {
+            stmts: vec![stored, check],
+            value: Some(result),
         })
     }
 
@@ -2269,5 +2297,15 @@ fn lower_type_operation(operation: FirTypeOperation, target: crate::types::Ty) -
             unreachable!("safe casts expand to checked control flow before common IR")
         }
         FirTypeOperation::NotNullAssertion => unreachable!("lowered as NotNullAssert"),
+    }
+}
+
+/// The not-null check a checked platform narrowing lowers to.
+pub(super) fn platform_null_check(
+    narrowing: &crate::fir::FirPlatformNarrowing,
+) -> crate::ir::NullCheck {
+    match &narrowing.message {
+        Some(message) => crate::ir::NullCheck::Named(message.to_string()),
+        None => crate::ir::NullCheck::Unnamed,
     }
 }

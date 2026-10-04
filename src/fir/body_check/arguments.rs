@@ -533,10 +533,7 @@ impl BodyFirChecker<'_> {
     ) -> Result<Option<FirConversion>, BodyCheckFailure> {
         if let Some(narrowing) = self.info.platform_narrowings.get(&expression).copied() {
             if narrowing == PlatformNarrowing::Declaration
-                && matches!(
-                    self.file.expr(expression),
-                    Expr::If { .. } | Expr::When { .. } | Expr::Elvis { .. }
-                )
+                && is_value_boundary(self.file.expr(expression))
             {
                 self.guard_platform_conditional(expression, value, target)?;
             } else if let Some(conversion) =
@@ -622,8 +619,8 @@ impl BodyFirChecker<'_> {
 
     /// Put a checked platform-type boundary on the producer selected by Kotlin's conditional
     /// rules. A declared expected type reaches `if`/`when` branches and an Elvis fallback, while an
-    /// Elvis left operand remains the nullable probe. Blocks containing statements deliberately
-    /// stop the walk, matching Kotlin's rule that only a directly produced named value is guarded.
+    /// Elvis left operand remains the nullable probe. A block hands the type on to its trailing
+    /// value (`when (val x = ...)` is a block declaring the subject before the `when`).
     fn guard_platform_conditional(
         &mut self,
         source: ExprId,
@@ -723,6 +720,35 @@ impl BodyFirChecker<'_> {
                 };
                 *rhs = guarded;
             }
+            Expr::Block {
+                trailing: Some(trailing),
+                ..
+            } => {
+                let result = match &self
+                    .body
+                    .expr(value)
+                    .ok_or_else(|| self.failure(None, BodyCheckFailureKind::UnsupportedCallShape))?
+                    .kind
+                {
+                    FirExprKind::Block {
+                        result: Some(result),
+                        ..
+                    } => *result,
+                    _ => {
+                        return Err(self.failure(None, BodyCheckFailureKind::UnsupportedCallShape));
+                    }
+                };
+                let guarded = self.guard_platform_branch(trailing, result, target)?;
+                let FirExprKind::Block { result, .. } = &mut self
+                    .body
+                    .expr_mut(value)
+                    .expect("the checked block expression still exists")
+                    .kind
+                else {
+                    unreachable!("the checked block shape was validated above")
+                };
+                *result = Some(guarded);
+            }
             _ => {}
         }
         Ok(())
@@ -739,40 +765,41 @@ impl BodyFirChecker<'_> {
                 self.guard_platform_conditional(source, value, target)?;
                 Ok(value)
             }
+            // A block produces its value through its trailing expression, past its statements and
+            // any nested block, as `conditional_branch::branch_value_expression` reads it. A
+            // conditional or block there is guarded in place; any other unchecked Java value is
+            // guarded around the innermost block, which kotlinc's check cannot name.
             Expr::Block {
-                stmts,
                 trailing: Some(trailing),
-            } if stmts.is_empty() => {
-                let result = match &self
-                    .body
-                    .expr(value)
-                    .ok_or_else(|| self.failure(None, BodyCheckFailureKind::UnsupportedCallShape))?
-                    .kind
-                {
-                    FirExprKind::Block {
-                        statements,
-                        result: Some(result),
-                    } if statements.is_empty() => *result,
-                    _ => return Ok(value),
-                };
-                let guarded = self.guard_platform_branch(trailing, result, target)?;
-                if let FirExprKind::Block { result, .. } = &mut self
-                    .body
-                    .expr_mut(value)
-                    .expect("the checked block expression still exists")
-                    .kind
-                {
-                    *result = Some(guarded);
+                ..
+            } => {
+                if is_value_boundary(self.file.expr(trailing)) {
+                    self.guard_platform_conditional(source, value, target)?;
+                    return Ok(value);
                 }
-                Ok(value)
+                if !self.info.produces_unchecked_java_value(trailing) {
+                    return Ok(value);
+                }
+                let cause = self.expression_origin(source)?;
+                let conversion = self.platform_narrowing_conversion(None, cause, target);
+                Ok(self.body.add_expr(crate::fir::FirExpr {
+                    origin: cause,
+                    ty: target,
+                    kind: FirExprKind::ImplicitConversion { value, conversion },
+                }))
             }
             Expr::Block { .. } => Ok(value),
+            _ if !self.info.produces_unchecked_java_value(source) => Ok(value),
             _ => {
                 let cause = self.expression_origin(source)?;
-                let Some(conversion) = self.platform_producer_conversion(source, cause, target)
-                else {
-                    return Ok(value);
-                };
+                let conversion = self
+                    .platform_producer_conversion(source, cause, target)
+                    .ok_or_else(|| {
+                        self.failure(
+                            self.file.expr_span(source),
+                            BodyCheckFailureKind::UnsupportedCallShape,
+                        )
+                    })?;
                 Ok(self.body.add_expr(crate::fir::FirExpr {
                     origin: cause,
                     ty: target,
@@ -789,16 +816,25 @@ impl BodyFirChecker<'_> {
         target: ResolvedTy,
     ) -> Option<FirConversion> {
         let message = self.platform_narrowing_message(source)?;
+        Some(self.platform_narrowing_conversion(Some(message), cause, target))
+    }
+
+    fn platform_narrowing_conversion(
+        &mut self,
+        message: Option<Box<str>>,
+        cause: OriginId,
+        target: ResolvedTy,
+    ) -> FirConversion {
         let narrowing = self
             .body
             .add_platform_narrowing(FirPlatformNarrowing { message });
-        Some(FirConversion {
+        FirConversion {
             origin: cause,
             kind: FirConversionKind::PlatformNarrowing {
                 narrowing,
                 to: target,
             },
-        })
+        }
     }
 
     /// kotlinc names the platform value by the callable that produced it. A call, including an
@@ -1371,4 +1407,13 @@ impl BodyFirChecker<'_> {
             parameter_identities: sam.parameter_identities.clone(),
         })
     }
+}
+
+/// A conditional, or a block producing its trailing value: the shapes whose value a declared
+/// platform narrowing guards where it is produced rather than as a whole.
+fn is_value_boundary(expression: &Expr) -> bool {
+    matches!(
+        expression,
+        Expr::If { .. } | Expr::When { .. } | Expr::Elvis { .. } | Expr::Block { .. }
+    )
 }

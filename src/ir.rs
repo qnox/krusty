@@ -62,6 +62,7 @@ pub(crate) use local_delegates::{
 };
 mod local_property_references;
 mod module_records;
+mod null_checks;
 mod operators;
 mod overrides;
 mod package_declarations;
@@ -115,6 +116,7 @@ pub use module_records::{
     IrCallableTypeParameter, IrClassifierKind, IrHeaderAnnotation, IrModuleCallable,
     IrModuleClassifier, IrModuleMemberAccess, IrModuleSource,
 };
+pub use null_checks::NullCheck;
 pub use operators::{IrBinOp, IrTypeOp};
 pub use overrides::{is_kotlin_primitive, IrFunctionOverride, IrPropertyOverride};
 pub use package_declarations::{
@@ -769,17 +771,13 @@ pub enum IrExpr {
         params: Vec<Ty>,
         ret: Ty,
     },
-    /// The not-null assertion `operand!!` — yields `operand`, throwing if it is null. On the JVM this
-    /// is `kotlin/jvm/internal/Intrinsics.checkNotNull` applied to a duplicate of the value.
-    ///
-    /// `message` is set instead for the assertion a PLATFORM value (`T!`) gets when it is committed
-    /// to a declared non-null type: the same yields-or-throws semantics, but with the checked
-    /// expression's rendering (`getenv(...)`) carried into the failure, so the JVM form is
-    /// `Intrinsics.checkNotNullExpressionValue(value, message)`. Every pass treats the two alike —
-    /// only the emitted intrinsic and the `-X` option that removes it differ.
+    /// A not-null assertion: yields `operand`, throwing if it is null. `check` says whether the
+    /// source wrote it (`operand!!`) or it guards a Java value committed to a declared non-null
+    /// type. Every pass treats them alike; only the emitted intrinsic and the `-X` option that
+    /// removes the implicit ones differ.
     NotNullAssert {
         operand: ExprId,
-        message: Option<String>,
+        check: NullCheck,
     },
     /// A `lateinit` read: yields `operand`, throwing `UninitializedPropertyAccessException(name)` if it
     /// is still null. Emitted as `<operand>; dup; ifnonnull L; ldc name;

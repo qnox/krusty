@@ -612,19 +612,17 @@ impl JvmDefaultMode {
     }
 }
 
-/// Drop every `Intrinsics.checkNotNullExpressionValue` guard on a narrowed platform value.
+/// Drop every implicit not-null guard on a narrowed platform value.
 ///
 /// `-Xno-call-assertions` removes the null checks kotlinc emits where a Java call's `T!` result is
 /// committed to a declared non-null type. The guard is an expression wrapper, so it is removed by
-/// rewriting the node into its operand's value rather than by clearing a record: `x!!`
-/// ([`IrExpr::NotNullAssert`] with no message) is a SOURCE assertion the flag must leave alone.
+/// rewriting the node into its operand's value: `x!!` is a SOURCE assertion the flag leaves alone.
 pub(crate) fn strip_call_assertions(ir: &mut IrFile) {
     for expr in &mut ir.exprs {
-        if let IrExpr::NotNullAssert {
-            operand,
-            message: Some(_),
-        } = expr
-        {
+        let IrExpr::NotNullAssert { operand, check } = expr else {
+            continue;
+        };
+        if check.is_implicit() {
             *expr = IrExpr::Block {
                 stmts: Vec::new(),
                 value: Some(*operand),

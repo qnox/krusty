@@ -133,7 +133,8 @@ pub enum FirSamMethod {
 /// diagnoses that it cannot support Java platform values.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FirPlatformNarrowing {
-    pub message: Box<str>,
+    /// The checked producer's name; `None` for a value kotlinc cannot name, such as a block's.
+    pub message: Option<Box<str>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1640,6 +1641,9 @@ pub struct FirIteratorCall {
     /// protocol call is not specialized per site, so a substituted receiver (`Int` for `T?`)
     /// crosses into the declared type here.
     pub receiver_conversion: Option<FirConversion>,
+    /// The not-null check of an enhanced Java result the loop stores (`ArrayList.iterator()`, and
+    /// the `next()` of the iterator it returns), named by the protocol call.
+    pub result_check: Option<FirPlatformNarrowingId>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2811,7 +2815,12 @@ impl FirBody {
             + self
                 .platform_narrowings
                 .iter()
-                .map(|narrowing| narrowing.message.len())
+                .map(|narrowing| {
+                    narrowing
+                        .message
+                        .as_ref()
+                        .map_or(0, |message| message.len())
+                })
                 .sum::<usize>()
             + self.control_targets.len() * std::mem::size_of::<FirControlTarget>()
             + self.expressions.len() * std::mem::size_of::<FirExpr>()

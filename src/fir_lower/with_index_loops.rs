@@ -125,6 +125,7 @@ impl BodyLowering<'_> {
         next: &crate::fir::FirIteratorCall,
     ) -> crate::fir::FirIteratorCall {
         let mut next = next.clone();
+        next.result_check = None;
         if let crate::fir::FirCallTarget::External {
             result,
             declared_result: Some(declared),
