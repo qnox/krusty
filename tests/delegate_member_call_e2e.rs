@@ -5,6 +5,10 @@
 //! forwarder's declared result rejects `null` kotlinc's implicit not-null cast checks it before
 //! returning, naming the call (`get(...)`). A forwarder whose result is a type parameter admitting
 //! `null`, or whose delegate result is a Kotlin declaration, stays unchecked.
+//!
+//! A class delegate's property accessors dispatch virtually; a type-parameter delegate forwards
+//! through its bound, even when that bound applies the interface with other type arguments; and a
+//! delegate with no class type (a function type) keeps the interface declaration's call.
 
 use super::common;
 
@@ -34,6 +38,32 @@ class Impl : Source {
 
 class Forwarded : Source by Impl()
 
+interface Labeled {
+    val label: String
+    var count: Int
+}
+
+class LabelImpl : Labeled {
+    override val label: String = "L"
+    override var count: Int = 0
+}
+
+class Labels : Labeled by LabelImpl()
+
+class Bounded<D : Source>(d: D) : Source by d
+
+interface Transform<out T, in K> {
+    fun apply(a: K): T
+}
+
+class Echo : Transform<Echo, Echo> {
+    override fun apply(a: Echo): Echo = a
+}
+
+class Chained<D : Transform<D, D>, A : D>(a: A) : Transform<D, A> by a
+
+class Call(f: () -> String) : () -> String by f
+
 fun box(): String {
     val items = ArrayList<String>()
     items.add("O")
@@ -54,6 +84,13 @@ fun box(): String {
     nullable.add(null)
     if (Generic(nullable).get(0) != null) return "Generic.get"
     if (Forwarded().maybe() != null) return "maybe"
+    val labels = Labels()
+    labels.count = 2
+    if (labels.count != 2 || labels.label != "L") return "Labels"
+    if (Bounded(Impl()).text() != "OK") return "Bounded"
+    val echo = Echo()
+    if (Chained<Echo, Echo>(echo).apply(echo) !== echo) return "Chained"
+    if (Call { "OK" }() != "OK") return "Call"
     return Forwarded().text()
 }
 "#;
@@ -77,6 +114,10 @@ fn delegate_member_calls_match_kotlinc() {
         ("Walk", &["iterator"]),
         ("Generic", &["get", "iterator"]),
         ("Forwarded", &["text", "maybe"]),
+        ("Labels", &["getLabel", "getCount", "setCount"]),
+        ("Bounded", &["text", "maybe"]),
+        ("Chained", &["apply"]),
+        ("Call", &["invoke"]),
     ];
     for (class, methods) in cases {
         let pair = common::ModuleClassPair::compile(&[("DelegateMemberCall.kt", SOURCE)], class);

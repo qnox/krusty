@@ -22,8 +22,8 @@ use crate::symbol_source::SymbolSource;
 use crate::types::Ty;
 
 use super::{
-    applied_property_signature, effective_function, effective_property, function_call,
-    interface_owners, is_delegated_function, property_call, PropertyCallShape,
+    applied_owner_type, applied_property_signature, effective_function, effective_property,
+    function_call, interface_owners, is_delegated_function, property_call, PropertyCallShape,
 };
 
 /// Select, for every forwarder of `delegation`, the call it makes on a delegate of type
@@ -49,9 +49,7 @@ pub(in crate::resolve) fn delegate_member_calls(
                     ResolvedDelegatedMember::Function(function) => {
                         ResolvedDelegateMemberCalls::Function(unchanged(&function.call))
                     }
-                    ResolvedDelegatedMember::Property(property) => {
-                        unchanged_property(property)
-                    }
+                    ResolvedDelegatedMember::Property(property) => unchanged_property(property),
                 })
                 .collect(),
         );
@@ -119,6 +117,16 @@ fn overrides(
         )
 }
 
+/// Whether two hierarchy views of a member name one declaration.
+fn same_declaration(
+    function: &crate::libraries::FunctionInfo,
+    declaration: &crate::libraries::FunctionInfo,
+) -> bool {
+    function.callable.owner == declaration.callable.owner
+        && function.stable_declaration == declaration.stable_declaration
+        && function.callable.external_identity == declaration.callable.external_identity
+}
+
 /// kotlinc's `acceptsNullValues` for a forwarder's declared result: a nullable type or a type
 /// parameter whose bound admits `null` accepts it.
 fn rejects_null(result: Ty) -> bool {
@@ -147,6 +155,18 @@ fn delegate_function_call(
         .find(|function| {
             function_call(source, index, interface, function).as_ref() == Some(&forwarded.call)
         })?;
+    // kotlinc's `findDelegateToSymbol` relates declarations, not the interface's type arguments: a
+    // delegate may implement the interface with other arguments (`InOutBase<D, D>` delegating
+    // `InOutBase<D, A>`). The forwarded declaration is therefore compared as the delegate's own
+    // supertype applies it, substituted exactly as the delegate's members are.
+    let applied_interface =
+        applied_owner_type(source, delegate, interface.kotlin_class_internal()?)?;
+    let applied_declarations =
+        crate::symbol_resolver::members_in_hierarchy(source, applied_interface, &forwarded.name);
+    let forwarded_declaration = applied_declarations
+        .functions()
+        .iter()
+        .find(|function| same_declaration(function, forwarded_declaration))?;
     let available = crate::symbol_resolver::members_in_hierarchy(source, delegate, &forwarded.name);
     let candidates = available.functions().iter().filter(|function| {
         function.kind == FnKind::Member && overrides(source, function, forwarded_declaration)
