@@ -1623,6 +1623,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   and boxes `callableReference/genericLocalClassConstructorReference.kt`,
   `callableReference/genericConstructorReference.kt`, and
   `localClasses/innerOfLocalCaptureExtensionReceiver.kt`.
+- **An anonymous object's capture check reads every member body, including completed ones.** The
+  construction-site scratch check that decides an anonymous object's receiver captures counts the
+  receiver uses its member bodies make during that check. A member whose result is inferred is
+  completed on the first visit, and the authoritative class check skips it afterwards. A revisit
+  of the construction (`by lazy { object : S() { override fun f() = outerProperty } }`, visited
+  again once the `lazy` call settles) still reads that member in its scratch check, so the outer
+  instance the member reads stays captured. Skipping it dropped `this$0` while the member body
+  still selected it, and lowering failed with `MissingImplicitReceiver`. Test:
+  `tests/anon_object_capture_e2e.rs::lazy_delegate_object_keeps_outer_instance_for_inferred_member`.
 - **Nullability is a first-class fact on `Ty`** (`Ty::Nullable(&Ty)`, `types.rs`), not faked as the
   boxed JVM wrapper. `Int?` is `Nullable(Int)` (a Kotlin-level type), and the boxing to a JVM reference
   (`Int?` → `Ljava/lang/Integer;`, `UInt?` → `Lkotlin/UInt;`, a nullable reference → its own descriptor)
@@ -2541,6 +2550,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   known captured-`Ref` initialization residue. Test: `tests/local_shadows_receiver_member_e2e.rs`
   (a local, parameter, materialized local-class capture, and outer property, each pinned by the
   value the box run reads).
+- **An implicit receiver's extension beats a receiver-less top-level function.** kotlinc's tower
+  gives each implicit receiver a lexical depth, and that receiver's member level and its extension
+  levels over every non-local scope sit at that depth. Receiver-less top-level declarations live in
+  the file and import scopes, which are always deeper. So `run { }` inside a member is
+  `this.run { }` (`T.run`, a lambda with a receiver), not `run(block)`, even when the receiver-less
+  `run` is declared in the same package and the extension comes from a default import. Test:
+  `tests/implicit_receiver_extension_tower_e2e.rs`.
 - **A top-level callable beats a context-parameter receiver's member.** kotlinc's tower puts
   `ImplicitOrNonLocal` before `ContextReceiverGroup`, and a dispatch or extension receiver stays in
   `Member`, ahead of both. Inside `context(A) { foo(); b }`, unqualified `foo` and `b` are the
