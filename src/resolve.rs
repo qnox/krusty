@@ -15958,8 +15958,9 @@ impl<'a> Checker<'a> {
     /// the type parameters' declared and already-collected upper bounds.
     ///
     /// A symbolic parameter is not automatically applicable. In `Builder<T : Base>.set(T)`, after
-    /// one call contributes `Value <: T`, a later `set(Other())` would merge the lower bounds to
-    /// `Any`. That violates `T : Base`, so the member is inapplicable and the scope tower must be
+    /// one call contributes `Value <: T`, a later `set(Other())` with an `Other` outside `Base`
+    /// joins the lower bounds to their common supertype `Any`. That violates `T : Base`, so the
+    /// member is inapplicable and the scope tower must be
     /// allowed to consider an extension overload. Deferring this check until the outer call is
     /// solved loses the overload decision and reports the violation at the wrong call.
     fn postponed_argument_constraint_is_satisfiable(&self, expected: Ty, actual: Ty) -> bool {
@@ -16004,7 +16005,13 @@ impl<'a> Checker<'a> {
             collect_declared_bounds(actual, &constraints.formals, &mut declared_bounds);
 
             let mut trial = constraints.clone();
-            trial.constrain_assignable(expected, actual, &inferred, &shadowed_formals);
+            trial.constrain_assignable(
+                &self.fed_source(),
+                expected,
+                actual,
+                &inferred,
+                &shadowed_formals,
+            );
             for (formal, &lower) in &trial.lower {
                 if shadowed_formals.contains(formal)
                     || lower == Ty::Error
@@ -17245,11 +17252,13 @@ impl<'a> Checker<'a> {
             (!inferred.is_empty()).then_some(inferred)
         });
         if let Some(inferred) = expected_bindings.as_ref() {
+            let mut frames = std::mem::take(&mut self.postponed_call_constraints);
             for (formal, actual) in inferred {
-                for frame in &mut self.postponed_call_constraints {
-                    frame.constrain_equal(formal, *actual);
+                for frame in &mut frames {
+                    frame.constrain_equal(&self.fed_source(), formal, *actual);
                 }
             }
+            self.postponed_call_constraints = frames;
         }
         let full_params = self
             .applied_member_call_params(
@@ -21742,7 +21751,7 @@ impl<'a> Checker<'a> {
                                         inferred.lower,
                                         inferred.upper,
                                     );
-                                    postponed_constraints.merge(inferred);
+                                    postponed_constraints.merge(&self.fed_source(), inferred);
                                 }
                                 return checked;
                             }
@@ -22134,7 +22143,7 @@ impl<'a> Checker<'a> {
                                     inferred.lower,
                                     inferred.upper,
                                 );
-                                postponed_constraints.merge(inferred);
+                                postponed_constraints.merge(&self.fed_source(), inferred);
                             }
                             return checked;
                         }
@@ -22410,7 +22419,7 @@ impl<'a> Checker<'a> {
                                     inferred.lower,
                                     inferred.upper,
                                 );
-                                postponed_constraints.merge(inferred);
+                                postponed_constraints.merge(&self.fed_source(), inferred);
                             }
                             // `expected_function` was specialized with these bindings before the
                             // lambda was checked. The checked lambda therefore already carries the
@@ -58533,8 +58542,15 @@ impl<'a> Checker<'a> {
             actual,
         );
         let mut shadowed_formals = std::collections::HashSet::new();
-        for constraints in self.postponed_call_constraints.iter_mut().rev() {
-            constraints.constrain_assignable(expected, actual, &inferred, &shadowed_formals);
+        let mut frames = std::mem::take(&mut self.postponed_call_constraints);
+        for constraints in frames.iter_mut().rev() {
+            constraints.constrain_assignable(
+                &self.fed_source(),
+                expected,
+                actual,
+                &inferred,
+                &shadowed_formals,
+            );
             crate::trace_compiler!(
                 "resolve",
                 "postponed constraint expected={expected:?} actual={actual:?} lower={:?} upper={:?}",
@@ -58543,6 +58559,7 @@ impl<'a> Checker<'a> {
             );
             shadowed_formals.extend(constraints.formals.iter().cloned());
         }
+        self.postponed_call_constraints = frames;
         if postponed_symbolic_constraint || postponed_pending {
             return;
         }
