@@ -891,16 +891,17 @@ fn finish_callable_body(
         } else {
             ir.add_expr(crate::ir::IrExpr::Return(None))
         };
-        match unit_return_line {
+        let exit = match unit_return_line {
             Some(UnitReturnLine::ClosingBrace(line)) => {
-                ir.mark_fallthrough_return_line(return_unit, line);
+                Some(crate::ir::UnitBodyExit::ClosingBrace(line))
             }
             Some(UnitReturnLine::ExpressionEnd) => {
-                if let Some(end) = expression_end {
-                    ir.mark_implicit_return_end_line(return_unit, end);
-                }
+                expression_end.map(crate::ir::UnitBodyExit::ExpressionEnd)
             }
-            None => {}
+            None => None,
+        };
+        if let Some(exit) = exit {
+            ir.mark_unit_body_exit(return_unit, exit);
         }
         roots.push(return_unit);
         ir.add_expr(crate::ir::IrExpr::Block {
@@ -952,7 +953,7 @@ fn finish_callable_body(
 
 /// The end line of a `Unit` expression body's trailing root. A checked `CoerceToUnit` wraps the
 /// expression in `Block { effects, value: UnitInstance }`; its last effect is then the expression.
-fn unit_expression_end(ir: &IrFile, trailing: ExprId) -> Option<u32> {
+pub(super) fn unit_expression_end(ir: &IrFile, trailing: ExprId) -> Option<u32> {
     ir.expr_end_lines.get(&trailing).copied().or_else(|| {
         let crate::ir::IrExpr::Block {
             stmts,

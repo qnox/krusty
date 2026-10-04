@@ -11999,6 +11999,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   already has that line in effect, so no entry is added. Test:
   `tests/unit_expression_body_return_line_e2e.rs`.
 
+- **A setter's `return` carries a line, as a declared `Unit` function's does.** A block-bodied
+  setter falls off its closing `}`, which kotlinc marks on the `return`
+  (`setExtraLineNumberForVoidReturningFunction`); an expression-bodied setter `set(value) = …` is an
+  expression body, whose `return` carries the expression's end line. The checker records the
+  closing line of a block setter on its FIR body and marks an expression setter's body as an
+  implicit return, as it already did for an expression getter; property lowering records the
+  resulting exit on the setter body (`IrFile::record_accessor_body_exit`), and the accessor that
+  appends the `return` marks it (`UnitBodyExit`). Test: `tests/setter_return_line_e2e.rs`.
+
 - **Backend temporaries are entered and left on the frame's stack, as kotlinc's `enterTemp` and
   `leaveTemp` move `FrameMapBase.currentSize`.** Leaving the newest entry, keyed or not, hands its
   slot back to whatever is entered next. `javap -c -p` of `ExpressionCodegen` in kotlinc 2.4.20's
