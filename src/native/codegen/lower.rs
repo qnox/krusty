@@ -1748,7 +1748,12 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 op,
                 arg,
                 type_operand,
-            } => self.type_operation(op, arg, type_operand),
+            } => self.type_operation(
+                op,
+                arg,
+                type_operand,
+                self.file.ir.declaration_result_coercions.contains(&id),
+            ),
             IrExpr::PrimitiveBinOp { op, lhs, rhs } => self.binary(op, lhs, rhs),
             IrExpr::Equality { op, mode, lhs, rhs } => self.equality(op, mode, lhs, rhs),
             IrExpr::PrimitiveNeg { operand, ty } => self.negate(operand, ty),

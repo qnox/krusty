@@ -217,7 +217,17 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         target: &crate::fir::PropertyId,
     ) -> Result<Option<Value>, Unsupported> {
         match self.top_level(target, false)? {
-            TopLevel::Slot(index) => self.static_read(index),
+            TopLevel::Slot(index) => {
+                let declaration = &self.file.ir.statics[index as usize];
+                let guarded = declaration.is_lateinit;
+                let name = declaration.name.clone();
+                let value = self.static_read(index)?;
+                if guarded {
+                    let value = value.expect("a `lateinit` property has a reference carrier");
+                    self.lateinit_guard(value, &name)?;
+                }
+                Ok(value)
+            }
             TopLevel::Accessor(function) => self.accessor_call(function, &[]),
         }
     }

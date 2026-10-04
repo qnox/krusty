@@ -294,7 +294,21 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         op: IrTypeOp,
         arg: u32,
         type_operand: Ty,
+        declaration_result: bool,
     ) -> Result<Option<Value>, Unsupported> {
+        // This exact coercion was placed between a call's declared result and the substitution
+        // selected at the call site. A bare type parameter physically returns a reference, and
+        // Kotlin checks that reference against the selected concrete result before adapting its
+        // representation. The common-IR marker is the authority: an ordinary implicit coercion is
+        // still only a representation change and must not acquire cast semantics here.
+        if declaration_result
+            && op == IrTypeOp::ImplicitCoercion
+            && self
+                .declared_call_result(arg)
+                .is_some_and(|declared| matches!(declared.non_null(), Ty::TyParam(..)))
+        {
+            return self.type_operation(IrTypeOp::Cast, arg, type_operand, false);
+        }
         match op {
             IrTypeOp::InstanceOf | IrTypeOp::NotInstanceOf => {
                 // Two of Kotlin's types answer without asking the object anything, because their
@@ -452,6 +466,23 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                     .erased_nullable_carrier(arg, type_operand)
                     .unwrap_or(arg);
                 self.coerce(arg, type_operand)
+            }
+        }
+    }
+
+    /// The declaration result attached to the terminal call beneath a result-boundary wrapper.
+    /// Blocks are transparent because argument ordering may have wrapped a checked call in its
+    /// evaluation statements; no other shape is reinterpreted as a call.
+    fn declared_call_result(&self, mut expression: u32) -> Option<Ty> {
+        loop {
+            match self.file.ir.expr(expression) {
+                IrExpr::Call { .. } | IrExpr::MethodCall { .. } => {
+                    return self.file.ir.call_declared_ret.get(&expression).copied();
+                }
+                IrExpr::Block {
+                    value: Some(value), ..
+                } => expression = *value,
+                _ => return None,
             }
         }
     }
