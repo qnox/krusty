@@ -1,8 +1,10 @@
-//! A cast to the continuation-passing function does not erase a suspend callable.
+//! A cast to the continuation-passing function keeps both the carrier and the suspend value.
 //!
 //! `Foo::bar as Function2<Int, Continuation<Int>, Any?>` still answers `is SuspendFunction1`
 //! and `is KSuspendFunction1`. A suspend lambda cast the same way still answers both
-//! `is SuspendFunction1` and `is Function2`.
+//! `is SuspendFunction1` and `is Function2`. After `value as Function2<...>`, `value(1, c)`
+//! uses that carrier, and a non-null cast of a nullable suspend value still has the non-null
+//! suspend type.
 
 use super::common;
 
@@ -54,6 +56,22 @@ fn a_suspend_callable_keeps_its_type_after_a_continuation_cast() {
             if (ref1 !is Function2<Int, Continuation<Int>, Any?>) return "l"
             if (builder { (ref1 as SuspendFunction1<Int, Int>)(117) } != 117) return "m"
             if (builder { (ref1 as suspend (Int) -> Int)(117) } != 117) return "n"
+
+            fun cps(value: suspend (Int) -> Int, c: Continuation<Int>): Any? {
+                value as Function2<Int, Continuation<Int>, Any?>
+                if (value !is SuspendFunction1<Int, Any?>) return "o"
+                if (value !is Function2<Int, Continuation<Int>, Any?>) return "p"
+                return value(1, c)
+            }
+            if (cps({ y -> y + 41 }, EmptyContinuation) != 42) return "q"
+
+            fun nonNullSuspend(value: (suspend (Int) -> Int)?): Int {
+                value as Function2<Int, Continuation<Int>, Any?>
+                val typed: suspend (Int) -> Int = value
+                return builder { typed(7) }
+            }
+            val nullable: (suspend (Int) -> Int)? = { y -> y + 1 }
+            if (nonNullSuspend(nullable) != 8) return "r"
             return "OK"
         }
     "#;

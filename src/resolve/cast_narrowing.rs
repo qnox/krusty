@@ -99,24 +99,81 @@ impl Checker<'_> {
         Some(rhs_scope)
     }
 
-    /// A suspend callable already implements the continuation-passing `FunctionN+1` /
-    /// `KFunctionN+1` shape, but that shape is not a Kotlin subtype. Casting to it must not
-    /// replace the suspend type: a later `is SuspendFunction` / `is KSuspendFunction` would
-    /// otherwise see only the ordinary function type and be rejected as erased. The cast
-    /// expression itself still has the target type.
-    pub(super) fn suspend_value_keeps_its_type(&self, declared: Ty, narrowed: Ty) -> bool {
-        let source = self.fed_source();
-        crate::symbol_resolver::classifier_callable_signatures(&source, declared.non_null())
+    /// Exact function values proved for `expression` besides its current read type.
+    ///
+    /// A cast to the continuation-passing carrier leaves that carrier as the read projection and
+    /// keeps the original suspend value in the intersection. The local's callable-reference
+    /// signature is the same kind of fact. A nominal classifier's `operator invoke` is not: this
+    /// walk never asks a classifier for callable signatures.
+    pub(super) fn proven_function_value_facts(
+        &self,
+        scope: &CheckerScope<'_>,
+        expression: ExprId,
+    ) -> Vec<Ty> {
+        let mut facts = Vec::new();
+        let mut push = |ty: Ty| {
+            let ty = ty.non_null();
+            if matches!(ty, Ty::Fun(_)) && !facts.contains(&ty) {
+                facts.push(ty);
+            }
+        };
+        let Some(path) = self.expr_access_path(expression) else {
+            return facts;
+        };
+        for constituent in self.lookup_intersection_narrowing(scope, &path) {
+            push(constituent);
+        }
+        if path.segments.is_empty() {
+            if let super::scope::PathRoot::Value(identity) = path.root {
+                if let Some((_, local)) = self.visible_flow_value(scope, identity) {
+                    if let Some(function) = local.callable_reference_type {
+                        push(function);
+                    }
+                }
+            }
+        }
+        facts
+    }
+
+    /// `fact` is one exact function value. A suspend value also implements its continuation-passing
+    /// carrier; that carrier is not a subtype, so both directions are spelled here.
+    pub(super) fn function_value_fact_matches(&self, fact: Ty, proof_target: Ty) -> bool {
+        let Ty::Fun(signature) = fact.non_null() else {
+            return false;
+        };
+        self.receiver_is_assignable(fact.non_null(), proof_target)
+            || (signature.suspend
+                && self.receiver_is_assignable(
+                    continuation_function_type(signature),
+                    proof_target.non_null(),
+                ))
+    }
+
+    /// A later `is SuspendFunction` / `is KSuspendFunction`, or a use that expects the suspend
+    /// type, sees every constituent of the cast intersection. The CPS read projection alone would
+    /// reject the suspend check as erased.
+    pub(super) fn suspend_intersection_proves_check(
+        &self,
+        scope: &CheckerScope<'_>,
+        operand: ExprId,
+        target: Ty,
+        proof_target: Option<Ty>,
+    ) -> bool {
+        let constituents = self
+            .expr_access_path(operand)
+            .map(|path| self.lookup_intersection_narrowing(scope, &path))
+            .unwrap_or_default();
+        if constituents
+            .iter()
+            .any(|constituent| self.receiver_is_assignable(constituent.non_null(), target))
+        {
+            return true;
+        }
+        let Some(proof_target) = proof_target else {
+            return false;
+        };
+        self.proven_function_value_facts(scope, operand)
             .into_iter()
-            .any(|signature| {
-                let Ty::Fun(fun) = signature else {
-                    return false;
-                };
-                fun.suspend
-                    && self.receiver_is_assignable(
-                        continuation_function_type(fun),
-                        narrowed.non_null(),
-                    )
-            })
+            .any(|fact| self.function_value_fact_matches(fact, proof_target))
     }
 }
