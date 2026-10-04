@@ -78,3 +78,18 @@ fn a_tailrec_extension_rebinds_its_receiver_and_runs_flat() {
         "OK",
     );
 }
+
+#[test]
+fn a_tailrec_member_steps_on_its_own_instance_and_runs_flat() {
+    // The member counterpart: the self-call dispatches on `this`, so the instance does not change
+    // and only the parameters are reassigned.
+    expect_native_box(
+        "class Counter(val step: Int) {\n\
+         \x20   tailrec fun count(n: Int, acc: Int): Int =\n\
+         \x20       if (n == 0) acc else count(n - 1, acc + step)\n\
+         }\n\
+         fun box(): String = if (Counter(1).count(1000000, 0) == 1000000) \"OK\" else \"fail\"\n",
+        "MemberTailrec",
+        "OK",
+    );
+}

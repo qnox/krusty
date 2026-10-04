@@ -291,7 +291,20 @@ impl EmptySymbolSource {
                 ("toString", Vec::new(), Ty::String),
             ];
             for (name, params, ret) in declarations {
-                let mut callable = LibraryCallable::library(internal, name, params, ret, ret, "");
+                let mut callable =
+                    LibraryCallable::library(internal, name, params.clone(), ret, ret, "");
+                callable.semantic_role = super::builtin_declaration::semantic_call_role(
+                    super::builtin_declaration::BuiltinMemberDeclaration {
+                        owner: internal,
+                        name,
+                        params: &params,
+                        ret,
+                        is_property: false,
+                        is_operator: false,
+                        is_infix: false,
+                        annotations: &[],
+                    },
+                );
                 if name == "toString" {
                     // The target-free core provider has no dependency registry from which it could
                     // allocate an `ExternalCallableId`. Preserve the selected declaration as the
@@ -643,6 +656,23 @@ impl crate::symbol_source::SymbolSource for EmptySymbolSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn core_any_declarations_publish_their_semantic_roles() {
+        let classifier = EmptySymbolSource::builtin_classifier("Any", crate::types::wk::any())
+            .expect("core Any declaration");
+        let expected = [
+            ("equals", SemanticCallRole::KotlinAnyEquals),
+            ("hashCode", SemanticCallRole::KotlinAnyHashCode),
+            ("toString", SemanticCallRole::KotlinAnyToString),
+        ];
+        for (name, role) in expected {
+            let [declaration] = classifier.declared_callables[name].functions() else {
+                panic!("core Any.{name} declaration");
+            };
+            assert_eq!(declaration.callable.semantic_role, Some(role));
+        }
+    }
 
     #[test]
     fn enum_name_intrinsic_belongs_to_the_exact_core_declaration() {

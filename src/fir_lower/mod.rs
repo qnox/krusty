@@ -18,6 +18,8 @@ mod bottom_value_tests;
 #[cfg(test)]
 mod builtin_operation_tests;
 #[cfg(test)]
+mod call_result_tests;
+#[cfg(test)]
 mod call_target_tests;
 mod checked;
 mod checked_arguments;
@@ -44,6 +46,8 @@ mod function_value_conversions;
 mod generics;
 mod initialization;
 mod inline_body;
+#[cfg(test)]
+mod inline_catch_tests;
 mod inline_returns;
 mod inlining;
 mod interface_delegation;
