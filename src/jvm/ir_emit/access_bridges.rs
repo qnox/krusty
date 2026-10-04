@@ -197,41 +197,61 @@ fn enclosing_protected_subclass(
     caller: crate::ir::ClassId,
     target: crate::types::TypeName,
 ) -> Option<crate::types::TypeName> {
-    let mut current = caller;
+    let mut pending = std::collections::VecDeque::from([caller]);
     let mut seen = std::collections::HashSet::new();
-    while seen.insert(current) {
-        let next = enclosing_class(ir, current, target)?;
-        let next_name = ir.classes.get(next as usize)?.fq_name;
-        if next_name != target
-            && next_name.namespace() != target.namespace()
-            && extends_target(ir, next, target)
-        {
-            return Some(next_name);
+    seen.insert(caller);
+    while let Some(current) = pending.pop_front() {
+        for next in enclosing_classes(ir, current) {
+            if !seen.insert(next) {
+                continue;
+            }
+            let next_name = ir.classes.get(next as usize)?.fq_name;
+            if next_name != target
+                && next_name.namespace() != target.namespace()
+                && extends_target(ir, next, target)
+            {
+                return Some(next_name);
+            }
+            pending.push_back(next);
         }
-        current = next;
     }
     None
 }
 
-fn enclosing_class(
-    ir: &IrFile,
-    class: crate::ir::ClassId,
-    target: crate::types::TypeName,
-) -> Option<crate::ir::ClassId> {
-    let declared = ir.classes.get(class as usize)?;
-    match declared.enclosure? {
-        crate::ir::IrEnclosure::Function(function) | crate::ir::IrEnclosure::Lambda(function) => {
-            let owners = ir.class_method_owners.get(&function)?;
-            owners
-                .iter()
-                .copied()
-                .find(|&owner| owner != class && extends_target(ir, owner, target))
-                .or_else(|| owners.iter().copied().find(|&owner| owner != class))
-        }
+/// Every exact classifier edge out of `class`'s lexical enclosure. A function can be attached to
+/// several specialized class copies, so this returns the recorded set instead of choosing one by
+/// whether it happens to inherit the protected target.
+fn enclosing_classes(ir: &IrFile, class: crate::ir::ClassId) -> Vec<crate::ir::ClassId> {
+    let Some(enclosure) = ir
+        .classes
+        .get(class as usize)
+        .and_then(|declared| declared.enclosure)
+    else {
+        return Vec::new();
+    };
+    match enclosure {
+        crate::ir::IrEnclosure::Function(function) | crate::ir::IrEnclosure::Lambda(function) => ir
+            .class_method_owners
+            .get(&function)
+            .into_iter()
+            .flatten()
+            .copied()
+            .filter(|&owner| owner != class)
+            .collect(),
         crate::ir::IrEnclosure::ClassInitializer(owner)
         | crate::ir::IrEnclosure::Constructor { class: owner, .. }
-        | crate::ir::IrEnclosure::Classifier(owner) => Some(owner),
-        crate::ir::IrEnclosure::PropertyAccessor { .. } | crate::ir::IrEnclosure::File => None,
+        | crate::ir::IrEnclosure::Classifier(owner) => vec![owner],
+        crate::ir::IrEnclosure::PropertyAccessor { property, setter } => {
+            let function = super::property_accessor_function(ir, property, setter);
+            ir.class_method_owners
+                .get(&function)
+                .into_iter()
+                .flatten()
+                .copied()
+                .filter(|&owner| owner != class)
+                .collect()
+        }
+        crate::ir::IrEnclosure::File => Vec::new(),
     }
 }
 
