@@ -694,6 +694,7 @@ pub(in crate::resolve) fn streamed_classifier_header_by_declaration(
 ) -> Option<StreamedClassifierHeader> {
     let declaration = headers.syntax.declaration(declaration)?;
     let crate::fir::HeaderDeclarationKind::Classifier {
+        source_name: _,
         type_parameters,
         lexical_type_parameter_captures,
         bounds,

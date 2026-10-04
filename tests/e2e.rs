@@ -1041,6 +1041,8 @@ mod interface_default_args_e2e;
 mod interface_default_method_e2e;
 #[path = "interface_default_property_e2e.rs"]
 mod interface_default_property_e2e;
+#[path = "interface_default_superclass_e2e.rs"]
+mod interface_default_superclass_e2e;
 #[path = "interface_delegation_e2e.rs"]
 mod interface_delegation_e2e;
 #[path = "interface_delegation_expr_e2e.rs"]
@@ -2297,6 +2299,8 @@ mod type_annotation_newline_e2e;
 mod type_of_e2e;
 #[path = "type_param_vararg_check_e2e.rs"]
 mod type_param_vararg_check_e2e;
+#[path = "type_parameter_bound_erasure_e2e.rs"]
+mod type_parameter_bound_erasure_e2e;
 #[path = "type_parameter_invoke_e2e.rs"]
 mod type_parameter_invoke_e2e;
 #[path = "type_parameter_nullability_e2e.rs"]

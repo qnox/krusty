@@ -441,6 +441,36 @@ fn declaration_formal_bounds(
         .collect()
 }
 
+/// Exact interface classifiers inherited through one source classifier's direct superclass.
+///
+/// This is path provenance, not another member lookup: the full applied hierarchy is already a
+/// stable FIR fact, but flattening it loses whether an interface arrived through the superclass or
+/// through a directly declared interface. Compatibility emitters need that distinction without
+/// reopening providers after checking.
+fn inherited_superclass_interfaces(
+    index: &ResolvedModuleIndex,
+    source: &dyn SymbolSource,
+    classifier: crate::fir::DeclarationId,
+) -> Vec<TypeName> {
+    let Some(superclass) = index
+        .classifier_header(classifier)
+        .and_then(|header| header.superclass)
+    else {
+        return Vec::new();
+    };
+    let mut seen = HashSet::new();
+    crate::symbol_resolver::applied_hierarchy(source, superclass.get())
+        .into_iter()
+        .filter_map(|(candidate, _, _)| {
+            (source
+                .classifier(candidate)
+                .is_some_and(|shape| shape.is_interface())
+                && seen.insert(candidate))
+            .then_some(candidate)
+        })
+        .collect()
+}
+
 fn publish_inherited_interface_function_plans(
     index: &ResolvedModuleIndex,
     source: &dyn crate::symbol_source::SymbolSource,
@@ -1327,7 +1357,7 @@ pub(crate) fn publish_checked_local_override_plans(
     source_file: u32,
     classifiers: &[crate::fir::DeclarationId],
 ) {
-    let (plans, preorders) = {
+    let (plans, preorders, superclass_interfaces) = {
         let module = crate::fir::StreamedModuleSymbols::for_file(index, source_file);
         let source = CompositeSource::new(vec![
             &module as &dyn SymbolSource,
@@ -1446,13 +1476,27 @@ pub(crate) fn publish_checked_local_override_plans(
             .flat_map(|(_, _, functions)| functions.iter().cloned())
             .collect::<Vec<_>>();
         let preorders = default_supertype_orders(&source, &function_edges);
-        (plans, preorders)
+        let superclass_interfaces = plans
+            .iter()
+            .map(|(classifier, _, _)| {
+                (
+                    *classifier,
+                    inherited_superclass_interfaces(index, &source, *classifier),
+                )
+            })
+            .collect::<Vec<_>>();
+        (plans, preorders, superclass_interfaces)
     };
     let function_edges = plans
         .iter()
         .flat_map(|(_, _, functions)| functions.iter().cloned())
         .collect::<Vec<_>>();
     publish_inherited_function_defaults(index, &preorders, &function_edges);
+    for (classifier, interfaces) in superclass_interfaces {
+        if index.superclass_interfaces(classifier).is_none() {
+            index.publish_superclass_interfaces(classifier, interfaces);
+        }
+    }
     // A local classifier's plan is published once, by the first body that checks it (a default
     // argument's object is checked for each function that carries the default); its statuses go
     // with that first publication.
@@ -1710,7 +1754,7 @@ fn publish_inherited_function_defaults(
 }
 
 pub(crate) fn publish_override_plans(index: &mut ResolvedModuleIndex, table: &SymbolTable) {
-    let (plans, preorders) = {
+    let (plans, preorders, superclass_interfaces) = {
         let module = ModuleSymbols::new(table);
         let source =
             CompositeSource::new(vec![&module as &dyn SymbolSource, table.libraries.as_ref()]);
@@ -1752,13 +1796,27 @@ pub(crate) fn publish_override_plans(index: &mut ResolvedModuleIndex, table: &Sy
             .flat_map(|(_, _, functions)| functions.iter().cloned())
             .collect::<Vec<_>>();
         let preorders = default_supertype_orders(&source, &function_edges);
-        (plans, preorders)
+        let superclass_interfaces = plans
+            .iter()
+            .filter_map(|(classifier, _, _)| {
+                index.classifier_header(*classifier).map(|_| {
+                    (
+                        *classifier,
+                        inherited_superclass_interfaces(index, &source, *classifier),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        (plans, preorders, superclass_interfaces)
     };
     let function_edges = plans
         .iter()
         .flat_map(|(_, _, functions)| functions.iter().cloned())
         .collect::<Vec<_>>();
     publish_inherited_function_defaults(index, &preorders, &function_edges);
+    for (classifier, interfaces) in superclass_interfaces {
+        index.publish_superclass_interfaces(classifier, interfaces);
+    }
     publish_inherited_statuses(index, &plans);
     for (classifier, properties, functions) in plans {
         index.publish_property_overrides(classifier, properties);

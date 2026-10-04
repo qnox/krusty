@@ -1605,6 +1605,10 @@ pub struct IrFile {
     /// Common lowering copies it from the stable FIR index; target passes may inspect target-specific
     /// representation rules but must not reconstruct semantic inheritance through frontend lookup.
     pub classifier_hierarchies: std::collections::HashMap<TypeName, Vec<IrAppliedClassifier>>,
+    /// Exact interface identities reached through each source classifier's direct superclass.
+    /// Common resolution records the path distinction before flattening the complete hierarchy;
+    /// target emitters consume it without reopening a classifier provider.
+    pub superclass_interfaces: std::collections::HashMap<TypeName, Vec<TypeName>>,
     /// Exact semantic property-override edges copied from stable FIR. A target backend may erase
     /// these types and materialize representation bridges, but it must not search declarations.
     pub property_overrides: std::collections::HashMap<TypeName, Vec<IrPropertyOverride>>,
@@ -2187,6 +2191,11 @@ pub struct IrFile {
     /// `FunId` → the backend-agnostic generic-signature SHAPE of a type-parameterized function. The JVM
     /// backend formats this into a `Signature` attribute; the IR itself holds no target descriptors.
     pub signatures: std::collections::HashMap<u32, IrGenericSig>,
+    /// Exact non-local type-parameter declarations referenced by a generic callable's own bounds.
+    /// Common lowering resolves each identity in the callable's declaration scope and closes over
+    /// further bound references, so a backend never reconnects `<T : S>` by source spelling.
+    pub(crate) callable_bound_type_parameters:
+        std::collections::HashMap<FunId, Vec<IrTypeParameter>>,
     /// Class MEMBERS whose semantic parameter/return types mention an ENCLOSING-CLASS type parameter
     /// (`open class Base<T> { open fun choose(value: T): T }`): fid → (semantic params, semantic ret).
     /// The erased [`IrFunction`] carries `Any`, and `signatures` only describes function-OWNED type

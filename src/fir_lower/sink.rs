@@ -708,6 +708,11 @@ impl<'a> CommonIrBodySink<'a> {
                         .classifier_header(declaration)
                         .ok_or(FirFileLoweringFailure::MissingClassifier(declaration))?
                         .classifier;
+                    if let Some(interfaces) = index.superclass_interfaces(declaration) {
+                        self.ir
+                            .superclass_interfaces
+                            .insert(classifier_identity, interfaces.to_vec());
+                    }
                     // A local classifier may have a stable skeleton before an inferred member is
                     // checked. Refresh only the semantic override payload once Pass 2 marks both
                     // plans complete; class identity and all already-attached bodies stay intact.
@@ -778,6 +783,15 @@ impl<'a> CommonIrBodySink<'a> {
                     .is_none(),
                 "a source classifier may publish one applied hierarchy per IR file"
             );
+            if let Some(interfaces) = index.superclass_interfaces(declaration) {
+                assert!(
+                    self.ir
+                        .superclass_interfaces
+                        .insert(classifier_identity, interfaces.to_vec())
+                        .is_none(),
+                    "a source classifier may publish superclass interface facts once"
+                );
+            }
             let property_overrides = lower_property_override_plans(index, declaration);
             assert!(
                 self.ir

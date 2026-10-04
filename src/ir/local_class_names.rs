@@ -830,6 +830,9 @@ impl super::IrFile {
         for signature in self.signatures.values_mut() {
             generic_signature(signature, names);
         }
+        for parameters in self.callable_bound_type_parameters.values_mut() {
+            type_parameters(parameters, names);
+        }
         for (parameters, result) in self.member_semantic_sigs.values_mut() {
             tys(parameters, names);
             *result = ty(*result, names);
