@@ -1334,6 +1334,9 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                         scope,
                         site,
                     } => {
+                        let checkpoint = expected
+                            .is_some()
+                            .then(|| semantics.isolate_delegate_expression_constraints());
                         let delegate = evaluate_expression(
                             semantics,
                             delegate_expr,
@@ -1397,7 +1400,9 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                         // A written property type fixes `getValue`'s result. Re-check the delegate
                         // expression under the receiver type that produces that result, so a call
                         // such as `delegateFor(x)` collects its argument constraints at
-                        // `SinkDelegate<String>` rather than at the unsolved formal.
+                        // `SinkDelegate<String>` rather than at the unsolved formal. The provisional
+                        // check can bind that formal to its upper bound; drop those bindings before
+                        // the second check.
                         let delegate = match expected.and_then(|property_type| {
                             semantics.delegate_expression_expectation(
                                 scope,
@@ -1406,6 +1411,9 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                             )
                         }) {
                             Some(expectation) => {
+                                if let Some(checkpoint) = checkpoint {
+                                    semantics.restore_delegate_expression_constraints(checkpoint);
+                                }
                                 match evaluate_expression_with_expected(
                                     semantics,
                                     delegate_expr,
