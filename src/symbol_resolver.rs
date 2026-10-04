@@ -32,6 +32,7 @@ mod member_property_selection;
 mod member_specialization;
 mod overload_selection;
 mod qualified_classifiers;
+pub(crate) use qualified_classifiers::ClassifierMiss;
 mod receiver_mro;
 mod sam;
 mod scope_level_callables;

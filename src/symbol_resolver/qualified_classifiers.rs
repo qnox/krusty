@@ -7,6 +7,15 @@
 
 use super::*;
 
+/// Why a written classifier path did not bind to one classifier.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ClassifierMiss {
+    /// The path stopped at this segment.
+    Unresolved(String),
+    /// Several complete classifiers are equally visible at the nearest scope rung.
+    Ambiguous(Vec<TypeName>),
+}
+
 #[derive(Clone, Copy)]
 enum ClassifierPathPrefix {
     Package(TypeName),
@@ -130,13 +139,13 @@ impl SymbolResolver<'_> {
     pub(crate) fn qualified_type_classifier_binding_in_scope(
         &self,
         spelling: &str,
-    ) -> (CandidateSelection<TypeName>, Option<String>) {
+    ) -> (CandidateSelectionWithTies<TypeName>, Option<String>) {
         let segments = spelling
             .split(['.', '/'])
             .filter(|segment| !segment.is_empty())
             .collect::<Vec<_>>();
         let Some(&first) = segments.first() else {
-            return (CandidateSelection::None, Some(spelling.to_string()));
+            return (CandidateSelectionWithTies::None, Some(spelling.to_string()));
         };
         let mut failure = None;
         let mut consider = |candidates: &[TypeName]| {
@@ -160,21 +169,23 @@ impl SymbolResolver<'_> {
             }
             match completed.as_slice() {
                 [] => None,
-                [classifier] => Some(CandidateSelection::Selected(*classifier)),
-                _ => Some(CandidateSelection::Ambiguous),
+                [classifier] => Some(CandidateSelectionWithTies::Selected(*classifier)),
+                _ => Some(CandidateSelectionWithTies::Ambiguous(completed)),
             }
         };
-        let selected = |selection: CandidateSelection<TypeName>| match selection {
-            CandidateSelection::Selected(_) => (selection, None),
-            CandidateSelection::Ambiguous => {
-                (CandidateSelection::Ambiguous, Some(first.to_string()))
+        let selected = |selection: CandidateSelectionWithTies<TypeName>| match selection {
+            CandidateSelectionWithTies::Selected(_) => (selection, None),
+            CandidateSelectionWithTies::Ambiguous(_) | CandidateSelectionWithTies::None => {
+                (selection, Some(first.to_string()))
             }
-            CandidateSelection::None => (CandidateSelection::None, Some(first.to_string())),
         };
         match self.fn_scope {
             Some(FunctionScopeRef::Imports(imports)) => {
                 if imports.explicit_is_ambiguous(first) {
-                    return (CandidateSelection::Ambiguous, Some(first.to_string()));
+                    return (
+                        CandidateSelectionWithTies::Ambiguous(Vec::new()),
+                        Some(first.to_string()),
+                    );
                 }
                 if let Some((owner, declared_name)) = imports.explicit_target(first) {
                     if let Some(candidate) = self.src.symbols(owner, &declared_name).classifier_name
@@ -207,7 +218,7 @@ impl SymbolResolver<'_> {
                 ClassifierPathPrefix::Package(crate::types::type_name_child(TypeName::ROOT, first)),
                 &segments[1..],
             ) {
-                Ok(classifier) => return (CandidateSelection::Selected(classifier), None),
+                Ok(classifier) => return (CandidateSelectionWithTies::Selected(classifier), None),
                 Err(mut package_failure) => {
                     if package_failure.1.is_empty() {
                         package_failure.1 = first.to_string();
@@ -222,7 +233,7 @@ impl SymbolResolver<'_> {
             }
         }
         (
-            CandidateSelection::None,
+            CandidateSelectionWithTies::None,
             failure
                 .map(|(_, segment)| segment)
                 .or_else(|| Some(first.to_string())),

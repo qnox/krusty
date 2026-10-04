@@ -181,7 +181,9 @@ Reverse-engineered from kotlinc for `class Point(val x: Int, var y: String)` (se
   `return_type` (f3) precedes its `type_parameter` (f4). Interning order in `d2` is independent of
   it. A `Type` naming a type parameter the declaration being written owns (a member function's or
   property's own, bounds included) uses `type_parameter_name` (f9); an enclosing class's uses
-  `type_parameter` (f7). A setter is a declaration of its own, so its value parameter addresses the
+  `type_parameter` (f7). A class header is the class's own declaration, so its type parameters'
+  bounds and its supertypes name the class's parameters too (`class C<T : Comparable<T>>`,
+  `class E<T> : I<E<T>>`), while its constructors and members address them by id. A setter is a declaration of its own, so its value parameter addresses the
   property's type parameter by id (`var <V> Cell<V>.content: V` names `V` in the return and receiver
   types but writes `type_parameter` in `setter_value_parameter`). krusty builds the record in any
   order and `Pb::canonical` sorts it. Test: `tests/metadata_type_reference_e2e.rs`.
