@@ -3298,6 +3298,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   stays intact and erases to `Object`. This is representation of an already-selected declaration.
   Test: `star_projected_member_and_extension_references_use_their_declared_bounds` in
   `tests/reference_adaptation_e2e.rs`.
+- **A generic callable reference is reflected by the declaration's erased JVM signature.**
+  `fun <T> foo(x: T): T` referenced as `KFunction1<Int, Int>` still names
+  `foo(Ljava/lang/Object;)Ljava/lang/Object;`. A primary bound is that erasure:
+  `fun <T : CharSequence> foo(x: T): T` names
+  `foo(Ljava/lang/CharSequence;)Ljava/lang/CharSequence;`. The use-site `Int` or `String` is
+  the adapter's calling convention (box, invoke the erased method, unbox); kotlin-reflect looks
+  the declaration up by the signature it was compiled as, then reports the declaration type
+  parameter (`returnType` is `T`). A companion-associated extension omits the receiver that
+  only names its static scope (`companion fun C.answer(value: Int)` reflects `answer(Int)`,
+  not `answer(C, Int)`). The omitted receiver is the parameter whose identity says it is the
+  extension receiver; a companion declaration whose parameter identities do not match its
+  parameters is a lowering error, not a signature that keeps the receiver. Test:
+  `tests/callable_ref_generic_signature_e2e.rs`. Corpus:
+  `reflection/functions/typeParameterInReturnType.kt`.
 - **Dead-code elimination after a diverging statement.** Statements following a `return`/`break`/
   `continue` or an expression of type `Nothing` (a `throw`, or a call that never returns) in the same
   block are unreachable; krusty drops them (and a trailing block value), matching kotlinc. Emitting them
