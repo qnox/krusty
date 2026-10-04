@@ -354,6 +354,29 @@ fun box(): String {
     common::expect_box_ok_with_stdlib(SOURCE, "ResumedNullCapableCarrier");
 }
 
+/// A suspend function value that completes without suspending already returned the box. The caller
+/// stores that box and its property use unboxes once. A direct call of a carrier-returning
+/// declaration still unboxes the box the state machine stored for the merge.
+#[test]
+fn a_synchronous_suspend_function_value_returns_the_box() {
+    const SOURCE: &str = r#"
+import kotlin.coroutines.*
+
+@JvmInline value class Wrap(val v: Any?)
+
+suspend fun read(fn: suspend () -> Wrap): String = fn().v as String
+
+fun box(): String {
+    var out = ""
+    val body: suspend () -> Unit = { out = read { Wrap("OK") } }
+    body.startCoroutine(Continuation(EmptyCoroutineContext) { it.getOrThrow() })
+    return out
+}
+"#;
+
+    common::expect_box_ok_with_stdlib(SOURCE, "SynchronousSuspendFunctionValue");
+}
+
 /// A value class resumed into a caller of `$default` unboxes it, and a suspend lambda hands its
 /// value-class result over boxed, as every lambda does, so its continuation does not box it again.
 #[test]

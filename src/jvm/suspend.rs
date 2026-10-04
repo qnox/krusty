@@ -70,7 +70,7 @@ pub(crate) use specialized_lambda_classes::SpecializedLambdaClasses;
 mod suspend_lambda;
 mod tail_forward;
 mod value_class_results;
-use value_class_results::{boxed_carrier, boxed_on_resume};
+use value_class_results::{boxed_carrier, boxed_on_resume, resumed_carrier};
 mod value_liveness;
 mod value_try;
 
@@ -2603,7 +2603,20 @@ impl Flat<'_> {
         });
         out.push(when);
         let mut vg = self.gv(vv);
-        if let Some((classifier, carrier)) = boxed_on_resume(self.ir, point, self.suspend) {
+        // A declaration that returns the carrier is boxed here, so this synchronous edge matches
+        // the box its continuation resumes with. A suspend function value already returned that
+        // box (`SuspendFunctionN.invoke` erases its result); boxing it again nests one box inside
+        // the carrier.
+        let function_value = matches!(
+            self.ir.exprs.get(point as usize),
+            Some(IrExpr::InvokeFunction { .. })
+        );
+        let resume_box = if function_value {
+            None
+        } else {
+            boxed_on_resume(self.ir, point, self.suspend)
+        };
+        if let Some((classifier, carrier)) = resume_box {
             vg = boxed_carrier(self.ir, vg, classifier, carrier);
         }
         self.setfield(out, 0, vg); // cont.result = v (so the resume reads the synchronous value)
@@ -2637,25 +2650,45 @@ impl Flat<'_> {
         // `kotlin.Unit` singleton here, never a JVM `void` result. Record the stored physical type
         // on the resume local so later checked coercions consume the existing operand instead of
         // materializing a second singleton and leaving the first one on the stack.
-        // A carrier-returning callee uses the carrier only on the synchronous invocation edge.
-        // `split_at_point` boxes that edge before storing it in `cont.result`, while the resumed
-        // edge already receives the box from the callee's continuation. Keep that common box in
-        // the merge local: value-class lowering has already installed the one representation
-        // wrapper that consumes it. Unboxing here as well makes a property/member use unbox twice.
+        // Both edges of the merge store one representation. A declaration's synchronous edge was
+        // boxed above and its continuation resumes with that box, but value-class lowering reads
+        // the declaration's erased carrier return and does not unbox the call: this local is the
+        // carrier. A suspend function value is the other way around. Lowering already unboxes that
+        // call, because `invoke` returns the box, so the local keeps the box. Unboxing it here as
+        // well makes the property or member use unbox twice.
+        let function_value = matches!(
+            self.ir.exprs.get(call as usize),
+            Some(IrExpr::InvokeFunction { .. })
+        );
         let physical_ty = realization.map_or_else(
             || crate::types::stored_value_ty(*ty),
             |realization| match realization {
-                crate::ir::IrValueClassSuspendResult::Boxed { classifier, .. }
-                | crate::ir::IrValueClassSuspendResult::Carrier { classifier, .. } => {
+                crate::ir::IrValueClassSuspendResult::Boxed { classifier, .. } => {
                     Ty::obj_name(classifier)
                 }
+                crate::ir::IrValueClassSuspendResult::Carrier { classifier, .. }
+                    if function_value =>
+                {
+                    Ty::obj_name(classifier)
+                }
+                crate::ir::IrValueClassSuspendResult::Carrier { carrier, .. } => carrier,
             },
         );
         let unb = match realization {
-            Some(crate::ir::IrValueClassSuspendResult::Boxed { classifier, .. })
-            | Some(crate::ir::IrValueClassSuspendResult::Carrier { classifier, .. }) => {
-                unbox(self.ir, rg, &Ty::obj_name(classifier))
+            Some(crate::ir::IrValueClassSuspendResult::Carrier { carrier, .. })
+                if !function_value =>
+            {
+                match boxed_on_resume(self.ir, call, self.suspend) {
+                    Some((classifier, carrier)) => {
+                        resumed_carrier(self.ir, rg, classifier, carrier)
+                    }
+                    None => unbox(self.ir, rg, &carrier),
+                }
             }
+            Some(
+                crate::ir::IrValueClassSuspendResult::Boxed { classifier, .. }
+                | crate::ir::IrValueClassSuspendResult::Carrier { classifier, .. },
+            ) => unbox(self.ir, rg, &Ty::obj_name(classifier)),
             None => unbox(self.ir, rg, ty),
         };
         self.mark_assigned(local);

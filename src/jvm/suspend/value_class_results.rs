@@ -1,8 +1,10 @@
 //! A value-class result that crosses a suspension as its carrier
 //! ([`crate::ir::IrValueClassSuspendResult::Carrier`]). The function returns the carrier where it
 //! does not suspend, and its continuation hands the value to the completion as its box, typed
-//! `Any?`, as kotlinc does. A caller resumed with the value therefore unboxes it; the IR machine,
-//! whose direct path re-enters the state its resume takes, boxes the direct result first.
+//! `Any?`, as kotlinc does. A direct caller unboxes that box. A caller of a suspend function value
+//! does not: `invoke` already returned the box, and the use lowered against that call unboxes it.
+//! The IR machine re-enters the state its resume takes, so a direct synchronous result is boxed
+//! first and a function value's box is stored as it is.
 
 use crate::ir::{
     Callee, ExprId, IrBinOp, IrConst, IrExpr, IrFile, IrTypeOp, IrValueClassSuspendResult,
@@ -36,6 +38,53 @@ pub(super) fn boxed_on_resume(
         call,
         suspend_functions,
     ))
+}
+
+/// The carrier of the boxed value `resumed` reads: `checkcast X; unbox-impl`, with the `null` of a
+/// nullable carrier passing through, since `unbox-impl` is an instance call. A direct call needs
+/// this. A suspend function value does not: its `invoke` already returned the box, and the use
+/// lowered against that call is the unbox.
+pub(super) fn resumed_carrier(
+    ir: &mut IrFile,
+    resumed: ExprId,
+    classifier: TypeName,
+    carrier: Ty,
+) -> ExprId {
+    let physical = crate::jvm::physical_type::ir_ty_to_jvm(&carrier);
+    let descriptor = format!(
+        "(){}",
+        crate::jvm::names::type_descriptor(physical.non_null())
+    );
+    let boxed = ir.add_expr(IrExpr::TypeOp {
+        op: IrTypeOp::Cast,
+        arg: resumed,
+        type_operand: Ty::nullable(Ty::obj_name(classifier)),
+    });
+    let unboxed = ir.add_expr(IrExpr::Call {
+        callee: Callee::realized_virtual(
+            classifier,
+            "unbox-impl".to_string(),
+            descriptor,
+            None,
+            false,
+        ),
+        dispatch_receiver: Some(boxed),
+        args: Vec::new(),
+    });
+    if !carrier.is_nullable() {
+        return unboxed;
+    }
+    let tested = ir.add_expr(ir.exprs[resumed as usize].clone());
+    let null = ir.add_expr(IrExpr::Const(IrConst::Null));
+    let is_null = ir.add_expr(IrExpr::PrimitiveBinOp {
+        op: IrBinOp::Eq,
+        lhs: tested,
+        rhs: null,
+    });
+    let passed = ir.add_expr(IrExpr::Const(IrConst::Null));
+    ir.add_expr(IrExpr::When {
+        branches: vec![(Some(is_null), passed), (None, unboxed)],
+    })
 }
 
 /// The box of the carrier `value` holds: `X.box-impl`, with the `null` of a nullable carrier

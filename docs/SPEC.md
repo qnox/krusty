@@ -739,7 +739,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`suspendCoroutineUninterceptedOrReturn<X>`, `suspendCoroutine<X>`) yields the box on either
   path, since its block returns `Any?`, so a function returning the carrier unboxes it and does not
   forward its continuation to it. A suspend lambda returns `X` boxed, as every lambda does, so its
-  continuation does not box it again. Tests: `tests/suspend_value_class_results_e2e.rs`.
+  continuation does not box it again. A direct caller of a carrier-returning declaration unboxes
+  the resumed box, because that call's erased return is the carrier and no use-site wrapper unboxes
+  it. A caller of a suspend function value keeps the box: `SuspendFunctionN.invoke` already
+  returned it, the use lowered against that call is the one unbox, and the synchronous edge stores
+  that box as it is rather than boxing it again. Tests: `tests/suspend_value_class_results_e2e.rs`.
 - **An unintercepted suspension block reports its suspension to the debug probes.** After the value
   of a `suspendCoroutineUninterceptedOrReturn` block, kotlinc writes `dup; getCOROUTINE_SUSPENDED;
   if_acmpne; <continuation>; probeCoroutineSuspended`, at the call's own line, leaving the value on
