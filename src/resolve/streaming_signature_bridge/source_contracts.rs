@@ -27,12 +27,16 @@ pub(crate) fn extract_source_contract_candidates(
     source: crate::fir::SourceFileId,
     stubs: &[crate::fir::DeclarationStub],
 ) -> Vec<SourceContractCandidate> {
+    // A member function declares a contract as well as a top-level one does; kotlinc rejects one
+    // only on an open or overriding member, which the contract checks report.
     file.decls
         .iter()
-        .filter_map(|&parser_declaration| {
-            let Decl::Fun(function) = file.decl(parser_declaration) else {
-                return None;
-            };
+        .flat_map(|&parser_declaration| match file.decl(parser_declaration) {
+            Decl::Fun(function) => std::slice::from_ref(function),
+            Decl::Class(class) => class.methods.as_slice(),
+            Decl::Property(_) => &[],
+        })
+        .filter_map(|function| {
             let FunBody::Block(body) = function.body else {
                 return None;
             };

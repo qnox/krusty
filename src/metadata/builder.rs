@@ -160,22 +160,64 @@ fn type_pb_declared(
         .unwrap_or_else(|error| panic!("invalid emitted metadata type: {error}"))
 }
 
+/// The containing declaration's `TypeTable` (`Package.type_table` / `Class.type_table` = 30). kotlinc
+/// writes a contract's `is` type here and refers to it by index (`Expression.is_instance_type_id`)
+/// instead of inlining it; an equal type is written once.
+#[derive(Default)]
+pub(crate) struct ContractTypeTable {
+    types: Vec<Pb>,
+}
+
+impl ContractTypeTable {
+    fn id(&mut self, ty: Pb) -> u64 {
+        let index = match self
+            .types
+            .iter()
+            .position(|known| known.as_bytes() == ty.as_bytes())
+        {
+            Some(index) => index,
+            None => {
+                self.types.push(ty);
+                self.types.len() - 1
+            }
+        };
+        index as u64
+    }
+
+    /// The `TypeTable` message (`repeated Type type` = 1), or `None` when no contract needed it.
+    pub(crate) fn encode(&self) -> Option<Pb> {
+        (!self.types.is_empty()).then(|| {
+            let mut table = Pb::new();
+            for ty in &self.types {
+                table.repeated_message(1, ty);
+            }
+            table
+        })
+    }
+}
+
 /// Serialize a decoded contract as a `Contract` message (`repeated Effect effect` = 1), the exact
 /// mirror of the reader in `src/jvm/metadata.rs`. `tps` maps the function's type-parameter names
 /// to their table ids (for an `is R` conclusion).
-fn contract_pb(
+pub(crate) fn contract_pb(
     st: &mut StringTable<'_>,
+    types: &mut ContractTypeTable,
     contract: &crate::contracts::Contract,
     tps: &TypeParameters,
 ) -> Pb {
     let mut p = Pb::new();
     for e in &contract.effects {
-        p.repeated_message(1, &effect_pb(st, e, tps));
+        p.repeated_message(1, &effect_pb(st, types, e, tps));
     }
     p
 }
 
-fn effect_pb(st: &mut StringTable<'_>, e: &crate::contracts::Effect, tps: &TypeParameters) -> Pb {
+fn effect_pb(
+    st: &mut StringTable<'_>,
+    types: &mut ContractTypeTable,
+    e: &crate::contracts::Effect,
+    tps: &TypeParameters,
+) -> Pb {
     use crate::contracts::Effect;
     let mut p = Pb::new();
     match e {
@@ -188,11 +230,11 @@ fn effect_pb(st: &mut StringTable<'_>, e: &crate::contracts::Effect, tps: &TypeP
                 p.field_varint(4, k); // Effect.kind
             }
         }
-        Effect::Returns(rv) => write_returns_effect(&mut p, st, rv, None, tps),
+        Effect::Returns(rv) => write_returns_effect(&mut p, st, types, rv, None, tps),
         Effect::ConditionalReturns {
             returns,
             conclusion,
-        } => write_returns_effect(&mut p, st, returns, Some(conclusion), tps),
+        } => write_returns_effect(&mut p, st, types, returns, Some(conclusion), tps),
     }
     p
 }
@@ -200,6 +242,7 @@ fn effect_pb(st: &mut StringTable<'_>, e: &crate::contracts::Effect, tps: &TypeP
 fn write_returns_effect(
     p: &mut Pb,
     st: &mut StringTable<'_>,
+    types: &mut ContractTypeTable,
     rv: &crate::contracts::ReturnsValue,
     conclusion: Option<&crate::contracts::Condition>,
     tps: &TypeParameters,
@@ -224,7 +267,7 @@ fn write_returns_effect(
         }
     }
     if let Some(c) = conclusion {
-        let cb = condition_pb(st, c, tps);
+        let cb = condition_pb(st, types, c, tps);
         p.field_message(3, &cb); // Effect.conclusion_of_conditional_effect
     }
 }
@@ -239,9 +282,30 @@ fn expression_param_ref_pb(param: crate::contracts::ParamRef) -> Pb {
 
 fn condition_pb(
     st: &mut StringTable<'_>,
+    types: &mut ContractTypeTable,
     c: &crate::contracts::Condition,
     tps: &TypeParameters,
 ) -> Pb {
+    condition_expression(st, types, c, tps).pb
+}
+
+/// One `Expression` message being built, with which repeated operand fields it already carries.
+struct ConditionExpression {
+    pb: Pb,
+    has_and: bool,
+    has_or: bool,
+}
+
+/// kotlinc's `ContractSerializer`: a conjunction reuses its left operand's message and appends the
+/// right operand as an `and_argument` (field 6), a disjunction likewise with `or_argument` (field
+/// 7). The left message is nested as the first argument instead only when it already carries the
+/// other connective's arguments, which would otherwise change its meaning.
+fn condition_expression(
+    st: &mut StringTable<'_>,
+    types: &mut ContractTypeTable,
+    c: &crate::contracts::Condition,
+    tps: &TypeParameters,
+) -> ConditionExpression {
     use crate::contracts::{Condition, ConditionType};
     let mut p = Pb::new();
     match c {
@@ -258,7 +322,7 @@ fn condition_pb(
                 panic!("unresolved source type reached metadata contract emission");
             };
             let it = type_pb_generic(st, *ty, tps);
-            p.field_message(4, &it); // Expression.is_instance_type
+            p.field_varint(5, types.id(it)); // Expression.is_instance_type_id
         }
         Condition::BoolParam(param) => {
             p.field_varint(2, param.to_wire());
@@ -266,38 +330,36 @@ fn condition_pb(
         Condition::Const(b) => {
             p.field_varint(3, if *b { 0 } else { 1 }); // Expression.constant_value TRUE/FALSE
         }
-        Condition::And(..) | Condition::Or(..) => {
-            // Flatten the formula; every operand rides the repeated field (the reader handles
-            // both the embedded-first-operand optimization and this plain form).
+        Condition::And(left, right) | Condition::Or(left, right) => {
             let and = matches!(c, Condition::And(..));
-            let field = if and { 6 } else { 7 };
-            let mut flat = Vec::new();
-            flatten_condition(c, and, &mut flat);
-            for operand in flat {
-                let ob = condition_pb(st, operand, tps);
-                p.repeated_message(field, &ob);
+            let left = condition_expression(st, types, left, tps);
+            let mut combined = if (and && left.has_or) || (!and && left.has_and) {
+                let mut nested = Pb::new();
+                nested.repeated_message(if and { 6 } else { 7 }, &left.pb);
+                ConditionExpression {
+                    pb: nested,
+                    has_and: and,
+                    has_or: !and,
+                }
+            } else {
+                left
+            };
+            let right = condition_expression(st, types, right, tps);
+            combined
+                .pb
+                .repeated_message(if and { 6 } else { 7 }, &right.pb);
+            if and {
+                combined.has_and = true;
+            } else {
+                combined.has_or = true;
             }
+            return combined;
         }
     }
-    p
-}
-
-fn flatten_condition<'a>(
-    c: &'a crate::contracts::Condition,
-    and: bool,
-    out: &mut Vec<&'a crate::contracts::Condition>,
-) {
-    use crate::contracts::Condition;
-    match (and, c) {
-        (true, Condition::And(l, r)) => {
-            flatten_condition(l, true, out);
-            flatten_condition(r, true, out);
-        }
-        (false, Condition::Or(l, r)) => {
-            flatten_condition(l, false, out);
-            flatten_condition(r, false, out);
-        }
-        _ => out.push(c),
+    ConditionExpression {
+        pb: p,
+        has_and: false,
+        has_or: false,
     }
 }
 
@@ -423,6 +485,7 @@ fn function_pb(
     st: &mut StringTable<'_>,
     f: &FnMeta,
     requirements: &mut VersionRequirementTable,
+    contract_types: &mut ContractTypeTable,
     param_assertions: bool,
     annotations_in_metadata: bool,
 ) -> Pb {
@@ -615,7 +678,7 @@ fn function_pb(
     // The declared contract (Function.contract = 32) — `returns(…) implies …` / `callsInPlace`
     // effects a separate compilation applies at call sites.
     if let Some(contract) = &f.contract {
-        let cb = contract_pb(st, contract, &tps);
+        let cb = contract_pb(st, contract_types, contract, &tps);
         p.field_message(32, &cb);
     }
     // JvmProtoBuf.methodSignature extension (Function field 100): only the descriptor (field 2) — the
@@ -1024,6 +1087,7 @@ pub(crate) fn build_package_with_intersection_approximation(
 ) -> (Vec<u8>, Vec<String>) {
     let mut st = StringTable::with_intersection_approximation(intersection_approximation);
     let mut requirements = VersionRequirementTable::default();
+    let mut contract_types = ContractTypeTable::default();
     let mut package = Pb::new();
     // STRINGS INTERN IN SOURCE DECLARATION ORDER across kinds (a `const val` before a `fun`
     // interns first), while the proto still writes functions (f3) before properties (f4) — so the
@@ -1065,6 +1129,7 @@ pub(crate) fn build_package_with_intersection_approximation(
                     &mut st,
                     &funcs[index],
                     &mut requirements,
+                    &mut contract_types,
                     param_assertions,
                     annotations_in_metadata,
                 ))
@@ -1081,6 +1146,9 @@ pub(crate) fn build_package_with_intersection_approximation(
     }
     for ap in alias_pbs.iter().flatten() {
         package.repeated_message(5, ap); // Package.type_alias = 5
+    }
+    if let Some(table) = contract_types.encode() {
+        package.field_message(30, &table); // Package.type_table = 30
     }
     if let Some(table) = requirements.encode() {
         package.field_message(32, &table); // Package.version_requirement_table = 32

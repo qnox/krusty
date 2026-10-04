@@ -2335,6 +2335,9 @@ pub struct IrFile {
     /// carried as provenance; the JVM backend is where it becomes a class name. A suspend function
     /// with no entry has no source declaration behind it.
     pub fn_continuation_ordinal: std::collections::HashMap<u32, u32>,
+    /// The declared `contract { … }` of a member function, a Kotlin declaration fact the class's
+    /// metadata records. A package function carries its own on [`IrPackageFunction`].
+    pub fn_contracts: std::collections::HashMap<u32, crate::contracts::ResolvedContract>,
     /// Class fq-internal-name → its generic-signature SHAPE (type parameters + bounds), for a generic
     /// class. The JVM backend formats it into the class `Signature` attribute.
     class_signatures: std::collections::HashMap<TypeName, IrGenericSig>,

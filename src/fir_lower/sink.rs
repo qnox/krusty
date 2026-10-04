@@ -1347,6 +1347,9 @@ impl<'a> CommonIrBodySink<'a> {
             if index.has_function_typed_parameter(callable.id) {
                 self.ir.function_typed_parameter_fns.insert(function);
             }
+            if let Some(contract) = index.contract(declaration).filter(|_| class.is_some()) {
+                self.ir.fn_contracts.insert(function, contract.clone());
+            }
             // An override also inherits `operator` / `infix`; see `finalize_inherited_statuses`.
             if declaration_header
                 .flags

@@ -11056,6 +11056,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   accessor the plan placed for it. A dependency superclass's companion is also an implicit
   receiver while Pass 1 infers a declaration's type, as a source one is. Verified against kotlinc
   2.4.20. (`tests/companion_private_members_e2e.rs`.)
+ - **Contracts.** A `returns(…) implies` conclusion narrows the caller's arguments like the
+  matching `is` or null test, a primitive type included; a Boolean call in a condition applies
+  `returns(true)`/`returns(false)`, and a call compared with `null` applies `returnsNotNull()`
+  (`!= null`) or `returns(null)` (`== null`). A final member function's contract narrows at its
+  call sites and is written to class metadata like a top-level one. An `is` conclusion's type goes
+  to the declaration's `type_table` (deduplicated) and the expression names it by
+  `is_instance_type_id`; a conjunction reuses its left operand's message and appends the right one
+  as an `and_argument` (a disjunction as an `or_argument`), nesting the left operand only when it
+  already carries the other connective. kotlinc's declaration errors are reported at the
+  `contract` call: it must be the first statement of a function's block body (not of a lambda, an
+  `init` block or a nested block, and not an expression body); local, open, abstract, overriding
+  and non-private interface functions cannot declare one; property accessors and secondary
+  constructors may. Its description may refer only to the owner's value parameters and extension
+  receiver, and describes each parameter with at most one `callsInPlace`. Verified against kotlinc
+  2.4.20. (`tests/contract_smart_casts_e2e.rs`, `tests/contract_declarations_e2e.rs`.)
 - **The receiver of a compound member assignment.** `receiver.x op= value` evaluates `receiver`
   once. A read of a `val`, a parameter, or a value a lambda or local function lifted to a method
   receives as a parameter is read again for the setter, and so is every `this` receiver, including

@@ -28,6 +28,7 @@ pub(super) fn functions(underlying: &str) -> Vec<FnMeta> {
             annotations: Default::default(),
             param_annotations: Vec::new(),
             no_infer_params: Vec::new(),
+            contract: None,
         },
         FnMeta {
             context_count: 0,
@@ -50,6 +51,7 @@ pub(super) fn functions(underlying: &str) -> Vec<FnMeta> {
             annotations: Default::default(),
             param_annotations: Vec::new(),
             no_infer_params: Vec::new(),
+            contract: None,
         },
         FnMeta {
             context_count: 0,
@@ -72,6 +74,7 @@ pub(super) fn functions(underlying: &str) -> Vec<FnMeta> {
             annotations: Default::default(),
             param_annotations: Vec::new(),
             no_infer_params: Vec::new(),
+            contract: None,
         },
     ]
 }

@@ -326,6 +326,57 @@ pub fn decode_source(
     Some(Contract { effects })
 }
 
+/// kotlinc's "error in contract description" findings for a confirmed source `contract { … }`
+/// call, each with the expression it is reported at: a reference that names neither a value
+/// parameter of the owner nor its extension receiver (reported at its effect), and a parameter
+/// described by `callsInPlace` more than once (reported at the contract call).
+pub fn description_errors(
+    file: &File,
+    call: ExprId,
+    params: &[String],
+    fn_name: &str,
+    has_receiver: bool,
+) -> Vec<(ExprId, String)> {
+    let ctx = SourceCtx {
+        file,
+        params,
+        fn_name,
+        has_receiver,
+    };
+    let Expr::Call { args, .. } = file.expr(call) else {
+        return Vec::new();
+    };
+    let Some(Expr::Lambda { body, .. }) = args.last().map(|lambda| file.expr(*lambda)) else {
+        return Vec::new();
+    };
+    let Expr::Block { stmts, trailing } = file.expr(*body) else {
+        return Vec::new();
+    };
+    let effects = stmts
+        .iter()
+        .filter_map(|statement| match file.stmt(*statement) {
+            Stmt::Expr(expression) => Some(*expression),
+            _ => None,
+        })
+        .chain(trailing.iter().copied());
+    let mut errors = Vec::new();
+    let mut in_place = Vec::new();
+    for effect in effects {
+        if let Some(message) = ctx.reference_error(effect) {
+            errors.push((effect, message));
+        } else if let Some(Effect::CallsInPlace { param, .. }) = ctx.effect(effect) {
+            if in_place.contains(&param) {
+                errors.push((
+                    call,
+                    "A value parameter may not be annotated with callsInPlace twice.".to_string(),
+                ));
+            }
+            in_place.push(param);
+        }
+    }
+    errors
+}
+
 struct SourceCtx<'a> {
     file: &'a File,
     params: &'a [String],
@@ -466,6 +517,69 @@ impl SourceCtx<'_> {
             Expr::BoolLit(b) => Some(Condition::Const(*b)),
             _ => None,
         }
+    }
+
+    /// The first reference in effect `e` that is not a value parameter or the extension receiver.
+    fn reference_error(&self, e: ExprId) -> Option<String> {
+        let Expr::Call { callee, args } = self.file.expr(e) else {
+            return None;
+        };
+        match self.file.expr(*callee) {
+            Expr::Member { name, .. } if name == "implies" && args.len() == 1 => {
+                self.condition_reference_error(args[0])
+            }
+            Expr::Name(name) if name == "callsInPlace" => {
+                let argument = *args.first()?;
+                match self.file.expr(argument) {
+                    Expr::Name(name) => self.reference_name_error(name),
+                    _ => Some("element is not a parameter or receiver reference.".to_string()),
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn condition_reference_error(&self, e: ExprId) -> Option<String> {
+        use crate::ast::BinOp;
+        match self.file.expr(e) {
+            Expr::Binary {
+                op: BinOp::And | BinOp::Or,
+                lhs,
+                rhs,
+                ..
+            } => self
+                .condition_reference_error(*lhs)
+                .or_else(|| self.condition_reference_error(*rhs)),
+            Expr::Binary {
+                op: BinOp::Eq | BinOp::Ne,
+                lhs,
+                rhs,
+                ..
+            } => [*lhs, *rhs]
+                .into_iter()
+                .find_map(|side| match self.file.expr(side) {
+                    Expr::Name(name) => self.reference_name_error(name),
+                    _ => None,
+                }),
+            Expr::Is { operand, .. } => match self.file.expr(*operand) {
+                Expr::Name(name) => self.reference_name_error(name),
+                _ => None,
+            },
+            Expr::Name(name) => self.reference_name_error(name),
+            _ => None,
+        }
+    }
+
+    fn reference_name_error(&self, name: &str) -> Option<String> {
+        if self.param_ref(name).is_some() {
+            return None;
+        }
+        Some(if name == "this" || name.starts_with("this@") {
+            "'this' can only be a qualified reference to the extension receiver of contract owner.."
+                .to_string()
+        } else {
+            format!("'{name}' is not a value parameter.")
+        })
     }
 
     fn param_ref(&self, name: &str) -> Option<ParamRef> {

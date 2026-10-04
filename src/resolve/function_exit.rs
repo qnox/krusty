@@ -14,6 +14,9 @@ impl Checker<'_> {
     pub(super) fn check_fun_body(&mut self, scope: &CheckerScope<'_>, function: &FunDecl) {
         match &function.body {
             FunBody::Expr(expression) => {
+                if self.is_contract_call(scope, *expression) {
+                    self.check_contract_expression_body(*expression);
+                }
                 let checked = self.expr_declared(scope, *expression, self.ret_ty);
                 let actual = self.recorded_expression_type_for_expected(
                     scope,
