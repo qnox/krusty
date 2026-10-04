@@ -62,8 +62,6 @@ pub(crate) struct SuspendLambdaCapture {
     pub field: u32,
     /// The captured value's type.
     pub ty: crate::types::Ty,
-    /// Whether the constructor names it `$receiver` rather than like its field.
-    pub receiver: bool,
 }
 
 /// A suspend lambda realized as a class of its own (kotlinc's `SuspendLambdaLowering`), which the
@@ -76,6 +74,8 @@ pub(crate) struct SuspendLambdaClass {
     pub function_type: crate::types::Ty,
     /// The captured values, in constructor order.
     pub captures: Vec<SuspendLambdaCapture>,
+    /// What each parameter of the class's constructor, `create` and typed `invoke` is.
+    pub member_parameters: super::SuspendLambdaParameters,
     /// The lambda's own parameters (its receiver first), in order: each one's type, and the field
     /// it is kept in when the body reads it.
     pub parameters: Vec<(crate::types::Ty, Option<u32>)>,

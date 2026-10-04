@@ -83,6 +83,15 @@ pub enum IrGeneratedParameterRole {
     ReferenceInvokeValue {
         ordinal: u32,
     },
+    /// A parameter of the `FunctionN.invoke` a generated function class overrides, by its position
+    /// in the interface's parameter list. A suspend function type's continuation is one of them:
+    /// it is the interface's last parameter, not a declared completion.
+    FunctionInvokeValue {
+        ordinal: u32,
+    },
+    /// The value a suspend lambda's `create` receives for the lambda's one parameter, ahead of the
+    /// completion.
+    SuspendLambdaCreateValue,
     /// Value parameter of an `interface by` forwarding declaration. The JVM backend formats the
     /// producer-owned ordinal for metadata/debug ABI surfaces.
     InterfaceDelegationValue {

@@ -2,6 +2,8 @@
 
 use std::collections::HashMap;
 
+use crate::fir::CapturedCallableOwner;
+
 use super::*;
 
 #[derive(Clone, Debug)]
@@ -130,7 +132,14 @@ impl BodyFirChecker<'_> {
             return FirCapturedReceiver::Lambda(lambda.label().map(Box::<str>::from));
         }
         if let Some(name) = self.body.debug_name() {
-            return FirCapturedReceiver::Callable(name.into());
+            let owner = match self.body.local_callable() {
+                Some(_) => CapturedCallableOwner::LocalFunction,
+                None => CapturedCallableOwner::Declaration,
+            };
+            return FirCapturedReceiver::Callable {
+                label: name.into(),
+                owner,
+            };
         }
         let declaration = DeclarationId::from_raw(self.body.owner().raw());
         let property = self
@@ -143,7 +152,10 @@ impl BodyFirChecker<'_> {
             .index
             .declaration_name(property)
             .expect("an extension property has a source name");
-        FirCapturedReceiver::Callable(name.into())
+        FirCapturedReceiver::Callable {
+            label: name.into(),
+            owner: CapturedCallableOwner::Declaration,
+        }
     }
 
     fn context_receiver_capture(&self, ordinal: usize) -> FirCapturedReceiver {

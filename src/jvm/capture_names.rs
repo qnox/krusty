@@ -5,11 +5,13 @@
 //! the constructor's `MethodParameters` entry and its `LocalVariableTable` row the same way (`$a`).
 //! Every class-file surface that names a capture goes through this module.
 
+use crate::fir::CapturedCallableOwner;
 use crate::ir::{
     FunId, IrCapturedReceiver, IrClass, IrConstructorCapture, IrFile, IrLambdaCapture,
-    IrLambdaClass,
+    IrLambdaClass, IrParameterIdentity, IrParameterRole,
 };
 use crate::jvm::anonymous_context_labels;
+use crate::jvm::suspend::cps::SuspendLambdaParameters;
 use crate::types::CapturedContextKind;
 
 /// The field a local or anonymous `class` stores `capture` in, which is also the constructor's
@@ -35,7 +37,7 @@ pub(super) fn class_capture(
 fn receiver_name(receiver: &IrCapturedReceiver, dispatch: usize) -> String {
     match receiver {
         IrCapturedReceiver::Enclosing => format!("this${dispatch}"),
-        IrCapturedReceiver::Callable(label) | IrCapturedReceiver::Lambda(Some(label)) => {
+        IrCapturedReceiver::Callable { label, .. } | IrCapturedReceiver::Lambda(Some(label)) => {
             format!("$this_{label}")
         }
         IrCapturedReceiver::Lambda(None) => "$this".to_string(),
@@ -85,6 +87,37 @@ pub(super) fn lambda_class_capture(
     })
 }
 
+/// The field a suspend lambda's class stores `capture`, one of its constructor's recorded captures,
+/// in, and the constructor parameter that passes it: spelled like [`lambda_class_capture`], from
+/// the receiver origins and lifting root the class's parameter record keeps.
+pub(super) fn suspend_lambda_capture(
+    ir: &IrFile,
+    parameters: &SuspendLambdaParameters,
+    capture: &IrParameterIdentity,
+) -> CaptureNames {
+    match capture.role {
+        IrParameterRole::CapturedValue { .. } => CaptureNames::value(
+            capture
+                .source_name
+                .as_deref()
+                .expect("a suspend lambda's captured value keeps its source name"),
+        ),
+        IrParameterRole::CapturedReceiver { ordinal } => {
+            let container = parameters
+                .lifting_root
+                .as_ref()
+                .and_then(|root| super::lifted_names::root_container_at(ir, root));
+            receiver_capture(
+                ir,
+                &parameters.captured_receivers,
+                ordinal as usize,
+                container,
+            )
+        }
+        role => panic!("a suspend lambda's constructor captures no {role:?}"),
+    }
+}
+
 /// The field a class stores a capture in and the constructor parameter that passes it.
 pub(super) struct CaptureNames {
     pub(super) field: String,
@@ -125,9 +158,12 @@ fn receiver_capture(
 /// Receiver `ordinal` of `receivers`, captured by a callable lifted out of `container`.
 ///
 /// kotlinc lowers a value class's members and constructors to statics before it lifts what they
-/// declare, so the enclosing instance such a callable captures is no dispatch receiver but the
-/// value the static realizes it as, `$`-prefixed like any captured value: a member's or accessor's
-/// carrier parameter (`$arg0`), or the temporary a `constructor-impl` holds it in.
+/// declare, so the receivers of such a declaration are no receivers any more but parameters of the
+/// static, which a class captures like any value, under its field name. The enclosing instance is
+/// named after the value the static realizes it as, `$`-prefixed: a member's or accessor's carrier
+/// parameter (`$arg0`), or the temporary a `constructor-impl` holds it in. The declaration's own
+/// extension receiver keeps its `$this_name`. A local function is lifted, not lowered to a
+/// static, so its extension receiver stays one.
 fn realized_receiver(
     ir: &IrFile,
     receivers: &[IrCapturedReceiver],
@@ -135,17 +171,21 @@ fn realized_receiver(
     container: Option<FunId>,
 ) -> (String, bool) {
     let receiver = &receivers[ordinal];
-    if *receiver == IrCapturedReceiver::Enclosing {
-        if let Some(value) =
-            container.and_then(|container| value_class_receiver_value(ir, container))
-        {
-            return (format!("${value}"), false);
-        }
+    let realization = container.and_then(|container| value_class_receiver_value(ir, container));
+    match (receiver, realization) {
+        (IrCapturedReceiver::Enclosing, Some(value)) => (format!("${value}"), false),
+        (
+            IrCapturedReceiver::Callable {
+                owner: CapturedCallableOwner::Declaration,
+                ..
+            },
+            Some(_),
+        ) => (lifted_receiver_name(receivers, ordinal), false),
+        _ => (
+            lifted_receiver_name(receivers, ordinal),
+            uses_receiver_constructor_parameter(receiver),
+        ),
     }
-    (
-        lifted_receiver_name(receivers, ordinal),
-        uses_receiver_constructor_parameter(receiver),
-    )
 }
 
 /// The name of the value the value-class static `container` realizes its receiver as. kotlinc's
@@ -189,7 +229,7 @@ fn lifted_receiver_name(receivers: &[IrCapturedReceiver], ordinal: usize) -> Str
 fn uses_receiver_constructor_parameter(receiver: &IrCapturedReceiver) -> bool {
     matches!(
         receiver,
-        IrCapturedReceiver::Enclosing | IrCapturedReceiver::Callable(_)
+        IrCapturedReceiver::Enclosing | IrCapturedReceiver::Callable { .. }
     )
 }
 

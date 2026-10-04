@@ -178,8 +178,12 @@ pub struct IrConstructorCapture {
 pub enum IrCapturedReceiver {
     /// The enclosing class instance.
     Enclosing,
-    /// The extension receiver of the named callable with this source name.
-    Callable(Box<str>),
+    /// The extension receiver of the named callable with this source name, and whether that
+    /// callable is a local function or the declaration the capture is written in.
+    Callable {
+        label: Box<str>,
+        owner: crate::fir::CapturedCallableOwner,
+    },
     /// A lambda's or anonymous function's receiver, with the lambda's label when it has one.
     Lambda(Option<Box<str>>),
     /// A context parameter that is an implicit receiver: its kind, the declared types of its
