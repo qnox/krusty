@@ -636,7 +636,7 @@ impl Emitter<'_> {
         }
         let mut pending = vec![root];
         while let Some(expression) = pending.pop() {
-            if self.machine_suspensions.contains(&expression) {
+            if self.machine_suspensions.contains_key(&expression) {
                 return true;
             }
             crate::ir::for_each_child(&self.ir.exprs, expression, &mut |child| pending.push(child));

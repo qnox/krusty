@@ -5197,7 +5197,7 @@ fn emit_method_inner_with_holder(
         e.continuation_slot = Some(continuation);
         e.machine_suspensions = suspensions
             .iter()
-            .map(|suspension| suspension.call)
+            .map(|suspension| (suspension.call, suspension.resumed_box))
             .collect();
         crate::trace_compiler!(
             "suspend",
@@ -5539,6 +5539,7 @@ fn emit_method_inner_with_holder(
                     source_file: source_file.as_deref(),
                     receiver: machine.receiver.as_deref(),
                     bridge: machine.bridge.as_deref(),
+                    completion_box: crate::jvm::suspend::completion_box(ir, fid),
                 });
             env.run
                 .machine_classes
@@ -6040,9 +6041,9 @@ struct Emitter<'a> {
     /// Where `IrExpr::CurrentContinuation` reads the continuation from, for a function whose
     /// coroutine machine this emission owns. `None` for every other function.
     continuation_slot: Option<u16>,
-    /// The suspensions of the function being emitted, by call expression, in machine order. Empty
-    /// for every function whose machine the IR pass owns.
-    machine_suspensions: HashSet<u32>,
+    /// The suspensions of the function being emitted, by call expression, each with the value
+    /// class box its resumption unboxes. Empty for every function whose machine the IR pass owns.
+    machine_suspensions: HashMap<u32, Option<(TypeName, Ty)>>,
     /// The suspension points kotlinc's coroutine transformer takes, when it takes this function.
     transformed_suspensions: transformed_suspensions::TransformedSuspensions,
     /// The declarations that read a suspend lambda's parameters from their fields, in the
@@ -6172,7 +6173,7 @@ impl<'a> Emitter<'a> {
             checked_parameters: HashSet::new(),
             frame: frame_map::FrameMap::default(),
             continuation_slot: None,
-            machine_suspensions: HashSet::new(),
+            machine_suspensions: HashMap::new(),
             transformed_suspensions: Default::default(),
             suspend_lambda_parameter_reads: HashSet::new(),
             erased_invocations: HashSet::new(),
@@ -6791,98 +6792,6 @@ impl<'a> Emitter<'a> {
         );
         code.invokespecial(constructor, 2, 0);
         code.athrow();
-    }
-
-    /// Spill the locals that must survive suspension `ordinal`, and record which state to resume in.
-    ///
-    /// Emitted BEFORE the call's operands, which is also where the dependency's own stack prefix
-    /// still sits: this block empties that prefix into locals, so the operands are pushed onto a
-    /// clean stack and the call's own emission needs to know nothing about any of it.
-    fn emit_machine_spills(&mut self, ordinal: usize, code: &mut CodeBuilder) {
-        let Some(machine) = self.machine.clone() else {
-            return;
-        };
-        let Some(suspension) = machine.plan.suspensions.get(ordinal) else {
-            return;
-        };
-        // What the dependency left on the stack under this call goes into locals first — top value
-        // into the last slot — so the call's own operands are pushed onto an empty stack and nothing
-        // is lost to the `areturn` a suspension leaves through.
-        for &(slot, ty) in suspension.prefix.iter().rev() {
-            store(ir_ty_to_jvm(&ty), slot, code);
-        }
-        for (slot, ty, field, descriptor) in coroutine_machine::suspension_fields(suspension) {
-            code.aload(machine.slots.continuation);
-            load(ir_ty_to_jvm(&ty), slot, code);
-            let reference = self.cw.fieldref(&machine.internal, &field, descriptor);
-            code.putfield(reference, slot_words(ir_ty_to_jvm(&ty)) as i32);
-        }
-        code.aload(machine.slots.continuation);
-        code.push_int(ordinal as i32 + 1, self.cw);
-        let label = self.cw.fieldref(&machine.internal, "label", "I");
-        code.putfield(label, 1);
-    }
-
-    /// The `COROUTINE_SUSPENDED` check that follows a suspension's call, and the state the dispatch
-    /// re-enters at.
-    ///
-    /// The call's result is on the stack. If the callee suspended, this frame returns that sentinel
-    /// and the machine is re-entered later at the marked position, which restores the spilled locals
-    /// and pushes the resumed value instead. Both paths join with one value on the stack, so
-    /// whatever consumes the call cannot tell which one ran.
-    fn emit_machine_check(&mut self, ordinal: usize, code: &mut CodeBuilder) {
-        let Some(machine) = self.machine.clone() else {
-            return;
-        };
-        let Some(suspension) = machine.plan.suspensions.get(ordinal) else {
-            return;
-        };
-        let join = code.new_label();
-        code.dup();
-        code.aload(machine.slots.suspended);
-        code.if_acmpne(join);
-        code.aload(machine.slots.suspended);
-        code.areturn();
-        // The resume point: where the dispatch's restore block re-enters, with the spills restored
-        // and nothing on the stack. A resumption that failed is rethrown HERE, inside the body —
-        // inside any `try` the body wraps around the suspension, which is the only place a `catch`
-        // there can see the callee's exception — and a successful one pushes its value and falls
-        // into the join. kotlinc lays its state out at this same position, for the same reason.
-        //
-        // The `areturn` above ended the stream and nothing in this builder branches here, so the
-        // position is declared an external arrival. The marker names it for the enclosing method,
-        // which owns both the label the restore block jumps to and the frame — one recorded in this
-        // builder would be merged with the host's locals when the body is relocated, claiming locals
-        // the dispatch cannot produce.
-        let resume = code.new_label();
-        code.bind_external_target(resume);
-        code.set_stack_height(0);
-        if let Ok(marker) = u16::try_from(ordinal) {
-            code.coroutine_marker(crate::jvm::classfile::CoroutineMarker::Resume, marker);
-        }
-        let throw_on_failure =
-            self.cw
-                .methodref("kotlin/ResultKt", "throwOnFailure", "(Ljava/lang/Object;)V");
-        code.aload(machine.slots.result);
-        code.invokestatic(throw_on_failure, 1, 0);
-        code.aload(machine.slots.result);
-        // Where the two paths meet: the call that did not suspend, and the resume point above, both
-        // with the call's result on the stack.
-        code.bind(join);
-        if let Ok(marker) = u16::try_from(ordinal) {
-            code.coroutine_marker(crate::jvm::classfile::CoroutineMarker::Join, marker);
-        }
-        // Both paths meet here holding only the call's result, so the dependency's own values go
-        // back on the stack AFTER the join — once, for the two of them. The code the splice wrapped
-        // around this one then finds exactly what it pushed, with the result on top.
-        if !suspension.prefix.is_empty() {
-            let result = machine.slots.result;
-            code.astore(result);
-            for &(slot, ty) in &suspension.prefix {
-                load(ir_ty_to_jvm(&ty), slot, code);
-            }
-            code.aload(result);
-        }
     }
 
     /// Describe a spliced body's own locals in the caller's debug table.
@@ -7734,7 +7643,7 @@ impl<'a> Emitter<'a> {
     /// branch is not such a boundary: final-body dataflow carries the live prefix through its edges.
     /// Conservative: the spill path is always correct, only byte-parity with kotlinc is deferred.
     fn must_spill_across(&self, e: u32) -> bool {
-        if self.machine_suspensions.contains(&e) {
+        if self.machine_suspensions.contains_key(&e) {
             return true;
         }
         match self.ir.expr(e) {
@@ -8978,7 +8887,10 @@ mod invariant_tests {
         let mut machines = crate::jvm::suspend::EmitTimeMachines::default();
         machines.record(
             function,
-            vec![crate::jvm::suspend::cps::SplicedSuspension { call: suspension }],
+            vec![crate::jvm::suspend::cps::SplicedSuspension {
+                call: suspension,
+                resumed_box: None,
+            }],
         );
         // The EMITTING pass: a plan is already in hand, so the machine is what this emission builds.
         let run = EmitRun::default();

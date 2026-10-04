@@ -68,6 +68,7 @@ pub(crate) use specialized_lambda_classes::SpecializedLambdaClasses;
 mod suspend_lambda;
 mod tail_forward;
 mod value_class_results;
+pub(crate) use value_class_results::completion_box;
 use value_class_results::{boxed_carrier, boxed_on_resume, resumed_carrier};
 mod value_liveness;
 mod value_try;
@@ -527,11 +528,12 @@ pub(crate) fn lower_suspend(
             let b = body.expect("a spliced-inline suspension implies a body");
             let mut recorded = Vec::new();
             for &call in &spliced_suspensions {
+                let resumed_box = boxed_on_resume(ir, call, &suspend_set);
                 let cont = ir.add_expr(IrExpr::CurrentContinuation);
                 if !append_continuation(ir, call, cont, outputs.default_call_operands) {
                     return false;
                 }
-                recorded.push(cps::SplicedSuspension { call });
+                recorded.push(cps::SplicedSuspension { call, resumed_box });
             }
             intrinsic_probes::bind_machine_continuation(
                 ir,

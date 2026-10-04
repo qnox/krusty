@@ -1055,6 +1055,8 @@ mod inline_lambda_local_table_order_e2e;
 mod inline_lambda_nested_return_e2e;
 #[path = "inline_lambda_result_boxing_e2e.rs"]
 mod inline_lambda_result_boxing_e2e;
+#[path = "inline_lambda_resumed_value_class_e2e.rs"]
+mod inline_lambda_resumed_value_class_e2e;
 #[path = "inline_lambda_return_scope_e2e.rs"]
 mod inline_lambda_return_scope_e2e;
 #[path = "inline_lambda_sibling_value_class_e2e.rs"]
