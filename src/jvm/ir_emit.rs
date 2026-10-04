@@ -6901,9 +6901,9 @@ impl<'a> Emitter<'a> {
             name,
             descriptor,
             splice_desc,
-            inline_only,
             allow_owner_bridge,
             for_inline_copy,
+            ..
         } = target;
         crate::trace_compiler!(
             "splice",
