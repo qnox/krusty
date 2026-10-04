@@ -45,4 +45,3 @@ reflection/typeOf/nonReifiedTypeParameters/recursiveBoundWithInline.kt
 reflection/typeOf/nonReifiedTypeParameters/recursiveBoundWithoutInline.kt
 reflection/typeOf/reifiedAsNestedArgument.kt
 reflection/typeOf/typeAliasedType.kt
-typeErasure/funWithReifiedTypeParameterContextParameterAndExtensionReceiverInsideClass.kt
