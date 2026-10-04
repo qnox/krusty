@@ -8,6 +8,7 @@
 use super::{Checker, PlatformNarrowing, ResolvedCall};
 use crate::ast::{Expr, ExprId};
 use crate::libraries::ResultEnhancement;
+use crate::symbol_resolver::ResolvedMember;
 use crate::types::Ty;
 
 impl Checker<'_> {
@@ -101,5 +102,42 @@ impl Checker<'_> {
             _ => return false,
         };
         call_sig.result_enhancement == ResultEnhancement::NotNull
+    }
+
+    /// The selected member's value parameters as the member DECLARES them for this receiver: the
+    /// class's type arguments applied, the call's own type arguments not.
+    ///
+    /// kotlinc's implicit not-null cast reads an argument's expected type from the unsubstituted
+    /// callee parameter, where a method type parameter with a nullable bound accepts `null`
+    /// (`Box<String>().put(v, extra)` with `fun <R> put(value: T, extra: R)` guards `v` but not
+    /// `extra`). `visible` is the parameter list after contextual reordering by `indices`; a
+    /// non-generic member declares exactly those types.
+    pub(super) fn declared_member_params(
+        &self,
+        selected: &ResolvedMember,
+        indices: &[usize],
+        visible: &[Ty],
+    ) -> Vec<Ty> {
+        let Some(signature) = selected
+            .member
+            .generic_sig
+            .as_ref()
+            .filter(|signature| signature.params.len() == selected.member.params.len())
+        else {
+            return visible.to_vec();
+        };
+        let bindings = self.member_receiver_type_bindings(selected.receiver, &selected.member);
+        indices
+            .iter()
+            .zip(visible)
+            .map(|(&parameter, &visible)| {
+                signature
+                    .params
+                    .get(parameter)
+                    .map_or(visible, |&declared| {
+                        crate::symbol_resolver::ty_subst_keep_unbound(declared, &bindings)
+                    })
+            })
+            .collect()
     }
 }

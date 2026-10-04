@@ -68320,6 +68320,8 @@ impl<'a> Checker<'a> {
         for (&parameter, &ty) in shape.parameter_indices.iter().zip(&visible_params) {
             semantic_params[parameter] = ty;
         }
+        let declared_params =
+            self.declared_member_params(&selected, &shape.parameter_indices, &visible_params);
         if !self.expect_selected_call_args(
             scope,
             CallArgs {
@@ -68328,7 +68330,7 @@ impl<'a> Checker<'a> {
                 arg_tys: &arg_tys,
             },
             &visible_params,
-            &visible_params,
+            &declared_params,
             &shape.call_sig,
             None,
         ) {
