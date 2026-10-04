@@ -10515,6 +10515,34 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`warning_level_configures_named_diagnostics` in `crates/krusty-cli/src/cli.rs`;
   `warning_level_is_forwarded_to_the_typed_cli_policy` in `crates/krusty-cli/src/worker.rs`;
   `kotlin_compiler_slice_compiles_through_krusty` in `crates/krusty-build/src/gradle.rs`.)
+- **A companion object's nested classifiers are in scope in the class that declares it.** Each
+  lexical class rung contributes its own nested classifiers, then those of its companion object
+  (kotlinc's companion static scope), before the next enclosing rung. A body call (`Edge(2)`), a
+  member signature, a primary-constructor parameter, and another nested classifier's header all
+  bind `Edge` declared in `companion object`; an own nested classifier of the same name wins. A
+  companion's own header does not see its nested classifiers, and a supertype's companion
+  contributes none. Verified against kotlinc 2.4.20.
+  (`tests/companion_nested_classifier_scope_e2e.rs`.)
+- **A classifier's own annotations resolve where the classifier is declared.** `@Dsl class Inner`
+  inside `Builder` binds `Builder.Dsl`, a nested classifier of `Builder`'s companion, or one of any
+  enclosing classifier; the annotated classifier's own nested declarations are not in scope for its
+  annotations (`@Own class C { annotation class Own }` is an unresolved reference). Verified against
+  kotlinc 2.4.20. (`tests/nested_class_annotation_scope_e2e.rs`.)
+- **`const val` initializers fold builtin bit operations.** Infix `and`, `or` and `xor` on `Int`,
+  `Long` and `Boolean`, and `inv()` on `Int` and `Long`, are folded when the selected callable is
+  the builtin bit-operation declaration, as kotlinc's constant evaluator does, so
+  `private const val MASK = 0x1 or 0x2` publishes `3` and every read inlines it. Verified against
+  kotlinc 2.4.20. (`tests/const_bit_operation_folding_e2e.rs`.)
+- **Explicit API mode (`-Xexplicit-api=strict|warning`).** An effectively public declaration
+  (it and every containing classifier `public` or `protected`, none local or anonymous) must write
+  a visibility modifier: classifiers, functions, properties, constructor properties, secondary
+  constructors and type aliases. Exempt are primary constructors, accessors, enum entries,
+  overrides, and properties of `data` and `annotation` classes. The report starts at the first
+  modifier after the annotations (a `context(...)` clause counts), or at the declaration keyword.
+  A public-API property with no written type, and an expression-body function with no written
+  return type, overrides included, are reported at the name. `strict` reports errors and
+  `warning` warnings with the same text; a test selects the mode with `// EXPLICIT_API_MODE:`.
+  Verified against kotlinc 2.4.20. (`tests/explicit_api_mode_e2e.rs`.)
 
 ## 8. Success criteria for the PoC
 

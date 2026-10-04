@@ -434,6 +434,8 @@ mod companion_e2e;
 mod companion_init_block_e2e;
 #[path = "companion_member_read_e2e.rs"]
 mod companion_member_read_e2e;
+#[path = "companion_nested_classifier_scope_e2e.rs"]
+mod companion_nested_classifier_scope_e2e;
 #[path = "companion_non_const_prop_e2e.rs"]
 mod companion_non_const_prop_e2e;
 #[path = "companion_supertype_e2e.rs"]
@@ -464,6 +466,8 @@ mod conditional_branch_inference_e2e;
 mod conditional_sibling_rebind_e2e;
 #[path = "consistent_copy_visibility_e2e.rs"]
 mod consistent_copy_visibility_e2e;
+#[path = "const_bit_operation_folding_e2e.rs"]
+mod const_bit_operation_folding_e2e;
 #[path = "const_constantvalue_e2e.rs"]
 mod const_constantvalue_e2e;
 #[path = "const_read_inline_e2e.rs"]
@@ -739,6 +743,8 @@ mod expected_return_invariant_binding_e2e;
 mod expected_type_propagation_e2e;
 #[path = "expected_type_seeds_invoke_e2e.rs"]
 mod expected_type_seeds_invoke_e2e;
+#[path = "explicit_api_mode_e2e.rs"]
+mod explicit_api_mode_e2e;
 #[path = "explicit_backing_field_e2e.rs"]
 mod explicit_backing_field_e2e;
 #[path = "explicit_import_shadows_same_package_e2e.rs"]
@@ -1353,6 +1359,8 @@ mod module_override_boxed_result_e2e;
 mod mpp_expect_actual_e2e;
 #[path = "mpp_requires_the_feature_e2e.rs"]
 mod mpp_requires_the_feature_e2e;
+#[path = "nested_class_annotation_scope_e2e.rs"]
+mod nested_class_annotation_scope_e2e;
 #[path = "nested_receiver_lambda_captures_e2e.rs"]
 mod nested_receiver_lambda_captures_e2e;
 #[path = "nothing_type_argument_signature_e2e.rs"]
