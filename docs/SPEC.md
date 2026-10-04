@@ -9543,9 +9543,25 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   identities (each capture's own captured identity, the completion, `create`'s value, the
   `FunctionN.invoke` values by ordinal); the `LocalVariableTable` and `MethodParameters` each
   format that record, never the other's rows or a descriptor position, and a record that does not
-  match the descriptor's arity is an internal error. Not yet matched: an object or lambda written in a
-  method of a local class or object inside a value-class member (`W$inObj$1$get$o$1`,
-  `W$inObjLam$1$get$f$1`), which kotlinc gives the static's `$arg0` value. Tests:
+  match the descriptor's arity is an internal error. The static's value is captured into each local or
+  anonymous class in turn, so an object written in a method of a local class or object inside a
+  value-class member captures the value class's instance as `$arg0` too, read from the enclosing
+  class's own `$arg0` field (`W$inObj$1$get$o$1`, `W$inLocal$L$get$o$1`), ahead of that class's
+  instance `this$0` when it uses it as well (`W$inLocalBoth$L$get$o$1`); an ordinary class's
+  instance stays `this$0` however deep (`Plain$inObj$1$get$o$1`). A captured enclosing instance
+  therefore records the classifier it is an instance of (`FirCapturedReceiver::Enclosing` and
+  `IrCapturedReceiver::Enclosing`, by `TypeName` identity, renamed with a local class), and the
+  backend walks from the capture's container out through the local classes it is written in to
+  that classifier's member, naming the capture after the value that member's static realizes. With
+  `-java-parameters` kotlinc flags the moved extension receiver of a value-class static member or
+  accessor (`$this$mext` of `mext-<hash>`, `$this$pp` of `getPp-impl`) `mandated`, beside the
+  carrier `arg0`, which is `synthetic`; an ordinary class's member extension and a top-level
+  extension keep their receiver unflagged. The backend flags it from the parameter's recorded
+  extension-receiver role in a recorded value-class receiver static. Not yet matched: a lambda
+  written in a method of a local class or object captures that class's instance and reads what it
+  needs from it (`W$inObjLam$1$get$f$1(W$inObjLam$1)`), where kotlinc captures the value itself
+  (`(String)`, `$arg0`); kotlinc does the same for an ordinary captured local (`$x`) and for an
+  ordinary class's outer instance, so this is a capture-structure difference, not a naming one. Tests:
   `src/jvm/suspend/cps/member_parameters.rs`,
   `tests/value_class_receiver_capture_debug_names_e2e.rs`,
   `tests/value_class_mangled_lambda_names_e2e.rs`, `tests/java_parameters_attribute_e2e.rs`.
@@ -10869,6 +10885,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   return type, overrides included, are reported at the name. `strict` reports errors and
   `warning` warnings with the same text; a test selects the mode with `// EXPLICIT_API_MODE:`.
   Verified against kotlinc 2.4.20. (`tests/explicit_api_mode_e2e.rs`.)
+- **A type-parameter bound resolves in the declaration's lexical scope.** `fun <T : Own>` in a
+  class body binds the nearest nested `Own` from the enclosing classifiers (or their companions,
+  or classifiers they inherit) before the file's package and imports, the same scope tower as any
+  other signature type; no module-wide simple-name table is consulted, so two packages declaring
+  `Item` each keep their own. A classifier's own bounds are in its header: they see the classifier
+  itself (`interface Entity<S : Entity<S>>`) but not its body. A qualified type binds among
+  complete paths: a rung whose root lacks the written suffix yields to the next, so `A.B` in a
+  class whose nested `A` has no `B` is the imported `p.A.B` (a qualified expression instead commits
+  to its first root). The bound reaches the `Signature`
+  attribute and the metadata unerased. A signature type whose simple name two star imports
+  provide equally is `overload resolution ambiguity between candidates:`, followed by each
+  candidate's header (`class Item : Any`), at the reference. Verified against kotlinc 2.4.20.
+  (`tests/nested_type_parameter_bound_e2e.rs`.)
 
 ## 8. Success criteria for the PoC
 

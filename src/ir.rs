@@ -101,7 +101,7 @@ pub use constructors::{
     IrCapturedReceiver, IrConstructorCapture, IrCtorParameterProvenance,
     IrJvmValueClassSecondaryCtor,
 };
-pub use constructors::{IrConstructorAccess, IrConstructorTarget};
+pub use constructors::{IrConstructorAccess, IrConstructorTarget, IrCustomSerializerConstruction};
 pub use constructors::{IrSecondaryCtor, IrSecondaryCtorLines};
 pub use expression_provenance::{EnumValueOfDeclaration, IrShortCircuitKind};
 pub use field_flags::IrfFlags;
@@ -1640,6 +1640,10 @@ pub struct IrFile {
     /// Common resolution records the path distinction before flattening the complete hierarchy;
     /// target emitters consume it without reopening a classifier provider.
     pub superclass_interfaces: std::collections::HashMap<TypeName, Vec<TypeName>>,
+    /// The frontend-selected custom serializer construction of each source classifier whose
+    /// `@Serializable(with = …)` names a serializer class, keyed by that classifier.
+    pub custom_serializer_constructions:
+        std::collections::HashMap<TypeName, IrCustomSerializerConstruction>,
     /// Exact semantic property-override edges copied from stable FIR. A target backend may erase
     /// these types and materialize representation bridges, but it must not search declarations.
     pub property_overrides: std::collections::HashMap<TypeName, Vec<IrPropertyOverride>>,

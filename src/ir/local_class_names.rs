@@ -40,6 +40,18 @@ fn name(name: &mut TypeName, names: &HashMap<TypeName, TypeName>) {
     }
 }
 
+/// A captured enclosing instance names its class by identity, which follows the class's rename.
+fn captured_receiver(
+    receiver: &mut super::IrCapturedReceiver,
+    names: &HashMap<TypeName, TypeName>,
+) {
+    match receiver {
+        super::IrCapturedReceiver::Enclosing { classifier } => name(classifier, names),
+        super::IrCapturedReceiver::Context { types, .. } => tys(types, names),
+        super::IrCapturedReceiver::Callable { .. } | super::IrCapturedReceiver::Lambda(_) => {}
+    }
+}
+
 fn ty(value: Ty, names: &HashMap<TypeName, TypeName>) -> Ty {
     match value {
         Ty::Obj(classifier, arguments) => Ty::obj_args_name(
@@ -713,15 +725,6 @@ fn declaration_argument_boundaries(
         .for_each(|boundary| boundary.declaration = ty(boundary.declaration, names));
 }
 
-fn captured_receiver(
-    receiver: &mut super::IrCapturedReceiver,
-    names: &HashMap<TypeName, TypeName>,
-) {
-    if let super::IrCapturedReceiver::Context { types, .. } = receiver {
-        tys(types, names);
-    }
-}
-
 fn remap_class(class: &mut super::IrClass, names: &HashMap<TypeName, TypeName>) {
     name(&mut class.fq_name, names);
     for (_, bound) in &mut class.type_param_bounds {
@@ -875,6 +878,9 @@ fn remap_class(class: &mut super::IrClass, names: &HashMap<TypeName, TypeName>) 
         }
     }
     if let Some(lambda) = &mut class.lambda {
+        for receiver in &mut lambda.captured_receivers {
+            captured_receiver(receiver, names);
+        }
         lambda.function_type = ty(lambda.function_type, names);
         tys(&mut lambda.bridge.param_tys, names);
         lambda.bridge.ret_ty = ty(lambda.bridge.ret_ty, names);
@@ -925,17 +931,21 @@ impl super::IrFile {
             }
             plan.reference.property_type = ty(plan.reference.property_type, names);
             for accessor in std::iter::once(&mut plan.getter).chain(plan.setter.iter_mut()) {
+                for receiver in &mut accessor.captured_receivers {
+                    captured_receiver(receiver, names);
+                }
                 tys(&mut accessor.parameters, names);
                 type_parameters(&mut accessor.type_parameters, names);
-                accessor
-                    .captured_receivers
-                    .iter_mut()
-                    .for_each(|receiver| captured_receiver(receiver, names));
                 accessor.result = ty(accessor.result, names);
             }
         }
         for class in &mut self.classes {
             remap_class(class, names);
+        }
+        for parameters in self.fn_params.values_mut() {
+            for receiver in &mut parameters.captured_receivers {
+                captured_receiver(receiver, names);
+            }
         }
         for annotations_by_function in self.function_annotations.values_mut() {
             annotations(annotations_by_function, names);
