@@ -1760,6 +1760,49 @@ fn interface_property_accessors_share_source_order_with_functions() {
 }
 
 #[test]
+fn abstract_member_properties_publish_their_exact_accessor_functions() {
+    let ir = lower_single_source(
+        "interface AbstractProperties {\n\
+             val answer: Int\n\
+             var tail: String\n\
+         }\n",
+        "AbstractPropertyAccessors",
+    );
+    let class = ir
+        .classes
+        .iter()
+        .find(|class| class.fq_name_matches("AbstractProperties"))
+        .expect("checked interface class");
+    let answer = class
+        .properties
+        .iter()
+        .find(|property| property.name == "answer")
+        .expect("answer property");
+    let tail = class
+        .properties
+        .iter()
+        .find(|property| property.name == "tail")
+        .expect("tail property");
+
+    let answer_getter = answer.getter.expect("abstract val getter identity");
+    let tail_getter = tail.getter.expect("abstract var getter identity");
+    let tail_setter = tail.setter.expect("abstract var setter identity");
+    assert!(answer.setter.is_none());
+    assert_eq!(
+        class
+            .methods
+            .iter()
+            .copied()
+            .filter(|function| [answer_getter, tail_getter, tail_setter].contains(function))
+            .collect::<Vec<_>>(),
+        [answer_getter, tail_getter, tail_setter]
+    );
+    for function in [answer_getter, tail_getter, tail_setter] {
+        assert!(ir.functions[function as usize].body.is_none());
+    }
+}
+
+#[test]
 fn consuming_lowering_retains_constructor_initialized_storage_read_by_custom_getter() {
     let platform: Box<dyn crate::libraries::SemanticPlatform> = Box::new(
         crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(

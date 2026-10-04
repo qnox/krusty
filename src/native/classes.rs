@@ -1109,11 +1109,9 @@ fn layout_class(
         ));
     }
 
-    // Which methods are property accessors, so their slots are keyed by the property. A property
-    // whose accessor has no BODY — an abstract `val` in an interface — carries no accessor id, and
-    // its accessor reaches the method list as an ordinary method; matching the declared accessor
-    // name is what ties the two back together, so the interface and the class implementing it
-    // agree on one key for the member.
+    // Which methods are property accessors, so their slots are keyed by the property. Common
+    // lowering records bodyless abstract accessors too, so this boundary consumes exact function
+    // identities and never reconstructs a property relationship from an accessor spelling.
     //
     // Only where the property has no STORAGE of its own. A property with a field is read through
     // that field — the accessor for it is synthesized below — so a method that happens to spell
@@ -1131,13 +1129,6 @@ fn layout_class(
             accessor_keys.insert(setter, SlotKey::Setter(id, property.name.clone()));
         }
     }
-    // The name fallback, through the same reading every CALL makes, so the two cannot disagree.
-    for &fid in &class.methods {
-        if let Some(key) = accessor_key_by_name(ir, id, fid) {
-            accessor_keys.entry(fid).or_insert(key);
-        }
-    }
-
     let overridden_functions = overridden_functions(ir, class)?;
     let overridden_properties = overridden_properties(ir, id, class)?;
 
@@ -1854,40 +1845,7 @@ pub(super) fn function_key(ir: &IrFile, owner: ClassId, fid: FunId) -> SlotKey {
             return SlotKey::Setter(owner, property.name.clone());
         }
     }
-    // The same fallback the layout makes, and it has to be the same or a call names one key while
-    // the table holds the other: an abstract `val` in an interface carries no accessor id, so its
-    // accessor reaches the method list as an ordinary method and is tied back by name. Reading it
-    // only in the layout is what left `interface A { val x: Int }`'s accessor with a `Getter` slot
-    // and every call to it asking for a `Function` one.
-    accessor_key_by_name(ir, owner, fid).unwrap_or(SlotKey::Function(fid))
-}
-
-/// The property whose accessor a method IS, matched by the accessor's declared NAME.
-///
-/// Only for a property with no storage of its own. A property with a field is read through that
-/// field — its accessor is synthesized — so a method that happens to spell the accessor's name is
-/// a method: `class Bottom(val data: Int) { override fun getData(): Int }` declares both, which is
-/// legal Kotlin, and keying the method as the property's getter took it out of the method
-/// numbering entirely.
-fn accessor_key_by_name(ir: &IrFile, owner: ClassId, fid: FunId) -> Option<SlotKey> {
-    let class = &ir.classes[owner as usize];
-    let function = &ir.functions[fid as usize];
-    for property in &class.properties {
-        if class.fields.iter().any(|field| field.name == property.name) {
-            continue;
-        }
-        if function.params.is_empty()
-            && function.name == crate::names::property_getter_name(&property.name)
-        {
-            return Some(SlotKey::Getter(owner, property.name.clone()));
-        }
-        if function.params.len() == 1
-            && function.name == crate::names::property_setter_name(&property.name)
-        {
-            return Some(SlotKey::Setter(owner, property.name.clone()));
-        }
-    }
-    None
+    SlotKey::Function(fid)
 }
 
 /// The slot an overriding property accessor replaces, found through the overridden property's
@@ -1972,20 +1930,12 @@ fn is_function_classifier(
     classifiers: &dyn crate::backend::BackendClassifierSource,
     classifier: TypeName,
 ) -> bool {
-    let published = matches!(
+    matches!(
         classifiers
             .classifier(classifier)
             .and_then(|fact| fact.role),
         Some(crate::types::ClassifierRole::FunctionOfArity(_))
-    );
-    #[cfg(test)]
-    {
-        // Synthetic unit-test IR has no declaration provider. Production always consumes the
-        // published classifier role above; this fallback exists only for those isolated fixtures.
-        published || super::intrinsics::is_function_type_name(classifier)
-    }
-    #[cfg(not(test))]
-    published
+    )
 }
 
 /// Implementation method → the method it overrides, for the methods `class` declares. Both ends
@@ -2117,6 +2067,7 @@ fn same_representation(implementation: &IrFunction, overridden: &IrFunction) -> 
 mod tests {
     use super::*;
     use crate::ir::{IrField, IrProperty, IrfFlags};
+    use std::sync::Arc;
 
     struct NoClassifiers;
 
@@ -2126,6 +2077,38 @@ mod tests {
             _classifier: TypeName,
         ) -> Option<std::sync::Arc<crate::backend::BackendClassifierFact>> {
             None
+        }
+    }
+
+    struct FunctionClassifier {
+        owner: TypeName,
+        arity: usize,
+    }
+
+    impl crate::backend::BackendClassifierSource for FunctionClassifier {
+        fn classifier(
+            &self,
+            classifier: TypeName,
+        ) -> Option<Arc<crate::backend::BackendClassifierFact>> {
+            (classifier == self.owner).then(|| {
+                Arc::new(crate::backend::BackendClassifierFact {
+                    access: crate::libraries::ClassifierAccess::Public,
+                    is_kotlin: true,
+                    source: false,
+                    outer_instance: None,
+                    kind: crate::libraries::TypeKind::Interface,
+                    is_abstract: true,
+                    is_extensible: true,
+                    supertypes: Box::new([]),
+                    surface: Box::new([]),
+                    annotations: Box::new([]),
+                    own_type_parameter_count: 0,
+                    type_param_variances: Box::new([]),
+                    value_underlying: None,
+                    value_underlying_property: None,
+                    role: Some(crate::types::ClassifierRole::FunctionOfArity(self.arity)),
+                })
+            })
         }
     }
 
@@ -2546,11 +2529,17 @@ mod tests {
             .contains("an annotation implementation class"));
     }
 
-    /// Record that `implementation` is `kotlin.Function{N}.invoke`, as the frontend does: an edge to
-    /// an EXTERNAL declaration on a function type.
-    fn record_invoke(ir: &mut IrFile, class: ClassId, implementation: FunId, arity: usize) {
+    /// Record that `implementation` is a function classifier's `invoke`, as the frontend does: an
+    /// edge to an external declaration whose provider publishes the exact classifier role.
+    fn record_invoke(
+        ir: &mut IrFile,
+        class: ClassId,
+        implementation: FunId,
+        arity: usize,
+    ) -> FunctionClassifier {
         use crate::fir::{CallableId, ExternalCallableId};
         let owner = ir.classes[class as usize].fq_name_id();
+        let function_owner = crate::types::type_name(&format!("fixture/Callable{arity}"));
         ir.function_overrides
             .entry(owner)
             .or_default()
@@ -2563,7 +2552,7 @@ mod tests {
                 overridden: ResolvedFunctionOverrideTarget::External(ExternalCallableId::from_raw(
                     1,
                 )),
-                overridden_owner: crate::types::type_name(&format!("kotlin/Function{arity}")),
+                overridden_owner: function_owner,
                 collection_barrier: None,
                 overridden_is_interface: true,
                 name: "invoke".to_string(),
@@ -2579,6 +2568,10 @@ mod tests {
                 has_kotlin_superclass_override: false,
                 depth: 1,
             });
+        FunctionClassifier {
+            owner: function_owner,
+            arity,
+        }
     }
 
     #[test]
@@ -2595,9 +2588,9 @@ mod tests {
             b,
             function("invoke", "B", vec![], Ty::String, false),
         );
-        record_invoke(&mut ir, b, invoke, 0);
+        let classifiers = record_invoke(&mut ir, b, invoke, 0);
 
-        let model = build(&ir).expect("layout");
+        let model = super::build(&ir, &classifiers).expect("layout");
         let foo_slot = model.slot(b, &SlotKey::Function(foo)).expect("foo's slot");
         assert_ne!(foo_slot, FUNCTION_SLOT);
         assert_eq!(
