@@ -21,7 +21,7 @@ fn inline_default_catches_use_each_calls_reified_type() {
         "InlineDefaultCatch",
     );
 
-    let default_catch_types = ir
+    let default_catches = ir
         .value_names
         .iter()
         .filter_map(|(&declaration, name)| {
@@ -29,6 +29,7 @@ fn inline_default_catches_use_each_calls_reified_type() {
                 return None;
             }
             let IrExpr::Variable {
+                index,
                 init: Some(initial),
                 ..
             } = ir.expr(declaration)
@@ -38,25 +39,46 @@ fn inline_default_catches_use_each_calls_reified_type() {
             let IrExpr::Try { catches, .. } = ir.expr(*initial) else {
                 return None;
             };
-            catches.first().map(|catch| catch.ty)
+            catches.first().map(|catch| {
+                (
+                    *index,
+                    catch.ty,
+                    catches.iter().map(|catch| catch.var).collect::<Vec<_>>(),
+                )
+            })
         })
         .collect::<Vec<_>>();
 
-    assert_eq!(default_catch_types.len(), 2, "{default_catch_types:?}");
+    assert_eq!(default_catches.len(), 2, "{default_catches:?}");
+    for (parameter, _, catches) in &default_catches {
+        assert!(
+            catches.iter().all(|catch| catch != parameter),
+            "the default parameter and its catch bindings need distinct slots: {default_catches:?}"
+        );
+        assert_eq!(
+            catches
+                .iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            catches.len(),
+            "each catch binding needs its own slot: {default_catches:?}"
+        );
+    }
     assert_eq!(
-        default_catch_types
+        default_catches
             .iter()
-            .filter(|&&ty| ty == Ty::obj("ParentFailure"))
+            .filter(|(_, ty, _)| *ty == Ty::obj("ParentFailure"))
             .count(),
         1,
-        "{default_catch_types:?}"
+        "{default_catches:?}"
     );
     assert_eq!(
-        default_catch_types
+        default_catches
             .iter()
-            .filter(|&&ty| ty == Ty::obj("ChildFailure"))
+            .filter(|(_, ty, _)| *ty == Ty::obj("ChildFailure"))
             .count(),
         1,
-        "{default_catch_types:?}"
+        "{default_catches:?}"
     );
 }
