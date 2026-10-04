@@ -34,7 +34,8 @@ fun box(): String {
 #[test]
 fn a_return_to_the_outer_lambda_leaves_only_that_lambda() {
     assert_eq!(
-        common::expect_box_run_against_kotlinc(LIB, MAIN).expect("reference kotlinc is provisioned"),
+        common::expect_box_run_against_kotlinc(LIB, MAIN)
+            .expect("reference kotlinc is provisioned"),
         "OK"
     );
 }

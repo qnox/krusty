@@ -27,7 +27,8 @@ fun box(): String = withIt(Holder("OK")) {
 #[test]
 fn a_delegated_local_in_an_inlined_lambda_runs() {
     assert_eq!(
-        common::expect_box_run_against_kotlinc(LIB, MAIN).expect("reference kotlinc is provisioned"),
+        common::expect_box_run_against_kotlinc(LIB, MAIN)
+            .expect("reference kotlinc is provisioned"),
         "OK"
     );
 }

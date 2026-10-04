@@ -173,7 +173,10 @@ fn inline_template_copies(ir: &IrFile, fid: FunId, every_emitted_root: bool) -> 
         }
     };
     for root in emitted_roots(ir, every_emitted_root) {
-        enclosed_templates(&crate::ir::value_namespace_expressions(ir, root), &mut pending);
+        enclosed_templates(
+            &crate::ir::value_namespace_expressions(ir, root),
+            &mut pending,
+        );
     }
     let mut seen = std::collections::HashSet::new();
     let mut copies = Vec::new();

@@ -34,7 +34,8 @@ fun box(): String {
 #[test]
 fn an_inlined_lambda_with_locals_runs() {
     assert_eq!(
-        common::expect_box_run_against_kotlinc(LIB, MAIN).expect("reference kotlinc is provisioned"),
+        common::expect_box_run_against_kotlinc(LIB, MAIN)
+            .expect("reference kotlinc is provisioned"),
         "OK"
     );
 }

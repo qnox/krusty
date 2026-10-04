@@ -29,7 +29,8 @@ fun box(): String {
 #[test]
 fn a_suspend_lambda_in_an_inlined_lambda_builds_its_class() {
     assert_eq!(
-        common::expect_box_run_against_kotlinc(LIB, MAIN).expect("reference kotlinc is provisioned"),
+        common::expect_box_run_against_kotlinc(LIB, MAIN)
+            .expect("reference kotlinc is provisioned"),
         "OK"
     );
 }

@@ -30,8 +30,8 @@ fun box(): String = if (C.visited == "2") "OK" else "FAIL ${C.visited}"
 #[test]
 fn a_lambda_capture_in_a_companion_initializer_reads_its_own_slot() {
     assert_eq!(
-        common::expect_box_run_against_kotlinc(LIB, MAIN).expect("reference kotlinc is provisioned"),
+        common::expect_box_run_against_kotlinc(LIB, MAIN)
+            .expect("reference kotlinc is provisioned"),
         "OK"
     );
 }
-

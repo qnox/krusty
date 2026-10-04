@@ -201,10 +201,8 @@ impl Emitter<'_> {
                 !semantic.is_nullable()
                     && crate::jvm::names::same_type_descriptor(physical, Ty::obj_name(class))
             })
-            .and_then(|class| {
-                crate::jvm::value_classes::boxed_value_class_underlying(self.ir, class)
-            });
-        let carrier = unboxed.map_or(physical, |underlying| ir_ty_to_jvm(&underlying));
+            .and_then(|class| crate::jvm::value_classes::boxed_value_class_carrier(self.ir, class));
+        let carrier = unboxed.map_or(physical, |carrier| ir_ty_to_jvm(&carrier));
         (carrier, self.invoke_coercion(semantic, carrier))
     }
 
@@ -282,10 +280,10 @@ impl Emitter<'_> {
         if !self.is_value_class_ty(&semantic) {
             return None;
         }
-        let underlying = crate::jvm::value_classes::boxed_value_class_underlying(self.ir, class)?;
+        let unboxed = crate::jvm::value_classes::boxed_value_class_carrier(self.ir, class)?;
         let carried = type_descriptor(carrier);
         (carried != type_descriptor(Ty::obj_name(class))
-            && carried == type_descriptor(ir_ty_to_jvm(&underlying)))
+            && carried == type_descriptor(ir_ty_to_jvm(&unboxed)))
         .then(|| class.render())
     }
 

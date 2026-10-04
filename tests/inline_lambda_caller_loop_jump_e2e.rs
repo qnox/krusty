@@ -45,7 +45,8 @@ fun box(): String = if (Visits().total == 5 && visits() == 4) "OK" else "FAIL"
 #[test]
 fn a_lambda_jumping_to_its_callers_loop_is_only_inlined() {
     assert_eq!(
-        common::expect_box_run_against_kotlinc(LIB, MAIN).expect("reference kotlinc is provisioned"),
+        common::expect_box_run_against_kotlinc(LIB, MAIN)
+            .expect("reference kotlinc is provisioned"),
         "OK"
     );
 }
