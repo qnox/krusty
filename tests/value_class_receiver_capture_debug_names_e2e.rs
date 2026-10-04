@@ -174,3 +174,69 @@ fn a_value_class_suspend_lambda_stores_its_captured_receiver_like_kotlinc() {
         assert_eq!(krusty, reference, "{class}: {constructor}");
     }
 }
+
+/// A lambda `LambdaMetafactory` cannot adapt, such as one returning the value class, is a class of
+/// its own. Its field and constructor parameter carry the captured receiver under the same name as
+/// a lifted method's parameter (`$arg0`, `$tmp0`, `$tmp0_$this`), not `this$0` and `$receiver`,
+/// and in capture order among the captured values. A lambda written in an `init` block is enclosed
+/// by the primary `constructor-impl`, which runs it.
+const LAMBDA_CLASSES: &str = "@JvmInline value class Tag(val s: String)\n\
+    @JvmInline value class U(val s: String) {\n\
+    \x20   init {\n\
+    \x20       val f: () -> U = { this }\n\
+    \x20       f()\n\
+    \x20   }\n\
+    \x20   constructor(t: Tag, u: Tag) : this(u.s) {\n\
+    \x20       val g: () -> U = { this }\n\
+    \x20       g()\n\
+    \x20   }\n\
+    \x20   fun mv(): () -> U = { this }\n\
+    \x20   val pv: () -> U get() = { this }\n\
+    \x20   fun mx(x: Int): () -> U = { if (x > 0) this else this }\n\
+    \x20   fun both(t: Tag): () -> Tag = { Tag(t.s + this.s) }\n\
+    \x20   fun inLocal(): () -> U {\n\
+    \x20       fun loc(): () -> U = { this }\n\
+    \x20       return loc()\n\
+    \x20   }\n\
+    }\n\
+    class Holder(val s: String) {\n\
+    \x20   fun m(): () -> U = { U(s) }\n\
+    }\n\
+    fun U.ext(): () -> U = { this }\n";
+
+#[test]
+fn a_value_class_lambda_class_stores_its_captured_receiver_like_kotlinc() {
+    let classes = common::classes_against_kotlinc_module(&[("LambdaClasses.kt", LAMBDA_CLASSES)]);
+    // An ordinary class's instance stays `this$0`, passed as `$receiver`, and an extension
+    // receiver `$this_ext`: only a value-class static's receiver is a captured value.
+    for class in [
+        "U$f$1",
+        "U$g$1",
+        "U$mv$1",
+        "U$pv$1",
+        "U$mx$1",
+        "U$both$1",
+        "U$inLocal$loc$1",
+        "Holder$m$1",
+        "LambdaClassesKt$ext$1",
+    ] {
+        let reference = classes
+            .reference
+            .get(class)
+            .unwrap_or_else(|| panic!("kotlinc writes {class}"));
+        let krusty = classes
+            .krusty
+            .get(class)
+            .unwrap_or_else(|| panic!("krusty writes {class}"));
+        assert_eq!(
+            common::member_table(krusty),
+            common::member_table(reference),
+            "{class}: kotlinc's fields and methods"
+        );
+        let (reference, krusty) = classes.class_listing(class);
+        assert_eq!(
+            krusty, reference,
+            "{class}: kotlinc's code and debug tables"
+        );
+    }
+}
