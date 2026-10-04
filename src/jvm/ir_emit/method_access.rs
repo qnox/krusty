@@ -127,7 +127,8 @@ pub(super) fn class_realized_lambda_method(
     fid: u32,
     modes: LambdaModes,
 ) -> Option<&str> {
-    let runtime_reified = ir.runtime_reified_lambda_implementations.contains(&fid);
+    let runtime_reified = ir.runtime_reified_lambda_implementations.contains(&fid)
+        || ir.inline_anonymous_lambdas.contains(&fid);
     ir.exprs.iter().find_map(|expression| {
         let IrExpr::Lambda {
             impl_fn,

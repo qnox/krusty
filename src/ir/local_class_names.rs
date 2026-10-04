@@ -667,6 +667,25 @@ fn remap_class(class: &mut super::IrClass, names: &HashMap<TypeName, TypeName>) 
             super::CtorDelegateTarget::ImplicitEnumBase => {}
         }
     }
+    if let Some(lambda) = &mut class.lambda {
+        lambda.function_type = ty(lambda.function_type, names);
+        tys(&mut lambda.bridge.param_tys, names);
+        lambda.bridge.ret_ty = ty(lambda.bridge.ret_ty, names);
+        lambda
+            .bridge
+            .unbox_params
+            .iter_mut()
+            .flatten()
+            .for_each(|value| name(value, names));
+        lambda
+            .bridge
+            .box_ret
+            .iter_mut()
+            .for_each(|value| name(value, names));
+    }
+    if let Some(wrapper) = &mut class.sam_wrapper {
+        name(&mut wrapper.interface, names);
+    }
 }
 
 impl super::IrFile {
@@ -910,6 +929,9 @@ impl super::IrFile {
         self.shared_secondary_super_capture_parameters
             .values_mut()
             .for_each(|value| *value = ty(*value, names));
+        for parameters in self.physical_call_parameters.values_mut() {
+            tys(parameters, names);
+        }
         self.logical_types
             .values_mut()
             .for_each(|value| *value = ty(*value, names));
