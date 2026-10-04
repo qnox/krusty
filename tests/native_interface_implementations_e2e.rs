@@ -1,15 +1,9 @@
-//! An interface member this file's class implements, which no OVERRIDE TABLE names.
+//! Interface members whose implementations arrive through less direct source forms.
 //!
-//! Two shapes leave an interface's number empty while the method that fills it is already in the
-//! class's own vtable. A member EXTENSION's override is recorded in no override table — the
-//! frontend keeps none for one — so nothing aliases the interface's spelling onto the override's
-//! slot. And a member an `Interface by delegate` clause supplies is recorded against the one
-//! interface it forwards to, so a SECOND interface declaring the same member is left empty
-//! although the delegation answers it too.
-//!
-//! The native model reads the number by signature in both cases, which is the rule it already
-//! uses up the superclass chain. Every expectation is kotlinc's, taken by running the same
-//! program under it.
+//! Member extensions and members supplied to a second interface by inheritance/delegation must
+//! reach Native through the exact override edges recorded by the common frontend. The backend does
+//! not recover a missing edge by comparing source names or erased signatures. Every expectation is
+//! kotlinc's, taken by running the same program under it.
 
 use super::common::{expect_box_ok_with_stdlib, expect_native_box, kotlinc_box_result};
 

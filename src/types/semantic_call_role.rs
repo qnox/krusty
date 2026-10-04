@@ -4,6 +4,7 @@
 /// or target metadata.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SemanticCallRole {
+    KotlinAnyEquals,
     KotlinAnyHashCode,
     KotlinAnyToString,
 }

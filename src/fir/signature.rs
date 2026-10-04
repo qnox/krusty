@@ -1787,6 +1787,7 @@ pub struct ResolvedDelegatedTypeParameter {
 pub struct ResolvedDelegatedFunctionDeclaration {
     pub target: super::ResolvedFunctionOverrideTarget,
     pub owner: TypeName,
+    pub semantic_role: Option<crate::types::SemanticCallRole>,
     pub collection_barrier: Option<crate::libraries::CollectionBarrierOutcome>,
     pub parameter_identities: Box<[super::ResolvedParameterIdentity]>,
     pub parameters: Box<[ResolvedTy]>,

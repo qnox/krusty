@@ -288,6 +288,7 @@ fn materialize_delegation(
                         implementation_owner,
                         overridden: member.overridden.target,
                         overridden_owner: member.overridden.owner,
+                        overridden_semantic_role: member.overridden.semantic_role,
                         collection_barrier: member.overridden.collection_barrier,
                         overridden_is_interface: member.overridden.interface,
                         name: member.name.to_string(),

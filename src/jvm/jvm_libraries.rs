@@ -5015,7 +5015,14 @@ impl JvmLibraries {
                                     builtin_cn,
                                 ))
                                 .is_some());
-                        let semantic_role = if inherits_any_member && params.is_empty() {
+                        let semantic_role = if builtin_cn == crate::types::wk::any()
+                            && m.name == "equals"
+                            && params.as_slice()
+                                == [Ty::nullable(Ty::obj_name(crate::types::wk::any()))]
+                            && ret == Ty::Boolean
+                        {
+                            Some(crate::types::SemanticCallRole::KotlinAnyEquals)
+                        } else if inherits_any_member && params.is_empty() {
                             match m.name.as_str() {
                                 "hashCode" => {
                                     Some(crate::types::SemanticCallRole::KotlinAnyHashCode)

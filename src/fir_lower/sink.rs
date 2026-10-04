@@ -136,6 +136,7 @@ fn lower_function_override_plans(
             implementation_owner: edge.implementation_owner,
             overridden: edge.overridden,
             overridden_owner: edge.overridden_owner,
+            overridden_semantic_role: edge.overridden_semantic_role,
             collection_barrier: edge.collection_barrier,
             overridden_is_interface: edge.overridden_is_interface,
             name: edge.name.to_string(),

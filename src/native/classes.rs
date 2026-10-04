@@ -336,33 +336,13 @@ fn any_vtable() -> (Vec<Slot>, HashMap<SlotKey, u32>) {
     (vtable, slots)
 }
 
-/// The `kotlin.Any` slot a method overrides, decided by name and signature — the frontend does not
-/// record an override of a dependency member in `function_overrides`. `hashCode()` and
-/// `toString()` cannot be declared again without overriding, but `equals` can be OVERLOADED:
-/// `fun equals(other: String)` is a new member, so only an `equals` taking exactly `Any?` is the
-/// override.
-fn any_slot(function: &IrFunction) -> Option<u32> {
-    match (function.name.as_str(), function.params.as_slice()) {
-        ("equals", [other])
-            if other.is_nullable()
-                && matches!(other.non_null(), Ty::Obj(name, _)
-                    if crate::types::same(name, crate::types::wk::any())) =>
-        {
-            Some(0)
-        }
-        ("hashCode", []) => Some(1),
-        ("toString", []) => Some(2),
-        _ => None,
-    }
-}
-
-/// The expected carriers of `kotlin.Any`'s slots, so a same-named member with another signature
-/// is not mistaken for an override.
-fn any_slot_signature(slot: u32) -> (&'static [CKind], CKind) {
-    match slot {
-        0 => (&[CKind::Ref], CKind::Scalar("kt_boolean")),
-        1 => (&[], CKind::Scalar("kt_int")),
-        _ => (&[], CKind::Ref),
+/// The fixed `kotlin.Any` slot named by one exact checked override edge.
+fn any_slot(role: Option<crate::types::SemanticCallRole>) -> Option<u32> {
+    match role {
+        Some(crate::types::SemanticCallRole::KotlinAnyEquals) => Some(0),
+        Some(crate::types::SemanticCallRole::KotlinAnyHashCode) => Some(1),
+        Some(crate::types::SemanticCallRole::KotlinAnyToString) => Some(2),
+        None => None,
     }
 }
 
@@ -388,9 +368,8 @@ pub(super) fn build(
         check_supported(class)?;
     }
     let order = hierarchy_order(ir)?;
-    // Before the layouts, because a class laying itself out needs to know which interfaces it
-    // implements: an accessor it supplies with no override edge to name it — interface delegation
-    // synthesizes exactly those — is matched against the members those interfaces declare.
+    // Before the layouts because the program-wide interface region uses the complete transitive
+    // set after each class has consumed its exact override edges.
     let interfaces = interface_closure(ir);
 
     let mut layouts: Vec<Option<ClassLayout>> = vec![None; ir.classes.len()];
@@ -403,14 +382,7 @@ pub(super) fn build(
                     .as_ref()
                     .expect("superclasses are laid out first")
             });
-            layout_class(
-                ir,
-                classifiers,
-                id,
-                superclass,
-                parent,
-                &interfaces[id as usize],
-            )?
+            layout_class(ir, classifiers, id, superclass, parent)?
         };
         layouts[id as usize] = Some(layout);
     }
@@ -716,19 +688,6 @@ fn place_interface_slots(
             // such a class abstract for the same reason; common IR does not, so the shape is read
             // here. An entry WITHOUT a body is an instance of the enum class, and then the trap is
             // reachable and this does not apply.
-            // An interface member this class plainly implements, which no KEY named. A member
-            // EXTENSION's override is in no override table — the frontend records none for one —
-            // and neither is the member an interface DELEGATION fills for a SECOND interface that
-            // declares the same one. Both leave a number with nothing in it while the method that
-            // fills it sits in this very vtable. Reading it by signature is the rule the
-            // superclass chain already uses (see `inherited_slot`), asked of the interface region.
-            let entry = match entry {
-                Slot::Abstract if implemented => {
-                    interface_member_by_signature(ir, id, layouts, &vtable, member)
-                        .unwrap_or(Slot::Abstract)
-                }
-                entry => entry,
-            };
             let entries_carry_it = is_enum(&ir.classes[id as usize])
                 && !ir.classes[id as usize].enum_entries.is_empty()
                 && ir.classes[id as usize]
@@ -774,85 +733,6 @@ fn member_name(ir: &IrFile, member: &InterfaceMember) -> String {
         SlotKey::Any(slot) => format!("kotlin.Any slot {slot}"),
     };
     format!("{interface}.{name}")
-}
-
-/// The entry one of this class's OWN methods fills an interface member with, where no key named it.
-///
-/// Two shapes reach here. A member EXTENSION's override is in no override table — the frontend
-/// records none for one — so nothing aliased the interface's spelling onto the override's slot. And
-/// a member an interface DELEGATION supplies is recorded against the ONE interface it forwards to,
-/// so a second interface declaring the same member is left empty although `Interface by delegate`
-/// answers it too. In both the implementation is already in this vtable; what is missing is the
-/// number pointing at it.
-///
-/// What says which method that is, is the language's own rule rather than a guess: a class
-/// implementing an interface must implement its members, and Kotlin rejects a fresh redeclaration
-/// of an inherited member ("hides member of supertype and needs `override`"). So a method of this
-/// class matching the member by name and machine signature IS that implementation.
-///
-/// The match must be UNIQUE. Two members whose Kotlin signatures differ can share a machine one —
-/// `String` and `Any` are both references — and choosing between them would be the guess this
-/// deliberately does not make. Where it cannot tell, it answers nothing and the caller declines,
-/// which is what it did before.
-fn interface_member_by_signature(
-    ir: &IrFile,
-    id: ClassId,
-    layouts: &[ClassLayout],
-    vtable: &[Slot],
-    member: &InterfaceMember,
-) -> Option<Slot> {
-    let machine = |function: &IrFunction| {
-        (
-            function.name.clone(),
-            function
-                .params
-                .iter()
-                .copied()
-                .map(c_kind)
-                .collect::<Vec<_>>(),
-            c_kind(function.ret),
-        )
-    };
-    // The interface's own declaration, which only a method key names. A property's key carries a
-    // name and a declaring class rather than a declaration, and the member extensions this repairs
-    // reach the region as methods.
-    let declared = std::iter::once(&member.key)
-        .chain(&member.aliases)
-        .find_map(|key| match key {
-            SlotKey::Function(fid) => Some(&ir.functions[*fid as usize]),
-            _ => None,
-        })?;
-    let wanted = machine(declared);
-    // Every method of this class and its ancestors that has a slot here, so an implementation a
-    // BASE class supplies fills the number too.
-    let mut found: Option<u32> = None;
-    let mut at = Some(id);
-    while let Some(class) = at {
-        for &candidate in &ir.classes[class as usize].methods {
-            let function = &ir.functions[candidate as usize];
-            if machine(function) != wanted {
-                continue;
-            }
-            let Some(&slot) = layouts[id as usize]
-                .slots
-                .get(&function_key(ir, class, candidate))
-            else {
-                continue;
-            };
-            match found {
-                // One slot reached by two spellings is one implementation, not two candidates.
-                Some(existing) if existing == slot => {}
-                Some(_) => return None,
-                None => found = Some(slot),
-            }
-        }
-        at = ir.class_id_by_name(ir.classes[class as usize].superclass);
-    }
-    match vtable.get(found? as usize) {
-        // The slot this class reached is itself empty, so it answers nothing the member wants.
-        Some(Slot::Abstract) | None => None,
-        Some(entry) => Some(entry.clone()),
-    }
 }
 
 /// A total order over slot keys, so an interface's members are numbered the same way on every
@@ -984,7 +864,6 @@ fn layout_class(
     id: ClassId,
     superclass: Option<ClassId>,
     parent: Option<&ClassLayout>,
-    interfaces: &[ClassId],
 ) -> Result<ClassLayout, Unsupported> {
     let class = &ir.classes[id as usize];
 
@@ -1147,15 +1026,12 @@ fn layout_class(
             .cloned()
             .unwrap_or(SlotKey::Function(fid));
 
-        // The edge by which this method overrides `kotlin.Function{N}.invoke`, if it does. Read
-        // once, because both the fixed slot below and the stand-in that covers the case where the
-        // method cannot take it are the same question about the same edge.
-        let invoke_edge = ir
+        let mut override_edges = ir
             .function_overrides
             .get(&class.fq_name_id())
             .into_iter()
             .flatten()
-            .find(|edge| {
+            .filter(|edge| {
                 // Either shape of implementation reference. An edge for a method the checked
                 // lowering built names it by CALLABLE and leaves `implementation_function` empty,
                 // which a pre-filter on that field alone used to drop — and dropping it is why
@@ -1168,20 +1044,18 @@ fn layout_class(
                             ResolvedFunctionOverrideTarget::External(_) => return false,
                         })
                         == Some(&fid)
-            })
-            .filter(|edge| {
-                edge.name == "invoke" && is_function_classifier(classifiers, edge.overridden_owner)
             });
-        let replaces = match any_slot(function) {
-            Some(slot) => {
-                let (params, ret) = any_slot_signature(slot);
-                let actual: Vec<CKind> = function.params.iter().copied().map(c_kind).collect();
-                if actual == params && c_kind(function.ret) == ret {
-                    Some(slot)
-                } else {
-                    None
-                }
-            }
+        let any_replaces = override_edges
+            .clone()
+            .find_map(|edge| any_slot(edge.overridden_semantic_role));
+        // The edge by which this method overrides a function classifier's `invoke`, if it does.
+        // Read once, because both the fixed slot below and the stand-in that covers a representation
+        // mismatch are the same question about the same exact edge.
+        let invoke_edge = override_edges.find(|edge| {
+            edge.name == "invoke" && is_function_classifier(classifiers, edge.overridden_owner)
+        });
+        let replaces = match any_replaces {
+            Some(slot) => Some(slot),
             // `invoke` on a class implementing a FUNCTION TYPE takes the one other fixed slot this
             // target has: the runtime names it (`KT_SLOT_INVOKE`) and every caller through a
             // function type reads it, a lambda's body included.
@@ -1242,33 +1116,9 @@ fn layout_class(
                 bridged.push((slot, overridden));
             }
         }
-        // A member EXTENSION's override is not in the override tables — the frontend records none
-        // for one — so an override of it would take a new slot and a call through the base's type
-        // would reach the base's body. `fresh_method_decls` lists property accessors only, so it
-        // cannot say whether a METHOD is an override; the language can. A member that is open,
-        // visible to this class and declared with exactly these parameter types cannot be
-        // redeclared without `override` ("hides member of supertype"), so matching one is reading
-        // that rule — and `inherited_slot` matches nothing else, not an overload that merely
-        // shares the machine signature and not a private member this class cannot see.
-        let inherited_replaces = match class_replaces {
-            Some(slot) => Some(slot),
-            None if !ir.fresh_method_decls.contains(&fid) => {
-                inherited_slot(ir, superclass, function, &slots)
-            }
-            // A property ACCESSOR is recorded as a fresh declaration whether or not its property
-            // overrides one — common lowering pushes every accessor into `fresh_method_decls`
-            // without reading the modifier — so for one the table above cannot be believed. What
-            // can be: an OPEN, non-private base member with the same name and machine signature
-            // that this class redeclares. Kotlin rejects a fresh redeclaration of such a member
-            // ("hides member of supertype and needs `override`"), so matching it is reading the
-            // language's own rule rather than guessing. For a method the table is right and this
-            // never fires; for an accessor of `override val Foo.bar` it is what points the base's
-            // slot at the override instead of giving it one of its own.
-            None => inherited_open_slot(ir, superclass, function, &slots),
-        };
         let replaces = match replaces {
             Some(slot) => Some(slot),
-            None => match inherited_replaces {
+            None => match class_replaces {
                 Some(slot) => Some(slot),
                 None => match &own_key {
                     SlotKey::Getter(_, name) | SlotKey::Setter(_, name) => {
@@ -1296,14 +1146,7 @@ fn layout_class(
                                 None
                             }
                             Some((slot, _)) => Some(slot),
-                            // No edge names a base for this accessor. The base's own accessor may
-                            // be SYNTHESIZED — `override lateinit var x` has no method to match
-                            // by signature — so the inherited slot is found by the property's
-                            // NAME instead. `class E : B(), C by D()` is the case: the delegation
-                            // supplies `x` again with no edge of its own, and kotlinc answers
-                            // with the delegate (KT-70417), which is what taking the base's slot
-                            // makes true here.
-                            None => inherited_accessor_slot(ir, superclass, name, setter, &slots),
+                            None => None,
                         }
                     }
                     _ => None,
@@ -1456,14 +1299,6 @@ fn layout_class(
     }
 
     register_inherited_interface_members(ir, class, &mut slots, &mut interface_bridges)?;
-    register_accessors_without_an_edge(
-        ir,
-        id,
-        class,
-        interfaces,
-        &mut slots,
-        &mut interface_bridges,
-    );
 
     // Kotlin's `Enum.toString()` is the constant's name, where `kotlin.Any`'s is its identity. The
     // runtime answers it, because the storage it reads belongs to `kotlin.Enum` — a base no file
@@ -1499,79 +1334,6 @@ fn layout_class(
         slots,
         interface_bridges,
     })
-}
-
-/// Point an interface's property numbers at accessors this class supplies with NO override edge to
-/// name them.
-///
-/// Interface delegation is the shape: `class Q(a: A) : A by a` synthesizes `Q`'s own `x` and its
-/// accessors, and nothing records that they implement `A.x` — there is no source declaration to
-/// carry the edge, so the edge tables say nothing and `A`'s number found no implementation.
-///
-/// Kotlin has already decided they do implement it: a class does not compile with an interface
-/// property left unimplemented, and it cannot declare a second property of that name beside the
-/// inherited one. So an interface in this class's hierarchy declaring the same name IS the member
-/// these accessors fill — which is why matching by name is reading the language's rule rather than
-/// guessing, the same ground `inherited_open_slot` stands on.
-///
-/// A source `override val` has an edge, and that edge's answer wins, so these entries are
-/// `or_insert`ed — except where a delegation supplies again a member an edge already placed, which
-/// takes that member's slot outright.
-fn register_accessors_without_an_edge(
-    ir: &IrFile,
-    id: ClassId,
-    class: &IrClass,
-    interfaces: &[ClassId],
-    slots: &mut HashMap<SlotKey, u32>,
-    interface_bridges: &mut HashMap<SlotKey, Slot>,
-) {
-    for property in &class.properties {
-        for setter in [false, true] {
-            let spell = |owner: ClassId| {
-                if setter {
-                    SlotKey::Setter(owner, property.name.clone())
-                } else {
-                    SlotKey::Getter(owner, property.name.clone())
-                }
-            };
-            let Some(&slot) = slots.get(&spell(id)) else {
-                continue;
-            };
-            for &interface in interfaces {
-                let Some(declared) = ir.classes[interface as usize]
-                    .properties
-                    .iter()
-                    .find(|candidate| candidate.name == property.name)
-                else {
-                    continue;
-                };
-                // A `val` in the interface has no setter number to fill.
-                if setter && !declared.is_var {
-                    continue;
-                }
-                let key = spell(interface);
-                // The same representation question the edge-carrying paths ask: an interface
-                // declaring `val x: T` erases its accessor to a reference while the class supplies
-                // an unboxed machine integer, and the number takes a bridge rather than an alias.
-                if c_kind(declared.ty) != c_kind(property.ty) {
-                    interface_bridges
-                        .entry(key.clone())
-                        .or_insert(Slot::AccessorBridge {
-                            declared: declared.ty,
-                            implemented: property.ty,
-                            setter,
-                            target_slot: slot,
-                        });
-                }
-                // Overwrites rather than `or_insert`: what a class SUPPLIES wins over what it
-                // inherited, and the entry already there came from the superclass's layout.
-                // `class E : B(), C by D()` is that case — `B` implements `A.x` and the
-                // delegation to `D` supplies it again, and kotlinc answers with the delegate
-                // (KT-70417).
-                slots.insert(key, slot);
-            }
-        }
-    }
 }
 
 /// Point an interface's member numbers at implementations this class INHERITS rather than declares.
@@ -1697,114 +1459,6 @@ fn register_inherited_interface_members(
         }
     }
     Ok(())
-}
-
-/// The slot an inherited member of the same name and machine signature occupies, searched up the
-/// superclass chain. Used only for a method the IR has already identified as an override.
-/// [`inherited_slot`] restricted to a base member a subclass CANNOT redeclare freshly: one that is
-/// `open` or `abstract`, and not private (a private member is not inherited, so a subclass may
-/// declare the same name without overriding anything).
-fn inherited_open_slot(
-    ir: &IrFile,
-    superclass: Option<ClassId>,
-    function: &IrFunction,
-    slots: &HashMap<SlotKey, u32>,
-) -> Option<u32> {
-    let slot = inherited_slot(ir, superclass, function, slots)?;
-    let overridable = |candidate: &FunId| {
-        ir.open_methods.contains(candidate) && !ir.method_visibility(*candidate).is_private()
-    };
-    let mut at = superclass;
-    while let Some(class) = at {
-        for candidate in &ir.classes[class as usize].methods {
-            if ir.functions[*candidate as usize].name == function.name
-                && slots.get(&function_key(ir, class, *candidate)) == Some(&slot)
-            {
-                return overridable(candidate).then_some(slot);
-            }
-        }
-        at = ir.class_id_by_name(ir.classes[class as usize].superclass);
-    }
-    None
-}
-
-/// The slot an inherited PROPERTY of the same name occupies, searched up the superclass chain.
-///
-/// By name, because a base's accessor need not be a method at all: a field-backed property's
-/// accessors are synthesized, so there is no signature for [`inherited_slot`] to match. Kotlin
-/// rejects a fresh redeclaration of an inherited property ("hides member of supertype and needs
-/// `override`"), so a subclass property of that name IS that one — except where the base's is
-/// PRIVATE, which is not inherited and which a subclass may shadow freely.
-fn inherited_accessor_slot(
-    ir: &IrFile,
-    superclass: Option<ClassId>,
-    name: &str,
-    setter: bool,
-    slots: &HashMap<SlotKey, u32>,
-) -> Option<u32> {
-    let mut at = superclass;
-    while let Some(class) = at {
-        if let Some(property) = ir.classes[class as usize]
-            .properties
-            .iter()
-            .find(|candidate| candidate.name == name)
-        {
-            if property.is_private {
-                return None;
-            }
-            let key = if setter {
-                SlotKey::Setter(class, name.to_string())
-            } else {
-                SlotKey::Getter(class, name.to_string())
-            };
-            return slots.get(&key).copied();
-        }
-        at = ir.class_id_by_name(ir.classes[class as usize].superclass);
-    }
-    None
-}
-
-fn inherited_slot(
-    ir: &IrFile,
-    superclass: Option<ClassId>,
-    function: &IrFunction,
-    slots: &HashMap<SlotKey, u32>,
-) -> Option<u32> {
-    let signature = |candidate: &IrFunction| {
-        (
-            candidate
-                .params
-                .iter()
-                .copied()
-                .map(c_kind)
-                .collect::<Vec<_>>(),
-            c_kind(candidate.ret),
-        )
-    };
-    let mine = signature(function);
-    let mut at = superclass;
-    while let Some(class) = at {
-        for &candidate in &ir.classes[class as usize].methods {
-            let other = &ir.functions[candidate as usize];
-            // Only a member that CAN be overridden is: an open, non-private one, declared with
-            // exactly these parameter types. The machine signature alone would take `foo(x: Any)`
-            // for `foo(x: String)` — an overload, not an override — and a private base member is
-            // invisible to the subclass, which declares a new one of the same name.
-            if other.name != function.name
-                || signature(other) != mine
-                || other.params != function.params
-                || !ir.open_methods.contains(&candidate)
-                || ir.method_visibility(candidate).is_private()
-            {
-                continue;
-            }
-            if let Some(&slot) = slots.get(&function_key(ir, class, candidate)) {
-                return Some(slot);
-            }
-        }
-        at = ir.class_id_by_name(ir.classes[class as usize].superclass);
-    }
-    None
 }
 
 /// Whether any class in this file hands `owner`'s property `name` to an interface it implements.
@@ -2194,6 +1848,47 @@ mod tests {
                 overridden_owner: ir.functions[overridden as usize]
                     .dispatch_receiver
                     .expect("instance method"),
+                overridden_semantic_role: None,
+                collection_barrier: None,
+                overridden_is_interface: false,
+                name,
+                declared_parameters: Vec::new(),
+                declared_result: Ty::Unit,
+                applied_parameters: Vec::new(),
+                applied_result: Ty::Unit,
+                implementation_parameters: Vec::new(),
+                implementation_parameter_identities: Vec::new(),
+                overridden_parameter_identities: Vec::new(),
+                implementation_result: Ty::Unit,
+                suspend: false,
+                has_kotlin_superclass_override: false,
+                depth: 1,
+            });
+    }
+
+    fn record_semantic_override(
+        ir: &mut IrFile,
+        class: ClassId,
+        implementation: FunId,
+        role: crate::types::SemanticCallRole,
+    ) {
+        use crate::fir::{CallableId, ExternalCallableId};
+        let owner = ir.classes[class as usize].fq_name_id();
+        let name = ir.functions[implementation as usize].name.clone();
+        ir.function_overrides
+            .entry(owner)
+            .or_default()
+            .push(crate::ir::IrFunctionOverride {
+                implementation: ResolvedFunctionOverrideTarget::Module(CallableId::from_raw(
+                    3000 + implementation,
+                )),
+                implementation_function: Some(implementation),
+                implementation_owner: owner,
+                overridden: ResolvedFunctionOverrideTarget::External(ExternalCallableId::from_raw(
+                    2,
+                )),
+                overridden_owner: crate::types::type_name("fixture/Root"),
+                overridden_semantic_role: Some(role),
                 collection_barrier: None,
                 overridden_is_interface: false,
                 name,
@@ -2296,22 +1991,28 @@ mod tests {
     }
 
     #[test]
-    fn kotlin_any_members_are_matched_by_name_and_signature() {
+    fn kotlin_any_slots_follow_exact_semantic_roles() {
         let mut ir = IrFile::default();
         let p = class(&mut ir, "P", "kotlin/Any", 0);
-        let to_string = add_method(
+        let display = add_method(
+            &mut ir,
+            p,
+            function("display", "P", vec![], Ty::String, false),
+        );
+        record_semantic_override(
+            &mut ir,
+            p,
+            display,
+            crate::types::SemanticCallRole::KotlinAnyToString,
+        );
+        // A familiar spelling without the selected declaration role is an unrelated member.
+        let overload = add_method(
             &mut ir,
             p,
             function("toString", "P", vec![], Ty::String, false),
         );
-        // Same name, different arity: an overload, not an override.
-        let overload = add_method(
-            &mut ir,
-            p,
-            function("toString", "P", vec![Ty::Int], Ty::String, false),
-        );
         let model = build(&ir).expect("layout");
-        assert_eq!(model.layout(p).vtable[2], Slot::Function(to_string));
+        assert_eq!(model.layout(p).vtable[2], Slot::Function(display));
         assert_eq!(model.layout(p).vtable[4], Slot::Function(overload));
     }
 
@@ -2553,6 +2254,7 @@ mod tests {
                     1,
                 )),
                 overridden_owner: function_owner,
+                overridden_semantic_role: None,
                 collection_barrier: None,
                 overridden_is_interface: true,
                 name: "invoke".to_string(),
@@ -2645,31 +2347,43 @@ mod tests {
     }
 
     #[test]
-    fn only_an_equals_over_any_overrides_kotlin_any() {
+    fn an_any_like_spelling_does_not_replace_a_slot_without_the_exact_role() {
         let mut ir = IrFile::default();
         let p = class(&mut ir, "P", "kotlin/Any", 0);
         add_method(
             &mut ir,
             p,
-            function("equals", "P", vec![Ty::String], Ty::Boolean, false),
+            function(
+                "equals",
+                "P",
+                vec![Ty::nullable(Ty::obj("fixture/Value"))],
+                Ty::Boolean,
+                false,
+            ),
         );
         let q = class(&mut ir, "Q", "kotlin/Any", 0);
         let equals = add_method(
             &mut ir,
             q,
             function(
-                "equals",
+                "same",
                 "Q",
-                vec![Ty::nullable(Ty::obj("kotlin/Any"))],
+                vec![Ty::nullable(Ty::obj("fixture/Value"))],
                 Ty::Boolean,
                 false,
             ),
+        );
+        record_semantic_override(
+            &mut ir,
+            q,
+            equals,
+            crate::types::SemanticCallRole::KotlinAnyEquals,
         );
         let model = build(&ir).expect("layout");
         assert_eq!(
             model.layout(p).vtable[0],
             Slot::Runtime("kt_any_equals"),
-            "`equals(String)` is an overload"
+            "spelling alone is not an override identity"
         );
         assert_eq!(model.layout(q).vtable[0], Slot::Function(equals));
     }
