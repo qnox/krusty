@@ -25,7 +25,8 @@ pub use annotation_application::{
     AnnotationPositionalPolicy,
 };
 pub use call_realization::{
-    DefaultCallRealization, NonvirtualCallRealization, OverriddenCallKind,
+    DefaultCallRealization, ExternalCallableKind, ExternalCallableRealization,
+    ExternalPropertyRealization, NonvirtualCallRealization, OverriddenCallKind,
     OverriddenCallRealization,
 };
 pub(crate) use classifier_callables::constructor_generic_signature;
@@ -441,51 +442,6 @@ pub(crate) fn type_alias_target_classifier(expansion: Ty) -> Option<TypeName> {
         Ty::Nothing => Some(crate::types::type_name("kotlin/Nothing")),
         expansion => function_classifiers::supertype_classifier(expansion).kotlin_class_internal(),
     }
-}
-
-/// How a provider realizes one already-selected dependency callable.
-///
-/// The identity a consumer holds is opaque and provider-assigned; this is what the provider hands
-/// back for it. Neither half names a target: [`LibraryCallable`] is the semantic declaration, and
-/// the kind says which shape the declaration takes — a top-level function, a member, or a property
-/// realized over storage rather than an accessor. A backend reads it; it does not reconstruct it.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum ExternalCallableKind {
-    TopLevel,
-    Extension,
-    Member,
-    Constructor,
-    /// A provider-normalized Kotlin property getter realized as a read of instance storage.
-    InstanceFieldRead,
-    /// A provider-normalized Kotlin property setter realized as a write of instance storage.
-    InstanceFieldWrite,
-    /// A selected dependency property whose realization is a static field read.
-    StaticFieldRead,
-    /// A selected dependency property whose realization is a static field write.
-    StaticFieldWrite,
-}
-
-#[derive(Clone, Debug)]
-pub struct ExternalCallableRealization {
-    pub callable: LibraryCallable,
-    pub kind: ExternalCallableKind,
-    /// Provider-published identities parallel to the callable's semantic source parameters. The
-    /// physical parameter plan joins them to ABI-only slots such as a suspend continuation.
-    /// A backend formats these for debug/metadata surfaces; it never reconstructs them from arity.
-    pub parameter_identities: Box<[crate::fir::ResolvedParameterIdentity]>,
-}
-
-/// A provider's realization of one normalized Kotlin property. FIR carries only its opaque
-/// identity; callers read the semantic name and the independently interned physical accessors here.
-#[derive(Clone, Debug)]
-pub struct ExternalPropertyRealization {
-    pub name: String,
-    pub getter: crate::fir::ExternalCallableId,
-    pub setter: Option<crate::fir::ExternalCallableId>,
-    /// The provider-normalized declaration is its value class's underlying storage property.
-    pub declares_value_class_storage: bool,
-    /// Provider-normalized payload of a compile-time constant property.
-    pub compile_time_constant: Option<LibraryConst>,
 }
 
 pub trait SemanticPlatform: crate::symbol_source::SymbolSource {

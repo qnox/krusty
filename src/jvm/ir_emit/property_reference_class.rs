@@ -89,20 +89,27 @@ impl PropertyReferenceTarget {
             .unwrap_or_else(|| {
                 crate::jvm::jvm_class_map::to_jvm_internal(&semantic_call_owner).to_string()
             });
-        let reflection_facade = property.ext_facade_or_facade(facade);
+        let physical_facade = property.ext_facade_or_facade(facade);
+        // A private member accessor bridge is static only as an invocation detail. Reporting its
+        // owner as a facade would set CallableReference's top-level flag and make the mutable view
+        // of the property unequal to an immutable reference to the same declaration.
+        let reflection_facade = (realization.accessor_role
+            != crate::jvm::property_references::PropertyAccessorRole::AccessBridge)
+            .then(|| physical_facade.clone())
+            .flatten();
         let getter_facade = realization
             .getter_bridge_owner
             .map(TypeName::render)
-            .or_else(|| reflection_facade.clone());
+            .or_else(|| physical_facade.clone());
         let setter_facade = realization
             .setter_bridge_owner
             .map(TypeName::render)
-            .or_else(|| reflection_facade.clone());
+            .or(physical_facade);
         let getter_descriptor = property_getter_descriptor(property, getter_facade.is_some());
         let (getter_params, getter_ret) = parse_physical_method_desc(&getter_descriptor)
             .expect("validated property getter descriptor");
         let signature = realization
-            .protected_reflection_getter
+            .reflection_getter
             .as_ref()
             .map(|(name, descriptor)| format!("{name}{descriptor}"))
             .unwrap_or_else(|| format!("{}{getter_descriptor}", property.getter_name));

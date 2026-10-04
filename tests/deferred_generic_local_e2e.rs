@@ -7,6 +7,7 @@
 //! `0`. Specializing the unbounded local itself to `int` unboxes the `null`.
 
 use super::common;
+use super::common::expect_native_box;
 use std::rc::Rc;
 
 const UNBOUNDED: &str = "\
@@ -145,6 +146,9 @@ fn an_uninitialized_generic_local_runs() {
     common::expect_box_ok_with_stdlib(UNBOUNDED, "DeferredGenericLocal");
     common::expect_box_ok_with_stdlib(PRIMITIVE_BOUND, "DeferredPrimitiveBoundLocal");
     common::expect_box_ok_with_stdlib(INITIALIZED, "InitializedGenericLocal");
+    expect_native_box(UNBOUNDED, "DeferredGenericLocalNative", "OK");
+    expect_native_box(PRIMITIVE_BOUND, "DeferredPrimitiveBoundLocalNative", "OK");
+    expect_native_box(INITIALIZED, "InitializedGenericLocalNative", "OK");
 }
 
 #[test]

@@ -342,12 +342,11 @@ impl EmptySymbolSource {
                 let mut function = FunctionInfo::plain(FnKind::Extension, Some(receiver), callable);
                 function.call_sig = CallSig::metadata_plain(1);
                 function.flags.operator = true;
-                function.callable.compiler_intrinsic =
-                    super::builtin_top_level_realization::normalized_function_realization(
-                        crate::types::type_name("kotlin"),
-                        name,
-                        &function,
-                    );
+                super::builtin_top_level_realization::attach_function_realization(
+                    crate::types::type_name("kotlin"),
+                    name,
+                    &mut function,
+                );
                 functions.overloads.push(function);
             }
             "toString" => {
@@ -362,12 +361,11 @@ impl EmptySymbolSource {
                 );
                 let mut function = FunctionInfo::plain(FnKind::Extension, Some(receiver), callable);
                 function.call_sig = CallSig::metadata_plain(0);
-                function.callable.compiler_intrinsic =
-                    super::builtin_top_level_realization::normalized_function_realization(
-                        crate::types::type_name("kotlin"),
-                        name,
-                        &function,
-                    );
+                super::builtin_top_level_realization::attach_function_realization(
+                    crate::types::type_name("kotlin"),
+                    name,
+                    &mut function,
+                );
                 functions.overloads.push(function);
             }
             "code" => {
@@ -455,12 +453,11 @@ impl EmptySymbolSource {
                         None,
                     );
                 }
-                function.callable.compiler_intrinsic =
-                    super::builtin_top_level_realization::normalized_function_realization(
-                        crate::types::type_name("kotlin/text"),
-                        name,
-                        &function,
-                    );
+                super::builtin_top_level_realization::attach_function_realization(
+                    crate::types::type_name("kotlin/text"),
+                    name,
+                    &mut function,
+                );
                 function
             })
             .collect();
@@ -486,12 +483,11 @@ impl EmptySymbolSource {
                 let callable =
                     LibraryCallable::library(owner, name, params, Ty::Unit, Ty::Unit, "");
                 let mut function = FunctionInfo::plain(FnKind::TopLevel, None, callable);
-                function.callable.compiler_intrinsic =
-                    super::builtin_top_level_realization::normalized_function_realization(
-                        crate::types::type_name("kotlin/io"),
-                        name,
-                        &function,
-                    );
+                super::builtin_top_level_realization::attach_function_realization(
+                    crate::types::type_name("kotlin/io"),
+                    name,
+                    &mut function,
+                );
                 function
             })
             .collect();
