@@ -89,6 +89,7 @@ impl LibraryCallable {
             suspend: false,
             is_abstract: false,
             owner_is_interface: false,
+            visibility: crate::types::Visibility::Public,
             member_realization: MemberRealization::Dispatch,
             inline: InlineKind::None,
             default_call: false,

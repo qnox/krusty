@@ -63,6 +63,17 @@ pub struct IrModuleCallable {
 /// parameter shape at that use site. The stable declaration identity remains authoritative for
 /// visibility/ownership; the selected parameters let a backend build a representation adapter for
 /// a generic call without reverse-engineering types from operands.
+/// A protected dependency member selected at a call. The declaring class, physical name, and
+/// erased parameters are the member the JVM access check names. A nested caller in another
+/// package cannot invoke it directly; the subclass that may is chosen later, at emission.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IrProtectedDependencyCall {
+    pub owner: TypeName,
+    pub name: String,
+    pub parameters: Box<[Ty]>,
+    pub result: Ty,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum IrModuleMemberAccess {
     Callable {

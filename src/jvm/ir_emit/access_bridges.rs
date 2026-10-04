@@ -533,6 +533,50 @@ pub(super) fn cross_owner_member_calls(
                     }
                 }
             }
+            if !protected.contains_key(&expression) {
+                if let Some(dependency) = ir.protected_dependency_calls.get(&expression).cloned() {
+                    if let IrExpr::Call {
+                        callee: Callee::Virtual { .. },
+                        dispatch_receiver: Some(receiver),
+                        ..
+                    } = ir.expr(expression)
+                    {
+                        if let Some(bridge_owner) = protected_bridge_owner(
+                            ir,
+                            expression,
+                            Some(*receiver),
+                            owner,
+                            dependency.owner,
+                        ) {
+                            crate::trace_compiler!(
+                                "emit",
+                                "protected dependency bridge expression={expression} owner={} target_owner={}",
+                                bridge_owner,
+                                dependency.owner
+                            );
+                            let parameters = dependency
+                                .parameters
+                                .iter()
+                                .map(jvm_declared_ty)
+                                .collect::<Vec<_>>();
+                            let parameter_names = (0..parameters.len())
+                                .map(|index| Some(format!("p{index}")))
+                                .collect();
+                            protected.insert(
+                                expression,
+                                ProtectedMemberAccessBridge {
+                                    owner: bridge_owner,
+                                    name: dependency.name,
+                                    target_parameters: parameters.clone(),
+                                    bridge_parameters: parameters,
+                                    result: jvm_declared_ty(&dependency.result),
+                                    parameter_names,
+                                },
+                            );
+                        }
+                    }
+                }
+            }
             crate::ir::for_each_child(&ir.exprs, expression, &mut |child| stack.push(child));
         }
     };

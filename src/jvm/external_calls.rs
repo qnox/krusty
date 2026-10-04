@@ -1173,6 +1173,7 @@ pub(super) fn realize(
             inline_modifiers,
         )?;
         let realized_call = bridge_external_result(ir, index, physical_result, semantic_ret);
+        record_protected_dependency_call(ir, realized_call, &callable);
         if let Some(role) = semantic_role {
             ir.semantic_call_roles.insert(realized_call, role);
         }
@@ -1347,6 +1348,34 @@ fn publish_inline_substitutions(
             ir.reified_call_subst.insert(expression, reified);
         }
     }
+}
+
+/// Remember a protected dependency member so a nested caller can reach it through the subclass
+/// accessor. The realized expression is the call emission will see; a result wrapper is not.
+fn record_protected_dependency_call(
+    ir: &mut IrFile,
+    expression: crate::ir::ExprId,
+    callable: &crate::backend::BackendCallableFact,
+) {
+    if callable.visibility != crate::types::Visibility::Protected {
+        return;
+    }
+    let IrExpr::Call {
+        callee: Callee::Virtual { name, .. },
+        ..
+    } = ir.expr(expression)
+    else {
+        return;
+    };
+    ir.protected_dependency_calls.insert(
+        expression,
+        crate::ir::IrProtectedDependencyCall {
+            owner: callable.physical_owner,
+            name: name.clone(),
+            parameters: callable.physical_params.clone().into_boxed_slice(),
+            result: callable.physical_ret,
+        },
+    );
 }
 
 /// The provider owns physical erasure; checked FIR owns the final semantic result. Preserve both by

@@ -113,7 +113,7 @@ pub(crate) use local_class_names::{IrLocalClassNameProvenance, IrLocalClassOwner
 pub use local_property_references::IrLocalPropertyReference;
 pub use module_records::{
     IrCallableTypeParameter, IrClassifierKind, IrHeaderAnnotation, IrModuleCallable,
-    IrModuleClassifier, IrModuleMemberAccess, IrModuleSource,
+    IrModuleClassifier, IrModuleMemberAccess, IrModuleSource, IrProtectedDependencyCall,
 };
 pub use operators::{IrBinOp, IrTypeOp};
 pub use overrides::{is_kotlin_primitive, IrFunctionOverride, IrPropertyOverride};
@@ -2040,6 +2040,10 @@ pub struct IrFile {
     /// survives physical virtual/property realization so a backend can implement access bridges
     /// without owner/name lookup.
     pub(crate) module_member_accesses: std::collections::HashMap<ExprId, IrModuleMemberAccess>,
+    /// Protected dependency calls, keyed by the realized call. Emission turns one whose caller
+    /// is outside the subclass into that subclass's `access$` bridge.
+    pub(crate) protected_dependency_calls:
+        std::collections::HashMap<ExprId, IrProtectedDependencyCall>,
     /// Private methods a synthesized callable-reference class calls; each gets one access bridge.
     pub function_reference_access_bridges: std::collections::HashSet<u32>,
     /// Lambda impls pre-marked `inline_only` by `mark_must_inline_lambdas` (a must-inline callee's

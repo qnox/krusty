@@ -38,6 +38,9 @@ pub struct BackendCallableFact {
     /// Target owner selected by the provider. This is a physical realization fact (a facade or a
     /// mapped platform class), not the declaration's semantic Kotlin owner.
     pub physical_owner: TypeName,
+    /// Declaration visibility. A protected member stays callable from a subclass, and a nested
+    /// class of that subclass reaches it through an accessor rather than a public invoke.
+    pub visibility: crate::types::Visibility,
     pub kind: ExternalCallableKind,
     pub owner_is_interface: bool,
     pub compiler_intrinsic: Option<BackendCompilerIntrinsic>,
@@ -211,6 +214,7 @@ impl CheckedBackendCallables {
                     physical_name: callable.physical_name,
                     reflection_name: callable.reflection_name,
                     physical_owner: callable.owner,
+                    visibility: callable.visibility,
                     kind: realization.kind,
                     owner_is_interface: callable.owner_is_interface,
                     compiler_intrinsic: callable.compiler_intrinsic,

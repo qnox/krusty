@@ -48,6 +48,7 @@ pub(super) fn clone_below_representation_wrapper(ir: &mut IrFile, source: ExprId
     move_fact!(call_declared_params);
     move_fact!(physical_call_parameters);
     move_fact!(module_member_accesses);
+    move_fact!(protected_dependency_calls);
     move_fact!(static_extension_receivers);
     move_fact!(call_inline_modifiers);
     move_fact!(value_class_unbox_type_operation_edges);

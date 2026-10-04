@@ -301,8 +301,9 @@ pub struct LibraryMember {
     /// Structural expansion decoded from this exact member's inline body.
     pub inline_body_plan: Option<Box<InlineBodyPlan>>,
     /// The member's Kotlin visibility, from its bytecode access flags/`@Metadata`. A `Protected` member
-    /// is surfaced (not dropped) so a subclass can reach an inherited classpath member; the emit is
-    /// identical to a public one. `Public` by default.
+    /// is surfaced (not dropped) so a subclass can reach an inherited classpath member. A call in
+    /// that subclass's own method is an ordinary invoke; a nested class in another package reaches
+    /// it through the subclass's `access$` bridge. `Public` by default.
     pub visibility: Visibility,
     /// Source call-shape (parameter names + default flags + `required`, lambda parameter types) — the same
     /// facts `CallSig` carries for functions. Lets a resolver member query drive a NAMED-argument member
@@ -964,6 +965,11 @@ pub struct LibraryCallable {
     /// property accessors and functions expose the same provider-normalized modality; physical JVM
     /// access flags are only one input at a provider boundary.
     pub is_abstract: bool,
+    /// Declaration visibility copied from the member this callable was normalized from. `Public`
+    /// when the constructor did not have a member. A protected member stays an ordinary invoke
+    /// from the subclass itself; a nested class in another package reaches it through the
+    /// subclass's `access$` bridge.
+    pub visibility: Visibility,
     /// [`owner`](Self::owner) is an INTERFACE, so the call dispatches with `invokeinterface`. Carried on
     /// the selected callable because the owner's own declaration may not be re-readable at the call
     /// site: a mapped builtin's JVM owner (`java/util/List`) has no class file when no JDK is on the
