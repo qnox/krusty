@@ -453,21 +453,26 @@ impl<'a> ModuleSymbols<'a> {
             // `SymbolSource::is_value_name` contract instead of branching on symbol provenance.
             value_underlying: c.value_field.as_ref().map(|(_, ty)| *ty),
             value_declaration: c.value_field.as_ref().map(|(property, underlying)| {
-                crate::types::DeclaredValueClass::over(
-                    property,
-                    *underlying,
-                    c.type_params
+                crate::types::DeclaredValueClass {
+                    property: property.as_str().into(),
+                    underlying: *underlying,
+                    // The class's own formals are already its declaration-scoped identities.
+                    type_parameters: c
+                        .type_params
                         .iter()
-                        .zip(&c.type_param_bounds)
-                        .map(|(name, bound)| {
-                            let bound = if *bound == Ty::Error {
-                                Ty::nullable(Ty::obj("kotlin/Any"))
-                            } else {
-                                *bound
-                            };
-                            (name.as_str(), bound)
-                        }),
-                )
+                        .enumerate()
+                        .map(|(index, name)| {
+                            Ty::ty_param(
+                                name,
+                                c.type_param_bounds
+                                    .get(index)
+                                    .copied()
+                                    .filter(|bound| *bound != Ty::Error)
+                                    .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any"))),
+                            )
+                        })
+                        .collect(),
+                }
             }),
             alias_target: None,
             // Preserve the classifier's formals on the common type shape. Receiver-coupled queries can

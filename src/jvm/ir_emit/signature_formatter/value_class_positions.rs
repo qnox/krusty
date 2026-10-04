@@ -132,27 +132,31 @@ impl JvmSignatureFormatter<'_> {
                 (declaration.underlying, declaration.type_parameters.to_vec())
             }
         };
-        // An argument's type, or the parameter's upper bound for a star.
-        let bindings = parameters
-            .iter()
-            .zip(arguments.iter())
-            .map(|(parameter, argument)| {
-                let Ty::TyParam(name, bound) = *parameter else {
-                    panic!("a declared type parameter is a type-parameter type");
-                };
-                let argument = match argument {
-                    Ty::StarProjection(_) => *bound,
-                    argument => argument.projection_inner().unwrap_or(*argument),
-                };
-                (name.to_string(), argument)
-            })
-            .collect::<HashMap<_, _>>();
-        Some(match type_parameter_or_array_thereof(declared) {
-            Some(parameter) => {
-                substitute_upper_bound(declared, parameter.substitute_erased(&bindings))
-            }
-            None => declared.substitute_erased(&bindings),
+        Some(substituted_underlying(declared, &parameters, arguments))
+    }
+}
+
+/// `declared` with each of the declaration's `parameters` replaced by the matching argument (its
+/// upper bound for a star), by the parameter's semantic identity. An underlying type parameter, or
+/// an array of one, becomes its upper bound.
+fn substituted_underlying(declared: Ty, parameters: &[Ty], arguments: &[Ty]) -> Ty {
+    let bindings = parameters
+        .iter()
+        .zip(arguments)
+        .map(|(parameter, argument)| {
+            let Ty::TyParam(identity, bound) = *parameter else {
+                panic!("a declared type parameter is a type-parameter type");
+            };
+            let argument = match argument {
+                Ty::StarProjection(_) => *bound,
+                argument => argument.projection_inner().unwrap_or(*argument),
+            };
+            (identity.to_string(), argument)
         })
+        .collect::<HashMap<_, _>>();
+    match type_parameter_or_array_thereof(declared) {
+        Some(parameter) => substitute_upper_bound(declared, parameter.substitute_erased(&bindings)),
+        None => declared.substitute_erased(&bindings),
     }
 }
 
@@ -196,4 +200,30 @@ fn is_unboxed_jvm_scalar(ty: Ty) -> bool {
 /// kotlinc's `isNullableType`: marked nullable, or a type parameter whose bound admits `null`.
 fn is_nullable_type(ty: Ty) -> bool {
     ty.admits_null() || ty.upper_bound_admits_null()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::substituted_underlying;
+    use crate::types::{declaration_type_parameter, Ty};
+
+    /// Two declarations that both spell their parameter `T` own two identities. An application of
+    /// one binds only its own parameter, never the other declaration's same-spelled one.
+    #[test]
+    fn same_spelled_parameters_of_different_declarations_never_cross() {
+        let any = Ty::nullable(Ty::obj("kotlin/Any"));
+        let first = Ty::ty_param(declaration_type_parameter(0, 0, 10, 0, "T"), any);
+        let second = Ty::ty_param(declaration_type_parameter(0, 0, 20, 0, "T"), any);
+        let label = Ty::obj("fixture/Label");
+        let sink = |argument: Ty| Ty::obj_args("fixture/Sink", &[argument]);
+        assert_eq!(
+            substituted_underlying(sink(first), &[first], &[label]),
+            sink(label)
+        );
+        // The first declaration's `T` stays unbound and erases to its bound.
+        assert_eq!(
+            substituted_underlying(sink(first), &[second], &[label]),
+            sink(Ty::obj("kotlin/Any"))
+        );
+    }
 }
