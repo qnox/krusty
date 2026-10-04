@@ -5037,25 +5037,6 @@ fn backend_member_jvm_name(ir: &IrFile, member: &crate::backend::BackendMemberFa
     )
 }
 
-fn forwarder_member_key(
-    ir: &IrFile,
-    member: &crate::backend::BackendMemberFact,
-    declared_in_module: bool,
-) -> (String, String) {
-    let types = crate::jvm::value_classes::forwarded_member_types(ir, member, declared_in_module);
-    let mut params = jvm_tys(&types.physical_params);
-    if member.suspend() {
-        params.push(Ty::obj("kotlin/coroutines/Continuation"));
-    }
-    (
-        backend_member_jvm_name(ir, member),
-        params
-            .iter()
-            .map(|parameter| crate::jvm::names::type_descriptor(*parameter))
-            .collect(),
-    )
-}
-
 fn emit_default_impls_forwarders(
     ir: &IrFile,
     c: &crate::ir::IrClass,
@@ -5070,10 +5051,12 @@ fn emit_default_impls_forwarders(
     let derives_from = |candidate: crate::types::TypeName, ancestor: crate::types::TypeName| {
         interface_hierarchy::derives_from(symbols, candidate, ancestor)
     };
-    let hierarchy = interface_hierarchy::implemented_interfaces(ir, symbols, c);
-    let mut all_interfaces = hierarchy.own.clone();
-    all_interfaces.extend(hierarchy.inherited.iter().copied());
-    let closure = interface_hierarchy::sorted_closure(symbols, all_interfaces);
+    let closure = interface_hierarchy::sorted_closure(symbols, c.interfaces.iter_ids().collect());
+    let superclass_interfaces = ir
+        .superclass_interfaces
+        .get(&c.fq_name)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
 
     let method_key = |name: &str, params: &[Ty]| {
         (
@@ -5246,14 +5229,6 @@ fn emit_default_impls_forwarders(
             });
         }
     };
-    let superclass_closure = interface_hierarchy::sorted_closure(symbols, hierarchy.inherited);
-    let mut superclass_winner = std::collections::HashMap::new();
-    for (interface, shape) in superclass_closure {
-        for member in &shape.surface {
-            let key = forwarder_member_key(ir, member, shape.source);
-            superclass_winner.entry(key).or_insert(interface);
-        }
-    }
     for (interface, shape) in closure {
         for member in &shape.surface {
             let types = crate::jvm::value_classes::forwarded_member_types(ir, member, shape.source);
@@ -5281,18 +5256,17 @@ fn emit_default_impls_forwarders(
                 semantic_ret = Ty::nullable(Ty::obj("java/lang/Object"));
             }
             let name = backend_member_jvm_name(ir, member);
-            let key = forwarder_member_key(ir, member, shape.source);
-            debug_assert_eq!(key, method_key(&name, &param_tys));
+            let key = method_key(&name, &param_tys);
             // The nearest declaration wins even when it is abstract: an abstract redeclaration
             // suppresses a farther ancestor's body rather than exposing it as a fake override.
             if !selected.insert(key.clone()) {
                 continue;
             }
-            // A superclass already realizes this exact interface declaration, either with a real
-            // override or with its own forwarder. Another forwarder here would hide that method.
-            // The keys agree only when both closures selected the same declaring interface, so a
-            // subclass that adds a more specific override still forwards to it.
-            if superclass_winner.get(&key).copied() == Some(interface) {
+            // Common resolution records which exact interface declarations arrive through the
+            // direct superclass. Another compatibility forwarder would hide that inherited
+            // implementation. A more-specific directly declared interface has a different
+            // identity and therefore still receives its own forwarder.
+            if superclass_interfaces.contains(&interface) {
                 continue;
             }
             if member.is_abstract()
