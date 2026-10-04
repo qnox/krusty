@@ -464,6 +464,10 @@ pub enum ExternalCallableKind {
 pub struct ExternalCallableRealization {
     pub callable: LibraryCallable,
     pub kind: ExternalCallableKind,
+    /// Exact semantic package that declares a top-level function or extension. Providers publish
+    /// this independently of the physical owner: a JVM facade and a KLIB package have different
+    /// physical shapes but the same declaration package.
+    pub declaration_package: Option<TypeName>,
     /// Provider-published identities parallel to the callable's semantic source parameters. The
     /// physical parameter plan joins them to ABI-only slots such as a suspend continuation.
     /// A backend formats these for debug/metadata surfaces; it never reconstructs them from arity.

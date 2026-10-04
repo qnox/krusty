@@ -4934,6 +4934,7 @@ impl JvmLibraries {
                             suspend,
                             context_count: m.context_count,
                             member_realization: m.realization,
+                            compiler_intrinsic: m.realization.compiler_intrinsic(),
                             semantic_role,
                             collection_barrier,
                             signature: m.signature.clone(),

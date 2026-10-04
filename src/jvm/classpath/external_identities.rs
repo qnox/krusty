@@ -58,9 +58,15 @@ impl Classpath {
         );
         let mut stored = callable.clone();
         stored.external_identity = Some(identity);
+        let declaration_package = matches!(
+            kind,
+            ExternalCallableKind::TopLevel | ExternalCallableKind::Extension
+        )
+        .then(|| callable.owner.parent().unwrap_or(TypeName::ROOT));
         callables.push(ExternalCallableRealization {
             callable: stored,
             kind,
+            declaration_package,
             parameter_identities: Box::new([]),
         });
         self.external_callable_ids
