@@ -263,6 +263,7 @@ pub fn compile(opts: &cli::Options) -> Result<usize, String> {
         diags
             .diags
             .retain(|diagnostic| diagnostic.severity == krusty::diag::Severity::Error);
+        diags.module_warnings.clear();
         return Err(format!(
             "{}krusty: {} error(s)\n",
             diags.render_all(&rendered),

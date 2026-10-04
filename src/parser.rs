@@ -2407,7 +2407,7 @@ impl<'a> Parser<'a> {
                 let pname = self.ident_or_error("parameter name");
                 self.expect(TokenKind::Colon, "':'");
                 self.skip_newlines(); // a wrapped declaration puts the type on the next line (`val x:\n  T`)
-                let ty = self.parse_type();
+                let ty = self.parse_vararg_aware_type(is_vararg);
                 // A default value (`enum class C(val x: Int = 1)`) — same as a regular class ctor param;
                 // each enum entry that omits the argument gets it at its construction site.
                 let default = if self.eat(TokenKind::Eq) {
@@ -3332,7 +3332,7 @@ impl<'a> Parser<'a> {
                 let pname = self.ident_or_error("parameter name");
                 self.expect(TokenKind::Colon, "':'");
                 self.skip_newlines(); // a wrapped declaration puts the type on the next line (`val x:\n  T`)
-                let ty = self.parse_type();
+                let ty = self.parse_vararg_aware_type(is_vararg);
                 let default = if self.eat(TokenKind::Eq) {
                     self.skip_newlines();
                     Some(self.parse_expr())

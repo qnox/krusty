@@ -374,7 +374,7 @@ pub fn compile_in_process(
     (report.diagnostics.is_empty() && !report.classes.is_empty()).then_some(report.classes)
 }
 
-/// The complete diagnostics of an in-process compile of `src`, in emission order; empty when it
+/// The complete error diagnostics of an in-process compile of `src`, in emission order; empty when
 /// compiled.
 pub fn compile_in_process_diagnostics(
     src: &str,
@@ -427,9 +427,11 @@ fn emit_in_process<B: krusty::compiler::Backend>(
     let artifacts = krusty::compiler::emit_analyzed(analysis, &stems, backend, "main", &mut diags);
     InProcessEmissionReport {
         artifacts,
+        // A warning does not fail a compilation, as with kotlinc; only errors reject it.
         diagnostics: diags
             .diags
             .into_iter()
+            .filter(|diagnostic| diagnostic.severity == krusty::diag::Severity::Error)
             .map(|diagnostic| diagnostic.msg)
             .collect(),
     }

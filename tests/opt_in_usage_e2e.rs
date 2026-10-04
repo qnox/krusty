@@ -232,3 +232,47 @@ fun nonNull(v: Any?): Boolean {
 ";
     common::assert_accepted_like_kotlinc(src);
 }
+
+#[test]
+fn an_unresolved_compiler_opt_in_marker_warns_once_per_compilation() {
+    let accepted = [
+        ("first.kt", "// OPT_IN: no.such.Marker\nfun first() = 1\n"),
+        ("second.kt", "// OPT_IN: no.such.Marker\nfun second() = 2\n"),
+    ];
+    let arguments = ["-opt-in=no.such.Marker".to_string()];
+    let result = common::compiler_diagnostics_with_reference_args(&accepted, &[], &arguments);
+    assert_eq!(result.reference_code, 0, "{}", result.reference_stderr);
+    assert_eq!(
+        result.krusty_code, 0,
+        "{}{}",
+        result.krusty_stdout, result.krusty_stderr
+    );
+    let reference = common::compiler_module_warnings(&result.reference_stderr);
+    assert_eq!(
+        reference,
+        ["opt-in requirement marker 'no.such.Marker' is unresolved. Make sure it's present in the \
+          module dependencies."]
+    );
+    assert_eq!(
+        common::compiler_module_warnings(&result.krusty_stderr),
+        reference
+    );
+    assert_eq!(common::compiler_warnings(&result.krusty_stderr), []);
+    assert_eq!(common::compiler_errors(&result.krusty_stderr), []);
+
+    // A failed compilation reports its errors only.
+    let rejected = [(
+        "main.kt",
+        "// OPT_IN: no.such.Marker\nfun f(): Int = \"x\"\n",
+    )];
+    let result = common::compiler_diagnostics_with_reference_args(&rejected, &[], &arguments);
+    common::expect_identical_rejection(&result, "unresolved marker beside an error");
+    assert_eq!(
+        common::compiler_module_warnings(&result.reference_stderr),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        common::compiler_module_warnings(&result.krusty_stderr),
+        Vec::<String>::new()
+    );
+}

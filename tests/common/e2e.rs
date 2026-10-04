@@ -141,6 +141,16 @@ pub fn compiler_warnings(output: &str) -> Vec<CompilerError> {
     rendered_diagnostics(output, "warning:")
 }
 
+/// Every warning about the compilation itself rather than a source position (`warning: …` with no
+/// location), in emission order.
+pub fn compiler_module_warnings(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .filter_map(|rendered| rendered.strip_prefix("warning: "))
+        .map(str::to_string)
+        .collect()
+}
+
 fn rendered_diagnostics(output: &str, severity: &str) -> Vec<CompilerError> {
     output
         .lines()

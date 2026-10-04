@@ -108,6 +108,13 @@ impl Checker<'_> {
         }
         let mut requirements = Vec::new();
         self.add_type_requirements(resolved, &mut requirements);
+        // A `vararg` parameter's type is the array of the element written here (`UByteArray`).
+        if reference.is_vararg_element() {
+            self.add_type_requirements(
+                semantic_value_parameter_ty(resolved, true),
+                &mut requirements,
+            );
+        }
         self.report_opt_in_requirements(reference.span, &requirements);
     }
 
@@ -593,14 +600,35 @@ impl Checker<'_> {
     /// The markers the compiler arguments opt in to. Each `-opt-in` spelling is only lookup input:
     /// it binds once, from the root package, to a classifier identity.
     fn command_line_opt_ins(&self) -> &[TypeName] {
-        self.command_line_opt_ins.get_or_init(|| {
-            let resolver = self.resolver();
-            self.file
-                .opted_in_markers
-                .iter()
-                .filter_map(|spelling| resolver.fully_qualified_classifier(spelling))
-                .collect()
-        })
+        self.command_line_opt_ins
+            .get_or_init(|| self.bind_command_line_opt_ins().0)
+    }
+
+    /// Bind every `-opt-in` marker and report each spelling that names no classifier, as kotlinc
+    /// does once per compilation. Every checking unit binds the same arguments; the module-level
+    /// sink keeps one copy of each warning.
+    pub(super) fn report_unresolved_command_line_opt_ins(&mut self) {
+        let (bound, unresolved) = self.bind_command_line_opt_ins();
+        for spelling in unresolved {
+            self.diags.module_warning(format!(
+                "opt-in requirement marker '{spelling}' is unresolved. Make sure it's present in \
+                 the module dependencies."
+            ));
+        }
+        let _ = self.command_line_opt_ins.set(bound);
+    }
+
+    fn bind_command_line_opt_ins(&self) -> (Vec<TypeName>, Vec<String>) {
+        let resolver = self.resolver();
+        let mut bound = Vec::new();
+        let mut unresolved = Vec::new();
+        for spelling in &self.file.opted_in_markers {
+            match resolver.fully_qualified_classifier(spelling) {
+                Some(marker) => bound.push(marker),
+                None => unresolved.push(spelling.clone()),
+            }
+        }
+        (bound, unresolved)
     }
 
     fn report_opt_in_requirements(&mut self, span: Span, requirements: &[OptInRequirement]) {

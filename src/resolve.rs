@@ -37333,6 +37333,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
     }
     if resolved_index.is_some() {
         c.push_file_policies(scope);
+        c.report_unresolved_command_line_opt_ins();
     }
 
     // The streaming path already published contracts as stable, semantically resolved Pass-1

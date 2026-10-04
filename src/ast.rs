@@ -564,6 +564,8 @@ impl TrFlags {
     // sole diagnostic authority, however; marking the duplicate detached occurrence prevents a
     // file-scope fallback from rechecking it outside its declaration's lexical suppression scope.
     const ANNOTATION: u16 = 1 << 8;
+    /// The element type written on a `vararg` parameter; the parameter's type is its array.
+    const VARARG_ELEMENT: u16 = 1 << 9;
 
     #[inline]
     const fn with(mut self, mask: u16, on: bool) -> Self {
@@ -614,6 +616,10 @@ impl TrFlags {
     #[inline]
     pub const fn with_annotation(self, on: bool) -> Self {
         self.with(Self::ANNOTATION, on)
+    }
+    #[inline]
+    pub const fn with_vararg_element(self, on: bool) -> Self {
+        self.with(Self::VARARG_ELEMENT, on)
     }
 }
 
