@@ -265,3 +265,17 @@ impl IrFile {
             .copied()
     }
 }
+
+/// The custom serializer CLASS a source classifier's `@Serializable(with = …)` names, constructed
+/// by the classifier's generated `serializer(…)` accessor through the primary constructor the
+/// serialization frontend selected and validated. A backend plugin realizes exactly this choice;
+/// it never inspects the serializer's constructors itself.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IrCustomSerializerConstruction {
+    pub serializer: TypeName,
+    /// The selected constructor's declared parameter types.
+    pub parameters: Box<[Ty]>,
+    /// The accessor's operand ordinal passed to each constructor parameter, in parameter order.
+    pub operands: Box<[u32]>,
+    pub target: IrConstructorTarget,
+}

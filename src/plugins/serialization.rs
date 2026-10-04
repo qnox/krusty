@@ -13,6 +13,7 @@
 
 mod cached_serializer;
 mod constructed_standard_serializers;
+mod custom_serializer_class;
 mod descriptor_element;
 mod deserialization_constructor;
 mod deserialize_body;
@@ -856,9 +857,9 @@ fn build_polymorphic_serializer(ir: &mut IrFile, classifier: TypeName) -> ExprId
 impl SerializationPlugin {
     /// Add `static serializer(): KSerializer<C>` returning the explicit serializer `X` from
     /// `@Serializable(with = X::class)`. An `object` serializer (`object Other : KSerializer<…>`) is its
-    /// `INSTANCE`; a file-declared serializer class taking one `KSerializer` per type parameter is
-    /// `new X(typeSerial0, …)`; another class serializer (`ContextualSerializer`/
-    /// `PolymorphicSerializer`, single `KClass` ctor) is
+    /// `INSTANCE`; a serializer class the frontend selected a primary constructor for is
+    /// `new X(typeSerial0, …)` through exactly that recorded construction; another class
+    /// serializer (`ContextualSerializer`/`PolymorphicSerializer`, single `KClass` ctor) is
     /// `new X(Reflection.getOrCreateKotlinClass(C.class))`.
     fn add_custom_serializer_accessor(
         ir: &mut IrFile,
@@ -871,40 +872,40 @@ impl SerializationPlugin {
         } else {
             type_name(&companion_fq(class_fq))
         };
-        // A serializer CLASS this file declares with one `KSerializer` constructor parameter per
-        // type parameter is constructed from the frontend accessor's own `typeSerialN` operands,
-        // exactly as kotlinc's accessor does (`new X(typeSerial0)`). The accessor is a member of
-        // its owner, so slot 0 is the receiver and the declared operands start at 1.
-        let constructed = frontend_serializer_accessor(ir, frontend_owner).and_then(|accessor| {
-            let arity = ir.functions[accessor as usize].params.len();
-            let serializer = ir
-                .classes
-                .iter()
-                .position(|class| class.fq_name_id() == custom && !class.is_object)?;
-            element_serializer::takes_one_serializer_per_type_parameter(
-                ir,
-                serializer as u32,
-                arity,
-            )
-            .then_some(arity)
-        });
+        // The frontend selected and validated the serializer's primary constructor and mapped the
+        // accessor's `typeSerialN` operands onto its parameters. The accessor is a member of its
+        // owner, so slot 0 is the receiver and the declared operands start at 1.
+        let construction = ir
+            .custom_serializer_constructions
+            .get(&type_name(class_fq))
+            .filter(|construction| construction.serializer == custom)
+            .filter(|_| frontend_serializer_accessor(ir, frontend_owner).is_some())
+            .cloned();
         // An OBJECT serializer has no public constructor — return its singleton `INSTANCE`.
-        let inst = if let Some(arity) = constructed {
-            let args = (0..arity)
-                .map(|parameter| ir.add_expr(IrExpr::GetValue(parameter as u32 + 1)))
+        let inst = if let Some(construction) = construction {
+            let args = construction
+                .operands
+                .iter()
+                .map(|&operand| ir.add_expr(IrExpr::GetValue(operand + 1)))
                 .collect();
-            let construction = ir.add_expr(IrExpr::New {
-                internal: custom,
+            // A primary constructor this file declares is realized from its own class; another
+            // file's is reached through its declared parameters, as an ordinary module call is.
+            let declared_here = ir.class_id_by_name(construction.serializer).is_some();
+            let new = ir.add_expr(IrExpr::New {
+                internal: construction.serializer,
                 args,
-                ctor_params: None,
+                ctor_params: (!declared_here).then(|| construction.parameters.to_vec()),
                 ctor_desc: None,
                 external_target: None,
                 defaults: Box::new([]),
                 default_prefix_count: 0,
             });
+            ir.construction_declared_params
+                .insert(new, construction.parameters.clone());
+            ir.construction_targets.insert(new, construction.target);
             ir.add_expr(IrExpr::TypeOp {
                 op: IrTypeOp::Cast,
-                arg: construction,
+                arg: new,
                 type_operand: kserializer_of(class_ty(class_fq)),
             })
         } else if let Some(oid) = ir
@@ -1250,6 +1251,14 @@ impl IrPlugin for SerializationPlugin {
             ctx,
             self.compiler_plugin,
         ));
+    }
+
+    fn select_named_class_constructor(
+        &self,
+        ctx: &crate::plugins::FrontendNamedClassContext<'_>,
+        diagnostics: &mut Vec<crate::plugins::FrontendPluginDiagnostic>,
+    ) -> Option<crate::plugins::FrontendNamedClassConstruction> {
+        custom_serializer_class::select_constructor(ctx, self.compiler_plugin, diagnostics)
     }
 
     fn plan_frontend_expressions(
