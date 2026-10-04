@@ -7734,46 +7734,28 @@ impl<'a> Emitter<'a> {
             // A sibling source class has no classfile in `bodies`, so this is the only realization
             // that cannot read the exact JVM accessor spelling from a declaration. Exact selected
             // spellings returned above; an unstamped ordinary property keeps Kotlin's convention.
-            // The semantic IR node itself remains target-neutral.
             name: stamped
                 .map(|(name, _)| name.clone())
                 .or_else(|| selected.map(|(name, _)| name.clone()))
                 .unwrap_or_else(|| crate::names::property_getter_name(operation.name)),
-            // The logical property type is intentionally retained on the node for the surrounding
-            // expression. Its call boundary instead uses the most specific declaration fact: a JVM
-            // value-class realization when present, otherwise the semantic declaration type. Without
-            // that split a generic `getA(): Object` can be called as `getA(): A`, or a mangled
-            // `getId-…(): String` as `getId-…(): Id`; both are invalid descriptors. An annotation
-            // member declared `KClass` is the exception that returns `java.lang.Class`.
+            // Keep the logical type on the node; the call boundary uses the JVM realization when
+            // present, otherwise the declaration type. That prevents calling generic `getA(): Object`
+            // as `getA(): A`, or mangled `getId-…(): String` as `getId-…(): Id`.
             descriptor: method_descriptor(
                 &[],
-                ir_ty_to_jvm(&self.annotation_member_read_ty(
+                ir_ty_to_jvm(&crate::jvm::annotation_kclass::annotation_member_read_type(
+                    self.classifiers,
                     operation.owner,
                     stored_value_ty(*physical.unwrap_or(operation.ty)),
                 )),
             ),
             is_static: false,
             // Resolution carries source-module shape because a sibling class is not in `bodies`.
-            // For classpath owners the body reader remains authoritative.
             is_interface: operation.interface
                 || self.bodies.owner_is_interface_name(operation.owner),
             static_receiver: None,
         };
         self.emit_realized_property_read(&operation, access, code)
-    }
-
-    /// JVM result of a property read planned without the declaring class file. Annotation members
-    /// declared `KClass` return `java.lang.Class`; every other property keeps its semantic type.
-    fn annotation_member_read_ty(&self, owner: TypeName, ty: Ty) -> Ty {
-        if self
-            .classifiers
-            .classifier(owner)
-            .is_some_and(|classifier| classifier.is_annotation())
-        {
-            crate::jvm::annotation_kclass::annotation_member_jvm_type(ty)
-        } else {
-            ty
-        }
     }
 
     /// Realize `IrExpr::PropertyWrite` — the write analogue of [`Self::emit_property_read`], and the same
