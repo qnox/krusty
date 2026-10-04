@@ -100,6 +100,28 @@ fn annotations_on_companion_accessors_match_kotlinc() {
     ]);
 }
 
+/// `@JvmName` on a declared accessor renames the accessor method, and `@Metadata`'s
+/// `JvmPropertySignature` names the renamed method.
+#[test]
+fn a_jvm_name_on_a_declared_accessor_renames_it_like_kotlinc() {
+    assert_module_matches_kotlinc(&[(
+        "Renamed.kt",
+        "package accessors\n\
+         \n\
+         class Box(var raw: Int) {\n\
+         \x20   var n: Int\n\
+         \x20       @JvmName(\"grab\") get() = raw\n\
+         \x20       @JvmName(\"stash\") set(v) { raw = v }\n\
+         }\n\
+         \n\
+         val Box.tag: String @JvmName(\"grabTag\") get() = \"T:\" + raw\n\
+         \n\
+         var counter: Int = 1\n\
+         \x20   @JvmName(\"readCounter\") get() = field\n\
+         \x20   @JvmName(\"writeCounter\") set(value) { field = value }\n",
+    )]);
+}
+
 const WRONG_TARGETS: &str = "package accessors\n\
     \n\
     @Target(AnnotationTarget.FUNCTION)\n\

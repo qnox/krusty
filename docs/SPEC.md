@@ -6401,8 +6401,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `annotation` (f7), with arguments. A setter falls off the end of its body into its implicit
   `return`, which is marked on the body's last line (a block's closing `}`, an expression body's
   last line), as kotlinc does. Known gaps, independent of annotations: a written accessor with no
-  body (`get` on its own line) keeps the property's line instead of its own; `@JvmName` on an
-  accessor does not rename it; use-site targets (`@get:A`) are not part of this path. Tests:
+  body (`get` on its own line) keeps the property's line instead of its own; `@JvmName` renames a
+  declared accessor (and the package `JvmPropertySignature` names the renamed method) but not a
+  bodyless one; use-site targets (`@get:A`) are not part of this path. Tests:
   `property_accessor_annotation_e2e`, `expression_line_marks_e2e` (setter fall-through),
   `types::annotation_targets` unit tests.
 

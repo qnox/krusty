@@ -1312,6 +1312,10 @@ pub fn facade_package_metadata_from_ir(
         })
         .collect::<Vec<_>>();
 
+    // A declared accessor's realized name, which `@JvmName` may have changed.
+    let accessor_jvm_name = |function: Option<u32>| {
+        function.map(|function| ir.functions[function as usize].name.clone())
+    };
     let properties = ir
         .package_properties
         .iter()
@@ -1319,27 +1323,30 @@ pub fn facade_package_metadata_from_ir(
             // Which accessors the facade really declares, declared or compiler-default: a private
             // property with default accessors has none, and kotlinc's `JvmPropertySignature` then
             // names neither.
-            let (has_getter, has_setter, setter_function) =
-                match ir.local_property_layouts.get(&declaration.property) {
-                    Some(crate::ir::IrLocalPropertyLayout::TopLevelStorage {
-                        storage,
-                        getter,
-                        setter,
-                        ..
-                    }) => (
-                        getter.is_some() || ir.has_jvm_default_static_getter(*storage),
-                        setter.is_some() || ir.has_jvm_default_static_setter(*storage),
-                        *setter,
-                    ),
-                    Some(crate::ir::IrLocalPropertyLayout::TopLevelAccessor { setter, .. }) => {
-                        (true, setter.is_some(), *setter)
-                    }
-                    Some(
-                        crate::ir::IrLocalPropertyLayout::Member { .. }
-                        | crate::ir::IrLocalPropertyLayout::MemberExtension { .. },
-                    )
-                    | None => (true, declaration.mutable, None),
-                };
+            let (has_getter, has_setter, getter_function, setter_function) = match ir
+                .local_property_layouts
+                .get(&declaration.property)
+            {
+                Some(crate::ir::IrLocalPropertyLayout::TopLevelStorage {
+                    storage,
+                    getter,
+                    setter,
+                    ..
+                }) => (
+                    getter.is_some() || ir.has_jvm_default_static_getter(*storage),
+                    setter.is_some() || ir.has_jvm_default_static_setter(*storage),
+                    *getter,
+                    *setter,
+                ),
+                Some(crate::ir::IrLocalPropertyLayout::TopLevelAccessor {
+                    getter, setter, ..
+                }) => (true, setter.is_some(), Some(*getter), *setter),
+                Some(
+                    crate::ir::IrLocalPropertyLayout::Member { .. }
+                    | crate::ir::IrLocalPropertyLayout::MemberExtension { .. },
+                )
+                | None => (true, declaration.mutable, None, None),
+            };
             let companion = declaration.is_companion_extension();
             let accessor_parameters = declaration
                 .context_parameters
@@ -1354,7 +1361,9 @@ pub fn facade_package_metadata_from_ir(
             let ty_descriptor = crate::jvm::names::type_descriptor(declaration.ty);
             let getter = has_getter.then(|| {
                 (
-                    crate::jvm::names::property_getter_name(&declaration.name),
+                    accessor_jvm_name(getter_function).unwrap_or_else(|| {
+                        crate::jvm::names::property_getter_name(&declaration.name)
+                    }),
                     format!("({descriptor_parameters}){ty_descriptor}"),
                 )
             });
@@ -1362,7 +1371,9 @@ pub fn facade_package_metadata_from_ir(
                 let mut parameters = descriptor_parameters;
                 parameters.push_str(&ty_descriptor);
                 (
-                    crate::jvm::names::property_setter_name(&declaration.name),
+                    accessor_jvm_name(setter_function).unwrap_or_else(|| {
+                        crate::jvm::names::property_setter_name(&declaration.name)
+                    }),
                     format!("({parameters})V"),
                 )
             });
