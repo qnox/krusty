@@ -73,6 +73,7 @@ pub mod property_annotations;
 mod property_realizations;
 mod property_references;
 pub mod property_storage;
+pub(crate) mod protected_dependency_calls;
 mod ranges;
 #[cfg(test)]
 pub(crate) mod realization_test_support;

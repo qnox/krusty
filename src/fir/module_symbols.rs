@@ -577,6 +577,7 @@ impl<'a> StreamedModuleSymbols<'a> {
             physical_ret: result,
             suspend: false,
             is_abstract: false,
+            visibility: crate::types::Visibility::Public,
             owner_is_interface: false,
             member_realization: MemberRealization::Dispatch,
             inline: InlineKind::None,

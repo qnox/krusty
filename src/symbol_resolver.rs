@@ -7987,6 +7987,7 @@ mod tests {
             suspend: false,
             is_abstract: false,
             owner_is_interface: false,
+            visibility: crate::types::Visibility::Public,
             member_realization: crate::libraries::MemberRealization::Dispatch,
             inline: crate::libraries::InlineKind::None,
             default_call: true,
