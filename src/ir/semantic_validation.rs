@@ -769,6 +769,12 @@ impl IrFile {
                 .copied(),
         )?;
         reject_all(
+            "custom serializer constructor parameter",
+            self.custom_serializer_constructions
+                .values()
+                .flat_map(|construction| construction.parameters.iter().copied()),
+        )?;
+        reject_all(
             "property declaration type",
             self.property_declaration_types.values().copied(),
         )?;

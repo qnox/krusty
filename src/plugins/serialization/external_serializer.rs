@@ -65,6 +65,16 @@ pub(crate) fn generated_external_serializer(
     }
 }
 
+/// The serializer of a classifier whose `@Serializable(with = …)` names a serializer CLASS rather
+/// than an object. kotlinc never constructs that class at a use site: the classifier's generated
+/// companion `serializer(…)` does, taking one `KSerializer` per type parameter, and every element
+/// of the classifier calls that accessor.
+pub(crate) fn custom_class_serializer(
+    declaration: &ClassifierDeclarationFacts,
+) -> Option<ExternalSerializer> {
+    companion_serializer(declaration)
+}
+
 /// The companion that carries the generated `serializer(…)`. A dependency's metadata records it,
 /// generated or declared. Absence is an unsupported external shape, never permission to invent the
 /// conventional name.
