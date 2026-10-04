@@ -13,7 +13,7 @@ fun <L> lazy(initializer: () -> L): Lazy<L> = Lazy(initializer())
 operator fun <G> Lazy<G>.getValue(thisRef: Any?, property: Any?): G = value
 fun usedInCondition() = buildConsumer { x ->
     val y by lazy { expectConsumerString(x); "OK" }
-    if (y.length != 2) throw RuntimeException("fail")
+    if (y.length != 2) error("fail")
 }
 fun unused() = buildConsumer { x ->
     val y by lazy { expectConsumerString(x); "OK" }
@@ -25,7 +25,7 @@ fun usedAsResult() = buildConsumer { x ->
 fun inTry() = try {
     buildConsumer { x ->
         val y by lazy { expectConsumerString(x); "OK" }
-        if (y.length != 2) throw RuntimeException("fail")
+        if (y.length != 2) error("fail")
     }
 } finally {
 }
