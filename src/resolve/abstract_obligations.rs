@@ -112,15 +112,16 @@ impl Checker<'_> {
                     for member in &delegation.members {
                         match member {
                             crate::fir::ResolvedDelegatedMember::Function(function) => {
-                                delegated_functions.insert((
-                                    function.name.to_string(),
-                                    function
-                                        .overridden
-                                        .parameters
-                                        .iter()
-                                        .map(|parameter| erased_type_key(parameter.get()))
-                                        .collect(),
-                                ));
+                                for overridden in &function.overridden {
+                                    delegated_functions.insert((
+                                        function.name.to_string(),
+                                        overridden
+                                            .parameters
+                                            .iter()
+                                            .map(|parameter| erased_type_key(parameter.get()))
+                                            .collect(),
+                                    ));
+                                }
                             }
                             crate::fir::ResolvedDelegatedMember::Property(property) => {
                                 delegated_properties.insert(property.name.to_string());

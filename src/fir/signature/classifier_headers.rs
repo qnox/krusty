@@ -6,9 +6,9 @@
 
 use super::super::{HeaderSyntaxArena, HeaderTypeId, ResolvedTy};
 use super::{
-    DeclarationId, ResolvedClassifierContextParameter, ResolvedInterfaceDelegation,
-    ResolvedModuleIndex, UnpublishableType,
+    DeclarationId, ResolvedClassifierContextParameter, ResolvedModuleIndex, UnpublishableType,
 };
+use crate::fir::ResolvedInterfaceDelegation;
 use crate::types::{Ty, TypeName};
 
 #[derive(Clone, Debug, Eq, PartialEq)]

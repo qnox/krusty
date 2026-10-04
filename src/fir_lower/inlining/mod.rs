@@ -168,8 +168,11 @@ fn checked_substitution_bindings<'a>(
 
 impl BodyLowering<'_> {
     /// Declare an omitted parameter's local, initialized by a copy of the declaration's checked
-    /// default. The copy reads the expansion's parameter locals and moves its own locals above the
-    /// current temporaries. A default that reads a spliced lambda parameter has no value to read.
+    /// default. The copy reads the expansion's preceding parameter locals and moves its own locals
+    /// above the current temporaries. The checker numbers only parameters in scope before this
+    /// default; including the parameter being initialized would reinterpret the default's first
+    /// local as that parameter. A default that reads a spliced lambda parameter has no value to
+    /// read.
     fn inline_default_declaration(
         &mut self,
         default: ExprId,
@@ -213,7 +216,7 @@ impl BodyLowering<'_> {
     }
 
     /// Copy an omitted parameter's default lambda for splicing. Its captures read the expansion's
-    /// parameter locals; its body keeps its own numbering.
+    /// preceding parameter locals; its body keeps its own numbering.
     fn inline_default_lambda(
         &mut self,
         default: ExprId,
@@ -555,7 +558,7 @@ impl BodyLowering<'_> {
         for &index in &default_lambdas {
             let lambda = self.inline_default_lambda(
                 defaults[index]?,
-                &operand_slots,
+                &operand_slots[..index],
                 (&bindings, &reified_bindings),
             )?;
             let IrExpr::Lambda { impl_fn, .. } = *self.ir.expr(lambda) else {
@@ -568,7 +571,7 @@ impl BodyLowering<'_> {
             let default = defaults[index]?;
             let (declaration, cloned) = self.inline_default_declaration(
                 default,
-                &operand_slots,
+                &operand_slots[..index],
                 slot,
                 operand_types[index],
                 (&bindings, &reified_bindings),

@@ -4,6 +4,7 @@
 //! signature solving, checked body ownership, and exhaustive parser coverage.
 
 mod active_source;
+mod annotation_constructor_defaults;
 mod body;
 mod body_check;
 mod body_work;
@@ -15,6 +16,7 @@ mod entry_point;
 mod header;
 mod identities;
 mod inline_body;
+mod interface_delegation;
 mod local_callables;
 mod local_class_capture;
 mod local_class_names;
@@ -33,6 +35,7 @@ mod source_map;
 mod type_parameters;
 
 pub(crate) use active_source::*;
+pub(crate) use annotation_constructor_defaults::publish_checked_annotation_defaults;
 pub use body::value_parameters::FirValueParameterName;
 pub use body::*;
 pub use body_check::*;
@@ -42,6 +45,7 @@ pub use delegate_calls::*;
 pub use entry_point::{MainEntryShape, ResolvedEntryPoint};
 pub use header::*;
 pub use inline_body::*;
+pub use interface_delegation::*;
 pub use local_callables::BodyLocalCallableDeclarationId;
 pub use local_class_capture::*;
 pub use local_class_names::*;

@@ -2377,6 +2377,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   keeping the default bounds. This is the companion-object shape in
   `PerformanceCounter.getCallStack`. Test:
   `tests/contextual_lambda_expected_return_e2e.rs`.
+- **An initialized local statement constrains the enclosing builder call even when its binding is not the result.** `fun <T> buildValue(block: (ValueSink<T>) -> Unit): T` used as
+  `buildValue { x -> val y by deferValue { requireTextSink(x); "OK" }; if (y.length != 2) throw ... }`
+  (KT-65262) infers `String`. The constraint is the initializer's
+  `ValueSink<T> <: ValueSink<String>`.
+  Pass 1 owns that expression-bodied result. An `if` condition is not a dependency of the `if`
+  result, and a local was not itself a statement effect, so an initializer whose binding was read
+  only from that condition — or not read at all — left `T` at `Any?`. kotlinc's builder inference
+  still collects initializer constraints. Every initialized local is therefore a block effect:
+  signature evaluation walks ordinary and delegated initializers. A failed effect does not reject
+  the enclosing result, the same way other statements behave. The `try`/`finally` around that call
+  does not change the constraint; the box covers it. Tests:
+  `tests/delegate_initializer_constraint_e2e.rs`; box:
+  `inference/pcla/pclaRootIsTrySyntheticCallWithDelegate.kt`.
 - **Equally specific candidates: a non-parameterized callable wins.** kotlinc's last tie-break
   (spec 11.7) applied to the receiver-less SAM selection: `assertDoesNotThrow(Executable)` beside
   `<T> assertDoesNotThrow(ThrowingSupplier<T>)` (JUnit, imported as a static) both take a `{ … }`
@@ -5750,6 +5763,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   before the method's code, each call's constants in instruction order, and its fields when the
   field table is written; its `hashCode` names `this` in its `LocalVariableTable`. Tests:
   `tests/annotation_instance_class_rows_e2e.rs`.
+- **A later file's annotation constructor call uses the declaration's closed defaults.** After
+  every file's default bodies are checked, an annotation constructor republishes the constants,
+  enum entries, class literals, arrays, and nested annotation instances those bodies folded. The
+  consuming file lowers that payload with the construction. A same-file call takes the declaring
+  file's lowered default bodies, which replace the compact payload for that file. Tests:
+  `tests/annotation_cross_file_defaults_e2e.rs`,
+  `annotations/instances/annotationInstancesEmptyDefaultLowered.kt`.
 - **A local class interns its `EnclosingMethod` refs before its `InnerClasses` rows.** kotlinc
   visits the `EnclosingMethod` refs before the `InnerClasses` rows, so the enclosing class and
   method come before the local class's own simple name in the pool. The serialized attribute order
@@ -8488,6 +8508,103 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`a_null_cast_to_an_erased_type_parameter_names_it_by_its_owner`),
   `tests/unboxing_coercion_e2e.rs`
   (`failed_null_casts_name_primitive_and_qualified_type_parameter_targets`).
+- **Native runtime: exceptions and integer arithmetic.** `src/native/runtime/krusty_rt.c` raises
+  what Kotlin raises and does not stop there: `kt_throw` RECORDS the exception in the one pending
+  slot and returns, and the caller's check of that slot is the propagation. So every runtime entry
+  that raises must return right after (a null `UInt?` unboxed used to fall through and dereference
+  the null). Integer `/` and `%` by zero record `ArithmeticException: / by zero`; `MIN_VALUE / -1`
+  wraps; `mod` takes the divisor's sign; shift counts are masked to 5/6 bits; unsigned `/`, `%` and
+  `toString` read their operands unsigned; a callable reference hashes as `31 * target +
+  receiver.hashCode()` on the wrapping ring. Two DIVERGENCES from the JVM backend, both deliberate:
+  a runtime exception names Kotlin's class (`kotlin.ArithmeticException: / by zero`, and
+  `assertFailsWith` reads `Expected an exception of class kotlin.IllegalStateException …`) where the
+  JVM names `java.lang.…`; and an uncaught exception prints `Exception in thread "main" <toString>`
+  and ends the program with status 134, this target's code for every abnormal end, where the JVM
+  exits with 1. String literals are interned through one runtime-owned table, so their number is not
+  bounded by the collector's global-root table.
+  Tests: `tests/native_runtime_e2e.rs` (`integer_arithmetic_and_exceptions_answer_as_kotlin_does`,
+  `unboxing_a_null_unsigned_records_a_null_pointer_exception_and_returns`,
+  `equal_callable_references_hash_on_the_wrapping_ring`,
+  `string_literals_outnumbering_the_global_roots_stay_interned_and_alive`). The uncaught path's exit
+  status is not yet driven: a driver cannot observe its own exit, so it lands with the harness's
+  first test of a program that is meant to fail.
+- **Native maps and sets (`src/native/runtime/krusty_rt.c`).** A map is two parallel lists, keys
+  in insertion order, with LINEAR lookup by `equals`; every spelling (`mapOf`, `hashMapOf`,
+  `HashSet()`) answers the insertion-ordered `LinkedHashMap`/`LinkedHashSet`, since the unordered
+  ones leave order unspecified. `keys`, `values` and `entries` are snapshots rather than views, and
+  an entry is a copied pair; `keys`/`entries` copy without comparing, since the keys are distinct.
+  A collection that holds itself renders `(this Map)` / `(this Collection)` in its place, as
+  `AbstractMap`/`AbstractCollection` do. An element member that throws stops the operation there
+  and propagates: `put`/`add` insert nothing, `mapOf`/`setOf`, `toString` and `hashCode` ask no
+  later element. `assert(false) { … }`, `error(x)` and `TODO(x)` whose message throws propagate
+  that exception, not their own. Known divergences: iterating a map walks its entries snapshot, so
+  mutating the map inside the loop raises no `ConcurrentModificationException` (a set's iteration
+  does, as on the JVM); and `values` is a `List`, so it compares equal to a list of the same
+  elements where the JVM's `values` collection compares by identity.
+  Tests: `tests/native_runtime_e2e.rs` (`collection_to_string_self_reference`,
+  `map_stops_at_a_raise`, `map_views_do_not_compare_keys`, `stdlib_thrower_keeps_first_exception`).
+- **Native runtime lists and walks raise the way Kotlin's do, and a raise ends the walk.** `kt_throw`
+  records the exception and comes back, so each runtime raise returns at once and each walk checks
+  for a pending exception after every `next` and every lambda it calls. That covers the lambda's own
+  exception and a `ConcurrentModificationException` from the list it walks. An out-of-bounds
+  `get`/`set`/`add(i, e)`/`removeAt` raises `IndexOutOfBoundsException` and leaves the list as it
+  was. `first()`/`last()` of an empty list, and `next()` on an exhausted array or string iterator,
+  raise `NoSuchElementException`. `ArrayList(-1)` raises `IllegalArgumentException`.
+  `xs.addAll(list)` appends the argument's elements as they were when the call began, so
+  `xs.addAll(xs)` doubles `xs`, as Kotlin's collection `addAll` does. Collecting a range of 2^31 or
+  more elements (up to the full 64-bit span) stops the program as too long, where kotlinc runs out
+  of memory. `IndexedValue.hashCode` wraps like Kotlin's `Int`. A string iterator is linear in the
+  string's length.
+  Tests: `tests/native_runtime_e2e.rs` (drivers under `tests/native_runtime/`).
+- **Native integral ranges and progressions answer what Kotlin's classes answer.** The native
+  runtime (`src/native/runtime/krusty_rt.c`) keeps a range and a progression in one struct, with a
+  flag for which it is, because the two classes differ observably and the step cannot tell them
+  apart (`1..3 step 1` is a progression). A range (`..`, `until`) renders `"$first..$last"`, hashes
+  `31 * first + last`, and equals only a range of the same element type; a progression (`step`,
+  `downTo`, `reversed()`) renders `"$first..$last step $step"` or `"$first downTo $last step
+  ${-step}"`, hashes `31 * (31 * first + last) + step`, and equals a range or a progression with
+  the same first, last and step — the asymmetry of `IntRange` subclassing `IntProgression`, so
+  `(1..3 step 1) == (1..3)` but not the reverse. Two empty ones are equal and hash to `-1`.
+  `last` is the last element reached. `UIntRange`/`ULongRange` read their bounds unsigned in
+  every comparison, membership residue and walk step, so a `ULong` walk across 2^63 neither
+  misreports membership nor overflows; an empty unsigned `until` answers the declared `EMPTY`
+  (`UInt.MAX_VALUE..0u`), not the signed types' `1..0`.
+  Tests: `tests/native_runtime_e2e.rs` (`range_contains_unsigned`, `range_progression_members`,
+  `range_unsigned_until_empty`, `range_iterator_ulong_crosses_sign`).
+- **Native `Double`/`Float` `toString`, `%` and `mod` answer what the JVM answers.** The native
+  runtime (`src/native/runtime/krusty_fp.c`) renders a floating-point value as the SHORTEST decimal
+  that reads back as it, in Java's layout (plain for 10^-3 <= |x| < 10^7, `d.dddEn` outside,
+  `NaN`/`Infinity`/`-0.0` spelled out). Where one significant digit would do, Java's rule also weighs
+  the two-digit decimals and takes the nearer, which is why `Double.MIN_VALUE` is `4.9E-324` and not
+  `5E-324`; the output matches JDK 19+ (the reference compiler's JVM). `%` is IEEE's remainder
+  truncated toward zero (C's `fmod`), computed exactly on the significands, and `a.mod(b)` is
+  Kotlin's own definition, `val r = a % b; if (r != 0.0 && r.sign != b.sign) r + b else r`. NaN BITS
+  are not Kotlin's to specify and differ between JVM hosts, so `%` follows IEEE 754: a NaN operand
+  comes back quieted with its sign and payload, and an invalid operation (`Inf % x`, `x % 0.0`)
+  answers x86's default NaN `0xFFF8…`, what an x86 JVM yields there; an AArch64 or RISC-V JVM
+  answers the positive `0x7FF8…` instead.
+  Tests: `tests/native_runtime_e2e.rs` (`fp_render_known_answers`, `fp_remainder_known_answers`).
+- **Native: a throwing initializer leaves nothing half-built.** An `object`'s instance is
+  published before its constructor runs (a constructor reaching back into its own object must find
+  it), and so are an enum's constants. When the constructor throws, the instance — or every
+  constant, and the enum's ready flag — is withdrawn and the exception carries on, so a later
+  access builds it again and throws again where Kotlin throws (the JVM answers that access with
+  `NoClassDefFoundError`; both are a throw). A top-level initializer that throws ends the program
+  before the entry's first statement, as the JVM's failed facade initializer does.
+  Tests: `tests/native_exceptions_e2e.rs` (`a_throwing_object_initializer_leaves_no_instance_behind`,
+  `a_throwing_enum_constant_leaves_no_constants_behind`,
+  `a_throwing_top_level_initializer_stops_before_the_entry`).
+- **Native: a local classifier is named as Kotlin/Native names it.** The frontend gives a local or
+  anonymous classifier an opaque identity plus its naming provenance (lexical owner, source
+  segments, ordinal), and each target spells the name from that. The walk is shared
+  (`IrFile::realize_local_class_names`); a target supplies only where a name with no classifier
+  owner starts. The JVM nests it in the declaring file's facade (`AKt$box$Local`). Native has no
+  facade class, so it starts in the package: the class local to a top-level `box` is
+  `box$MyLocalObject`, the first anonymous object in it `box$1`, and that is the name a failed
+  cast reports.
+  Tests: `tests/native_try_catch_e2e.rs`
+  (`a_failed_cast_names_a_local_or_anonymous_class_the_way_kotlin_native_does`); the box corpus's
+  `casts/nativeCCEMessage` cases in the native lane.
 - **An extension receiver constrains its declared formal through the receiver's supertypes.** In
   `fun <E> f(a: List<E>, b: List<E>) = a + b`, the receiver `List<E>` reaches
   `Collection<T>.plus` only as `Collection<E>`, which fixes `T := E` for every `plus` overload.
@@ -9110,6 +9227,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   consumer (`Any?`, or a generic parameter) hands that box on unchanged: the checked coercion from
   `T` to `R<Int>` would unbox it and the consumer would box it again, and kotlinc emits neither
   call. Reading `c.a` as `R<Int>` still unboxes once. Tests: `tests/value_class_generic_carrier_e2e.rs`.
+- **A return to a reference supertype is a value-class boundary.** A function declared to return
+  `Any`, `Any?`, or a direct or indirect interface a value class implements hands each returned
+  value, a guard
+  `return` as much as the tail, through a reference slot, exactly as an `Any` parameter or local
+  takes it. A carrier (a value-class parameter, local, or call result) is boxed: `fun f(t: Tag): Any
+  = t` returns `Tag.box-impl(t)`. A value that already is the box is returned unchanged:
+  `fun f(s: Shelf<Tag>): Any = s[0]`, `= s.get(0)`, and `Shelf<Tag?>[0]` as `Any?` are the
+  generic call followed directly by `areturn`, with no `checkcast`, `unbox-impl`, or `box-impl`, as
+  in kotlinc. The checked coercion from the generic result to `Tag` (or `Tag?`) would unbox it and
+  the return would box it again, so the pair is dropped, null-safe forms included. A lambda whose
+  result is `Any` (`val f: () -> Any = { s[0] }`) returns through the same boundary. Tests:
+  `tests/value_class_reference_return_e2e.rs`.
 - **A value-class default of a primary constructor is lowered like the constructor's other code.**
   `class Test(val x: S, val y: S = S("K"))` fills an omitted `y` in its synthetic
   `<init>(String, String, int, DefaultConstructorMarker)`. The default expression runs over the
@@ -10343,6 +10472,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `tests/native_codegen_e2e.rs` (`a_class_declines_by_its_name`,
   `a_top_level_property_declines`, `a_main_taking_its_arguments_declines`),
   `tests/native_try_catch_e2e.rs` (`a_long_try_in_a_reference_position_is_boxed`).
+- **Native: a throwing initializer leaves nothing half-built.** An `object`'s instance is
+  published before its constructor runs (a constructor reaching back into its own object must find
+  it), and so are an enum's constants. When the constructor throws, the instance — or every
+  constant, and the enum's ready flag — is withdrawn and the exception carries on, so a later
+  access builds it again and throws again where Kotlin throws (the JVM answers that access with
+  `NoClassDefFoundError`; both are a throw). A top-level initializer that throws ends the program
+  before the entry's first statement, as the JVM's failed facade initializer does.
+  Tests: `tests/native_exceptions_e2e.rs` (`a_throwing_object_initializer_leaves_no_instance_behind`,
+  `a_throwing_enum_constant_leaves_no_constants_behind`,
+  `a_throwing_top_level_initializer_stops_before_the_entry`).
 
 - **`-Xwarning-level=<NAME>:<SEVERITY>` configures a typed diagnostic identity.** The accepted
   severities are kotlinc's exact, case-sensitive `error`, `warning`, and `disabled` spellings.
@@ -13064,9 +13203,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   interface, rebuilds `KClass` with `Reflection.getOrCreateKotlinClass`, and compares those:
   `Int::class` and `Integer::class` are equal. `hashCode` hashes the stored `Class` through
   `Object.hashCode`, so those two instances hash differently. A Kotlin read of the member
-  invokes the `Class`-returning method and rebuilds the `KClass`. Metadata records the Kotlin
-  type `kotlin.reflect.KClass` and the JVM getter descriptor `()Ljava/lang/Class;`. Tests:
-  `tests/annotation_kclass_member_e2e.rs`,
+  invokes the `Class`-returning method and rebuilds the `KClass`, including a read from another
+  source file of the same module, where the declaring class is not in the file being emitted.
+  Metadata records the Kotlin type `kotlin.reflect.KClass` and the JVM getter descriptor
+  `()Ljava/lang/Class;`. Tests: `tests/annotation_kclass_member_e2e.rs`,
+  `tests/annotation_cross_file_defaults_e2e.rs`,
   `tests/annotation_emission_e2e.rs::an_instantiated_kclass_annotation_reads_its_member`.
 
 - **A missing context argument names its parameter, and a loop's `hasNext` belongs to its iterator.**

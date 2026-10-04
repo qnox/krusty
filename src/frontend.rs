@@ -1309,6 +1309,7 @@ where
         );
         match default_arguments {
             Some(default_arguments) => {
+                crate::fir::publish_checked_annotation_defaults(&mut index, &default_arguments);
                 let (index, sources, body_work) = pass1_headers.finish(index);
                 let bodies = body_work.partition_by_inline(&index);
                 let module = crate::fir::FrontendModule::new(

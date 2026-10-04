@@ -4912,31 +4912,18 @@ impl JvmLibraries {
                                 &m.name,
                                 params.len(),
                             );
-                        // Normalize the exact Kotlin `Any` declaration while its provider identity
-                        // and source member are still together. Later JVM passes consume this role
-                        // from the selected callable; they never rediscover it from call spelling.
-                        // A builtin scalar whose metadata declares no `hashCode` (`Int`) inherits
-                        // `Any`'s; the wrapper method found for it realizes that same declaration.
-                        let inherits_any_member = builtin_cn == crate::types::wk::any()
-                            || (m.realization == crate::libraries::MemberRealization::Dispatch
-                                && m.name == "hashCode"
-                                && super::jvm_class_map::wrapper_internal(Ty::obj_name(
-                                    builtin_cn,
-                                ))
-                                .is_some());
-                        let semantic_role = if inherits_any_member && params.is_empty() {
-                            match m.name.as_str() {
-                                "hashCode" => {
-                                    Some(crate::types::SemanticCallRole::KotlinAnyHashCode)
-                                }
-                                "toString" => {
-                                    Some(crate::types::SemanticCallRole::KotlinAnyToString)
-                                }
-                                _ => None,
-                            }
-                        } else {
-                            None
-                        };
+                        // Exact builtin declarations already carry their role from the shared
+                        // declaration normalizer. A builtin scalar whose metadata declares no
+                        // `hashCode` (`Int`) is the one additional JVM projection: its wrapper
+                        // method realizes the `Any` declaration that the scalar inherits.
+                        let inherited_wrapper_role = (m.realization
+                            == crate::libraries::MemberRealization::Dispatch
+                            && m.name == "hashCode"
+                            && params.is_empty()
+                            && super::jvm_class_map::wrapper_internal(Ty::obj_name(builtin_cn))
+                                .is_some())
+                        .then_some(crate::types::SemanticCallRole::KotlinAnyHashCode);
+                        let semantic_role = m.semantic_role.or(inherited_wrapper_role);
                         let physical_owner = erased_top_member_owner(cn, m.owner.as_ref().copied());
                         let collection_barrier =
                             collection_barrier_role(builtin_cn, scope_name, &params, ret);

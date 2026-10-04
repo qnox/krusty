@@ -87,3 +87,43 @@ fn any_is_the_question_of_whether_there_is_a_value_at_all() {
     expect_box_ok_with_stdlib(src, "AnyIsWhetherThereIsAValue");
     expect_native_box(src, "AnyIsWhetherThereIsAValue", "OK");
 }
+
+#[test]
+fn a_settled_check_still_evaluates_its_receiver() {
+    // The constant is the ANSWER, not the expression. A receiver with effects runs exactly once,
+    // which is what separates folding the answer from dropping the question. Native-only for the
+    // `Nothing` half, for the reason given above.
+    expect_native_box(
+        "var calls = 0\n\
+         fun subject(): Any? { calls++; return \"a\" }\n\
+         fun box(): String {\n\
+         \x20   val never = subject() is Nothing\n\
+         \x20   val always = subject() is Any\n\
+         \x20   if (never) return \"fail: Nothing\"\n\
+         \x20   if (!always) return \"fail: Any\"\n\
+         \x20   return if (calls == 2) \"OK\" else \"fail: $calls\"\n\
+         }\n",
+        "SettledCheckEvaluatesReceiver",
+        "OK",
+    );
+}
+
+#[test]
+fn unit_is_asked_about_as_the_object_it_is() {
+    // `Unit` reaches a check spelled as the object rather than as the carrier the generator names,
+    // and it is one type either way.
+    //
+    // Native-only for the same reason as `Nothing`: `ref_internal` has no `Ty::Unit` arm either, so
+    // krusty's JVM backend answers `"a" is Unit` with `true`.
+    expect_native_box(
+        "fun box(): String {\n\
+         \x20   val value: Any = Unit\n\
+         \x20   val other: Any = \"a\"\n\
+         \x20   if (value !is Unit) return \"fail: Unit is not Unit\"\n\
+         \x20   if (other is Unit) return \"fail: a String is Unit\"\n\
+         \x20   return \"OK\"\n\
+         }\n",
+        "UnitIsAskedAsAnObject",
+        "OK",
+    );
+}
