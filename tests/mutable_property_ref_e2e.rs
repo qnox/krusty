@@ -479,10 +479,15 @@ class ValueIdentityOwner(bits: Int) {
 
 fun box(): String {
     val direct = ValueIdentityOwner::token
-    if ((direct as Any) != (ValueIdentityOwner(1).unbound() as Any)) return "Fail unbound"
+    val unboundMutable = ValueIdentityOwner(1).unbound()
+    if ((direct as Any) != (unboundMutable as Any)) return "Fail unbound"
     val owner = ValueIdentityOwner(2)
-    if ((owner::token as Any) != (owner.bound() as Any)) return "Fail bound"
+    val boundMutable = owner.bound()
+    if ((owner::token as Any) != (boundMutable as Any)) return "Fail bound"
     if (direct.get(owner).bits != 2) return "Fail get"
+    if (unboundMutable.get(owner).bits != 2) return "Fail mutable get"
+    unboundMutable.set(owner, IdentityToken(3))
+    if (boundMutable.get().bits != 3) return "Fail mutable set"
     return "OK"
 }
 "#;
