@@ -11,7 +11,7 @@ use crate::types::{Ty, TypeName};
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct ValueClassDeclaration {
     pub underlying: Ty,
-    pub property: Option<String>,
+    pub declaration: Option<crate::types::DeclaredValueClass>,
 }
 
 pub(super) fn from_class_info(class: &ClassInfo) -> Option<ValueClassDeclaration> {
@@ -35,7 +35,7 @@ pub(super) fn from_class_info(class: &ClassInfo) -> Option<ValueClassDeclaration
     .canonical_semantic();
     Some(ValueClassDeclaration {
         underlying,
-        property: metadata.property_name.clone(),
+        declaration: metadata.declaration.clone(),
     })
 }
 

@@ -2340,6 +2340,10 @@ pub struct IrFile {
     /// native scalar (the unsigned integers) is recorded like any other; its representation is the
     /// backend's question.
     external_value_classes: std::collections::HashMap<TypeName, Ty>,
+    /// The declarations of [`Self::external_value_classes`] as their providers published them: the
+    /// underlying type over the declaration's own type parameters.
+    external_value_class_declarations:
+        std::collections::HashMap<TypeName, crate::types::DeclaredValueClass>,
     /// Expression identity → `(declared value-class name, erased underlying type)` for a construction
     /// rewritten in place by the JVM value-class pass. This records semantic origin rather than the
     /// generated helper's spelling: a source `new` remains distinguishable from an unrelated static call

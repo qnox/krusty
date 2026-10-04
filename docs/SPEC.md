@@ -9197,18 +9197,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `Comparable<T>` signs `Comparable<String>`), except that an underlying type parameter, or an
   array of one, becomes its upper bound (`Arr<Int>` over `Array<T : Int>` signs `[Integer`, so it
   needs no attribute). The expansion continues through nested value classes; a nullable value
-  class keeps its box when the expansion is a primitive or nullable, and makes the expansion
-  nullable otherwise. A value class with no type arguments is mapped in `TypeMappingMode.DEFAULT`,
+  class keeps its box when the expansion is carried as an unboxed JVM scalar or is nullable, and
+  makes the expansion nullable otherwise. A value class declared in a dependency expands the same
+  way, from the declared underlying type and type parameters its metadata publishes. A value class with no type arguments is mapped in `TypeMappingMode.DEFAULT`,
   which writes every declaration-site wildcard even in a return (`ICmp` over `Comparable<Int>`
   returns `Comparable<-Integer>`, `Fn` over `(Int) -> String` returns
   `Function1<-Integer;+String>`); a generic one takes the position's own mode over its expansion.
   The generated members are signed from their kotlinc IR shape: `constructor-impl` declares the
   class's type parameters and returns the class (`<T:Ljava/lang/Integer;>(TT;)I`), a static
   replacement (the `-impl` statics, computed accessors, user `equals`/`hashCode`/`toString`) takes
-  the class `C<T>` first, and `equals-impl0` compares two `C<*>`. A dependency's value class
-  publishes its underlying type with its own parameters already erased to their bounds, so only
-  this file's value classes have arguments to substitute. Tests: `tests/value_class_signature_e2e.rs`
-  (every method of five value classes and their callers against kotlinc). Corpus:
+  the class `C<T>` first, and `equals-impl0` compares two `C<*>`. Tests:
+  `tests/value_class_signature_e2e.rs` (every method of five value classes and their callers
+  against kotlinc, in one file and with the value classes in a kotlinc-built dependency). Corpus:
   `inlineClasses/*Generic*` (`constructor-impl`), `inlineClasses/kt26103_*`.
 - **A `Nothing` override of a value-class member is reached through mangled bridges.** The
   supertype's accessor or function returning a value class is named with the value-class hash

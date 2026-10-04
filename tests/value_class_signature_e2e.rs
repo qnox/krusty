@@ -3,7 +3,8 @@
 //! arguments substituted, or the upper bound for an underlying type parameter (or array of one). A
 //! value class without type arguments is spelled with every declaration-site wildcard, even as a
 //! return. The generated `constructor-impl` declares the class's type parameters and returns the
-//! class, and the `-impl` statics take the class as their first parameter.
+//! class, and the `-impl` statics take the class as their first parameter. A value class declared
+//! in a dependency expands the same way, from the declaration its metadata publishes.
 
 use super::common;
 
@@ -87,4 +88,80 @@ fn method_signatures(bytes: &[u8]) -> Vec<(String, String, Option<String>)> {
             )
         })
         .collect()
+}
+
+/// Generic value classes over a type parameter in variant positions and in an array, declared in a
+/// dependency kotlinc builds.
+const DEPENDENCY: &str = "package dep\n\
+interface Sink<in T> { fun put(value: T): String }\n\
+interface Source<out T> { fun take(): T }\n\
+open class Label(val text: String)\n\
+class Reader : Sink<Label> { override fun put(value: Label): String = value.text }\n\
+class Fixed(val label: Label) : Source<Label> { override fun take(): Label = label }\n\
+@JvmInline value class Plain(val sink: Sink<Label>)\n\
+@JvmInline value class Wrapped<T>(val sink: Sink<T>)\n\
+@JvmInline value class Produced<T>(val source: Source<T>)\n\
+@JvmInline value class Bounded<T : Label>(val value: T)\n\
+@JvmInline value class Cells<T : Label>(val cells: Array<T>)\n";
+
+const CONSUMER: &str = "import dep.*\n\
+fun plain(value: Plain): Plain = value\n\
+fun wrapped(value: Wrapped<Label>): Wrapped<Label> = value\n\
+fun produced(value: Produced<Label>): Produced<Label> = value\n\
+fun <T> generic(value: Wrapped<T>): Wrapped<T> = value\n\
+fun star(value: Wrapped<*>): Wrapped<*> = value\n\
+fun bounded(value: Bounded<Label>): Bounded<Label> = value\n\
+fun cells(value: Cells<Label>): Cells<Label> = value\n\
+fun box(): String {\n\
+    val first = plain(Plain(Reader())).sink.put(Label(\"O\"))\n\
+    val second = generic(wrapped(Wrapped(Reader()))).sink.put(produced(Produced(Fixed(Label(\"K\")))).source.take())\n\
+    val third = bounded(Bounded(Label(\"\"))).value.text + (star(Wrapped(Reader())).sink as Reader).put(Label(\"\"))\n\
+    return first + second + third + cells(Cells(arrayOf(Label(\"\")))).cells[0].text\n\
+}\n";
+
+#[test]
+fn dependency_value_class_shapes_run() {
+    assert_eq!(
+        common::expect_box_run_against_kotlinc(DEPENDENCY, CONSUMER).as_deref(),
+        Some("OK")
+    );
+}
+
+#[test]
+fn dependency_value_class_positions_sign_as_kotlinc() {
+    let library =
+        common::kotlinc_library(DEPENDENCY).expect("reference kotlinc builds the dependency");
+    let dir = common::scratch_dir().expect("scratch directory");
+    let path = dir.join("DependencyValueClasses.kt");
+    std::fs::write(&path, CONSUMER).expect("write source");
+    let out = dir.join("ref");
+    let (code, stderr) = common::kotlinc_compile(&[
+        "-d".to_string(),
+        out.to_string_lossy().into_owned(),
+        "-cp".to_string(),
+        library.to_string_lossy().into_owned(),
+        path.to_string_lossy().into_owned(),
+    ])
+    .expect("reference kotlinc is provisioned");
+    assert_eq!(code, 0, "kotlinc failed: {stderr}");
+    let krusty = common::compile_in_process_metadata_cp_module_target(
+        CONSUMER,
+        "DependencyValueClasses",
+        &[common::stdlib_jar(), library],
+        "main",
+        None,
+    )
+    .expect("krusty compiles the consumer");
+    let class = "DependencyValueClassesKt";
+    let reference = std::fs::read(out.join(format!("{class}.class")))
+        .unwrap_or_else(|_| panic!("kotlinc did not emit {class}"));
+    let (_, emitted) = krusty
+        .iter()
+        .find(|(emitted, _)| emitted == class)
+        .unwrap_or_else(|| panic!("krusty did not emit {class}"));
+    assert_eq!(
+        method_signatures(emitted),
+        method_signatures(&reference),
+        "{class}: generic method signatures"
+    );
 }

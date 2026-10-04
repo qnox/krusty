@@ -305,8 +305,17 @@ impl<'a> StreamedModuleSymbols<'a> {
                             .index
                             .signature(declaration)
                             .map(|signature| signature.result.get());
-                        projected.value_underlying_property =
-                            self.index.declaration_name(declaration).map(str::to_owned);
+                        projected.value_declaration = projected
+                            .value_underlying
+                            .zip(self.index.declaration_name(declaration))
+                            .zip(self.index.own_type_parameter_types(owner))
+                            .map(|((underlying, property), type_parameters)| {
+                                crate::types::DeclaredValueClass {
+                                    property: property.into(),
+                                    underlying,
+                                    type_parameters,
+                                }
+                            });
                     }
                     let Some((name, value)) = self
                         .index

@@ -5,7 +5,8 @@
 //! over `Comparable<T>` signs `Comparable<String>`), except that an underlying type parameter, or an
 //! array of one, becomes its upper bound (`Arr<Int>` over `Array<T : Int>` signs `[Integer`). It
 //! continues through nested value classes. A nullable value class keeps its box when the expansion
-//! is a primitive or itself nullable, and otherwise makes the expansion nullable.
+//! is carried as an unboxed JVM scalar or is itself nullable, and otherwise makes the expansion
+//! nullable.
 //!
 //! The wildcard mode follows `getOptimalModeForSignaturePart`: a value class without type arguments
 //! is mapped in `TypeMappingMode.DEFAULT`, whose arguments write every declaration-site wildcard
@@ -58,10 +59,12 @@ impl JvmSignatureFormatter<'_> {
                 }
                 let upper = *bound;
                 let expanded = self.expanded(upper, visited)?;
-                let upper_is_primitive_or_value =
-                    is_primitive(upper) || self.underlying(upper.non_null()).is_some();
+                let upper_is_scalar_or_value =
+                    is_unboxed_jvm_scalar(upper) || self.underlying(upper.non_null()).is_some();
                 Some(
-                    if is_primitive(expanded) && is_nullable_type(ty) && upper_is_primitive_or_value
+                    if is_unboxed_jvm_scalar(expanded)
+                        && is_nullable_type(ty)
+                        && upper_is_scalar_or_value
                     {
                         Ty::nullable(upper)
                     } else if is_nullable_type(expanded) || !ty.is_nullable() {
@@ -85,7 +88,7 @@ impl JvmSignatureFormatter<'_> {
                 let expanded = self.expanded(underlying, visited)?;
                 Some(if !is_nullable_type(ty) {
                     expanded
-                } else if is_nullable_type(expanded) || is_primitive(expanded) {
+                } else if is_nullable_type(expanded) || is_unboxed_jvm_scalar(expanded) {
                     ty
                 } else {
                     Ty::nullable(expanded)
@@ -103,31 +106,47 @@ impl JvmSignatureFormatter<'_> {
         let Ty::Obj(classifier, arguments) = ty else {
             return None;
         };
-        // A dependency's declaration publishes its underlying type with its own type parameters
-        // already erased to their bounds, so only this file's classes have arguments to substitute.
-        let declared = match self.current_class(classifier) {
-            Some(class) => class.fields.first().filter(|_| class.is_value)?.ty,
-            None => *self.ir.external_value_class_name(classifier)?,
+        let (declared, parameters) = match self.current_class(classifier) {
+            Some(class) => (
+                class.fields.first().filter(|_| class.is_value)?.ty,
+                self.ir
+                    .class_signature_name(classifier)
+                    .map(|signature| {
+                        signature
+                            .type_params
+                            .iter()
+                            .map(crate::ir::IrTypeParameter::ty)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            ),
+            None => {
+                self.ir.external_value_class_name(classifier)?;
+                let Some(declaration) = self.ir.external_value_class_declaration(classifier) else {
+                    self.run.set_emit_error(format!(
+                        "internal: value class '{}' has no published declaration",
+                        classifier.render()
+                    ));
+                    return None;
+                };
+                (declaration.underlying, declaration.type_parameters.to_vec())
+            }
         };
         // An argument's type, or the parameter's upper bound for a star.
-        let bindings = self
-            .ir
-            .class_signature_name(classifier)
-            .map(|signature| {
-                signature
-                    .type_params
-                    .iter()
-                    .zip(arguments.iter())
-                    .map(|(parameter, argument)| {
-                        let argument = match argument {
-                            Ty::StarProjection(_) => parameter.upper_bound(),
-                            argument => argument.projection_inner().unwrap_or(*argument),
-                        };
-                        (parameter.semantic_name.clone(), argument)
-                    })
-                    .collect::<HashMap<_, _>>()
+        let bindings = parameters
+            .iter()
+            .zip(arguments.iter())
+            .map(|(parameter, argument)| {
+                let Ty::TyParam(name, bound) = *parameter else {
+                    panic!("a declared type parameter is a type-parameter type");
+                };
+                let argument = match argument {
+                    Ty::StarProjection(_) => *bound,
+                    argument => argument.projection_inner().unwrap_or(*argument),
+                };
+                (name.to_string(), argument)
             })
-            .unwrap_or_default();
+            .collect::<HashMap<_, _>>();
         Some(match type_parameter_or_array_thereof(declared) {
             Some(parameter) => {
                 substitute_upper_bound(declared, parameter.substitute_erased(&bindings))
@@ -168,8 +187,9 @@ fn substitute_upper_bound(ty: Ty, upper: Ty) -> Ty {
     }
 }
 
-/// kotlinc's `isPrimitiveType`: a non-null built-in primitive.
-fn is_primitive(ty: Ty) -> bool {
+/// Whether `ty` is carried as an unboxed JVM scalar (`I`, `J`, `Z`…) when it is not null; kotlinc
+/// asks `isPrimitiveType`. An unsigned type is a value class here, expanded through its own carrier.
+fn is_unboxed_jvm_scalar(ty: Ty) -> bool {
     ty.is_jvm_scalar() && !ty.is_unsigned()
 }
 
