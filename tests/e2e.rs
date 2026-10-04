@@ -44,6 +44,8 @@ mod annotated_setter_parameter_e2e;
 mod annotation_array_literal_e2e;
 #[path = "annotation_class_element_e2e.rs"]
 mod annotation_class_element_e2e;
+#[path = "annotation_cross_file_defaults_e2e.rs"]
+mod annotation_cross_file_defaults_e2e;
 #[path = "annotation_emission_e2e.rs"]
 mod annotation_emission_e2e;
 #[path = "annotation_impl_class_e2e.rs"]
@@ -579,6 +581,8 @@ mod deferred_val_init_e2e;
 mod definitely_non_null_type_e2e;
 #[path = "delegate_by_lazy_e2e.rs"]
 mod delegate_by_lazy_e2e;
+#[path = "delegate_initializer_constraint_e2e.rs"]
+mod delegate_initializer_constraint_e2e;
 #[path = "delegate_scalar_boundary_e2e.rs"]
 mod delegate_scalar_boundary_e2e;
 #[path = "delegated_local_prop_e2e.rs"]

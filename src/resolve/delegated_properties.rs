@@ -387,7 +387,7 @@ pub(super) fn select_delegate_operator(
     name: &str,
     args: &[Ty],
 ) -> DelegateConventionSelection {
-    select_delegate_operator_in_kind(resolver, receiver, name, args, None)
+    select_delegate_operator_in_kind(resolver, receiver, name, args, None, None)
 }
 
 pub(super) fn select_delegate_operator_kind(
@@ -396,8 +396,9 @@ pub(super) fn select_delegate_operator_kind(
     name: &str,
     args: &[Ty],
     kind: crate::libraries::FnKind,
+    expected_result: Option<Ty>,
 ) -> DelegateConventionSelection {
-    select_delegate_operator_in_kind(resolver, receiver, name, args, Some(kind))
+    select_delegate_operator_in_kind(resolver, receiver, name, args, Some(kind), expected_result)
 }
 
 fn select_delegate_operator_in_kind(
@@ -406,6 +407,7 @@ fn select_delegate_operator_in_kind(
     name: &str,
     args: &[Ty],
     kind: Option<crate::libraries::FnKind>,
+    expected_result: Option<Ty>,
 ) -> DelegateConventionSelection {
     let callables = resolver.receiver_callables(receiver, name);
     crate::trace_compiler!(
@@ -456,7 +458,7 @@ fn select_delegate_operator_in_kind(
         &args,
         &[],
         &callables,
-        None,
+        expected_result,
     ) {
         crate::symbol_resolver::ReceiverFunctionSelection::Selected((selected, _, ret, _)) => {
             DelegateConventionSelection::Selected(selected, ret)
@@ -1401,7 +1403,7 @@ impl Checker<'_> {
                 &call_args,
                 &[],
                 &callables,
-                None,
+                expected_result,
             ) {
                 crate::symbol_resolver::ReceiverFunctionSelection::Selected((
                     selected,

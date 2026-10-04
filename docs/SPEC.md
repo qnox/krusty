@@ -2377,6 +2377,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   keeping the default bounds. This is the companion-object shape in
   `PerformanceCounter.getCallStack`. Test:
   `tests/contextual_lambda_expected_return_e2e.rs`.
+- **An initialized local statement constrains the enclosing builder call even when its binding is not the result.** `fun <T> buildValue(block: (ValueSink<T>) -> Unit): T` used as
+  `buildValue { x -> val y by deferValue { requireTextSink(x); "OK" }; if (y.length != 2) throw ... }`
+  (KT-65262) infers `String`. The constraint is the initializer's
+  `ValueSink<T> <: ValueSink<String>`.
+  Pass 1 owns that expression-bodied result. An `if` condition is not a dependency of the `if`
+  result, and a local was not itself a statement effect, so an initializer whose binding was read
+  only from that condition — or not read at all — left `T` at `Any?`. kotlinc's builder inference
+  still collects initializer constraints. Every initialized local is therefore a block effect:
+  signature evaluation walks ordinary and delegated initializers. A failed effect does not reject
+  the enclosing result, the same way other statements behave. The `try`/`finally` around that call
+  does not change the constraint; the box covers it. Tests:
+  `tests/delegate_initializer_constraint_e2e.rs`; box:
+  `inference/pcla/pclaRootIsTrySyntheticCallWithDelegate.kt`.
 - **Equally specific candidates: a non-parameterized callable wins.** kotlinc's last tie-break
   (spec 11.7) applied to the receiver-less SAM selection: `assertDoesNotThrow(Executable)` beside
   `<T> assertDoesNotThrow(ThrowingSupplier<T>)` (JUnit, imported as a static) both take a `{ … }`
@@ -5750,6 +5763,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   before the method's code, each call's constants in instruction order, and its fields when the
   field table is written; its `hashCode` names `this` in its `LocalVariableTable`. Tests:
   `tests/annotation_instance_class_rows_e2e.rs`.
+- **A later file's annotation constructor call uses the declaration's closed defaults.** After
+  every file's default bodies are checked, an annotation constructor republishes the constants,
+  enum entries, class literals, arrays, and nested annotation instances those bodies folded. The
+  consuming file lowers that payload with the construction. A same-file call takes the declaring
+  file's lowered default bodies, which replace the compact payload for that file. Tests:
+  `tests/annotation_cross_file_defaults_e2e.rs`,
+  `annotations/instances/annotationInstancesEmptyDefaultLowered.kt`.
 - **A local class interns its `EnclosingMethod` refs before its `InnerClasses` rows.** kotlinc
   visits the `EnclosingMethod` refs before the `InnerClasses` rows, so the enclosing class and
   method come before the local class's own simple name in the pool. The serialized attribute order
@@ -13143,9 +13163,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   interface, rebuilds `KClass` with `Reflection.getOrCreateKotlinClass`, and compares those:
   `Int::class` and `Integer::class` are equal. `hashCode` hashes the stored `Class` through
   `Object.hashCode`, so those two instances hash differently. A Kotlin read of the member
-  invokes the `Class`-returning method and rebuilds the `KClass`. Metadata records the Kotlin
-  type `kotlin.reflect.KClass` and the JVM getter descriptor `()Ljava/lang/Class;`. Tests:
-  `tests/annotation_kclass_member_e2e.rs`,
+  invokes the `Class`-returning method and rebuilds the `KClass`, including a read from another
+  source file of the same module, where the declaring class is not in the file being emitted.
+  Metadata records the Kotlin type `kotlin.reflect.KClass` and the JVM getter descriptor
+  `()Ljava/lang/Class;`. Tests: `tests/annotation_kclass_member_e2e.rs`,
+  `tests/annotation_cross_file_defaults_e2e.rs`,
   `tests/annotation_emission_e2e.rs::an_instantiated_kclass_annotation_reads_its_member`.
 
 - **A missing context argument names its parameter, and a loop's `hasNext` belongs to its iterator.**

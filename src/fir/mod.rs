@@ -4,6 +4,7 @@
 //! signature solving, checked body ownership, and exhaustive parser coverage.
 
 mod active_source;
+mod annotation_constructor_defaults;
 mod body;
 mod body_check;
 mod body_work;
@@ -34,6 +35,7 @@ mod source_map;
 mod type_parameters;
 
 pub(crate) use active_source::*;
+pub(crate) use annotation_constructor_defaults::publish_checked_annotation_defaults;
 pub use body::value_parameters::FirValueParameterName;
 pub use body::*;
 pub use body_check::*;

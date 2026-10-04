@@ -175,15 +175,14 @@ pub enum SigExpr {
         result: SigExprId,
         scope: SignatureScopeId,
     },
-    /// Evaluate compact side effects in source order, then yield `result`. This is used only when
-    /// an expression that determines a published signature contains nested executable syntax whose
-    /// constraints affect that signature (for example a selected anonymous-object method).
+    /// Evaluate nested executable effects in source order before yielding the signature result.
     Sequence {
         effects: OperandRange,
         result: SigExprId,
     },
     Delegate {
         delegate: SigExprId,
+        expected: Option<SigExprId>,
         scope: SignatureScopeId,
         site: SignatureDelegateSiteId,
     },
@@ -1076,6 +1075,7 @@ pub trait SignatureSemantics {
         &self,
         scope: SignatureScope,
         delegate: ResolvedTy,
+        expected: Option<ResolvedTy>,
         site: ResolvedSignatureDelegateSite,
         demand: &mut dyn FnMut(DeclarationId) -> Result<ResolvedSignature, DiagnosticId>,
     ) -> Result<ResolvedTy, DiagnosticId>;
