@@ -5,6 +5,10 @@
 //! directly, for an explicit `f.invoke(x)` as well, and a generic subclass calls its own erased
 //! `invoke(Object)Object`. Only a callable reference keeps its exact function shape beside the
 //! nominal reflection type and is invoked as that function value.
+//!
+//! The member is reached through the function classifier the supertype instantiates, for a suspend
+//! or big-arity function type as well (`SuspendFunction1`, `Function23`), and for a function-type
+//! supertype in a dependency's metadata: a property reference value calls `KProperty0.invoke`.
 
 use super::common;
 
@@ -34,4 +38,38 @@ fn a_function_subclass_value_runs_its_own_invoke() {
 }}\n"
     );
     common::expect_box_ok_with_stdlib(&source, "FunctionSubclassInvokeRun");
+}
+
+const SHAPES_SRC: &str = "class Token(val n: Int)\n\
+class Later : suspend (Token) -> Token { override suspend fun invoke(t: Token): Token = Token(t.n + 1) }\n\
+suspend fun later(f: Later, t: Token): Token = f(t)\n\
+class Wide : (Token, Token, Token, Token, Token, Token, Token, Token, Token, Token, Token, Token, Token, Token, Token, Token, Token, Token, Token, Token, Token, Token, Token) -> Int {\n\
+    override fun invoke(a: Token, b: Token, c: Token, d: Token, e: Token, f: Token, g: Token, h: Token, i: Token, j: Token, k: Token, l: Token, m: Token, n: Token, o: Token, p: Token, q: Token, r: Token, s: Token, t: Token, u: Token, v: Token, w: Token): Int = a.n + w.n\n\
+}\n\
+fun wide(f: Wide, t: Token): Int = f(t, t, t, t, t, t, t, t, t, t, t, t, t, t, t, t, t, t, t, t, t, t, t)\n\
+class Holder(val count: Int) {\n\
+    fun viaProperty(): Int = pass(::count) { it() }\n\
+}\n\
+fun <T, R> pass(value: T, f: (T) -> R): R = f(value)\n";
+
+#[test]
+fn suspend_big_arity_and_reference_values_call_invoke_like_kotlinc() {
+    let stdlib = [common::stdlib_jar()];
+    for class in ["FunctionShapeInvokeKt", "Wide", "Holder"] {
+        common::byte_diff_against_kotlinc_cp("FunctionShapeInvoke", SHAPES_SRC, class, &stdlib)
+            .expect("reference kotlinc is provisioned")
+            .unwrap_or_else(|diff| panic!("{class}: {diff}"));
+    }
+}
+
+#[test]
+fn big_arity_and_reference_values_run_their_invoke() {
+    let source = format!(
+        "{SHAPES_SRC}fun box(): String {{\n\
+    val holder = Holder(3)\n\
+    val sum = wide(Wide(), Token(1)) + holder.viaProperty()\n\
+    return if (sum == 5) \"OK\" else \"fail $sum\"\n\
+}}\n"
+    );
+    common::expect_box_ok_with_stdlib(&source, "FunctionShapeInvokeRun");
 }
