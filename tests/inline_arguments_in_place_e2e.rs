@@ -27,6 +27,11 @@ const SOURCE: &str = "import kotlin.coroutines.*\n\
     fun orderedOnce(): Int {\n\
     \x20   events = 0\n\
     \x20   return maxOf(mark(0, 1), mark(1, 2)) * 10 + events\n\
+    }\n\
+    fun held(value: Int): Result<Int> = Result.success(value)\n\
+    fun receiverFirst(): Int {\n\
+    \x20   events = 0\n\
+    \x20   return held(mark(0, 1)).getOrDefault(mark(1, 2)) * 10 + events\n\
     }\n";
 
 #[test]
@@ -49,6 +54,7 @@ fn inline_only_arguments_are_read_where_the_body_loads_them_like_kotlinc() {
         "int invokeStored(",
         "void resumeBuilt(",
         "void resumeUnit(",
+        "int receiverFirst(",
     ] {
         let reference = method_instructions(&built.reference, member);
         assert!(!reference.is_empty(), "{member} not found");
@@ -77,6 +83,7 @@ fn inline_only_arguments_read_in_place_still_run() {
              \x20   if (table[\"k\"] != \"k\") return \"table\"\n\
              \x20   if (invokeStored {{ 9 }} != 9) return \"function parameter\"\n\
              \x20   if (orderedOnce() != 22) return \"evaluation order\"\n\
+             \x20   if (receiverFirst() != 12) return \"receiver order\"\n\
              \x20   return if (checked(true, 4) == 4) \"OK\" else \"checked\"\n\
              }}\n"
         ),
