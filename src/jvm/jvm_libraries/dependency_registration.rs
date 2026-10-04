@@ -64,6 +64,10 @@ impl JvmLibraries {
     }
 
     pub(super) fn register_external_property(&self, property: &mut PropertyInfo) {
+        // A JavaBean projection reuses the Java methods' declarations; it does not declare Kotlin
+        // accessors with generated property-parameter roles. The function provider publishes those
+        // methods' exact parameter identities before this projection is registered.
+        let declares_accessors = !property.accessor_derived();
         let kind = match property.kind {
             PropKind::TopLevel => FnKind::TopLevel,
             PropKind::Extension => FnKind::Extension,
@@ -94,11 +98,13 @@ impl JvmLibraries {
         );
         property.getter.visibility = property.visibility;
         self.register_external_callable(&mut property.getter, kind);
-        if let Some(identity) = property.getter.external_identity {
-            self.cp.publish_external_callable_parameter_identities(
-                identity,
-                getter_parameter_identities.into_boxed_slice(),
-            );
+        if declares_accessors {
+            if let Some(identity) = property.getter.external_identity {
+                self.cp.publish_external_callable_parameter_identities(
+                    identity,
+                    getter_parameter_identities.into_boxed_slice(),
+                );
+            }
         }
         if let Some(setter) = &mut property.setter {
             setter.visibility = property.setter_visibility;
@@ -119,11 +125,13 @@ impl JvmLibraries {
                 "a normalized dependency property setter publishes every parameter identity"
             );
             self.register_external_callable(setter, kind);
-            if let Some(identity) = setter.external_identity {
-                self.cp.publish_external_callable_parameter_identities(
-                    identity,
-                    setter_parameter_identities.into_boxed_slice(),
-                );
+            if declares_accessors {
+                if let Some(identity) = setter.external_identity {
+                    self.cp.publish_external_callable_parameter_identities(
+                        identity,
+                        setter_parameter_identities.into_boxed_slice(),
+                    );
+                }
             }
         }
         let Some(getter) = property.getter.external_identity else {

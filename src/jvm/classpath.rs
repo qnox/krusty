@@ -68,7 +68,7 @@ use crate::jvm::classreader::{parse_class, ClassBodies, ClassInfo, MethodCode, R
 use crate::jvm::compilation_inputs::{
     classify_classpath_entry, JvmClasspathEntryKind, JvmCompilationInputInventory,
 };
-use crate::libraries::{CallSig, GenericSig, LibraryCallable, ReturnInfo};
+use crate::libraries::{CallSig, GenericSig, ReturnInfo};
 use crate::name_tree::{NameId, NameTree};
 use crate::symbol_source::SymbolNamespace;
 use crate::types::{type_name, type_name_from, Ty, TypeName, TypeNameList};
