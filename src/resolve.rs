@@ -54622,7 +54622,13 @@ impl<'a> Checker<'a> {
                         };
                         if let (Some(r), Some(init)) = (&bp.ty, bp.init) {
                             let declared = self.type_ref_ty(&property_scope, r);
-                            let it = self.expr_declared(&property_scope, init, declared);
+                            let nominal = self.expr_declared(&property_scope, init, declared);
+                            let it = self.recorded_expression_type_for_expected(
+                                &property_scope,
+                                init,
+                                nominal,
+                                declared,
+                            );
                             let sp = self.value_diagnostic_span(init, it);
                             self.narrow_platform_value(
                                 declared,
@@ -55781,7 +55787,17 @@ impl<'a> Checker<'a> {
                         let it = match (prechecked_storage, declared) {
                             (Some(storage), _) => storage,
                             (None, Some(expected)) => {
-                                self.expr_declared(&initializer_scope, init, expected)
+                                // The declared type is the initializer's committed expected type:
+                                // an `Int` constant expression adapts to a declared `Long` exactly
+                                // as it does for a top-level property or a local.
+                                let nominal =
+                                    self.expr_declared(&initializer_scope, init, expected);
+                                self.recorded_expression_type_for_expected(
+                                    &initializer_scope,
+                                    init,
+                                    nominal,
+                                    expected,
+                                )
                             }
                             (None, None) => self.expr(&initializer_scope, init),
                         };

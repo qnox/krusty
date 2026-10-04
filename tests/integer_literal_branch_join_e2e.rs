@@ -325,3 +325,43 @@ fn same_spelled_user_unary_member_is_not_an_integer_constant() {
         &[],
     );
 }
+
+/// A member property's declared `Long` adapts an `Int` constant expression exactly as a local's or
+/// a top-level property's does: class, companion, object, `const`, and enum-entry body members.
+#[test]
+fn member_property_int_constant_initializer_adapts_to_long() {
+    both_compilers_box(
+        "class Plain {\n\
+         val product: Long = 60 * 60\n\
+         val wrapped: Long = 2147483647 + 1\n\
+         fun defaulted(age: Long = SECONDS): Long = age\n\
+         companion object {\n\
+         private const val SECONDS: Long = 60 * 60\n\
+         val shared: Long = -(1 shl 31)\n\
+         }\n\
+         }\n\
+         object Limits {\n\
+         const val HOUR: Long = 60 * 60\n\
+         val day: Long = 24 * 3600\n\
+         }\n\
+         enum class Scale {\n\
+         SECOND {\n\
+         val scaled: Long = 60 * 60\n\
+         override fun factor(): Long = scaled\n\
+         };\n\
+         abstract fun factor(): Long\n\
+         }\n\
+         fun box(): String {\n\
+         val plain = Plain()\n\
+         if (plain.product != 3600L) return \"product: ${plain.product}\"\n\
+         if (plain.wrapped != -2147483648L) return \"wrapped: ${plain.wrapped}\"\n\
+         if (plain.defaulted() != 3600L) return \"defaulted: ${plain.defaulted()}\"\n\
+         if (Plain.shared != -2147483648L) return \"shared: ${Plain.shared}\"\n\
+         if (Limits.HOUR != 3600L) return \"hour: ${Limits.HOUR}\"\n\
+         if (Limits.day != 86400L) return \"day: ${Limits.day}\"\n\
+         if (Scale.SECOND.factor() != 3600L) return \"scaled: ${Scale.SECOND.factor()}\"\n\
+         return \"OK\"\n\
+         }\n",
+        "member_property_int_constant_initializer_adapts_to_long",
+    );
+}

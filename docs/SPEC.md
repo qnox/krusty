@@ -7021,6 +7021,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   and the initializer records a numeric conversion. Tests:
   `resolve::integer_constants::tests::overflowing_int_constant_initializers_widen_to_long`,
   `tests/integer_literal_branch_join_e2e.rs::overflowing_int_constant_expression_wraps_before_adapting_to_long`.
+- **A member property's declared type adapts an `Int` constant initializer too.** The rule is the
+  declaration's expected type, not its position: `val x: Long = 60 * 60` and
+  `const val X: Long = 60 * 60` in a class, companion, object, or enum-entry body are accepted and
+  store `3600L`, exactly like a local or a top-level property. Test:
+  `tests/integer_literal_branch_join_e2e.rs::member_property_int_constant_initializer_adapts_to_long`.
 - **An `Int` division or remainder by zero stays an integer constant.** `1 / 0` and `1 % 0` have no
   compile-time magnitude — executing them throws — but they are still `Int` constant expressions, so
   they adapt to `Long` the way every `Int` constant does. They do not narrow to `Byte` or `Short`.
