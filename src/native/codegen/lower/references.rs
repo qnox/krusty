@@ -52,7 +52,10 @@ pub(super) struct ReferenceSite {
 #[derive(Clone, Copy)]
 enum Access {
     /// A top-level property: a global slot, or a source-written accessor pair.
-    TopLevel,
+    TopLevel {
+        /// Exact checked declaration whose backend layout selects storage or an accessor.
+        property: crate::fir::PropertyId,
+    },
     /// A member of a class of this file, read and written through the receiver.
     Member { class: ClassId, index: usize },
     /// A `const val` of an object or companion, whose value lives in a STATIC rather than in the
@@ -445,7 +448,9 @@ impl<'a> FileLowering<'a> {
             Some(IrLocalPropertyLayout::TopLevelAccessor { .. })
             | Some(IrLocalPropertyLayout::MemberExtension { .. }) => return None,
             _ => match checked.class {
-                None => Access::TopLevel,
+                None => Access::TopLevel {
+                    property: *property,
+                },
                 Some(class) => match self.ir.classes[class as usize]
                     .properties
                     .iter()
@@ -554,7 +559,7 @@ impl<'a> FileLowering<'a> {
             match site.access {
                 Access::Member { .. } => 1,
                 Access::Accessor { receiver, .. } => usize::from(receiver),
-                Access::TopLevel | Access::Static { .. } => 0,
+                Access::TopLevel { .. } | Access::Static { .. } => 0,
             }
         };
         // What an `is` against a reflection type asks about: this object's own type is one of a
@@ -693,7 +698,7 @@ impl<'a> FileLowering<'a> {
         receiver_offset: Option<u32>,
     ) -> Result<(), Unsupported> {
         let signature = self.signature_of(&[any(), any()], any())?;
-        let (access, ty, name) = (site.access, site.ty, site.name.clone());
+        let (access, ty) = (site.access, site.ty);
         self.emit_function(
             id,
             signature,
@@ -701,7 +706,7 @@ impl<'a> FileLowering<'a> {
             &format!("{base}_get"),
             &mut |body, params| {
                 let value = match access {
-                    Access::TopLevel => body.top_level_read(&name)?,
+                    Access::TopLevel { property } => body.top_level_read(&property)?,
                     Access::Static { index } => body.static_read(index)?,
                     Access::Member { class, index } => {
                         let object = receiver(body, params, receiver_offset);
@@ -756,12 +761,12 @@ impl<'a> FileLowering<'a> {
                     Access::Static { .. } => {
                         return Err(format!("a write to the constant `{name}`"));
                     }
-                    Access::TopLevel => {
-                        let ty = body.top_level_written_ty(&name)?;
+                    Access::TopLevel { property } => {
+                        let ty = body.top_level_written_ty(&property)?;
                         let Some(value) = body.convert(params[2], Some(any()), ty)? else {
                             return Err(format!("a `Unit` value assigned to `{name}`"));
                         };
-                        body.top_level_write_value(&name, value)?;
+                        body.top_level_write_value(&property, value)?;
                     }
                     Access::Member { class, index } => {
                         let ty = body.written_property_ty(class, index)?;
