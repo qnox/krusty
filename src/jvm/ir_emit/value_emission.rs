@@ -14,10 +14,10 @@ use super::{
     default_mask_bit, default_mask_count, emit_box_impl, emit_constructor_default_arguments,
     instance_field_jvm_name, ir_ty_to_jvm, jvm_declared_ty, jvm_function_interface,
     jvm_function_invoke_descriptor, jvm_function_params, jvm_tys, lambda_class, lambda_class_names,
-    load, mapped_builtin_virtual_name, method_defaults, native_unsigned_impl_target,
-    parse_descriptor_params, physical_call_result_words, prim_newarray_atype, push_zero, ref_class,
-    singleton_instance_load, slot_words, try_emission, ty_from_descriptor_ret, vararg,
-    JvmDefaultMode, LambdaClassPlan, LambdaMode, PropertyOperation, LMF_METAFACTORY_DESC,
+    load, method_defaults, native_unsigned_impl_target, parse_descriptor_params,
+    physical_call_result_words, prim_newarray_atype, push_zero, ref_class, singleton_instance_load,
+    slot_words, try_emission, ty_from_descriptor_ret, vararg, JvmDefaultMode, LambdaClassPlan,
+    LambdaMode, PropertyOperation, LMF_METAFACTORY_DESC,
 };
 
 impl super::Emitter<'_> {
@@ -1216,7 +1216,6 @@ impl super::Emitter<'_> {
                         self.value_ty(recv),
                     );
                     let ret = ty_from_descriptor_ret(&descriptor);
-                    let jvm_name = mapped_builtin_virtual_name(owner_identity, &name, &descriptor);
                     let operand_result = if let Some(bridge) = protected_bridge.as_ref() {
                         let mut operands = Vec::with_capacity(args.len() + 1);
                         operands.push(recv);
@@ -1230,7 +1229,7 @@ impl super::Emitter<'_> {
                             e,
                             crate::jvm::ir_emit::call_operands::VirtualCallTarget {
                                 owner: &owner,
-                                name: jvm_name,
+                                name: &name,
                                 descriptor: &descriptor,
                             },
                             recv,
@@ -1250,7 +1249,7 @@ impl super::Emitter<'_> {
                         bridge_params.push(Ty::obj_name(bridge.owner));
                         bridge_params.extend(bridge.bridge_parameters.iter().copied());
                         let bridge_descriptor = method_descriptor(&bridge_params, ret);
-                        let bridge_name = format!("access${jvm_name}");
+                        let bridge_name = format!("access${name}");
                         let method = self.cw.methodref(
                             &bridge.owner.render(),
                             &bridge_name,
@@ -1259,11 +1258,11 @@ impl super::Emitter<'_> {
                         self.mark_call_start(e, code);
                         code.invokestatic(method, aw + 1, slot_words(ret) as i32);
                     } else if interface {
-                        let m = self.cw.interface_methodref(&owner, jvm_name, &descriptor);
+                        let m = self.cw.interface_methodref(&owner, &name, &descriptor);
                         self.mark_call_start(e, code);
                         code.invokeinterface(m, aw, slot_words(ret) as i32);
                     } else {
-                        let m = self.cw.methodref(&owner, jvm_name, &descriptor);
+                        let m = self.cw.methodref(&owner, &name, &descriptor);
                         self.mark_call_start(e, code);
                         code.invokevirtual(m, aw, slot_words(ret) as i32);
                     }

@@ -65,16 +65,30 @@ pub(super) fn realize(
         let id = u32::try_from(raw).expect("too many common IR expressions");
         let (plan_expression, owner, candidates) = match expression {
             IrExpr::Call {
-                callee: Callee::Virtual { owner, target, .. },
+                callee:
+                    Callee::Virtual {
+                        owner,
+                        module_target,
+                        target,
+                        ..
+                    },
                 ..
             } => {
-                let candidates = match target {
-                    Some(IrVirtualTarget::Function(target)) => {
+                // `module_target` is the exact declaration the checker selected. A source
+                // override may still carry an external ancestor target for bridge/dispatch
+                // bookkeeping, but that ancestor does not replace the selected declaration's
+                // call-site ABI.
+                let candidates = match (module_target, target) {
+                    (Some(_), _) => Vec::new(),
+                    (None, Some(IrVirtualTarget::Function(target))) => {
                         function_candidates(callables, *target)
                     }
-                    Some(IrVirtualTarget::PropertyGetter(_))
-                    | Some(IrVirtualTarget::PropertySetter(_))
-                    | None => Vec::new(),
+                    (
+                        None,
+                        Some(IrVirtualTarget::PropertyGetter(_))
+                        | Some(IrVirtualTarget::PropertySetter(_))
+                        | None,
+                    ) => Vec::new(),
                 };
                 (id, *owner, candidates)
             }
