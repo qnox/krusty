@@ -61,3 +61,67 @@ fn a_join_keeps_the_abbreviation_only_of_an_equal_first_branch() {
     );
     assert_identical("AliasJoin", &src, "app/AliasJoinKt");
 }
+
+const DEPENDENCY: &str = "package dep\n\
+    \n\
+    class Payload\n\
+    typealias Cargo = Payload\n";
+
+fn assert_identical_over_dependency(stem: &str, src: &str, class_internal: &str) {
+    let result = common::metadata_diff_against_kotlinc_lib(
+        stem,
+        &[("Dep.kt", DEPENDENCY)],
+        src,
+        class_internal,
+    )
+    .expect("reference kotlinc is provisioned");
+    result.unwrap_or_else(|diff| panic!("{diff}"));
+}
+
+/// A constructor call through an explicitly imported alias keeps that alias.
+#[test]
+fn an_imported_alias_constructor_keeps_the_alias() {
+    let src = "package app\n\
+        \n\
+        import dep.Cargo\n\
+        \n\
+        val stored = Cargo()\n";
+    assert_identical_over_dependency("ImportedAlias", src, "app/ImportedAliasKt");
+}
+
+/// A nearer nested classifier owns the spelling: its constructor's result names no alias even
+/// though a same-named alias is declared in the package.
+#[test]
+fn a_nested_classifier_shadowing_a_package_alias_names_no_alias() {
+    let src = format!("{PRELUDE}\nclass Host {{\n    class Cargo\n    val stored = Cargo()\n}}\n");
+    assert_identical("AliasShadowed", &src, "app/Host");
+}
+
+/// The same for an explicitly imported alias.
+#[test]
+fn a_nested_classifier_shadowing_an_imported_alias_names_no_alias() {
+    let src = "package app\n\
+        \n\
+        import dep.Cargo\n\
+        \n\
+        class Host {\n\
+            class Cargo\n\
+            val stored = Cargo()\n\
+        }\n";
+    assert_identical_over_dependency("ImportShadowed", src, "app/Host");
+}
+
+/// An inferred type reached through an annotated typealias carries the right-hand side's type-use
+/// annotations on its expanded type, as an explicitly written use of the alias does.
+#[test]
+fn an_inferred_annotated_alias_keeps_its_annotations() {
+    let src = "package app\n\
+        \n\
+        @Target(AnnotationTarget.TYPE)\n\
+        annotation class Kept\n\
+        class Payload\n\
+        typealias Marked = @Kept Payload\n\
+        val stored = Marked()\n\
+        fun made() = Marked()\n";
+    assert_identical("AliasAnnotated", src, "app/AliasAnnotatedKt");
+}

@@ -151,20 +151,7 @@ impl ProductionSignatureSemantics<'_> {
     ) -> Option<AppliedSourceAlias> {
         let (identity, formals, expansion) =
             self.signature_source_alias_expansion(scope, spelling)?;
-        if !explicit_type_arguments.is_empty() && explicit_type_arguments.len() != formals.len() {
-            return None;
-        }
-        let bindings = formals
-            .iter()
-            .cloned()
-            .zip(explicit_type_arguments.iter().copied())
-            .collect::<crate::symbol_resolver::GSigBinds>();
-        Some(AppliedSourceAlias {
-            identity,
-            expansion: crate::symbol_resolver::ty_subst_keep_unbound(expansion, &bindings),
-            explicit_arguments: explicit_type_arguments.to_vec(),
-            formals,
-        })
+        AppliedSourceAlias::apply(identity, formals, expansion, explicit_type_arguments)
     }
 
     /// The type a constructor call through `alias` produces, with the abbreviation it carries:
@@ -594,6 +581,44 @@ pub(super) struct AppliedSourceAlias {
     pub(super) expansion: Ty,
     /// The call's explicit type arguments, already applied to `expansion`; empty when omitted.
     explicit_arguments: Vec<Ty>,
+}
+
+impl AppliedSourceAlias {
+    /// The alias a scope-tower selection carried, applied to the call's explicit type arguments.
+    pub(super) fn selected(
+        alias: Option<&crate::libraries::AliasExpansion>,
+        explicit_type_arguments: &[Ty],
+    ) -> Option<Self> {
+        let alias = alias?;
+        Self::apply(
+            alias.identity,
+            alias.formals.clone(),
+            alias.expansion,
+            explicit_type_arguments,
+        )
+    }
+
+    fn apply(
+        identity: crate::types::TypeName,
+        formals: Vec<String>,
+        expansion: Ty,
+        explicit_type_arguments: &[Ty],
+    ) -> Option<Self> {
+        if !explicit_type_arguments.is_empty() && explicit_type_arguments.len() != formals.len() {
+            return None;
+        }
+        let bindings = formals
+            .iter()
+            .cloned()
+            .zip(explicit_type_arguments.iter().copied())
+            .collect::<crate::symbol_resolver::GSigBinds>();
+        Some(Self {
+            identity,
+            expansion: crate::symbol_resolver::ty_subst_keep_unbound(expansion, &bindings),
+            explicit_arguments: explicit_type_arguments.to_vec(),
+            formals,
+        })
+    }
 }
 
 impl ProductionSignatureSemantics<'_> {

@@ -618,7 +618,7 @@ fn abbreviation_spelling(
         });
     Spelled {
         alias: Some(abbreviation.alias),
-        args: super::expansion_arg_spellings(template, &alias_args),
+        args: super::type_spellings::expansion_arg_spellings(template, &alias_args),
         alias_args,
         ..Spelled::default()
     }
