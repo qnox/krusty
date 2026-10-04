@@ -54,10 +54,11 @@ pub(super) fn symbolic(
     declaration_spelling: Option<&str>,
     declared_names: &[String],
     declared_bounds: &[(String, TypeRef)],
-    table: &SymbolTable,
-    source: u32,
+    semantics: &super::ProductionSignatureSemantics<'_>,
+    source: crate::fir::SourceFileId,
     declaration_start: u32,
 ) -> super::super::TParams {
+    let table = semantics.table;
     let enclosing = enclosing(index, declaration);
     // A classifier is in scope recursively in its own header. The complete declaration inventory
     // has already assigned its stable identity, but the module-wide spelling table deliberately
@@ -76,7 +77,9 @@ pub(super) fn symbolic(
             if self_classifier.is_some() && declaration_spelling == Some(name) {
                 self_classifier
             } else {
-                table.class_names.get(name)
+                semantics
+                    .type_parameter_bound_classifier(declaration, source, name)
+                    .or_else(|| table.class_names.get(name))
             }
         },
         &|name| {
@@ -89,7 +92,7 @@ pub(super) fn symbolic(
     .alpha_renamed_declaration(
         declared_names,
         table.compilation_id,
-        source,
+        source.raw(),
         declaration_start,
     )
 }

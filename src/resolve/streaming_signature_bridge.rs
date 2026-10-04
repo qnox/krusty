@@ -5232,8 +5232,8 @@ pub(crate) fn finalized_streamed_signature_index(
             declaration_spelling,
             &declared_names,
             &declared_bounds,
-            table,
-            stub.source.raw(),
+            &semantics,
+            stub.source,
             declaration_start,
         );
         for (ordinal, (source_name, parameter)) in declared_names.iter().zip(packed).enumerate() {

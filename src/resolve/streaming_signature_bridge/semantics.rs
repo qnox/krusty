@@ -415,7 +415,10 @@ impl ProductionSignatureSemantics<'_> {
         let semantic = super::super::TParams::symbolic_from_decl_enclosing(
             &source_names,
             &declared_bounds,
-            &|name| self.table.class_names.get(name),
+            &|name| {
+                self.type_parameter_bound_classifier(declaration, anchor.source, name)
+                    .or_else(|| self.table.class_names.get(name))
+            },
             &|name| enclosing.contains(name).then(|| enclosing.bound(name)),
         )
         .alpha_renamed_declaration(

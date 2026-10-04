@@ -1353,6 +1353,27 @@ impl ProductionSignatureSemantics<'_> {
             .expect("a bound local classifier call must retain its semantic identity")
     }
 
+    /// The nested classifier a type-parameter bound of `declaration` names by a simple spelling.
+    /// A callable's or property's bound sees the classifiers of its lexical owners; a classifier's
+    /// bound is in its header, outside its own body.
+    pub(super) fn type_parameter_bound_classifier(
+        &self,
+        declaration: crate::fir::DeclarationId,
+        source: crate::fir::SourceFileId,
+        spelling: &str,
+    ) -> Option<crate::types::TypeName> {
+        let in_header = self
+            .headers
+            .declarations
+            .anchor(declaration)
+            .is_some_and(|anchor| anchor.kind == crate::fir::DeclarationKind::Classifier);
+        let scope = crate::fir::SignatureScope {
+            owner: declaration,
+            source,
+        };
+        self.lexically_nested_classifier_at(scope, spelling, !in_header)
+    }
+
     fn lexically_nested_classifier_at(
         &self,
         scope: crate::fir::SignatureScope,

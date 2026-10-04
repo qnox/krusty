@@ -10543,6 +10543,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   return type, overrides included, are reported at the name. `strict` reports errors and
   `warning` warnings with the same text; a test selects the mode with `// EXPLICIT_API_MODE:`.
   Verified against kotlinc 2.4.20. (`tests/explicit_api_mode_e2e.rs`.)
+- **A type-parameter bound resolves in the declaration's lexical scope.** `fun <T : Own>` in a
+  class body binds the nearest nested `Own` from the enclosing classifiers (or their companions)
+  before the file's top-level and imported classifiers. A classifier's own bounds are in its
+  header and do not see its own body. The bound reaches the `Signature` attribute and the
+  metadata unerased. Verified against kotlinc 2.4.20. (`tests/nested_type_parameter_bound_e2e.rs`.)
 
 ## 8. Success criteria for the PoC
 
