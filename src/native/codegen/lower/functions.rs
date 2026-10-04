@@ -197,7 +197,7 @@ impl<'a> FileLowering<'a> {
     ///
     /// Its ADDRESS is the identity; nothing ever reads its contents. One byte, because a symbol
     /// needs storage to have an address at all.
-    fn reference_identity_marker(&mut self, name: &str) -> Result<DataId, Unsupported> {
+    pub(super) fn reference_identity_marker(&mut self, name: &str) -> Result<DataId, Unsupported> {
         if let Some(existing) = self.reference_identities.get(name) {
             return Ok(*existing);
         }

@@ -235,13 +235,14 @@ impl<'a> FileLowering<'a> {
 
     /// Declare a type and its member bodies for every property reference in the file.
     ///
-    /// One type per (property, bound-or-not), NOT one per site: Kotlin compares callable references
-    /// by the declaration they name, so two `::foo`s written in different places are equal — and
-    /// with one type and, for an unbound reference, one instance, identity equality answers that
-    /// without a word of reflection metadata.
+    /// One type per (property, bound-or-not, effective mutability), NOT one per site. Mutability is
+    /// a fact about the use site's access to the setter, so references to the same declaration can
+    /// need different reflection interfaces. Both representations share one declaration marker:
+    /// Kotlin equality still compares the declaration and bound receiver, not that interface set.
     pub(super) fn declare_property_references(&mut self) -> Result<(), Unsupported> {
         self.declare_dependency_property_references()?;
-        let mut emitted: HashMap<(crate::fir::PropertyId, bool), ReferenceItems> = HashMap::new();
+        let mut emitted: HashMap<(crate::fir::PropertyId, bool, bool), ReferenceItems> =
+            HashMap::new();
         for index in 0..self.ir.exprs.len() {
             let Some((property, bound, mutable)) = reference_site(&self.ir.exprs[index]) else {
                 continue;
@@ -252,11 +253,17 @@ impl<'a> FileLowering<'a> {
                 // lowered, so the diagnostic still names the construct rather than this pass.
                 continue;
             };
-            let key = (property, bound.is_some());
+            let is_bound = bound.is_some();
+            let key = (property, is_bound, mutable);
             let items = match emitted.get(&key) {
                 Some(items) => *items,
                 None => {
-                    let items = self.define_reference(emitted.len(), site)?;
+                    let identity = format!(
+                        "kt_refid_prop_{}_m{}",
+                        if is_bound { "b" } else { "u" },
+                        property.raw()
+                    );
+                    let items = self.define_reference(emitted.len(), site, &identity)?;
                     emitted.insert(key, items);
                     items
                 }
@@ -275,9 +282,10 @@ impl<'a> FileLowering<'a> {
     /// differs is where `get` and `set` lead — a pair of synthesized functions that reach the
     /// dependency through the ordinary dependency-property path, rather than storage or an
     /// accessor this file declares. One type per PROPERTY and boundness, for the reason the other
-    /// pass has one: two references to one declaration are equal, and the type is what they share.
+    /// pass has one. References with different setter access need different interface sets, but
+    /// share the declaration marker used by equality.
     fn declare_dependency_property_references(&mut self) -> Result<(), Unsupported> {
-        let mut emitted: HashMap<(crate::fir::ExternalPropertyId, bool), ReferenceItems> =
+        let mut emitted: HashMap<(crate::fir::ExternalPropertyId, bool, bool), ReferenceItems> =
             HashMap::new();
         for index in 0..self.ir.exprs.len() {
             let index = index as u32;
@@ -308,14 +316,20 @@ impl<'a> FileLowering<'a> {
                 mutable: realized.mutable,
                 bound: realized.bound,
             };
-            let key = (realized.property, realized.bound.is_some());
+            let is_bound = realized.bound.is_some();
+            let key = (realized.property, is_bound, realized.mutable);
             let items = match emitted.get(&key) {
                 Some(items) => *items,
                 None => {
                     // The ordinal only names the emitted symbols, and the two passes share the
                     // namespace — so this one counts on from where a property of this file would.
                     let ordinal = self.references.len() + emitted.len();
-                    let items = self.define_reference(ordinal, site)?;
+                    let identity = format!(
+                        "kt_refid_prop_{}_e{}",
+                        if is_bound { "b" } else { "u" },
+                        realized.property.raw()
+                    );
+                    let items = self.define_reference(ordinal, site, &identity)?;
                     emitted.insert(key, items);
                     items
                 }
@@ -511,6 +525,7 @@ impl<'a> FileLowering<'a> {
         &mut self,
         ordinal: usize,
         site: Site,
+        identity: &str,
     ) -> Result<ReferenceItems, Unsupported> {
         let base = format!("kt_prop_{ordinal}");
         // The bound receiver is the object's one field, and the one reference the collector traces.
@@ -536,13 +551,13 @@ impl<'a> FileLowering<'a> {
             .transpose()?;
         let name = self.declare_local_function(&format!("{base}_name"), &[any()], any())?;
 
-        let equals =
-            self.declare_local_function(&format!("{base}_equals"), &[any(), any()], Ty::Boolean)?;
         let mut vtable = self.any_vtable()?;
         // Kotlin compares two references by the declaration they name and the receiver they bind.
-        // The type IS the declaration here — one per property — so `equals` is a type comparison,
-        // plus the bound receivers when there are any.
-        vtable[0] = equals;
+        // Effective setter access can give that declaration two emitted types, so both publish the
+        // same exact declaration marker and use the common callable-reference equality and hash.
+        let marker = self.reference_identity_marker(identity)?;
+        vtable[0] = self.runtime_member_import("kt_reference_equals")?;
+        vtable[1] = self.runtime_member_import("kt_reference_hash_code")?;
         vtable.push(getter);
         vtable.push(match setter {
             Some(setter) => setter,
@@ -590,7 +605,7 @@ impl<'a> FileLowering<'a> {
                 vtable: &vtable,
                 superclass: any_type,
                 interfaces: &markers,
-                reference_target: None,
+                reference_target: Some((marker, receiver_offset.unwrap_or(0))),
                 walk: super::objects::WalkMembers::default(),
                 qualified_name: None,
                 simple_name: None,
@@ -598,7 +613,6 @@ impl<'a> FileLowering<'a> {
             },
         )?;
 
-        self.define_reference_equals(equals, &base, descriptor, receiver_offset)?;
         self.define_reference_get(getter, &base, &site, receiver_offset)?;
         if let Some(setter) = setter {
             self.define_reference_set(setter, &base, &site, receiver_offset)?;

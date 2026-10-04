@@ -400,6 +400,7 @@ open class Bar(name: String) {
     var shown: String = name
         protected set
     fun insideFoo() = Bar::foo
+    fun boundFoo() = this::foo
     fun insideShown() = Bar::shown
     fun boundInside() = this::shown
 }
@@ -415,8 +416,12 @@ class Baz(name: String) : Bar(name) {
 fun box(): String {
     val p1: KProperty1<Bar, String> = Bar::foo
     if (p1 is KMutableProperty<*>) return "Fail p1"
+    if ((p1 as Any) != (Bar("M").insideFoo() as Any)) return "Fail unbound equality"
     if (Baz("").hidden() is KMutableProperty<*>) return "Fail hidden"
-    if (Bar("")::foo is KMutableProperty<*>) return "Fail bound foo"
+    val privateOwner = Bar("P")
+    val privateBound = privateOwner::foo
+    if (privateBound is KMutableProperty<*>) return "Fail bound foo"
+    if ((privateBound as Any) != (privateOwner.boundFoo() as Any)) return "Fail bound equality"
     if (p1.get(Bar("OK")) != "OK") return "Fail get"
     val owner = Bar("O")
     owner.insideFoo().set(owner, "K")
