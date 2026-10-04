@@ -14218,3 +14218,27 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the method is declared with. Spelling that parameter `V` is not a method descriptor, and the JVM
   rejects the continuation class while loading it. This is the receiver of `suspend Unit.() -> Unit`.
   Test: `tests/suspend_unit_receiver_e2e.rs`. Corpus: `coroutines/kt28844.kt`.
+
+- **An inline body with a loop, a try/catch or a suspension point is entered with an empty operand
+  stack** (kotlinc's `requiresEmptyStackOnEntry`: try/catch blocks, a `mark` before a suspend call
+  or an inline suspend call, or any backward jump). When the caller has already pushed operands (an
+  earlier argument, a `new`/`dup` of the object being constructed), kotlinc brackets the inlined
+  body with `InlineMarker.beforeInlineCall`/`afterInlineCall`; its mandatory `FixStack` stores those
+  operands into locals above every slot of the finished method, reloads them under the call's
+  result, and `UninitializedStoresProcessor` then moves a saved `new` after the constructor's
+  arguments. krusty's inliner declined such a body, so a reified call that has no callable fallback
+  (`pair(id, xs.filterIsInstance<String>())`) failed the whole compile with "inline splice failed".
+  The MethodNode inliner now writes the two markers around the body when the stack is not empty,
+  and the class writer runs FixStack and the uninitialized-store move over every finished method
+  that is not a coroutine (a coroutine runs both inside its transformation) before kotlinc's
+  optimizer, so the result is kotlinc's bytes. Once the markers are written the normalization is
+  mandatory: a handler entered over the caller's operands loses them, so the body as emitted need
+  not verify. A method the passes cannot normalize fails the compile with a diagnostic naming it;
+  the class is not written. Not yet kotlinc's bytes: an inline body with handlers is still reached
+  with the operands already moved to temporaries by the operand sequencing ahead of the call
+  (`must_spill_across`), and a call with a literal lambda over a non-empty stack still takes the
+  byte splice.
+  Tests: `tests/inline_call_operand_spill_e2e.rs` (one operand, wide operands, a constructor
+  argument, each run and compared with kotlinc; a try/catch callee under an operand, run), and
+  `classfile::inline_call_stacks::tests::a_method_the_passes_cannot_normalize_fails_the_class`.
+  Corpus: a private-corpus module.

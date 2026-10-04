@@ -19,6 +19,7 @@ mod uninitialized_stores;
 
 pub(crate) use lambda_mode::{transform_suspend_lambda, SuspendLambda};
 pub(crate) use transform::transform_named_function;
+pub(crate) use uninitialized_stores::process_uninitialized_stores;
 
 use super::analysis::AnalyzerError;
 use super::fix_stack::FixStackError;
