@@ -8,7 +8,12 @@
 use super::*;
 use crate::ir::{ExprId, IrExpr};
 
-fn slot_type(ir: &IrFile, declaration: ExprId, semantic: Ty) -> Ty {
+/// The JVM type of the slot a `Variable` declaration owns. A declaration always stores a value, so
+/// semantic `Unit` is the `kotlin/Unit` reference; only a callable's control-flow return is `V`.
+/// Every reader of a declaration's representation asks here: the live slot map when the slot is
+/// entered, and the body-wide declaration table ([`super::collect_body_var_types`]) once its scope has
+/// closed or before it opens.
+pub(super) fn slot_type(ir: &IrFile, declaration: ExprId, semantic: Ty) -> Ty {
     let declared = ir
         .deferred_local_types
         .get(&declaration)

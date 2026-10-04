@@ -6339,8 +6339,9 @@ struct Emitter<'a> {
     /// A chain's receiver temporaries declared after its first guard already jumped to the shared
     /// null exit, by that exit: none of them is assigned on every path into it.
     safe_call_exit_temporaries: HashMap<Label, Vec<u32>>,
-    /// Every `Variable` index → its JVM type (file-wide); a `value_ty(GetValue)` fallback for a slot not
-    /// yet registered in `slots` (queried before its declaration emits — e.g. an inline result temp).
+    /// Every `Variable` index → the JVM type of the slot it owns (file-wide); a `value_ty(GetValue)`
+    /// fallback for a slot not registered in `slots` (queried before its declaration emits, or after
+    /// its block's scope closed — e.g. an inline result temporary a discarded block reads).
     var_types: HashMap<u32, Ty>,
     /// Values stored into semantic locals, used only for pre-emission semantic non-null facts.
     value_stores: non_null_operands::ValueStores,
@@ -9213,6 +9214,67 @@ mod invariant_tests {
             param_checks: vec![],
         });
         let _ = emit_for_test(&ir, "TestKt", &EmitRun::default());
+    }
+
+    // A `Unit` declaration owns a `kotlin/Unit` reference slot, so reading it pushes one operand. A
+    // discarded block whose value is that read is popped only after the block's scope has closed,
+    // when the type comes from the body-wide declaration table instead of the live slot map. Both
+    // must name the slot the declaration owns; reading the table as `Unit` (no operand) left the
+    // reference on the stack, and the `if` branch reached its join one operand higher than the
+    // empty `else`.
+    #[test]
+    fn a_discarded_unit_temporary_read_is_popped_after_its_scope_closes() {
+        let mut ir = IrFile::default();
+        let unit = ir.add_expr(IrExpr::UnitInstance);
+        let declaration = ir.add_expr(IrExpr::Variable {
+            index: 1,
+            ty: Ty::Unit,
+            init: Some(unit),
+            named: false,
+        });
+        let read = ir.add_expr(IrExpr::GetValue(1));
+        let temporary = ir.add_expr(IrExpr::Block {
+            stmts: vec![declaration],
+            value: Some(read),
+        });
+        let then_branch = ir.add_expr(IrExpr::Block {
+            stmts: Vec::new(),
+            value: Some(temporary),
+        });
+        let else_branch = ir.add_expr(IrExpr::Block {
+            stmts: Vec::new(),
+            value: None,
+        });
+        let condition = ir.add_expr(IrExpr::GetValue(0));
+        let branch = ir.add_expr(IrExpr::When {
+            branches: vec![(Some(condition), then_branch), (None, else_branch)],
+        });
+        let body = ir.add_expr(IrExpr::Block {
+            stmts: vec![branch],
+            value: None,
+        });
+        ir.add_fun(IrFunction {
+            name: "box".into(),
+            params: vec![Ty::Boolean],
+            ret: Ty::Unit,
+            body: Some(body),
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: vec![None],
+        });
+        // Before the fix this panicked computing frames: `StackHeight` at the branch join.
+        let classes = emit_for_test(&ir, "TestKt", &EmitRun::default()).expect("emitted class");
+        let (_, bytes) = classes
+            .iter()
+            .find(|(name, _)| name == "TestKt")
+            .expect("facade class");
+        let code =
+            crate::jvm::classreader::read_method_code(bytes, "box", "(Z)V").expect("box code");
+        // The popped read is dead, and the optimizer then removes the unused temporary with it.
+        assert_eq!(
+            code.max_stack, 1,
+            "only the condition reaches the stack; the temporary's read is popped"
+        );
     }
 
     // A machine recorded for a function with no `$completion` parameter cannot resolve the
