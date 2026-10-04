@@ -754,6 +754,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   records that physical value in JVM emission facts while common IR retains only the semantic
   suspension kind; the emitter writes the check (`jvm/suspend/intrinsic_probes.rs`,
   `jvm/ir_emit/intrinsic_probes.rs`). Tests: `tests/intrinsic_suspension_probes_e2e.rs`.
+- **A named function's unintercepted block is a suspension point of kotlinc's transformer.** The
+  block reads kotlinc's fake continuation (`mark(FakeContinuation); aconst_null`, cast to
+  `Continuation`), which the bytecode transformer replaces with the machine's continuation, or
+  with `$completion` when every point is a tail call; its probe loads the same fake. The block is
+  bracketed by the suspension markers from its first instruction to after its probe, with the
+  `Unit`-call marker when its result is `Unit`, so a `Unit` function whose body is the block keeps
+  kotlinc's `dup; getCOROUTINE_SUSPENDED; if_acmpne; areturn; pop; Unit` tail and no state
+  machine. After the block the line is written afresh, and a used result is read at the call's
+  line, which is the next line the transformer's `@DebugMetadata` records. Inline calls inside the
+  block do not decline the transformer: the block is one point at its own line. Suspend lambdas
+  that read their continuation still take the IR machine (`jvm/suspend/bytecode_machine.rs`,
+  `jvm/ir_emit/transformed_suspensions.rs`). Tests: `tests/intrinsic_suspension_probes_e2e.rs`.
 - **A private suspend member's `access$` bridge is the one every other class uses.** A
   continuation re-enters a private member with an ordinary call from its own class, so the owner's
   single `access$<name>` bridge serves both it and a suspend lambda class calling the member.

@@ -37,6 +37,10 @@ pub(crate) struct TransformedMachine {
     pub suspensions: Vec<TransformedSuspension>,
     /// Set for a suspend lambda's `invokeSuspend`, which the transformer takes in its lambda mode.
     pub lambda: Option<SuspendLambdaMachine>,
+    /// The `IrExpr::CurrentContinuation` reads inside its `suspendCoroutineUninterceptedOrReturn`
+    /// blocks. Each is written as kotlinc's fake continuation, which the transformer replaces with
+    /// the machine's continuation, or with `$completion` when every point is a tail call.
+    pub fake_continuations: Vec<ExprId>,
 }
 
 /// What the transformer's lambda mode needs from a suspend lambda's `invokeSuspend` beyond its
