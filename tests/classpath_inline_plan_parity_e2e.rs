@@ -1,9 +1,10 @@
-//! An external classpath inline call that lowers through the inline-body plan (an `@InlineOnly`
-//! stdlib call like `apply`/`let`, or an iteration plan like `forEach`) carries kotlinc's inline
-//! debug surface: the `$i$a$-<callee>-<lambda class>` lambda-frame marker, the callee frame's
+//! An external classpath inline call that lowers through the inline-body plan carries kotlinc's
+//! inline debug surface: the `$i$a$-<callee>-<lambda class>` lambda-frame marker, the callee frame's
 //! `$iv` locals, the line numbers the call maps through the callee's SMAP, and the `nop`s that
-//! separate the inlined frame from its caller. This suite pins the emitted class bytes against
-//! the reference compiler so the plan path cannot drift from that surface.
+//! separate the inlined frame from its caller. A repository-owned dependency below proves the
+//! generic `InlineBodyPlan::InvokeLambda` route; the stdlib cases additionally cover inline-only and
+//! iteration plans. This suite pins the emitted class bytes against the reference compiler so the
+//! plan path cannot drift from that surface.
 
 use super::common;
 
@@ -37,21 +38,24 @@ fn nested_inline_only_calls_are_the_reference_compilers_class() {
     common::assert_classes_identical_to_kotlinc_jdk("PlanNested", NESTED, &["PlanNestedKt"]);
 }
 
-/// An inline call with two lambda arguments marks each lambda frame separately.
-const BOTH_LIB: &str = r#"inline fun both(x: Int, f: (Int) -> Int, g: (Int) -> Int): Int = f(x) + g(x)
+/// A neutral dependency function with one direct lambda invocation is the generic
+/// `InlineBodyPlan::InvokeLambda` shape. Its owner and name do not belong to the stdlib, so no
+/// intrinsic or name-specific plan can make this regression pass. A two-lambda body would contain
+/// two invoke sites and deliberately route through `MethodInliner`, testing the wrong path here.
+const STEP_LIB: &str = r#"inline fun step(x: Int, transform: (Int) -> Int): Int = transform(x)
 "#;
 
-const BOTH: &str = r#"fun box(): String {
-    val v = both(20, { it + 1 }, { it * 2 })
-    return if (v == 61) "OK" else "FAIL: " + v
+const STEP: &str = r#"fun box(): String {
+    val v = step(20) { it + 1 }
+    return if (v == 21) "OK" else "FAIL: " + v
 }
 "#;
 
 #[test]
-fn an_inline_call_with_two_lambdas_is_the_reference_compilers_class() {
-    let lib = common::kotlinc_lib_out(&[("BothLib.kt", BOTH_LIB)])
+fn a_neutral_invoke_lambda_plan_is_the_reference_compilers_class() {
+    let lib = common::kotlinc_lib_out(&[("StepLib.kt", STEP_LIB)])
         .expect("reference kotlinc is provisioned");
-    common::assert_classes_identical_to_kotlinc_against("PlanBoth", BOTH, &["PlanBothKt"], &[lib]);
+    common::assert_classes_identical_to_kotlinc_against("PlanStep", STEP, &["PlanStepKt"], &[lib]);
 }
 
 /// An iteration plan (`forEach` over a list): the callee is NOT inline-only, so its frame keeps
