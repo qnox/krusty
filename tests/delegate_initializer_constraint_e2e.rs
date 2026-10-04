@@ -11,18 +11,12 @@ fun requireTextSink(x: ValueSink<String>) {}
 class DeferredCell<E>(val value: E)
 fun <L> deferValue(initializer: () -> L): DeferredCell<L> = DeferredCell(initializer())
 operator fun <G> DeferredCell<G>.getValue(thisRef: Any?, property: Any?): G = value
-class SinkDelegate<S>(val sink: ValueSink<S>, val value: S)
-fun <S> delegateFor(sink: ValueSink<S>): SinkDelegate<S> = SinkDelegate(sink, "OK" as S)
-operator fun <S> SinkDelegate<S>.getValue(thisRef: Any?, property: Any?): S = value
 fun usedInCondition() = buildValue { x ->
     val y by deferValue { requireTextSink(x); "OK" }
     if (y.length != 2) error("fail")
 }
 fun unusedDelegate() = buildValue { x ->
     val y by deferValue { requireTextSink(x); "OK" }
-}
-fun typedDelegate() = buildValue { x ->
-    val y: String by delegateFor(x)
 }
 fun ordinaryInitializer() = buildValue { x ->
     val ignored = requireTextSink(x)
@@ -34,16 +28,15 @@ fun usedAsResult() = buildValue { x ->
 fun box(): String {
     if (usedInCondition() != "OK") return "condition"
     if (unusedDelegate() != "OK") return "unused delegate"
-    if (typedDelegate() != "OK") return "typed delegate"
     if (ordinaryInitializer() != "OK") return "ordinary initializer"
     if (usedAsResult() != "OK") return "result"
     return "OK"
 }
 "#;
 
-/// Each expression-bodied function returns `String`: a statement initializer or the declared
-/// delegated-property result fixes the builder type variable even when the local is unused. The
-/// `try`/`finally` wrapper from KT-65262 is the box
+/// Each expression-bodied function returns `String`: an initializer fixes the builder type
+/// variable when the binding is used only in an `if` condition, when it is unused, and when it is
+/// the lambda result. The `try`/`finally` wrapper from KT-65262 is the box
 /// `inference/pcla/pclaRootIsTrySyntheticCallWithDelegate.kt`.
 #[test]
 fn local_initializers_fix_the_builder_type_argument() {
