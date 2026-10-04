@@ -64,8 +64,13 @@ pub(in crate::resolve) fn collect_declared_spellings(
     for (file_index, file) in files.iter().enumerate() {
         let file_index = file_index as u32;
         let names = &file_class_names[file_index as usize];
-        // Spellings the parse seam parked when it expanded this file's own aliases away.
-        let spellings = &file.alias_spellings;
+        // Type-use annotations are recorded by the compact declaration path only; this
+        // retained-AST collector serves builds without compact headers and does not carry them.
+        let no_annotations = crate::spelling::RecordedTypeAnnotations::default();
+        let spellings = crate::spelling::SourceSpellings {
+            aliases: &file.alias_spellings,
+            annotations: &no_annotations,
+        };
         for &d in &file.decls {
             match file.decl(d) {
                 Decl::Fun(f) => {
@@ -348,7 +353,7 @@ fn type_param_bound_spellings(
     names: &ClassNames,
     scope: &TParams,
     expansions: &HashMap<TypeName, (Spelled, Vec<String>, Ty)>,
-    spellings: &HashMap<Span, TypeRef>,
+    spellings: crate::spelling::SourceSpellings<'_>,
 ) -> Vec<Vec<Spelled>> {
     type_params
         .iter()

@@ -556,14 +556,7 @@ fn function_pb(
         } else {
             (*pty, f.spellings.param(i).clone())
         };
-        let mut ty = type_pb_declared(st, declared_ty, &declared_spelling, &tps);
-        if f.no_infer_params.get(i).copied().unwrap_or(false) {
-            let annotation = crate::metadata::type_encoder::encode_annotation(
-                st,
-                crate::types::type_name("kotlin/internal/NoInfer"),
-            );
-            ty.field_message(100, &annotation);
-        }
+        let ty = type_pb_declared(st, declared_ty, &declared_spelling, &tps);
         vp.field_message(3, &ty); // ValueParameter.type = 3
                                   // A `vararg` parameter records its ELEMENT type as `vararg_element_type` (field 4) —
                                   // kotlinc's declared type stays the array.

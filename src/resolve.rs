@@ -9363,7 +9363,7 @@ pub(crate) fn spelling_of_ref(
     classes: &ClassNames,
     tparams: &TParams,
     expansions: &HashMap<TypeName, (Spelled, Vec<String>, Ty)>,
-    spellings: &HashMap<Span, TypeRef>,
+    spellings: crate::spelling::SourceSpellings<'_>,
 ) -> Spelled {
     let mut sink = DiagSink::new();
     spelling_of_ref_with(
@@ -9384,7 +9384,7 @@ pub(crate) fn spelling_of_ref_with(
     classes: &ClassNames,
     tparams: &TParams,
     expansions: &HashMap<TypeName, (Spelled, Vec<String>, Ty)>,
-    spellings: &HashMap<Span, TypeRef>,
+    spellings: crate::spelling::SourceSpellings<'_>,
     resolve_argument: &mut dyn FnMut(&TypeRef) -> Ty,
 ) -> Spelled {
     // Two ways a reference can name an alias, and they are mutually exclusive:
@@ -9395,11 +9395,13 @@ pub(crate) fn spelling_of_ref_with(
     //    still spells it and only name resolution can say so.
     //
     // An import path names a declaration rather than using the type, and gets no abbreviation.
-    let spelled = spellings.get(&r.span).unwrap_or(r);
+    let spelled = spellings.aliases.get(&r.span).unwrap_or(r);
+    let annotations = spellings.annotations.at(r.span.lo).to_vec();
     // A type parameter shadows any same-named alias, and is never itself one.
     if tparams.contains(&spelled.name) {
         return Spelled {
             definitely_non_null: spelled.definitely_non_null(),
+            annotations,
             ..Spelled::default()
         };
     }
@@ -9450,6 +9452,7 @@ pub(crate) fn spelling_of_ref_with(
             alias: None,
             alias_args: Vec::new(),
             args,
+            annotations,
         };
     }
     let alias = (!r.is_import())
@@ -9479,6 +9482,7 @@ pub(crate) fn spelling_of_ref_with(
             // Without an alias at this node the expanded type's arguments ARE the spelled ones,
             // position for position.
             args: argument_spellings,
+            annotations,
         };
     };
     // At an aliased node the two argument lists diverge: the abbreviated `Type` takes the
@@ -9520,6 +9524,7 @@ pub(crate) fn spelling_of_ref_with(
         // its recorded expansion, whose right-hand-side spellings the metadata decoder recovers
         // from the dependency's `Type.abbreviated_type`.
         args: expansion_args,
+        annotations,
     }
 }
 
@@ -9618,6 +9623,7 @@ fn substitute_expansion_spelling(
         alias: spelling.alias,
         alias_args,
         args,
+        annotations: spelling.annotations.clone(),
     }
 }
 

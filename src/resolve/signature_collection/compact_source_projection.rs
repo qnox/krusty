@@ -170,12 +170,17 @@ pub(in crate::resolve) fn resolve_source_alias_expansion(
     if expansion == Ty::Error {
         return None;
     }
+    // Annotations written inside an alias's right-hand side are not carried into its expansion.
+    let spellings = crate::spelling::SourceSpellings {
+        aliases: &target_spellings,
+        annotations: &crate::spelling::RecordedTypeAnnotations::default(),
+    };
     let spelling = spelling_of_ref(
         &expanded_target,
         names,
         &symbolic,
         known_spellings,
-        &target_spellings,
+        spellings,
     );
     Some((expansion, spelling))
 }

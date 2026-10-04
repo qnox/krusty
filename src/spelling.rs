@@ -47,6 +47,12 @@ pub struct Spelled {
     /// as `CargoBox` writes abbreviations on BOTH expanded arguments as well as on the node itself.
     /// A short or empty vec leaves the remaining arguments unabbreviated.
     pub args: Vec<Spelled>,
+    /// The annotations `@Metadata` records on THIS occurrence (`Type.annotation`, extension field
+    /// 100), in source order: every applied annotation whose retention is not `SOURCE`
+    /// (`fun f(x: @Mark Item)`, `Holder<@Mark Item>`). An application written with arguments is
+    /// left out until the metadata writer encodes annotation argument values: a record naming the
+    /// class with its arguments dropped would describe a different annotation.
+    pub annotations: Vec<TypeName>,
 }
 
 impl Spelled {
@@ -57,12 +63,16 @@ impl Spelled {
         alias: None,
         alias_args: Vec::new(),
         args: Vec::new(),
+        annotations: Vec::new(),
     };
 
     /// Whether this node and everything below it is free of alias spellings — the fast path that
     /// lets the encoder skip the parallel walk entirely.
     pub fn is_none(&self) -> bool {
-        !self.definitely_non_null && self.alias.is_none() && self.args.iter().all(Spelled::is_none)
+        !self.definitely_non_null
+            && self.alias.is_none()
+            && self.annotations.is_empty()
+            && self.args.iter().all(Spelled::is_none)
     }
 
     /// This node's spelling for the type argument at `index`, or the empty spelling when the
@@ -82,6 +92,7 @@ impl Spelled {
             alias: None,
             alias_args: Vec::new(),
             args: vec![self.clone()],
+            annotations: Vec::new(),
         }
     }
 
@@ -97,6 +108,7 @@ impl Spelled {
     pub(crate) fn storage_payload_bytes(&self) -> usize {
         self.alias_args.len() * std::mem::size_of::<(Ty, Spelled)>()
             + self.args.len() * std::mem::size_of::<Spelled>()
+            + self.annotations.len() * std::mem::size_of::<TypeName>()
             + self
                 .alias_args
                 .iter()
@@ -108,6 +120,37 @@ impl Spelled {
                 .map(Spelled::storage_payload_bytes)
                 .sum::<usize>()
     }
+}
+
+/// The annotations `@Metadata` records on each type occurrence of one source file, keyed by the
+/// occurrence's start offset (the key the parser files type-use annotations under). Built once per
+/// file from Pass-1 bound annotation identities; see [`Spelled::annotations`] for what is recorded.
+#[derive(Debug, Default)]
+pub(crate) struct RecordedTypeAnnotations(std::collections::HashMap<u32, Vec<TypeName>>);
+
+impl RecordedTypeAnnotations {
+    pub(crate) fn record(&mut self, occurrence: u32, annotations: Vec<TypeName>) {
+        if !annotations.is_empty() {
+            self.0.insert(occurrence, annotations);
+        }
+    }
+
+    /// The annotations recorded on the type occurrence starting at `occurrence`.
+    pub(crate) fn at(&self, occurrence: u32) -> &[TypeName] {
+        self.0
+            .get(&occurrence)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+}
+
+/// What one source file says about its type occurrences beyond their resolved types: the alias
+/// spellings the parse seam parked when it expanded the file's own aliases away, and the
+/// annotations `@Metadata` records on each occurrence.
+#[derive(Clone, Copy)]
+pub(crate) struct SourceSpellings<'a> {
+    pub aliases: &'a std::collections::HashMap<crate::diag::Span, crate::ast::TypeRef>,
+    pub annotations: &'a RecordedTypeAnnotations,
 }
 
 /// Source spellings of ONE declaration's declared types, addressed the way the metadata builders
@@ -145,6 +188,7 @@ impl DeclaredSpellings {
             alias: None,
             alias_args: Vec::new(),
             args: Vec::new(),
+            annotations: Vec::new(),
         },
         params: Vec::new(),
         receiver: Spelled {
@@ -152,18 +196,21 @@ impl DeclaredSpellings {
             alias: None,
             alias_args: Vec::new(),
             args: Vec::new(),
+            annotations: Vec::new(),
         },
         superclass: Spelled {
             definitely_non_null: false,
             alias: None,
             alias_args: Vec::new(),
             args: Vec::new(),
+            annotations: Vec::new(),
         },
         type_param_bounds: Vec::new(),
         supertypes: Vec::new(),
     };
 
-    /// Whether this declaration spelled no `typealias` anywhere — the signal not to record it.
+    /// Whether this declaration spelled no `typealias` and recorded no type-use annotation anywhere
+    /// — the signal not to record it.
     pub fn is_none(&self) -> bool {
         self.ret.is_none()
             && self.receiver.is_none()
