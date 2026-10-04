@@ -31,7 +31,7 @@ pub use property_access::{
 };
 
 use crate::kt_string::KtString;
-use crate::types::TypeName;
+use crate::types::{Ty, TypeName};
 
 use super::body_work::BodyWorkItem;
 use super::capture::{FirCapture, FirCaptureSource, FirImplicitReceiverCapture};
@@ -511,6 +511,20 @@ impl ClassBodyContext {
 pub enum FirAnnotationDefaultValue {
     Constant(FirConstant),
     Singleton(TypeName),
+    EnumEntry {
+        classifier: TypeName,
+        name: Box<str>,
+    },
+    KClass(Ty),
+    Array {
+        array_type: Ty,
+        elements: Vec<Self>,
+    },
+    Annotation {
+        classifier: TypeName,
+        members: Vec<(String, Ty)>,
+        values: Vec<Self>,
+    },
 }
 
 /// Complete checked declaration shape needed to realize an annotation value. This is Kotlin

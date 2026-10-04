@@ -43,6 +43,23 @@ pub(crate) fn annotation_member_jvm_type(ty: Ty) -> Ty {
     }
 }
 
+/// JVM result of a property read planned without the declaring class file. Annotation members
+/// declared `KClass` use `java.lang.Class`; every other property keeps its semantic type.
+pub(crate) fn annotation_member_read_type(
+    classifiers: &dyn BackendClassifierSource,
+    owner: TypeName,
+    ty: Ty,
+) -> Ty {
+    if classifiers
+        .classifier(owner)
+        .is_some_and(|classifier| classifier.is_annotation())
+    {
+        annotation_member_jvm_type(ty)
+    } else {
+        ty
+    }
+}
+
 /// The single type argument of a `KClass` member. A raw or star `KClass` is `*`.
 pub(crate) enum KClassArgument {
     Star,

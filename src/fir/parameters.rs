@@ -209,6 +209,31 @@ impl ResolvedModuleIndex {
             .map(Box::as_ref)
     }
 
+    pub(crate) fn annotation_constructor_callables(&self) -> Vec<CallableId> {
+        self.annotation_constructor_defaults
+            .keys()
+            .copied()
+            .collect()
+    }
+
+    pub(crate) fn replace_annotation_constructor_defaults(
+        &mut self,
+        callable: CallableId,
+        defaults: impl IntoIterator<Item = Option<crate::libraries::DefaultValue>>,
+    ) {
+        let defaults = defaults.into_iter().collect::<Vec<_>>().into_boxed_slice();
+        let published = self
+            .annotation_constructor_defaults
+            .get_mut(&callable)
+            .expect("annotation constructor defaults are replaced only after publication");
+        assert_eq!(
+            published.len(),
+            defaults.len(),
+            "checked annotation defaults keep the published parameter count"
+        );
+        *published = defaults;
+    }
+
     pub fn callable_behavior(&self, callable: CallableId) -> ResolvedCallableBehavior {
         self.callable_behaviors
             .get(&callable)

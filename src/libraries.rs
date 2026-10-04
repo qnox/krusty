@@ -12,6 +12,7 @@ mod classifier_kind;
 mod classifier_role;
 mod compiler_intrinsic;
 mod core_builtins;
+mod default_value;
 pub(crate) mod function_classifiers;
 mod generic_signature;
 mod inline_body;
@@ -26,6 +27,7 @@ pub(crate) use classifier_callables::constructor_generic_signature;
 pub use classifier_callables::BoundInnerConstructor;
 pub use classifier_declaration::{AliasExpansion, ClassifierDeclaration};
 pub use classifier_kind::TypeKind;
+pub use default_value::DefaultValue;
 pub use physical_parameter_plan::PhysicalParameterSlot;
 pub use platform_contract::{
     PlatformInitializationError, PlatformSourceHeaderInput, SourceHeaderError,
@@ -46,38 +48,6 @@ pub use inline_body::{
 };
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
-
-/// A source default value captured without an AST/file identity. Providers attach these directly to
-/// callable metadata so any selected source callable can be lowered without looking its declaration
-/// up again. Unrepresentable defaults remain `None` and therefore cannot be silently miscompiled.
-#[derive(Clone, Debug, PartialEq)]
-pub enum DefaultValue {
-    Int(i64),
-    Long(i64),
-    Double(f64),
-    Float(f32),
-    Bool(bool),
-    Char(u16),
-    Str(crate::kt_string::KtString),
-    Null,
-    Object(TypeName),
-}
-
-impl DefaultValue {
-    pub fn fills_param_ty(&self, ty: Ty) -> bool {
-        match self {
-            Self::Int(_) => ty.int_arithmetic_repr() == Ty::Int,
-            Self::Long(_) => ty == Ty::Long,
-            Self::Double(_) => ty == Ty::Double,
-            Self::Float(_) => ty == Ty::Float,
-            Self::Bool(_) => ty == Ty::Boolean,
-            Self::Char(_) => ty == Ty::Char,
-            Self::Str(_) => ty == Ty::String,
-            Self::Null => ty.is_reference(),
-            Self::Object(_) => false,
-        }
-    }
-}
 
 /// Declaration-level classifier access. Unlike [`Visibility`], this preserves JVM package-private
 /// metadata; accessibility itself is computed by the resolver from this fact and its use context.

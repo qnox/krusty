@@ -8,6 +8,49 @@ use crate::resolve::{
     ResolvedCtorDelegation, ResolvedCtorDelegationTarget,
 };
 
+fn annotation_default_value(default: crate::libraries::DefaultValue) -> FirAnnotationDefaultValue {
+    use crate::libraries::DefaultValue;
+
+    match default {
+        DefaultValue::Int(value) => FirAnnotationDefaultValue::Constant(FirConstant::Int(value)),
+        DefaultValue::Long(value) => FirAnnotationDefaultValue::Constant(FirConstant::Long(value)),
+        DefaultValue::Double(value) => {
+            FirAnnotationDefaultValue::Constant(FirConstant::Double(value))
+        }
+        DefaultValue::Float(value) => {
+            FirAnnotationDefaultValue::Constant(FirConstant::Float(value))
+        }
+        DefaultValue::Bool(value) => {
+            FirAnnotationDefaultValue::Constant(FirConstant::Boolean(value))
+        }
+        DefaultValue::Char(value) => FirAnnotationDefaultValue::Constant(FirConstant::Char(value)),
+        DefaultValue::Str(value) => FirAnnotationDefaultValue::Constant(FirConstant::String(value)),
+        DefaultValue::Null => FirAnnotationDefaultValue::Constant(FirConstant::Null),
+        DefaultValue::Object(classifier) => FirAnnotationDefaultValue::Singleton(classifier),
+        DefaultValue::EnumEntry { classifier, name } => FirAnnotationDefaultValue::EnumEntry {
+            classifier,
+            name: name.into_boxed_str(),
+        },
+        DefaultValue::KClass(classifier) => FirAnnotationDefaultValue::KClass(classifier),
+        DefaultValue::Array {
+            array_type,
+            elements,
+        } => FirAnnotationDefaultValue::Array {
+            array_type,
+            elements: elements.into_iter().map(annotation_default_value).collect(),
+        },
+        DefaultValue::Annotation {
+            classifier,
+            members,
+            values,
+        } => FirAnnotationDefaultValue::Annotation {
+            classifier,
+            members,
+            values: values.into_iter().map(annotation_default_value).collect(),
+        },
+    }
+}
+
 impl BodyFirChecker<'_> {
     pub(super) fn constructor_call(
         &mut self,
@@ -426,8 +469,6 @@ impl BodyFirChecker<'_> {
         span: Span,
         annotation: ResolvedAnnotationConstruction,
     ) -> Result<FirAnnotationConstruction, BodyCheckFailure> {
-        use crate::libraries::DefaultValue;
-
         if annotation.members.len() != annotation.defaults.len() {
             return Err(self.failure(Some(span), BodyCheckFailureKind::UnsupportedCallShape));
         }
@@ -442,35 +483,7 @@ impl BodyFirChecker<'_> {
         let defaults = annotation
             .defaults
             .into_iter()
-            .map(|default| {
-                default.map(|default| match default {
-                    DefaultValue::Int(value) => {
-                        FirAnnotationDefaultValue::Constant(FirConstant::Int(value))
-                    }
-                    DefaultValue::Long(value) => {
-                        FirAnnotationDefaultValue::Constant(FirConstant::Long(value))
-                    }
-                    DefaultValue::Double(value) => {
-                        FirAnnotationDefaultValue::Constant(FirConstant::Double(value))
-                    }
-                    DefaultValue::Float(value) => {
-                        FirAnnotationDefaultValue::Constant(FirConstant::Float(value))
-                    }
-                    DefaultValue::Bool(value) => {
-                        FirAnnotationDefaultValue::Constant(FirConstant::Boolean(value))
-                    }
-                    DefaultValue::Char(value) => {
-                        FirAnnotationDefaultValue::Constant(FirConstant::Char(value))
-                    }
-                    DefaultValue::Str(value) => {
-                        FirAnnotationDefaultValue::Constant(FirConstant::String(value))
-                    }
-                    DefaultValue::Null => FirAnnotationDefaultValue::Constant(FirConstant::Null),
-                    DefaultValue::Object(classifier) => {
-                        FirAnnotationDefaultValue::Singleton(classifier)
-                    }
-                })
-            })
+            .map(|default| default.map(annotation_default_value))
             .collect::<Vec<_>>();
         Ok(FirAnnotationConstruction {
             members: members.into_boxed_slice(),

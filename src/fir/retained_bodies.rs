@@ -151,6 +151,10 @@ impl InlineBodyStore {
 }
 
 impl DefaultArgumentStore {
+    pub(crate) fn body(&self, callable: CallableId) -> Option<&FirBody> {
+        self.bodies.get(&callable)
+    }
+
     pub fn insert(&mut self, callable: ResolvedCallableHeader, body: FirBody) {
         assert!(
             body.is_default_fragment(),
