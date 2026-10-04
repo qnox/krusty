@@ -187,6 +187,97 @@ fn protected_bridge_owner(
         })
 }
 
+/// The source class that encloses `caller` and may call protected `target`.
+///
+/// A nested class does not carry the receiver's classifier on every classpath call, and it is not
+/// itself a subclass. The class it is declared in is, when that class extends the member's owner
+/// and lives in another package.
+fn enclosing_protected_subclass(
+    ir: &IrFile,
+    caller: crate::ir::ClassId,
+    target: crate::types::TypeName,
+) -> Option<crate::types::TypeName> {
+    let mut pending = std::collections::VecDeque::from([caller]);
+    let mut seen = std::collections::HashSet::new();
+    seen.insert(caller);
+    while let Some(current) = pending.pop_front() {
+        for next in enclosing_classes(ir, current) {
+            if !seen.insert(next) {
+                continue;
+            }
+            let next_name = ir.classes.get(next as usize)?.fq_name;
+            if next_name != target
+                && next_name.namespace() != target.namespace()
+                && extends_target(ir, next, target)
+            {
+                return Some(next_name);
+            }
+            pending.push_back(next);
+        }
+    }
+    None
+}
+
+/// Every exact classifier edge out of `class`'s lexical enclosure. A function can be attached to
+/// several specialized class copies, so this returns the recorded set instead of choosing one by
+/// whether it happens to inherit the protected target.
+fn enclosing_classes(ir: &IrFile, class: crate::ir::ClassId) -> Vec<crate::ir::ClassId> {
+    let Some(enclosure) = ir
+        .classes
+        .get(class as usize)
+        .and_then(|declared| declared.enclosure)
+    else {
+        return Vec::new();
+    };
+    match enclosure {
+        crate::ir::IrEnclosure::Function(function) | crate::ir::IrEnclosure::Lambda(function) => ir
+            .class_method_owners
+            .get(&function)
+            .into_iter()
+            .flatten()
+            .copied()
+            .filter(|&owner| owner != class)
+            .collect(),
+        crate::ir::IrEnclosure::ClassInitializer(owner)
+        | crate::ir::IrEnclosure::Constructor { class: owner, .. }
+        | crate::ir::IrEnclosure::Classifier(owner) => vec![owner],
+        crate::ir::IrEnclosure::PropertyAccessor { property, setter } => {
+            let function = super::property_accessor_function(ir, property, setter);
+            ir.class_method_owners
+                .get(&function)
+                .into_iter()
+                .flatten()
+                .copied()
+                .filter(|&owner| owner != class)
+                .collect()
+        }
+        crate::ir::IrEnclosure::File => Vec::new(),
+    }
+}
+
+fn extends_target(ir: &IrFile, class: crate::ir::ClassId, target: crate::types::TypeName) -> bool {
+    let mut current = class;
+    let mut seen = std::collections::HashSet::new();
+    while seen.insert(current) {
+        let Some(declared) = ir.classes.get(current as usize) else {
+            return false;
+        };
+        if declared.superclass == target
+            || declared
+                .interfaces
+                .iter_ids()
+                .any(|interface| interface == target)
+        {
+            return true;
+        }
+        let Some(superclass) = ir.class_id_by_name(declared.superclass) else {
+            return false;
+        };
+        current = superclass;
+    }
+    false
+}
+
 /// The local-variable names of a protected property accessor's parameters: the setter's value is
 /// named as its declaration names it.
 fn protected_property_parameter_names(
@@ -225,7 +316,10 @@ pub(super) fn cross_owner_member_calls(
 ) -> MemberAccessBridges {
     let mut private = std::collections::HashSet::new();
     let mut protected = std::collections::HashMap::new();
-    let mut scan = |owner: &str, roots: Vec<crate::ir::ExprId>, export_private: bool| {
+    let mut scan = |owner: &str,
+                    caller: Option<crate::ir::ClassId>,
+                    roots: Vec<crate::ir::ExprId>,
+                    export_private: bool| {
         let mut seen = std::collections::HashSet::new();
         let mut stack = roots;
         while let Some(expression) = stack.pop() {
@@ -533,6 +627,50 @@ pub(super) fn cross_owner_member_calls(
                     }
                 }
             }
+            if !protected.contains_key(&expression) {
+                if let Some(dependency) =
+                    ir.jvm_protected_dependency_calls.get(&expression).cloned()
+                {
+                    if let IrExpr::Call {
+                        callee: Callee::Virtual { .. },
+                        dispatch_receiver: Some(_),
+                        ..
+                    } = ir.expr(expression)
+                    {
+                        // A dependency member's protected accessor belongs to the lexical source
+                        // subclass. The receiver's realized JVM type may be the dependency owner,
+                        // and expression-owner spellings may name the anonymous caller; neither is
+                        // an alternate source of subclass identity.
+                        let bridge_owner = caller.and_then(|caller| {
+                            enclosing_protected_subclass(ir, caller, dependency.owner)
+                        });
+                        if let Some(bridge_owner) = bridge_owner {
+                            crate::trace_compiler!(
+                                "emit",
+                                "protected dependency bridge expression={expression} owner={} target_owner={}",
+                                bridge_owner,
+                                dependency.owner
+                            );
+                            let parameters = dependency
+                                .parameters
+                                .iter()
+                                .map(jvm_declared_ty)
+                                .collect::<Vec<_>>();
+                            protected.insert(
+                                expression,
+                                ProtectedMemberAccessBridge {
+                                    owner: bridge_owner,
+                                    name: dependency.name,
+                                    target_parameters: parameters.clone(),
+                                    bridge_parameters: parameters,
+                                    result: jvm_declared_ty(&dependency.result),
+                                    parameter_names: dependency.parameter_names.into_vec(),
+                                },
+                            );
+                        }
+                    }
+                }
+            }
             crate::ir::for_each_child(&ir.exprs, expression, &mut |child| stack.push(child));
         }
     };
@@ -542,6 +680,7 @@ pub(super) fn cross_owner_member_calls(
         for &root in &context.roots {
             scan(
                 &owner,
+                context.class.map(|class| class as crate::ir::ClassId),
                 vec![root],
                 static_accessors::non_private_inline_body(ir, root),
             );
@@ -776,6 +915,54 @@ pub(super) struct SelectedMemberCall<'a> {
     pub(super) export_private_calls: bool,
 }
 
+/// The physical invocation shape the selected declaration needs.
+///
+/// Only [`MemberInvocation::Virtual`] dispatches on the call-site spelling, so only it may carry a
+/// call-site retarget (the special-builtin rename): every other shape names something derived from
+/// the DECLARED member — an `access$` bridge or the private accessor itself — and bridge bodies
+/// always forward to the declared name.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum MemberInvocation {
+    ProtectedBridge,
+    PrivateExtensionBridge,
+    DirectPrivateAccessor,
+    Virtual,
+}
+
+/// Select the [`MemberInvocation`] for an already-resolved member call. No lookup or overload
+/// selection happens here: `protected` reports the caller's recorded bridge, and the private
+/// shapes read the selected declaration's visibility.
+pub(super) fn select_member_invocation(
+    ir: &IrFile,
+    run: &EmitRun,
+    source_owner: Option<StaticOwner>,
+    expression: crate::ir::ExprId,
+    owner_identity: TypeName,
+    protected: bool,
+    export_private_calls: bool,
+) -> MemberInvocation {
+    let member_target = ir.jvm_member_targets.get(&expression).copied();
+    let private_extension_bridge = member_target.is_some_and(|function| {
+        (source_owner != Some(StaticOwner::Class(owner_identity)) || export_private_calls)
+            && run
+                .private_member_access_bridges
+                .borrow()
+                .contains(&function)
+    });
+    let same_owner_private = !private_extension_bridge
+        && source_owner == Some(StaticOwner::Class(owner_identity))
+        && member_target.is_some_and(|function| ir.method_visibility(function).is_private());
+    if protected {
+        MemberInvocation::ProtectedBridge
+    } else if private_extension_bridge {
+        MemberInvocation::PrivateExtensionBridge
+    } else if same_owner_private {
+        MemberInvocation::DirectPrivateAccessor
+    } else {
+        MemberInvocation::Virtual
+    }
+}
+
 /// Emit [`SelectedMemberCall`]. The exact selected declaration determines whether the physical
 /// invocation goes through its access bridge; descriptors and owners are built here too.
 pub(super) fn emit_selected_member_call(
@@ -786,37 +973,44 @@ pub(super) fn emit_selected_member_call(
     code: &mut CodeBuilder,
     call: &SelectedMemberCall<'_>,
 ) {
-    let member_target = ir.jvm_member_targets.get(&call.expression).copied();
-    let private_extension_bridge = member_target.is_some_and(|function| {
-        (source_owner != Some(StaticOwner::Class(call.owner_identity)) || call.export_private_calls)
-            && run
-                .private_member_access_bridges
-                .borrow()
-                .contains(&function)
-    });
-    let same_owner_private = !private_extension_bridge
-        && source_owner == Some(StaticOwner::Class(call.owner_identity))
-        && member_target.is_some_and(|function| ir.method_visibility(function).is_private());
-    if let Some(bridge) = call.protected {
-        emit_protected_member_invocation(cw, code, bridge, call);
-    } else if private_extension_bridge {
-        emit_private_member_extension_call(cw, code, call);
-    } else if same_owner_private {
-        emit_direct_private_accessor_call(cw, code, call);
-    } else if call.interface_owner {
-        let method = cw.interface_methodref(call.owner, call.name, call.descriptor);
-        code.invokeinterface(
-            method,
-            call.argument_words,
-            physical_call_result_words(call.result),
-        );
-    } else {
-        let method = cw.methodref(call.owner, call.name, call.descriptor);
-        code.invokevirtual(
-            method,
-            call.argument_words,
-            physical_call_result_words(call.result),
-        );
+    match select_member_invocation(
+        ir,
+        run,
+        source_owner,
+        call.expression,
+        call.owner_identity,
+        call.protected.is_some(),
+        call.export_private_calls,
+    ) {
+        MemberInvocation::ProtectedBridge => emit_protected_member_invocation(
+            cw,
+            code,
+            call.protected
+                .expect("a protected-bridge invocation carries its bridge"),
+            call,
+        ),
+        MemberInvocation::PrivateExtensionBridge => {
+            emit_private_member_extension_call(cw, code, call)
+        }
+        MemberInvocation::DirectPrivateAccessor => {
+            emit_direct_private_accessor_call(cw, code, call)
+        }
+        MemberInvocation::Virtual if call.interface_owner => {
+            let method = cw.interface_methodref(call.owner, call.name, call.descriptor);
+            code.invokeinterface(
+                method,
+                call.argument_words,
+                physical_call_result_words(call.result),
+            );
+        }
+        MemberInvocation::Virtual => {
+            let method = cw.methodref(call.owner, call.name, call.descriptor);
+            code.invokevirtual(
+                method,
+                call.argument_words,
+                physical_call_result_words(call.result),
+            );
+        }
     }
 }
 

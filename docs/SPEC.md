@@ -701,14 +701,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `::compare_to_and_contains_cross_file_execute` and
   `::invoke_convention_cross_file_executes`).
 - **A suspend function's value-class result across a suspension.** A suspend function whose
-  declared result is a value class `X` over a non-null reference returns the carrier where it does
-  not suspend (`IrValueClassSuspendResult::Carrier`). Its continuation hands the value to its
-  completion typed `Any?`, so `invokeSuspend` boxes it after the `COROUTINE_SUSPENDED` check
+  declared result is a non-null value class `X` returns the carrier where it does not suspend when
+  that carrier is a reference, a nullable reference included (`Result<String>`, `X(val v: Any?)`,
+  `IrValueClassSuspendResult::Carrier`). `X(null)` is that carrier's null; the result type is not
+  itself nullable, so the two are not confused. Its continuation hands the value to its completion
+  typed `Any?`, so `invokeSuspend` boxes it after the `COROUTINE_SUSPENDED` check
   (`dup; getCOROUTINE_SUSPENDED; if_acmpne; areturn; checkcast carrier; X.box-impl; areturn`, a
   nullable carrier keeping `null`). A caller resumed with the value therefore unboxes it
-  (`checkcast X; unbox-impl`), and it cannot hand its own continuation to such a call: kotlinc builds
-  a state machine for `suspend fun test() = bar().s` and for `suspend fun g(): X = bar()`. A scalar
-  or null-capable carrier crosses as the box on both paths (`Boxed`). Following kotlinc's
+  (`checkcast X; unbox-impl`). It cannot hand its own continuation to such a call: kotlinc builds a
+  state machine for `suspend fun test() = bar().s` and for `suspend fun g(): X = bar()`. A scalar
+  carrier crosses as the box on both paths (`Boxed`), and so does a nullable result whose ordinary
+  erasure is the box (`Result<String>?`, `X(val v: Int)?`). A nullable result over a non-null
+  reference (`Name?`) keeps the carrier, null included. A caller must not treat the carrier a
+  non-suspending completion returned as a box: `Result.success("OK")` is that `String`, and
+  casting it to `kotlin.Result` fails. Following kotlinc's
   `originalReturnTypeOfSuspendFunctionReturningUnboxedInlineClass`, a suspend override also returns
   the box when a declaration it overrides, in this module or a dependency, returns another
   classifier, a type parameter included (`override suspend fun generic(): X` over
@@ -733,7 +739,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`suspendCoroutineUninterceptedOrReturn<X>`, `suspendCoroutine<X>`) yields the box on either
   path, since its block returns `Any?`, so a function returning the carrier unboxes it and does not
   forward its continuation to it. A suspend lambda returns `X` boxed, as every lambda does, so its
-  continuation does not box it again. Tests: `tests/suspend_value_class_results_e2e.rs`.
+  continuation does not box it again. A direct caller of a carrier-returning declaration unboxes
+  the resumed box, because that call's erased return is the carrier and no use-site wrapper unboxes
+  it. A caller of a suspend function value keeps the box: `SuspendFunctionN.invoke` already
+  returned it, the use lowered against that call is the one unbox, and the synchronous edge stores
+  that box as it is rather than boxing it again. A callable reference to a suspend function follows
+  the same function-value contract: its adapter returns the box even when the referenced
+  declaration returns the carrier. Tests: `tests/suspend_value_class_results_e2e.rs`.
 - **An unintercepted suspension block reports its suspension to the debug probes.** After the value
   of a `suspendCoroutineUninterceptedOrReturn` block, kotlinc writes `dup; getCOROUTINE_SUSPENDED;
   if_acmpne; <continuation>; probeCoroutineSuspended`, at the call's own line, leaving the value on
@@ -4032,6 +4044,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `mapped_kotlin_number_publishes_jdk_realizations_without_stdlib`,
   `java_charsequence_get_realization_is_an_operator`,
   `tests/classpath_number_conversion_e2e.rs`.
+
+- **An exact override family may publish a special JVM call-site name.** Kotlin builtins
+  such as `Collection.size`, `Map.keys`, `MutableList.removeAt`, `CharSequence.get`, and
+  `Number.toByte` have target spellings that differ from their source names
+  (`MethodSignatureMapper.mapOverriddenSpecialBuiltinIfNeeded`,
+  compiler/ir/backend.jvm/.../mapping/MethodSignatureMapper.kt:411-422, backed by
+  `getOverriddenBuiltinWithDifferentJvmName`,
+  core/descriptors.jvm/.../specialBuiltinMembers.kt:88-102). The provider joins each exact decoded
+  dependency declaration to its target-policy realization while both identities are available.
+  A selected source override reaches that policy only through its exact frontend override edges;
+  emission never recovers it from an owner/member spelling. Thus `SmartSet.size` calls
+  `SmartSet.size()I`, `MyList.removeAt` calls `remove(I)Object`, and a covariant
+  `keys: HashSet<K>` calls `keySet()Set` then narrows the result. Super calls, writes, plain
+  `fun getSize()`, and Java bean getters retain their declared ABI. Tests:
+  `tests/special_builtin_call_sites_e2e.rs`.
 
 - **Unchecked cast to a type parameter (`x as T`).** kotlinc erases the target to the type parameter's
   upper bound — `Object` for an unbounded `<T>` (no `checkcast` emitted), the bound's class for `<T :
@@ -7358,6 +7385,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/member_extension_property_e2e.rs::protected_member_extension_property_read_in_declaring_class`,
   `::protected_member_extension_property_read_in_subclass`,
   `::protected_member_extension_property_read_from_unrelated_class_is_rejected`.
+- **A protected classpath member called from a nested class uses the subclass's `access$<name>`.**
+  Kotlin lets a subclass call a protected member of a classpath supertype. The JVM allows that
+  call from the subclass's own method, including across packages. A nested or anonymous class is
+  a separate class file and is not that subclass, so `invokevirtual` of the protected method from
+  it is an `IllegalAccessError` when the packages differ. The subclass declares
+  `public static final synthetic access$<name>(Subclass, …)`, whose body `invokevirtual`s the
+  member, and the nested class calls that accessor. Parameters the dependency does not name are
+  `p0`, `p1`, …. A call in the subclass's own method stays a direct `invokevirtual`. A caller in
+  the member's package needs no accessor. Tests:
+  `tests/classpath_protected_nested_access_e2e.rs`. Box `coroutines/generate.kt`.
 - **A value class's private member reached from its companion calls `access$<name>-impl`.** The member
   is realized as a `private static <name>-impl` over the carrier, so the companion's call is already
   static when the backend sees it; value-class lowering records the exact function each such call
@@ -9264,6 +9301,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **A value recorded as a carrier stays that value class.** A sole-property read of a nested value
   class (`o` in `Outer(val o: Inner)`) yields `Inner`'s carrier; it keeps `Inner`'s unboxed
   representation, so `o.toString()` calls `Inner.toString-impl` over the carrier, as kotlinc does.
+  The outer class's synthesized `toString-impl` does the same with its property: it calls the
+  nested `toString-impl` on the carrier and appends that `String`. On the `StringBuilder` path the
+  append is `append(Object)`; on JVM 9+ the same `String` is the `invokedynamic` argument. A
+  nullable property stays the value erasure stored, so a primitive-backed `Inner?` is the box and
+  its `toString()` runs from there.
   Tests: `tests/value_class_nested_property_to_string_e2e.rs`.
 - **`==` with a value class on the left is kotlinc's specialized call.** With the left operand of
   value class `V` (nullable or not) and at least one operand carried unboxed (a non-null `V`, or a

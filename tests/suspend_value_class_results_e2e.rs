@@ -284,6 +284,125 @@ fun box(): String {
 }
 "#;
 
+const RESULT_CARRIER: &str = "import kotlin.coroutines.*\n\
+@JvmInline value class Wrap(val v: Any?)\n\
+@JvmInline value class Count(val n: Int)\n\
+fun interface ResultProvider { suspend fun getResult(): Result<String> }\n\
+var out = \"\"\n\
+@Suppress(\"RESULT_CLASS_IN_RETURN_TYPE\")\n\
+suspend fun make(): Result<String> = Result.success(\"R\")\n\
+suspend fun makeWrap(): Wrap = Wrap(\"W\")\n\
+suspend fun makeCount(): Count = Count(1)\n\
+@Suppress(\"RESULT_CLASS_IN_RETURN_TYPE\")\n\
+suspend fun makeNullable(): Result<String>? = Result.success(\"N\")\n\
+suspend fun handle(provider: ResultProvider) { out += provider.getResult().getOrThrow() }\n\
+suspend fun runAll() {\n\
+    out += make().getOrThrow()\n\
+    out += makeWrap().v as String\n\
+    out += makeCount().n.toString()\n\
+    out += makeNullable()!!.getOrThrow()\n\
+    handle { Result.success(\"S\") }\n\
+}\n\
+fun box(): String {\n\
+    val body: suspend () -> Unit = { runAll() }\n\
+    body.startCoroutine(Continuation(EmptyCoroutineContext) { it.getOrThrow() })\n\
+    return if (out == \"RW1NS\") \"OK\" else out\n\
+}\n";
+
+/// A non-null `Result` and a value class over `Any?` complete with the carrier, including through
+/// a fun interface. A scalar and a nullable `Result?` still cross as the box. None of these calls
+/// suspend, so the caller must not cast the carrier to the value class.
+#[test]
+fn a_null_capable_reference_carrier_completes_without_a_box() {
+    common::expect_box_ok_with_stdlib(RESULT_CARRIER, "SuspendValueClassResults");
+}
+
+/// A state-machine merge stores the value-class box on both its synchronous and resumed edges.
+/// The already-lowered property access consumes that representation exactly once, including when
+/// the selected suspend member is private and emission routes the call through an access bridge.
+#[test]
+fn a_resumed_null_capable_carrier_is_unboxed_once() {
+    const SOURCE: &str = r#"
+import kotlin.coroutines.*
+import kotlin.coroutines.intrinsics.*
+
+@JvmInline value class Opaque(val value: Any?)
+
+var parked: Continuation<Any?>? = null
+
+suspend fun <T> park(): T = suspendCoroutineUninterceptedOrReturn {
+    @Suppress("UNCHECKED_CAST")
+    parked = it as Continuation<Any?>
+    COROUTINE_SUSPENDED
+}
+
+class Holder {
+    private suspend fun value(): Opaque = Opaque(park<String>())
+    fun operation(): suspend () -> Opaque = { value() }
+}
+
+fun box(): String {
+    var result = "fail"
+    suspend { result = Holder().operation()().value as String }.startCoroutine(
+        Continuation(EmptyCoroutineContext) { it.getOrThrow() }
+    )
+    parked?.resume("OK")
+    return result
+}
+"#;
+
+    common::expect_box_ok_with_stdlib(SOURCE, "ResumedNullCapableCarrier");
+}
+
+/// A suspend function value that completes without suspending already returned the box. The caller
+/// stores that box and its property use unboxes once. A direct call of a carrier-returning
+/// declaration still unboxes the box the state machine stored for the merge.
+#[test]
+fn a_synchronous_suspend_function_value_returns_the_box() {
+    const SOURCE: &str = r#"
+import kotlin.coroutines.*
+
+@JvmInline value class Wrap(val v: Any?)
+
+suspend fun read(fn: suspend () -> Wrap): String = fn().v as String
+
+fun box(): String {
+    var out = ""
+    val body: suspend () -> Unit = { out = read { Wrap("OK") } }
+    body.startCoroutine(Continuation(EmptyCoroutineContext) { it.getOrThrow() })
+    return out
+}
+"#;
+
+    common::expect_box_ok_with_stdlib(SOURCE, "SynchronousSuspendFunctionValue");
+}
+
+/// A callable reference to `suspend fun ok(): R` is a function value. Its adapter returns the box
+/// even though the declaration returns the carrier, so `call(::ok)` can pass that box to `useR`.
+#[test]
+fn a_suspend_callable_reference_returns_the_value_class_box() {
+    const SOURCE: &str = r#"
+import kotlin.coroutines.*
+
+@JvmInline value class R(val x: Any)
+
+suspend fun <T> call(fn: suspend () -> T): T = fn()
+fun useR(r: R) = if (r.x == "OK") "OK" else "fail"
+suspend fun ok() = R("OK")
+
+fun box(): String {
+    var res = "fail"
+    val body: suspend () -> Unit = { res = useR(call(::ok)) }
+    body.startCoroutine(Continuation(EmptyCoroutineContext) { it.getOrThrow() })
+    return res
+}
+"#;
+    assert_eq!(
+        common::compile_and_run_with_stdlib(SOURCE, "SuspendValueClassResults").as_deref(),
+        Some("OK")
+    );
+}
+
 /// A value class resumed into a caller of `$default` unboxes it, and a suspend lambda hands its
 /// value-class result over boxed, as every lambda does, so its continuation does not box it again.
 #[test]

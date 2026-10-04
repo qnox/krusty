@@ -594,10 +594,14 @@ fn delegated_call(
                             ))
                         }
                         ResolvedDelegatedModuleTarget::PropertyGetter(property) => {
-                            IrVirtualTarget::PropertyGetter(property)
+                            IrVirtualTarget::PropertyGetter(
+                                crate::fir::ResolvedPropertyOverrideTarget::Module(property),
+                            )
                         }
                         ResolvedDelegatedModuleTarget::PropertySetter(property) => {
-                            IrVirtualTarget::PropertySetter(property)
+                            IrVirtualTarget::PropertySetter(
+                                crate::fir::ResolvedPropertyOverrideTarget::Module(property),
+                            )
                         }
                     }),
                 },

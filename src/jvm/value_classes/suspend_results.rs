@@ -1,11 +1,14 @@
 //! How a suspend function's value-class result crosses the erased `Continuation` boundary.
 //!
-//! kotlinc returns a value-class result unboxed only when the function's own declared result is
-//! that value class and no declaration it overrides returns another classifier; otherwise the box
-//! crosses. A call receives what its callee returns, so a call to a callee that returns a type
-//! parameter receives the box and unboxes it, whatever the call's own result type.
+//! kotlinc returns a non-null value-class result unboxed when its carrier is a reference, a
+//! nullable reference included, and no declaration it overrides returns another classifier. A
+//! scalar carrier, and a nullable value class whose ordinary erasure is the box, cross boxed. A
+//! callable reference's adapter is a function value's `invoke`, so it returns the box even when
+//! the referenced declaration returns the carrier. A call receives what its callee returns, so a
+//! call to a callee that returns a type parameter receives the box and unboxes it, whatever the
+//! call's own result type.
 
-use super::{erase, nullable_is_boxed, Under};
+use super::{erase, is_ref, nullable_is_boxed, Under};
 use crate::fir::ResolvedFunctionOverrideTarget;
 use crate::ir::{IrExpr, IrFile, IrTypeOp, IrValueClassSuspendResult};
 use crate::types::{Ty, TypeName};
@@ -20,8 +23,11 @@ pub(super) fn record_suspend_results(
     suspend_functions: &HashSet<u32>,
 ) -> HashSet<u32> {
     let forced = force_boxed_results(ir, under, declared_results, suspend_functions);
-    // A suspend lambda's `invoke` erases its result to `Object`, so its implementation returns the
-    // value class boxed, as every lambda does, unless its SAM method declares that very value class.
+    // A suspend lambda's `invoke`, and a callable reference's adapter, erase their result to
+    // `Object`. Both return the value class boxed, as every function value does, unless a lambda's
+    // SAM method declares that very value class. Reference realization has already replaced each
+    // `CallableReference` with its carrier: the adapter is that carrier's local target, or its own
+    // `invoke` when the adapter was moved onto the carrier.
     let lambdas = ir
         .exprs
         .iter()
@@ -31,13 +37,20 @@ pub(super) fn record_suspend_results(
         })
         .filter(|&function| !super::sam_declares_vc_return(ir, declared_results, function, under))
         .collect::<HashSet<_>>();
+    let references = ir
+        .classes
+        .iter()
+        .filter_map(|class| class.func_ref.as_ref())
+        .filter(|reference| reference.is_suspend)
+        .flat_map(|reference| reference.local_target.into_iter().chain(reference.invoke))
+        .collect::<HashSet<_>>();
     // This includes nullable value classes: `X<String>?` can use `String` itself as the nullable
     // carrier, whereas `X<Int>?` must remain the boxed `X` because an `int` cannot represent null.
     for &function in suspend_functions {
         if let Some(realization) = declared_results.get(function as usize).and_then(|result| {
             suspend_result_representation(result, under, forced.contains(&function))
         }) {
-            let realization = match lambdas.contains(&function) {
+            let realization = match lambdas.contains(&function) || references.contains(&function) {
                 true => boxed(realization),
                 false => realization,
             };
@@ -204,9 +217,11 @@ fn declares_another_classifier(overridden: Ty, classifier: TypeName) -> bool {
 /// Select the physical result carried through a suspend function's erased `Object` boundary.
 ///
 /// The declared type remains the semantic identity used for overloads and metadata. This target pass
-/// records only how that already-selected value crosses CPS. Scalar and null-capable carriers require a
-/// box; a non-null reference carrier crosses directly unless an exact override edge requires the concrete
-/// value-class identity at the supertype boundary. Nullable value classes keep their ordinary erasure.
+/// records only how that already-selected value crosses CPS. A scalar carrier requires a box. A
+/// reference carrier, a null-capable one included, crosses directly unless an exact override edge
+/// requires the concrete value-class identity at the supertype boundary: `X(null)` is that
+/// carrier's null, and a non-null result is not also a missing value. A nullable value class keeps
+/// its ordinary erasure, so `X?` crosses as the box exactly when `X?` is boxed.
 pub(super) fn suspend_result_representation(
     declared: &Ty,
     under: &Under,
@@ -217,7 +232,12 @@ pub(super) fn suspend_result_representation(
         .obj_internal()
         .filter(|classifier| under.contains_key(classifier))?;
     let carrier = erase(declared, under);
-    if !declared.is_nullable() && (force_boxed || nullable_is_boxed(classifier, under)) {
+    let crosses_as_box = if declared.is_nullable() {
+        nullable_is_boxed(classifier, under)
+    } else {
+        force_boxed || !underlying_is_reference(classifier, under)
+    };
+    if crosses_as_box {
         Some(IrValueClassSuspendResult::Boxed {
             classifier,
             carrier,
@@ -228,4 +248,12 @@ pub(super) fn suspend_result_representation(
             carrier,
         })
     }
+}
+
+/// Whether `classifier`'s underlying erases to a JVM reference. A nullable reference counts: its
+/// null is a legal carrier of the non-null value class (`X(null)`).
+fn underlying_is_reference(classifier: TypeName, under: &Under) -> bool {
+    under
+        .get(&classifier)
+        .is_some_and(|underlying| is_ref(&erase(underlying, under)))
 }

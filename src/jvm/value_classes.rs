@@ -311,6 +311,9 @@ pub(crate) fn lower_value_classes(
 
     // Exact identities of members whose JVM realization synthesis already finalized.
     let mut realized_members = synth_members::SynthesizedValueMembers::default();
+    // Exact synthesized expressions that have already rendered a nested value-class carrier to a
+    // String while retaining the nested class as their logical concat-boundary type.
+    let mut rendered_value_class_text = HashSet::new();
     // Synthesize each value class's `-impl`/`equals`/`hashCode`/`toString` members up front (a JVM
     // concern — common lowering only emits the plain single-field class). Done before the analysis below so
     // they participate in `vc_methods`/erasure like any other method.
@@ -357,6 +360,7 @@ pub(crate) fn lower_value_classes(
             ir.classes[cid as usize].init_body.is_some(),
             constructor_default,
             &mut realized_members,
+            &mut rendered_value_class_text,
         ) {
             crate::trace_compiler!(
                 "value_classes",
@@ -3135,7 +3139,13 @@ pub(crate) fn lower_value_classes(
                     }
                 }
             }
-            aggregate_boundaries::record(&ir.exprs, id, &repr_ctx, &mut ops);
+            aggregate_boundaries::record(
+                &ir.exprs,
+                id,
+                &repr_ctx,
+                &rendered_value_class_text,
+                &mut ops,
+            );
             if let IrExpr::Call { callee, args, .. } = &ir.exprs[id as usize] {
                 call_arguments::record_boundaries(
                     callee,
@@ -3703,15 +3713,20 @@ pub(crate) fn lower_value_classes(
             if under.contains_key(&x) && suspend_fids.contains(&(fid as u32)) {
                 // …EXCEPT a `suspend fun`: its CPS return is `Object`. The declaration-level suspension
                 // representation decides whether the carrier crosses directly or is wrapped in the value
-                // class. Besides scalar carriers, a null-capable carrier must be wrapped too: otherwise
-                // the raw `null` for `X(null)` is indistinguishable from a null result at the caller.
+                // class. A scalar carrier is wrapped. A null-capable reference carrier of a non-null
+                // result crosses directly: `X(null)` is that carrier's null, and the result type is not
+                // itself nullable. A nullable result keeps its ordinary erasure.
                 if let Some(body) = ir.functions[fid].body {
-                    match suspend_result_representation(
-                        &orig_rets[fid],
-                        &under,
-                        force_boxed_suspend_returns.contains(&(fid as u32)),
-                    ) {
-                        Some(crate::ir::IrValueClassSuspendResult::Boxed { .. }) => {
+                    // The recorded return is the carrier for a declaration and the box for a
+                    // callable-reference adapter. Recomputing from the declared type alone would
+                    // hand the adapter's `invoke` the carrier.
+                    let representation = ir
+                        .value_class_suspend_returns
+                        .get(&(fid as u32))
+                        .copied()
+                        .expect("suspend value-class result representation was not recorded");
+                    match representation {
+                        crate::ir::IrValueClassSuspendResult::Boxed { .. } => {
                             ir.functions[fid].ret = boxed_value_ty(x);
                             restore_boxed_suspension_tails(ir, body, &boxed_suspension_unboxes);
                             box_ref_tail(
@@ -3728,7 +3743,7 @@ pub(crate) fn lower_value_classes(
                                 },
                             );
                         }
-                        Some(crate::ir::IrValueClassSuspendResult::Carrier { carrier, .. }) => {
+                        crate::ir::IrValueClassSuspendResult::Carrier { carrier, .. } => {
                             ir.functions[fid].ret = carrier;
                             // A safe coroutine primitive produces `T` through the generic
                             // `SafeContinuation<T>` slot, so a value-class `T` is boxed even when this
@@ -3750,7 +3765,6 @@ pub(crate) fn lower_value_classes(
                                 null_slot,
                             );
                         }
-                        None => unreachable!("the return was already identified as a value class"),
                     }
                 }
             } else if under.contains_key(&x) {

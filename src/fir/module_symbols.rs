@@ -577,6 +577,7 @@ impl<'a> StreamedModuleSymbols<'a> {
             physical_ret: result,
             suspend: false,
             is_abstract: false,
+            visibility: crate::types::Visibility::Public,
             owner_is_interface: false,
             member_realization: MemberRealization::Dispatch,
             inline: InlineKind::None,
@@ -598,6 +599,7 @@ impl<'a> StreamedModuleSymbols<'a> {
             singleton_dispatch: None,
             default_realization: None,
             nonvirtual_realization: None,
+            overridden_call_realizations: Box::new([]),
             declared_ret: None,
             overridden_results: Box::new([]),
         }

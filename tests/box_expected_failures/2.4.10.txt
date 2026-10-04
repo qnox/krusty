@@ -9,11 +9,6 @@ bridges/internalMethodOverrideInOtherModule.kt
 bridges/internalMethodOverrideMultipleInheritance.kt
 compileKotlinAgainstKotlin/inlineClasses/privateCompanionObjectValInDifferentModule.kt
 compileKotlinAgainstKotlin/inlineClasses/privateTopLevelValInDifferentModule.kt
-coroutines/generate.kt
-coroutines/inlineClasses/direct/boxReturnValueOfSuspendFunctionReference.kt
-coroutines/inlineClasses/direct/boxUnboxInsideCoroutine_suspendFunType.kt
-coroutines/inlineClasses/kt84305.kt
-coroutines/inlineClasses/resume/boxUnboxInsideCoroutine_suspendFunType.kt
 coroutines/tailCallOptimizations/crossinline.kt
 extensionFunctions/kt475.kt
 functions/functionNtoString.kt

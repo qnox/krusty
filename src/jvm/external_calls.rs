@@ -257,6 +257,7 @@ pub(super) fn realize(
             _ => None,
         };
         let mut property_dispatch = crate::ir::IrPropertyDispatch::Ordinary;
+        let mut property_virtual_target = None;
         if let Some((
             property,
             write,
@@ -279,6 +280,12 @@ pub(super) fn realize(
             } else {
                 realization.getter
             };
+            let property_target = crate::fir::ResolvedPropertyOverrideTarget::External(target);
+            property_virtual_target = Some(if write {
+                crate::ir::IrVirtualTarget::PropertySetter(property_target)
+            } else {
+                crate::ir::IrVirtualTarget::PropertyGetter(property_target)
+            });
             ir.exprs[index] = IrExpr::Call {
                 callee: Callee::External {
                     target,
@@ -869,9 +876,11 @@ pub(super) fn realize(
             continue;
         }
         // A member dispatch realizes the dependency declaration the frontend selected.
-        let selected = crate::ir::IrVirtualTarget::Function(
-            crate::fir::ResolvedFunctionOverrideTarget::External(target),
-        );
+        let selected = property_virtual_target.unwrap_or_else(|| {
+            crate::ir::IrVirtualTarget::Function(
+                crate::fir::ResolvedFunctionOverrideTarget::External(target),
+            )
+        });
         match kind {
             ExternalCallableKind::TopLevel => {
                 *callee = Callee::Static {
@@ -1164,6 +1173,7 @@ pub(super) fn realize(
             inline_modifiers,
         )?;
         let realized_call = bridge_external_result(ir, index, physical_result, semantic_ret);
+        record_protected_dependency_call(ir, realized_call, &callable);
         if let Some(role) = semantic_role {
             ir.semantic_call_roles.insert(realized_call, role);
         }
@@ -1338,6 +1348,42 @@ fn publish_inline_substitutions(
             ir.reified_call_subst.insert(expression, reified);
         }
     }
+}
+
+/// Remember a protected dependency member so a nested caller can reach it through the subclass
+/// accessor. The realized expression is the call emission will see; a result wrapper is not.
+fn record_protected_dependency_call(
+    ir: &mut IrFile,
+    expression: crate::ir::ExprId,
+    callable: &crate::backend::BackendCallableFact,
+) {
+    if callable.visibility != crate::types::Visibility::Protected {
+        return;
+    }
+    let IrExpr::Call {
+        callee: Callee::Virtual { name, .. },
+        ..
+    } = ir.expr(expression)
+    else {
+        return;
+    };
+    ir.jvm_protected_dependency_calls.insert(
+        expression,
+        crate::jvm::protected_dependency_calls::ProtectedDependencyCall {
+            owner: callable.physical_owner,
+            name: name.clone(),
+            parameters: callable.physical_params.clone().into_boxed_slice(),
+            parameter_names: crate::jvm::parameter_names::dependency_access_bridge_local_variables(
+                &callable.parameter_identities,
+                &callable.params,
+                &callable.physical_params,
+                callable.physical_parameter_plan.as_deref(),
+                name,
+            )
+            .into_boxed_slice(),
+            result: callable.physical_ret,
+        },
+    );
 }
 
 /// The provider owns physical erasure; checked FIR owns the final semantic result. Preserve both by

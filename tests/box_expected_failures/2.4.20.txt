@@ -10,11 +10,6 @@ bridges/internalMethodOverrideMultipleInheritance.kt
 compileKotlinAgainstKotlin/inlineClasses/privateCompanionObjectValInDifferentModule.kt
 compileKotlinAgainstKotlin/inlineClasses/privateTopLevelValInDifferentModule.kt
 coroutines/functionReference_Function_SuspendFunction_casts.kt
-coroutines/generate.kt
-coroutines/inlineClasses/direct/boxReturnValueOfSuspendFunctionReference.kt
-coroutines/inlineClasses/direct/boxUnboxInsideCoroutine_suspendFunType.kt
-coroutines/inlineClasses/kt84305.kt
-coroutines/inlineClasses/resume/boxUnboxInsideCoroutine_suspendFunType.kt
 coroutines/tailCallOptimizations/crossinline.kt
 extensionFunctions/kt475.kt
 fullValueClasses/basicSyntax.kt
@@ -41,7 +36,6 @@ inference/capturedSelfInsideIntersection.kt
 inference/overrideDefaultProperty.kt
 inference/overrideGenericDefaultMethod.kt
 inference/pcla/pclaRootIsTrySyntheticCallWithDelegate.kt
-inlineClasses/callableRefClassMergingNestedValueClass.kt
 innerNested/nestedInPackage.kt
 multiplatform/k2/defaultArguments/bothInExpectAndActual.kt
 multiplatform/k2/defaultArguments/bothInExpectAndActual2.kt

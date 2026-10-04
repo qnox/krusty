@@ -941,6 +941,7 @@ fn fn_info(
         inline_body_plan: None,
         plugin_expression: sig.plugin_expression,
         descriptor: String::new(),
+        visibility: crate::types::Visibility::Public,
         physical_params: params.clone(),
         physical_parameter_plan: Some(
             crate::libraries::physical_parameter_plan::source_parameter_plan(params.len()),
@@ -977,6 +978,7 @@ fn fn_info(
         singleton_dispatch: None,
         default_realization: None,
         nonvirtual_realization: None,
+        overridden_call_realizations: Box::new([]),
         // A SOURCE callable's `ret` is already the declared type and its `physical_ret` is not yet
         // erased, so there is no carrier-vs-box question for the value-class pass to answer here — it
         // sees the declaration itself. The fact exists for callables read back from a class file.
@@ -1077,6 +1079,7 @@ fn source_callable(
         suspend: false,
         is_abstract: false,
         owner_is_interface,
+        visibility: crate::types::Visibility::Public,
         member_realization: crate::libraries::MemberRealization::Dispatch,
         inline: InlineKind::None,
         default_call: false,
@@ -1095,6 +1098,7 @@ fn source_callable(
         singleton_dispatch: None,
         default_realization: None,
         nonvirtual_realization: None,
+        overridden_call_realizations: Box::new([]),
         // See the note in the builder above: a source callable carries its declaration un-erased.
         declared_ret: None,
         overridden_results: Box::new([]),
