@@ -63,7 +63,7 @@ fn a_value_class_suspend_override_delegates_through_the_cps_entry() {
         text.lines().any(|line| {
             line.contains("invokestatic")
                 && line.contains(
-                    "build-impl:(LDelegate;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;",
+                    "\"build-impl\":(LDelegate;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;",
                 )
         }),
         "{text}"
