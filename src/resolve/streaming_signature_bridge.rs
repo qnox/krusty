@@ -16,6 +16,7 @@ mod callable_references;
 mod classifier_associated;
 mod classifier_identities;
 mod classifier_parents;
+mod convention_results;
 mod declaration_aliases;
 mod declaration_conflicts;
 mod declaration_spellings;
@@ -2288,77 +2289,6 @@ impl ProductionSignatureSemantics<'_> {
             &bindings,
         ))
         .map_err(|_| Self::failure())
-    }
-
-    fn apply_demanded_function(
-        &self,
-        receiver: Ty,
-        selected: &crate::libraries::FunctionInfo,
-        signature: &crate::fir::ResolvedSignature,
-        arguments: &[Ty],
-    ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
-        let mut bindings = crate::symbol_resolver::GSigBinds::new();
-        let dispatch_member = selected.kind == crate::libraries::FnKind::Member;
-        if !dispatch_member {
-            if let Some(declared) = selected.semantic_receiver() {
-                crate::symbol_resolver::unify_inferred_ty(declared, receiver, &mut bindings);
-            }
-        }
-        let specialize_dispatch = |ty| {
-            if dispatch_member {
-                self.apply_dispatch_owner(
-                    receiver,
-                    selected.callable.owner,
-                    selected.generic_sig.as_ref(),
-                    ty,
-                )
-            } else {
-                ty
-            }
-        };
-        let context_count = selected.context_count.min(signature.parameters.len());
-        for (parameter, argument) in signature.parameters[context_count..].iter().zip(arguments) {
-            crate::symbol_resolver::unify_inferred_ty(
-                specialize_dispatch(parameter.get()),
-                *argument,
-                &mut bindings,
-            );
-        }
-        crate::fir::ResolvedTy::new(crate::symbol_resolver::ty_subst_keep_unbound(
-            specialize_dispatch(signature.result.get()),
-            &bindings,
-        ))
-        .map_err(|_| Self::failure())
-    }
-
-    fn selected_convention_result(
-        &self,
-        receiver: Ty,
-        selected: &crate::libraries::FunctionInfo,
-        result: Ty,
-        arguments: &[Ty],
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
-    ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
-        if let Some(signature) =
-            self.demanded_member_signature(selected.stable_declaration, demand)?
-        {
-            return self.apply_demanded_function(receiver, selected, &signature, arguments);
-        }
-        if let Some(signature) =
-            self.demanded_source_signature(None, selected.stable_declaration, demand)?
-        {
-            crate::trace_compiler!(
-                "signature",
-                "demanded convention receiver={receiver:?} parameters={:?} result={:?}",
-                signature.parameters,
-                signature.result,
-            );
-            return self.apply_demanded_function(receiver, selected, &signature, arguments);
-        }
-        crate::fir::ResolvedTy::new(result).map_err(|_| panic!("unresolved convention result"))
     }
 
     fn constructor_result(

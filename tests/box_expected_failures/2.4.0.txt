@@ -3,7 +3,6 @@
 # tests/box_expected_failures/2.4.0.txt with KRUSTY_BLESS_BOX_FAILURES=1 on a full local run.
 # The goal is to empty this list of expected failures.
 annotations/instances/AnnotationInstantiationWithArray.kt
-annotations/instances/annotationInstancesEmptyDefaultLowered.kt
 annotations/instances/multimoduleTypeParams.kt
 bridges/internalMethodOverrideInOtherModule.kt
 bridges/internalMethodOverrideMultipleInheritance.kt
@@ -13,9 +12,6 @@ coroutines/tailCallOptimizations/crossinline.kt
 extensionFunctions/kt475.kt
 functions/functionNtoString.kt
 functions/functionNtoStringGeneric.kt
-inference/overrideDefaultProperty.kt
-inference/overrideGenericDefaultMethod.kt
-inference/pcla/pclaRootIsTrySyntheticCallWithDelegate.kt
 innerNested/nestedInPackage.kt
 multiplatform/k2/defaultArguments/bothInExpectAndActual.kt
 multiplatform/k2/defaultArguments/bothInExpectAndActual2.kt
