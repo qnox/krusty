@@ -80,6 +80,10 @@ impl LambdaMethods {
 /// compiles to a class of its own.
 pub(super) struct Site {
     pub(super) node: ExprId,
+    /// The copies of the value in the inline-lambda templates that enclose it. A template is
+    /// emitted where its lambda is inlined, so each copy builds the same class from its own
+    /// captures, which read the template's values.
+    pub(super) template_copies: Vec<ExprId>,
     pub(super) class: TypeName,
     pub(super) function_type: Ty,
     pub(super) captures: Vec<ExprId>,
@@ -128,6 +132,7 @@ fn site_in_roots(
     let fits = usize::from(*arity) <= crate::jvm::names::MAX_NUMBERED_FUNCTION_ARITY;
     (fits && !inline_call_argument(ir, node)).then(|| Site {
         node,
+        template_copies: inline_template_copies(ir, fid, every_emitted_root),
         class,
         function_type,
         captures: captures.clone(),
@@ -139,6 +144,56 @@ fn site_in_roots(
 /// node builds no value. Property/static initializers matter here too: a suspend lambda stored by
 /// one is a class just like a lambda stored from a function body.
 fn reachable_lambdas(ir: &IrFile, fid: FunId, every_emitted_root: bool) -> Vec<ExprId> {
+    let mut nodes = emitted_roots(ir, every_emitted_root)
+        .into_iter()
+        .flat_map(|body| crate::ir::value_namespace_expressions(ir, body))
+        .filter(|&node| {
+            matches!(ir.exprs[node as usize], IrExpr::Lambda { impl_fn, .. } if impl_fn == fid)
+        })
+        .collect::<Vec<_>>();
+    nodes.sort_unstable();
+    nodes.dedup();
+    nodes
+}
+
+/// The `Lambda` nodes building `fid`'s value inside the `inline_body` template of a lambda that
+/// some emitted root reaches, at any depth. A template numbers its own values, so the namespace
+/// walk of [`reachable_lambdas`] does not enter it.
+fn inline_template_copies(ir: &IrFile, fid: FunId, every_emitted_root: bool) -> Vec<ExprId> {
+    let mut pending = Vec::new();
+    let enclosed_templates = |namespace: &[ExprId], pending: &mut Vec<ExprId>| {
+        for &node in namespace {
+            if let IrExpr::Lambda {
+                inline_body: Some(template),
+                ..
+            } = ir.exprs[node as usize]
+            {
+                pending.push(template);
+            }
+        }
+    };
+    for root in emitted_roots(ir, every_emitted_root) {
+        enclosed_templates(&crate::ir::value_namespace_expressions(ir, root), &mut pending);
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut copies = Vec::new();
+    while let Some(template) = pending.pop() {
+        if !seen.insert(template) {
+            continue;
+        }
+        let namespace = crate::ir::value_namespace_expressions(ir, template);
+        copies.extend(namespace.iter().copied().filter(|&node| {
+            matches!(ir.exprs[node as usize], IrExpr::Lambda { impl_fn, .. } if impl_fn == fid)
+        }));
+        enclosed_templates(&namespace, &mut pending);
+    }
+    copies.sort_unstable();
+    copies.dedup();
+    copies
+}
+
+/// The bodies and initializers emission writes, each the root of one value namespace.
+fn emitted_roots(ir: &IrFile, every_emitted_root: bool) -> Vec<ExprId> {
     let mut roots = Vec::new();
     for (function, declaration) in ir.functions.iter().enumerate() {
         roots.extend(declaration.body);
@@ -174,17 +229,7 @@ fn reachable_lambdas(ir: &IrFile, fid: FunId, every_emitted_root: bool) -> Vec<E
         }
         roots.extend(ir.statics.iter().filter_map(|property| property.init));
     }
-
-    let mut nodes = roots
-        .into_iter()
-        .flat_map(|body| crate::ir::value_namespace_expressions(ir, body))
-        .filter(|&node| {
-            matches!(ir.exprs[node as usize], IrExpr::Lambda { impl_fn, .. } if impl_fn == fid)
-        })
-        .collect::<Vec<_>>();
-    nodes.sort_unstable();
-    nodes.dedup();
-    nodes
+    roots
 }
 
 /// Whether the body declares a lambda or local function of its own. Its lifted function would have
@@ -374,6 +419,7 @@ fn delegate_sites(ir: &IrFile, fid: FunId, class_name: Option<TypeName>) -> Resu
             };
             Ok(Site {
                 node,
+                template_copies: Vec::new(),
                 class,
                 function_type: ir.logical_types.get(&node).copied().ok_or(())?,
                 captures: captures.clone(),
@@ -582,25 +628,31 @@ fn realize_class(
 
 fn replace_value(ir: &mut IrFile, site: &Site) {
     let internal = site.class;
-    ir.exprs[site.node as usize] = if site.captures.is_empty() {
-        IrExpr::ExternalStaticInstance {
-            owner: internal,
-            ty: internal,
-            field: "INSTANCE".to_string(),
-        }
-    } else {
-        IrExpr::New {
-            internal,
-            args: site.captures.clone(),
-            ctor_params: None,
-            ctor_desc: None,
-            external_target: None,
-            defaults: Box::new([]),
-            default_prefix_count: 0,
-        }
-    };
-    // The value's type is the class's: a consumer that needs its `FunctionN` casts it.
-    ir.logical_types.insert(site.node, Ty::obj_name(internal));
+    for node in std::iter::once(site.node).chain(site.template_copies.iter().copied()) {
+        let IrExpr::Lambda { captures, .. } = &ir.exprs[node as usize] else {
+            unreachable!("a lambda class site builds a lambda value");
+        };
+        let captures = captures.clone();
+        ir.exprs[node as usize] = if captures.is_empty() {
+            IrExpr::ExternalStaticInstance {
+                owner: internal,
+                ty: internal,
+                field: "INSTANCE".to_string(),
+            }
+        } else {
+            IrExpr::New {
+                internal,
+                args: captures,
+                ctor_params: None,
+                ctor_desc: None,
+                external_target: None,
+                defaults: Box::new([]),
+                default_prefix_count: 0,
+            }
+        };
+        // The value's type is the class's: a consumer that needs its `FunctionN` casts it.
+        ir.logical_types.insert(node, Ty::obj_name(internal));
+    }
 }
 
 /// Declare the class: a field and a constructor parameter per captured value, the function type
