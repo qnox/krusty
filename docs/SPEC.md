@@ -9234,6 +9234,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`sam/kt59858.kt`). Tests: `tests/local_override_boxed_result_e2e.rs`,
   `fir::body_check::lambda_tests::sam_argument_records_a_primitive_result_over_a_non_primitive_one`,
   `tests/module_override_boxed_result_e2e.rs`.
+- **A primitive property override of a non-primitive property returns the wrapper from its
+  getter.** The same rule applies to a getter's result: `override val level: Int` over
+  `Gauge<T>.level: T` is `getLevel()Ljava/lang/Integer;` (`@NotNull`) with a `getLevel()Object`
+  bridge, and over `val count: Int?` it is `getCount()Ljava/lang/Integer;` with no bridge, since
+  the descriptors agree. A default getter boxes its field, a source-written getter and a
+  delegation forwarder box what they return, and the setter keeps taking the primitive. A read
+  through the class, a `super` read and a caller in another file name the wrapper and unbox it; the
+  `JvmPropertySignature` names it too. Common IR keeps the primitive property type; the JVM
+  backend records the boxed properties in `jvm::override_results`, a cross-file declaration's
+  module record carries `IrModuleProperty::overrides_non_primitive_type`, and a kotlinc-compiled
+  dependency getter already declared with the wrapper is overridden with the same descriptor.
+  Tests: `tests/boxed_property_getters_e2e.rs`.
 - **A lambda `LambdaMetafactory` cannot adapt compiles to a class, as kotlinc's does.** kotlinc's
   `LambdaMetafactoryArguments` rejects a lambda whose function type takes or returns a value class
   over a non-null, non-primitive underlying type (a reference, `UInt`, or a type parameter bounded

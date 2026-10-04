@@ -118,6 +118,8 @@ mod box_runtime_reflect_e2e;
 mod boxed_array_construction_e2e;
 #[path = "boxed_override_results_e2e.rs"]
 mod boxed_override_results_e2e;
+#[path = "boxed_property_getters_e2e.rs"]
+mod boxed_property_getters_e2e;
 #[path = "bracket_lambda_param_e2e.rs"]
 mod bracket_lambda_param_e2e;
 #[path = "branch_soft_keyword_name_e2e.rs"]

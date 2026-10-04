@@ -182,7 +182,7 @@ fn run_backend_passes_after_plugins(
     let module_readable_value_classes = classifiers.module().metadata_readable_value_classes();
     // Plugins produce backend-neutral checked IR. Realize any semantic super dispatch they add at
     // the same JVM boundary as source super calls, never in the plugin itself or the emitter.
-    crate::jvm::module_calls::realize_super_calls(ir, callables)
+    crate::jvm::module_calls::realize_super_calls(ir, callables, &mut facts.property_realizations)
         .map_err(|_| SkipReason::SuperCalls)?;
     crate::jvm::annotation_constructions::lower_annotation_constructions(ir, facade);
     // A property's own annotations become a synthetic marker method — a JVM realization of a Kotlin
@@ -225,8 +225,11 @@ fn run_backend_passes_after_plugins(
     if !crate::jvm::value_classes::record_referenced_value_classes(ir, classifiers) {
         return Err(SkipReason::ValueClasses);
     }
-    facts.override_results =
-        crate::jvm::override_results::box_primitive_override_results(ir, callables)?;
+    facts.override_results = crate::jvm::override_results::box_primitive_override_results(
+        ir,
+        callables,
+        &facts.property_realizations,
+    )?;
     crate::jvm::bridges::derive_bridges(
         ir,
         classpath,

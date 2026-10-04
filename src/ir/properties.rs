@@ -225,4 +225,7 @@ pub struct IrModuleProperty {
     pub compile_time_constant: Option<IrConst>,
     /// Where the property lives when `owner` is absent.
     pub placement: IrStaticPlacement,
+    /// The property overrides one whose own type is not a Kotlin primitive, as the override edges
+    /// its classifier published say (see [`super::IrPropertyOverride::overrides_non_primitive_type`]).
+    pub overrides_non_primitive_type: bool,
 }

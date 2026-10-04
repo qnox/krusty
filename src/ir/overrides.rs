@@ -69,6 +69,15 @@ impl IrFunctionOverride {
     }
 }
 
+impl IrPropertyOverride {
+    /// Whether the overridden declaration's own type is not a Kotlin primitive. kotlinc's JVM
+    /// backend boxes the getter result of a primitive property overriding such a declaration, as it
+    /// boxes a function's result (see [`IrFunctionOverride::overrides_non_primitive_result`]).
+    pub fn overrides_non_primitive_type(&self) -> bool {
+        !is_kotlin_primitive(self.declared_type)
+    }
+}
+
 impl IrFile {
     /// Whether `function` is the common-IR body of an `interface by` forwarder.
     ///

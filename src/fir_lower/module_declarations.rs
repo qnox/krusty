@@ -219,6 +219,16 @@ fn publish_property(
     let header = index.declaration_header(property.declaration).ok_or(
         FirFileLoweringFailure::MissingProperty(property.declaration),
     )?;
+    // As for a function, only the owner's edges for its own declaration say what it overrides.
+    let overrides_non_primitive_type = owner.is_some_and(|classifier| {
+        index
+            .property_overrides(classifier.declaration)
+            .iter()
+            .any(|edge| {
+                edge.implementation == crate::fir::ResolvedPropertyOverrideTarget::Module(target)
+                    && !crate::ir::is_kotlin_primitive(edge.declared_type.get())
+            })
+    });
     ir.referenced_module_properties.insert(
         target,
         IrModuleProperty {
@@ -259,6 +269,7 @@ fn publish_property(
                 property.extension_receiver.map(ResolvedTy::get),
                 FirFileLoweringFailure::MissingProperty(property.declaration),
             )?,
+            overrides_non_primitive_type,
         },
     );
     Ok(())

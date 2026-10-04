@@ -167,6 +167,10 @@ mod type_operation_emission;
 mod value_emission;
 mod vararg;
 mod when;
+use declared_property_accessor::{
+    declared_property_accessor_jvm, emit_backing_field_read_adaptation,
+    emit_backing_field_write_adaptation,
+};
 use signature_formatter::{JvmSignatureFormatter, Wildcards};
 use singleton_instance::{add_singleton_instance_field, emit_singleton_instance_clinit};
 use synth_debug_tables::attach_synth_debug_tables;
@@ -2254,97 +2258,6 @@ fn checkcast_internal(ty: Ty) -> Option<String> {
     }
 }
 
-/// JVM type exposed by a synthesized property accessor. The value-class pass stamps the exact
-/// mangled getter only when this property's own type uses its erased field carrier. Consume that
-/// decision directly; emission must not repeat classifier/value-class lookup. An explicit backing
-/// field with a narrower type does not otherwise change the property's public descriptor.
-fn declared_property_accessor_jvm(
-    _ir: &IrFile,
-    property: &crate::ir::IrProperty,
-    field: &crate::ir::IrField,
-) -> Ty {
-    if property.getter_jvm_name.is_some() {
-        jvm_declared_ty(&field.ty)
-    } else {
-        jvm_declared_ty(&stored_value_ty(property.ty))
-    }
-}
-
-/// Adapt the physical backing-field value already on the stack to the property's declared return.
-/// Resolution has already chosen both types; this is only their JVM representation boundary.
-fn emit_backing_field_read_adaptation(
-    ir: &IrFile,
-    cw: &mut ClassWriter,
-    code: &mut CodeBuilder,
-    property: &crate::ir::IrProperty,
-    field_jvm: Ty,
-    accessor_jvm: Ty,
-) {
-    if field_jvm == accessor_jvm {
-        return;
-    }
-    if field_jvm.is_reference() && accessor_jvm.is_jvm_scalar() {
-        unbox_prim_from(cw, code, field_jvm, accessor_jvm);
-    } else if accessor_jvm.is_reference() {
-        if let Some(storage) = property
-            .storage_ty
-            .and_then(|ty| ty.non_null().obj_internal())
-        {
-            if crate::jvm::value_classes::is_boxed_value_class(ir, storage)
-                && field_jvm.is_jvm_scalar()
-            {
-                emit_box_impl(ir, cw, &Ty::obj_name(storage), code);
-                return;
-            }
-        }
-        if field_jvm.is_jvm_scalar() {
-            box_prim_free(cw, code, field_jvm);
-        } else {
-            let internal = crate::jvm::names::instanceof_internal_name(accessor_jvm);
-            if internal != "java/lang/Object" {
-                let class = cw.class_ref(&internal);
-                code.checkcast(class);
-            }
-        }
-    }
-}
-
-/// Adapt a synthesized setter's declared argument to the physical backing-field representation.
-fn emit_backing_field_write_adaptation(
-    ir: &IrFile,
-    cw: &mut ClassWriter,
-    code: &mut CodeBuilder,
-    property: &crate::ir::IrProperty,
-    accessor_jvm: Ty,
-    field_jvm: Ty,
-) {
-    if accessor_jvm == field_jvm {
-        return;
-    }
-    if accessor_jvm.is_reference() && field_jvm.is_jvm_scalar() {
-        if let Some(storage) = property
-            .storage_ty
-            .and_then(|ty| ty.non_null().obj_internal())
-        {
-            if crate::jvm::value_classes::is_boxed_value_class(ir, storage) {
-                let class = cw.class_ref(&storage.render());
-                code.checkcast(class);
-                emit_unbox_impl(ir, cw, &Ty::obj_name(storage), code);
-                return;
-            }
-        }
-        unbox_prim_from(cw, code, accessor_jvm, field_jvm);
-    } else if accessor_jvm.is_jvm_scalar() && field_jvm.is_reference() {
-        box_prim_free(cw, code, accessor_jvm);
-    } else if accessor_jvm.is_reference() && field_jvm.is_reference() {
-        let internal = crate::jvm::names::instanceof_internal_name(field_jvm);
-        if internal != "java/lang/Object" {
-            let class = cw.class_ref(&internal);
-            code.checkcast(class);
-        }
-    }
-}
-
 /// Synthesize the accessors for the properties a class DECLARES but whose accessor methods the IR does
 /// not carry — a plain backing-field property has no source-written accessor, so `getX()`/`setX(v)` are
 /// pure realization and belong here, not in the language-level lowering. A property that declares its own
@@ -2390,6 +2303,7 @@ fn emit_declared_property_accessors(
         fq_name,
         formatter,
         param_assertions,
+        override_results: env.override_results,
     };
     for property in &c.properties {
         declared_property_accessor::emit(
@@ -2462,6 +2376,7 @@ fn emit_scheduled_member(
                 fq_name,
                 formatter: signature_formatter,
                 param_assertions,
+                override_results: env.override_results,
             };
             declared_property_accessor::emit(
                 &accessor_owner,
@@ -3497,14 +3412,17 @@ fn emit_class(
     if computed.is_some() && !is_coroutine_state_machine(c) {
         attach_synth_debug_tables(
             ir,
+            env.override_results,
             c,
             &mut cw,
             opts.param_assertions,
-            primary_ctor_debug
-                .as_ref()
-                .map(|(descriptor, pc)| (descriptor.as_str(), *pc)),
-            &ctor_lines,
-            &init_locals,
+            synth_debug_tables::PrimaryConstructorDebug {
+                method: primary_ctor_debug
+                    .as_ref()
+                    .map(|(descriptor, pc)| (descriptor.as_str(), *pc)),
+                lines: &ctor_lines,
+                init_locals: &init_locals,
+            },
         );
         attach_declared_method_debug(ir, env.override_results, c, &mut cw);
         attach_synth_nullability(ir, c, &mut cw);
@@ -3968,7 +3886,14 @@ fn emit_interface_class(
         .then(|| build_class_metadata(ir, c, opts, env))
         .flatten();
     if computed.is_some() {
-        attach_synth_debug_tables(ir, c, &mut cw, opts.param_assertions, None, &[], &[]);
+        attach_synth_debug_tables(
+            ir,
+            env.override_results,
+            c,
+            &mut cw,
+            opts.param_assertions,
+            synth_debug_tables::PrimaryConstructorDebug::default(),
+        );
         attach_declared_method_debug(ir, env.override_results, c, &mut cw);
         attach_synth_nullability(ir, c, &mut cw);
     }
@@ -4719,12 +4644,14 @@ fn emit_enum_class(
     if class_metadata.is_some() {
         attach_synth_debug_tables(
             ir,
+            env.override_results,
             c,
             &mut cw,
             opts.param_assertions,
-            emits_primary_ctor.then_some((ctor_desc.as_str(), 0)),
-            &[],
-            &[],
+            synth_debug_tables::PrimaryConstructorDebug {
+                method: emits_primary_ctor.then_some((ctor_desc.as_str(), 0)),
+                ..Default::default()
+            },
         );
         attach_declared_method_debug(ir, env.override_results, c, &mut cw);
         attach_synth_nullability(ir, c, &mut cw);
