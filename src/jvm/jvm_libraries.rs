@@ -8,6 +8,7 @@ mod builtins_customizer;
 mod catalog_presence;
 mod classifier_facts;
 mod dependency_registration;
+mod enclosing_type_parameters;
 mod generic_signatures;
 mod inline_body_plan;
 mod inline_capability;
@@ -324,73 +325,6 @@ impl JvmLibraries {
         }
         signature.ret = self.semanticize_jvm_type(signature.ret);
         signature
-    }
-
-    /// The own type parameters (names with their declared bounds) of every class enclosing
-    /// `internal`, outermost first — the id space a nested class's `Type.type_parameter` (f7)
-    /// counts into. The per-classfile metadata reader records such a reference as a placeholder;
-    /// rebinding it needs the enclosing classes' metadata, reachable only through the classpath at
-    /// this provider boundary.
-    fn enclosing_type_parameters(&self, internal: TypeName) -> Vec<(String, Vec<Ty>)> {
-        let mut owners = Vec::new();
-        let mut nested = internal;
-        loop {
-            let Some(class) = self.cp.find_name(nested) else {
-                // Without one structural link the joint metadata id space is unknowable. Keep the
-                // decoded placeholders unresolved rather than shifting them onto a different owner.
-                return Vec::new();
-            };
-            let Some(owner) = class
-                .inner_class_self()
-                .and_then(|entry| entry.outer.as_deref())
-                .map(type_name)
-            else {
-                break;
-            };
-            owners.push(owner);
-            nested = owner;
-        }
-        owners.reverse();
-        let mut collected = Vec::new();
-        for owner in owners {
-            let class = self
-                .cp
-                .find_name(owner)
-                .expect("the structural enclosing-class walk validated every owner");
-            let parameters = &class.meta.class_type_parameters;
-            let identities = parameters
-                .type_params()
-                .iter()
-                .enumerate()
-                .map(|(ordinal, source)| {
-                    (
-                        source.as_str(),
-                        crate::types::external_classifier_type_parameter(owner, ordinal, source),
-                    )
-                })
-                .collect::<std::collections::HashMap<_, _>>();
-            let level = parameters
-                .type_params()
-                .iter()
-                .zip(parameters.type_param_bounds())
-                .enumerate()
-                .map(|(ordinal, (source, bounds))| {
-                    let semantic =
-                        crate::types::external_classifier_type_parameter(owner, ordinal, source);
-                    let bounds = bounds
-                        .iter()
-                        .map(|bound| {
-                            let bound =
-                                metadata::rebind_enclosing_type_parameters(*bound, &collected);
-                            crate::types::ty_rename_params(bound, &identities)
-                        })
-                        .collect();
-                    (semantic.to_string(), bounds)
-                })
-                .collect::<Vec<_>>();
-            collected.extend(level);
-        }
-        collected
     }
 
     fn member_scope_names(
@@ -1477,8 +1411,32 @@ impl JvmLibraries {
             // A member may reference an ENCLOSING class's type parameter (`inner class
             // Inner(val e: E)`): kotlinc writes that by id alone, so the reader left a
             // placeholder. This is the boundary where the owner chain is reachable — rebind the
-            // placeholders to the enclosing parameters' names and declared bounds.
-            let enclosing_type_parameters = self.enclosing_type_parameters(internal_name);
+            // placeholders to the enclosing parameters' identities and declared bounds.
+            let enclosing_type_parameters =
+                enclosing_type_parameters::enclosing_type_parameters(&self.cp, internal_name);
+            // The class's own type parameters with the same rebind applied to their declared
+            // bounds (`class Outer<E> { inner class Inner<T : E> }` decodes the bound as a
+            // placeholder): constructor signatures built from them must not leak it.
+            let class_type_parameters = crate::types::TypeParameters::new(
+                ci.meta.class_type_parameters.type_params().clone(),
+                ci.meta
+                    .class_type_parameters
+                    .type_param_bounds()
+                    .iter()
+                    .map(|bounds| {
+                        bounds
+                            .iter()
+                            .map(|bound| {
+                                metadata::rebind_enclosing_type_parameters(
+                                    *bound,
+                                    &enclosing_type_parameters,
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>(),
+                ci.meta.class_type_parameters.type_param_variances().clone(),
+            );
             // The class's `@Metadata` CONSTRUCTOR records — the only place a constructor parameter's
             // source-level shape survives (a receiver function type erases to `FunctionN` in both the
             // descriptor and the `Signature`).
@@ -1705,7 +1663,7 @@ impl JvmLibraries {
                     member.physical_params =
                         physical_params[physical_source_start..physical_source_end].to_vec();
                     member.generic_sig = classifier_facts::classifier_constructor_generic_sig(
-                        &ci.meta.class_type_parameters,
+                        &class_type_parameters,
                         internal_name,
                         &member.params,
                     );
@@ -1998,26 +1956,11 @@ impl JvmLibraries {
             let metadata_class_signature = ci.meta.class_visibility.map(|_| {
                 // The class's OWN level references an enclosing class's parameter by the same
                 // id-only encoding as its members (`class Outer<E> { inner class Inner<T : E> :
-                // Comparable<E> }`) — rebind those placeholders before the bounds and supertypes
-                // publish, exactly as the member records above.
+                // Comparable<E> }`) — the bounds were rebound with the class parameters above;
+                // rebind the supertypes before they publish, exactly as the member records above.
                 (
-                    ci.meta.class_type_parameters.type_params.clone(),
-                    ci.meta
-                        .class_type_parameters
-                        .type_param_bounds
-                        .iter()
-                        .map(|bounds| {
-                            bounds
-                                .iter()
-                                .map(|bound| {
-                                    metadata::rebind_enclosing_type_parameters(
-                                        *bound,
-                                        &enclosing_type_parameters,
-                                    )
-                                })
-                                .collect::<Vec<_>>()
-                        })
-                        .collect(),
+                    class_type_parameters.type_params().clone(),
+                    class_type_parameters.type_param_bounds().clone(),
                     ci.meta
                         .class_supertypes
                         .iter()
@@ -2231,13 +2174,22 @@ impl JvmLibraries {
                 }
                 let mut constructor = LibraryMember::new(
                     "<init>".to_string(),
-                    signature.types.clone(),
+                    signature
+                        .types
+                        .iter()
+                        .map(|ty| {
+                            metadata::rebind_enclosing_type_parameters(
+                                *ty,
+                                &enclosing_type_parameters,
+                            )
+                        })
+                        .collect(),
                     Ty::obj_name(internal_name),
                     String::new(),
                 );
                 constructor.owner = Some(internal_name);
                 constructor.generic_sig = classifier_facts::classifier_constructor_generic_sig(
-                    &ci.meta.class_type_parameters,
+                    &class_type_parameters,
                     internal_name,
                     &constructor.params,
                 );
@@ -3453,7 +3405,8 @@ impl JvmLibraries {
         let mapped_property = mapped_members
             .iter()
             .find(|mapping| mapping.is_property() && mapping.source_name == name);
-        let enclosing_type_parameters = self.enclosing_type_parameters(cn);
+        let enclosing_type_parameters =
+            enclosing_type_parameters::enclosing_type_parameters(&self.cp, cn);
         if let Some(ci) = self.cp.find_name(cn) {
             for mp in metadata::class_properties(&ci) {
                 // A `companion { … }` block property is a classifier member, not an instance one.
@@ -4969,10 +4922,23 @@ impl JvmLibraries {
                         // final real source parameter from the already-logical descriptor.
                         let descriptor = m.descriptor.clone();
                         let meta_name = m.physical_name.as_deref().unwrap_or(&m.name);
-                        let metadata_ret = m.declared_ret.or_else(|| {
-                            self.cp
-                                .metadata_property_ret_ty_name(cn, meta_name, &m.descriptor)
-                        });
+                        let metadata_ret = m
+                            .declared_ret
+                            .or_else(|| {
+                                self.cp
+                                    .metadata_property_ret_ty_name(cn, meta_name, &m.descriptor)
+                            })
+                            // A property getter's metadata return may still name an ENCLOSING
+                            // class's parameter by placeholder (`inner class Inner(val e: E)`);
+                            // rebind it like the member records at the load boundary.
+                            .map(|ty| {
+                                metadata::rebind_enclosing_type_parameters(
+                                    ty,
+                                    &enclosing_type_parameters::enclosing_type_parameters(
+                                        &self.cp, cn,
+                                    ),
+                                )
+                            });
                         let suspend_ret_nullable = suspend && m.ret_nullable();
                         let ret = if suspend {
                             // A generic `suspend` member returns a type parameter (`byId(): T`) via

@@ -7,9 +7,7 @@
 //! candidate family from the same declarations.
 
 use crate::libraries::{FunctionInfo, LibraryMember, LibraryType};
-use crate::symbol_resolver::{
-    applied_hierarchy, classifier_bindings, member_scope_receiver, specialize_member_function,
-};
+use crate::symbol_resolver::{outer_instance_bindings, specialize_member_function};
 use crate::symbol_source::SymbolSource;
 use crate::types::{Ty, TypeName};
 
@@ -24,21 +22,10 @@ pub(crate) fn bound_inner_constructor_candidates(
     classifier: &LibraryType,
     constructors: impl IntoIterator<Item = LibraryMember>,
 ) -> Vec<FunctionInfo> {
-    let Some(outer) = classifier.outer_instance else {
-        return Vec::new();
-    };
-    let Some((applied_outer, rank)) = applied_hierarchy(source, member_scope_receiver(receiver))
-        .into_iter()
-        .find(|(owner, ..)| *owner == outer)
-        .map(|(_, applied, depth)| (applied, depth))
-    else {
+    let Some((bindings, rank)) = outer_instance_bindings(source, receiver, classifier) else {
         return Vec::new();
     };
     let rank = u32::try_from(rank).expect("receiver hierarchy depth exceeds callable rank");
-    let bindings = source
-        .classifier(outer)
-        .map(|outer| classifier_bindings(&outer, applied_outer))
-        .unwrap_or_default();
     constructors
         .into_iter()
         .filter_map(|constructor| {

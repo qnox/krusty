@@ -748,6 +748,20 @@ impl<'a> CommonIrBodySink<'a> {
             };
             let classifier_identity = header.classifier;
             let mut class = crate::ir::IrClass::source_skeleton(header, declaration_header.flags);
+            // The lexical classifier this declaration is written in, from the stable owner graph —
+            // the only place declaration nesting survives parser hoisting. Executable owners
+            // (functions, accessors, initializers) are not classifier anchors, so a local or
+            // anonymous class keeps `None` and its `enclosure` scope instead.
+            class.declaration_owner = anchor
+                .owner
+                .filter(|owner| {
+                    index
+                        .declaration_anchor(*owner)
+                        .is_some_and(|owner_anchor| {
+                            owner_anchor.kind == DeclarationKind::Classifier
+                        })
+                })
+                .and_then(|owner| index.classifier_identity(owner));
             if declaration_header.visibility != crate::types::Visibility::Public {
                 assert!(
                     self.ir

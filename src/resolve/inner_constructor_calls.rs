@@ -223,6 +223,19 @@ impl Checker<'_> {
             internal.render(),
             selected.is_some(),
         );
+        // The receiver supplies the captured outer instance, so its application of the outer
+        // classifier fixes the enclosing type parameters the constructor's declared shapes
+        // reference. The preselected member-level candidate was already specialized by selection;
+        // only a constructor-family selection here still needs the receiver's bindings.
+        let enclosing_bindings = if selected.is_some() {
+            None
+        } else {
+            let source = self.fed_source();
+            self.resolved_type_name(internal).and_then(|classifier| {
+                crate::symbol_resolver::outer_instance_bindings(&source, receiver, &classifier)
+                    .map(|(bindings, _)| bindings)
+            })
+        };
         match self.record_resolved_library_constructor(
             scope,
             call,
@@ -234,6 +247,7 @@ impl Checker<'_> {
                 expected,
                 priority: ConstructorPriorityTier::All,
                 selected,
+                enclosing_bindings,
             },
         ) {
             Ok(LibraryConstructorSelection::Selected) => {

@@ -999,6 +999,12 @@ pub struct IrClass {
     /// A language-level non-static nested class. Backends consume this declaration property directly;
     /// a synthetic receiver field or its physical name does not imply inner-class semantics.
     pub is_inner_class: bool,
+    /// The classifier this declaration is lexically written in, recorded by the front end from source
+    /// containment. `None` for a top-level classifier and for a class whose parent is executable code
+    /// (a local class, an anonymous object, or anything generated — [`Self::enclosure`] describes
+    /// those scopes instead). A JVM `$` inside a source spelling is not an owner boundary, so a
+    /// backend must read this edge and never rederive declaration nesting from the physical name.
+    pub declaration_owner: Option<TypeName>,
     /// A classifier declared in STATEMENT position. Its name is qualified by the declaration it was
     /// written in, so it contains a `$` that names no class — a local class is not a member of
     /// anything, and the JVM says so with `outer_class_info_index = 0` in its `InnerClasses` entry.
@@ -1222,6 +1228,7 @@ impl IrClass {
             is_anonymous_object: false,
             enclosure: None,
             is_inner_class: false,
+            declaration_owner: None,
             is_local_class: false,
             is_value: false,
             is_data: false,
@@ -1341,6 +1348,7 @@ impl IrClass {
             is_anonymous_object: flags.has(crate::fir::DeclarationFlags::ANONYMOUS_OBJECT),
             enclosure: None,
             is_inner_class: flags.has(crate::fir::DeclarationFlags::INNER),
+            declaration_owner: None,
             is_local_class: flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS),
             is_value: flags.has(crate::fir::DeclarationFlags::VALUE),
             is_data: flags.has(crate::fir::DeclarationFlags::DATA),

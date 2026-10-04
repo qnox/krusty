@@ -38,17 +38,24 @@ pub(super) fn enclosing_type_parameters(ir: &IrFile, class: &IrClass) -> Vec<Str
     if !class.is_source_declared || is_local(ir, class) {
         return Vec::new();
     }
-    let mut owners = class.fq_name_id().existing_nested_owners();
-    owners.reverse(); // recorded deepest-first; ids count from the outermost class
+    let mut owners = Vec::new();
+    let mut owner = class.declaration_owner;
+    while let Some(enclosing) = owner {
+        let Some(enclosing_class) = ir
+            .class_id_by_name(enclosing)
+            .map(|id| &ir.classes[id as usize])
+        else {
+            // Without one structural link the joint metadata id space is unknowable. Reserve
+            // nothing rather than shifting the class's own parameters onto a different id.
+            return Vec::new();
+        };
+        owners.push(enclosing_class);
+        owner = enclosing_class.declaration_owner;
+    }
+    owners.reverse(); // walked innermost-first; ids count from the outermost class
     owners
         .into_iter()
-        .flat_map(|owner| {
-            let Some(owner_class) = ir
-                .class_id_by_name(owner)
-                .map(|id| &ir.classes[id as usize])
-            else {
-                return Vec::new();
-            };
+        .flat_map(|owner_class| {
             if owner_class.type_params.is_empty() {
                 // Nongeneric declarations legitimately have no `IrGenericSig` entry and reserve
                 // no ids. Treating that absence as malformed made every ordinary nested class
@@ -56,7 +63,7 @@ pub(super) fn enclosing_type_parameters(ir: &IrFile, class: &IrClass) -> Vec<Str
                 return Vec::new();
             }
             let signature = ir
-                .class_signature_name(owner)
+                .class_signature_name(owner_class.fq_name_id())
                 .expect("a generic source classifier has a class signature");
             signature
                 .type_params
@@ -70,6 +77,33 @@ pub(super) fn enclosing_type_parameters(ir: &IrFile, class: &IrClass) -> Vec<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn source_class(ir: &mut IrFile, name: TypeName, type_params: &[&str]) {
+        let mut class = IrClass::synthetic(name);
+        class.is_source_declared = true;
+        class.type_params = type_params.iter().map(|name| name.to_string()).collect();
+        if !type_params.is_empty() {
+            ir.insert_class_signature_name(
+                name,
+                crate::ir::IrGenericSig {
+                    type_params: type_params
+                        .iter()
+                        .map(|name| crate::ir::IrTypeParameter {
+                            name: name.to_string(),
+                            semantic_name: name.to_string(),
+                            bounds: Vec::new(),
+                            variance: crate::types::TypeVariance::Invariant,
+                            reified: false,
+                        })
+                        .collect(),
+                    params: Vec::new(),
+                    ret: None,
+                    supers: Vec::new(),
+                },
+            );
+        }
+        ir.add_class(class);
+    }
 
     #[test]
     fn executable_and_generated_classes_do_not_infer_metadata_owners_from_their_jvm_names() {
@@ -89,11 +123,43 @@ mod tests {
         let outer = crate::types::type_name("fixture/Outer");
         let nested = crate::types::type_name_nested_child(outer, "Nested");
         let mut ir = IrFile::default();
-        let mut outer_class = IrClass::synthetic(outer);
-        outer_class.is_source_declared = true;
-        ir.add_class(outer_class);
+        source_class(&mut ir, outer, &[]);
         let mut nested_class = IrClass::synthetic(nested);
         nested_class.is_source_declared = true;
+        nested_class.declaration_owner = Some(outer);
+        assert!(enclosing_type_parameters(&ir, &nested_class).is_empty());
+    }
+
+    /// A `$` inside a top-level backticked classifier name is not an owner boundary:
+    /// `fixture/Outer$Literal` declares no owner, so the unrelated `fixture/Outer` declaration and
+    /// its parameter `D` reserve no ids for `Outer$Literal`'s own `Inner`.
+    #[test]
+    fn a_dollar_in_a_source_spelling_is_not_a_declaration_owner_boundary() {
+        let outer = crate::types::type_name("fixture/Outer");
+        let literal = crate::types::type_name("fixture/Outer$Literal");
+        let inner = crate::types::type_name_nested_child(literal, "Inner");
+        let mut ir = IrFile::default();
+        source_class(&mut ir, outer, &["D"]);
+        source_class(&mut ir, literal, &["E"]);
+        let mut inner_class = IrClass::synthetic(inner);
+        inner_class.is_source_declared = true;
+        inner_class.declaration_owner = Some(literal);
+        assert_eq!(enclosing_type_parameters(&ir, &inner_class), ["E"]);
+
+        let literal_class = &ir.classes[ir.class_id_by_name(literal).unwrap() as usize];
+        assert!(enclosing_type_parameters(&ir, literal_class).is_empty());
+    }
+
+    /// A missing link in the declaration-owner chain makes the joint id space unknowable; the
+    /// class's own parameters keep their ids instead of being shifted past a guessed reservation.
+    #[test]
+    fn a_missing_declaration_owner_link_reserves_nothing() {
+        let owner = crate::types::type_name("fixture/Missing");
+        let nested = crate::types::type_name_nested_child(owner, "Nested");
+        let ir = IrFile::default();
+        let mut nested_class = IrClass::synthetic(nested);
+        nested_class.is_source_declared = true;
+        nested_class.declaration_owner = Some(owner);
         assert!(enclosing_type_parameters(&ir, &nested_class).is_empty());
     }
 }

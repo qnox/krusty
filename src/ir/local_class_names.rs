@@ -551,6 +551,10 @@ impl super::IrFile {
         }
         for class in &mut self.classes {
             name(&mut class.fq_name, names);
+            class
+                .declaration_owner
+                .iter_mut()
+                .for_each(|value| name(value, names));
             for (_, bound) in &mut class.type_param_bounds {
                 *bound = ty(*bound, names);
             }

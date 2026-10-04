@@ -97,11 +97,11 @@ fn an_inner_class_addresses_an_enclosing_type_parameter_by_id_in_its_bounds_and_
 /// The reader side of that id-only reference: a dependent module resolves an inner class's
 /// members whose types name an enclosing class's parameter — against a krusty-built library and
 /// against the real kotlinc's (the per-classfile decode carries a placeholder, rebound at the
-/// classpath boundary from the enclosing class's metadata, declared bound included). Receiver
-/// instantiation does not yet substitute an enclosing class's argument into such a member (the
-/// classpath classifier publishes only the class's own parameters), so the member type reads at
-/// the parameter's declared bound and a member whose signature still names the parameter is not
-/// an applicable call target.
+/// classpath boundary from the enclosing class's metadata, declared bound included). A
+/// construction through the outer receiver substitutes that receiver's argument for the
+/// parameter (`Outer<String>().Inner<String>("b")` passes a `String` where the constructor
+/// declares `E`); a later member READ through the inner instance still reads at the parameter's
+/// declared bound (the classpath classifier publishes only the class's own parameters).
 #[test]
 fn an_inner_class_member_reads_an_enclosing_type_parameter_across_modules() {
     const LIB: &str = "package lib\n\
@@ -128,6 +128,37 @@ fn an_inner_class_member_reads_an_enclosing_type_parameter_across_modules() {
     assert_eq!(
         common::expect_box_run_against_kotlinc(LIB, MAIN).expect("kotlinc-built library"),
         "OK"
+    );
+}
+
+/// The receiver's enclosing-class argument is part of the constructor's expected parameter
+/// types: `Outer<String>().Inner(42)` must FAIL, because the constructor declares `val e: E` and
+/// the receiver fixes `E = String`. kotlinc rejects this with an argument type mismatch.
+#[test]
+fn an_inner_class_argument_must_match_the_enclosing_type_argument() {
+    const LIB: &str = "package lib\n\
+        \n\
+        class Outer<E : CharSequence> {\n\
+        \x20   inner class Inner<T : E>(val e: E)\n\
+        }\n";
+    const MAIN: &str = "import lib.Outer\n\
+        \n\
+        fun box(): String {\n\
+        \x20   val inner = Outer<String>().Inner(42)\n\
+        \x20   return \"fail\"\n\
+        }\n";
+    let expected = vec![
+        "argument type mismatch: actual type is 'Int', but 'String' was expected.".to_string(),
+    ];
+    assert_eq!(
+        common::diagnostics_against("inner_enclosing_tp_arg", LIB, MAIN)
+            .expect("krusty-built library"),
+        expected,
+    );
+    assert_eq!(
+        common::diagnostics_against_ref("inner_enclosing_tp_arg", LIB, MAIN)
+            .expect("kotlinc-built library"),
+        expected,
     );
 }
 

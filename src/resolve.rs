@@ -10485,6 +10485,10 @@ struct LibraryConstructorOptions<'a> {
     /// A constructor already chosen by a selection that ran over a wider candidate family (the
     /// receiver member level of `outer.Inner(args)`). Only that declaration is materialized.
     selected: Option<&'a crate::libraries::FunctionInfo>,
+    /// The outer classifier's formal bindings an enclosing-instance receiver supplies to a bound
+    /// inner-class construction (`Outer<String>().Inner(args)` fixes the constructor's `E` to
+    /// `String`). `None` for every construction that captures no receiver-supplied instance.
+    enclosing_bindings: Option<crate::symbol_resolver::GSigBinds>,
 }
 
 enum LibraryConstructorFailure {
@@ -18829,6 +18833,7 @@ impl<'a> Checker<'a> {
                                 expected,
                                 priority: ConstructorPriorityTier::All,
                                 selected: None,
+                                enclosing_bindings: None,
                             },
                         ) {
                             Ok(LibraryConstructorSelection::Selected) => {
@@ -22869,6 +22874,7 @@ impl<'a> Checker<'a> {
                                         ConstructorPriorityTier::All
                                     },
                                     selected: None,
+                                    enclosing_bindings: None,
                                 },
                             ) {
                                 Ok(LibraryConstructorSelection::Selected) => {
@@ -23013,6 +23019,7 @@ impl<'a> Checker<'a> {
                                         ConstructorPriorityTier::All
                                     },
                                     selected: None,
+                                    enclosing_bindings: None,
                                 },
                             ) {
                                 Ok(LibraryConstructorSelection::Selected) => {
@@ -23643,6 +23650,7 @@ impl<'a> Checker<'a> {
                             expected,
                             priority: ConstructorPriorityTier::Low,
                             selected: None,
+                            enclosing_bindings: None,
                         },
                     ) {
                         Ok(LibraryConstructorSelection::Selected) => {
@@ -69980,6 +69988,7 @@ impl<'a> Checker<'a> {
             expected,
             priority,
             selected,
+            enclosing_bindings,
         } = options;
         for &argument in args {
             if self.expr_types[argument.0 as usize] == Ty::Error
@@ -70065,6 +70074,31 @@ impl<'a> Checker<'a> {
             let mut member = declaration;
             member.generic_sig =
                 crate::libraries::constructor_generic_signature(internal, classifier, &member);
+            // A bound inner-class construction reaches its constructor through the outer-instance
+            // receiver, so the enclosing classifier's parameters are not inference variables of
+            // this call: the receiver's application fixes them (`Outer<String>().Inner(42)` checks
+            // the argument against `String`, the receiver's `E`). Specialize the declared shapes
+            // before applicability, exactly as the member-level candidate selection does.
+            if let Some(bindings) = &enclosing_bindings {
+                if let Some(signature) = &mut member.generic_sig {
+                    for parameter in &mut signature.params {
+                        *parameter =
+                            crate::symbol_resolver::ty_subst_keep_unbound(*parameter, bindings);
+                    }
+                    for bounds in &mut signature.formal_bounds {
+                        for bound in bounds {
+                            *bound =
+                                crate::symbol_resolver::ty_subst_keep_unbound(*bound, bindings);
+                        }
+                    }
+                    signature.ret =
+                        crate::symbol_resolver::ty_subst_keep_unbound(signature.ret, bindings);
+                }
+                for parameter in &mut member.params {
+                    *parameter =
+                        crate::symbol_resolver::ty_subst_keep_unbound(*parameter, bindings);
+                }
+            }
             let declaration_parameter_shapes = member
                 .generic_sig
                 .as_ref()

@@ -45,6 +45,11 @@ pub struct BackendClassifierFact {
     pub is_kotlin: bool,
     pub source: bool,
     pub outer_instance: Option<TypeName>,
+    /// The classifier this declaration is lexically written in, from source containment. `None`
+    /// for a top-level classifier (and for a dependency record, whose nesting its own classfile
+    /// answers). A JVM `$` inside a source spelling is not an owner boundary, so a backend must
+    /// read this edge and never rederive declaration nesting from the physical name.
+    pub declaration_owner: Option<TypeName>,
     pub kind: crate::libraries::TypeKind,
     pub is_abstract: bool,
     pub is_extensible: bool,
@@ -151,6 +156,9 @@ impl BackendClassifierFact {
             is_kotlin: shape.is_kotlin,
             source: shape.source_file.is_some(),
             outer_instance: shape.outer_instance,
+            // A dependency record's nesting is answered by its own classfile (`InnerClasses`),
+            // not by this view.
+            declaration_owner: None,
             kind: shape.kind,
             is_abstract: shape.inheritance.is_abstract,
             is_extensible: shape.inheritance.is_extensible,
@@ -394,6 +402,14 @@ impl BackendModuleFacts {
                         .map(|owner| owner.classifier)
                 })
                 .flatten();
+            // The lexical classifier owner from source containment, independent of the `inner`
+            // modifier: a static nested class has the same declaration owner an inner class's
+            // captured instance names. A `$` inside a backticked source spelling is not an owner
+            // boundary, so the backend reads this edge instead of the physical name.
+            let declaration_owner = declaration_header
+                .owner
+                .and_then(|owner| index.classifier_header(owner))
+                .map(|owner| owner.classifier);
             let type_param_variances = index
                 .classifier_type_arguments(declaration)
                 .unwrap_or_default()
@@ -602,6 +618,7 @@ impl BackendModuleFacts {
                 is_kotlin: true,
                 source: true,
                 outer_instance,
+                declaration_owner,
                 kind,
                 is_abstract: flags.has(crate::fir::DeclarationFlags::ABSTRACT) || is_interface,
                 is_extensible: !is_interface && !flags.has(crate::fir::DeclarationFlags::FINAL),

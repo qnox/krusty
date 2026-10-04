@@ -256,6 +256,7 @@ pub(super) fn build_continuation_class(
         is_anonymous_object: false,
         enclosure: None,
         is_inner_class: false,
+        declaration_owner: None,
         is_local_class: false,
         is_value: false,
         is_data: false,

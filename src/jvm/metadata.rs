@@ -1659,38 +1659,69 @@ pub fn decode_metadata(
     // without the containing Class.type_parameter table silently widens the receiver to `Any` and
     // turns its physical leading parameter into an apparent value parameter. Recover the names once
     // at the metadata boundary and give every class function the complete semantic context.
-    let class_tparams = if k == Some(1) {
+    //
+    // Each name is folded into its declaration identity (declaring classifier + ordinal), exactly as
+    // a source declaration's parameters are: two same-spelled parameters of different classes are
+    // different types, and a nested class's references to an ENCLOSING parameter rebind to the same
+    // identity once the classpath provider walks the owner chain.
+    let parsed_class_type_params = if k == Some(1) {
         type_param_bodies(ctx.msg, CLASS_TYPE_PARAMETER_FIELD)
             .into_iter()
             .map(parse_type_param)
             .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .filter_map(|parameter| {
-                Some((
-                    parameter.id,
-                    resolve_string(ctx.records, ctx.d2, parameter.name_id as usize)?,
-                ))
-            })
-            .collect::<Vec<_>>()
     } else {
         Vec::new()
     };
+    let this_class_name = crate::types::type_name(this_class);
+    let mut own_type_parameter_identities = Vec::new();
+    let class_tparams = parsed_class_type_params
+        .iter()
+        .enumerate()
+        .filter_map(|(ordinal, parameter)| {
+            let source = resolve_string(ctx.records, ctx.d2, parameter.name_id as usize)?;
+            let identity =
+                crate::types::external_classifier_type_parameter(this_class_name, ordinal, &source);
+            own_type_parameter_identities.push((source, identity));
+            Some((parameter.id, identity.to_owned()))
+        })
+        .collect::<Vec<_>>();
+    let own_identities = own_type_parameter_identities
+        .iter()
+        .map(|(source, identity)| (source.as_str(), *identity))
+        .collect::<std::collections::HashMap<_, _>>();
+    let rename_own_type_parameters = |ty: Ty| crate::types::ty_rename_params(ty, &own_identities);
+    // The class's OWN level (bounds and supertypes) names its own parameters by string (`f9`), so
+    // they decode with the source spelling; fold them into the same declaration identities the
+    // id-keyed (`f7`) member references already carry.
     let (class_type_params, class_type_param_bounds, class_supertypes) = if k == Some(1) {
-        decode_class_signature(&ctx)?
+        let (formals, bounds, supertypes) = decode_class_signature(&ctx)?;
+        (
+            formals
+                .into_iter()
+                .map(|formal| {
+                    own_type_parameter_identities
+                        .iter()
+                        .find(|(source, _)| *source == formal)
+                        .map(|(_, identity)| identity.to_string())
+                        .unwrap_or(formal)
+                })
+                .collect(),
+            bounds
+                .into_iter()
+                .map(|bounds| bounds.into_iter().map(rename_own_type_parameters).collect())
+                .collect(),
+            supertypes
+                .into_iter()
+                .map(rename_own_type_parameters)
+                .collect(),
+        )
     } else {
         (Vec::new(), Vec::new(), Vec::new())
     };
-    let class_type_param_variances = if k == Some(1) {
-        type_param_bodies(ctx.msg, CLASS_TYPE_PARAMETER_FIELD)
-            .into_iter()
-            .map(parse_type_param)
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .map(|parameter| type_variance(parameter.variance))
-            .collect()
-    } else {
-        Vec::new()
-    };
+    let class_type_param_variances = parsed_class_type_params
+        .iter()
+        .map(|parameter| type_variance(parameter.variance))
+        .collect();
     let class_flags = (k == Some(1)).then(|| class_identity::class_flags(&ctx));
     // `@Deprecated(level = HIDDEN)` lives on the JVM realization (a `kotlin.Deprecated` runtime
     // annotation), not in the protobuf. A declaration whose realization method carries it exists
@@ -1729,7 +1760,19 @@ pub fn decode_metadata(
     // `Class.type_parameter`. Constructor decoding owns only the Class schema; running it over a
     // package would feed each complete TypeAlias message to the strict type-parameter decoder.
     let mut constructors = if k == Some(1) {
-        ctor_params(&ctx)?
+        let mut constructors = ctor_params(&ctx)?;
+        // Constructor parameter types decode like the class's own level: references to the class's
+        // own parameters carry the source spelling, so fold them into the same declaration
+        // identities the class signature and member (`f7`) references already use.
+        for constructor in &mut constructors {
+            constructor.params.types = constructor
+                .params
+                .types
+                .iter()
+                .map(|ty| rename_own_type_parameters(*ty))
+                .collect();
+        }
+        constructors
     } else {
         Vec::new()
     };
@@ -1871,7 +1914,7 @@ fn enclosing_type_parameter_placeholder(id: u64) -> String {
 }
 
 /// The joint (outermost-first) id behind an [`enclosing_type_parameter_placeholder`] name.
-pub fn enclosing_type_parameter_id(name: &str) -> Option<usize> {
+fn enclosing_type_parameter_id(name: &str) -> Option<usize> {
     name.strip_prefix(ENCLOSING_TYPE_PARAMETER_PREFIX)?
         .parse()
         .ok()

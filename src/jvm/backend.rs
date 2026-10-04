@@ -498,6 +498,7 @@ fn checked_module_inner_class_resolver(
             .map(|(classifier, shape)| InnerModuleClassifier {
                 classifier,
                 visibility: shape.access.visibility(),
+                declaration_owner: shape.declaration_owner,
                 inner: shape.outer_instance.is_some(),
                 annotation: shape.is_annotation(),
                 interface: shape.is_interface(),
@@ -514,6 +515,10 @@ fn checked_module_inner_class_resolver(
 struct InnerModuleClassifier {
     classifier: crate::types::TypeName,
     visibility: crate::types::Visibility,
+    /// The lexical classifier owner from source containment; `None` for a top-level classifier,
+    /// which kotlinc gives no `InnerClasses` row. A `$` inside a backticked source spelling is not
+    /// an owner boundary, so this edge — never the physical name — decides nesting.
+    declaration_owner: Option<crate::types::TypeName>,
     inner: bool,
     annotation: bool,
     interface: bool,
@@ -539,35 +544,23 @@ fn module_inner_class_resolver_from_shapes<'a>(
     const SYNTHETIC: u16 = 0x1000;
 
     let classes = classes.into_iter().collect::<Vec<_>>();
-    let module_names = classes
-        .iter()
-        .map(|class| class.classifier)
-        .collect::<std::collections::HashSet<_>>();
     let mut source = std::collections::HashMap::new();
     for class in classes {
         let internal = class.classifier.render();
-        // Only MEMBER-nested classes get snapshot entries, and the outer boundary is NOT the last
-        // `$` (mirroring `register_inner_classes`): the boundary is the longest proper prefix that
-        // is itself a module class. A name whose remainder still carries `$` past that boundary is
-        // a hoisted LOCAL class (`pkg/Outer$m$Local` — `m` is a function, not a class) or a
-        // backticked simple name; kotlinc spells a local's entry with `outer_class_info_index = 0`,
-        // and inventing an outer makes the loader chase a class that does not exist
-        // (`NoClassDefFoundError`). The two are not distinguishable from the name alone (a
-        // backticked MEMBER `` class `X$Y` `` is denotable cross-file and would deserve an entry),
-        // so the snapshot omits the ambiguous shape rather than risk fabricating an outer.
-        let Some(boundary) = internal
-            .char_indices()
-            .filter(|&(_, ch)| ch == '$')
-            .map(|(at, _)| at)
-            .filter(|&at| module_names.contains(&crate::types::type_name(&internal[..at])))
-            .max()
-        else {
-            continue; // top-level (or nested under nothing this module declares)
-        };
-        let (outer, simple) = (&internal[..boundary], &internal[boundary + 1..]);
-        if simple.contains('$') {
+        // Only MEMBER-nested classes get snapshot entries, on the exact declaration-owner edge:
+        // a top-level class (a backticked `Outer$Literal` included) has no row, and a member
+        // class's outer is the classifier its declaration is written in — never the longest `$`
+        // prefix that happens to name a module class, which a literal `$` in a source spelling
+        // would misread. Hoisted LOCAL classes are not part of this snapshot at all (their
+        // completed shape belongs to the active IR file), so no `outer_class_info_index = 0`
+        // row is fabricated for them here either.
+        let Some(owner) = class.declaration_owner else {
             continue;
-        }
+        };
+        let simple = class
+            .classifier
+            .nested_segment_within(owner)
+            .expect("a recorded declaration owner must prefix its nested class");
         let visibility = match class.visibility {
             crate::types::Visibility::Protected => PROTECTED,
             crate::types::Visibility::Private => PRIVATE,
@@ -586,9 +579,9 @@ fn module_inner_class_resolver_from_shapes<'a>(
             access |= FINAL;
         }
         source.insert(
-            internal.clone(),
+            internal,
             crate::jvm::classfile::InnerClassDetails {
-                outer: Some(outer.to_string()),
+                outer: Some(owner.render()),
                 name: Some(simple.to_string()),
                 access,
             },

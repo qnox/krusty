@@ -238,6 +238,7 @@ mod tests {
             is_kotlin: true,
             source: true,
             outer_instance: None,
+            declaration_owner: None,
             kind: crate::libraries::TypeKind::Class,
             is_abstract: false,
             is_extensible: true,

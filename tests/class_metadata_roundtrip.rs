@@ -316,7 +316,13 @@ fn inner_member_metadata_maps_captured_and_own_type_parameters_to_distinct_ids()
         ],
     );
     let ci = class_info_kind("sample/Outer$Inner", d1, d2, Some(1));
-    assert_eq!(ci.meta.class_type_parameters.type_params(), &["U"]);
+    // The class's own parameter publishes its declaration identity (declaring classifier +
+    // ordinal), not the bare spelling: a same-spelled parameter of another class is a different
+    // type, and a member's id-keyed reference to it decodes to that same identity.
+    let [ref own_identity] = ci.meta.class_type_parameters.type_params()[..] else {
+        panic!("the class declares exactly one own type parameter");
+    };
+    assert_ne!(own_identity, "U");
     let pair = class_functions(&ci)
         .iter()
         .find(|function| function.jvm_name == "pair")
@@ -326,7 +332,10 @@ fn inner_member_metadata_maps_captured_and_own_type_parameters_to_distinct_ids()
         signature.params[0],
         Ty::TyParam("\0tp:enclosing:0", _)
     ));
-    assert!(matches!(signature.params[1], Ty::TyParam("U", _)));
+    assert!(matches!(
+        signature.params[1],
+        Ty::TyParam(name, _) if name == own_identity.as_str()
+    ));
 }
 
 #[test]
@@ -415,7 +424,12 @@ fn nested_inner_metadata_numbers_captures_from_outermost_to_innermost() {
         ],
     );
     let ci = class_info_kind("sample/Outer$Middle$Inner", d1, d2, Some(1));
-    assert_eq!(ci.meta.class_type_parameters.type_params(), &["V"]);
+    // As in the single-capture test above, the own parameter publishes its declaration identity
+    // and the member's f7 = 2 reference decodes to it; the captured ids stay placeholders.
+    let [ref own_identity] = ci.meta.class_type_parameters.type_params()[..] else {
+        panic!("the class declares exactly one own type parameter");
+    };
+    assert_ne!(own_identity, "V");
     let signature = class_functions(&ci)
         .iter()
         .find(|function| function.jvm_name == "triple")
@@ -429,7 +443,10 @@ fn nested_inner_metadata_numbers_captures_from_outermost_to_innermost() {
         signature.params[1],
         Ty::TyParam("\0tp:enclosing:1", _)
     ));
-    assert!(matches!(signature.params[2], Ty::TyParam("V", _)));
+    assert!(matches!(
+        signature.params[2],
+        Ty::TyParam(name, _) if name == own_identity.as_str()
+    ));
 }
 
 #[test]

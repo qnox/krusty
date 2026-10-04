@@ -136,9 +136,32 @@ impl InnerClasses {
                 continue;
             }
 
-            // Generated local names and source identifiers containing `$` make textual boundaries
-            // ambiguous. Compare every already-interned candidate, deepest first, with the exact
-            // declaration set; do not reinterpret any of them as a semantic lexical-owner edge.
+            // A source-declared member class reads its recorded declaration owner: a `$` inside a
+            // source spelling (a backticked identifier) is not an owner boundary, and a top-level
+            // class has no `InnerClasses` entry at all. kotlinc lists it under its simple name in
+            // the exact class its declaration is written in.
+            if class.is_source_declared && !class.is_local_class {
+                let Some(owner) = class.declaration_owner else {
+                    continue; // top-level class
+                };
+                specs.push(InnerClassSpec {
+                    inner: identity.render(),
+                    outer: Some(owner.render()),
+                    name: Some(
+                        identity
+                            .nested_segment_within(owner)
+                            .expect("a recorded declaration owner must prefix its nested class")
+                            .to_string(),
+                    ),
+                    access: class_access(ir, class),
+                });
+                continue;
+            }
+
+            // Local and generated names qualify a declaration, not a class, and generated
+            // segments make textual boundaries ambiguous. Compare every already-interned
+            // candidate, deepest first, with the exact declaration set; do not reinterpret any of
+            // them as a semantic lexical-owner edge.
             let declared_owner = identity
                 .existing_nested_owners()
                 .into_iter()
@@ -599,6 +622,39 @@ mod tests {
                     access: 0x0019,
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn a_source_member_reads_its_declaration_owner_not_a_dollar_boundary() {
+        let mut ir = IrFile::default();
+        let decoy = type_name("sample/Outer");
+        let literal = type_name("sample/Outer$Literal");
+        let inner = type_name("sample/Outer$Literal$Inner");
+        ir.add_class(IrClass::synthetic(decoy));
+
+        let mut literal_class = IrClass::synthetic(literal);
+        literal_class.is_source_declared = true;
+        ir.add_class(literal_class);
+
+        let mut inner_class = IrClass::synthetic(inner);
+        inner_class.is_source_declared = true;
+        inner_class.declaration_owner = Some(literal);
+        ir.add_class(inner_class);
+
+        assert_eq!(
+            InnerClasses::new(
+                &ir,
+                &crate::jvm::override_results::OverrideResults::default(),
+                "sample/FacadeKt",
+            )
+            .specs,
+            [InnerClassSpec {
+                inner: "sample/Outer$Literal$Inner".to_string(),
+                outer: Some("sample/Outer$Literal".to_string()),
+                name: Some("Inner".to_string()),
+                access: 0x0019,
+            }]
         );
     }
 

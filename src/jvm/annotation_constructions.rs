@@ -129,6 +129,7 @@ fn annotation_implementation(
         is_anonymous_object: false,
         enclosure: Some(enclosure),
         is_inner_class: false,
+        declaration_owner: None,
         is_local_class: false,
         is_value: false,
         is_data: false,

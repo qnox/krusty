@@ -241,11 +241,16 @@ Reverse-engineered from kotlinc for `class Point(val x: Int, var y: String)` (se
   outer classes' parameters at the ids before its own: every enclosing class's OWN parameters are
   reserved eagerly, outermost first, so `class Outer<E> { class Nested<E> }` numbers the nested
   `E` 1 and `class Outer<E> { inner class Inner(val e: E) }` addresses the outer `E` as id 0. The
-  reader decodes per classfile, so a reference to an enclosing class's parameter (absent from the
-  class's own `type_parameter` table) becomes a placeholder carrying the joint id
-  (`\0tp:enclosing:N`); the classpath provider rebinds it to the enclosing parameter's name and
-  declared bound from the owner chain's metadata, in member signatures and in the class's own
-  bounds and supertypes alike (`metadata::rebind_enclosing_type_parameters`).
+  reservation walks the declaration-owner edge the front end records from source containment —
+  a `$` inside a backticked source spelling is not an owner boundary. The reader decodes per
+  classfile, folding each class's own parameters into declaration identities (declaring
+  classifier + ordinal, like a source declaration's), so a reference to an enclosing class's
+  parameter (absent from the class's own `type_parameter` table) becomes a placeholder carrying
+  the joint id (`\0tp:enclosing:N`); the classpath provider rebinds it to the SAME declaration
+  identity and its declared bound from the owner chain's metadata, in member signatures and in
+  the class's own bounds and supertypes alike (`metadata::rebind_enclosing_type_parameters`). A
+  construction through the outer receiver then substitutes that receiver's argument for the
+  enclosing parameter, exactly as for the class's own.
   Test: `tests/metadata_captured_type_parameters_e2e.rs`,
   `tests/metadata_type_reference_e2e.rs`.
 - Inline parameter modifiers (kotlinc 2.4.20): `ValueParameter.flags` bit 2 for `crossinline` and

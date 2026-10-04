@@ -454,6 +454,29 @@ pub(crate) fn classifier_bindings(
         .collect()
 }
 
+/// The bindings an outer-instance receiver supplies to the constructors of one of its `inner`
+/// classifiers, plus the receiver-hierarchy depth of that outer classifier. The receiver's member
+/// scope applies the outer classifier (`Outer<String>`), and an inner classifier's declarations
+/// reference the outer classifier's parameters (`inner class Inner(val e: E)`): those references
+/// specialize from that application exactly like a member declared on the outer classifier itself.
+/// `None` when the classifier captures no outer instance or the receiver's hierarchy does not
+/// apply the outer classifier.
+pub(crate) fn outer_instance_bindings(
+    source: &dyn SymbolSource,
+    receiver: Ty,
+    classifier: &crate::libraries::LibraryType,
+) -> Option<(super::GSigBinds, usize)> {
+    let outer = classifier.outer_instance?;
+    let (_, applied_outer, depth) = applied_hierarchy(source, member_scope_receiver(receiver))
+        .into_iter()
+        .find(|(owner, ..)| *owner == outer)?;
+    let bindings = source
+        .classifier(outer)
+        .map(|outer| classifier_bindings(&outer, applied_outer))
+        .unwrap_or_default();
+    Some((bindings, depth))
+}
+
 /// The declared upper bound carried by each classifier type-parameter occurrence.
 ///
 /// JVM `Signature` parsing discovers a class's formal declarations separately from a member's type

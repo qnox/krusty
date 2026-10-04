@@ -10502,6 +10502,24 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `inner_constructors_and_member_functions_are_one_overload_family`,
   `member_level_selection_chooses_between_inner_constructors_and_functions`.)
 
+- **A receiver-bound inner construction fixes the enclosing type parameters from the receiver.**
+  The outer-instance receiver's application of the outer classifier binds the enclosing
+  parameters in the constructor's declared shapes, exactly as it does for a member declared on the
+  outer classifier itself: `Outer<String>().Inner(42)` against
+  `class Outer<E : CharSequence> { inner class Inner(val e: E) }` checks the argument against
+  `String` and is rejected, never admitted against an unconstrained `E`. The constructor-family
+  path applies the same receiver bindings (`symbol_resolver::outer_instance_bindings`) that the
+  member-level candidate selection computes. Across a module boundary a classpath inner
+  classifier's metadata addresses an enclosing parameter by bare id; the provider rebinds that
+  placeholder to the enclosing class's owner-qualified parameter identity (declared bound
+  included) by walking the classfile `InnerClasses` owner chain — never `$` boundaries in the
+  internal name, which a literal `$` in a backticked source spelling would misread — so a
+  same-spelled parameter of the inner class stays a different type from the captured one.
+  (`tests/metadata_type_reference_e2e.rs`,
+  `an_inner_class_argument_must_match_the_enclosing_type_argument`,
+  `same_spelled_inner_and_outer_parameters_stay_distinct_across_modules`,
+  `an_enclosing_type_parameter_follows_inner_classes_not_dollar_segments`.)
+
 - **A bare constructor family shapes a postponed argument by what its members share.** Where a
   classifier call cannot run constructor overload selection before its lambda is shaped (a named
   or trailing argument, or a positional call selection cannot yet decide), every constructor whose
