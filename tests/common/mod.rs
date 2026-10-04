@@ -28,6 +28,23 @@ pub use source_set_compile::compile_in_process_files;
 
 pub(crate) use kotlin_metadata::raw_kotlin_metadata;
 
+/// Canonical spelling accepted by kotlinc for a numeric JVM target. This exact value is also part
+/// of the binary reference-cache invocation key, so callers must not key `8` while executing
+/// `-jvm-target 1.8`.
+pub(crate) fn kotlinc_jvm_target_argument(target: u16) -> String {
+    if target == 8 {
+        "1.8".to_string()
+    } else {
+        target.to_string()
+    }
+}
+
+#[test]
+fn numeric_jvm_targets_use_the_exact_kotlinc_invocation_spelling() {
+    assert_eq!(kotlinc_jvm_target_argument(8), "1.8");
+    assert_eq!(kotlinc_jvm_target_argument(17), "17");
+}
+
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read as _, Write as _};
 use std::os::unix::io::AsRawFd;

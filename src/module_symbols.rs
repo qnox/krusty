@@ -941,6 +941,7 @@ fn fn_info(
         inline_body_plan: None,
         plugin_expression: sig.plugin_expression,
         descriptor: String::new(),
+        visibility: crate::types::Visibility::Public,
         physical_params: params.clone(),
         physical_parameter_plan: Some(
             crate::libraries::physical_parameter_plan::source_parameter_plan(params.len()),
@@ -1078,6 +1079,7 @@ fn source_callable(
         suspend: false,
         is_abstract: false,
         owner_is_interface,
+        visibility: crate::types::Visibility::Public,
         member_realization: crate::libraries::MemberRealization::Dispatch,
         inline: InlineKind::None,
         default_call: false,

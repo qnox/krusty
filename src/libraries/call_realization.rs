@@ -89,6 +89,7 @@ impl LibraryCallable {
             suspend: false,
             is_abstract: false,
             owner_is_interface: false,
+            visibility: crate::types::Visibility::Public,
             member_realization: MemberRealization::Dispatch,
             inline: InlineKind::None,
             default_call: false,
@@ -134,6 +135,7 @@ impl LibraryCallable {
         callable.default_realization = member.default_realization.clone();
         callable.external_default_provider = member.external_default_provider;
         callable.nonvirtual_realization = member.nonvirtual_realization.clone();
+        callable.visibility = member.visibility;
         callable
     }
 

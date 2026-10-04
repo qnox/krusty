@@ -65,6 +65,7 @@ fn a_dependency_super_call_uses_its_frozen_nonvirtual_target() {
     let realization = ExternalCallableRealization {
         callable: declaration,
         kind: ExternalCallableKind::Member,
+        parameter_identities: Box::new([]),
     };
     let mut facts = CheckedBackendCallables::default();
     facts

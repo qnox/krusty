@@ -342,6 +342,8 @@ mod classpath_properties_query_e2e;
 mod classpath_property_mutable_collection_e2e;
 #[path = "classpath_protected_member_e2e.rs"]
 mod classpath_protected_member_e2e;
+#[path = "classpath_protected_nested_access_e2e.rs"]
+mod classpath_protected_nested_access_e2e;
 #[path = "classpath_provide_delegate_e2e.rs"]
 mod classpath_provide_delegate_e2e;
 #[path = "classpath_qualified_nested_named_ctor_e2e.rs"]

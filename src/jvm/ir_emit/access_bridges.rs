@@ -187,6 +187,97 @@ fn protected_bridge_owner(
         })
 }
 
+/// The source class that encloses `caller` and may call protected `target`.
+///
+/// A nested class does not carry the receiver's classifier on every classpath call, and it is not
+/// itself a subclass. The class it is declared in is, when that class extends the member's owner
+/// and lives in another package.
+fn enclosing_protected_subclass(
+    ir: &IrFile,
+    caller: crate::ir::ClassId,
+    target: crate::types::TypeName,
+) -> Option<crate::types::TypeName> {
+    let mut pending = std::collections::VecDeque::from([caller]);
+    let mut seen = std::collections::HashSet::new();
+    seen.insert(caller);
+    while let Some(current) = pending.pop_front() {
+        for next in enclosing_classes(ir, current) {
+            if !seen.insert(next) {
+                continue;
+            }
+            let next_name = ir.classes.get(next as usize)?.fq_name;
+            if next_name != target
+                && next_name.namespace() != target.namespace()
+                && extends_target(ir, next, target)
+            {
+                return Some(next_name);
+            }
+            pending.push_back(next);
+        }
+    }
+    None
+}
+
+/// Every exact classifier edge out of `class`'s lexical enclosure. A function can be attached to
+/// several specialized class copies, so this returns the recorded set instead of choosing one by
+/// whether it happens to inherit the protected target.
+fn enclosing_classes(ir: &IrFile, class: crate::ir::ClassId) -> Vec<crate::ir::ClassId> {
+    let Some(enclosure) = ir
+        .classes
+        .get(class as usize)
+        .and_then(|declared| declared.enclosure)
+    else {
+        return Vec::new();
+    };
+    match enclosure {
+        crate::ir::IrEnclosure::Function(function) | crate::ir::IrEnclosure::Lambda(function) => ir
+            .class_method_owners
+            .get(&function)
+            .into_iter()
+            .flatten()
+            .copied()
+            .filter(|&owner| owner != class)
+            .collect(),
+        crate::ir::IrEnclosure::ClassInitializer(owner)
+        | crate::ir::IrEnclosure::Constructor { class: owner, .. }
+        | crate::ir::IrEnclosure::Classifier(owner) => vec![owner],
+        crate::ir::IrEnclosure::PropertyAccessor { property, setter } => {
+            let function = super::property_accessor_function(ir, property, setter);
+            ir.class_method_owners
+                .get(&function)
+                .into_iter()
+                .flatten()
+                .copied()
+                .filter(|&owner| owner != class)
+                .collect()
+        }
+        crate::ir::IrEnclosure::File => Vec::new(),
+    }
+}
+
+fn extends_target(ir: &IrFile, class: crate::ir::ClassId, target: crate::types::TypeName) -> bool {
+    let mut current = class;
+    let mut seen = std::collections::HashSet::new();
+    while seen.insert(current) {
+        let Some(declared) = ir.classes.get(current as usize) else {
+            return false;
+        };
+        if declared.superclass == target
+            || declared
+                .interfaces
+                .iter_ids()
+                .any(|interface| interface == target)
+        {
+            return true;
+        }
+        let Some(superclass) = ir.class_id_by_name(declared.superclass) else {
+            return false;
+        };
+        current = superclass;
+    }
+    false
+}
+
 /// The local-variable names of a protected property accessor's parameters: the setter's value is
 /// named as its declaration names it.
 fn protected_property_parameter_names(
@@ -225,7 +316,10 @@ pub(super) fn cross_owner_member_calls(
 ) -> MemberAccessBridges {
     let mut private = std::collections::HashSet::new();
     let mut protected = std::collections::HashMap::new();
-    let mut scan = |owner: &str, roots: Vec<crate::ir::ExprId>, export_private: bool| {
+    let mut scan = |owner: &str,
+                    caller: Option<crate::ir::ClassId>,
+                    roots: Vec<crate::ir::ExprId>,
+                    export_private: bool| {
         let mut seen = std::collections::HashSet::new();
         let mut stack = roots;
         while let Some(expression) = stack.pop() {
@@ -533,6 +627,50 @@ pub(super) fn cross_owner_member_calls(
                     }
                 }
             }
+            if !protected.contains_key(&expression) {
+                if let Some(dependency) =
+                    ir.jvm_protected_dependency_calls.get(&expression).cloned()
+                {
+                    if let IrExpr::Call {
+                        callee: Callee::Virtual { .. },
+                        dispatch_receiver: Some(_),
+                        ..
+                    } = ir.expr(expression)
+                    {
+                        // A dependency member's protected accessor belongs to the lexical source
+                        // subclass. The receiver's realized JVM type may be the dependency owner,
+                        // and expression-owner spellings may name the anonymous caller; neither is
+                        // an alternate source of subclass identity.
+                        let bridge_owner = caller.and_then(|caller| {
+                            enclosing_protected_subclass(ir, caller, dependency.owner)
+                        });
+                        if let Some(bridge_owner) = bridge_owner {
+                            crate::trace_compiler!(
+                                "emit",
+                                "protected dependency bridge expression={expression} owner={} target_owner={}",
+                                bridge_owner,
+                                dependency.owner
+                            );
+                            let parameters = dependency
+                                .parameters
+                                .iter()
+                                .map(jvm_declared_ty)
+                                .collect::<Vec<_>>();
+                            protected.insert(
+                                expression,
+                                ProtectedMemberAccessBridge {
+                                    owner: bridge_owner,
+                                    name: dependency.name,
+                                    target_parameters: parameters.clone(),
+                                    bridge_parameters: parameters,
+                                    result: jvm_declared_ty(&dependency.result),
+                                    parameter_names: dependency.parameter_names.into_vec(),
+                                },
+                            );
+                        }
+                    }
+                }
+            }
             crate::ir::for_each_child(&ir.exprs, expression, &mut |child| stack.push(child));
         }
     };
@@ -542,6 +680,7 @@ pub(super) fn cross_owner_member_calls(
         for &root in &context.roots {
             scan(
                 &owner,
+                context.class.map(|class| class as crate::ir::ClassId),
                 vec![root],
                 static_accessors::non_private_inline_body(ir, root),
             );

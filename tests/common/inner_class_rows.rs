@@ -55,7 +55,7 @@ fn compile_pairs(
     classes: &[&str],
 ) -> Vec<(Vec<u8>, Vec<u8>)> {
     let target = jvm_target
-        .map(|target| target.to_string())
+        .map(super::common_core::kotlinc_jvm_target_argument)
         .unwrap_or_else(|| "default".to_string());
     let language_args = super::common_core::language_directives::kotlinc_args(source);
     let inputs = super::common_core::byte_dump::class_dump_inputs(
@@ -86,9 +86,9 @@ fn compile_pairs(
                         .into_owned(),
                 );
             }
-            if let Some(target) = jvm_target {
+            if jvm_target.is_some() {
                 args.push("-jvm-target".to_string());
-                args.push(target.to_string());
+                args.push(target.clone());
             }
             args.extend(language_args.iter().cloned());
             args.push(source_path.to_string_lossy().into_owned());

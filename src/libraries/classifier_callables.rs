@@ -90,6 +90,7 @@ impl FunctionInfo {
         callable.inline_body_plan = member.inline_body_plan.clone();
         callable.suspend = member.suspend();
         callable.owner_is_interface = member.is_interface();
+        callable.visibility = member.visibility;
         callable.member_realization = member.realization;
         callable.default_realization = member.default_realization.clone();
         callable.external_default_provider = member.external_default_provider;
