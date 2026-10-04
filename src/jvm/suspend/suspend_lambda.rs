@@ -17,7 +17,8 @@
 
 use super::bytecode_machine::{eligible_points, owned_suspensions, Route, Routed, Subject};
 use super::cps::{
-    SuspendLambdaCapture, SuspendLambdaClass, SuspendLambdaMachine, TransformedMachine,
+    SuspendLambdaCapture, SuspendLambdaClass, SuspendLambdaMachine, SuspendLambdaParameters,
+    TransformedMachine,
 };
 use super::{append_continuation, box_returns, continuation_ty, ensure_tail_return, int_ty};
 use crate::ir::{
@@ -32,8 +33,6 @@ const SUSPEND_LAMBDA: &str = "kotlin/coroutines/jvm/internal/SuspendLambda";
 struct Capture {
     name: String,
     ty: Ty,
-    /// Whether its constructor parameter uses kotlinc's `$receiver` spelling.
-    receiver: bool,
 }
 
 /// One of the lambda's own parameters.
@@ -84,7 +83,7 @@ pub(super) fn route(
     if eligible_points(ir, fid, body, &route, Subject::SuspendLambda).is_none() {
         return Routed::NotEligible;
     }
-    let Some((captures, parameters)) = layout(ir, fid, body, &site) else {
+    let Some((captures, parameters, member_parameters)) = layout(ir, fid, body, &site) else {
         crate::trace_compiler!("suspend", "suspend lambda fid={fid}: no field layout");
         return Routed::NotEligible;
     };
@@ -200,9 +199,9 @@ pub(super) fn route(
                 .map(|(index, capture)| SuspendLambdaCapture {
                     field: index as u32,
                     ty: capture.ty,
-                    receiver: capture.receiver,
                 })
                 .collect(),
+            member_parameters,
             parameters: parameters
                 .iter()
                 .map(|parameter| {
@@ -225,6 +224,7 @@ pub(super) fn route(
         TransformedMachine {
             continuation_class: internal.render(),
             suspensions,
+            fake_continuations: Vec::new(),
             lambda: Some(SuspendLambdaMachine {
                 parameter_reads,
                 declared_spill_fields,
@@ -268,13 +268,14 @@ pub(super) fn innermost_first(ir: &IrFile, fids: Vec<u32>) -> Vec<u32> {
 }
 
 /// The class's captured values and the lambda's own parameters, when every one of them has the
-/// identity its field or local needs.
+/// identity its field or local needs, and the parameter identities of the members the class
+/// declares over them.
 fn layout(
     ir: &IrFile,
     fid: u32,
     body: ExprId,
     site: &Site,
-) -> Option<(Vec<Capture>, Vec<Parameter>)> {
+) -> Option<(Vec<Capture>, Vec<Parameter>, SuspendLambdaParameters)> {
     let function = &ir.functions[fid as usize];
     let parameter_info = ir.fn_params.get(&fid)?;
     let identities = &parameter_info.identities;
@@ -284,29 +285,35 @@ fn layout(
     {
         return None;
     }
-    let mut captures = Vec::with_capacity(own_from);
-    for (parameter, identity) in identities[..own_from].iter().enumerate() {
-        let (name, receiver) = match identity.role {
-            IrParameterRole::CapturedValue { .. } => {
-                (format!("${}", identity.source_name.as_ref()?), false)
-            }
+    let captured_receivers = &parameter_info.captured_receivers;
+    let recorded = identities[..own_from]
+        .iter()
+        .all(|identity| match identity.role {
+            IrParameterRole::CapturedValue { .. } => identity.source_name.is_some(),
             IrParameterRole::CapturedReceiver { ordinal } => {
-                let receiver = parameter_info.captured_receivers.get(ordinal as usize)?;
-                (
-                    crate::jvm::capture_names::lifted_receiver_name(
-                        &parameter_info.captured_receivers,
-                        ordinal as usize,
-                    ),
-                    crate::jvm::capture_names::uses_receiver_constructor_parameter(receiver),
-                )
+                (ordinal as usize) < captured_receivers.len()
             }
-            _ => return None,
-        };
+            _ => false,
+        });
+    if !recorded {
+        return None;
+    }
+    let member_parameters = SuspendLambdaParameters::new(
+        identities[..own_from].to_vec(),
+        identities.len() - own_from,
+        captured_receivers.clone(),
+        crate::jvm::lifted_names::lifting_root(ir, fid),
+    );
+    let mut captures = Vec::with_capacity(own_from);
+    for (parameter, identity) in member_parameters.captures().iter().enumerate() {
+        let name =
+            crate::jvm::capture_names::suspend_lambda_capture(ir, &member_parameters, identity)
+                .field;
         let ty = match ir.shared_capture_parameters.get(&(fid, parameter as u32)) {
             Some(element) => crate::jvm::shared_captures::holder_ty(element),
             None => function.params[parameter],
         };
-        captures.push(Capture { name, ty, receiver });
+        captures.push(Capture { name, ty });
     }
     let expressions = crate::ir::value_namespace_expressions(ir, body);
     let read = |value: usize| {
@@ -378,7 +385,7 @@ fn layout(
             field,
         });
     }
-    Some((captures, parameters))
+    Some((captures, parameters, member_parameters))
 }
 
 /// kotlinc's `Type.normalize()` descriptor: every reference is `Object`, and the sub-int

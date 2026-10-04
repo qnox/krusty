@@ -62,6 +62,7 @@ pub(crate) use local_delegates::{
 };
 mod local_property_references;
 mod module_records;
+mod null_checks;
 mod operators;
 mod overrides;
 mod package_declarations;
@@ -107,14 +108,15 @@ pub use field_flags::IrfFlags;
 pub use fields::IrField;
 pub use function_scope::IrFunctionScope;
 pub use intrinsic::IrIntrinsic;
-pub use lambda_classes::{IrInvokeBridge, IrLambdaClass, IrSamWrapperClass};
-pub(crate) use lifting_sequences::{IrLiftingEntry, IrLiftingSequence};
+pub use lambda_classes::{IrInvokeBridge, IrLambdaCapture, IrLambdaClass, IrSamWrapperClass};
+pub(crate) use lifting_sequences::{IrLiftingEntry, IrLiftingRoot, IrLiftingSequence};
 pub(crate) use local_class_names::{IrLocalClassNameProvenance, IrLocalClassOwner};
 pub use local_property_references::IrLocalPropertyReference;
 pub use module_records::{
     IrCallableTypeParameter, IrClassifierKind, IrHeaderAnnotation, IrModuleCallable,
     IrModuleClassifier, IrModuleMemberAccess, IrModuleSource,
 };
+pub use null_checks::NullCheck;
 pub use operators::{IrBinOp, IrTypeOp};
 pub use overrides::{is_kotlin_primitive, IrFunctionOverride, IrPropertyOverride};
 pub use package_declarations::{
@@ -130,7 +132,7 @@ pub use references::{
     FuncRef, IrCallableReference, IrCallableReferenceTarget, IrClassifierCallable, PropRef,
     ReflectedCallable,
 };
-pub use sam_target::IrSamTarget;
+pub use sam_target::{IrSamMethod, IrSamTarget};
 pub use static_properties::{IrStatic, IrStaticAccessor, IrStaticAccessors};
 pub use type_check_role::TypeCheckRole;
 pub use type_reflection::IrGenericTopLevelProperty;
@@ -346,6 +348,8 @@ pub enum IrCheckedOperation {
         unsigned_compare: Option<IrRuntimeFunction>,
         body: ExprId,
         label: String,
+        /// The index a destructured `withIndex()` loop over the progression counts beside it.
+        with_index: Option<IrLoopIndex>,
     },
     PropertyReference {
         target: crate::fir::FirPropertyReferenceTarget,
@@ -371,8 +375,26 @@ pub struct IrAnnotationConstruction {
     pub members: Vec<(String, Ty)>,
     /// Constructor defaults as lowered declarations, not evaluated call operands.
     pub defaults: Vec<Option<ExprId>>,
-    /// Lexical classifier containing this call. `None` means a top-level/file-facade scope.
-    pub enclosing_class: Option<TypeName>,
+    /// The lexical scopes this construction is evaluated in; `None` is the file facade. A written
+    /// construction has its own one. A construction inside an annotation declaration's default is
+    /// evaluated at every construction that omits that element, so it has theirs, and none when no
+    /// construction in this source uses that default.
+    pub scopes: Vec<Option<TypeName>>,
+}
+
+/// kotlinc's `WithIndexLoopHeader` over a counted loop: each iteration binds the index, steps the
+/// index when the loop counts its own, then binds the element.
+#[derive(Clone, Debug, PartialEq)]
+pub struct IrLoopIndex {
+    /// The index's `var index = 0` declaration. A backend whose counter starts at constant `0` and
+    /// steps by `1` uses this slot as that counter instead of declaring a second one.
+    pub declaration: ExprId,
+    /// A block of the declarations that read the index, opening each iteration.
+    pub bindings: ExprId,
+    /// Whether the source binds the element. A loop that does not binds no loop variable.
+    pub element_bound: bool,
+    /// A block of the declarations that copy the bound element.
+    pub element_copies: ExprId,
 }
 
 /// An IR expression node (a subset of Kotlin IR's `IrExpression` hierarchy). Operands reference
@@ -749,17 +771,13 @@ pub enum IrExpr {
         params: Vec<Ty>,
         ret: Ty,
     },
-    /// The not-null assertion `operand!!` — yields `operand`, throwing if it is null. On the JVM this
-    /// is `kotlin/jvm/internal/Intrinsics.checkNotNull` applied to a duplicate of the value.
-    ///
-    /// `message` is set instead for the assertion a PLATFORM value (`T!`) gets when it is committed
-    /// to a declared non-null type: the same yields-or-throws semantics, but with the checked
-    /// expression's rendering (`getenv(...)`) carried into the failure, so the JVM form is
-    /// `Intrinsics.checkNotNullExpressionValue(value, message)`. Every pass treats the two alike —
-    /// only the emitted intrinsic and the `-X` option that removes it differ.
+    /// A not-null assertion: yields `operand`, throwing if it is null. `check` says whether the
+    /// source wrote it (`operand!!`) or it guards a Java value committed to a declared non-null
+    /// type. Every pass treats them alike; only the emitted intrinsic and the `-X` option that
+    /// removes the implicit ones differ.
     NotNullAssert {
         operand: ExprId,
-        message: Option<String>,
+        check: NullCheck,
     },
     /// A `lateinit` read: yields `operand`, throwing `UninitializedPropertyAccessException(name)` if it
     /// is still null. Emitted as `<operand>; dup; ifnonnull L; ldc name;
@@ -1160,7 +1178,8 @@ pub struct IrClass {
     /// `@Target` admits `PROPERTY`), by property name. Kotlin properties have no class-file
     /// declaration, so these are emitted onto a synthetic `get<Name>$annotations()` marker method
     /// that the property's `JvmPropertySignature` names. Empty for a class whose properties carry
-    /// none.
+    /// none. The marker pass consumes every entry that retains an annotation; an entry left after
+    /// it records only erased optional expectations, which reach `@Metadata` as a flag alone.
     pub property_annotations: Vec<PropertyAnnotations>,
     /// User annotations declared on the PRIMARY constructor (`class C @Mark constructor(…)`) — the
     /// primary-`<init>` analogue of [`IrSecondaryCtor::annotations`], carrying retention per
@@ -1547,6 +1566,14 @@ pub struct IrSpecializedAnonymousClass {
     /// Later materialization appends backing fields and accessors past these prefixes.
     pub field_count: u32,
     pub property_count: u32,
+    /// Property reads and writes in the inlined caller whose receiver is this copy's construction.
+    /// Accessor functions are not available when the construction is retargeted, so the read is
+    /// rebound once the copy's properties exist.
+    pub caller_property_uses: Vec<ExprId>,
+    /// Cloned property initializer and accessor roots. Accessor functions do not exist yet, and
+    /// these roots are not constructor statements. Nested specialization walks this field;
+    /// [`IrClass::init_body`] stays the constructor body.
+    pub pending_property_roots: Vec<ExprId>,
 }
 
 /// One lowered source file (`IrFile`) — its arenas. Index-based, bulk-freeable.
@@ -1807,6 +1834,9 @@ pub struct IrFile {
     /// keeps one generic construction node; a backend consumes this semantic annotation tag when it
     /// must realize annotation instances through a platform-specific implementation class.
     pub annotation_constructions: std::collections::HashMap<ExprId, IrAnnotationConstruction>,
+    /// Each annotation class this file declares → the closed declaration default of each element
+    /// that has one, by element name. A backend records them with the annotation's declaration.
+    pub annotation_element_defaults: std::collections::HashMap<TypeName, Vec<(String, AnnoValue)>>,
     /// Current class identity → semantic superclass-constructor parameter ordinals omitted by its
     /// primary delegation. Kept separate from `super_args` so common IR does not encode a target's
     /// mask/marker ABI.
@@ -1896,6 +1926,22 @@ pub struct IrFile {
     /// Lowered `&&`/`||` identities and their source operators. Backends consume this provenance;
     /// the same generic `when` written by hand must remain distinguishable.
     pub short_circuits: std::collections::HashMap<ExprId, IrShortCircuitKind>,
+    /// Local assignments a lowering generated without the increment or compound-assignment form a
+    /// source update has (kotlinc's `index = index + 1` in `WithIndexLoopHeader`). A target emits
+    /// them as the plain arithmetic and store they are, never as a fused increment.
+    pub plain_updates: std::collections::HashSet<ExprId>,
+    /// Pre-test loops whose body block is a transparent scope, as the body of a `for` loop kotlinc's
+    /// `ForLoopsLowering` rebuilt as a `while` is (an `IrComposite`): the declarations it opens with
+    /// stay in scope until the loop ends.
+    pub transparent_loop_bodies: std::collections::HashSet<ExprId>,
+    /// Post-test loops a counted `for` loop was realized as that keep the `for` loop's origin, with
+    /// a body opening with the loop variable's initialization (kotlinc's `FOR_LOOP_NEXT` block
+    /// heading a `FOR_LOOP_INNER_WHILE` body: the guarded do-while that steps first). kotlinc's
+    /// `visitDoWhileLoop` emits that initialization ahead of the loop's labels, so the body's locals
+    /// keep their ranges through the condition. Any other post-test loop, a written one or the
+    /// overflow-guarded counted shape (`doWhileCounterLoopOrigin`), ends a local the condition does
+    /// not read at the condition (`endUnreferencedDoWhileLocals`).
+    pub for_loop_next_loops: std::collections::HashSet<ExprId>,
     /// The casts the source wrote (`x as T`). Every other cast is compiler-inserted, kotlinc's
     /// `IMPLICIT_CAST` (an `as?`'s narrowing after its `is`, a carrier handed on as its function
     /// type): the value is already known to be a `T`, so a backend narrows it with a plain cast
@@ -2064,9 +2110,9 @@ pub struct IrFile {
     /// private primary constructor. The JVM value-class pass records the function identities when
     /// it creates them; emission must not recover their roles from generated method spellings.
     pub(crate) jvm_value_class_representation_order: std::collections::HashMap<u32, u8>,
-    /// The static `constructor-impl` realizing each value-class constructor: its `$default` stub
-    /// takes kotlinc's constructor marker (`DefaultConstructorMarker`), not a function's `Object`.
-    pub(crate) jvm_value_class_constructor_impls: std::collections::HashSet<u32>,
+    /// The static `constructor-impl` realizing each value-class constructor, with that constructor's
+    /// ordinal (`0` is the primary). Its `$default` stub takes kotlinc's `DefaultConstructorMarker`.
+    pub(crate) jvm_value_class_constructor_impls: std::collections::HashMap<u32, u32>,
     /// Generated JVM methods kotlinc writes without nullability annotations. The JVM value-class
     /// pass records exact function identities; common lowering does not interpret this set.
     pub(crate) jvm_nullability_unannotated_methods: std::collections::HashSet<u32>,

@@ -13,6 +13,107 @@ use crate::libraries::{
 };
 use crate::types::{ArrayFactoryKind, Ty, TypeName};
 
+/// Attach every compiler-owned realization fact for one normalized top-level declaration.
+/// Providers call this only after constructing the complete semantic signature; consumers never
+/// rediscover either fact from a package, facade, or member spelling.
+pub(crate) fn attach_function_realization(
+    package: TypeName,
+    name: &str,
+    function: &mut FunctionInfo,
+) {
+    if let Some(intrinsic) = normalized_function_realization(package, name, function) {
+        function.callable.compiler_intrinsic = Some(intrinsic);
+    }
+    function.callable.semantic_role = normalized_function_semantic_role(package, name, function);
+}
+
+fn property_reference_receiver(receiver: Ty, mutable: bool) -> Option<(u8, &'static [Ty])> {
+    let receiver = receiver.non_null();
+    let internal = receiver.obj_internal()?;
+    let arity = [
+        (
+            if mutable {
+                "kotlin/reflect/KMutableProperty0"
+            } else {
+                "kotlin/reflect/KProperty0"
+            },
+            0,
+        ),
+        (
+            if mutable {
+                "kotlin/reflect/KMutableProperty1"
+            } else {
+                "kotlin/reflect/KProperty1"
+            },
+            1,
+        ),
+    ]
+    .into_iter()
+    .find_map(|(candidate, arity)| {
+        (internal == crate::types::type_name(candidate)).then_some(arity)
+    })?;
+    let arguments = receiver.type_args();
+    (arguments.len() == arity as usize + 1).then_some((arity, arguments))
+}
+
+fn property_reference_metadata_parameter(ty: Ty) -> bool {
+    let ty = ty.non_null();
+    ty.obj_internal() == Some(crate::types::type_name("kotlin/reflect/KProperty"))
+        && matches!(ty.type_args(), [Ty::StarProjection(_)])
+}
+
+pub(crate) fn function_semantic_role(
+    facts: &BuiltinFunctionDeclaration<'_>,
+) -> Option<crate::types::SemanticCallRole> {
+    use crate::types::SemanticCallRole;
+
+    if facts.package != crate::types::wk::kotlin_package()
+        || facts.kind != FnKind::Extension
+        || facts.context_count != 0
+        || facts.is_suspend
+        || !facts.is_operator
+        || facts.is_infix
+        || facts.vararg.is_some()
+    {
+        return None;
+    }
+    let receiver = facts.receiver?;
+    if facts.name == "getValue" {
+        let (arity, arguments) = property_reference_receiver(receiver, false)?;
+        let [this_ref, property] = facts.params else {
+            return None;
+        };
+        let this_ref_matches = match arity {
+            0 => *this_ref == Ty::nullable(Ty::obj_name(crate::types::wk::any())),
+            1 => *this_ref == arguments[0],
+            _ => false,
+        };
+        return (facts.type_parameter_count == arity as usize + 1
+            && this_ref_matches
+            && property_reference_metadata_parameter(*property)
+            && facts.ret == arguments[arity as usize])
+            .then_some(SemanticCallRole::KotlinPropertyReferenceDelegateGet(arity));
+    }
+    if facts.name == "setValue" {
+        let (arity, arguments) = property_reference_receiver(receiver, true)?;
+        let [this_ref, property, value] = facts.params else {
+            return None;
+        };
+        let this_ref_matches = match arity {
+            0 => *this_ref == Ty::nullable(Ty::obj_name(crate::types::wk::any())),
+            1 => *this_ref == arguments[0],
+            _ => false,
+        };
+        return (facts.type_parameter_count == arity as usize + 1
+            && this_ref_matches
+            && property_reference_metadata_parameter(*property)
+            && *value == arguments[arity as usize]
+            && facts.ret == Ty::Unit)
+            .then_some(SemanticCallRole::KotlinPropertyReferenceDelegateSet(arity));
+    }
+    None
+}
+
 fn plain(facts: &BuiltinFunctionDeclaration<'_>, kind: FnKind) -> bool {
     facts.kind == kind
         && facts.context_count == 0
@@ -273,6 +374,73 @@ fn collection_or_text(facts: &BuiltinFunctionDeclaration<'_>) -> Option<Compiler
     }
 }
 
+/// kotlinc's `WithIndexHandler.matchIterable`, over the complete stdlib declarations:
+/// - `kotlin.collections`: `fun <T> Array<out T>.withIndex(): Iterable<IndexedValue<T>>`, each
+///   primitive array's `fun IntArray.withIndex(): Iterable<IndexedValue<Int>>`, and
+///   `fun <T> Iterable<T>.withIndex(): Iterable<IndexedValue<T>>`;
+/// - `kotlin.text`: `fun CharSequence.withIndex(): Iterable<IndexedValue<Char>>`;
+/// - `kotlin.sequences`: `fun <T> Sequence<T>.withIndex(): Sequence<IndexedValue<T>>`.
+///
+/// The result must wrap exactly the receiver's element in `IndexedValue`, so a same-named
+/// extension with another result or element relation stays an ordinary call.
+fn with_index(facts: &BuiltinFunctionDeclaration<'_>) -> Option<CompilerIntrinsic> {
+    use crate::types::wk;
+    if facts.name != wk::WITH_INDEX
+        || !plain(facts, FnKind::Extension)
+        || !facts.params.is_empty()
+        || facts.vararg.is_some()
+        || facts.is_operator
+    {
+        return None;
+    }
+    let receiver = facts.receiver?;
+    if receiver != receiver.non_null() {
+        return None;
+    }
+    // The receiver's own type parameter `T`, unprojected unless the declaration says otherwise.
+    let generic_element = |argument: Ty| {
+        (facts.type_parameter_count == 1 && argument.is_ty_param()).then_some(argument)
+    };
+    let class = receiver.obj_internal();
+    let (element, container) = if facts.package == wk::kotlin_collections_package() {
+        if receiver.is_reference_array() {
+            let [Ty::OutProjection(element)] = receiver.type_args() else {
+                return None;
+            };
+            (generic_element(**element)?, wk::iterable())
+        } else if receiver.is_array() {
+            if facts.type_parameter_count != 0 {
+                return None;
+            }
+            (receiver.array_elem()?, wk::iterable())
+        } else if class == Some(wk::iterable()) {
+            let [element] = receiver.type_args() else {
+                return None;
+            };
+            (generic_element(*element)?, wk::iterable())
+        } else {
+            return None;
+        }
+    } else if facts.package == wk::kotlin_text_package() {
+        if class != Some(wk::char_sequence())
+            || !receiver.type_args().is_empty()
+            || facts.type_parameter_count != 0
+        {
+            return None;
+        }
+        (Ty::Char, wk::iterable())
+    } else if facts.package == wk::kotlin_sequences_package() && class == Some(wk::sequence()) {
+        let [element] = receiver.type_args() else {
+            return None;
+        };
+        (generic_element(*element)?, wk::sequence())
+    } else {
+        return None;
+    };
+    let indexed = Ty::obj_args_name(wk::indexed_value(), &[element]);
+    (facts.ret == Ty::obj_args_name(container, &[indexed])).then_some(CompilerIntrinsic::WithIndex)
+}
+
 fn kotlin_test(facts: &BuiltinFunctionDeclaration<'_>) -> Option<CompilerIntrinsic> {
     if !facts.package.matches("kotlin/test")
         || !plain(facts, FnKind::TopLevel)
@@ -458,7 +626,9 @@ pub(crate) fn runtime_function_declaration(
 pub(crate) fn function_realization(
     facts: BuiltinFunctionDeclaration<'_>,
 ) -> Option<CompilerIntrinsic> {
-    if facts.package.matches("kotlin") {
+    if let Some(intrinsic) = with_index(&facts) {
+        Some(intrinsic)
+    } else if facts.package.matches("kotlin") {
         kotlin_function(&facts)
     } else if facts.package.matches("kotlin/io") {
         console(&facts)
@@ -503,6 +673,31 @@ pub(crate) fn normalized_function_realization(
         is_infix: function.flags.infix,
     };
     function_realization(facts)
+}
+
+/// Attach a semantic language role to an already-normalized provider callable. Unlike a compiler
+/// intrinsic this is consumed by every backend and remains tied to the selected declaration.
+pub(crate) fn normalized_function_semantic_role(
+    package: TypeName,
+    name: &str,
+    function: &FunctionInfo,
+) -> Option<crate::types::SemanticCallRole> {
+    let params = function.semantic_params();
+    let generic = function.generic_sig.as_ref();
+    function_semantic_role(&BuiltinFunctionDeclaration {
+        package,
+        name,
+        kind: function.kind,
+        receiver: function.semantic_receiver(),
+        params: params.as_ref(),
+        ret: generic.map_or(function.callable.ret, |signature| signature.ret),
+        context_count: function.context_count,
+        type_parameter_count: generic.map_or(0, |signature| signature.formals.len()),
+        vararg: function.call_sig.vararg_index,
+        is_suspend: function.flags.suspend,
+        is_operator: function.flags.operator,
+        is_infix: function.flags.infix,
+    })
 }
 
 pub(crate) fn property_realization(
@@ -728,6 +923,189 @@ mod tests {
         );
     }
 
+    fn with_index_declaration<'a>(
+        package: &str,
+        receiver: Ty,
+        type_parameter_count: usize,
+        ret: Ty,
+    ) -> BuiltinFunctionDeclaration<'a> {
+        BuiltinFunctionDeclaration {
+            package: type_name(package),
+            name: "withIndex",
+            kind: FnKind::Extension,
+            receiver: Some(receiver),
+            params: &[],
+            ret,
+            context_count: 0,
+            type_parameter_count,
+            vararg: None,
+            is_suspend: false,
+            is_operator: false,
+            is_infix: false,
+        }
+    }
+
+    fn indexed(container: &str, element: Ty) -> Ty {
+        Ty::obj_args(
+            container,
+            &[Ty::obj_args("kotlin/collections/IndexedValue", &[element])],
+        )
+    }
+
+    #[test]
+    fn with_index_matches_each_stdlib_overload_completely() {
+        let t = Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")));
+        let iterable = "kotlin/collections/Iterable";
+        let sequence = "kotlin/sequences/Sequence";
+        for declaration in [
+            with_index_declaration(
+                "kotlin/collections",
+                Ty::obj_args("kotlin/Array", &[Ty::out_projection(t)]),
+                1,
+                indexed(iterable, t),
+            ),
+            with_index_declaration(
+                "kotlin/collections",
+                Ty::array(Ty::Int),
+                0,
+                indexed(iterable, Ty::Int),
+            ),
+            with_index_declaration(
+                "kotlin/collections",
+                Ty::obj_args(iterable, &[t]),
+                1,
+                indexed(iterable, t),
+            ),
+            with_index_declaration(
+                "kotlin/text",
+                Ty::obj("kotlin/CharSequence"),
+                0,
+                indexed(iterable, Ty::Char),
+            ),
+            with_index_declaration(
+                "kotlin/sequences",
+                Ty::obj_args(sequence, &[t]),
+                1,
+                indexed(sequence, t),
+            ),
+        ] {
+            assert_eq!(
+                function_realization(declaration),
+                Some(CompilerIntrinsic::WithIndex)
+            );
+        }
+    }
+
+    #[test]
+    fn a_same_spelled_with_index_with_another_signature_has_no_realization() {
+        let t = Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")));
+        let iterable = "kotlin/collections/Iterable";
+        let sequence = "kotlin/sequences/Sequence";
+        let generic_iterable = Ty::obj_args(iterable, &[t]);
+        for (declaration, why) in [
+            (
+                with_index_declaration("example", generic_iterable, 1, indexed(iterable, t)),
+                "a repository package declaring the same extension",
+            ),
+            (
+                with_index_declaration(
+                    "kotlin/collections",
+                    Ty::obj_args("example/Bag", &[t]),
+                    1,
+                    indexed(iterable, t),
+                ),
+                "a repository classifier receiver",
+            ),
+            (
+                with_index_declaration("kotlin/collections", generic_iterable, 1, generic_iterable),
+                "a result that is not IndexedValue",
+            ),
+            (
+                with_index_declaration(
+                    "kotlin/collections",
+                    generic_iterable,
+                    1,
+                    indexed(iterable, Ty::Int),
+                ),
+                "an IndexedValue that does not carry the receiver's element",
+            ),
+            (
+                with_index_declaration(
+                    "kotlin/collections",
+                    generic_iterable,
+                    1,
+                    indexed(sequence, t),
+                ),
+                "a Sequence result over an Iterable receiver",
+            ),
+            (
+                with_index_declaration(
+                    "kotlin/collections",
+                    generic_iterable,
+                    2,
+                    indexed(iterable, t),
+                ),
+                "an extra type parameter",
+            ),
+            (
+                with_index_declaration(
+                    "kotlin/collections",
+                    Ty::obj_args("kotlin/Array", &[t]),
+                    1,
+                    indexed(iterable, t),
+                ),
+                "an invariant Array<T> receiver",
+            ),
+            (
+                with_index_declaration(
+                    "kotlin/collections",
+                    Ty::obj_args(iterable, &[Ty::Int]),
+                    0,
+                    indexed(iterable, Ty::Int),
+                ),
+                "a receiver argument that is not the declaration's type parameter",
+            ),
+            (
+                with_index_declaration(
+                    "kotlin/collections",
+                    Ty::array(Ty::Int),
+                    0,
+                    indexed(iterable, Ty::Long),
+                ),
+                "a primitive array yielding another element",
+            ),
+            (
+                with_index_declaration(
+                    "kotlin/text",
+                    Ty::obj("kotlin/CharSequence"),
+                    0,
+                    indexed(sequence, Ty::Char),
+                ),
+                "a CharSequence overload returning a Sequence",
+            ),
+            (
+                with_index_declaration(
+                    "kotlin/sequences",
+                    Ty::obj_args(sequence, &[t]),
+                    1,
+                    indexed(iterable, t),
+                ),
+                "a Sequence overload returning an Iterable",
+            ),
+            (
+                with_index_declaration(
+                    "kotlin/collections",
+                    Ty::nullable(generic_iterable),
+                    1,
+                    indexed(iterable, t),
+                ),
+                "a nullable receiver",
+            ),
+        ] {
+            assert_eq!(function_realization(declaration), None, "{why}");
+        }
+    }
+
     #[test]
     fn a_shape_equivalent_floating_range_has_no_realization() {
         let package = crate::types::wk::kotlin_ranges_package();
@@ -746,5 +1124,41 @@ mod tests {
             normalized_function_realization(package, "rangeTo", &same_shape),
             None
         );
+    }
+
+    #[test]
+    fn property_reference_delegate_roles_require_the_complete_extension_signature() {
+        let any = Ty::obj_name(crate::types::wk::any());
+        let value = Ty::ty_param("V", any);
+        let receiver = Ty::obj_args("kotlin/reflect/KProperty0", &[value]);
+        let property = Ty::obj_args(
+            "kotlin/reflect/KProperty",
+            &[Ty::star_projection(Ty::nullable(any))],
+        );
+        let params = [Ty::nullable(any), property];
+        let declaration = BuiltinFunctionDeclaration {
+            package: crate::types::wk::kotlin_package(),
+            name: "getValue",
+            kind: FnKind::Extension,
+            receiver: Some(receiver),
+            params: &params,
+            ret: value,
+            context_count: 0,
+            type_parameter_count: 1,
+            vararg: None,
+            is_suspend: false,
+            is_operator: true,
+            is_infix: false,
+        };
+        assert_eq!(
+            function_semantic_role(&declaration),
+            Some(crate::types::SemanticCallRole::KotlinPropertyReferenceDelegateGet(0))
+        );
+
+        let lookalike = BuiltinFunctionDeclaration {
+            package: crate::types::type_name("fixture"),
+            ..declaration
+        };
+        assert_eq!(function_semantic_role(&lookalike), None);
     }
 }

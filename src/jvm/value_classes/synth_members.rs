@@ -24,9 +24,10 @@ pub(super) struct SynthesizedValueMembers {
     pub(super) constructor_impls: HashMap<(TypeName, u32), u32>,
 }
 
-/// A declaration written in a value class's constructor (a local class, a lambda's class) is
-/// enclosed by the static `constructor-impl` realizing that constructor, as kotlinc's
-/// `EnclosingMethod` names it: the instance constructor does not exist on the JVM. A callable lifted
+/// A declaration written in a value class's constructor or `init` block (a local class, a lambda's
+/// class) is enclosed by the static `constructor-impl` realizing that constructor, the primary's
+/// for an `init` block, as kotlinc's `EnclosingMethod` names it: the instance constructor does not
+/// exist on the JVM. A callable lifted
 /// out of a constructor or an `init` block is likewise contained by that `constructor-impl`, whose
 /// name kotlinc gives it (`constructor_impl$lambda$0`).
 pub(super) fn enclose_in_constructor_impls(ir: &mut IrFile, realized: &SynthesizedValueMembers) {
@@ -47,10 +48,8 @@ pub(super) fn enclose_in_constructor_impls(ir: &mut IrFile, realized: &Synthesiz
         _ => None,
     };
     for declaration in &mut ir.classes {
-        if let Some(crate::ir::IrEnclosure::Constructor { .. }) = declaration.enclosure {
-            if let Some(function) = constructor_impl(declaration.enclosure) {
-                declaration.enclosure = Some(crate::ir::IrEnclosure::Function(function));
-            }
+        if let Some(function) = constructor_impl(declaration.enclosure) {
+            declaration.enclosure = Some(crate::ir::IrEnclosure::Function(function));
         }
     }
     for entry in ir
@@ -393,7 +392,7 @@ pub(super) fn synth_value_members(
         let cfid = add_static(ir, "constructor-impl", vec![u_ir], u_ir, body);
         ir.jvm_value_class_representation_order.insert(cfid, 0);
         realized.constructor_impls.insert((internal_name, 0), cfid);
-        ir.jvm_value_class_constructor_impls.insert(cfid);
+        ir.jvm_value_class_constructor_impls.insert(cfid, 0);
         crate::jvm::method_parameters::record_function(ir, cfid, &[&fname], &[]);
         // Unlike a source value-class member converted to `member-impl`, this generated function's
         // carrier is its declared constructor parameter, not a former dispatch receiver. Keeping an
@@ -755,7 +754,8 @@ pub(super) fn synth_value_members(
             realized
                 .constructor_impls
                 .insert((internal_name, ordinal), constructor);
-            ir.jvm_value_class_constructor_impls.insert(constructor);
+            ir.jvm_value_class_constructor_impls
+                .insert(constructor, ordinal);
             let names = sc
                 .named_params
                 .iter()

@@ -4,6 +4,7 @@ use crate::ir::{
     IrClass, IrFile, IrGeneratedParameterRole, IrParameterIdentity, IrParameterRole,
     IrSecondaryCtor,
 };
+use crate::jvm::suspend::cps::{SuspendLambdaMember, SuspendLambdaParameters};
 use crate::types::{Ty, TypeName};
 
 pub(super) type MethodParameter = (Option<String>, u16);
@@ -79,7 +80,8 @@ pub(super) fn record_function(
 
 /// Parameters of one emitted common-IR function. Presence of `FnParamInfo` is the explicit contract
 /// that the function has declaration/debug parameter identities; compiler-generated parameters are
-/// flagged from their recorded provenance. A holder receiver is a JVM-generated synthetic prefix.
+/// flagged from their recorded provenance. A holder receiver is a JVM-generated synthetic prefix, and
+/// kotlinc flags every value or receiver a lifted callable captures synthetic too.
 pub(super) fn function(
     ir: &IrFile,
     function: u32,
@@ -115,7 +117,8 @@ pub(super) fn function(
                     IrParameterRole::Generated(
                         IrGeneratedParameterRole::HolderReceiver
                             | IrGeneratedParameterRole::ValueClassCarrier
-                    )
+                    ) | IrParameterRole::CapturedValue { .. }
+                        | IrParameterRole::CapturedReceiver { .. }
                 )) * SYNTHETIC,
             )
         })
@@ -126,7 +129,7 @@ pub(super) fn function(
     parameters
 }
 
-fn constructor_prefix(class: &IrClass, count: usize) -> Vec<MethodParameter> {
+fn constructor_prefix(ir: &IrFile, class: &IrClass, count: usize) -> Vec<MethodParameter> {
     assert!(
         count <= class.ctor_args.len(),
         "constructor prefix exceeds its arguments"
@@ -150,7 +153,7 @@ fn constructor_prefix(class: &IrClass, count: usize) -> Vec<MethodParameter> {
             let name = argument
                 .capture
                 .as_ref()
-                .map(crate::jvm::capture_names::capture_name)
+                .map(|capture| crate::jvm::capture_names::class_capture(ir, class, capture).field)
                 .or_else(|| {
                     let field = argument.field_index?;
                     Some(class.fields.get(field as usize)?.name.clone())
@@ -172,6 +175,7 @@ fn generated_constructor_flags(role: IrGeneratedParameterRole) -> u16 {
 }
 
 pub(super) fn primary_constructor(
+    ir: &IrFile,
     class: &IrClass,
     physical_parameters: &[Ty],
 ) -> Vec<MethodParameter> {
@@ -184,7 +188,7 @@ pub(super) fn primary_constructor(
         "primary constructor identities must match its physical JVM parameters"
     );
     let prefix = class.constructor_prefix_count as usize;
-    let mut parameters = constructor_prefix(class, prefix);
+    let mut parameters = constructor_prefix(ir, class, prefix);
     let projected = crate::jvm::parameter_names::constructor_method_parameters(&class.ctor_args);
     parameters.extend(projected[prefix..].iter().cloned().map(|name| (name, 0)));
     parameters
@@ -194,10 +198,11 @@ pub(super) fn primary_constructor(
 /// JVM `MethodParameters` attribute was requested. Synthetic marker accessors still need these for
 /// their `LocalVariableTable`; omitting that table must not be used as a substitute for identities.
 pub(super) fn primary_constructor_identities(
+    ir: &IrFile,
     class: &IrClass,
     physical_parameters: &[Ty],
 ) -> Vec<Option<String>> {
-    let identities = crate::jvm::parameter_names::constructor_local_variables(&class.ctor_args);
+    let identities = crate::jvm::parameter_names::constructor_local_variables(ir, class);
     assert_eq!(identities.len(), physical_parameters.len());
     identities
 }
@@ -239,6 +244,7 @@ impl OwnerConstructorPrefix {
 }
 
 pub(super) fn secondary_constructor(
+    ir: &IrFile,
     class: &IrClass,
     constructor: &IrSecondaryCtor,
     owner_prefix: &OwnerConstructorPrefix,
@@ -253,7 +259,11 @@ pub(super) fn secondary_constructor(
         "secondary constructor identities must match its physical JVM parameters"
     );
     let mut parameters = owner_prefix.parameters.clone();
-    parameters.extend(constructor_prefix(class, constructor.prefix_params.len()));
+    parameters.extend(constructor_prefix(
+        ir,
+        class,
+        constructor.prefix_params.len(),
+    ));
     parameters.extend(
         constructor
             .named_params
@@ -268,6 +278,7 @@ pub(super) fn secondary_constructor(
 /// `MethodParameters`, but an emitted marker accessor must still use the identities common IR
 /// recorded instead of inventing `pN` names or silently dropping its debug locals.
 pub(super) fn secondary_constructor_identities(
+    ir: &IrFile,
     class: &IrClass,
     constructor: &IrSecondaryCtor,
     owner_prefix: &OwnerConstructorPrefix,
@@ -279,7 +290,11 @@ pub(super) fn secondary_constructor_identities(
         "secondary constructor identities must match its physical JVM parameters"
     );
     let mut parameters = owner_prefix.parameters.clone();
-    parameters.extend(constructor_prefix(class, constructor.prefix_params.len()));
+    parameters.extend(constructor_prefix(
+        ir,
+        class,
+        constructor.prefix_params.len(),
+    ));
     parameters.extend(
         constructor
             .named_params
@@ -354,4 +369,38 @@ pub(super) fn continuation_constructor(class: &IrClass) -> Vec<MethodParameter> 
 
 pub(super) fn continuation_invoke_suspend() -> [MethodParameter; 1] {
     [parameter("$result", 0)]
+}
+
+/// `MethodParameters` of a suspend lambda class's generated `member`, formatted from the
+/// parameter identities its realization recorded and checked against `physical_parameters`: a
+/// captured value or receiver under the name of the field it initializes, synthetic; the
+/// completion, `create`'s value and the typed `invoke`'s `FunctionN` values as their roles spell
+/// them.
+pub(super) fn suspend_lambda_member(
+    ir: &IrFile,
+    parameters: &SuspendLambdaParameters,
+    member: SuspendLambdaMember,
+    physical_parameters: &[Ty],
+) -> Vec<MethodParameter> {
+    parameters
+        .physical(member, physical_parameters.len())
+        .iter()
+        .map(|identity| match identity.role {
+            IrParameterRole::CapturedValue { .. } | IrParameterRole::CapturedReceiver { .. } => {
+                let names =
+                    crate::jvm::capture_names::suspend_lambda_capture(ir, parameters, identity);
+                parameter(names.field, SYNTHETIC)
+            }
+            IrParameterRole::Generated(
+                IrGeneratedParameterRole::Continuation
+                | IrGeneratedParameterRole::SuspendLambdaCreateValue
+                | IrGeneratedParameterRole::FunctionInvokeValue { .. },
+            ) => parameter(
+                crate::jvm::parameter_names::method_parameter(identity, "")
+                    .expect("a suspend lambda's generated parameter role has a JVM name"),
+                0,
+            ),
+            role => panic!("a suspend lambda's {member:?} declares no {role:?} parameter"),
+        })
+        .collect()
 }

@@ -69,10 +69,30 @@ pub(crate) fn constructs_anonymous_object(callee: &MethodNode, classes: &dyn Cla
     )
 }
 
-/// `requiresEmptyStackOnEntry`: a body with try/catch blocks or a backward jump (a loop) is entered
-/// with nothing under it on the stack, which kotlinc arranges by spilling the caller's stack.
+/// `requiresEmptyStackOnEntry` (`IrInlineCodegen`): a body with try/catch blocks, a suspension
+/// point (`isBeforeSuspendMarker`/`isBeforeInlineSuspendMarker`) or a backward jump (a loop) is
+/// entered with nothing under it on the stack, which kotlinc arranges by spilling the caller's
+/// stack.
 pub(crate) fn requires_empty_stack_on_entry(callee: &MethodNode) -> bool {
+    use crate::jvm::bytecode_passes::coroutines::markers::{
+        int_constant, is_suspend_inline_marker, SuspendMarker,
+    };
     if !callee.try_catch_blocks.is_empty() {
+        return true;
+    }
+    let before_suspend = |previous: &Node, marker: &Node| {
+        is_suspend_inline_marker(marker)
+            && matches!(
+                int_constant(previous),
+                Some(id) if id == SuspendMarker::BeforeSuspend as i32
+                    || id == SuspendMarker::BeforeInlineSuspend as i32
+            )
+    };
+    if callee
+        .nodes
+        .windows(2)
+        .any(|pair| before_suspend(&pair[0], &pair[1]))
+    {
         return true;
     }
     let positions = label_positions(callee);

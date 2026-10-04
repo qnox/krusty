@@ -11,7 +11,9 @@
 //! The port follows the order of kotlinc's own passes, because each one sees the previous one's
 //! output: `prepareNode`, `removeFakeVariablesInitializationIfPresent`, `LocalReturnsNormalizer`,
 //! dead-code removal, `LocalVariablesSorter`, `removeClosureAssertions`, `LocalVarRemapper` and
-//! `processReturns`.
+//! `processReturns`. Each expanded lambda stays bracketed by `InlineMarker.beforeInlineCall` /
+//! `afterInlineCall`, for the caller's FixStack (when its class is written) to save the operand stack
+//! around it.
 //!
 //! Lambda arguments, anonymous-object regeneration, `$default` masks and `finally` rewriting are
 //! later stages of the port (see "JVM unified inliner" in `docs/IMPLEMENTATION_PLAN.md`). Bodies on
@@ -126,7 +128,7 @@ pub(in crate::jvm) fn inline(
         parameters,
         lambdas,
         inline_only,
-        inline_markers: false,
+        inline_markers: true,
     };
     let mut node = lambda_expansion::expand(&node, &context, invokes, call.lines)?;
     preparation::remove_closure_assertions(&mut node)?;

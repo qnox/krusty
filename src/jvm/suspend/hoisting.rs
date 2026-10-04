@@ -405,6 +405,22 @@ fn hoist_stmt(
                 .iter()
                 .any(|(c, _)| c.is_some_and(|c| expr_calls_suspend(ir, c, suspend_set)));
             if !cond_suspends {
+                // Normalizing an arm block demotes its trailing value to a statement, so that arm
+                // no longer yields the `when`'s checked result. A statement `when` keeps a joined
+                // value only while every arm still produces it; once one does not, the `when` is
+                // a statement whose result is `Unit`, as a statement `try` becomes in
+                // `normalize_statement_try_results`.
+                let demotes_arm_value = branches.iter().any(|&(_, body)| {
+                    matches!(
+                        ir.exprs[body as usize],
+                        IrExpr::Block { value: Some(_), .. }
+                    )
+                });
+                if demotes_arm_value {
+                    if let Some(result) = ir.whens.exhaustive.get_mut(&stmt) {
+                        *result = Ty::Unit;
+                    }
+                }
                 let branches = branches
                     .into_iter()
                     .map(|(condition, body)| {
@@ -933,9 +949,9 @@ fn hoist_expr(
             };
             e
         }
-        IrExpr::NotNullAssert { operand, message } => {
+        IrExpr::NotNullAssert { operand, check } => {
             let operand = hoist_expr(ir, operand, suspend_set, orig_rets, value_types, prelude);
-            ir.exprs[e as usize] = IrExpr::NotNullAssert { operand, message };
+            ir.exprs[e as usize] = IrExpr::NotNullAssert { operand, check };
             e
         }
         IrExpr::LateinitCheck { operand, name } => {

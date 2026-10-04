@@ -29,6 +29,7 @@ import org.gradle.process.ExecOperations
 import org.jetbrains.kotlin.buildtools.api.ExperimentalBuildToolsApi
 import org.jetbrains.kotlin.gradle.ExperimentalKotlinGradlePluginApi
 import org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension
+import org.jetbrains.kotlin.gradle.plugin.CompilerPluginConfig
 import org.jetbrains.kotlin.gradle.plugin.KotlinBasePlugin
 import org.jetbrains.kotlin.gradle.plugin.KotlinCompilerPluginSupportPlugin
 import org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile
@@ -54,17 +55,13 @@ abstract class KrustyKotlinPlugin @Inject constructor(
             )
         }
         val aggregate = aggregateTask(project.rootProject)
-        // The compiler-plugin baseline and its hook realize no tasks, so they stay at apply time:
-        // a support plugin applied after krusty must be caught, wherever in the build script that
-        // happens.
-        val supplementalCompilerPluginIds =
+        // Every applied compiler-plugin support plugin, whether it was applied before krusty or
+        // after it, wherever in the build script that happens. `all` replays the plugins already
+        // applied and realizes no tasks, so it stays at apply time.
+        val compilerPluginIds =
             project.objects.listProperty(String::class.java).convention(emptyList())
-        val compilerPluginBaseline =
-            project.plugins.withType(KotlinCompilerPluginSupportPlugin::class.java).toSet()
         project.plugins.withType(KotlinCompilerPluginSupportPlugin::class.java).all {
-            if (this !in compilerPluginBaseline) {
-                supplementalCompilerPluginIds.add(getCompilerPluginId())
-            }
+            compilerPluginIds.add(getCompilerPluginId())
         }
         // Wire replacements at the end of project configuration, not during plugin application.
         // Realizing a KotlinJvmCompile while a convention plugin is mid-apply reads — and so
@@ -73,12 +70,14 @@ abstract class KrustyKotlinPlugin @Inject constructor(
         // applying the Kotlin JVM plugin), and Gradle forbids registering a task from inside a
         // task configuration callback.
         project.afterEvaluate {
-            replaceKotlinJvmCompiles(project, javaToolchains, aggregate, supplementalCompilerPluginIds)
+            replaceKotlinJvmCompiles(project, javaToolchains, aggregate, compilerPluginIds)
         }
     }
 }
 
 private const val AGGREGATE_TASK_PROPERTY = "krusty.aggregateTaskProvider"
+
+private const val KOTLIN_DSL_BASE_PLUGIN_ID = "org.gradle.kotlin.kotlin-dsl.base"
 
 private fun aggregateTask(root: Project): TaskProvider<Task> {
     val extra = root.extensions.extraProperties
@@ -98,10 +97,33 @@ private fun replaceKotlinJvmCompiles(
     project: Project,
     javaToolchains: JavaToolchainService,
     aggregate: TaskProvider<Task>,
-    supplementalCompilerPluginIds: ListProperty<String>,
+    appliedCompilerPluginIds: ListProperty<String>,
 ) {
+    // Gradle's kotlin-dsl (applied through `kotlin-dsl` or `kotlin-dsl.base`) owns every Kotlin
+    // compilation of its project: precompiled script plugins are `.gradle.kts` scripts compiled
+    // against the Gradle script templates, the SAM-with-receiver and assignment compiler plugins
+    // change call resolution, and its compiler settings add arguments krusty does not model. A
+    // replacement would drop the scripts or reject the build, so kotlinc keeps those compiles.
+    val kotlinDsl = project.pluginManager.hasPlugin(KOTLIN_DSL_BASE_PLUGIN_ID)
     project.tasks.withType(KotlinJvmCompile::class.java).all {
         val kotlinTask = this
+        // A KotlinJvmCompile outside every source-set compilation is not a krusty compile either:
+        // kotlin-dsl's `compilePluginsBlocks` compiles the `plugins {}` blocks it extracts from
+        // precompiled script plugins as scripts, with no source set, Java sibling or classes output.
+        val sourceSetName = kotlinTask.sourceSetName.orNull
+        val kotlincReason = when {
+            sourceSetName == null -> "it belongs to no source set"
+            kotlinDsl -> "its project applies kotlin-dsl"
+            else -> null
+        }
+        if (kotlincReason != null) {
+            project.logger.lifecycle(
+                "krusty: {} is left to kotlinc: {}",
+                kotlinTask,
+                kotlincReason,
+            )
+            return@all
+        }
         val replacementName = "${kotlinTask.name}WithKrusty"
         val pluginVersion = project.provider {
             project.plugins.withType(KotlinBasePlugin::class.java).single().pluginVersion
@@ -121,7 +143,11 @@ private fun replaceKotlinJvmCompiles(
             kotlinTarget.set(kotlinTask.compilerOptions.jvmTarget.map { it.target })
             targetValidationMode.set(kotlinTask.jvmTargetValidationMode.map { it.name })
             kotlinPluginVersion.set(pluginVersion)
-            compilerPluginIds.set(supplementalCompilerPluginIds.map { it.sorted() })
+            compilerPluginIds.set(appliedCompilerPluginIds.map { it.distinct().sorted() })
+            // The compiler-plugin request kotlinc receives from this task: KGP's resolved plugin
+            // classpath (`-Xplugin`) and its per-plugin options (`-P plugin:<id>:<key>=<value>`).
+            compilerPluginClasspath.from(kotlinTask.pluginClasspath)
+            compilerPluginOptions.set(kotlinTask.pluginOptions.map(::pluginOptionArguments))
             compilerVersion.set(
                 project.extensions.getByType(KotlinTopLevelExtension::class.java)
                     .compilerVersion.orElse(pluginVersion),
@@ -147,13 +173,14 @@ private fun replaceKotlinJvmCompiles(
                 javaVersion.set(selectedJavaVersion)
                 kotlinJavaVersion.set(
                     kotlinTask.kotlinJavaToolchainProvider
-                        .map { it.javaVersion.get().majorVersion }
+                        .flatMap { it.javaVersion }
+                        .map { it.majorVersion }
                         .orElse(selectedJavaVersion),
                 )
             }
             java.sourceSets.configureEach {
                 val sourceSet = this
-                if (sourceSet.name == kotlinTask.sourceSetName.get()) {
+                if (sourceSet.name == sourceSetName) {
                     val javaCompile = project.tasks.named(sourceSet.compileJavaTaskName, JavaCompile::class.java)
                     replacement.configure {
                         javaSourceFiles.from(sourceSet.allJava)
@@ -206,6 +233,12 @@ abstract class KrustyCompileTask @Inject constructor(
 
     @get:Input
     abstract val compilerPluginIds: ListProperty<String>
+
+    @get:Classpath
+    abstract val compilerPluginClasspath: ConfigurableFileCollection
+
+    @get:Input
+    abstract val compilerPluginOptions: ListProperty<String>
 
     @get:Input
     abstract val jdkHome: Property<String>
@@ -264,7 +297,7 @@ abstract class KrustyCompileTask @Inject constructor(
             )
         }
         val pluginVersion = supportedKotlinPluginVersion(kotlinPluginVersion.get())
-        val unsupportedCompilerPlugins = compilerPluginIds.get()
+        val unsupportedCompilerPlugins = compilerPluginIds.get().filter { it !in COMPILER_PLUGIN_IDS }
         if (unsupportedCompilerPlugins.isNotEmpty()) {
             throw GradleException(
                 "Kotlin compiler plugins are not supported by krusty: " +
@@ -275,6 +308,15 @@ abstract class KrustyCompileTask @Inject constructor(
             throw GradleException(
                 "Kotlin compiler ${compilerVersion.get()} differs from Kotlin Gradle plugin $pluginVersion",
             )
+        }
+        if (!compilerPluginClasspath.isEmpty) {
+            arguments.add(
+                "-Xplugin=" + compilerPluginClasspath.files.joinToString(",", transform = File::getAbsolutePath),
+            )
+        }
+        compilerPluginOptions.get().forEach { option ->
+            arguments.add("-P")
+            arguments.add(option)
         }
         arguments.add("-Xkotlin-reference-version=$pluginVersion")
         if ("-no-jdk" !in arguments) {
@@ -303,6 +345,24 @@ abstract class KrustyCompileTask @Inject constructor(
         }
     }
 }
+
+/**
+ * The compiler-plugin support plugins krusty accepts. Their jars and options are forwarded as the
+ * Kotlin Gradle plugin hands them to kotlinc, and the compiler resolves each jar by the registrar it
+ * declares: kotlinx.serialization runs as krusty's native pass; `kotlin.scripting` is kotlinc's
+ * default scripting plugin, which the Kotlin Gradle plugin applies to every project and which acts
+ * only on script sources (this task passes krusty `.kt` and `.java` sources only). Any other applied
+ * support plugin (all-open, no-arg, Compose, ...) fails the task wherever it was applied: krusty
+ * cannot preserve its compiler semantics, and skipping it would produce wrong output.
+ */
+private val COMPILER_PLUGIN_IDS = setOf("org.jetbrains.kotlinx.serialization", "kotlin.scripting")
+
+private fun pluginOptionArguments(configs: List<CompilerPluginConfig>): List<String> =
+    configs.flatMap { config ->
+        config.allOptions().flatMap { (pluginId, options) ->
+            options.map { option -> "plugin:$pluginId:${option.key}=${option.value}" }
+        }
+    }
 
 private fun validateJvmTargets(kotlin: String, java: String, mode: String, warn: (String) -> Unit) {
     fun normalized(value: String): String = value.removePrefix("1.")

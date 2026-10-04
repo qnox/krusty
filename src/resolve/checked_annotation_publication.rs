@@ -347,7 +347,8 @@ impl Checker<'_> {
         internal: TypeName,
         arguments: &[ExprId],
     ) -> Option<crate::types::AppliedAnnotation> {
-        let (values, facts) = self.fold_annotation_values(internal, arguments, None)?;
+        let (values, mut facts) = self.fold_annotation_values(internal, arguments, None)?;
+        facts.optional_expectation = self.is_optional_expectation_classifier(internal);
         let module_retention = self.module.annotation_retention(internal);
         let classifier = self.resolver().classifier(internal)?;
         let retention = module_retention.or_else(|| {

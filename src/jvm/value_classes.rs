@@ -39,6 +39,7 @@ mod synth_members;
 mod type_operation_roles;
 mod unboxing_rewrites;
 mod value_boundaries;
+mod value_members;
 use crate::ir::{Callee, ExprId, IrExpr, IrFile};
 use crate::jvm::method_descriptors::jvm_tys;
 use crate::jvm::names::{method_descriptor, property_getter_name, type_descriptor};
@@ -564,14 +565,8 @@ pub(crate) fn lower_value_classes(
     let vc_reference_supertypes =
         reference_returns::value_class_reference_supertypes(classifiers, &under);
 
-    // Functions that are members of a value class — their bodies operate on the BOXED object and must
-    // not be rewritten (only their signatures erase).
-    let mut vc_methods: HashSet<u32> = HashSet::new();
-    for c in &ir.classes {
-        if c.is_value {
-            vc_methods.extend(c.methods.iter().copied());
-        }
-    }
+    // Members of a value class: their bodies operate on the BOXED object (only signatures erase).
+    let vc_methods = value_members::value_class_members(ir);
     // Exprs reachable from a value-class member body reference the BOXED class (`other is X`, `this.field`
     // in the synthesized `equals`) and must NOT be erased — those methods run on the boxed object.
     let mut vc_body_exprs: HashSet<ExprId> = HashSet::new();
@@ -2259,11 +2254,7 @@ pub(crate) fn lower_value_classes(
                 let (name, ret) = match ir.semantic_call_roles[&id] {
                     SemanticCallRole::KotlinAnyHashCode => ("hashCode-impl", "I"),
                     SemanticCallRole::KotlinAnyToString => ("toString-impl", "Ljava/lang/String;"),
-                    SemanticCallRole::KotlinAnyEquals
-                    | SemanticCallRole::KotlinComparableCompareTo
-                    | SemanticCallRole::KotlinFunctionInvoke => {
-                        unreachable!("excluded by the guard")
-                    }
+                    _ => unreachable!("excluded by the guard"),
                 };
                 let Repr::Unboxed(value_class) = repr_ctx.repr(*receiver) else {
                     unreachable!("guarded unboxed receiver")
@@ -2595,29 +2586,29 @@ pub(crate) fn lower_value_classes(
     // no box-class instance at either boundary, so retaining the semantic value-class operand would
     // emit a wrong `checkcast` after the required unbox operation.
     let mut retarget: Vec<(ExprId, Ty)> = Vec::new();
-    // Each body to box/unbox: every non-value-class-member function body (with its captured slot types),
-    // plus every class `init { … }` block (slots = `this` + the ctor params), so a value-class member
-    // call / boundary INSIDE an init block (`class B(val a: A) { init { a.f() } }`) is boxed too.
+    // Each body to box/unbox: every non-value-class-member function body (with its slot types), and
+    // every class `init` block (slots `this` + ctor params), whose boundaries (`a.f()`) box too.
     let mut bodies: Vec<(ExprId, HashMap<u32, Ty>)> = Vec::new();
     for (fid, function) in ir.functions.iter().enumerate() {
+        let id = fid as u32;
         crate::trace_compiler!(
             "value_classes",
             "boundary body fid={fid} name={} value_member={} body={:?}",
             function.name,
-            vc_methods.contains(&(fid as u32)),
+            vc_methods.contains(&id),
             function.body
         );
         // A `constructor-impl` runs source constructor bodies over the carrier.
-        if vc_methods.contains(&(fid as u32))
-            && !lowered_value_members.contains(&(fid as u32))
-            && !ir.jvm_value_class_constructor_impls.contains(&(fid as u32))
+        if vc_methods.contains(&id)
+            && !lowered_value_members.contains(&id)
+            && !ir.jvm_value_class_constructor_impls.contains_key(&id)
         {
             continue;
         }
         if let Some(root) = function.body {
             bodies.push((root, slot_types[fid].clone()));
         }
-        if let Some(defaults) = ir.param_defaults(fid as u32) {
+        if let Some(defaults) = ir.param_defaults(id) {
             for &root in defaults.iter().flatten() {
                 bodies.push((root, slot_types[fid].clone()));
             }

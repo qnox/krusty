@@ -1,8 +1,8 @@
 use super::*;
 use crate::metadata::decode::{
     field, packed_varints, parse_type_node, parse_type_param, parse_value_parameter, require_wire,
-    Cursor, DecodedPackageFragment, ParameterDecodeError, ParsedTypeArgument, ParsedTypeNode,
-    ParsedTypeParam, ParsedValueParam, ParsedVariance, QName,
+    ClassAnnotationProtocol, Cursor, DecodedPackageFragment, ParameterDecodeError,
+    ParsedTypeArgument, ParsedTypeNode, ParsedTypeParam, ParsedValueParam, ParsedVariance, QName,
 };
 use crate::metadata::semantic as metadata;
 
@@ -209,6 +209,123 @@ fn validate_annotation(
     qnames: &[QName],
 ) -> Result<(), PackageFragmentDecodeError> {
     annotation_identity(body, strings, qnames).map(drop)
+}
+
+/// The annotations under `annotation_fields` of `body`, each with its decoded arguments.
+fn annotation_applications(
+    body: &[u8],
+    annotation_fields: &[u64],
+    strings: &[String],
+    qnames: &[QName],
+    context: &str,
+) -> Result<Vec<metadata::AnnotationApplication>, PackageFragmentDecodeError> {
+    let mut cursor = Cursor::new(body, 0);
+    let mut annotations = Vec::new();
+    while !cursor.at_end() {
+        let (number, wire) = field(&mut cursor, context)?;
+        if annotation_fields.contains(&number) {
+            require_wire(&cursor, wire, 2, context)?;
+            let annotation = cursor.length_delimited("annotation")?.0;
+            annotations.push(annotation_application(annotation, strings, qnames)?);
+        } else {
+            cursor.skip(wire, context)?;
+        }
+    }
+    Ok(annotations)
+}
+
+fn annotation_application(
+    body: &[u8],
+    strings: &[String],
+    qnames: &[QName],
+) -> Result<metadata::AnnotationApplication, PackageFragmentDecodeError> {
+    let identity = annotation_identity(body, strings, qnames)?;
+    let mut cursor = Cursor::new(body, 0);
+    let mut arguments = Vec::new();
+    while !cursor.at_end() {
+        let (number, wire) = field(&mut cursor, "annotation")?;
+        if (number, wire) != (2, 2) {
+            cursor.skip(wire, "annotation")?;
+            continue;
+        }
+        let argument = cursor.length_delimited("annotation argument")?.0;
+        let mut argument = Cursor::new(argument, 0);
+        let mut name = None;
+        let mut value = metadata::AnnotationArgument::Other;
+        while !argument.at_end() {
+            let (number, wire) = field(&mut argument, "annotation argument")?;
+            match (number, wire) {
+                (1, 0) => name = Some(argument.varint("annotation argument name")?),
+                (2, 2) => {
+                    let body = argument.length_delimited("annotation argument value")?.0;
+                    value = annotation_argument(body, strings, qnames)?;
+                }
+                (_, wire) => argument.skip(wire, "annotation argument")?,
+            }
+        }
+        let name = semantic_string(
+            strings,
+            name.ok_or_else(|| semantic_error("annotation argument has no name"))?,
+            "annotation argument",
+        )?;
+        arguments.push((name, value));
+    }
+    Ok(metadata::AnnotationApplication {
+        identity,
+        arguments,
+    })
+}
+
+/// `Annotation.Argument.Value`: `type` (1) ENUM = 10 names `class_id` (6) and `enum_value_id` (7);
+/// ARRAY = 12 repeats `array_element` (9). [`validate_annotation_value`] has already checked the
+/// rest of the shape.
+fn annotation_argument(
+    body: &[u8],
+    strings: &[String],
+    qnames: &[QName],
+) -> Result<metadata::AnnotationArgument, PackageFragmentDecodeError> {
+    let mut cursor = Cursor::new(body, 0);
+    let mut kind = None;
+    let mut class = None;
+    let mut entry = None;
+    let mut elements = Vec::new();
+    while !cursor.at_end() {
+        let (number, wire) = field(&mut cursor, "annotation value")?;
+        match (number, wire) {
+            (1, 0) => kind = Some(cursor.varint("annotation value kind")?),
+            (6, 0) => {
+                let id = cursor.varint("annotation class value")?;
+                class = Some(semantic_qname(
+                    strings,
+                    qnames,
+                    id,
+                    "annotation class value",
+                )?);
+            }
+            (7, 0) => {
+                let id = cursor.varint("annotation enum value")?;
+                entry = Some(semantic_string(strings, id, "annotation enum value")?);
+            }
+            (9, 2) => {
+                let element = cursor.length_delimited("annotation array element")?.0;
+                elements.push(annotation_argument(element, strings, qnames)?);
+            }
+            (_, wire) => cursor.skip(wire, "annotation value")?,
+        }
+    }
+    Ok(match (kind, class, entry) {
+        (Some(10), Some(class), Some(entry)) => metadata::AnnotationArgument::Enum {
+            class: crate::types::type_name(&class),
+            entry,
+        },
+        (Some(10), _, _) => {
+            return Err(semantic_error(
+                "enum annotation value has no class or entry",
+            ))
+        }
+        (Some(12), _, _) => metadata::AnnotationArgument::Array(elements),
+        _ => metadata::AnnotationArgument::Other,
+    })
 }
 
 fn annotation_identities(
@@ -1427,6 +1544,7 @@ fn semantic_class(
     qnames: &[QName],
     header: SemanticClassHeader,
     inherited_type_parameters: &std::collections::HashMap<u64, String>,
+    annotation_protocol: ClassAnnotationProtocol,
 ) -> Result<
     (
         String,
@@ -1435,7 +1553,20 @@ fn semantic_class(
     ),
     PackageFragmentDecodeError,
 > {
-    validate_annotation_fields(body, &[25, 170], strings, qnames, "class declaration")?;
+    // kotlinc reads `Class.annotation` (25) and falls back to the protocol's class-annotation
+    // extension only when the class carries none there.
+    let mut annotations =
+        annotation_applications(body, &[25], strings, qnames, "class declaration")?;
+    let extension_annotations = annotation_applications(
+        body,
+        &[annotation_protocol.extension_field()],
+        strings,
+        qnames,
+        "class declaration",
+    )?;
+    if annotations.is_empty() {
+        annotations = extension_annotations;
+    }
     let (types, first_nullable) = match type_table_bodies(body, "class declaration")? {
         Some(table) => (table.types, table.first_nullable),
         None => (Vec::new(), None),
@@ -1595,6 +1726,7 @@ fn semantic_class(
             modality: metadata::declaration_modality(header.flags),
             is_nested,
             metadata_flags: header.flags,
+            annotations,
         },
         type_parameters,
     ))
@@ -1610,6 +1742,7 @@ pub(super) fn parse(
         classes,
         file_annotations,
         class_names,
+        class_annotations,
     } = decoded;
     let mut result = KotlinPackage::default();
     for annotation in file_annotations {
@@ -1705,6 +1838,7 @@ pub(super) fn parse(
                 &qnames,
                 header,
                 &inherited,
+                class_annotations,
             )?);
             remaining -= 1;
             progressed = true;

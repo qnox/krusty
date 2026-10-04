@@ -142,3 +142,131 @@ fn an_ambiguous_imported_bound_is_rejected_like_kotlinc() {
         &[],
     );
 }
+
+const SHADOWED_OWNER: &str = r#"package p
+
+class A {
+    class B
+}
+"#;
+
+const SHADOWING: &str = r#"package u
+
+import p.A
+
+class Outer {
+    class A
+    fun <T : A.B> pick(t: T): T = t
+    fun take(b: A.B): A.B = b
+    class Holder<T : A.B>(val t: T)
+}
+
+fun box(): String {
+    val b = p.A.B()
+    if (Outer().pick(b) !== b) return "pick"
+    if (Outer().take(b) !== b) return "take"
+    if (Outer.Holder(b).t !== b) return "holder"
+    return "OK"
+}
+"#;
+
+/// A type reference binds among complete paths: the lexical `Outer.A` has no `B`, so `A.B` is
+/// the imported `p.A.B`, which kotlinc accepts (warning only that the bound is final).
+#[test]
+fn a_qualified_bound_reaches_past_a_nearer_root_without_the_suffix() {
+    let sources = [("Owner.kt", SHADOWED_OWNER), ("Shadowing.kt", SHADOWING)];
+    let result = common::compiler_diagnostics(&sources, &[]);
+    assert_eq!(result.reference_code, 0, "{}", result.reference_stderr);
+    assert_eq!(
+        result.krusty_code, 0,
+        "{}{}",
+        result.krusty_stdout, result.krusty_stderr
+    );
+    assert_eq!(common::compiler_errors(&result.krusty_stderr), []);
+    assert_eq!(
+        common::compile_and_run_files_with_stdlib(&sources).expect("compile and run the module"),
+        "OK"
+    );
+    let classes = common::classes_against_kotlinc_module(&sources);
+    assert_eq!(classes.differences(), Vec::<String>::new());
+}
+
+const COMPLETE_STAR_ROOT: &str = r#"package complete
+
+class ImportedRoot {
+    open class Leaf
+}
+"#;
+
+const INCOMPLETE_STAR_ROOT: &str = r#"package incomplete
+
+class ImportedRoot
+"#;
+
+const COMPLETE_STAR_USE: &str = r#"package staruse
+
+import complete.*
+import incomplete.*
+
+class Holder<T : ImportedRoot.Leaf>(val value: T)
+
+fun box(): String {
+    val leaf = complete.ImportedRoot.Leaf()
+    return if (Holder(leaf).value === leaf) "OK" else "wrong"
+}
+"#;
+
+/// Star imports are one precedence rung, but only complete type paths participate in that rung's
+/// ambiguity. An imported root without `Leaf` cannot make the type `ImportedRoot.Leaf` ambiguous.
+/// The expression `ImportedRoot.Leaf()` is still rejected by kotlinc 2.4.20 (its root qualifier is
+/// ambiguous), so the value is built through the package-qualified path.
+#[test]
+fn an_incomplete_star_import_root_does_not_hide_the_complete_path() {
+    let sources = [
+        ("Complete.kt", COMPLETE_STAR_ROOT),
+        ("Incomplete.kt", INCOMPLETE_STAR_ROOT),
+        ("Use.kt", COMPLETE_STAR_USE),
+    ];
+    let result = common::compiler_diagnostics(&sources, &[]);
+    assert_eq!(result.reference_code, 0, "{}", result.reference_stderr);
+    assert_eq!(
+        result.krusty_code, 0,
+        "{}{}",
+        result.krusty_stdout, result.krusty_stderr
+    );
+    assert_eq!(common::compiler_errors(&result.krusty_stderr), []);
+    assert_eq!(
+        common::compile_and_run_files_with_stdlib(&sources).expect("compile and run the module"),
+        "OK"
+    );
+    let classes = common::classes_against_kotlinc_module(&sources);
+    assert_eq!(classes.differences(), Vec::<String>::new());
+}
+
+const SECOND_COMPLETE_STAR_ROOT: &str = r#"package secondcomplete
+
+class ImportedRoot {
+    open class Leaf
+}
+"#;
+
+const AMBIGUOUS_COMPLETE_STAR_USE: &str = r#"package staruse
+
+import complete.*
+import secondcomplete.*
+
+class Holder<T : ImportedRoot.Leaf>
+"#;
+
+/// When both roots complete the path, the final classifier identities remain ambiguous.
+#[test]
+fn two_complete_star_import_paths_are_rejected_like_kotlinc() {
+    common::assert_errors_match_kotlinc(
+        &[
+            ("Complete.kt", COMPLETE_STAR_ROOT),
+            ("SecondComplete.kt", SECOND_COMPLETE_STAR_ROOT),
+            ("Use.kt", AMBIGUOUS_COMPLETE_STAR_USE),
+        ],
+        &[],
+    );
+}

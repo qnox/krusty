@@ -38,11 +38,13 @@ impl Checker<'_> {
                 .get(&(annotation.span.lo, annotation.span.hi))
             {
                 annotation_class_arguments.extend(applied.values.iter().filter_map(
-                    |(_, value)| match value {
-                        crate::types::AnnotationValue::Class(classifier) => {
-                            Some((ordinal, *classifier))
+                    |(_, value)| {
+                        match value {
+                            crate::types::AnnotationValue::Class(ty) => ty
+                                .kotlin_class_internal()
+                                .map(|classifier| (ordinal, classifier)),
+                            _ => None,
                         }
-                        _ => None,
                     },
                 ));
             }

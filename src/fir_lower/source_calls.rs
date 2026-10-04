@@ -1068,8 +1068,11 @@ impl BodyLowering<'_> {
     /// A dependency inline call keeps its non-lambda operands in source-order locals so that a
     /// captured lambda operand can reference them. A root operand that is already a plain value —
     /// a local read or a constant — and is used exactly once by this very call needs no local of
-    /// its own: re-reading it where the call consumes it is the same value in the same order.
-    /// Nested uses, including vararg elements, retain their locals because this fold only replaces
+    /// its own: re-reading it where the call consumes it is the same value in the same order. So
+    /// does the last operand local whatever its value, unless it suspends (a suspension point
+    /// stays a statement of its own): evaluating it where the call consumes it
+    /// still runs it after every operand before it, and the target then reads an `@InlineOnly`
+    /// callee's argument in place as kotlinc does. Nested uses, including vararg elements, retain their locals because this fold only replaces
     /// root operands. Keeping a foldable root local costs a slot and a copy the reference compiler
     /// does not emit, and shifts every local the spliced body goes on to use.
     ///
@@ -1093,24 +1096,24 @@ impl BodyLowering<'_> {
         let mut statements = statements;
         let mut receiver = receiver;
         let mut args = args;
-        let mut index = 0;
-        while index < statements.len() {
+        // Walk back from the last statement: an operand whose evaluation has effects folds back
+        // only while it is the last statement left, so it still runs after every one before it.
+        let mut index = statements.len();
+        while index > 0 {
+            index -= 1;
             let IrExpr::Variable {
                 index: slot,
                 init: Some(init),
                 ..
             } = self.ir.expr(statements[index]).clone()
             else {
-                index += 1;
                 continue;
             };
             let source = match self.ir.expr(init) {
                 IrExpr::GetValue(source) => Some(*source),
                 IrExpr::Const(_) => None,
-                _ => {
-                    index += 1;
-                    continue;
-                }
+                _ if index + 1 == statements.len() && !self.operand_suspends(init) => None,
+                _ => continue,
             };
             // Replacement is deliberately limited to a root call operand. Require exactly one
             // such read, and fail closed if the slot is also read by a nested operand or surviving
@@ -1139,7 +1142,6 @@ impl BodyLowering<'_> {
                 })
             });
             if root_uses != 1 || all_uses != root_uses || rewritten {
-                index += 1;
                 continue;
             }
             statements.remove(index);
@@ -1260,7 +1262,7 @@ impl BodyLowering<'_> {
                 interface: classifier,
                 members,
                 defaults,
-                enclosing_class,
+                scopes: vec![enclosing_class],
             },
         );
         Some(())
@@ -1336,18 +1338,14 @@ impl BodyLowering<'_> {
                     defaults: Box::new([]),
                     default_prefix_count: 0,
                 });
-                let enclosing_class = self
-                    .body
-                    .lexical_class_owner()
-                    .and_then(|owner| self.index.classifier_header(owner))
-                    .map(|owner| owner.classifier);
                 self.ir.annotation_constructions.insert(
                     construction,
                     crate::ir::IrAnnotationConstruction {
                         interface: *classifier,
                         members: members.clone(),
                         defaults: vec![None; members.len()],
-                        enclosing_class,
+                        // Evaluated where the constructions omitting this element are.
+                        scopes: Vec::new(),
                     },
                 );
                 Some(construction)

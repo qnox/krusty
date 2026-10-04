@@ -2996,9 +2996,13 @@ fn inapplicable_implicit_receiver_extension_falls_through_to_top_level() {
     assert!(call.extension_receiver.is_none());
 }
 
+/// kotlinc's tower puts an implicit receiver's extension levels, over every non-local scope, at the
+/// receiver's own depth, which is nearer than the file and import scopes holding receiver-less
+/// functions. `run { }` in a member is therefore the default-imported `T.run` on `this`, even
+/// beside a same-package receiver-less `run`, and its block is a lambda with a receiver.
 #[test]
-fn applicable_top_level_rung_is_not_replaced_by_an_imported_receiver_extension() {
-    let (body, index) = checked_function_body_with_platform(
+fn implicit_receiver_extension_precedes_a_same_package_receiverless_function() {
+    let (body, _) = checked_function_body_with_platform(
         "fun <R> run(block: () -> R): R = block()\n\
          class Scope { fun test(): String = run { \"OK\" } }\n",
         "test",
@@ -3006,17 +3010,16 @@ fn applicable_top_level_rung_is_not_replaced_by_an_imported_receiver_extension()
     );
     let FirExprKind::Call(call) = &body
         .expr(root_expression(&body))
-        .expect("selected top-level call")
+        .expect("selected extension call")
         .kind
     else {
-        panic!("the applicable receiver-less rung must produce checked call FIR")
+        panic!("the implicit-receiver extension rung must produce checked call FIR")
     };
-    let declaration = index
-        .callable(call.target.module().expect("same-module callable"))
-        .expect("stable selected callable");
-    assert_eq!(index.callable_name(declaration.id), Some("run"));
-    assert!(call.dispatch_receiver.is_none());
-    assert!(call.extension_receiver.is_none());
+    assert!(
+        call.target.module().is_none(),
+        "the same-package receiver-less run must not be selected"
+    );
+    assert!(call.extension_receiver.is_some());
     let FirCallArgument::Expression { value, .. } = &call.arguments[0] else {
         panic!("run block must remain an explicit argument")
     };
@@ -3025,7 +3028,7 @@ fn applicable_top_level_rung_is_not_replaced_by_an_imported_receiver_extension()
     else {
         panic!("run argument must remain a checked lambda")
     };
-    assert_eq!(lambda.receiver_type(), None);
+    assert!(lambda.receiver_type().is_some());
 }
 
 #[test]

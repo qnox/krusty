@@ -68,6 +68,7 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
         let owner_prefix_words: u16 = owner_prefix_tys.iter().map(|ty| slot_words(*ty)).sum();
         let method_parameters = if env.java_parameters {
             crate::jvm::method_parameters::secondary_constructor(
+                ir,
                 c,
                 sc,
                 self.owner_prefix,
@@ -443,6 +444,7 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
         if !generated {
             sctor.add_local_entry(0, None, 0, "this", &format!("L{fq_name};"));
             let names = crate::jvm::method_parameters::secondary_constructor_identities(
+                ir,
                 c,
                 sc,
                 self.owner_prefix,
@@ -549,7 +551,7 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
         }
         // Declared constructor annotations, with the same `Deprecated` / `ACC_SYNTHETIC` companions
         // a function's carry (see the method emitter).
-        if !sc.annotations.is_empty() {
+        if !sc.annotations.retains_none() {
             cw.set_method_annotations("<init>", &sc_desc, &sc.annotations);
             if sc.annotations.deprecated() {
                 cw.mark_method_deprecated("<init>", &sc_desc);
@@ -601,6 +603,7 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
         if sc.vc_params && !c.is_sealed {
             let parameter_identities =
                 crate::jvm::method_parameters::secondary_constructor_identities(
+                    ir,
                     c,
                     sc,
                     self.owner_prefix,

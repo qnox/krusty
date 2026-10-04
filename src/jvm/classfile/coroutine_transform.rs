@@ -179,12 +179,18 @@ impl ClassWriter {
                 ),
             };
         self.install_transformed(index, access, &method_name, &method_desc, node)?;
+        if matches!(outcome, CoroutineOutcome::StateMachine { .. }) {
+            // kotlinc generates the state machine's continuation class from this class, which
+            // lists it, although only the transformer's raw instructions construct it.
+            self.class_ref(&request.continuation_class);
+        }
         Ok(outcome)
     }
 
     /// Replace method `index` with its transformed body, then run kotlinc's optimizer over it, as
-    /// kotlinc's visitor chain hands the transformer's method on.
-    fn install_transformed(
+    /// kotlinc's visitor chain hands the transformer's method on. A body whose inline calls saved
+    /// the operand stack (see [`super::inline_call_stacks`]) is installed the same way.
+    pub(super) fn install_transformed(
         &mut self,
         index: usize,
         access: u16,
@@ -195,8 +201,11 @@ impl ClassWriter {
         // The transformed body's constants intern here; the class's pool layout later places them
         // where kotlinc's writer interns them when the transformed method is visited.
         let interned_after = self.cp.slot_count();
-        let assembled = node
-            .assemble(self)
+        // kotlinc's transformer rewrites the generated method node with raw ASM, so its own
+        // references never pass through the type mapper. Re-encoding copies them: a reference the
+        // class's code named stays mapped, one only inlined code named stays copied.
+        let assembled = self
+            .copying(|writer| node.assemble(writer))
             .map_err(|error| format!("the transformed body does not assemble: {error:?}"))?;
         let lvt = assembled
             .local_variables
