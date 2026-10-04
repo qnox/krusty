@@ -65,6 +65,31 @@ impl Checker<'_> {
         depth
     }
 
+    /// Open the policies of the classifiers whose bodies declare `classifier`, outermost first. A
+    /// nested classifier is published beside its owners, so it is checked outside their
+    /// declaration policies unless they are reopened here.
+    pub(super) fn push_classifier_owner_policies(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        classifier: DeclId,
+    ) -> usize {
+        let depth = self.active_lexical_policies.len();
+        let mut owners = Vec::new();
+        let mut current = classifier;
+        while let Some(owner) = self.file.hoisted_classifier_owner(current) {
+            owners.push(owner);
+            current = owner;
+        }
+        for owner in owners.into_iter().rev() {
+            if let Decl::Class(class) = self.file.decl(owner) {
+                let (annotations, arguments) =
+                    (class.annotations.clone(), class.annotation_args.clone());
+                self.push_declaration_policies(scope, &annotations, &arguments);
+            }
+        }
+        depth
+    }
+
     /// Open the policies of the annotations written on statement `statement`.
     pub(super) fn push_statement_policies(
         &mut self,

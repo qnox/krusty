@@ -37422,7 +37422,9 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         match file.decl(d) {
             Decl::Fun(f) => c.check_top_level_fun(scope, f, d),
             Decl::Class(cl) => {
+                let policy_depth = c.push_classifier_owner_policies(scope, d);
                 c.check_class(scope, cl, d);
+                c.active_lexical_policies.truncate(policy_depth);
             }
             Decl::Property(p) => {
                 c.check_property(scope, p, d);

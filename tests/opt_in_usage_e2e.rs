@@ -96,6 +96,7 @@ fun accepted() {
 class AcceptedClass {
     fun m() = a()
     inner class In { fun n(e: Exp) = e }
+    class Nested { fun n(e: Exp) = e }
 }
 
 @A fun propagates() = a()
