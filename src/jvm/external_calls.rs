@@ -1367,9 +1367,9 @@ fn record_protected_dependency_call(
     else {
         return;
     };
-    ir.protected_dependency_calls.insert(
+    ir.jvm_protected_dependency_calls.insert(
         expression,
-        crate::ir::IrProtectedDependencyCall {
+        crate::jvm::protected_dependency_calls::ProtectedDependencyCall {
             owner: callable.physical_owner,
             name: name.clone(),
             parameters: callable.physical_params.clone().into_boxed_slice(),

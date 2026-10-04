@@ -534,7 +534,9 @@ pub(super) fn cross_owner_member_calls(
                 }
             }
             if !protected.contains_key(&expression) {
-                if let Some(dependency) = ir.protected_dependency_calls.get(&expression).cloned() {
+                if let Some(dependency) =
+                    ir.jvm_protected_dependency_calls.get(&expression).cloned()
+                {
                     if let IrExpr::Call {
                         callee: Callee::Virtual { .. },
                         dispatch_receiver: Some(receiver),
