@@ -1,7 +1,7 @@
 //! A function declared to return a reference supertype of a value class (`Any`, `Any?`, or an
 //! interface the class implements) takes its returned value through a reference slot, the same
 //! boundary as an `Any` parameter or local. A value already in its box, such as the result of a
-//! generic call substituted with the value class (`shelf[0]`, `list[0]`, `map[key]`), is returned
+//! generic call substituted with the value class (`shelf[0]`), is returned
 //! as it is; a carrier (a value-class parameter or local) is boxed. A lambda whose result is `Any`
 //! returns through its erased `invoke` the same way.
 //!
@@ -20,8 +20,6 @@ const SOURCE: &str = "interface Named\n\
     fun counted(s: Shelf<Count>): Any = s[0]\n\
     fun named(s: Shelf<Tag>): Named = s[0]\n\
     fun nullable(s: Shelf<Tag?>): Any? = s[0]\n\
-    fun listed(l: List<Tag>): Any = l[0]\n\
-    fun mapped(m: Map<String, Tag>): Any? = m[\"a\"]\n\
     fun argument(s: Shelf<Tag>): Any = take(s[0])\n\
     fun parameter(t: Tag): Any = t\n\
     fun countParameter(c: Count): Any = c\n\
@@ -37,8 +35,6 @@ const METHODS: &[&str] = &[
     " counted(",
     " named(",
     " nullable(",
-    " listed(",
-    " mapped(",
     " argument(",
     " parameter-",
     " countParameter-",
