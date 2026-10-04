@@ -32,6 +32,7 @@ impl BodyLowering<'_> {
             parameters,
             result,
             declared_result,
+            semantic_role,
             suspend: declaration_suspend,
         } = target
         else {
@@ -180,6 +181,7 @@ impl BodyLowering<'_> {
             result,
             declared_result,
             overridden_results: &[],
+            semantic_role,
             suspend: declaration_suspend,
             can_inline: false,
             inline_plan: None,

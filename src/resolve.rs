@@ -29526,6 +29526,7 @@ fun box(): String {
                         associated_access_owner: None,
                         external_default_provider: None,
                         external_property_identity: None,
+                        semantic_role: None,
                         singleton_dispatch: None,
                         name: "make".to_string(),
                         owner: Some(crate::types::type_name("test/Factory")),

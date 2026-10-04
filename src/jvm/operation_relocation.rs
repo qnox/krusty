@@ -92,10 +92,8 @@ mod tests {
         let source = ir.add_expr(IrExpr::UnitInstance);
         let unbox_receiver = ir.add_expr(IrExpr::UnitInstance);
         ir.ext_call_source_receiver.insert(source, Ty::String);
-        ir.semantic_call_roles.insert(
-            source,
-            crate::libraries::SemanticCallRole::KotlinAnyToString,
-        );
+        ir.semantic_call_roles
+            .insert(source, crate::types::SemanticCallRole::KotlinAnyToString);
         ir.call_declared_ret.insert(source, Ty::String);
         ir.call_declared_params
             .insert(source, vec![Ty::String].into_boxed_slice());
@@ -115,7 +113,7 @@ mod tests {
         assert!(!ir.semantic_call_roles.contains_key(&source));
         assert_eq!(
             ir.semantic_call_roles.get(&target),
-            Some(&crate::libraries::SemanticCallRole::KotlinAnyToString)
+            Some(&crate::types::SemanticCallRole::KotlinAnyToString)
         );
         assert!(!ir.call_declared_ret.contains_key(&source));
         assert_eq!(ir.call_declared_ret.get(&target), Some(&Ty::String));

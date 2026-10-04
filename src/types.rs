@@ -3,6 +3,8 @@
 
 mod intersection;
 pub(crate) use intersection::declaration_approximation;
+mod semantic_call_role;
+pub use semantic_call_role::SemanticCallRole;
 mod interning;
 mod spelling;
 mod substitute;

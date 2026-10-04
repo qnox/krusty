@@ -101,6 +101,7 @@ pub(super) struct ExternalCallRequest<'a> {
     pub(super) result: ResolvedTy,
     pub(super) declared_result: Option<ResolvedTy>,
     pub(super) overridden_results: &'a [ResolvedTy],
+    pub(super) semantic_role: Option<crate::types::SemanticCallRole>,
     pub(super) suspend: bool,
     pub(super) can_inline: bool,
     pub(super) inline_plan: Option<&'a crate::fir::FirInlineBodyPlan>,
@@ -369,6 +370,7 @@ impl BodyLowering<'_> {
             result,
             declared_result,
             overridden_results,
+            semantic_role,
             suspend,
             can_inline,
             inline_plan,
@@ -448,6 +450,9 @@ impl BodyLowering<'_> {
             args,
         });
         argument_boundaries::record(self.ir, call, &boundary_parameters, &boundary_defaults);
+        if let Some(role) = semantic_role {
+            self.ir.semantic_call_roles.insert(call, role);
+        }
         if let Some(receiver) = source_receiver {
             self.ir
                 .ext_call_source_receiver

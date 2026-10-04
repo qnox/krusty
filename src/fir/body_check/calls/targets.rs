@@ -20,6 +20,7 @@ pub(super) struct ExternalCallTarget<'a> {
     pub(super) result: Ty,
     pub(super) declared_result: Option<Ty>,
     pub(super) overridden_results: &'a [Ty],
+    pub(super) semantic_role: Option<crate::types::SemanticCallRole>,
     pub(super) suspend: bool,
     pub(super) can_inline: bool,
     pub(super) inline_plan: Option<&'a crate::libraries::InlineBodyPlan>,

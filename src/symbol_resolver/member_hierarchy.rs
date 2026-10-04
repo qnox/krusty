@@ -468,9 +468,107 @@ fn normalize_inherited_member_functions_with_family(
             function.flags.operator = true;
         }
     }
+    inherit_overridden_semantic_roles(source, functions, intersection_parts);
     inherit_overridden_default_arguments(source, functions);
     inherit_overridden_results(source, functions);
     retain_covariant_inherited_overrides(source, functions, intersection_parts);
+}
+
+/// Carry a language role from the declaration an override implements onto the selected override.
+///
+/// Providers publish roles only on the exact declarations that own them. The common hierarchy is
+/// the authority for override relationships, so this is where a nearer declaration inherits that
+/// role. Matching only the callable spelling would misclassify an unrelated same-named member;
+/// matching the complete override input shape keeps the role attached to one semantic slot.
+fn inherit_overridden_semantic_roles(
+    source: &dyn SymbolSource,
+    functions: &mut FunctionSet,
+    intersection_parts: Option<&[Ty]>,
+) {
+    let declarations = functions.overloads.clone();
+    for implementation in &mut functions.overloads {
+        if implementation.callable.semantic_role.is_some() {
+            continue;
+        }
+        let implementation_params = implementation.semantic_params();
+        let implementation_formals = implementation
+            .generic_sig
+            .as_ref()
+            .map(|signature| signature.formals.as_slice())
+            .unwrap_or_default();
+        let implementation_bounds = implementation
+            .generic_sig
+            .as_ref()
+            .map(|signature| signature.formal_bounds.as_slice())
+            .unwrap_or_default();
+        let mut inherited_role = None;
+        let mut conflicting = false;
+        for inherited in &declarations {
+            let Some(role) = inherited.callable.semantic_role else {
+                continue;
+            };
+            if inherited.receiver_rank <= implementation.receiver_rank
+                || !intersection_parts.is_none_or(|parts| {
+                    owners_share_intersection_component(
+                        source,
+                        parts,
+                        implementation.callable.owner,
+                        inherited.callable.owner,
+                    )
+                })
+            {
+                continue;
+            }
+            let inherited_params = inherited.semantic_params();
+            let inherited_formals = inherited
+                .generic_sig
+                .as_ref()
+                .map(|signature| signature.formals.as_slice())
+                .unwrap_or_default();
+            let inherited_bounds = inherited
+                .generic_sig
+                .as_ref()
+                .map(|signature| signature.formal_bounds.as_slice())
+                .unwrap_or_default();
+            if !override_input_shapes_match(
+                source,
+                OverrideInputShape {
+                    params: &inherited_params,
+                    receiver: inherited
+                        .semantic_receiver()
+                        .filter(|_| inherited.is_extension()),
+                    formals: inherited_formals,
+                    formal_bounds: inherited_bounds,
+                    context_count: inherited.context_count,
+                    suspend: inherited.flags.suspend,
+                },
+                OverrideInputShape {
+                    params: &implementation_params,
+                    receiver: implementation
+                        .semantic_receiver()
+                        .filter(|_| implementation.is_extension()),
+                    formals: implementation_formals,
+                    formal_bounds: implementation_bounds,
+                    context_count: implementation.context_count,
+                    suspend: implementation.flags.suspend,
+                },
+            ) || !resolution_subtype(
+                source,
+                implementation.ret.apply(implementation.callable.ret),
+                inherited.ret.apply(inherited.callable.ret),
+            ) {
+                continue;
+            }
+            match inherited_role {
+                None => inherited_role = Some(role),
+                Some(existing) if existing == role => {}
+                Some(_) => conflicting = true,
+            }
+        }
+        if !conflicting {
+            implementation.callable.semantic_role = inherited_role;
+        }
+    }
 }
 
 /// Left-to-right depth-first visit order of `root` and its supertypes. The first visit wins in a
@@ -1094,6 +1192,71 @@ pub(crate) fn inherited_nested_classifier_name(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn member(
+        owner: &str,
+        rank: u32,
+        params: Vec<Ty>,
+        role: Option<crate::types::SemanticCallRole>,
+    ) -> crate::libraries::FunctionInfo {
+        let mut callable = crate::libraries::LibraryCallable::library(
+            crate::types::type_name(owner),
+            "operation",
+            params,
+            Ty::String,
+            Ty::String,
+            "()Ljava/lang/String;",
+        );
+        callable.semantic_role = role;
+        let mut function = crate::libraries::FunctionInfo::plain(
+            crate::libraries::FnKind::Member,
+            Some(Ty::obj(owner)),
+            callable,
+        );
+        function.receiver_rank = rank;
+        function
+    }
+
+    #[test]
+    fn an_override_inherits_its_declarations_semantic_role() {
+        use crate::types::SemanticCallRole::KotlinAnyToString;
+
+        let mut functions = FunctionSet {
+            overloads: vec![
+                member("sample/Derived", 0, Vec::new(), None),
+                member("kotlin/Any", 1, Vec::new(), Some(KotlinAnyToString)),
+            ],
+        };
+        inherit_overridden_semantic_roles(
+            &crate::libraries::EmptySymbolSource,
+            &mut functions,
+            None,
+        );
+
+        assert_eq!(
+            functions.overloads[0].callable.semantic_role,
+            Some(KotlinAnyToString)
+        );
+    }
+
+    #[test]
+    fn a_different_overload_does_not_borrow_an_inherited_role() {
+        use crate::types::SemanticCallRole::KotlinAnyToString;
+
+        let mut functions = FunctionSet {
+            overloads: vec![
+                member("sample/Derived", 0, vec![Ty::Int], None),
+                member("kotlin/Any", 1, Vec::new(), Some(KotlinAnyToString)),
+            ],
+        };
+        inherit_overridden_semantic_roles(
+            &crate::libraries::EmptySymbolSource,
+            &mut functions,
+            None,
+        );
+
+        assert_eq!(functions.overloads[0].callable.semantic_role, None);
+    }
 
     #[test]
     fn override_input_shape_includes_context_and_suspend() {

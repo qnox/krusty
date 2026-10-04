@@ -173,6 +173,7 @@ impl BodyFirChecker<'_> {
                             .map(resolved)
                             .collect::<Result<Vec<_>, _>>()?
                             .into_boxed_slice(),
+                        semantic_role: member.member.semantic_role,
                         suspend: member.member.suspend(),
                         can_inline: member.member.inline.can_inline(),
                         inline_plan: super::inline_body_plan::publish(
@@ -231,6 +232,7 @@ impl BodyFirChecker<'_> {
                             .map(resolved)
                             .collect::<Result<Vec<_>, _>>()?
                             .into_boxed_slice(),
+                        semantic_role: callable.semantic_role,
                         suspend: callable.suspend,
                         can_inline: callable.inline.can_inline(),
                         inline_plan: super::inline_body_plan::publish(
@@ -309,6 +311,7 @@ impl BodyFirChecker<'_> {
                             .map(resolved)
                             .collect::<Result<Vec<_>, _>>()?
                             .into_boxed_slice(),
+                        semantic_role: None,
                         suspend,
                         can_inline: inline.can_inline(),
                         inline_plan: super::inline_body_plan::publish(
