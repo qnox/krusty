@@ -1267,23 +1267,92 @@ impl BodyLowering<'_> {
     }
 
     fn lower_annotation_default(&mut self, default: &FirAnnotationDefaultValue) -> Option<ExprId> {
-        let expression = match default {
-            FirAnnotationDefaultValue::Singleton(classifier) => IrExpr::SingletonValue {
-                classifier: *classifier,
-            },
-            FirAnnotationDefaultValue::Constant(constant) => IrExpr::Const(match constant {
-                FirConstant::Int(value) => IrConst::Int(i32::try_from(*value).ok()?),
-                FirConstant::Long(value) | FirConstant::ULong(value) => IrConst::Long(*value),
-                FirConstant::UInt(value) => IrConst::Int(u32::try_from(*value).ok()? as i32),
-                FirConstant::Double(value) => IrConst::Double(*value),
-                FirConstant::Float(value) => IrConst::Float(*value),
-                FirConstant::Boolean(value) => IrConst::Boolean(*value),
-                FirConstant::String(value) => IrConst::String(value.clone()),
-                FirConstant::Char(value) => IrConst::Char(*value),
-                FirConstant::Null => IrConst::Null,
-            }),
-        };
-        Some(self.ir.add_expr(expression))
+        match default {
+            FirAnnotationDefaultValue::Singleton(classifier) => {
+                Some(self.ir.add_expr(IrExpr::SingletonValue {
+                    classifier: *classifier,
+                }))
+            }
+            FirAnnotationDefaultValue::Constant(constant) => {
+                Some(self.ir.add_expr(IrExpr::Const(match constant {
+                    FirConstant::Int(value) => IrConst::Int(i32::try_from(*value).ok()?),
+                    FirConstant::Long(value) | FirConstant::ULong(value) => IrConst::Long(*value),
+                    FirConstant::UInt(value) => IrConst::Int(u32::try_from(*value).ok()? as i32),
+                    FirConstant::Double(value) => IrConst::Double(*value),
+                    FirConstant::Float(value) => IrConst::Float(*value),
+                    FirConstant::Boolean(value) => IrConst::Boolean(*value),
+                    FirConstant::String(value) => IrConst::String(value.clone()),
+                    FirConstant::Char(value) => IrConst::Char(*value),
+                    FirConstant::Null => IrConst::Null,
+                })))
+            }
+            FirAnnotationDefaultValue::EnumEntry { classifier, name } => {
+                Some(self.ir.add_expr(IrExpr::EnumEntry {
+                    classifier: *classifier,
+                    name: name.clone(),
+                }))
+            }
+            FirAnnotationDefaultValue::KClass(classifier) => {
+                Some(self.ir.add_expr(IrExpr::KClassLiteral {
+                    classifier: Some(Ty::obj_name(*classifier)),
+                    value: None,
+                    type_argument: false,
+                }))
+            }
+            FirAnnotationDefaultValue::Array {
+                array_type,
+                elements,
+            } => {
+                let elements = elements
+                    .iter()
+                    .map(|element| self.lower_annotation_default(element))
+                    .collect::<Option<Vec<_>>>()?;
+                let spreads = vec![false; elements.len()];
+                Some(self.ir.add_expr(IrExpr::Vararg {
+                    array_type: *array_type,
+                    spreads,
+                    elements,
+                }))
+            }
+            FirAnnotationDefaultValue::Annotation {
+                classifier,
+                members,
+                values,
+            } => {
+                if members.len() != values.len() {
+                    return None;
+                }
+                let args = values
+                    .iter()
+                    .map(|value| self.lower_annotation_default(value))
+                    .collect::<Option<Vec<_>>>()?;
+                let ctor_params = members.iter().map(|(_, ty)| *ty).collect();
+                let construction = self.ir.add_expr(IrExpr::New {
+                    internal: *classifier,
+                    args,
+                    ctor_params: Some(ctor_params),
+                    ctor_desc: None,
+                    external_target: None,
+                    defaults: Box::new([]),
+                    default_prefix_count: 0,
+                });
+                let enclosing_class = self
+                    .body
+                    .lexical_class_owner()
+                    .and_then(|owner| self.index.classifier_header(owner))
+                    .map(|owner| owner.classifier);
+                self.ir.annotation_constructions.insert(
+                    construction,
+                    crate::ir::IrAnnotationConstruction {
+                        interface: *classifier,
+                        members: members.clone(),
+                        defaults: vec![None; members.len()],
+                        enclosing_class,
+                    },
+                );
+                Some(construction)
+            }
+        }
     }
 
     pub(super) fn module_constructor_call(
