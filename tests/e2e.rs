@@ -1043,6 +1043,8 @@ mod inline_lambda_expansion_e2e;
 mod inline_lambda_caller_loop_jump_e2e;
 #[path = "inline_lambda_initializer_values_e2e.rs"]
 mod inline_lambda_initializer_values_e2e;
+#[path = "inline_lambda_local_delegate_e2e.rs"]
+mod inline_lambda_local_delegate_e2e;
 #[path = "inline_lambda_local_table_order_e2e.rs"]
 mod inline_lambda_local_table_order_e2e;
 #[path = "inline_lambda_result_boxing_e2e.rs"]
