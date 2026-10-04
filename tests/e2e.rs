@@ -2250,6 +2250,8 @@ mod suspend_return_type_recovery_e2e;
 mod suspend_single_operand_hoist_e2e;
 #[path = "suspend_spill_slot_reuse_e2e.rs"]
 mod suspend_spill_slot_reuse_e2e;
+#[path = "suspend_statement_when_block_arms_e2e.rs"]
+mod suspend_statement_when_block_arms_e2e;
 #[path = "suspend_super_call_refusal_e2e.rs"]
 mod suspend_super_call_refusal_e2e;
 #[path = "suspend_super_calls_e2e.rs"]
