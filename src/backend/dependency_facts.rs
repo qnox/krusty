@@ -48,8 +48,9 @@ pub struct BackendCallableFact {
     pub member_realization: MemberRealization,
     pub params: Vec<Ty>,
     pub physical_params: Vec<Ty>,
-    /// Exact identities parallel to `physical_params`, published by the selected declaration's
-    /// provider. A backend may format them but must not invent positional names from arity.
+    /// Exact identities parallel to the callable's semantic source parameters, published by the
+    /// selected declaration's provider. `physical_parameter_plan` joins them to ABI-only slots.
+    /// A backend may format the resulting identities but must not invent them from arity.
     pub parameter_identities: Box<[crate::fir::ResolvedParameterIdentity]>,
     /// Exact physical slot roles published by the provider while it aligned metadata with the
     /// classfile declaration. Backends consume this frozen plan; they do not reconstruct roles

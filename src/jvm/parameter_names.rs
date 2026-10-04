@@ -599,9 +599,11 @@ pub(super) fn resolved_local_variables(
 pub(super) fn dependency_access_bridge_local_variables(
     identities: &[crate::fir::ResolvedParameterIdentity],
     semantic_types: &[crate::types::Ty],
+    physical_types: &[crate::types::Ty],
+    physical_plan: Option<&[crate::libraries::PhysicalParameterSlot]>,
     function_name: &str,
 ) -> Vec<Option<String>> {
-    resolved_local_variables(identities, semantic_types, function_name)
+    let source = resolved_local_variables(identities, semantic_types, function_name)
         .into_iter()
         .zip(identities)
         .map(|(name, identity)| match identity {
@@ -612,6 +614,28 @@ pub(super) fn dependency_access_bridge_local_variables(
                 Some("$receiver".to_string())
             }
             _ => name,
+        })
+        .collect::<Vec<_>>();
+    let physical_plan = physical_plan
+        .expect("a protected dependency accessor target carries a physical parameter plan");
+    assert_eq!(
+        physical_plan.len(),
+        physical_types.len(),
+        "a protected dependency accessor target names every physical parameter slot"
+    );
+    physical_plan
+        .iter()
+        .map(|slot| match *slot {
+            crate::libraries::PhysicalParameterSlot::Source(ordinal) => source
+                .get(ordinal as usize)
+                .cloned()
+                .expect("a physical source slot names an existing semantic parameter"),
+            crate::libraries::PhysicalParameterSlot::Continuation => {
+                Some("$completion".to_string())
+            }
+            crate::libraries::PhysicalParameterSlot::Dispatch => {
+                panic!("a virtual protected dependency target cannot carry a dispatch ABI slot")
+            }
         })
         .collect()
 }
@@ -992,6 +1016,43 @@ mod tests {
                     .flatten(),
                 Some("value".to_string()),
             ])
+        );
+    }
+
+    #[test]
+    fn dependency_bridge_names_follow_the_provider_physical_slot_plan() {
+        use crate::fir::ResolvedParameterIdentity;
+        use crate::libraries::PhysicalParameterSlot;
+        use crate::types::Ty;
+
+        assert_eq!(
+            dependency_access_bridge_local_variables(
+                &[
+                    ResolvedParameterIdentity::ExtensionReceiver,
+                    ResolvedParameterIdentity::Source("named".into()),
+                    ResolvedParameterIdentity::Unnamed { ordinal: 2 },
+                ],
+                &[Ty::String, Ty::Int, Ty::Long],
+                &[
+                    Ty::String,
+                    Ty::Int,
+                    Ty::Long,
+                    Ty::obj("kotlin/coroutines/Continuation"),
+                ],
+                Some(&[
+                    PhysicalParameterSlot::Source(0),
+                    PhysicalParameterSlot::Source(1),
+                    PhysicalParameterSlot::Source(2),
+                    PhysicalParameterSlot::Continuation,
+                ]),
+                "renamed-physical",
+            ),
+            vec![
+                Some("$receiver".to_string()),
+                Some("named".to_string()),
+                Some("p2".to_string()),
+                Some("$completion".to_string()),
+            ]
         );
     }
 }

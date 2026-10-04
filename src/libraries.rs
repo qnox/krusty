@@ -494,7 +494,8 @@ pub enum ExternalCallableKind {
 pub struct ExternalCallableRealization {
     pub callable: LibraryCallable,
     pub kind: ExternalCallableKind,
-    /// Provider-published semantic identities in the callable's physical source-parameter order.
+    /// Provider-published identities parallel to the callable's semantic source parameters. The
+    /// physical parameter plan joins them to ABI-only slots such as a suspend continuation.
     /// A backend formats these for debug/metadata surfaces; it never reconstructs them from arity.
     pub parameter_identities: Box<[crate::fir::ResolvedParameterIdentity]>,
 }

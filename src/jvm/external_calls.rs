@@ -1376,6 +1376,8 @@ fn record_protected_dependency_call(
             parameter_names: crate::jvm::parameter_names::dependency_access_bridge_local_variables(
                 &callable.parameter_identities,
                 &callable.params,
+                &callable.physical_params,
+                callable.physical_parameter_plan.as_deref(),
                 name,
             )
             .into_boxed_slice(),
