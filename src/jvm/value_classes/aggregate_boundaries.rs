@@ -8,11 +8,13 @@
 
 use super::{BoxOp, Repr, ReprCtx};
 use crate::ir::{ExprId, IrExpr};
+use std::collections::HashSet;
 
 pub(super) fn record(
     exprs: &[IrExpr],
     id: ExprId,
     repr_ctx: &ReprCtx<'_>,
+    rendered_value_class_text: &HashSet<ExprId>,
     ops: &mut Vec<(ExprId, BoxOp)>,
 ) {
     let aggregate = match &exprs[id as usize] {
@@ -42,6 +44,12 @@ pub(super) fn record(
             }
         );
         if let Repr::Unboxed(value_class) = representation {
+            // Synthesis already rendered this value-class carrier to text. The expression keeps
+            // the nested class as its logical type so concat selects kotlinc's Object boundary,
+            // but this exact provenance says the physical String must not be rendered again.
+            if template && rendered_value_class_text.contains(&element) {
+                continue;
+            }
             let op = match repr_ctx.box_op(element, value_class) {
                 BoxOp::Box(value_class) if template => BoxOp::StringOf(value_class),
                 op => op,
