@@ -6283,6 +6283,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   same-file). Tests: `mpp_expect_actual_e2e`; corpus `multiplatform/` 75 PASS / 0 FAIL
   (box total 2744 → 2825).
 
+- **A folded `dependsOn` file is a common source.** An optional expectation with no JVM actual
+  (`kotlin.js.JsStatic`, from the stdlib common-metadata klib) resolves in a common source and is
+  `unresolved reference 'kotlin.js.JsStatic'.` in a platform file. A `dependsOn` source set folded
+  into a platform compilation is that common source: the dependency-first prefix
+  (`ModuleUnit.common_file_count`) is `SourceInput::common()`, and the platform module's own files
+  are not. `@kotlin.jvm.JvmStatic` on an object and `@kotlin.js.JsStatic` on a companion in that
+  prefix keep the members callable from a dependent platform module. Tests:
+  `mpp_expect_actual_e2e::optional_expectation_in_common_source_runs`,
+  `mpp_expect_actual_e2e::platform_source_rejects_targetless_optional_expectation`; corpus
+  `multiplatform/k2/kt66970.kt`.
+
 - **`expect`/`actual` requires the multiplatform feature, and an `expect` declaration may not carry
   a body.** Two independent checks, both syntactic and both measured against the reference
   compiler. (1) Without `+MultiPlatformProjects`, every `expect`/`actual` MODIFIER is an error

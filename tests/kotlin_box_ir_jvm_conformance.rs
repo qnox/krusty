@@ -433,7 +433,18 @@ fn compile_multifile(
                 }
                 java_classes = classes;
             }
-            None => return compile_kotlin_first(src, &blocks, &java_blocks, cp_jars, jdk_modules),
+            None => {
+                return compile_kotlin_first(
+                    src,
+                    FoldedKotlinSources {
+                        files: &blocks,
+                        common_file_count: 0,
+                    },
+                    &java_blocks,
+                    cp_jars,
+                    jdk_modules,
+                );
+            }
         }
     }
 
@@ -441,7 +452,10 @@ fn compile_multifile(
     // whole source and apply to every block.
     let features = krusty::features::LangFeatures::from_source(src);
     let compiled = compile_blocks(
-        &blocks,
+        FoldedKotlinSources {
+            files: &blocks,
+            common_file_count: 0,
+        },
         cp_jars,
         &[],
         jdk_modules,
@@ -454,13 +468,20 @@ fn compile_multifile(
     Some(out)
 }
 
+/// Kotlin files of one compilation. `common_file_count` is the dependency-first prefix folded from
+/// `dependsOn` source sets; those files are common sources.
+struct FoldedKotlinSources<'a> {
+    files: &'a [(String, String)],
+    common_file_count: usize,
+}
+
 /// Kotlin-first mixed compilation for a test whose Java references Kotlin declarations. Kotlin and
 /// Java files enter the production frontend together, so its JVM provider publishes the Java
 /// declaration headers in Pass 1. Real javac runs only after Kotlin emission and only its classes
 /// ship. Header installation or javac failure means the corpus case failed to compile.
 fn compile_kotlin_first(
     src: &str,
-    blocks: &[(String, String)],
+    blocks: FoldedKotlinSources<'_>,
     java_blocks: &[(String, String)],
     cp_jars: &[std::path::PathBuf],
     jdk_modules: Option<&std::path::Path>,
@@ -505,7 +526,7 @@ fn compile_kotlin_first(
 /// Compile a set of already-split source blocks `(stem, content)` as ONE krusty module against the
 /// given classpath through the production two-pass FIR driver, returning all emitted classes.
 fn compile_blocks(
-    blocks: &[(String, String)],
+    blocks: FoldedKotlinSources<'_>,
     cp_jars: &[std::path::PathBuf],
     friend_paths: &[std::path::PathBuf],
     jdk_modules: Option<&std::path::Path>,
@@ -526,7 +547,7 @@ fn compile_blocks(
 }
 
 fn compile_blocks_mixed(
-    blocks: &[(String, String)],
+    blocks: FoldedKotlinSources<'_>,
     java_blocks: &[(String, String)],
     cp_jars: &[std::path::PathBuf],
     friend_paths: &[std::path::PathBuf],
@@ -554,13 +575,23 @@ fn compile_blocks_mixed(
             .expect("JVM provider initialization"),
     );
     let stems: Vec<String> = blocks
+        .files
         .iter()
         .chain(java_blocks)
         .map(|(name, _)| name.clone())
         .collect();
     let mut inputs = blocks
+        .files
         .iter()
-        .map(|(stem, content)| krusty::source::SourceInput::kotlin(content).with_file_stem(stem))
+        .enumerate()
+        .map(|(index, (stem, content))| {
+            let input = krusty::source::SourceInput::kotlin(content).with_file_stem(stem);
+            if index < blocks.common_file_count {
+                input.common()
+            } else {
+                input
+            }
+        })
         .collect::<Vec<_>>();
     inputs.extend(
         java_blocks
@@ -571,6 +602,7 @@ fn compile_blocks_mixed(
         &inputs, platform, features, &mut diags,
     );
     let jvm_default = blocks
+        .files
         .iter()
         .map(|(_, source)| krusty::conformance::jvm_default_mode(source))
         .find(|mode| *mode != krusty::jvm::ir_emit::JvmDefaultMode::default())
@@ -578,7 +610,7 @@ fn compile_blocks_mixed(
     let backend = krusty::jvm::JvmBackend::new(cp)
         .with_jvm_default(jvm_default)
         .with_lambda_modes(box_lambda_modes(
-            blocks.iter().map(|(_, source)| source.as_str()),
+            blocks.files.iter().map(|(_, source)| source.as_str()),
         ));
     let outputs = krusty::compiler::emit_analyzed(analysis, &stems, &backend, "main", &mut diags);
     let classes = outputs
@@ -671,7 +703,10 @@ fn compile_module_test(
         // the Kotlin-first stub pipeline, exactly like the single-module path.
         let classes = if java_files.is_empty() {
             compile_blocks(
-                files,
+                FoldedKotlinSources {
+                    files,
+                    common_file_count: m.common_file_count,
+                },
                 &cp,
                 &friend_paths,
                 jdk_modules,
@@ -695,7 +730,10 @@ fn compile_module_test(
                         // directory/jar entries contribute to — an overlaid dependency module
                         // loses them (measured: -95 box passes).
                         compile_blocks(
-                            files,
+                            FoldedKotlinSources {
+                                files,
+                                common_file_count: m.common_file_count,
+                            },
                             &cp,
                             &friend_paths,
                             jdk_modules,
@@ -709,7 +747,16 @@ fn compile_module_test(
                         k
                     })
                 }
-                None => compile_kotlin_first(src, files, java_files, &cp, jdk_modules),
+                None => compile_kotlin_first(
+                    src,
+                    FoldedKotlinSources {
+                        files,
+                        common_file_count: m.common_file_count,
+                    },
+                    java_files,
+                    &cp,
+                    jdk_modules,
+                ),
             }
         };
         let Some(classes) = classes else {
@@ -2151,7 +2198,10 @@ fun callableNamedClass(): Any {
     let jdk = krusty::jvm::classpath::platform_jdk_modules(None);
     let features = krusty::features::LangFeatures::from_source(source);
     let krusty = compile_blocks(
-        &[(stem.to_string(), source.to_string())],
+        FoldedKotlinSources {
+            files: &[(stem.to_string(), source.to_string())],
+            common_file_count: 0,
+        },
         &classpath,
         &[],
         jdk.as_deref(),
