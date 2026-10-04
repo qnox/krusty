@@ -39,7 +39,10 @@ fn capture(field: u32, identity: ClassCaptureIdentity) -> IrCtorArg {
         Some(field),
         Some(IrConstructorCapture {
             source_name: "same".into(),
-            receiver: Some(IrCapturedReceiver::Callable("same".into())),
+            receiver: Some(IrCapturedReceiver::Callable {
+                label: "same".into(),
+                owner: crate::fir::CapturedCallableOwner::Declaration,
+            }),
         }),
         Some(identity),
     )

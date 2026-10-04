@@ -388,6 +388,51 @@ fn java_parameters_names_an_anonymous_objects_value_class_receiver() {
     );
 }
 
+/// A value-class member's extension receiver is a parameter of the member's static, so the class
+/// of a lambda, suspend lambda, anonymous object or local class written there reflects it as a
+/// captured value, synthetic, under its field name `$this_mext`; so does an ordinary class's or a
+/// local function's, though their constructors' local-variable tables call it `$receiver`. A suspend
+/// lambda's class reflects its constructor's captures and `$completion`, `create`'s `value` and
+/// `$completion`, and the typed `invoke`'s `p1`, `p2`, … like kotlinc.
+#[test]
+fn java_parameters_names_a_value_class_member_extension_receiver_capture() {
+    assert_parameter_parity(
+        "JavaParametersMemberExtension",
+        "package demo\n\
+         interface Box { fun get(k: Int): Any }\n\
+         class Two(val first: Any, val second: Any)\n\
+         @JvmInline value class Tag(val raw: String)\n\
+         @JvmInline value class Held(val raw: String) {\n\
+         \x20 fun Tag.mext(): () -> Held = { Held(raw + this.raw) }\n\
+         \x20 fun Tag.msus(): suspend () -> Two = { Two(this, this@Held) }\n\
+         \x20 fun Tag.mo(): Box = object : Box { override fun get(k: Int): Any = this@mo }\n\
+         \x20 fun Tag.mlc(): Box { class L : Box { override fun get(k: Int): Any = this@mlc }; return L() }\n\
+         \x20 fun m(): Any {\n\
+         \x20\x20 fun Tag.loc(): () -> Held = { Held(this.raw) }\n\
+         \x20\x20 return Tag(raw).loc()\n\
+         \x20 }\n\
+         \x20 fun su(): suspend () -> Box = { object : Box { override fun get(k: Int): Any = this@Held } }\n\
+         }\n\
+         class Plain(val raw: String) {\n\
+         \x20 fun Tag.pext(): () -> Held = { Held(raw + this.raw) }\n\
+         }\n\
+         fun ps(x: Int): suspend (Int) -> Two = { y -> Two(x, y) }\n\
+         fun pair(): suspend (Int, Long) -> Long = { a, b -> a + b }\n",
+        &[
+            "demo/Held$mext$1",
+            "demo/Held$msus$1",
+            "demo/Held$mo$1",
+            "demo/Held$mlc$L",
+            "demo/Held$m$loc$1",
+            "demo/Held$su$1",
+            "demo/Held$su$1$1",
+            "demo/Plain$pext$1",
+            "demo/JavaParametersMemberExtensionKt$ps$1",
+            "demo/JavaParametersMemberExtensionKt$pair$1",
+        ],
+    );
+}
+
 #[test]
 fn method_parameters_remain_opt_in() {
     let jdk = common::jdk_modules();

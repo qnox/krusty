@@ -369,3 +369,25 @@ pub(super) fn continuation_constructor(class: &IrClass) -> Vec<MethodParameter> 
 pub(super) fn continuation_invoke_suspend() -> [MethodParameter; 1] {
     [parameter("$result", 0)]
 }
+
+/// A suspend lambda class's constructor: each captured value under its field's name, synthetic,
+/// then the completion.
+pub(super) fn suspend_lambda_constructor<'a>(
+    capture_fields: impl IntoIterator<Item = &'a str>,
+) -> Vec<MethodParameter> {
+    capture_fields
+        .into_iter()
+        .map(|field| parameter(field, SYNTHETIC))
+        .chain(std::iter::once(parameter("$completion", 0)))
+        .collect()
+}
+
+/// A generated method whose every parameter kotlinc reflects under its local-variable name, as a
+/// suspend lambda's `create` and typed `invoke` do: the locals after `this`.
+pub(super) fn generated_locals(locals: &[(String, String, u16)]) -> Vec<MethodParameter> {
+    locals
+        .iter()
+        .skip(1)
+        .map(|(name, _, _)| parameter(name.clone(), 0))
+        .collect()
+}

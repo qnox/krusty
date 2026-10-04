@@ -95,6 +95,7 @@ mod enum_entry_method_owner;
 mod explicit_backing_fields;
 mod explicit_property_write;
 mod expression_getter;
+mod extension_receiver_uses;
 mod finalized_projection;
 mod for_loop_iteration;
 mod function_exit;
@@ -25350,6 +25351,8 @@ impl<'a> Checker<'a> {
     /// functions are lifted to private static methods; captures become leading parameters.
     fn check_local_fun(&mut self, scope: &CheckerScope<'_>, f: &FunDecl, stmt_id: StmtId) {
         let enclosing_return_frame = self.lambda_returns.enter_function(Some(f.name.clone()));
+        self.local_function_receivers
+            .extend(f.receiver.as_ref().map(|receiver| receiver.span));
         let suppression_depth =
             self.push_declaration_suppressions(scope, &f.annotations, &f.annotation_args);
         for (annotation, arguments) in f.annotations.iter().zip(&f.annotation_args) {
@@ -36090,6 +36093,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         classifier_header_owner: None,
         exact_anonymous_class_roots: std::collections::HashSet::new(),
         extension_receiver_labels: Vec::new(),
+        local_function_receivers: std::collections::HashSet::new(),
         field_ty: None,
         field_receiver_identity: None,
         in_script_body: false,
@@ -38712,6 +38716,8 @@ struct Checker<'a> {
     /// exact roots, never evidence of lexical parents; those come only from `lexical_class_context`.
     exact_anonymous_class_roots: std::collections::HashSet<TypeName>,
     extension_receiver_labels: Vec<(usize, Span)>,
+    /// Receiver declarations of the local extension functions checked so far, by span.
+    local_function_receivers: std::collections::HashSet<Span>,
     /// The backing-field type while checking a property accessor body — makes the `field`
     /// soft-keyword resolve to the property's backing field. `None` outside an accessor.
     field_ty: Option<Ty>,
@@ -44235,16 +44241,6 @@ impl<'a> Checker<'a> {
         self.implicit_receiver_types(scope)
     }
 
-    fn mark_extension_receiver_used(&mut self, expression: ExprId, receiver: ImplicitReceiver) {
-        if !self.suppress_receiver_capture_accounting {
-            self.implicit_receiver_identity_uses
-                .record(receiver.identity);
-        }
-        if let Some(span) = receiver.extension_receiver {
-            self.mark_extension_receiver_span_used(expression, span);
-        }
-    }
-
     /// Preserve the receiver selected while resolving a BARE member access and account for a
     /// receiver-lambda capture in one operation. Lowering cannot safely repeat this lookup: an enclosing
     /// class receiver may be represented by a synthetic field rather than a local `this` slot, and
@@ -44316,61 +44312,8 @@ impl<'a> Checker<'a> {
             .record(receiver.identity);
     }
 
-    fn mark_extension_receiver_stmt_used(&mut self, statement: StmtId, receiver: ImplicitReceiver) {
-        self.implicit_receiver_identity_uses
-            .record(receiver.identity);
-        if let Some(span) = receiver.extension_receiver {
-            self.mark_extension_receiver_stmt_span_used(statement, span);
-        }
-    }
-
-    fn mark_extension_receiver_span_used(&mut self, expression: ExprId, span: Span) {
-        let uses = &mut self.extension_receiver_expr_uses[expression.0 as usize];
-        if !uses.contains(&span) {
-            uses.push(span);
-        }
-        self.implicit_receiver_identity_uses.record_extension(span);
-    }
-
-    fn mark_extension_receiver_stmt_span_used(&mut self, statement: StmtId, span: Span) {
-        let uses = &mut self.extension_receiver_stmt_uses[statement.0 as usize];
-        if !uses.contains(&span) {
-            uses.push(span);
-        }
-        self.implicit_receiver_identity_uses.record_extension(span);
-    }
-
-    fn extension_receiver_use_count(&self, declaration: Span) -> usize {
-        self.extension_receiver_expr_uses
-            .iter()
-            .filter(|uses| uses.contains(&declaration))
-            .count()
-            + self
-                .extension_receiver_stmt_uses
-                .iter()
-                .filter(|uses| uses.contains(&declaration))
-                .count()
-    }
-
     fn implicit_receiver_identity_use_count(&self, identity: (usize, usize)) -> usize {
         self.implicit_receiver_identity_uses.count(identity)
-    }
-
-    fn mark_extension_receiver_label_used(&mut self, expression: ExprId, label_index: usize) {
-        if let Some(span) = self
-            .extension_receiver_labels
-            .iter()
-            .rev()
-            .find_map(|(index, span)| (*index == label_index).then_some(*span))
-        {
-            self.mark_extension_receiver_span_used(expression, span);
-        }
-    }
-
-    fn mark_current_extension_receiver_used(&mut self, expression: ExprId) {
-        if let Some(span) = self.this_extension_receiver {
-            self.mark_extension_receiver_span_used(expression, span);
-        }
     }
 
     fn mark_context_extension_receiver_used(

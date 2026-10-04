@@ -192,7 +192,14 @@ pub(super) fn emit_suspend_lambda_class(
         cw.add_field_late(0x1010, &field.name, &field.descriptor, None, None);
     }
 
-    emit_constructor(&mut cw, &formatter, &shape, lambda, public);
+    emit_constructor(
+        &mut cw,
+        &formatter,
+        &shape,
+        lambda,
+        public,
+        env.java_parameters,
+    );
     emit_method(
         ir,
         lambda.invoke_suspend,
@@ -213,9 +220,9 @@ pub(super) fn emit_suspend_lambda_class(
         ],
     );
     if shape.has_create() {
-        emit_create(&mut cw, &shape);
+        emit_create(&mut cw, &shape, env.java_parameters);
     }
-    emit_invoke(&mut cw, &formatter, &shape, &result);
+    emit_invoke(&mut cw, &formatter, &shape, &result, env.java_parameters);
     emit_bridge(&mut cw, &shape);
     // A lambda class is local to the scope it was written in.
     let (d1, d2) = lambda_metadata(ir, lambda, &formatter);
@@ -290,13 +297,15 @@ fn class_signature(formatter: &JvmSignatureFormatter, shape: &Shape, result: &st
 }
 
 /// `<init>(captures…, Continuation)`: store each captured value, then call
-/// `SuspendLambda(arity, completion)`.
+/// `SuspendLambda(arity, completion)`. `-java-parameters` reflects each capture under its field's
+/// name, compiler-generated, also where the local-variable table calls it `$receiver`.
 fn emit_constructor(
     cw: &mut ClassWriter,
     formatter: &JvmSignatureFormatter,
     shape: &Shape,
     lambda: &SuspendLambdaClass,
     public: bool,
+    java_parameters: bool,
 ) {
     let descriptor = shape.constructor_desc();
     let mut signature = String::from("(");
@@ -359,6 +368,15 @@ fn emit_constructor(
         );
     }
     cw.set_method_debug("<init>", &descriptor, None, &locals);
+    if java_parameters {
+        let reflected = crate::jvm::method_parameters::suspend_lambda_constructor(
+            shape
+                .captures
+                .iter()
+                .map(|capture| capture.field.name.as_str()),
+        );
+        cw.set_method_parameters("<init>", &descriptor, &reflected);
+    }
 }
 
 /// `new Self(captures…, completion)`, left on the stack: the fresh copy `create` and `invoke`
@@ -395,7 +413,7 @@ fn store_parameter(
 
 /// `create([Object value,] Continuation)`: a fresh copy of the lambda with its parameter stored,
 /// as a `Continuation<Unit>`.
-fn emit_create(cw: &mut ClassWriter, shape: &Shape) {
+fn emit_create(cw: &mut ClassWriter, shape: &Shape, java_parameters: bool) {
     let descriptor = shape.create_desc();
     let parameter = shape.parameters.first();
     let signature = format!(
@@ -452,6 +470,10 @@ fn emit_create(cw: &mut ClassWriter, shape: &Shape) {
         Some(&signature),
     );
     cw.set_method_debug("create", &descriptor, None, &locals);
+    if java_parameters {
+        let reflected = crate::jvm::method_parameters::generated_locals(&locals);
+        cw.set_method_parameters("create", &descriptor, &reflected);
+    }
 }
 
 /// The typed `invoke(parameters…, Continuation)`: start a fresh copy of the lambda with `Unit`.
@@ -461,6 +483,7 @@ fn emit_invoke(
     formatter: &JvmSignatureFormatter,
     shape: &Shape,
     result: &str,
+    java_parameters: bool,
 ) {
     let descriptor = shape.invoke_desc();
     let mut signature = String::from("(");
@@ -542,6 +565,10 @@ fn emit_invoke(
         Some(&signature),
     );
     cw.set_method_debug("invoke", &descriptor, None, &locals);
+    if java_parameters {
+        let reflected = crate::jvm::method_parameters::generated_locals(&locals);
+        cw.set_method_parameters("invoke", &descriptor, &reflected);
+    }
 }
 
 /// The erased `FunctionN.invoke(Object…)` bridge to the typed `invoke`.
