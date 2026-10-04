@@ -1311,6 +1311,8 @@ impl<'a> Parser<'a> {
         declaration.visibility = visibility_of(modifiers);
         let id = self.file.add_decl(Decl::Class(declaration));
         self.file.decls.insert(declaration_index, id);
+        self.file
+            .adopt_hoisted_classifiers(id, declaration_index + 1);
     }
 
     fn parse_file(&mut self) {
@@ -2364,6 +2366,7 @@ impl<'a> Parser<'a> {
         };
         let id = self.file.add_decl(Decl::Class(declaration));
         self.file.decls.insert(nested_start, id);
+        self.file.adopt_hoisted_classifiers(id, nested_start + 1);
         declaration_modifiers::record_nested_actual(&mut self.file, modifiers, id);
         debug_assert!(self.lexical_type_parameters.names().is_empty());
         self.lexical_type_parameters = enclosing_type_parameters;

@@ -10,7 +10,6 @@ use crate::ast::{ClassDecl, Decl, DeclId, File, FunBody, FunDecl, PropDecl};
 use crate::diag::{DiagSink, Span};
 use crate::features::LangFeatures;
 use crate::types::Visibility;
-use std::collections::HashMap;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
@@ -34,23 +33,13 @@ pub(super) fn check(file: &File, features: &LangFeatures, diagnostics: &mut Diag
         file,
         reports: Vec::new(),
     };
-    let classes = file
-        .decls
-        .iter()
-        .filter_map(|&id| match file.decl(id) {
-            Decl::Class(class) => Some((class.name.as_str(), id)),
-            _ => None,
-        })
-        .collect::<HashMap<_, _>>();
     for &id in &file.decls {
         match file.decl(id) {
             Decl::Fun(function) if !file.is_local_declaration(id) => findings.function(function),
             Decl::Property(property) if !file.is_local_declaration(id) => {
                 findings.property(property, false)
             }
-            Decl::Class(class) if is_public_api_classifier(file, &classes, id) => {
-                findings.classifier(class)
-            }
+            Decl::Class(class) if is_public_api_classifier(file, id) => findings.classifier(class),
             _ => {}
         }
     }
@@ -67,8 +56,8 @@ pub(super) fn check(file: &File, features: &LangFeatures, diagnostics: &mut Diag
 }
 
 /// Whether classifier `id` is effectively public: neither it nor any classifier containing it is
-/// local or anonymous, and each is `public` or `protected`.
-fn is_public_api_classifier(file: &File, classes: &HashMap<&str, DeclId>, id: DeclId) -> bool {
+/// local or anonymous, and each is `public` or `protected`. Containment is the recorded owner edge.
+fn is_public_api_classifier(file: &File, id: DeclId) -> bool {
     let Decl::Class(class) = file.decl(id) else {
         return false;
     };
@@ -80,15 +69,8 @@ fn is_public_api_classifier(file: &File, classes: &HashMap<&str, DeclId>, id: De
     {
         return false;
     }
-    match file.hoisted_classifier_source_names.get(&id) {
-        None => true,
-        Some(source_name) => class
-            .name
-            .strip_suffix(source_name.as_str())
-            .and_then(|owner| owner.strip_suffix('.'))
-            .and_then(|owner| classes.get(owner))
-            .is_some_and(|&owner| is_public_api_classifier(file, classes, owner)),
-    }
+    file.hoisted_classifier_owner(id)
+        .is_none_or(|owner| is_public_api_classifier(file, owner))
 }
 
 fn is_public_api(visibility: Visibility) -> bool {

@@ -61,6 +61,33 @@ public
 fun multiLine() = 1
 "#;
 
+/// Nested classifiers that share simple names under distinct owners. Each one's effective
+/// visibility follows its own owner chain, never a same-named classifier elsewhere.
+const REPEATED_NESTED_NAMES: &str = r#"// EXPLICIT_API_MODE: STRICT
+package q
+
+public class First {
+    class Shared { fun a() = 1 }
+    private class Gate { class Shared { fun b() = 2 } }
+}
+private class Second { class Shared { fun c() = 3 } }
+public class Third {
+    private class First { class Shared { fun d() = 4 } }
+    class Second { class Shared { fun e() = 5 } }
+}
+private class WithCompanion { companion object { class Inside { fun f() = 6 } } }
+public class Fourth { public companion object { class Inside { fun g() = 7 } } }
+public class Anon { private val holder = object { fun h() = 8 } }
+"#;
+
+#[test]
+fn explicit_api_mode_follows_each_classifier_owner() {
+    common::assert_errors_match_kotlinc(
+        &[("main.kt", REPEATED_NESTED_NAMES)],
+        &["-Xexplicit-api=strict".to_string()],
+    );
+}
+
 #[test]
 fn explicit_api_mode_reports_like_kotlinc() {
     common::assert_errors_match_kotlinc(
