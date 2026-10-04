@@ -288,33 +288,48 @@ box-corpus VERSION=`just max-version`:
     # still operates on the outer krusty worktree and can replace its sparse-checkout definition.
     while read -r name; do unset "$name"; done < <(git rev-parse --local-env-vars)
     # The mock JDK's directory at this tag (KtTestUtil.findMockJdkRtJar): JetBrains moved it from
-    # compiler/testData/mockJDK to third-party/mockJDKs/mockJDK. Exactly one exists per tag.
+    # compiler/testData/mockJDK to third-party/mockJDKs/mockJDK. Exactly one exists per tag; print
+    # nothing when the checkout cannot name one. `cat-file -t HEAD:<path>` is stable across git
+    # releases, unlike `ls-tree` pathspec matching.
     mock_dir_at_tag() {
-        local dirs
-        dirs="$(git -C "$root" ls-tree -d --name-only HEAD \
-            third-party/mockJDKs/mockJDK/jre/lib compiler/testData/mockJDK/jre/lib)"
-        [ "$(printf '%s\n' "$dirs" | grep -c .)" -eq 1 ] \
-            || { echo "expected exactly one mock JDK directory at v${ver}, found: ${dirs:-none}" >&2; exit 1; }
-        printf '%s\n' "$dirs"
+        local found=()
+        local dir
+        for dir in third-party/mockJDKs/mockJDK/jre/lib compiler/testData/mockJDK/jre/lib; do
+            if [ "$(git -C "$root" cat-file -t "HEAD:$dir" 2>/dev/null)" = tree ]; then
+                found+=("$dir")
+            fi
+        done
+        if [ "${#found[@]}" -eq 1 ]; then printf '%s\n' "${found[0]}"; fi
     }
-    if [ -d "$root/.git" ] && [ -d "$box" ]; then
-        mock_dir="$(mock_dir_at_tag)"
-        if [ -f "$root/$mock_dir/rt.jar" ]; then echo "$box"; exit 0; fi
-        # A cache provisioned before the mock JDK was needed: extend it rather than accept it.
-        echo "adding the mock JDK to the Kotlin codegen/box corpus (v${ver})…" >&2
-        git -C "$root" sparse-checkout add "$mock_dir" >&2 \
-            || { echo "failed to add $mock_dir to the v${ver} corpus checkout" >&2; exit 1; }
-    else
+    clone_corpus() {
         echo "cloning Kotlin codegen/box corpus (v${ver})…" >&2
         rm -rf "$root"
         git clone --depth 1 --filter=blob:none --sparse --branch "v${ver}" \
             https://github.com/JetBrains/kotlin.git "$root" >&2 \
             || { echo "failed to clone JetBrains/kotlin v${ver}" >&2; rm -rf "$root"; exit 1; }
         mock_dir="$(mock_dir_at_tag)"
+        [ -n "$mock_dir" ] \
+            || { echo "JetBrains/kotlin v${ver} has no single mock JDK directory" >&2; exit 1; }
         # Keep cone mode: a fresh sparse clone checks out the repository-root files that cone mode
         # owns. Switching to non-cone while excluding them can leave those paths in place and abort
         # the update before the requested corpus directory is materialized.
         git -C "$root" sparse-checkout set compiler/testData/codegen/box "$mock_dir" >&2
+    }
+    mock_dir=""
+    if [ -d "$root/.git" ] && [ -d "$box" ]; then
+        mock_dir="$(mock_dir_at_tag)"
+    fi
+    if [ -n "$mock_dir" ] && [ -f "$root/$mock_dir/rt.jar" ]; then
+        echo "$box"
+        exit 0
+    elif [ -n "$mock_dir" ]; then
+        # A cache provisioned before the mock JDK was needed: extend it rather than accept it.
+        echo "adding the mock JDK to the Kotlin codegen/box corpus (v${ver})…" >&2
+        git -C "$root" sparse-checkout add "$mock_dir" >&2 \
+            || { echo "failed to add $mock_dir to the v${ver} corpus checkout" >&2; exit 1; }
+    else
+        # No checkout, or a restored one whose tree cannot name its mock JDK: provision afresh.
+        clone_corpus
     fi
     [ -d "$box" ] || { echo "box dir missing after sparse checkout: $box" >&2; exit 1; }
     [ -f "$root/$mock_dir/rt.jar" ] \
