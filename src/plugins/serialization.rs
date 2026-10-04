@@ -947,6 +947,11 @@ impl SerializationPlugin {
                 ty: oid as u32,
                 field: "INSTANCE",
             })
+        } else if ir.class_id_by_name(custom).is_some() {
+            panic!(
+                "the source custom serializer class {} for {class_fq} has no frontend-selected construction",
+                custom.render(),
+            );
         } else {
             let classlit = ir.class_const(Some(class_fq));
             let kclass = ir.add_expr(IrExpr::Call {
@@ -2386,6 +2391,23 @@ mod tests {
     #[should_panic(expected = "selects demo/OtherSerializer")]
     fn a_recorded_custom_serializer_construction_must_select_the_named_serializer() {
         let (mut ir, id) = recorded_construction_without_accessor("demo/OtherSerializer");
+        SerializationPlugin::add_custom_serializer_accessor(
+            &mut ir,
+            id,
+            "demo/Tagged",
+            type_name("demo/TaggedSerializer"),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "has no frontend-selected construction")]
+    fn a_source_custom_serializer_class_requires_a_recorded_construction() {
+        // A missing record is valid only for a dependency/runtime serializer class. A source
+        // non-object class must have been selected by the frontend; treating it as the external
+        // `new X(KClass)` convention would hide an incomplete semantic handoff.
+        let mut ir = IrFile::default();
+        let id = ir.add_class(synthetic_class("demo/Tagged"));
+        ir.add_class(synthetic_class("demo/TaggedSerializer"));
         SerializationPlugin::add_custom_serializer_accessor(
             &mut ir,
             id,
