@@ -44,7 +44,7 @@ mod debug_metadata;
 mod emission_facts;
 pub use emission_facts::{ContinuationMetadata, ContinuationMetadataMap};
 pub(crate) use emission_facts::{
-    IntrinsicProbeContinuations, SuspendedResultReturn, SuspendedResultReturns,
+    IntrinsicProbeContinuations, ProbedContinuation, SuspendedResultReturn, SuspendedResultReturns,
 };
 use emission_facts::{MachineOutputs, MachineSubject};
 mod get_or_create;
@@ -533,6 +533,11 @@ pub(crate) fn lower_suspend(
                 }
                 recorded.push(cps::SplicedSuspension { call });
             }
+            intrinsic_probes::bind_machine_continuation(
+                ir,
+                b,
+                outputs.intrinsic_probe_continuations,
+            );
             if !box_returns(ir, b) {
                 return false;
             }

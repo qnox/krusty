@@ -1059,10 +1059,12 @@ mod inline_lambda_result_boxing_e2e;
 mod inline_lambda_return_scope_e2e;
 #[path = "inline_lambda_sibling_value_class_e2e.rs"]
 mod inline_lambda_sibling_value_class_e2e;
-#[path = "inline_lambda_suspend_member_e2e.rs"]
-mod inline_lambda_suspend_member_e2e;
 #[path = "inline_lambda_suspend_lambda_e2e.rs"]
 mod inline_lambda_suspend_lambda_e2e;
+#[path = "inline_lambda_suspend_member_e2e.rs"]
+mod inline_lambda_suspend_member_e2e;
+#[path = "inline_lambda_unintercepted_probe_e2e.rs"]
+mod inline_lambda_unintercepted_probe_e2e;
 #[path = "inline_lambda_value_argument_e2e.rs"]
 mod inline_lambda_value_argument_e2e;
 #[path = "inline_lambda_value_return_e2e.rs"]
