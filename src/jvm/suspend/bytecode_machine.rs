@@ -18,9 +18,7 @@
 
 use std::collections::HashSet;
 
-use super::cps::{
-    spliced_inline_suspensions, TransformedMachine, TransformedSuspension,
-};
+use super::cps::{spliced_inline_suspensions, TransformedMachine, TransformedSuspension};
 use super::emission_facts::{ContinuationMetadata, MachineOutputs};
 use super::spill_layout::{suspension_points_in_order, SpillLayout};
 use super::{

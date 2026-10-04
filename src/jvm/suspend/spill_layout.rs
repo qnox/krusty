@@ -193,12 +193,8 @@ mod tests {
         let first = ir.add_expr(IrExpr::UnitInstance);
         let second = ir.add_expr(IrExpr::UnitInstance);
         for point in [first, second] {
-            ir.intrinsic_suspension_points.insert(
-                point,
-                IrIntrinsicSuspensionPoint {
-                    result: Ty::Unit,
-                },
-            );
+            ir.intrinsic_suspension_points
+                .insert(point, IrIntrinsicSuspensionPoint { result: Ty::Unit });
         }
         let body = ir.add_expr(IrExpr::Block {
             stmts: vec![first, second],

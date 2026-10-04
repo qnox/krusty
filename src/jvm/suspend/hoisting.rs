@@ -1622,9 +1622,7 @@ mod tests {
         let suspension = ir.add_expr(IrExpr::UnitInstance);
         ir.intrinsic_suspension_points.insert(
             suspension,
-            IrIntrinsicSuspensionPoint {
-                result: Ty::String,
-            },
+            IrIntrinsicSuspensionPoint { result: Ty::String },
         );
         let shared = ir.add_expr(IrExpr::EnumValueOf {
             classifier: type_name("example/Level"),
@@ -1685,9 +1683,7 @@ mod tests {
             let suspension = ir.add_expr(IrExpr::UnitInstance);
             ir.intrinsic_suspension_points.insert(
                 suspension,
-                IrIntrinsicSuspensionPoint {
-                    result: Ty::String,
-                },
+                IrIntrinsicSuspensionPoint { result: Ty::String },
             );
             let expression = match shape {
                 "ref-get" => IrExpr::RefGet {

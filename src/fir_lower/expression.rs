@@ -1472,7 +1472,10 @@ impl BodyLowering<'_> {
             // A call whose operands were stored first keeps the call's line on the call itself, which
             // kotlinc marks once those operands are evaluated.
             if let Some(&call) = self.operand_bound_calls.get(&lowered) {
-                self.ir.expr_source_lines.entry(call).or_insert(debug.source);
+                self.ir
+                    .expr_source_lines
+                    .entry(call)
+                    .or_insert(debug.source);
             }
             for raw in first_generated..self.ir.exprs.len() {
                 let raw = raw as u32;

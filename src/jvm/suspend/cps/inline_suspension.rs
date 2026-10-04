@@ -398,12 +398,8 @@ mod tests {
     /// function table.
     fn suspension(ir: &mut IrFile) -> ExprId {
         let point = ir.add_expr(IrExpr::UnitInstance);
-        ir.intrinsic_suspension_points.insert(
-            point,
-            IrIntrinsicSuspensionPoint {
-                result: Ty::Unit,
-            },
-        );
+        ir.intrinsic_suspension_points
+            .insert(point, IrIntrinsicSuspensionPoint { result: Ty::Unit });
         point
     }
 

@@ -84,9 +84,7 @@ impl Emitter<'_> {
 
 #[cfg(test)]
 mod tests {
-    use crate::ir::{
-        IrConst, IrExpr, IrFile, IrFunction, IrIntrinsicSuspensionPoint,
-    };
+    use crate::ir::{IrConst, IrExpr, IrFile, IrFunction, IrIntrinsicSuspensionPoint};
     use crate::jvm::ir_emit::invariant_tests::emit_for_test_with_probe_continuations;
     use crate::jvm::ir_emit::EmitRun;
     use crate::types::Ty;
