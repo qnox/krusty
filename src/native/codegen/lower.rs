@@ -672,6 +672,7 @@ impl<'a> FileLowering<'a> {
                     propagate: None,
                     finallys: Vec::new(),
                     dead: Vec::new(),
+                    unresolved_reified: Vec::new(),
                 };
                 let params = body.builder.block_params(entry).to_vec();
                 fill(&mut body, &params)?;
@@ -946,6 +947,10 @@ struct BodyLowering<'a, 'b, 'c> {
     /// Cranelift will accept. They are swept at the end of the body, where what is still empty is
     /// finally known.
     dead: Vec<Block>,
+    /// Exact semantic identities of reified parameters belonging to an erased helper currently
+    /// being emitted. A runtime type operation naming one executes Kotlin's direct-call failure;
+    /// ordinary functions and specialized inline copies leave this empty.
+    unresolved_reified: Vec<String>,
 }
 
 /// One `finally` the current position is inside.
@@ -1690,12 +1695,37 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 op,
                 arg,
                 type_operand,
-            } => self.type_operation(
-                op,
-                arg,
-                type_operand,
-                self.file.ir.declaration_result_coercions.contains(&id),
-            ),
+            } => {
+                if matches!(
+                    op,
+                    IrTypeOp::InstanceOf
+                        | IrTypeOp::NotInstanceOf
+                        | IrTypeOp::Cast
+                        | IrTypeOp::CastNonNull
+                ) && self.unresolved_reified.iter().any(|parameter| {
+                    type_operand
+                        .type_parameter_occurrence_bound(parameter)
+                        .is_some()
+                }) {
+                    // The operand precedes kotlinc's reified-operation marker and therefore keeps
+                    // any side effect or exception it produces before the marker's own failure.
+                    self.expression(arg)?;
+                    if self.terminated {
+                        return Ok(None);
+                    }
+                    let message = self.string_literal(
+                        b"This function has a reified type parameter and thus can only be inlined at compilation time, not called directly.",
+                    )?;
+                    self.raise("kt_type_unsupported_operation_exception", message)
+                } else {
+                    self.type_operation(
+                        op,
+                        arg,
+                        type_operand,
+                        self.file.ir.declaration_result_coercions.contains(&id),
+                    )
+                }
+            }
             IrExpr::PrimitiveBinOp { op, lhs, rhs } => self.binary(op, lhs, rhs),
             IrExpr::Equality { op, mode, lhs, rhs } => self.equality(op, mode, lhs, rhs),
             IrExpr::PrimitiveNeg { operand, ty } => self.negate(operand, ty),

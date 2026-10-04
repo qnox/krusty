@@ -46,6 +46,13 @@ impl FileLowering<'_> {
                     accessor.result,
                     &symbol,
                     &mut |body, parameters| {
+                        body.unresolved_reified.extend(
+                            accessor
+                                .type_parameters
+                                .iter()
+                                .filter(|parameter| parameter.reified)
+                                .map(|parameter| parameter.semantic_name.clone()),
+                        );
                         for (slot, (&value, &ty)) in parameters
                             .iter()
                             .zip(accessor.parameters.iter())
