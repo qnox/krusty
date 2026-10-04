@@ -12,11 +12,9 @@
 //! entryAnnotations, classAnnotations)` instead, exactly as for a `@Serializable` enum's own
 //! accessor. krusty rejected the whole file ("not yet supported by the IR backend") because the
 //! element plan only knew how to read a generated enum serializer.
-use super::common;
 use super::common::compare_with_kotlinc_plugin;
-use super::serialization_companion_byte_parity_e2e::{
-    gradle_module_jar, member_body, plugin_and_runtime,
-};
+use super::serialization_companion_byte_parity_e2e::{member_body, plugin_and_runtime};
+use super::serialization_test_support::both_compilers_box;
 
 const SRC: &str = "import kotlinx.serialization.SerialName\n\
                    import kotlinx.serialization.Serializable\n\
@@ -73,18 +71,13 @@ fn plain_enum_elements_in_every_position_match_kotlinc() {
 }
 
 /// The values must round-trip under the entries' serial names: a factory that ignored an entry's
-/// `@SerialName` would verify and run, and write different data.
+/// `@SerialName` would verify and run, and write different data. Both compilers run the identical
+/// fixture against the pinned, self-provisioned runtime and must agree.
 #[test]
 fn plain_enum_elements_round_trip() {
-    let json = gradle_module_jar("org.jetbrains.kotlinx", "kotlinx-serialization-json-jvm")
-        .expect("kotlinx-serialization-json must be provisioned for this regression");
-    let (_, mut cp) = plugin_and_runtime()
-        .expect("the serialization plugin and runtime must be available to this regression");
-    cp.push(json);
-    let jdk = common::jdk_modules();
-    cp.push(jdk.clone());
     let src = format!(
-        "{SRC}import kotlinx.serialization.json.Json\n\
+        "import kotlinx.serialization.json.Json\n\
+         {SRC}\
          fun box(): String {{\n\
          \x20   val value = Holder(Named.X, null, listOf(Kind.A, Kind.B), Kind.B)\n\
          \x20   val text = Json.encodeToString(Holder.serializer(), value)\n\
@@ -94,9 +87,5 @@ fn plain_enum_elements_round_trip() {
          \x20   return if (cfg == \"{{\\\"type\\\":\\\"B\\\"}}\") \"OK\" else \"FAIL: \" + cfg\n\
          }}\n"
     );
-    assert_eq!(
-        common::compile_and_run_box(&src, "PlainEnumRoundTrip", &cp, Some(jdk.as_path()))
-            .expect("plain enum elements must compile and run"),
-        "OK"
-    );
+    assert_eq!(both_compilers_box(&src, "plain_enum_round_trip"), "OK");
 }
