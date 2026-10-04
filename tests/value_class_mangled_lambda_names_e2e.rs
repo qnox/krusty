@@ -47,6 +47,10 @@ const SOURCE: &str = "@JvmInline value class Tag(val s: String)\n\
     \x20   val p: () -> Any get() = { s }\n\
     }\n";
 
+/// `V.n`'s lambda, which captures a `Tag` and returns it through `Any`.
+const CAPTURED_TAG: &str =
+    "private static final java.lang.Object n_txdesME$lambda$0(java.lang.String);";
+
 /// The lifted methods kotlinc writes, by class, as `javap -p` declares them, in class-file order.
 const LIFTED: &[(&str, &str)] = &[
     (
@@ -113,10 +117,7 @@ const LIFTED: &[(&str, &str)] = &[
         "V",
         "private static final java.lang.Object m_impl$lambda$0(java.lang.String);",
     ),
-    (
-        "V",
-        "private static final java.lang.Object n_txdesME$lambda$0(java.lang.String);",
-    ),
+    ("V", CAPTURED_TAG),
     (
         "V",
         "private static final java.lang.Object getP_impl$lambda$0(java.lang.String);",
@@ -169,12 +170,24 @@ fn a_lambda_in_a_value_class_mangled_function_is_named_after_its_jvm_name_like_k
             assert_eq!(krusty, reference, "kotlinc's methods of {class}");
         }
     }
-    // The value class's lambdas are compared by name only. kotlinc names a captured receiver
+    // Every lifted method's code matches. kotlinc names a value class's captured receiver
     // (`m-impl`, `getP-impl`, the `init` block) `$arg0` or `$tmp0` in its debug table where krusty
-    // writes `this$0`, and boxes `n`'s captured `Tag` for its `Any` result where krusty returns the
-    // carrier: gaps in the lambda's body, apart from the name it takes.
-    for (class, declaration) in LIFTED.iter().filter(|(class, _)| *class != "V") {
+    // writes `this$0`, so a value-class lambda that captures its receiver is compared without its
+    // local-variable table; `n`'s lambda captures only its `Tag` and is compared whole.
+    let code = |listing: &str| {
+        listing
+            .split("\nLocalVariableTable:")
+            .next()
+            .unwrap_or_default()
+            .to_owned()
+    };
+    for (class, declaration) in LIFTED {
         let (reference, krusty) = classes.method_listing(class, declaration);
-        assert_eq!(krusty, reference, "{class}: {declaration}");
+        let receiver_capture = *class == "V" && *declaration != CAPTURED_TAG;
+        if receiver_capture {
+            assert_eq!(code(&krusty), code(&reference), "{class}: {declaration}");
+        } else {
+            assert_eq!(krusty, reference, "{class}: {declaration}");
+        }
     }
 }
