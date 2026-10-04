@@ -17,6 +17,11 @@ fn callable_candidates(
     callables: &CheckedBackendCallables,
     target: crate::fir::ExternalCallableId,
 ) -> Vec<OverriddenCallRealization> {
+    // `target` is the exact overridden declaration selected by the frontend. A realization may
+    // deliberately name an earlier ancestor than that declaration: an intermediate override still
+    // carries its ancestor's physical call-site contract. Do not re-filter the typed plan against
+    // the nearest override owner; the receiver-hierarchy check in `select` decides whether that
+    // declaration contract applies at the call site.
     callables
         .callable(target)
         .map(|fact| fact.overridden_call_realizations.to_vec())
@@ -36,18 +41,10 @@ fn function_candidates(
             .flatten()
             .filter(|edge| edge.implementation == ResolvedFunctionOverrideTarget::Module(target))
             .filter_map(|edge| match edge.overridden {
-                ResolvedFunctionOverrideTarget::External(overridden) => {
-                    Some((edge.overridden_owner, overridden))
-                }
+                ResolvedFunctionOverrideTarget::External(overridden) => Some(overridden),
                 ResolvedFunctionOverrideTarget::Module(_) => None,
             })
-            .flat_map(|(owner, overridden)| {
-                callable_candidates(callables, overridden)
-                    .into_iter()
-                    .filter(move |candidate| {
-                        type_names_map_to_same_jvm_internal(candidate.declaration_owner, owner)
-                    })
-            })
+            .flat_map(|overridden| callable_candidates(callables, overridden))
             .collect(),
     }
 }
@@ -62,18 +59,10 @@ fn property_candidates(
         .flatten()
         .filter(|edge| edge.implementation == ResolvedPropertyOverrideTarget::Module(target))
         .filter_map(|edge| match edge.overridden {
-            ResolvedPropertyOverrideTarget::External(overridden) => {
-                Some((edge.overridden_owner, overridden))
-            }
+            ResolvedPropertyOverrideTarget::External(overridden) => Some(overridden),
             ResolvedPropertyOverrideTarget::Module(_) => None,
         })
-        .flat_map(|(owner, overridden)| {
-            callable_candidates(callables, overridden)
-                .into_iter()
-                .filter(move |candidate| {
-                    type_names_map_to_same_jvm_internal(candidate.declaration_owner, owner)
-                })
-        })
+        .flat_map(|overridden| callable_candidates(callables, overridden))
         .collect()
 }
 
@@ -94,18 +83,10 @@ fn method_candidates(
                 )
         })
         .filter_map(|edge| match edge.overridden {
-            ResolvedFunctionOverrideTarget::External(overridden) => {
-                Some((edge.overridden_owner, overridden))
-            }
+            ResolvedFunctionOverrideTarget::External(overridden) => Some(overridden),
             ResolvedFunctionOverrideTarget::Module(_) => None,
         })
-        .flat_map(|(owner, overridden)| {
-            callable_candidates(callables, overridden)
-                .into_iter()
-                .filter(move |candidate| {
-                    type_names_map_to_same_jvm_internal(candidate.declaration_owner, owner)
-                })
-        })
+        .flat_map(|overridden| callable_candidates(callables, overridden))
         .collect()
 }
 
