@@ -173,10 +173,17 @@ pub(super) fn prepare_inline_template(
         None if value_needed => Some(ir.add_expr(IrExpr::UnitInstance)),
         None => None,
     };
-    Some(ir.add_expr(IrExpr::Block {
+    let frame = ir.add_expr(IrExpr::Block {
         stmts: frame_statements,
         value,
-    }))
+    });
+    let frame_type = if result_slot.is_some() {
+        result
+    } else {
+        Ty::Unit
+    };
+    ir.logical_types.insert(frame, frame_type);
+    Some(frame)
 }
 
 /// Lambda implementation methods return language `Unit` through a value carrier. Make every

@@ -6224,20 +6224,25 @@ impl<'a> Emitter<'a> {
     /// where the lambda runs only on a branch. Final-body dataflow carries any existing operand prefix
     /// through ordinary branches; handlers, suspensions, and external transfers require a spill
     /// boundary.
-    /// Returns `false` (caller falls back / skips) on any unsupported shape.
-    #[allow(clippy::too_many_arguments)]
+    /// Returns `false` (caller falls back / skips) on an unsupported host shape found before any
+    /// literal is placed. Once a literal is placed, a checked fact it lacks is an emission error.
     fn try_inline_unified(
         &mut self,
-        call_expression: u32,
-        callee: &str,
-        inline_only: bool,
-        descriptor: &str,
-        args: &[u32],
-        leading_non_argument_operands: usize,
-        body: &crate::jvm::classreader::MethodCode,
+        call: &bytecode_inline_call::ClasspathInlineCall<'_, '_>,
         base: u16,
         code: &mut CodeBuilder,
     ) -> bool {
+        let bytecode_inline_call::ClasspathInlineCall {
+            call_expression,
+            target,
+            args,
+            leading_non_argument_operands,
+            body,
+            ..
+        } = *call;
+        let callee = target.name;
+        let inline_only = target.inline_only;
+        let descriptor = target.splice_desc;
         let Some(params) = parse_descriptor_params(descriptor) else {
             return false;
         };
@@ -6308,8 +6313,10 @@ impl<'a> Emitter<'a> {
                 // the suspend pass appends a physical `Continuation` parameter. The capture list is
                 // the exact boundary already carried by the IR.
                 let n_cap = captures.len();
-                if impl_f.params.len() < n_cap {
-                    return false;
+                if impl_f.params.len() < n_cap + arity {
+                    let reason = "a placed lambda's method lacks a parameter for each argument";
+                    self.run.set_emit_error(reason.to_string());
+                    return true;
                 }
                 let physical_impl_params = jvm_function_params(self.ir, impl_fn);
                 let lam_tys = physical_impl_params[n_cap..].to_vec();
@@ -6343,12 +6350,12 @@ impl<'a> Emitter<'a> {
                     .unwrap_or(impl_f.ret);
                 // Each capture binds to the caller's actual slot (a mutable capture writes through);
                 // a materialized one is left with the rest of the call's frame when it finishes.
-                let Some(cap_bindings) = self.bind_spliced_captures(a, &mut |emitter, cap, ty| {
-                    let slot = emitter.frame.enter_temp(TempRole::LambdaCapture, ty).slot();
-                    capture_materializations.push((i, cap, slot, ty));
-                    slot
-                }) else {
-                    return false;
+                // The literal is placed from here on: a capture fact it lacks fails the emission
+                // rather than turning the call into a real one.
+                let Some(cap_bindings) =
+                    self.bind_placed_captures(a, i, &mut capture_materializations)
+                else {
+                    return true;
                 };
                 // This lambda's own locals start where the host's frame is free at the invoke, not
                 // above every host local. `None` only when the body could not be decoded, in which
@@ -7018,17 +7025,7 @@ impl<'a> Emitter<'a> {
                     }
                 };
                 crate::trace_compiler!("splice", "literal-lambda call spliced: {reason:?}");
-                return self.try_inline_unified(
-                    call_expression,
-                    name,
-                    inline_only,
-                    splice_desc,
-                    args,
-                    leading_non_argument_operands,
-                    &body,
-                    base,
-                    code,
-                );
+                return self.try_inline_unified(&inline_call, base, code);
             }
             return self.inline_value_used_lambda_call(&inline_call, code);
         }
