@@ -6381,7 +6381,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   annotated with '@OptionalExpectation' can only be used in common module sources.` (identical
   on 2.4.0, 2.4.10 and 2.4.20). Annotation classifiers are no longer inferred from the common
   stdlib KLIB. An accessor use (`@JsStatic get()`, `@JsStatic set(v)`) follows the same rules:
-  common output is byte-identical and a platform source gets the same diagnostic. Tests: `optional_expectation_annotation_e2e`, `jvm::optional_annotations` and
+  common output is byte-identical and a platform source gets the same diagnostic. Tests:
+  `optional_expectation_annotation_e2e`, `jvm::optional_annotations` and
   `metadata::decode::module_mapping` unit tests.
 
 - **Annotations on property accessors are declaration annotations of the getter, the setter and

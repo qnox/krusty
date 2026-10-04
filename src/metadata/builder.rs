@@ -999,7 +999,8 @@ fn property_pb(st: &mut StringTable<'_>, m: &PropMeta, annotations_in_metadata: 
         jvm.field_message(4, setter);
     }
     p.field_message(100, &jvm); // JvmProtoBuf.propertySignature = 100
-                                // The accessors' records intern after the JVM signature, the getter's first.
+
+    // The accessors' records intern after the JVM signature, the getter's first.
     if annotations_in_metadata {
         let accessors = &m.accessor_annotations;
         for (field, annotations) in [(15, &accessors.getter), (16, &accessors.setter)] {

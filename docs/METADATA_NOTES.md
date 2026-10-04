@@ -148,6 +148,13 @@ Reverse-engineered from kotlinc for `class Point(val x: Int, var y: String)` (se
   `Property.flags` (8710 → 8711) — and because kotlinc derives an accessor's DEFAULT flags word from
   the property's (that bit included), an annotated property with plain accessors also writes
   `getter_flags`/`setter_flags` = 6 explicitly.
+- An annotation written on an accessor (`@A get`, `@A set`) sets `hasAnnotations` (bit 0) in that
+  accessor's flags word (`getter_flags` f7, `setter_flags` f8), which therefore differs from the
+  default word and is written. Its records go to `Property.getter_annotation` (f15) and
+  `setter_annotation` (f16); an annotation on the setter's parameter (`set(@A v)`) sets the bit on
+  `setter_value_parameter` and records it in that `ValueParameter.annotation` (f7). Arguments are
+  recorded as for any declaration annotation, and only where annotations are written into metadata
+  at all. Test: `tests/property_accessor_annotation_e2e.rs`.
 - A member property's modality (bits 4-5) follows its declaration, not its class (kotlinc 2.4.20):
   `open`, and an `override` not marked `final`, are OPEN even in a final class; `abstract`, and an
   interface property without a getter, are ABSTRACT; an interface property with a getter is OPEN.
