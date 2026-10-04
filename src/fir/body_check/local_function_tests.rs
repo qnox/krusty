@@ -820,6 +820,47 @@ fn local_function_reference_uses_body_local_callable_identity() {
 }
 
 #[test]
+fn suspend_local_function_reference_keeps_its_suspend_function_type() {
+    let (body, _) = checked_function_body(
+        "fun outer(): Any { suspend fun local() {}; return ::local }\n",
+        "outer",
+    );
+    let FirExprKind::Block { statements, .. } =
+        &body.expr(root_expression(&body)).expect("root block").kind
+    else {
+        panic!("function body must be a FIR block")
+    };
+    let FirStatementKind::Expression(return_expression) =
+        body.statement(statements[1]).expect("return").kind
+    else {
+        panic!("second statement must return the reference")
+    };
+    let FirExprKind::Jump {
+        value: Some(reference),
+        ..
+    } = body
+        .expr(return_expression)
+        .expect("return expression")
+        .kind
+    else {
+        panic!("return must contain the local reference")
+    };
+    let FirExprKind::LocalCallableReference {
+        function_type,
+        adaptation,
+        ..
+    } = &body.expr(reference).expect("local reference").kind
+    else {
+        panic!("local reference must retain a body-local callable coordinate")
+    };
+    assert!(adaptation.is_none());
+    assert!(matches!(
+        function_type.get(),
+        Ty::Fun(signature) if signature.suspend && signature.params.is_empty() && signature.ret == Ty::Unit
+    ));
+}
+
+#[test]
 fn local_extension_receiver_resolves_a_preceding_local_classifier_before_fir() {
     let (body, index) = checked_function_body(
         "fun box(): String {\n\
