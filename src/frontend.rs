@@ -284,9 +284,26 @@ fn actualize_headers_and_collect_inherited_defaults(
                 .iter()
                 .map(|parameter| parameter.flags.has_default())
                 .collect::<Vec<_>>();
-            (headers.syntax.parameters(target_parameters).len() == defaults.len()
-                && defaults.iter().any(|default| *default))
-            .then_some((pair, target_parameters, defaults))
+            let actual_defaults = headers
+                .syntax
+                .parameters(target_parameters)
+                .iter()
+                .map(|parameter| parameter.flags.has_default())
+                .collect::<Vec<_>>();
+            // An actual that writes a default on every parameter the expect defaulted owns those
+            // expressions. The expect stays the provider only for a parameter the actual left bare;
+            // publishing the expect here would evaluate its values and drop the actual's.
+            let actual_owns_defaults = defaults.len() == actual_defaults.len()
+                && actual_defaults.iter().any(|wrote| *wrote)
+                && defaults
+                    .iter()
+                    .zip(&actual_defaults)
+                    .all(|(expect_default, actual_default)| !expect_default || *actual_default);
+            if actual_owns_defaults {
+                return None;
+            }
+            (actual_defaults.len() == defaults.len() && defaults.iter().any(|default| *default))
+                .then_some((pair, target_parameters, defaults))
         })
         .collect::<Vec<_>>();
     let work = inherited_defaults

@@ -6280,8 +6280,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   of the member-modality rule). Interface bridges synthesize across FILES of one module: a
   cross-file module interface's erased signatures come from the symbol table (generic-iface
   direction only — body-presence isn't recorded there, so the fake-override direction stays
-  same-file). Tests: `mpp_expect_actual_e2e`; corpus `multiplatform/` 75 PASS / 0 FAIL
-  (box total 2744 → 2825).
+  same-file). A parameter default written only on the `expect` stays the expression provider
+  for the surviving `actual` (`foo("O")` appends the expect's `"K"`). An `actual` that writes a
+  default for every such parameter owns those expressions instead: `copyInto` uses `42`, `43`, and
+  `size + 44`, and a call through an override sees the actual interface default `"actual"`. Tests:
+  `mpp_expect_actual_e2e`; corpus `multiplatform/`, including
+  `multiplatform/k2/defaultArguments/bothInExpectAndActual.kt` and `bothInExpectAndActual2.kt`.
 
 - **`expect`/`actual` requires the multiplatform feature, and an `expect` declaration may not carry
   a body.** Two independent checks, both syntactic and both measured against the reference
