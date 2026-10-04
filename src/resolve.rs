@@ -216,7 +216,7 @@ pub(crate) use diagnostic_selection::unresolved_member_message;
 pub(crate) use finalized_projection::{
     project_finalized_signatures, publish_stable_declaration_metadata,
 };
-pub use for_loop_iteration::{ProgressionMember, ProgressionPlans};
+pub use for_loop_iteration::{IterationPlans, LoopMemberProperty};
 pub(crate) use inspection_analysis::{
     check_preinferred_file_in_source_set_with_index, inspection_source_declaration_keys,
 };
@@ -9950,7 +9950,7 @@ pub struct TypeInfo {
     /// operator call. Ordinary counted primitive progressions have no entry.
     pub for_range_iterator_protocols: HashMap<StmtId, ForRangeIteratorTarget>,
     /// `kotlin.ranges` progression classes a counted loop may read, with their selected members.
-    pub progression_plans: ProgressionPlans,
+    pub iteration_plans: IterationPlans,
     /// Bound classpath/library property references selected while checking, keyed by the
     /// `Expr::CallableRef` expression. Lowering emits the recorded getter instead of re-resolving.
     /// Classpath/library constructors selected while checking, keyed by the construction call.
@@ -36160,7 +36160,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         resolved_destructure_components: HashMap::new(),
         iterator_protocols: HashMap::new(),
         for_range_iterator_protocols: HashMap::new(),
-        progression_plans: ProgressionPlans::default(),
+        iteration_plans: IterationPlans::default(),
         resolved_constructors: HashMap::new(),
         resolved_enum_entry_constructors: HashMap::new(),
         resolved_ctor_delegations: HashMap::new(),
@@ -37576,7 +37576,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         resolved_destructure_components,
         iterator_protocols,
         for_range_iterator_protocols,
-        progression_plans,
+        iteration_plans,
         resolved_constructors,
         resolved_enum_entry_constructors,
         resolved_ctor_delegations,
@@ -37927,7 +37927,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         resolved_destructure_components,
         iterator_protocols,
         for_range_iterator_protocols,
-        progression_plans,
+        iteration_plans,
         resolved_constructors,
         resolved_enum_entry_constructors,
         resolved_ctor_delegations,
@@ -38863,7 +38863,7 @@ struct Checker<'a> {
     resolved_destructure_components: HashMap<(StmtId, usize), DestructureComponentTarget>,
     iterator_protocols: HashMap<ExprId, IteratorProtocolTarget>,
     for_range_iterator_protocols: HashMap<StmtId, ForRangeIteratorTarget>,
-    progression_plans: ProgressionPlans,
+    iteration_plans: IterationPlans,
     resolved_constructors: HashMap<ExprId, ResolvedConstructor>,
     resolved_enum_entry_constructors: HashMap<(u32, u32), ResolvedConstructor>,
     resolved_ctor_delegations: HashMap<(DeclId, usize), ResolvedCtorDelegation>,

@@ -46,7 +46,7 @@ impl BodyLowering<'_> {
                 target,
                 binding,
                 variable_ty: *variable_ty,
-                kind: *kind,
+                kind,
                 iterable: *iterable,
                 body,
             }),

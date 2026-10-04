@@ -18,12 +18,12 @@ pub(super) enum LoopBinding<'a> {
     WithIndex(&'a FirWithIndexLoop),
 }
 
-/// The checked pieces of one loop indexing an array or a `String`.
+/// The checked pieces of one loop indexing an array or a `CharSequence`.
 pub(super) struct IterableLoopContract<'a> {
     pub(super) target: ControlTargetId,
     pub(super) binding: LoopBinding<'a>,
     pub(super) variable_ty: ResolvedTy,
-    pub(super) kind: FirBuiltinIterableKind,
+    pub(super) kind: &'a FirBuiltinIterableKind,
     pub(super) iterable: FirExprId,
     pub(super) body: FirExprId,
 }
@@ -125,7 +125,7 @@ impl BodyLowering<'_> {
                 target,
                 binding: LoopBinding::Variable(*variable),
                 variable_ty: *variable_ty,
-                kind: *kind,
+                kind,
                 iterable: *iterable,
                 body,
             }),
@@ -267,12 +267,12 @@ impl BodyLowering<'_> {
                 });
                 (Some(setup), self.ir.add_expr(IrExpr::GetValue(slot)))
             };
-        let first = self.progression_member_read(&progression.first, value)?;
-        let last = self.progression_member_read(&progression.last, value)?;
+        let first = self.member_property_read(&progression.first, value)?;
+        let last = self.member_property_read(&progression.last, value)?;
         let step = progression
             .step
             .as_ref()
-            .map(|step| self.progression_member_read(step, value))
+            .map(|step| self.member_property_read(step, value))
             .transpose()?;
         Ok(IrProgressionSource::Value {
             setup,
@@ -282,9 +282,9 @@ impl BodyLowering<'_> {
         })
     }
 
-    /// A read of a selected progression member on the stored progression `value` (a leaf read,
-    /// re-read for each member).
-    fn progression_member_read(
+    /// A read of a selected member property on the stored receiver `value` (a leaf read, re-read
+    /// for each read).
+    pub(super) fn member_property_read(
         &mut self,
         target: &crate::fir::FirPropertyTarget,
         value: ExprId,
@@ -298,7 +298,7 @@ impl BodyLowering<'_> {
             dispatch,
         } = target
         else {
-            return Err(FirLoweringFailure::UnsupportedProgressionMember);
+            return Err(FirLoweringFailure::UnsupportedLoopMember);
         };
         let receiver_value = self.ir.add_expr(self.ir.expr(value).clone());
         self.external_property_access(super::source_calls::ExternalPropertyRequest {
@@ -342,10 +342,6 @@ impl BodyLowering<'_> {
             }
             _ => None,
         };
-        let (size_operation, get_operation) = match kind {
-            FirBuiltinIterableKind::Array => (IrIntrinsic::ArraySize, IrIntrinsic::ArrayGet),
-            FirBuiltinIterableKind::String => (IrIntrinsic::StringLength, IrIntrinsic::StringGet),
-        };
         let iterable_value = self.expression(iterable)?;
         let stable_slot = stable_local.and_then(|value| {
             matches!(self.ir.expr(iterable_value), IrExpr::GetValue(slot) if *slot == self.value_slot(value))
@@ -375,39 +371,55 @@ impl BodyLowering<'_> {
             init: Some(zero),
             named: false,
         });
-        let receiver = self.ir.add_expr(IrExpr::GetValue(iterable_slot));
-        let size = self.ir.add_expr(IrExpr::Call {
-            callee: Callee::Intrinsic {
-                operation: size_operation,
-                ret: Ty::Int,
-            },
-            dispatch_receiver: Some(receiver),
-            args: Vec::new(),
-        });
-        let size_slot = self.allocate_temporary();
-        let size_declaration = self.ir.add_expr(IrExpr::Variable {
-            index: size_slot,
-            ty: Ty::Int,
-            init: Some(size),
-            named: false,
-        });
-        let index_read = self.ir.add_expr(IrExpr::GetValue(index_slot));
-        let size_read = self.ir.add_expr(IrExpr::GetValue(size_slot));
-        let condition = self.ir.add_expr(IrExpr::PrimitiveBinOp {
-            op: IrBinOp::Lt,
-            lhs: index_read,
-            rhs: size_read,
-        });
-        let receiver = self.ir.add_expr(IrExpr::GetValue(iterable_slot));
-        let index_read = self.ir.add_expr(IrExpr::GetValue(index_slot));
-        let element = self.ir.add_expr(IrExpr::Call {
-            callee: Callee::Intrinsic {
-                operation: get_operation,
-                ret: variable_ty.get(),
-            },
-            dispatch_receiver: Some(receiver),
-            args: vec![index_read],
-        });
+        let (size_declaration, condition, element) = match kind {
+            FirBuiltinIterableKind::Array | FirBuiltinIterableKind::String => {
+                let (size_operation, get_operation) = match kind {
+                    FirBuiltinIterableKind::String => {
+                        (IrIntrinsic::StringLength, IrIntrinsic::StringGet)
+                    }
+                    _ => (IrIntrinsic::ArraySize, IrIntrinsic::ArrayGet),
+                };
+                let receiver = self.ir.add_expr(IrExpr::GetValue(iterable_slot));
+                let size = self.ir.add_expr(IrExpr::Call {
+                    callee: Callee::Intrinsic {
+                        operation: size_operation,
+                        ret: Ty::Int,
+                    },
+                    dispatch_receiver: Some(receiver),
+                    args: Vec::new(),
+                });
+                let size_slot = self.allocate_temporary();
+                let size_declaration = self.ir.add_expr(IrExpr::Variable {
+                    index: size_slot,
+                    ty: Ty::Int,
+                    init: Some(size),
+                    named: false,
+                });
+                let index_read = self.ir.add_expr(IrExpr::GetValue(index_slot));
+                let size_read = self.ir.add_expr(IrExpr::GetValue(size_slot));
+                let condition = self.ir.add_expr(IrExpr::PrimitiveBinOp {
+                    op: IrBinOp::Lt,
+                    lhs: index_read,
+                    rhs: size_read,
+                });
+                let receiver = self.ir.add_expr(IrExpr::GetValue(iterable_slot));
+                let index_read = self.ir.add_expr(IrExpr::GetValue(index_slot));
+                let element = self.ir.add_expr(IrExpr::Call {
+                    callee: Callee::Intrinsic {
+                        operation: get_operation,
+                        ret: variable_ty.get(),
+                    },
+                    dispatch_receiver: Some(receiver),
+                    args: vec![index_read],
+                });
+                (Some(size_declaration), condition, element)
+            }
+            FirBuiltinIterableKind::CharSequence(indexing) => {
+                let (condition, element) =
+                    self.char_sequence_indexing(indexing, iterable_slot, iterable_ty, index_slot)?;
+                (None, condition, element)
+            }
+        };
         let mut iteration = self.iteration(binding, variable_ty, element, false)?;
         iteration.push(self.expression(body)?);
         let body = self.ir.add_expr(IrExpr::Block {
@@ -434,7 +446,9 @@ impl BodyLowering<'_> {
         });
         let mut statements = Vec::with_capacity(4);
         statements.extend(iterable_declaration);
-        statements.extend([index_declaration, size_declaration, loop_expression]);
+        statements.push(index_declaration);
+        statements.extend(size_declaration);
+        statements.push(loop_expression);
         Ok(self.ir.add_expr(IrExpr::Block {
             stmts: statements,
             value: None,
@@ -583,7 +597,26 @@ impl BodyLowering<'_> {
                 Some(receiver),
             ),
         };
-        match &call.target {
+        self.loop_call(
+            &call.target,
+            dispatch_receiver,
+            extension_receiver,
+            &arguments,
+            &context_parameter_types,
+        )
+    }
+
+    /// A call a loop makes on its own to a selected `target`, with its receivers and arguments
+    /// already lowered.
+    pub(super) fn loop_call(
+        &mut self,
+        target: &crate::fir::FirCallTarget,
+        dispatch_receiver: Option<ExprId>,
+        extension_receiver: Option<ExprId>,
+        arguments: &[crate::ir::IrCheckedArgument],
+        context_parameter_types: &[Ty],
+    ) -> Result<ExprId, FirLoweringFailure> {
+        match target {
             // A loop protocol is never reached through `super`.
             crate::fir::FirCallTarget::Super { .. } => {
                 Err(FirLoweringFailure::UnsupportedIntrinsicCall)
@@ -596,8 +629,8 @@ impl BodyLowering<'_> {
                     *target,
                     super::source_calls::DispatchOperand::plain(dispatch_receiver),
                     extension_receiver,
-                    &arguments,
-                    &context_parameter_types,
+                    arguments,
+                    context_parameter_types,
                     &[],
                     None,
                 )
@@ -635,7 +668,7 @@ impl BodyLowering<'_> {
                     dispatch_receiver,
                     dispatch_class: Self::static_class(*receiver),
                     extension_receiver,
-                    arguments: &arguments,
+                    arguments,
                 })
                 .ok_or(FirLoweringFailure::UnsupportedExternalCall(*declaration)),
             crate::fir::FirCallTarget::Intrinsic {
@@ -651,7 +684,7 @@ impl BodyLowering<'_> {
                     *result,
                     dispatch_receiver,
                     extension_receiver,
-                    &arguments,
+                    arguments,
                 )
                 .ok_or(FirLoweringFailure::UnsupportedIntrinsicCall),
         }

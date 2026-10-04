@@ -19,6 +19,7 @@ mod bottom_value_tests;
 mod builtin_operation_tests;
 #[cfg(test)]
 mod call_target_tests;
+mod char_sequence_loops;
 mod checked;
 mod checked_arguments;
 mod classifier_references;

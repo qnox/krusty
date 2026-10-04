@@ -4,8 +4,9 @@
 
 use super::*;
 use crate::fir::{
-    FirBuiltinIterableKind, FirConversionKind, FirDestructureEntry, FirExprKind,
-    FirIndexedValueComponent, FirStatementId, FirStatementKind, FirWithIndexLoop, LocalValueId,
+    FirBuiltinIterableKind, FirCharSequenceIndexing, FirConversionKind, FirDestructureEntry,
+    FirExprKind, FirIndexedValueComponent, FirStatementId, FirStatementKind, FirWithIndexLoop,
+    LocalValueId,
 };
 use crate::libraries::CompilerIntrinsic;
 use crate::resolve::ResolvedCall;
@@ -33,6 +34,7 @@ impl BodyFirChecker<'_> {
         if super::calls::selected_extension_intrinsic(call) != Some(CompilerIntrinsic::WithIndex) {
             return Ok(None);
         }
+        let declared_receiver = call.receiver;
         let Expr::Call { callee, .. } = self.file.expr(iterable) else {
             return Ok(None);
         };
@@ -67,8 +69,13 @@ impl BodyFirChecker<'_> {
             return Ok(None);
         };
         let element = self.allocate_local();
-        let Some(nested) =
-            self.with_index_nested_header(statement, receiver_source, receiver.value, element)?
+        let Some(nested) = self.with_index_nested_header(
+            statement,
+            receiver_source,
+            receiver.value,
+            element,
+            declared_receiver,
+        )?
         else {
             return Ok(None);
         };
@@ -217,15 +224,17 @@ impl BodyFirChecker<'_> {
     }
 
     /// `NestedHeaderInfoBuilderForWithIndex`: the loop over the receiver of `withIndex()`, in the
-    /// order of its handlers. A progression is counted, an array or a `String` is indexed, and an
-    /// `Iterable` or a `Sequence` is iterated through the `iterator()` resolution selected for the
-    /// receiver.
+    /// order of its handlers. A progression is counted, an array, a `String` or another
+    /// `CharSequence` is indexed, and an `Iterable` or a `Sequence` is iterated through the
+    /// `iterator()` resolution selected for the receiver. `declared_receiver` is the receiver type
+    /// of the selected `withIndex()`.
     fn with_index_nested_header(
         &mut self,
         statement: StmtId,
         receiver_source: ExprId,
         receiver: FirExprId,
         element: LocalValueId,
+        declared_receiver: Ty,
     ) -> Result<Option<FirLoopHeader>, BodyCheckFailure> {
         let span = self
             .file
@@ -249,6 +258,19 @@ impl BodyFirChecker<'_> {
                 iterable: receiver,
             }));
         }
+        if declared_receiver.obj_internal() == Some(crate::types::wk::char_sequence()) {
+            return self
+                .char_sequence_indexing(span, declared_receiver)?
+                .map(|indexing| {
+                    Ok(FirLoopHeader::Iterable {
+                        variable: element,
+                        variable_ty: self.resolved_type(span, Ty::Char)?,
+                        kind: FirBuiltinIterableKind::CharSequence(Box::new(indexing)),
+                        iterable: receiver,
+                    })
+                })
+                .transpose();
+        }
         let Some(protocol) = self.info.iterator_protocol(receiver_source).cloned() else {
             return Ok(None);
         };
@@ -260,5 +282,35 @@ impl BodyFirChecker<'_> {
         }
         self.iterator_loop_header_from_protocol(statement, element, element_ty, receiver, &protocol)
             .map(Some)
+    }
+
+    /// The `length` and `get` of `kotlin.CharSequence` (`char_sequence`) resolution selected for
+    /// indexing a `CharSequence`. `None` keeps the loop iterating `IndexedValue`s.
+    fn char_sequence_indexing(
+        &self,
+        span: crate::diag::Span,
+        char_sequence: Ty,
+    ) -> Result<Option<FirCharSequenceIndexing>, BodyCheckFailure> {
+        let Some(indexing) = self.info.char_sequence_indexing() else {
+            return Ok(None);
+        };
+        let length = self.property_target_at(
+            Some(span),
+            None,
+            Some(super::properties::ExternalPropertyTarget {
+                property: indexing.length.property,
+                receiver: Some(char_sequence),
+                parameters: Vec::new(),
+                result: indexing.length.ty,
+                extension_receiver_parameter: None,
+            }),
+            false,
+            &[],
+        )?;
+        let get = self.selected_call_target(Some(span), Some(&indexing.get))?;
+        Ok(Some(FirCharSequenceIndexing {
+            length,
+            get: get.target,
+        }))
     }
 }

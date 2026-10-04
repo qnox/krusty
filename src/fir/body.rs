@@ -24,6 +24,8 @@ pub use ranges::{
     FirProgressionClass, FirProgressionSource, FirRangeComparisonProvenance, FirRangeCounterKind,
     FirRangeOperation, FirRuntimeFunction,
 };
+mod indexed_iteration;
+pub use indexed_iteration::{FirBuiltinIterableKind, FirCharSequenceIndexing};
 mod with_index;
 pub use with_index::{FirIndexedValueComponent, FirWithIndexLoop};
 mod property_access;
@@ -767,12 +769,6 @@ pub enum FirBinaryOperation {
     ShiftLeft,
     ShiftRight,
     UnsignedShiftRight,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum FirBuiltinIterableKind {
-    Array,
-    String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

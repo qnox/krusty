@@ -187,3 +187,10 @@ pub const INDEXED_VALUE_INDEX: &str = "index";
 
 /// The `IndexedValue` property holding the element itself: the second component.
 pub const INDEXED_VALUE_VALUE: &str = "value";
+
+/// The `kotlin.CharSequence` property kotlinc's `CharSequenceIterationHandler` bounds an indexed
+/// loop over a `CharSequence` with.
+pub const CHAR_SEQUENCE_LENGTH: &str = "length";
+
+/// The indexed-access operator convention (`OperatorNameConventions.GET`).
+pub const INDEXED_GET: &str = "get";

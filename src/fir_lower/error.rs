@@ -33,9 +33,9 @@ pub enum FirLoweringFailure {
         origin: OriginId,
         ty: crate::types::Ty,
     },
-    /// A counted loop's progression member that is not a dependency property; the checker only
-    /// selects `kotlin.ranges` members, which are.
-    UnsupportedProgressionMember,
+    /// A member a counted or indexed loop reads that is not a dependency property; the checker
+    /// only selects `kotlin.ranges` and `kotlin.CharSequence` members, which are.
+    UnsupportedLoopMember,
     MissingCallable(CallableId),
     /// A same-module inline call whose checked template could not be expanded at this call site.
     /// kotlinc always inlines it, so there is no ordinary call to lower instead.

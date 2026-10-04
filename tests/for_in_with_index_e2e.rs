@@ -10,14 +10,19 @@
 //!     n`), its counter is the index;
 //!   * otherwise `var index = 0` follows the nested loop's variables, and each iteration reads
 //!     `val i = index; index = index + 1` before the element;
+//!   * a `CharSequence` other than a `String` reads its `length` before every iteration;
 //!   * the first component (or `.index`) is the index and the second (or `.value`) the element.
 //!
 //! A loop variable that is not destructured in the header keeps the `IndexedValue` iteration.
 use super::common;
 
 fn assert_identical(name: &str, src: &str) {
+    assert_identical_cp(name, src, &[common::stdlib_jar()]);
+}
+
+fn assert_identical_cp(name: &str, src: &str, classpath: &[std::path::PathBuf]) {
     let class = format!("{name}Kt");
-    common::byte_diff_against_kotlinc_cp(name, src, &class, &[common::stdlib_jar()])
+    common::byte_diff_against_kotlinc_cp(name, src, &class, classpath)
         .expect("the reference kotlinc is provisioned")
         .unwrap_or_else(|diff| panic!("{class} differs from kotlinc:\n{diff}"));
 }
@@ -43,10 +48,15 @@ fn arrays_use_their_counter_as_the_index() {
 
 #[test]
 fn char_sequences_use_their_counter_as_the_index() {
-    assert_identical(
+    // `StringBuilder` is the JDK's class.
+    assert_identical_cp(
         "WithIndexText",
-        "fun string(text: String): Int { var s = 0; for ((i, c) in text.withIndex()) s += i + c.code; return s }\n\
-         fun chars(text: CharSequence): Int { var s = 0; for ((i, c) in text.withIndex()) s += i + c.code; return s }\n",
+        "fun string(text: String): Int { var s = 0; for ((i, c) in text.withIndex()) if (c == 'a') s += i; return s }\n\
+         fun chars(text: CharSequence): Int { var s = 0; for ((i, c) in text.withIndex()) if (c == 'a') s += i; return s }\n\
+         fun builder(text: StringBuilder): Int { var s = 0; for ((i, c) in text.withIndex()) if (c == 'a') s += i; return s }\n\
+         fun <C : CharSequence> bounded(text: C): Int { var s = 0; for ((i, _) in text.withIndex()) s += i; return s }\n\
+         fun computed(text: () -> CharSequence): Int { var s = 0; for ((_, c) in text().withIndex()) if (c == 'a') s += 1; return s }\n",
+        &[common::stdlib_jar(), common::jdk_modules()],
     );
 }
 
@@ -111,6 +121,8 @@ fn break_and_continue_keep_the_index_in_step() {
                \x20   val xs = IntArray(6) { it * 10 }\n\
                \x20   for ((i, v) in xs.withIndex()) { if (i == 1) continue; if (v == 40) break; out += \"$i:$v \" }\n\
                \x20   for ((i, c) in \"abcde\".withIndex()) { if (c == 'b') continue; if (i == 3) break; out += \"$i$c \" }\n\
+               \x20   val text: CharSequence = \"vwxyz\"\n\
+               \x20   for ((i, c) in text.withIndex()) { if (c == 'w') continue; if (i == 3) break; out += \"$i~$c \" }\n\
                \x20   for ((i, v) in Numbers(5).withIndex()) { if (i % 2 == 1) continue; if (v == 14) break; out += \"$i=$v \" }\n\
                \x20   for ((i, v) in (5 downTo 1).withIndex()) { if (v == 4) continue; if (i == 3) break; out += \"$i/$v \" }\n\
                \x20   for ((i, _) in (1..9 step 3).withIndex()) out += \"#$i\"\n\
@@ -119,5 +131,8 @@ fn break_and_continue_keep_the_index_in_step() {
     let actual =
         common::compile_and_run_box(src, "with_index_jumps", &[common::stdlib_jar()], None)
             .expect("the source compiles and the JVM runner is provisioned");
-    assert_eq!(actual, "0:0 2:20 3:30 0a 2c 0=10 2=12 0/5 2/3 #0#1#2");
+    assert_eq!(
+        actual,
+        "0:0 2:20 3:30 0a 2c 0~v 2~x 0=10 2=12 0/5 2/3 #0#1#2"
+    );
 }

@@ -1,6 +1,7 @@
 //! What a `for` loop iterates through, as checked FIR consumes it: the iterator protocol, selected
-//! as ordinary operator calls, and for a `kotlin.ranges` progression the `first`, `last` and `step`
-//! members kotlinc's `ForLoopsLowering` reads instead of iterating.
+//! as ordinary operator calls, for a `kotlin.ranges` progression the `first`, `last` and `step`
+//! members kotlinc's `ForLoopsLowering` reads instead of iterating, and for a `CharSequence` the
+//! `length` and `get` it indexes with.
 
 use crate::ast::{ExprId, StmtId};
 use crate::diag::Span;
@@ -17,9 +18,9 @@ use super::{Checker, CheckerScope, IncDecSite, IteratorProtocolTarget};
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProgressionPlan {
     pub class: wk::ProgressionClass,
-    pub first: ProgressionMember,
-    pub last: ProgressionMember,
-    pub step: ProgressionMember,
+    pub first: LoopMemberProperty,
+    pub last: LoopMemberProperty,
+    pub step: LoopMemberProperty,
     /// The comparison a counted loop over unsigned elements orders them with: the declaration
     /// carrying the provider's `UnsignedCompare` role for the element's carrier. `None` for a
     /// signed or `Char` element.
@@ -30,15 +31,27 @@ pub struct ProgressionPlan {
 /// and the `getProgressionLastElement` overload a `step` over it needs are selected independently,
 /// so a loop that never steps does not depend on the helper.
 #[derive(Clone, Debug, Default)]
-pub struct ProgressionPlans {
+pub struct IterationPlans {
     members: HashMap<Ty, ProgressionPlan>,
     /// The overload a stepped progression of the class moves its `last` with
     /// (`getProgressionLastElementByReturnType`), over the element type, or `Int` for a `Char`
     /// progression.
     last_elements: HashMap<Ty, RuntimeFunction>,
+    /// `kotlin.CharSequence`'s own `length` and `get`, selected once a loop indexes a
+    /// `CharSequence`.
+    char_sequence: Option<CharSequenceIndexing>,
 }
 
-impl ProgressionPlans {
+/// The members kotlinc's `CharSequenceIterationHandler` indexes a `CharSequence` with: the
+/// `length` it compares the index with on every iteration and the `get(Int)` it reads each
+/// element with, both declared by `kotlin.CharSequence` itself whatever the receiver's class.
+#[derive(Clone, Debug)]
+pub struct CharSequenceIndexing {
+    pub length: LoopMemberProperty,
+    pub get: Box<super::ResolvedCall>,
+}
+
+impl IterationPlans {
     /// The selected `first`, `last` and `step` of progression class `class`.
     pub fn plan(&self, class: Ty) -> Option<&ProgressionPlan> {
         self.members.get(&class)
@@ -48,15 +61,24 @@ impl ProgressionPlans {
     pub fn last_element(&self, class: Ty) -> Option<&RuntimeFunction> {
         self.last_elements.get(&class)
     }
+
+    /// The selected `CharSequence.length` and `CharSequence.get`.
+    pub fn char_sequence(&self) -> Option<&CharSequenceIndexing> {
+        self.char_sequence.as_ref()
+    }
 }
 
 impl super::TypeInfo {
     pub fn progression_plan(&self, class: Ty) -> Option<&ProgressionPlan> {
-        self.progression_plans.plan(class)
+        self.iteration_plans.plan(class)
     }
 
     pub fn progression_last_element(&self, class: Ty) -> Option<&RuntimeFunction> {
-        self.progression_plans.last_element(class)
+        self.iteration_plans.last_element(class)
+    }
+
+    pub fn char_sequence_indexing(&self) -> Option<&CharSequenceIndexing> {
+        self.iteration_plans.char_sequence()
     }
 }
 
@@ -68,9 +90,9 @@ pub struct RuntimeFunction {
     pub result: Ty,
 }
 
-/// A selected member property of a progression class, read on a receiver of that class.
+/// A selected member property a counted loop reads on a receiver of the declaring class.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ProgressionMember {
+pub struct LoopMemberProperty {
     pub property: ExternalPropertyId,
     /// The selected property's type on the progression receiver.
     pub ty: Ty,
@@ -200,6 +222,10 @@ impl Checker<'_> {
         }
         let receiver_ty = call.receiver;
         let class = receiver_ty.obj_internal();
+        if class == Some(wk::char_sequence()) {
+            self.record_char_sequence_indexing(receiver_ty);
+            return;
+        }
         if class != Some(wk::iterable()) && class != Some(wk::sequence()) {
             return;
         }
@@ -221,6 +247,82 @@ impl Checker<'_> {
         }
     }
 
+    /// Select `length` and `get(Int)` on `kotlin.CharSequence` (`char_sequence`), once per checked
+    /// file: the declarations kotlinc's `CharSequenceIterationHandler` takes from the class itself.
+    /// A family that selects no single member leaves the loop iterating `IndexedValue`s.
+    fn record_char_sequence_indexing(&mut self, char_sequence: Ty) {
+        if self.iteration_plans.char_sequence.is_some() {
+            return;
+        }
+        let Some(length) = self
+            .resolver()
+            .select_member_property(char_sequence, wk::CHAR_SEQUENCE_LENGTH)
+            .and_then(|selected| {
+                Some(LoopMemberProperty {
+                    property: selected.property?.getter.external_property_identity?,
+                    ty: selected.ty,
+                })
+            })
+            .filter(|length| length.ty == Ty::Int)
+        else {
+            return;
+        };
+        let Some(get) = self.char_sequence_get(char_sequence) else {
+            return;
+        };
+        crate::trace_compiler!(
+            "resolve",
+            "CharSequence indexed through {length:?} and {get:?}"
+        );
+        self.iteration_plans.char_sequence = Some(CharSequenceIndexing {
+            length,
+            get: Box::new(get),
+        });
+    }
+
+    /// The member `operator fun get(index: Int): Char` of `kotlin.CharSequence`, selected among the
+    /// class's members by ordinary overload selection over an `Int` argument.
+    fn char_sequence_get(&self, char_sequence: Ty) -> Option<super::ResolvedCall> {
+        let name = wk::INDEXED_GET;
+        let (mut functions, _) = self
+            .stable_receiver_callables(char_sequence, name)
+            .into_parts();
+        functions
+            .overloads
+            .retain(|candidate| candidate.kind == crate::libraries::FnKind::Member);
+        let callables = crate::libraries::Callables::Functions(functions);
+        let crate::symbol_resolver::CandidateSelection::Selected((selected, params, ret)) = self
+            .resolver()
+            .select_receiver_function_with_params_tracking(
+                char_sequence,
+                name,
+                &[crate::symbol_resolver::CallArgKind::Typed(Ty::Int)],
+                &[],
+                &callables,
+                None,
+            )
+        else {
+            return None;
+        };
+        if !selected.flags.operator || selected.context_count != 0 || ret != Ty::Char {
+            return None;
+        }
+        let mut member = selected.member_with_return(ret);
+        member.params = params;
+        Some(super::ResolvedCall::Member(
+            crate::symbol_resolver::ResolvedMember {
+                receiver: char_sequence,
+                physical_params: selected.callable.physical_params.clone(),
+                context_args: Vec::new(),
+                ret,
+                member,
+                projected_return_hazard: selected.projected_return_hazard,
+                suspend: selected.flags.suspend,
+                origin: selected.callable.origin.clone(),
+            },
+        ))
+    }
+
     /// Select the member plan of every well-known progression class, once per checked file. A
     /// counted loop may read any of them: its iterable's own class, a class `step`/`reversed` is
     /// applied to, or the most precise class of a `val` it reads, whatever type the iterable
@@ -236,7 +338,7 @@ impl Checker<'_> {
     /// counted loop that needs one is then rejected by the checker rather than iterated.
     fn record_progression_plan(&mut self, ty: Ty) {
         let ty = ty.platform_lower_bound().non_null();
-        if !ty.type_args().is_empty() || self.progression_plans.members.contains_key(&ty) {
+        if !ty.type_args().is_empty() || self.iteration_plans.members.contains_key(&ty) {
             return;
         }
         let Some(class) = ty.obj_internal().and_then(wk::progression_class) else {
@@ -245,7 +347,7 @@ impl Checker<'_> {
         let resolver = self.resolver();
         let member = |name| {
             let selected = resolver.select_member_property(ty, name)?;
-            Some(ProgressionMember {
+            Some(LoopMemberProperty {
                 property: selected.property?.getter.external_property_identity?,
                 ty: selected.ty,
             })
@@ -261,9 +363,7 @@ impl Checker<'_> {
             first.ty
         };
         if let Some(last_element) = self.progression_last_element(element, step.ty) {
-            self.progression_plans
-                .last_elements
-                .insert(ty, last_element);
+            self.iteration_plans.last_elements.insert(ty, last_element);
         }
         let compare = if first.ty.is_unsigned() {
             match self.unsigned_loop_compare(first.ty) {
@@ -273,7 +373,7 @@ impl Checker<'_> {
         } else {
             None
         };
-        self.progression_plans.members.insert(
+        self.iteration_plans.members.insert(
             ty,
             ProgressionPlan {
                 class,
