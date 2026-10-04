@@ -62,13 +62,13 @@ impl Parser<'_> {
                 let (qname, annotation_span) = self.parse_annotation_reference();
                 let args = self.parse_annotation_args();
                 if !qname.is_empty() {
-                    self.file.file_annotations.push((
-                        AnnotationRef {
-                            name: qname,
-                            span: annotation_span,
-                        },
-                        args,
-                    ));
+                    let annotation = AnnotationRef {
+                        name: qname,
+                        span: annotation_span,
+                    };
+                    let policy = self.file.use_site_annotation(annotation.clone(), &args);
+                    self.file.file_annotation_policies.push(policy);
+                    self.file.file_annotations.push((annotation, args));
                 }
                 if self.at(TokenKind::Comma) {
                     self.bump();
@@ -80,13 +80,13 @@ impl Parser<'_> {
         let (qname, annotation_span) = self.parse_annotation_reference();
         let args = self.parse_annotation_args();
         if target == "file" && !qname.is_empty() {
-            self.file.file_annotations.push((
-                AnnotationRef {
-                    name: qname.clone(),
-                    span: annotation_span,
-                },
-                args.clone(),
-            ));
+            let annotation = AnnotationRef {
+                name: qname.clone(),
+                span: annotation_span,
+            };
+            let policy = self.file.use_site_annotation(annotation.clone(), &args);
+            self.file.file_annotation_policies.push(policy);
+            self.file.file_annotations.push((annotation, args.clone()));
         }
         if use_site || qname.is_empty() {
             (None, args)

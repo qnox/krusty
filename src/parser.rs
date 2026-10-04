@@ -4774,33 +4774,22 @@ impl<'a> Parser<'a> {
                 }
             }
         }
-        // Statement annotations have no codegen representation, but `@Suppress` is a scoped
-        // frontend directive. Retain only its compact names on the decorated transient statement.
+        // Statement annotations have no codegen representation, but `@Suppress` and opt-in
+        // acceptance are scoped frontend policies. Retain what they read on the transient statement.
         if self.at(TokenKind::At) {
-            let mut suppressions = Vec::new();
+            let mut annotations = Vec::new();
             while self.at(TokenKind::At) {
                 let (annotation, arguments) = self.parse_annotation();
-                if annotation.as_ref().is_some_and(|annotation| {
-                    annotation
-                        .name
-                        .rsplit('.')
-                        .next()
-                        .is_some_and(|name| name == "Suppress")
-                }) {
-                    suppressions.extend(
-                        arguments
-                            .into_iter()
-                            .filter_map(|argument| self.file.const_string_value(argument))
-                            .map(|value| value.to_lossy().to_owned()),
-                    );
+                if let Some(annotation) = annotation {
+                    annotations.push(self.file.use_site_annotation(annotation, &arguments));
                 }
                 self.skip_newlines();
             }
             let statement = self.parse_stmt();
-            if !suppressions.is_empty() {
+            if !annotations.is_empty() {
                 self.file
-                    .statement_suppressions
-                    .insert(statement, suppressions);
+                    .statement_annotations
+                    .insert(statement, annotations);
             }
             return statement;
         }

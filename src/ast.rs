@@ -20,12 +20,14 @@ pub(crate) mod definitely_evaluated;
 mod destructuring;
 mod operators;
 mod type_refs;
+mod use_site_annotations;
 pub(crate) use call_shape::explicit_call_receiver;
 pub use call_shape::{first_lambda_param_or_it, lambda_params_or_implicit};
 pub use constructors::{CtorDelegation, CtorDelegationCall, SecondaryCtor};
 pub use declaration_prefixes::{DeclarationPrefix, DeclarationPrefixes};
 pub use destructuring::{DestructureProperty, DestructuringSyntax};
 pub use operators::{BinOp, UnOp};
+pub use use_site_annotations::UseSiteAnnotation;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct ExprId(pub u32);
@@ -1566,9 +1568,10 @@ pub struct File {
     /// This keeps access diagnostics attached to the exact annotation occurrence instead of treating
     /// one declaration's `@Suppress` as file-wide.
     pub detached_type_ref_suppressions: std::collections::HashMap<u32, Vec<String>>,
-    /// Diagnostic names suppressed by an annotation on one executable statement. This remains
-    /// transient parse state and is discarded with the active body AST after checking.
-    pub statement_suppressions: std::collections::HashMap<StmtId, Vec<String>>,
+    /// Annotations on one executable statement or expression. This remains transient parse state
+    /// and is discarded with the active body AST after checking.
+    pub statement_annotations: std::collections::HashMap<StmtId, Vec<UseSiteAnnotation>>,
+    pub expression_annotations: std::collections::HashMap<ExprId, Vec<UseSiteAnnotation>>,
     /// Number of source lines, including a final empty line after a trailing newline.
     pub source_line_count: u32,
     pub decls: Vec<DeclId>,
@@ -1837,6 +1840,8 @@ pub struct File {
     /// argument expressions. Resolution binds the reference span to a semantic classifier identity;
     /// plugins may still use the retained spelling for source-oriented configuration.
     pub file_annotations: Vec<(AnnotationRef, Vec<ExprId>)>,
+    /// What the file annotations' lexical policies read; every bounded declaration unit keeps it.
+    pub file_annotation_policies: Vec<UseSiteAnnotation>,
     /// `ExprId`s of call arguments written with the spread operator (`*arr`). The marked id is the
     /// inner expression (the `arr` of `*arr`), which is what appears in the call's `args`. Lets the
     /// vararg lowering pass the array through (`Arrays.copyOf`) instead of packing it as one element.
@@ -1897,6 +1902,8 @@ pub struct File {
     /// `+EagerLambdaAnalysis`: a lambda that does not discriminate applicable candidates by its
     /// shape is analyzed before the most specific candidate is chosen.
     pub eager_lambda_analysis: bool,
+    /// Opt-in markers accepted module-wide (`-opt-in`), as dotted fully qualified names.
+    pub opted_in_markers: Vec<String>,
 }
 
 impl File {

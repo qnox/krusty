@@ -991,6 +991,9 @@ pub struct LibraryCallable {
     /// extension receiver must unbox to the value class's underlying; `params[0]` is already erased and
     /// cannot make that distinction. This is the un-erased-source-type down payment on task B.
     pub source_receiver: Option<Ty>,
+    /// Annotation class identities declared on this callable. Consumers decide which annotations
+    /// affect resolution/emission; the library layer only records their qualified identities.
+    pub annotations: Vec<crate::types::TypeName>,
     /// The callee's DECLARED (un-erased, pre-substitution) parameter types in physical source order:
     /// leading contexts, then an extension receiver when present, then value parameters. An ordinary
     /// member's dispatch receiver is not included. This is the parameter analogue of
@@ -1726,9 +1729,6 @@ pub struct FunctionInfo {
     /// receiver's member level beside same-named member functions; selection runs once over both
     /// and the constructor path then materializes the selected declaration.
     pub bound_inner_constructor: Option<BoundInnerConstructor>,
-    /// Annotation class identities declared on this callable. Consumers decide which annotations affect
-    /// resolution/emission; the library layer only records their qualified identities.
-    pub annotations: Vec<crate::types::TypeName>,
 }
 
 /// Where an extension receiver sits among a callable's PHYSICAL parameters. Kotlin puts the leading
@@ -1951,7 +1951,6 @@ impl FunctionInfo {
             source_member: None,
             implicit_classifier_callable: None,
             bound_inner_constructor: None,
-            annotations: Vec::new(),
         }
     }
 
@@ -1994,7 +1993,7 @@ impl FunctionInfo {
         member.projected_return_hazard = self.projected_return_hazard;
         member.inline = self.flags.inline;
         member.reified = self.flags.reified;
-        member.annotations = self.annotations.clone();
+        member.annotations = self.callable.annotations.clone();
         member.visibility = self.visibility;
         member.set_suspend(self.flags.suspend);
         member.set_is_operator(self.flags.operator);

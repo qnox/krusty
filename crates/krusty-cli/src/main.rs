@@ -259,14 +259,14 @@ pub fn compile(opts: &cli::Options) -> Result<usize, String> {
         .map(|(p, s)| (p.as_str(), s.as_str()))
         .collect();
     if diags.has_errors() {
+        // Like kotlinc, a failed compilation reports its errors only.
+        diags
+            .diags
+            .retain(|diagnostic| diagnostic.severity == krusty::diag::Severity::Error);
         return Err(format!(
             "{}krusty: {} error(s)\n",
             diags.render_all(&rendered),
-            diags
-                .diags
-                .iter()
-                .filter(|diagnostic| diagnostic.severity == krusty::diag::Severity::Error)
-                .count()
+            diags.diags.len()
         ));
     }
     // Warnings alone do not fail the compilation, but they are still reported.

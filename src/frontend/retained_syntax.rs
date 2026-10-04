@@ -1048,10 +1048,16 @@ pub(super) fn compact(file: &mut File) {
         .into_iter()
         .filter_map(|(old, nested)| statements.get(&old).copied().map(|new| (new, nested)))
         .collect();
-    file.statement_suppressions = std::mem::take(&mut file.statement_suppressions)
+    file.statement_annotations = std::mem::take(&mut file.statement_annotations)
         .into_iter()
-        .filter_map(|(old, suppressions)| {
-            statements.get(&old).copied().map(|new| (new, suppressions))
+        .filter_map(|(old, annotations)| {
+            statements.get(&old).copied().map(|new| (new, annotations))
+        })
+        .collect();
+    file.expression_annotations = std::mem::take(&mut file.expression_annotations)
+        .into_iter()
+        .filter_map(|(old, annotations)| {
+            expressions.get(&old).copied().map(|new| (new, annotations))
         })
         .collect();
     file.assignment_target_spans = std::mem::take(&mut file.assignment_target_spans)

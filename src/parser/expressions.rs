@@ -245,6 +245,7 @@ impl Parser<'_> {
                 if !is_soft_kw && next_starts_expr {
                     let name = name.to_string();
                     let lspan = self.file.expr_spans[lhs.0 as usize];
+                    let name_span = self.tok().span;
                     self.bump(); // infix function name
                     self.skip_newlines();
                     self.relabel_left_operand(label_mark, Some(&name));
@@ -259,6 +260,9 @@ impl Parser<'_> {
                         },
                         Span::new(lspan.lo, rspan.hi),
                     );
+                    self.file
+                        .exact_member_name_spans
+                        .insert(callee.0, name_span);
                     lhs = self.file.add_expr(
                         Expr::Call {
                             callee,
@@ -335,11 +339,23 @@ impl Parser<'_> {
         // ordinary annotation grammar, then continue with the same prefix-expression parser so
         // annotations compose with labels, unary operators, and anonymous functions.
         if self.at(TokenKind::At) {
+            let mut annotations = Vec::new();
             while self.at(TokenKind::At) {
-                self.parse_annotation();
+                let (annotation, arguments) = self.parse_annotation();
+                if let Some(annotation) = annotation {
+                    annotations.push(self.file.use_site_annotation(annotation, &arguments));
+                }
                 self.skip_newlines();
             }
-            return self.parse_prefix();
+            let expression = self.parse_prefix();
+            if !annotations.is_empty() {
+                self.file
+                    .expression_annotations
+                    .entry(expression)
+                    .or_default()
+                    .extend(annotations);
+            }
+            return expression;
         }
         // A jump operand is a full expression, including an elvis chain.
         if self.at(TokenKind::Ident) && self.keyword_text("throw") {

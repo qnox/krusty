@@ -10553,6 +10553,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   provide equally is `overload resolution ambiguity between candidates:`, followed by each
   candidate's header (`class Item : Any`), at the reference. Verified against kotlinc 2.4.20.
   (`tests/nested_type_parameter_bound_e2e.rs`.)
+- **Opt-in requirements (`@RequiresOptIn`).** A declaration needs opt-in to each marker it is
+  annotated with, a marker being an annotation class annotated `@RequiresOptIn`. A callable (local
+  variables and parameters included) also needs the markers of the classifiers named in its
+  declared return, receiver and parameter types, type arguments included; a classifier needs those
+  of its outer classes, and a constructor those of its class. A use reports at the callee or member
+  name, a qualifier at its start, a type reference at its span and a supertype at its reference;
+  a call's written or inferred type arguments report at the callee. The use is accepted when the
+  marker or `@OptIn(Marker::class)` annotates an enclosing declaration, statement or expression,
+  the file (`@file:OptIn`), or the compiler gets `-opt-in=Marker` (a test writes
+  `// OPT_IN: Marker`). The message is `this declaration needs opt-in. Its usage must be marked
+  with '@M' or '@OptIn(M::class)'` (`should` for a `WARNING`-level marker, which warns), or the
+  marker's `message` with its first letter lowercased. As in kotlinc, warnings are not printed when
+  the compilation has errors. Uses through a type alias are not checked yet. Verified against
+  kotlinc 2.4.20. (`tests/opt_in_usage_e2e.rs`.)
 
 ## 8. Success criteria for the PoC
 
