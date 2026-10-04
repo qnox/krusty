@@ -8,7 +8,9 @@
 //!
 //! A class delegate's property accessors dispatch virtually; a type-parameter delegate forwards
 //! through its bound, even when that bound applies the interface with other type arguments; and a
-//! delegate with no class type (a function type) keeps the interface declaration's call.
+//! delegate with no class type (a function type) keeps the interface declaration's call. A
+//! delegate class whose member overrides the forwarded declaration through several supertypes
+//! dispatches virtually to it, and a member a superclass already implements gets no forwarder.
 
 use super::common;
 
@@ -64,6 +66,50 @@ class Chained<D : Transform<D, D>, A : D>(a: A) : Transform<D, A> by a
 
 class Call(f: () -> String) : () -> String by f
 
+interface Collected {
+    fun first(): String
+    val second: String
+}
+
+interface Listed : Collected {
+    override fun first(): String
+    override val second: String
+}
+
+interface Grown : Collected
+
+interface GrownList : Listed, Grown
+
+abstract class AbstractCollected protected constructor() : Collected {
+    abstract override fun first(): String
+    abstract override val second: String
+}
+
+class Arrayed : GrownList, AbstractCollected() {
+    override fun first(): String = "O"
+    override val second: String = "K"
+}
+
+class Overridden : Grown by Arrayed()
+
+interface Slot {
+    var x: String
+}
+
+open class LateSlot : Slot {
+    override lateinit var x: String
+}
+
+interface Shadow : Slot
+
+open class FixedSlot : Shadow {
+    override var x: String
+        get() = "OK"
+        set(_) {}
+}
+
+class Hidden : LateSlot(), Shadow by FixedSlot()
+
 fun box(): String {
     val items = ArrayList<String>()
     items.add("O")
@@ -91,6 +137,11 @@ fun box(): String {
     val echo = Echo()
     if (Chained<Echo, Echo>(echo).apply(echo) !== echo) return "Chained"
     if (Call { "OK" }() != "OK") return "Call"
+    val overridden = Overridden()
+    if (overridden.first() + overridden.second != "OK") return "Overridden"
+    val hidden = Hidden()
+    hidden.x = "OK"
+    if (hidden.x != "OK") return "Hidden"
     return Forwarded().text()
 }
 "#;
@@ -118,6 +169,7 @@ fn delegate_member_calls_match_kotlinc() {
         ("Bounded", &["text", "maybe"]),
         ("Chained", &["apply"]),
         ("Call", &["invoke"]),
+        ("Overridden", &["first", "getSecond"]),
     ];
     for (class, methods) in cases {
         let pair = common::ModuleClassPair::compile(&[("DelegateMemberCall.kt", SOURCE)], class);
