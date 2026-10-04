@@ -708,12 +708,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   typed `Any?`, so `invokeSuspend` boxes it after the `COROUTINE_SUSPENDED` check
   (`dup; getCOROUTINE_SUSPENDED; if_acmpne; areturn; checkcast carrier; X.box-impl; areturn`, a
   nullable carrier keeping `null`). A caller resumed with the value therefore unboxes it
-  (`checkcast X; unbox-impl`), and the fast path uses the carrier the call returned, skipping that
-  unbox. It cannot hand its own continuation to such a call: kotlinc builds a state machine for
-  `suspend fun test() = bar().s` and for `suspend fun g(): X = bar()`. A scalar carrier crosses as
-  the box on both paths (`Boxed`), and so does a nullable result whose ordinary erasure is the box
-  (`Result<String>?`, `X(val v: Int)?`). A nullable result over a non-null reference (`Name?`)
-  keeps the carrier, null included. Following kotlinc's
+  (`checkcast X; unbox-impl`). It cannot hand its own continuation to such a call: kotlinc builds a
+  state machine for `suspend fun test() = bar().s` and for `suspend fun g(): X = bar()`. A scalar
+  carrier crosses as the box on both paths (`Boxed`), and so does a nullable result whose ordinary
+  erasure is the box (`Result<String>?`, `X(val v: Int)?`). A nullable result over a non-null
+  reference (`Name?`) keeps the carrier, null included. A caller must not treat the carrier a
+  non-suspending completion returned as a box: `Result.success("OK")` is that `String`, and
+  casting it to `kotlin.Result` fails. Following kotlinc's
   `originalReturnTypeOfSuspendFunctionReturningUnboxedInlineClass`, a suspend override also returns
   the box when a declaration it overrides, in this module or a dependency, returns another
   classifier, a type parameter included (`override suspend fun generic(): X` over
