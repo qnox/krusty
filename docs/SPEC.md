@@ -8809,6 +8809,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     `Any`, which also changed the generic `Signature` attribute (`<Y:TX;>`).
   Tests: `tests/type_of_e2e.rs` (cross-checked against the reference compiler with kotlin-reflect)
   and `jvm::type_of::tests`; the corpus's `reflection/typeOf`, `ktype` and `typeErasure` cases.
+  An anonymous object declared in an inline function and capturing one of that function's
+  `crossinline` lambdas is a separate class at each call (`<caller>$$inlined$<callee>$N`).
+  `typeOf` of the instance names that copy, so two call sites compare unequal. A capture-free
+  lambda is inlined into the copy's methods and is not a constructor argument; the declaration
+  class still takes the lambda. A lambda that itself captures values stays the copy's constructor
+  argument. Tests: `fir_lower::inlining::escaping_inline_object` and
+  `tests/local_object_type_of_e2e.rs`. Corpus: `reflection/typeOf/localClass.kt`.
   A generic top-level extension property's accessors are generic methods and carry a `Signature`
   (`<P:Ljava/lang/Object;>(TP;)Lkotlin/reflect/KType;`), as kotlinc emits.
   Not yet: a reified member inline function (it is called rather than inlined, `typeOf` or not), a

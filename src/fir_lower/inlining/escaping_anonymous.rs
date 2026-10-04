@@ -1,10 +1,16 @@
-//! Call-site copies of anonymous objects that use a reified type parameter.
+//! Call-site copies of anonymous objects that use a reified type parameter, and of anonymous
+//! objects that capture an inline lambda.
 //!
 //! An anonymous object's methods are separate functions. Substituting types only in the inlined
 //! template leaves `new Declaration$1` pointing at the declaration class, whose `T` is erased.
 //! This module clones that class when the expansion fixes a reified type its members use, and
 //! points the copied construction at the clone. The declaration class stays in place so its own
 //! body can keep the reified marker.
+//!
+//! A `crossinline` lambda captured by the object is the other reason to copy. kotlinc regenerates
+//! that class at every call, and `typeOf` of the instance names the copy. A capture-free lambda is
+//! inlined into the copy's methods and dropped from its constructor. A lambda that itself captures
+//! values stays a constructor argument of the copy.
 
 use std::collections::{HashMap, HashSet};
 
@@ -23,9 +29,10 @@ pub(super) struct CallSite<'a> {
     pub inline_callee_source_name: &'a str,
 }
 
-/// Point each copied construction of a reified anonymous object at a class specialized for this
-/// expansion. A class that does not use the reified binding is left alone. Once it does, a missing
-/// body or accessor mapping fails the lowering instead of keeping the declaration class.
+/// Point each copied construction of an anonymous object at a class specialized for this
+/// expansion. A class that does not use the reified binding and does not capture an inline lambda
+/// is left alone. Once it is copied, a missing body or accessor mapping fails the lowering instead
+/// of keeping the declaration class.
 pub(super) fn specialize(
     ir: &mut crate::ir::IrFile,
     roots: impl IntoIterator<Item = ExprId>,
@@ -33,17 +40,19 @@ pub(super) fn specialize(
     reified_bindings: &HashMap<String, Ty>,
     site: &CallSite<'_>,
 ) -> Result<(), super::super::FirLoweringFailure> {
-    if reified_bindings.is_empty() {
-        return Ok(());
-    }
     let expansion = Expansion {
         bindings,
         reified_bindings,
         site,
     };
     let mut seen = HashSet::new();
-    for root in roots {
-        retarget(ir, root, &expansion, &mut seen)?;
+    let mut renames = HashMap::new();
+    let roots = roots.into_iter().collect::<Vec<_>>();
+    for root in &roots {
+        retarget(ir, *root, &expansion, &mut seen, &mut renames)?;
+    }
+    for root in &roots {
+        rename_class_types(ir, *root, &renames);
     }
     Ok(())
 }
@@ -59,6 +68,7 @@ fn retarget(
     root: ExprId,
     expansion: &Expansion<'_>,
     seen: &mut HashSet<ExprId>,
+    renames: &mut HashMap<TypeName, TypeName>,
 ) -> Result<(), super::super::FirLoweringFailure> {
     let mut pending = vec![root];
     let mut constructions = Vec::new();
@@ -76,7 +86,8 @@ fn retarget(
         let IrExpr::New { internal, .. } = ir.expr(expression).clone() else {
             continue;
         };
-        let Some(specialized) = specialized_class(ir, internal, expression, expansion, seen)?
+        let Some(specialized) =
+            specialized_class(ir, internal, expression, expansion, seen, renames)?
         else {
             continue;
         };
@@ -106,6 +117,7 @@ fn retarget(
             }
         }
     }
+    rename_class_types(ir, root, renames);
     Ok(())
 }
 
@@ -115,6 +127,7 @@ fn specialized_class(
     order: ExprId,
     expansion: &Expansion<'_>,
     seen: &mut HashSet<ExprId>,
+    renames: &mut HashMap<TypeName, TypeName>,
 ) -> Result<Option<TypeName>, super::super::FirLoweringFailure> {
     let Some(source) = ir.class_id_by_name(internal) else {
         return Ok(None);
@@ -126,15 +139,20 @@ fn specialized_class(
     if !anonymous {
         return Ok(None);
     }
-    if !class_uses_binding(ir, source, expansion.reified_bindings, &mut HashSet::new()) {
+    let uses_reified =
+        class_uses_binding(ir, source, expansion.reified_bindings, &mut HashSet::new());
+    let lambdas = inline_lambda_arguments(ir, source, order)?;
+    if !uses_reified && lambdas.is_empty() {
         return Ok(None);
     }
     let class_name = ir.classes[source as usize].fq_name;
+    if uses_reified {
+        ir.reified_anonymous_declarations.insert(source);
+    }
     let field_count = u32::try_from(ir.classes[source as usize].fields.len())
         .map_err(|_| malformed(class_name))?;
     let property_count = u32::try_from(ir.classes[source as usize].properties.len())
         .map_err(|_| malformed(class_name))?;
-    ir.reified_anonymous_declarations.insert(source);
     let placeholder = crate::types::type_name(&format!("specialized-anon#{order}"));
     let source_methods = ir.classes[source as usize].methods.clone();
     let mut cloned_methods = Vec::with_capacity(source_methods.len());
@@ -193,6 +211,9 @@ fn specialized_class(
         .collect::<Vec<_>>();
     copy_override_edges(ir, source_name, placeholder, &methods)?;
     remap_owned_class(ir, &owned, source, class_id, internal, placeholder);
+    let omitted_capture_fields =
+        consume_capture_free_lambdas(ir, class_id, order, &lambdas, class_name)?;
+    renames.insert(internal, placeholder);
     ir.specialized_anonymous_classes.insert(
         class_id,
         crate::ir::IrSpecializedAnonymousClass {
@@ -209,15 +230,16 @@ fn specialized_class(
             reified_bindings: expansion.reified_bindings.clone(),
             field_count,
             property_count,
+            omitted_capture_fields,
         },
     );
     for method in ir.classes[class_id as usize].methods.clone() {
         if let Some(body) = ir.functions[method as usize].body {
-            retarget(ir, body, expansion, seen)?;
+            retarget(ir, body, expansion, seen, renames)?;
         }
     }
     if let Some(body) = ir.classes[class_id as usize].init_body {
-        retarget(ir, body, expansion, seen)?;
+        retarget(ir, body, expansion, seen, renames)?;
     }
     Ok(Some(placeholder))
 }
@@ -403,8 +425,16 @@ fn publish_one_copy(
         .get(copy_id as usize)
         .map(|class| class.fq_name)
         .ok_or_else(|| malformed(source_name))?;
-    if ir.classes[copy_id as usize].fields.len() != spec.field_count as usize
+    if ir.classes[copy_id as usize].fields.len() + spec.omitted_capture_fields as usize
+        != spec.field_count as usize
         || ir.classes[copy_id as usize].properties.len() != spec.property_count as usize
+    {
+        return Err(malformed(source_name));
+    }
+    // A field appended to the declaration after the copy is indexed from `field_count`. Dropping a
+    // capture shifts every later index, so that append is not the copy's next field.
+    if spec.omitted_capture_fields != 0
+        && ir.classes[source as usize].fields.len() > spec.field_count as usize
     {
         return Err(malformed(source_name));
     }
@@ -870,6 +900,493 @@ fn remap_class(
         }
         IrExpr::PropertyRead { owner, .. } | IrExpr::PropertyWrite { owner, .. } => name(owner),
         _ => {}
+    }
+}
+
+struct InlineLambdaArgument {
+    parameter: usize,
+    field: u32,
+    impl_fn: u32,
+    inline_body: ExprId,
+    capture_count: usize,
+}
+
+/// Constructor arguments of `construction` that pass an inline lambda into a capture of `class`.
+fn inline_lambda_arguments(
+    ir: &crate::ir::IrFile,
+    class: ClassId,
+    construction: ExprId,
+) -> Result<Vec<InlineLambdaArgument>, super::super::FirLoweringFailure> {
+    let class_name = ir.classes[class as usize].fq_name;
+    let IrExpr::New { args, .. } = ir.expr(construction) else {
+        return Ok(Vec::new());
+    };
+    let args = args.clone();
+    let ctor_args = ir.classes[class as usize].ctor_args.clone();
+    if args.len() != ctor_args.len() {
+        let captures_lambda = ctor_args.iter().enumerate().any(|(index, argument)| {
+            argument.provenance == crate::ir::IrCtorParameterProvenance::Capture
+                && args
+                    .get(index)
+                    .is_some_and(|arg| inline_lambda(ir, *arg).is_some())
+        });
+        if captures_lambda {
+            return Err(malformed(class_name));
+        }
+        return Ok(Vec::new());
+    }
+    let mut found = Vec::new();
+    for (index, argument) in ctor_args.iter().enumerate() {
+        if argument.provenance != crate::ir::IrCtorParameterProvenance::Capture {
+            continue;
+        }
+        let Some((impl_fn, inline_body, capture_count)) = inline_lambda(ir, args[index]) else {
+            continue;
+        };
+        let Some(field) = argument.field_index else {
+            return Err(malformed(class_name));
+        };
+        found.push(InlineLambdaArgument {
+            parameter: index,
+            field,
+            impl_fn,
+            inline_body,
+            capture_count,
+        });
+    }
+    Ok(found)
+}
+
+fn inline_lambda(ir: &crate::ir::IrFile, expression: ExprId) -> Option<(u32, ExprId, usize)> {
+    match ir.expr(expression) {
+        IrExpr::Lambda {
+            impl_fn,
+            captures,
+            inline_body: Some(inline_body),
+            ..
+        } => Some((*impl_fn, *inline_body, captures.len())),
+        _ => None,
+    }
+}
+
+/// Inline each capture-free lambda into the copy and drop it from the constructor. A lambda that
+/// captures values stays a constructor argument: the copy is still a distinct class, and its
+/// methods keep calling the stored function.
+fn consume_capture_free_lambdas(
+    ir: &mut crate::ir::IrFile,
+    class: ClassId,
+    construction: ExprId,
+    lambdas: &[InlineLambdaArgument],
+    class_name: TypeName,
+) -> Result<u32, super::super::FirLoweringFailure> {
+    let mut removals = Vec::new();
+    for lambda in lambdas {
+        if lambda.capture_count != 0 {
+            continue;
+        }
+        inline_lambda_into_field_invokes(ir, class, lambda.field, lambda.inline_body, class_name)?;
+        ir.inline_only_fns.insert(lambda.impl_fn);
+        ir.functions
+            .get_mut(lambda.impl_fn as usize)
+            .ok_or_else(|| malformed(class_name))?
+            .body = None;
+        removals.push((lambda.parameter, lambda.field));
+    }
+    removals.sort_unstable();
+    removals.dedup();
+    let omitted = u32::try_from(removals.len()).map_err(|_| malformed(class_name))?;
+    for (parameter, field) in removals.into_iter().rev() {
+        remove_capture(ir, class, construction, parameter, field, class_name)?;
+    }
+    Ok(omitted)
+}
+
+fn inline_lambda_into_field_invokes(
+    ir: &mut crate::ir::IrFile,
+    class: ClassId,
+    field: u32,
+    inline_body: ExprId,
+    class_name: TypeName,
+) -> Result<(), super::super::FirLoweringFailure> {
+    let mut roots = ir.classes[class as usize]
+        .methods
+        .iter()
+        .filter_map(|method| ir.functions.get(*method as usize)?.body)
+        .collect::<Vec<_>>();
+    roots.extend(ir.classes[class as usize].init_body);
+    let mut pending = roots;
+    let mut seen = HashSet::new();
+    let mut invocations = Vec::new();
+    while let Some(expression) = pending.pop() {
+        if !seen.insert(expression) {
+            continue;
+        }
+        if let IrExpr::Lambda { .. } = ir.expr(expression) {
+            continue;
+        }
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+        if let IrExpr::InvokeFunction { func, .. } = ir.expr(expression) {
+            if reads_capture_field(ir, *func, class, field) {
+                invocations.push(expression);
+            }
+        }
+    }
+    for invocation in invocations {
+        let (body, _) = crate::ir::clone_expression_dag(ir, inline_body);
+        ir.exprs[invocation as usize] = IrExpr::Block {
+            stmts: Vec::new(),
+            value: Some(body),
+        };
+    }
+    if capture_field_remains(ir, class, field) {
+        return Err(malformed(class_name));
+    }
+    Ok(())
+}
+
+fn reads_capture_field(
+    ir: &crate::ir::IrFile,
+    expression: ExprId,
+    class: ClassId,
+    field: u32,
+) -> bool {
+    match ir.expr(expression) {
+        IrExpr::GetField {
+            class: owner,
+            index,
+            ..
+        } => *owner == class && *index == field,
+        IrExpr::NotNullAssert { operand, .. } => reads_capture_field(ir, *operand, class, field),
+        _ => false,
+    }
+}
+
+fn capture_field_remains(ir: &crate::ir::IrFile, class: ClassId, field: u32) -> bool {
+    let mut roots = ir.classes[class as usize]
+        .methods
+        .iter()
+        .filter_map(|method| ir.functions.get(*method as usize)?.body)
+        .collect::<Vec<_>>();
+    roots.extend(ir.classes[class as usize].init_body);
+    let mut pending = roots;
+    let mut seen = HashSet::new();
+    while let Some(expression) = pending.pop() {
+        if !seen.insert(expression) {
+            continue;
+        }
+        if let IrExpr::Lambda { .. } = ir.expr(expression) {
+            continue;
+        }
+        if let IrExpr::GetField {
+            class: owner,
+            index,
+            ..
+        } = ir.expr(expression)
+        {
+            if *owner == class && *index == field {
+                return true;
+            }
+        }
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+    }
+    false
+}
+
+fn remove_capture(
+    ir: &mut crate::ir::IrFile,
+    class: ClassId,
+    construction: ExprId,
+    parameter: usize,
+    field: u32,
+    class_name: TypeName,
+) -> Result<(), super::super::FirLoweringFailure> {
+    shift_capture_reads(ir, class, field);
+    let declaration = &mut ir.classes[class as usize];
+    if field as usize >= declaration.fields.len()
+        || parameter >= declaration.ctor_args.len()
+        || declaration.ctor_param_count == 0
+        || declaration.constructor_prefix_count == 0
+    {
+        return Err(malformed(class_name));
+    }
+    let parameter_index = u32::try_from(parameter).map_err(|_| malformed(class_name))?;
+    declaration.fields.remove(field as usize);
+    declaration.ctor_param_count -= 1;
+    declaration.constructor_prefix_count -= 1;
+    for argument in &mut declaration.ctor_args {
+        if let Some(index) = argument.field_index.as_mut() {
+            if *index > field {
+                *index -= 1;
+            }
+        }
+    }
+    declaration
+        .pre_super_param_fields
+        .retain(|(param, stored)| *param != parameter_index && *stored != field);
+    for (param, stored) in &mut declaration.pre_super_param_fields {
+        if *param > parameter_index {
+            *param -= 1;
+        }
+        if *stored > field {
+            *stored -= 1;
+        }
+    }
+    if !declaration.ctor_param_annotations.is_empty() {
+        if declaration.ctor_param_annotations.len() != declaration.ctor_args.len() {
+            return Err(malformed(class_name));
+        }
+        declaration.ctor_param_annotations.remove(parameter);
+    }
+    declaration.ctor_args.remove(parameter);
+    shift_capture_map(&mut ir.shared_class_capture_fields, class, field);
+    shift_capture_map(&mut ir.class_capture_identities, class, field);
+    let IrExpr::New {
+        args,
+        ctor_params,
+        default_prefix_count,
+        ..
+    } = &mut ir.exprs[construction as usize]
+    else {
+        return Err(malformed(class_name));
+    };
+    if parameter >= args.len() {
+        return Err(malformed(class_name));
+    }
+    args.remove(parameter);
+    if let Some(parameters) = ctor_params {
+        if parameter >= parameters.len() {
+            return Err(malformed(class_name));
+        }
+        parameters.remove(parameter);
+    }
+    if parameter < *default_prefix_count as usize {
+        *default_prefix_count -= 1;
+    }
+    Ok(())
+}
+
+fn shift_capture_reads(ir: &mut crate::ir::IrFile, class: ClassId, removed: u32) {
+    let mut roots = ir.classes[class as usize]
+        .methods
+        .iter()
+        .filter_map(|method| ir.functions.get(*method as usize)?.body)
+        .collect::<Vec<_>>();
+    roots.extend(ir.classes[class as usize].init_body);
+    let mut pending = roots;
+    let mut seen = HashSet::new();
+    while let Some(expression) = pending.pop() {
+        if !seen.insert(expression) {
+            continue;
+        }
+        if let IrExpr::Lambda { .. } = ir.expr(expression) {
+            continue;
+        }
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+        if let IrExpr::GetField {
+            class: owner,
+            index,
+            ..
+        } = &mut ir.exprs[expression as usize]
+        {
+            if *owner == class && *index > removed {
+                *index -= 1;
+            }
+        }
+    }
+}
+
+fn shift_capture_map<V: Clone>(
+    map: &mut std::collections::HashMap<(ClassId, u32), V>,
+    class: ClassId,
+    removed: u32,
+) {
+    let owned = map
+        .iter()
+        .filter(|((owner, _), _)| *owner == class)
+        .map(|((owner, index), value)| ((*owner, *index), Clone::clone(value)))
+        .collect::<Vec<_>>();
+    for ((owner, index), _) in &owned {
+        map.remove(&(*owner, *index));
+    }
+    for ((owner, index), value) in owned {
+        if index == removed {
+            continue;
+        }
+        let index = if index > removed { index - 1 } else { index };
+        map.insert((owner, index), value);
+    }
+}
+
+fn rename_class_types(
+    ir: &mut crate::ir::IrFile,
+    root: ExprId,
+    names: &HashMap<TypeName, TypeName>,
+) {
+    if names.is_empty() {
+        return;
+    }
+    let mut pending = vec![root];
+    let mut seen = HashSet::new();
+    while let Some(expression) = pending.pop() {
+        if !seen.insert(expression) {
+            continue;
+        }
+        if let IrExpr::Lambda { .. } = ir.expr(expression) {
+            rename_expression(ir, expression, names);
+            continue;
+        }
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+        rename_expression(ir, expression, names);
+    }
+}
+
+fn rename_expression(
+    ir: &mut crate::ir::IrFile,
+    expression: ExprId,
+    names: &HashMap<TypeName, TypeName>,
+) {
+    if let Some(ty) = ir.logical_types.get_mut(&expression) {
+        *ty = rename_ty(*ty, names);
+    }
+    if let Some(ty) = ir.physical_types.get_mut(&expression) {
+        *ty = rename_ty(*ty, names);
+    }
+    if let Some(ty) = ir.call_declared_ret.get_mut(&expression) {
+        *ty = rename_ty(*ty, names);
+    }
+    if let Some(parameters) = ir.call_declared_params.get_mut(&expression) {
+        rename_tys(parameters, names);
+    }
+    if let Some(substitutions) = ir.reified_call_subst.get_mut(&expression) {
+        for (_, ty) in substitutions {
+            *ty = rename_ty(*ty, names);
+        }
+    }
+    if let Some(substitutions) = ir.inline_call_type_arguments.get_mut(&expression) {
+        for (_, ty) in substitutions {
+            *ty = rename_ty(*ty, names);
+        }
+    }
+    let Some(node) = ir.exprs.get_mut(expression as usize) else {
+        return;
+    };
+    match node {
+        IrExpr::Call { callee, .. } => rename_callee(callee, names),
+        IrExpr::Checked(operation) => rename_checked(operation, names),
+        IrExpr::KClassLiteral { classifier, .. } => {
+            if let Some(classifier) = classifier {
+                *classifier = rename_ty(*classifier, names);
+            }
+        }
+        IrExpr::TypeOp { type_operand, .. } => *type_operand = rename_ty(*type_operand, names),
+        IrExpr::ClassConst {
+            internal: Some(internal),
+        } => {
+            if let Some(name) = names.get(internal) {
+                *internal = *name;
+            }
+        }
+        IrExpr::New {
+            internal,
+            ctor_params,
+            ..
+        } => {
+            if let Some(name) = names.get(internal) {
+                *internal = *name;
+            }
+            if let Some(parameters) = ctor_params {
+                rename_tys(parameters, names);
+            }
+        }
+        IrExpr::InvokeFunction { params, ret, .. } => {
+            rename_tys(params, names);
+            *ret = rename_ty(*ret, names);
+        }
+        IrExpr::Variable { ty, .. } => *ty = rename_ty(*ty, names),
+        _ => {}
+    }
+}
+
+fn rename_callee(callee: &mut crate::ir::Callee, names: &HashMap<TypeName, TypeName>) {
+    if let crate::ir::Callee::External {
+        params,
+        ret,
+        substitutions,
+        ..
+    } = callee
+    {
+        rename_tys(params, names);
+        *ret = rename_ty(*ret, names);
+        for substitution in substitutions {
+            substitution.value = rename_ty(substitution.value, names);
+            rename_tys(&mut substitution.additional_bounds, names);
+        }
+    }
+}
+
+fn rename_checked(
+    operation: &mut crate::ir::IrCheckedOperation,
+    names: &HashMap<TypeName, TypeName>,
+) {
+    let substitutions = match operation {
+        crate::ir::IrCheckedOperation::Call { substitutions, .. }
+        | crate::ir::IrCheckedOperation::ConstructorDelegation { substitutions, .. }
+        | crate::ir::IrCheckedOperation::PropertyRead { substitutions, .. }
+        | crate::ir::IrCheckedOperation::PropertyWrite { substitutions, .. }
+        | crate::ir::IrCheckedOperation::PropertyReference { substitutions, .. } => substitutions,
+        _ => return,
+    };
+    for substitution in substitutions {
+        substitution.value = rename_ty(substitution.value, names);
+        rename_tys(&mut substitution.additional_bounds, names);
+    }
+}
+
+fn rename_tys(types: &mut [Ty], names: &HashMap<TypeName, TypeName>) {
+    for ty in types {
+        *ty = rename_ty(*ty, names);
+    }
+}
+
+fn rename_ty(ty: Ty, names: &HashMap<TypeName, TypeName>) -> Ty {
+    match ty {
+        Ty::Obj(name, args) => {
+            let name = names.get(&name).copied().unwrap_or(name);
+            let args = args
+                .iter()
+                .map(|argument| rename_ty(*argument, names))
+                .collect::<Vec<_>>();
+            Ty::obj_args_name(name, &args)
+        }
+        Ty::Nullable(inner) => Ty::nullable(rename_ty(*inner, names)),
+        Ty::PlatformNullable(inner) => Ty::platform_nullable(rename_ty(*inner, names)),
+        Ty::InProjection(inner) => Ty::in_projection(rename_ty(*inner, names)),
+        Ty::OutProjection(inner) => Ty::out_projection(rename_ty(*inner, names)),
+        Ty::StarProjection(inner) => Ty::star_projection(rename_ty(*inner, names)),
+        Ty::DefinitelyNotNull(inner) => {
+            Ty::DefinitelyNotNull(crate::types::intern_ty(rename_ty(*inner, names)))
+        }
+        Ty::Intersection(parts) => Ty::intersection(
+            &parts
+                .iter()
+                .map(|part| rename_ty(*part, names))
+                .collect::<Vec<_>>(),
+        ),
+        Ty::Fun(signature) => Ty::Fun(crate::types::intern_fnsig(crate::types::FnSig {
+            params: signature
+                .params
+                .iter()
+                .map(|parameter| rename_ty(*parameter, names))
+                .collect(),
+            ret: rename_ty(signature.ret, names),
+            context_count: signature.context_count,
+            has_receiver: signature.has_receiver,
+            suspend: signature.suspend,
+        })),
+        Ty::TyParam(name, bound) => {
+            Ty::TyParam(name, crate::types::intern_ty(rename_ty(*bound, names)))
+        }
+        Ty::Unit | Ty::Null | Ty::Nothing | Ty::Error | Ty::Pending => ty,
     }
 }
 

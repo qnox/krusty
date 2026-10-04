@@ -1564,6 +1564,10 @@ pub struct IrSpecializedAnonymousClass {
     /// Later materialization appends backing fields and accessors past these prefixes.
     pub field_count: u32,
     pub property_count: u32,
+    /// Capture fields removed from this copy because their `crossinline` lambda was inlined into
+    /// the copy's methods. `field_count` still counts them on the declaration, so later fields
+    /// appended to the declaration stay past that prefix.
+    pub omitted_capture_fields: u32,
 }
 
 /// One lowered source file (`IrFile`) — its arenas. Index-based, bulk-freeable.

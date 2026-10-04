@@ -26,6 +26,8 @@ mod escaping_lambda;
 mod property_accessors;
 
 #[cfg(test)]
+mod escaping_inline_object;
+#[cfg(test)]
 mod escaping_reified_lambda;
 #[cfg(test)]
 mod escaping_reified_object;

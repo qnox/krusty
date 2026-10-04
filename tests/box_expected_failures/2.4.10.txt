@@ -20,7 +20,6 @@ reflection/functions/genericOverriddenFunction.kt
 reflection/functions/typeParameterInReturnType.kt
 reflection/properties/genericOverriddenProperty.kt
 reflection/typeOf/intersectionType.kt
-reflection/typeOf/localClass.kt
 reflection/typeOf/reifiedAsNestedArgument.kt
 reflection/typeOf/typeAliasedType.kt
 typeErasure/funWithReifiedTypeParameterContextParameterAndExtensionReceiverInsideClass.kt
