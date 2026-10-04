@@ -83,7 +83,10 @@ impl Emitter<'_> {
         if bottom == cont {
             self.bind(cont, code);
         }
-        if post_test && retained_body_scope.is_some() {
+        if post_test
+            && retained_body_scope.is_some()
+            && !self.ir.for_loop_next_loops.contains(&expression)
+        {
             self.end_unreferenced_do_while_locals([update, Some(cond)], code);
         }
         // The update is part of the loop, so it keeps the `break`/`continue` scope active — the
