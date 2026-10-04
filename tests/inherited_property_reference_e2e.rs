@@ -48,3 +48,44 @@ fn an_inherited_property_reference_substitutes_through_the_referenced_classifier
     );
     assert_eq!(reference, "OK");
 }
+
+#[test]
+fn an_inherited_property_reference_in_another_file_uses_the_referenced_classifier() {
+    let sources = [
+        (
+            "Types.kt",
+            r#"
+                interface H<T> {
+                    val parent: T?
+                }
+
+                interface A : H<A>
+            "#,
+        ),
+        (
+            "Main.kt",
+            r#"
+                fun box(): String {
+                    val onSubtype = A::parent.returnType.toString()
+                    if (onSubtype != "A?") return onSubtype
+                    val onDeclaration = H<A>::parent.returnType.toString()
+                    if (onDeclaration != "T?") return onDeclaration
+                    return "OK"
+                }
+            "#,
+        ),
+    ];
+    let reflect = reflect_jar();
+    let reference = common::kotlinc_box_files_result_with_classpath(
+        &sources,
+        "MainKt",
+        std::slice::from_ref(&reflect),
+    );
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let krusty =
+        common::compile_and_run_box_files(&sources, &[stdlib, reflect], Some(jdk.as_path()))
+            .expect("cross-file inherited property reference");
+    assert_eq!(krusty, reference);
+    assert_eq!(reference, "OK");
+}
