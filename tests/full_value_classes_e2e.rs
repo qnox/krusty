@@ -186,6 +186,21 @@ fun box(): String {
 }
 
 #[test]
+fn final_value_subclass_keeps_structural_tostring() {
+    const SRC: &str = "\
+// LANGUAGE: +FullValueClasses
+abstract value class Base
+value class Child(val x: Int) : Base()
+fun box(): String {
+    val child = Child(1)
+    if (child.toString() != \"Child(x=1)\") return child.toString()
+    return \"OK\"
+}
+";
+    common::expect_box_ok_with_stdlib(SRC, "final_value_subclass_keeps_structural_tostring");
+}
+
+#[test]
 fn full_value_class_accepts_unit_and_nothing_carriers() {
     const SRC: &str = "\
 // LANGUAGE: +FullValueClasses

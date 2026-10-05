@@ -2651,7 +2651,10 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                     }
                     // Kotlin's generated object overrides are ordinary declarations with a written
                     // member's stable identity and callable shape; common IR owns their bodies.
-                    if classifier_is_data || full_value {
+                    // An abstract or sealed value class does not declare the trio. Advertising a
+                    // final `toString` there would hide the final subclass's own members.
+                    if classifier_is_data || (full_value && classifier_flags.has(ClassFlags::FINAL))
+                    {
                         for (name, params, ret) in [
                             ("toString", Vec::new(), Ty::String),
                             ("hashCode", Vec::new(), Ty::Int),

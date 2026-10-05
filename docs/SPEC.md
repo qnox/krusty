@@ -1553,7 +1553,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   superclass `init` block and any member it calls (an abstract getter, `toString`) observe those
   values. An abstract or sealed value class declares no constructor properties and does not
   generate `equals`/`hashCode`/`toString`; a regular class that extends one keeps `Any`'s identity
-  members. A secondary constructor may omit a parameter that has a default, the same way an
+  members. A final value class that extends one still generates its own trio. A secondary constructor may omit a parameter that has a default, the same way an
   ordinary class does. `Unit` and `Nothing` are legal constructor properties: their JVM value
   positions are `kotlin.Unit` and `java.lang.Void`, not `void`. A local-variable descriptor follows
   the same rule, including a type parameter that erases to `Unit`. `tests/full_value_classes_e2e.rs`.
