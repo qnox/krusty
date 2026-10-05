@@ -12346,6 +12346,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   so a jump the constant folder removes shares their output line instead of remaining as its own
   `nop`. Tests: `tests/comparison_jump_line_e2e.rs`, `tests/constant_conditions_e2e.rs`.
 
+- **A local extension function's receiver is named after its lifted name.** kotlinc names an
+  extension receiver's local `$this$<name>` from the function's IR name when it writes the method;
+  `LocalDeclarationsLowering` has already renamed a local function to its lifted name, and the `$`
+  in it is escaped like any debug local: `fun String.wrap()` inside `top` has the receiver
+  `$this$top_u24wrap`, inside a member `member` `$this$member_u24twice`. A lambda's receiver keeps
+  its own `$this$<label>` spelling. Test: `tests/local_extension_receiver_name_e2e.rs`.
+
 - **A `$default` constructor's header precedes its body's constants.** ASM's `visitMethod` interns
   a method's name and descriptor when the method begins, so the synthetic
   `<init>(…, int, DefaultConstructorMarker)` descriptor is interned before the `Methodref` of the
