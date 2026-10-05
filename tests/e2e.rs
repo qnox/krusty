@@ -1431,6 +1431,8 @@ mod nullable_uint_property_e2e;
 mod open_end_range_membership_e2e;
 #[path = "optional_expectation_annotation_e2e.rs"]
 mod optional_expectation_annotation_e2e;
+#[path = "override_default_stub_e2e.rs"]
+mod override_default_stub_e2e;
 #[path = "primitive_hash_code_e2e.rs"]
 mod primitive_hash_code_e2e;
 #[path = "reference_carrier_cast_e2e.rs"]

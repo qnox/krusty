@@ -2514,7 +2514,7 @@ fn emit_scheduled_member(
         return;
     };
     let f = &ir.functions[fid as usize];
-    if let Some(defaults) = ir.param_defaults(fid) {
+    if let Some(defaults) = ir.declared_param_defaults(fid) {
         if f.is_static {
             let marker = static_default_stub_marker(ir, fid);
             emit_facade_default_stub(
@@ -3653,7 +3653,7 @@ fn emit_interface_class(
             .map(|(_, declaration)| *declaration)
             .unwrap_or(fid);
         if !deferred_suspend_declaration {
-            if let Some(defaults) = ir.param_defaults(default_fid) {
+            if let Some(defaults) = ir.declared_param_defaults(default_fid) {
                 // `disable` puts NOTHING executable on the interface, the `$default` stub included: call
                 // sites go to the holder's copy instead.
                 if bodies_on_interface {
@@ -4194,7 +4194,7 @@ fn emit_enum_class(
                 // silently had no stub at all — a call omitting the argument had nothing to dispatch to.
                 // Same call as the class path, so the super-call guard rides along: an enum IS
                 // inheritable (an entry body subclasses it), which is why kotlinc guards the stub.
-                if let Some(defaults) = ir.param_defaults(fid) {
+                if let Some(defaults) = ir.declared_param_defaults(fid) {
                     emit_default_stub(
                         ir,
                         fid,

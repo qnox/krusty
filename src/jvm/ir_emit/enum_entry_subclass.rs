@@ -157,7 +157,7 @@ pub(super) fn emit_enum_entry_subclass(
                 c.decl_line,
             );
         }
-        if let Some(defaults) = ir.param_defaults(fid) {
+        if let Some(defaults) = ir.declared_param_defaults(fid) {
             if function.is_static {
                 emit_facade_default_stub(
                     ir,

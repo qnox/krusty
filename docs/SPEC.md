@@ -1733,6 +1733,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   omitted-arg call to such an extension still inlines only checker-recorded constant defaults and
   otherwise bails (skip, never miscompile) — module calls are deliberately not routed through the
   stub (tests: `extension_default_stub_e2e`).
+  **Only the declaring function owns a stub**: an override inherits its parameters' defaults (Kotlin
+  forbids restating them), but kotlinc emits `name$default` solely on the function that WROTE them.
+  A call through any receiver dispatches via the declaring owner's stub, which `invokevirtual`s the
+  override. krusty once emitted a redundant stub on every overriding class, interface and enum entry
+  body (`IrFile::declared_param_defaults` gates emission; tests: `override_default_stub_e2e`).
 - `-jvm-default` (interface members with bodies): kotlinc offers three JVM realizations of the same
   Kotlin source, and the flag changes the CLASS SET, not just method bodies. Measured against
   kotlinc 2.4.10 on an interface with a default getter, a default method, a defaulted parameter and
