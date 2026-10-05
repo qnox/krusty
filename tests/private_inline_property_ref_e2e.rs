@@ -4,7 +4,9 @@
 //! A top-level value-class `val` is stored as its carrier. Reflection synthesizes `getOk()` of
 //! that carrier from the field descriptor, and the reference calls `access$getOk$p`. A companion
 //! `val` is a static of the outer class, so the same reference calls `access$getOk$cp` there —
-//! including a plain `String`, which has no value-class mangling of its own.
+//! including a plain `String`, which has no value-class mangling of its own. A companion `var`
+//! reads and writes that static through `access$getOk$cp` / `access$setOk$cp`. A reference
+//! carrier is unboxed; a nullable primitive carrier stays boxed.
 use std::path::PathBuf;
 
 use super::common::{self, compile_and_run_box_files};
@@ -98,6 +100,52 @@ class Host {
 }
 
 fun box() = Host.ref.call()
+"#,
+    );
+}
+
+#[test]
+fn a_private_companion_value_class_var_is_readable_and_writable() {
+    agree(
+        r#"
+import kotlin.reflect.jvm.isAccessible
+
+inline class S(val s: String)
+
+class Host {
+    companion object {
+        private var ok = S("no")
+        val ref = ::ok.apply { isAccessible = true }
+    }
+}
+
+fun box(): String {
+    Host.ref.set(S("OK"))
+    return Host.ref.get().s
+}
+"#,
+    );
+}
+
+#[test]
+fn a_private_companion_nullable_primitive_var_stays_boxed() {
+    agree(
+        r#"
+import kotlin.reflect.jvm.isAccessible
+
+inline class I(val n: Int)
+
+class Host {
+    companion object {
+        private var ok: I? = null
+        val ref = ::ok.apply { isAccessible = true }
+    }
+}
+
+fun box(): String {
+    Host.ref.set(I(7))
+    return if (Host.ref.get()?.n == 7) "OK" else "fail"
+}
 "#,
     );
 }

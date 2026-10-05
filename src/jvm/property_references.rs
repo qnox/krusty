@@ -976,7 +976,9 @@ fn synthesize(
 
 /// A private companion property is realized before its field moves to the outer class. Once that
 /// hoist (and any value-class carrier erasure) has happened, the reference calls
-/// `access$get<X>$cp` there and still reports `get<X>` of the field's physical type.
+/// `access$get<X>$cp` there, and a `var` calls `access$set<X>$cp` with the same physical value.
+/// Reflection still reports `get<X>` of that field type, including a nullable primitive carrier
+/// that stayed boxed.
 pub(crate) fn retarget_hoisted_companion_references(
     ir: &mut IrFile,
     realizations: &mut PropertyReferenceRealizations,
@@ -984,9 +986,10 @@ pub(crate) fn retarget_hoisted_companion_references(
     struct Retarget {
         class_index: usize,
         outer: TypeName,
-        call_name: String,
-        descriptor: String,
+        getter_call: String,
+        getter_descriptor: String,
         declared_getter: String,
+        setter_call: Option<String>,
         physical: Ty,
         value_class: Option<TypeName>,
     }
@@ -1038,17 +1041,25 @@ pub(crate) fn retarget_hoisted_companion_references(
         };
         let physical = storage.ty;
         let declared_getter = realization.declared_getter_name.clone();
-        let descriptor = format!("(){}", crate::jvm::names::type_descriptor(physical));
+        let getter_descriptor = format!("(){}", crate::jvm::names::type_descriptor(physical));
+        let setter_call = realization
+            .declared_setter_name
+            .clone()
+            .map(|name| format!("access${name}$cp"));
         pending.push(Retarget {
             class_index,
             outer,
-            call_name: format!("access${declared_getter}$cp"),
-            descriptor,
+            getter_call: format!("access${declared_getter}$cp"),
+            getter_descriptor,
             declared_getter,
+            setter_call,
             physical,
+            // A field that is already the value class is the boxed nullable carrier (`I?`).
+            // Recording it as a carrier would unbox the bridge argument to the underlying primitive.
             value_class: storage
                 .erased_declared_ty
-                .and_then(|original| original.non_null().obj_internal()),
+                .and_then(|original| original.non_null().obj_internal())
+                .filter(|value_class| physical.non_null().obj_internal() != Some(*value_class)),
         });
     }
 
@@ -1057,13 +1068,22 @@ pub(crate) fn retarget_hoisted_companion_references(
         let Some(realization) = realizations.get_mut(reference_name) else {
             continue;
         };
+        let setter_descriptor = update
+            .setter_call
+            .as_ref()
+            .map(|_| format!("({})V", crate::jvm::names::type_descriptor(update.physical)));
         realization.physical_getter_ret = Some(update.physical);
         realization.getter_bridge_owner = Some(update.outer);
-        realization.protected_reflection_getter =
-            Some((update.declared_getter, update.descriptor.clone()));
+        realization.reflection_getter =
+            Some((update.declared_getter, update.getter_descriptor.clone()));
         realization.getter_field = None;
+        realization.setter_field = None;
         realization.member_access_bridge = None;
         realization.accessor_names_are_physical = true;
+        if update.setter_call.is_some() {
+            realization.physical_setter_value = Some(update.physical);
+            realization.setter_bridge_owner = Some(update.outer);
+        }
         if let Some(value_class) = update.value_class {
             realization.boxed_value_class = Some(value_class);
         }
@@ -1072,8 +1092,12 @@ pub(crate) fn retarget_hoisted_companion_references(
             .as_mut()
             .expect("the scan only queued classes that have a property reference");
         reference.call_owner_internal = Some(update.outer);
-        reference.getter_name = update.call_name;
-        reference.getter_descriptor = Some(update.descriptor);
+        reference.getter_name = update.getter_call;
+        reference.getter_descriptor = Some(update.getter_descriptor);
         reference.ext_facade = None;
+        if let Some(setter_call) = update.setter_call {
+            reference.setter_name = Some(setter_call);
+            reference.setter_descriptor = setter_descriptor;
+        }
     }
 }

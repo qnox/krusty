@@ -890,10 +890,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   remains `super()`. An open property or a `lateinit` still keeps its instance field, and an
   initializer that touches that field stays on the constructor. A value-class companion
   property is hoisted as well: non-null `S` and `S?` over a reference carrier are stored as
-  that carrier, and `I?` over a primitive carrier stays the box. A private property reference
-  (`::ok` where `ok` is a private value-class `val`) reflects `getOk()` of the carrier and
-  calls `access$getOk$p` on a file facade or `access$getOk$cp` on the outer class. Metadata
-  records that carrier as the field descriptor, which is what `kotlin.reflect` resolves.
+  that carrier, and `I?` over a primitive carrier stays the box.   A private property reference
+  (`::ok` where `ok` is a private value-class `val` or companion `var`) reflects `getOk()` of
+  the field's physical type and calls `access$getOk$p` on a file facade or `access$getOk$cp`
+  on the outer class. A companion `var` writes through `access$setOk$cp` of that same type:
+  a reference carrier is unboxed, and a nullable primitive carrier (`I?`) stays the box.
+  Metadata records that carrier as the field descriptor, which is what `kotlin.reflect` resolves.
   Test: `tests/private_inline_property_ref_e2e.rs`. Interface companions keep their own
   `<clinit>`. Test: `tests/companion_init_block_e2e.rs`.
 - **`companion { … }` blocks and companion extensions (`CompanionBlocksAndExtensions`).** A block
