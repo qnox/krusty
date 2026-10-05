@@ -683,7 +683,6 @@ pub(super) fn realize(
     ir: &mut IrFile,
     stems: &[String],
     classifiers: &dyn crate::backend::BackendClassifierSource,
-    classpath: &crate::jvm::classpath::Classpath,
     callables: &crate::backend::CheckedBackendCallables,
     property_realizations: &mut PropertyRealizations,
 ) -> Result<(), ModuleRealizationTarget> {
@@ -843,33 +842,8 @@ pub(super) fn realize(
             }
             IrExpr::SingletonValue { classifier } => {
                 let failure = ModuleRealizationTarget::Classifier(classifier);
-                let (owner, field) = if let Some(declaration) =
-                    ir.referenced_module_classifiers.get(&classifier).copied()
-                {
-                    if !declaration.singleton {
-                        return Err(failure);
-                    }
-                    if let Some(owner) = declaration.companion_owner {
-                        (owner, classifier.nested_segment_ref().to_owned())
-                    } else {
-                        (classifier, "INSTANCE".to_string())
-                    }
-                } else if let Some(storage) = classpath.singleton_storage(classifier) {
-                    // The provider's physical storage, which for a mapped builtin's companion is
-                    // a JVM runtime object rather than a field of the holder.
-                    storage
-                } else {
-                    // A non-public companion is stored in the field its holder's classifier
-                    // record declares, whichever compilation declared the holder.
-                    classifier
-                        .nested_owner()
-                        .and_then(|holder| {
-                            let declared = classifiers.classifier(holder)?;
-                            let (field, companion) = declared.companion.as_ref()?;
-                            (*companion == classifier).then(|| (holder, field.to_string()))
-                        })
-                        .ok_or(failure)?
-                };
+                let (owner, field) =
+                    super::singleton_storage::of(classifiers, classifier).ok_or(failure)?;
                 Some(IrExpr::ExternalStaticInstance {
                     owner,
                     ty: classifier,

@@ -1133,7 +1133,6 @@ impl Backend for JvmBackend {
             &mut file.ir,
             file.stems,
             &file.classifiers,
-            &self.cp,
             &file.callables,
             &mut property_realizations,
         ) {

@@ -1406,12 +1406,7 @@ impl super::Emitter<'_> {
                 code.getstatic(f, 1);
             }
             IrExpr::SingletonValue { classifier } => {
-                // A dependency's non-public companion field has no public classfile storage to
-                // find; the holder's classifier record names it.
-                let dependency = self.bodies.singleton_storage(*classifier).or_else(|| {
-                    super::companion_field::companion_field_read(self.ir, self.classifiers, node)
-                        .map(|read| (read.holder, read.field.into_string()))
-                });
+                let dependency = crate::jvm::singleton_storage::of(self.classifiers, *classifier);
                 let Some(published) =
                     singleton_instance_load::published_singleton(self.ir, *classifier, dependency)
                 else {

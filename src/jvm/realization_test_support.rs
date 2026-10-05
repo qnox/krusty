@@ -39,7 +39,6 @@ pub(crate) fn realize_calls(
         ir,
         &stems,
         &classifiers,
-        classpath,
         &callables,
         &mut property_realizations,
     )

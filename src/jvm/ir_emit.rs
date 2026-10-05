@@ -7634,7 +7634,7 @@ impl<'a> Emitter<'a> {
             IrExpr::SingletonValue { classifier } => singleton_instance_load::published_singleton(
                 self.ir,
                 *classifier,
-                self.bodies.singleton_storage(*classifier),
+                crate::jvm::singleton_storage::of(self.classifiers, *classifier),
             )
             .is_some_and(|published| published.owner == access_owner),
             IrExpr::ExternalStaticField { owner, .. }

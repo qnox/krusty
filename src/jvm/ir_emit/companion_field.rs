@@ -40,7 +40,10 @@ pub(super) fn companion_field_read(
     expression: &IrExpr,
 ) -> Option<CompanionFieldRead> {
     let (holder, companion) = match expression {
-        IrExpr::SingletonValue { classifier } => (classifier.nested_owner()?, *classifier),
+        IrExpr::SingletonValue { classifier } => {
+            let (holder, _) = crate::jvm::singleton_storage::of(classifiers, *classifier)?;
+            (holder, *classifier)
+        }
         IrExpr::StaticInstance { owner, ty, .. } if owner != ty => (
             ir.classes.get(*owner as usize)?.fq_name,
             ir.classes.get(*ty as usize)?.fq_name,
