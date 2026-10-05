@@ -47,7 +47,7 @@ pub(super) fn derive_bridges(
             argument_arrays,
             &mut order,
         )?;
-        property_bridges(ir, cid, classpath, callables, &mut order)?;
+        property_bridges(ir, cid, classpath, callables, override_results, &mut order)?;
         declaration_order(&mut ir.classes[cid].bridges[first..], order);
     }
     Ok(())
@@ -402,6 +402,7 @@ fn property_bridges(
     cid: usize,
     classpath: &crate::jvm::classpath::Classpath,
     callables: &crate::backend::CheckedBackendCallables,
+    override_results: &crate::jvm::override_results::OverrideResults,
     order: &mut Vec<u32>,
 ) -> Result<(), SkipReason> {
     let internal_name = ir.classes[cid].fq_name;
@@ -452,15 +453,17 @@ fn property_bridges(
         );
         let declared_receiver = edge.declared_receiver.map(bridge_erasure);
         let implementation_receiver = edge.implementation_receiver.map(bridge_erasure);
-        if crate::jvm::names::same_type_descriptor(edge.declared_type, edge.implementation_type)
-            && match (declared_receiver, implementation_receiver) {
-                (None, None) => true,
-                (Some(declared), Some(implementation)) => {
-                    crate::jvm::names::same_type_descriptor(declared, implementation)
-                }
-                _ => false,
+        let getter_results = PropertyGetterResults::of(ir, callables, &edge, override_results)?;
+        if crate::jvm::names::same_type_descriptor(
+            getter_results.declared,
+            getter_results.implementation,
+        ) && match (declared_receiver, implementation_receiver) {
+            (None, None) => true,
+            (Some(declared), Some(implementation)) => {
+                crate::jvm::names::same_type_descriptor(declared, implementation)
             }
-            && bridge_getter == target_getter
+            _ => false,
+        } && bridge_getter == target_getter
         {
             continue;
         }
@@ -469,16 +472,23 @@ fn property_bridges(
         }
         let bridge_descriptor = method_descriptor(
             &declared_receiver.into_iter().collect::<Vec<_>>(),
-            bridge_erasure(edge.declared_type),
+            bridge_erasure(getter_results.declared),
         );
         if bridge_getter != target_getter
             && inherits_final_special_bridge(ir, cid, classpath, &bridge_getter, &bridge_descriptor)
         {
             continue;
         }
-        let position = implementation_property
-            .filter(|_| declared_here)
-            .map_or(u32::MAX, |property| property.source_order);
+        // A compiler-generated accessor (a delegation forwarder) takes its own place among the
+        // class's members, as a forwarding function does; the property it implements is another
+        // class's declaration.
+        let position = match edge.implementation_getter {
+            Some(getter) if declared_here => ir.fn_source_order.get(&getter).copied(),
+            _ => implementation_property
+                .filter(|_| declared_here)
+                .map(|property| property.source_order),
+        }
+        .unwrap_or(u32::MAX);
         let pushed_before = ir.classes[cid].bridges.len();
         if let (Some(declared), Some(implementation)) =
             (edge.declared_receiver, edge.implementation_receiver)
@@ -490,7 +500,7 @@ fn property_bridges(
             );
             continue;
         }
-        push_property_bridge(ir, cid, &edge, bridge_getter, target_getter);
+        push_property_bridge(ir, cid, &edge, getter_results, bridge_getter, target_getter);
         order.resize(
             order.len() + ir.classes[cid].bridges.len() - pushed_before,
             position,
@@ -562,13 +572,14 @@ fn push_member_extension_accessor_bridges(
     }
 }
 
-/// The `get<X>()` bridge (and, for a `var` override, the `set<X>()` one). A bridge already recorded under
-/// the accessor's name wins — the first supertype in the walk is the nearest one. Each delegates to
-/// the implementation's own accessor function when this class declares it.
+/// The `get<X>()` bridge (and, for a `var` override, the `set<X>()` one). A bridge already recorded
+/// under the accessor's name and descriptor wins — the first supertype in the walk is the nearest
+/// one. Each delegates to the implementation's own accessor function when this class declares it.
 fn push_property_bridge(
     ir: &mut IrFile,
     cid: usize,
     edge: &crate::ir::IrPropertyOverride,
+    getter_results: PropertyGetterResults,
     getter_name: String,
     getter_target: String,
 ) {
@@ -577,10 +588,17 @@ fn push_property_bridge(
         own(edge.implementation_getter),
         own(edge.implementation_setter),
     );
-    let has_getter = ir.classes[cid]
-        .bridges
-        .iter()
-        .any(|b| b.name == getter_name && b.erased_params.is_empty());
+    // A boxed getter can need one bridge per overridden slot (`getSize()I` for an `Int` slot and
+    // `getSize()Object` for a type parameter's), so a recorded bridge covers this one only when its
+    // descriptor is the same.
+    let has_getter = ir.classes[cid].bridges.iter().any(|b| {
+        b.name == getter_name
+            && b.erased_params.is_empty()
+            && crate::jvm::names::same_type_descriptor(
+                bridge_erasure(b.erased_ret),
+                bridge_erasure(getter_results.declared),
+            )
+    });
     if !has_getter {
         let target_name = (getter_name != getter_target).then_some(getter_target);
         let special = getter_name != property_getter_name(&edge.name);
@@ -592,9 +610,9 @@ fn push_property_bridge(
             parameters: Vec::new(),
             name: getter_name,
             erased_params: vec![],
-            erased_ret: edge.declared_type,
+            erased_ret: getter_results.declared,
             concrete_params: vec![],
-            concrete_ret: edge.implementation_type,
+            concrete_ret: getter_results.implementation,
             target_ret: None,
             barrier_plan: None,
             special,
@@ -605,11 +623,20 @@ fn push_property_bridge(
     if !(edge.overridden_mutable && edge.implementation_mutable) {
         return;
     }
+    // The setter keeps the declared types: over a slot whose getter only differs by the boxed
+    // result, the setter's descriptor is already the implementation's own.
+    let setter_param = bridge_erasure(edge.declared_type);
     let sname = property_setter_name(&edge.name);
-    let has_setter = ir.classes[cid]
-        .bridges
-        .iter()
-        .any(|b| b.name == sname && b.erased_params.len() == 1);
+    let has_setter =
+        crate::jvm::names::same_type_descriptor(setter_param, edge.implementation_type)
+            || ir.classes[cid].bridges.iter().any(|b| {
+                b.name == sname
+                    && b.erased_params.len() == 1
+                    && crate::jvm::names::same_type_descriptor(
+                        bridge_erasure(b.erased_params[0]),
+                        setter_param,
+                    )
+            });
     if !has_setter {
         ir.classes[cid].bridges.push(Bridge {
             kind: BridgeKind::PropertySetter,
@@ -631,6 +658,45 @@ fn push_property_bridge(
             target_name: None,
             property_implementation: property_implementation(edge, BridgeAccessorRole::Setter),
         });
+    }
+}
+
+/// The JVM results of the two getters a property override edge joins: the declared types, or their
+/// wrappers where a scalar getter result over a reference-returning overridden getter is boxed (see
+/// `jvm::override_results`). A setter keeps the declared types.
+#[derive(Clone, Copy)]
+struct PropertyGetterResults {
+    declared: Ty,
+    implementation: Ty,
+}
+
+impl PropertyGetterResults {
+    fn of(
+        ir: &IrFile,
+        callables: &crate::backend::CheckedBackendCallables,
+        edge: &crate::ir::IrPropertyOverride,
+        override_results: &crate::jvm::override_results::OverrideResults,
+    ) -> Result<Self, SkipReason> {
+        let boxes = |property, declared| match property {
+            crate::fir::ResolvedPropertyOverrideTarget::Module(property) => Ok(override_results
+                .boxed_property_result(ir, property)
+                .is_some()),
+            crate::fir::ResolvedPropertyOverrideTarget::External(_) => {
+                crate::jvm::override_results::external_boxed_getter(callables, property, declared)
+            }
+        };
+        let physical = |ty: Ty, boxed: bool| if boxed { Ty::nullable(ty) } else { ty };
+        let implementation_boxed = match edge.implementation_getter {
+            Some(forwarder) => override_results.boxes(forwarder),
+            None => boxes(edge.implementation, edge.implementation_type)?,
+        };
+        Ok(Self {
+            declared: physical(
+                edge.declared_type,
+                boxes(edge.overridden, edge.declared_type)?,
+            ),
+            implementation: physical(edge.implementation_type, implementation_boxed),
+        })
     }
 }
 

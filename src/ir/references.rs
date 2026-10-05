@@ -78,6 +78,9 @@ pub struct IrCallableReference {
     pub declaration_result: Ty,
     pub declaration_suspend: bool,
     pub adaptation: Option<Box<crate::fir::FirReferenceAdaptation>>,
+    /// Classifier an unbound inherited instance member was written on. Realization uses this
+    /// identity directly. Every other reference, including a member extension, leaves it empty.
+    pub reflection_owner: Option<crate::types::TypeName>,
 }
 
 /// A synthesized function-reference subclass of `kotlin/jvm/internal/FunctionReferenceImpl`. See

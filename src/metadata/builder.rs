@@ -356,9 +356,10 @@ fn annotation_value_pb(st: &mut StringTable<'_>, value: &crate::ir::AnnoValue) -
                 out.field_varint(1, 6);
                 out.field_fixed64(4, value.to_bits());
             }
+            // `int_value` is a `sint64` for every integral kind, a boolean included.
             IrConst::Boolean(value) => {
                 out.field_varint(1, 7);
-                out.field_varint(2, u64::from(*value));
+                out.field_varint(2, zigzag_i64(i64::from(*value)));
             }
             IrConst::String(value) => {
                 out.field_varint(1, 8);
@@ -551,14 +552,7 @@ fn function_pb(
         } else {
             (*pty, f.spellings.param(i).clone())
         };
-        let mut ty = type_pb_declared(st, declared_ty, &declared_spelling, &tps);
-        if f.no_infer_params.get(i).copied().unwrap_or(false) {
-            let annotation = crate::metadata::type_encoder::encode_annotation(
-                st,
-                crate::types::type_name("kotlin/internal/NoInfer"),
-            );
-            ty.field_message(100, &annotation);
-        }
+        let ty = type_pb_declared(st, declared_ty, &declared_spelling, &tps);
         vp.field_message(3, &ty); // ValueParameter.type = 3
                                   // A `vararg` parameter records its ELEMENT type as `vararg_element_type` (field 4) —
                                   // kotlinc's declared type stays the array.
@@ -696,6 +690,9 @@ pub struct PropMeta {
     /// A delegated property's `(name, descriptor)` of the static field holding its delegate, which
     /// kotlinc records explicitly after the accessors' signatures.
     pub delegate_field: Option<(String, String)>,
+    /// JVM field descriptor when storage is not what a reader derives from the Kotlin type. A
+    /// value class's field is its carrier (`S` stored as `Ljava/lang/String;`).
+    pub field_desc: Option<String>,
 }
 
 /// A source typealias declaration in package or classifier metadata.
@@ -972,7 +969,11 @@ fn property_pb(st: &mut StringTable<'_>, m: &PropMeta) -> Pb {
         field.field_varint(2, st.local(descriptor) as u64); // JvmFieldSignature.desc = 2
         jvm.field_message(1, &field);
     } else if m.has_backing_field {
-        jvm.field_message(1, &Pb::new());
+        let mut field = Pb::new();
+        if let Some(descriptor) = &m.field_desc {
+            field.field_varint(2, st.local(descriptor) as u64); // JvmFieldSignature.desc = 2
+        }
+        jvm.field_message(1, &field);
     }
     if let Some(getter) = &getter {
         jvm.field_message(3, getter);
@@ -1186,6 +1187,7 @@ mod tests {
                 setter_visibility: crate::types::Visibility::Public,
                 companion: false,
                 delegate_field: None,
+                field_desc: None,
                 decl_order: 0,
             }
         }
@@ -1241,6 +1243,7 @@ mod tests {
                 setter_visibility: crate::types::Visibility::Public,
                 companion: false,
                 delegate_field: None,
+                field_desc: None,
                 has_constant: false,
                 decl_order: 0,
             }],
@@ -1299,6 +1302,7 @@ mod tests {
                 setter_visibility: crate::types::Visibility::Public,
                 companion: false,
                 delegate_field: None,
+                field_desc: None,
                 has_constant: false,
                 decl_order: 0,
             }],
@@ -1356,6 +1360,7 @@ mod tests {
                 setter_visibility: crate::types::Visibility::Public,
                 companion: false,
                 delegate_field: None,
+                field_desc: None,
                 has_constant: false,
                 decl_order: 0,
             }],
@@ -1406,6 +1411,7 @@ mod tests {
                 setter_visibility: crate::types::Visibility::Public,
                 companion: false,
                 delegate_field: None,
+                field_desc: None,
                 decl_order: 0,
             }],
             &[],

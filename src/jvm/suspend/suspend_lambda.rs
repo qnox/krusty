@@ -154,6 +154,10 @@ pub(super) fn route(
     ) {
         ir.expr_source_lines.insert(unit, close);
     }
+    let Some(form) = ir.lambda_origins.get(&fid).map(|origin| origin.form) else {
+        crate::trace_compiler!("suspend", "suspend lambda fid={fid}: no source form");
+        return Routed::Failed;
+    };
     become_invoke_suspend(ir, fid, internal);
     enclose_in_invoke_suspend(ir, fid);
     ir.classes[class as usize].methods.push(fid);
@@ -217,6 +221,7 @@ pub(super) fn route(
                 .filter_map(|parameter| parameter.metadata_name.clone())
                 .collect(),
             type_parameters: ir.lambda_type_parameters(fid).to_vec(),
+            form,
         },
     );
     route.machines.record_transformed(
@@ -577,6 +582,7 @@ fn become_invoke_suspend(ir: &mut IrFile, fid: u32, class: TypeName) {
     ir.synthetic_methods.remove(&fid);
     ir.class_static_local_functions.remove(&fid);
     ir.lambda_own_params_from.remove(&fid);
+    ir.vc_declared_sigs.remove(&fid);
     ir.lambda_origins.remove(&fid);
     ir.lifted_functions.remove(&fid);
     ir.lifted_names.remove(&fid);

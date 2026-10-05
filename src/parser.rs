@@ -24,6 +24,7 @@ mod file_features;
 mod for_loops;
 mod function_types;
 mod incdec;
+mod interface_delegation;
 mod lambda_literals;
 mod lexical_type_parameters;
 mod nesting;
@@ -3537,16 +3538,19 @@ impl<'a> Parser<'a> {
                 let sup_span = self.tok().span;
                 let mut supertype_annotations = Vec::new();
                 while self.at(TokenKind::At) {
-                    let (annotation, _) = self.parse_annotation();
+                    let (annotation, arguments) = self.parse_annotation();
                     if let Some(annotation) = annotation {
+                        self.record_type_annotation_arguments(annotation.span, arguments);
                         supertype_annotations.push(annotation);
                     }
                     self.skip_plain_newlines();
                 }
+                // Keyed by the annotated reference's span start, which for a supertype is `sup_span`.
                 if !supertype_annotations.is_empty() {
+                    let annotated = sup_span.lo;
                     self.file
                         .type_annotations
-                        .insert(self.tok().span.lo, supertype_annotations);
+                        .insert(annotated, supertype_annotations);
                 }
                 // A FUNCTION-TYPE supertype (`class C : () -> R`, `(A) -> R`, `Recv.() -> R`): retain
                 // Kotlin's semantic `kotlin/FunctionN` classifier (arity N = value parameters, with an
@@ -3582,6 +3586,13 @@ impl<'a> Parser<'a> {
                             fun_params: ft.fun_params.clone(),
                             fun_context_count: ft.fun_context_count,
                         });
+                    }
+                    if let Some(delegation) = self.parse_interface_delegation(
+                        u32::try_from(ifaces.len() - 1).ok(),
+                        ifaces[ifaces.len() - 1].name.clone(),
+                        false,
+                    ) {
+                        interface_delegations.push(delegation);
                     }
                     if !self.eat(TokenKind::Comma) {
                         break;
@@ -3676,28 +3687,12 @@ impl<'a> Parser<'a> {
                     });
                     delegation_supertype = u32::try_from(ifaces.len() - 1).ok();
                 }
-                // Class delegation: `: Iface by delegate`. Preserve both the simple-name field form
-                // and a general delegate expression; representation support belongs to later phases.
-                if self.at(TokenKind::Ident) && self.keyword_text("by") {
-                    self.bump();
-                    // A following `{` opens the CLASS BODY, not a lambda on the delegate call.
-                    let saved = self.no_trailing_lambda;
-                    self.no_trailing_lambda = true;
-                    let value = self.parse_expr();
-                    self.no_trailing_lambda = saved;
-                    // Parentheses leave no node, so `by d` and `by (d)` both name the delegate
-                    // directly; any other shape (`by Impl()`, `by a.b`, …) is an EXPRESSION delegate.
-                    let bare_name = match self.file.expr(value) {
-                        Expr::Name(name) => Some(name.clone()),
-                        _ => None,
-                    };
-                    interface_delegations.push(InterfaceDelegation {
-                        supertype: delegation_supertype,
-                        interface: effective.clone(),
-                        value,
-                        bare_name,
-                        has_primitive_type_argument: has_primitive_targ,
-                    });
+                if let Some(delegation) = self.parse_interface_delegation(
+                    delegation_supertype,
+                    effective.clone(),
+                    has_primitive_targ,
+                ) {
+                    interface_delegations.push(delegation);
                 }
                 if !self.eat(TokenKind::Comma) {
                     break;
@@ -4170,12 +4165,8 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_type_atom(&mut self) -> TypeRef {
-        // Leading type annotations (`@Composable () -> Unit`, `@UnsafeVariance T`): consume them and
-        // record by the type's start offset so a plugin can recover them via `TypeRef.span.lo`.
-        // Without this, an `@` before a type would fail to parse. NOTE: a following `(` is NOT consumed
-        // as an annotation argument list here — in type position it belongs to a function type
-        // (`@Composable () -> Unit`); an argument-bearing type annotation (`@Foo(1) Bar`, rare) is not
-        // yet handled.
+        // Leading type annotations (`@Composable () -> Unit`, `@UnsafeVariance T`), recorded by the
+        // type's start offset (`TypeRef.span.lo`) with any argument list keyed by annotation span.
         let mut type_anns = Vec::new();
         while self.at(TokenKind::At) {
             self.bump(); // '@'
@@ -4185,7 +4176,8 @@ impl<'a> Parser<'a> {
             // has the `(` belong to the type. Disambiguate by peeking past the balanced `(…)`: an
             // `->` after it means a function type (leave the `(`), otherwise consume the args.
             if self.at(TokenKind::LParen) && !self.paren_group_precedes_arrow(self.i) {
-                let _ = self.parse_annotation_args();
+                let arguments = self.parse_annotation_args();
+                self.record_type_annotation_arguments(annotation_span, arguments);
             }
             if !qname.is_empty() {
                 type_anns.push(AnnotationRef {
