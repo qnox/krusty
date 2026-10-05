@@ -9742,6 +9742,8 @@ pub struct TypeInfo {
     /// SEMANTIC narrowing only; which expression shapes carry a runtime guard, and what its failure
     /// says, is lowering's decision (a call result names its callee, a plain value read has no name).
     pub platform_narrowings: HashMap<ExprId, PlatformNarrowing>,
+    /// Calls whose value carries kotlinc's `EnhancedNullability` (see `enhanced_values`).
+    pub enhanced_values: std::collections::HashSet<ExprId>,
     /// The calls each interface delegation's forwarders make on the delegate value, keyed by that
     /// value; see [`interface_delegate_calls`].
     pub interface_delegate_calls: HashMap<ExprId, Box<[crate::fir::ResolvedDelegateMemberCalls]>>,
@@ -37309,6 +37311,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
             c.type_ref_ty(scope, reference);
         }
     }
+    let enhanced_values = c.enhanced_value_heads();
     let Checker {
         expr_types,
         callable_reference_types,
@@ -37727,6 +37730,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         resolved_library_default_literals,
         resolved_whole_array_vararg_args,
         platform_narrowings,
+        enhanced_values,
         interface_delegate_calls,
         synthetic_ext_calls,
         delegate_getvalue_targets,
@@ -45349,11 +45353,7 @@ impl<'a> Checker<'a> {
             selected.callable.params.len(),
             "a selected callable's declared and selected parameters line up"
         );
-        let declared_params = shape
-            .parameter_indices
-            .iter()
-            .map(|&parameter| declared_signature.params[parameter])
-            .collect::<Vec<_>>();
+        let declared_params = shape.declared_params(&declared_signature.params);
         // Snapshot postponed producer ownership before selected-argument commitment turns those
         // calls into proper concrete values. Selection has already consumed their declaration
         // signatures; commitment finalizes the nested call and must not reopen the outer winner's
@@ -58007,7 +58007,11 @@ impl<'a> Checker<'a> {
             ) {
                 continue;
             }
-            self.expect_call_arg(scope, substituted, argument, actual);
+            // kotlinc reads an argument's implicit not-null cast from the unsubstituted parameter.
+            let declared = parameter_shapes
+                .get(index)
+                .map_or(*expected, |&(shape, _)| shape);
+            self.expect_call_arg_labeled(scope, substituted, declared, argument, actual, None);
         }
         for (index, binding) in bindings.iter_mut().enumerate() {
             if *binding == Ty::Null {
@@ -67151,6 +67155,7 @@ impl<'a> Checker<'a> {
             selected.context_count,
             argument_names,
         )?;
+        let declared_params = shape.declared_params(&selected.semantic_params());
         if !self.expect_selected_call_args(
             scope,
             CallArgs {
@@ -67159,7 +67164,7 @@ impl<'a> Checker<'a> {
                 arg_tys,
             },
             &shape.params,
-            &shape.params,
+            &declared_params,
             &shape.call_sig,
             None,
         ) {
@@ -69581,6 +69586,11 @@ impl<'a> Checker<'a> {
         ) else {
             return false;
         };
+        let declared = member
+            .generic_sig
+            .as_ref()
+            .map(|signature| &signature.params[..]);
+        let declared = declared.filter(|declared| declared.len() == member.params.len());
         self.expect_selected_call_args(
             scope,
             CallArgs {
@@ -69589,7 +69599,7 @@ impl<'a> Checker<'a> {
                 arg_tys: &arg_tys,
             },
             &contextual.params,
-            &contextual.params,
+            &contextual.declared_params(declared.unwrap_or(&member.params)),
             &contextual.call_sig,
             None,
         )

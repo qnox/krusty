@@ -14,7 +14,9 @@
 //! typing; [`super::platform_value_narrowing`] consumes them to decide kotlinc's implicit not-null
 //! casts.
 
-use super::{Checker, CheckerScope, Local, ReceiverFnValueOrigin, ResolvedCall};
+use super::{
+    Checker, CheckerScope, Local, ReceiverFnValueOrigin, ResolvedCall, ResolvedConstructor,
+};
 use crate::ast::{Expr, ExprId};
 use crate::libraries::{GenericSig, ResultEnhancement, TypeEnhancement};
 use crate::types::{Ty, TypeName};
@@ -88,10 +90,23 @@ impl Checker<'_> {
         }
     }
 
+    /// The calls whose value is itself marked, for checks that read a branch's value after
+    /// checking.
+    pub(super) fn enhanced_value_heads(&self) -> std::collections::HashSet<ExprId> {
+        self.resolved_calls
+            .keys()
+            .copied()
+            .filter(|&call| self.value_enhancement(call).head())
+            .collect()
+    }
+
     /// The marks of the value `e` produces.
     pub(super) fn value_enhancement(&self, e: ExprId) -> TypeEnhancement {
         if let Some(marks) = self.enhanced_locals.reads.get(&e) {
             return marks.clone();
+        }
+        if let Some(constructor) = self.resolved_constructors.get(&e) {
+            return self.constructor_result_enhancement(e, constructor);
         }
         let Some(call) = self.resolved_calls.get(&e) else {
             return TypeEnhancement::NONE;
@@ -117,6 +132,44 @@ impl Checker<'_> {
         let named_arguments = self.file.call_arg_names.contains_key(&e.0);
         let inferred = !explicit_type_arguments && !named_arguments;
         self.call_result_enhancement(call, receiver, inferred.then_some(&arguments[..]))
+    }
+
+    /// The marks of the object the constructor call `e` creates: its classifier's type arguments
+    /// inferred from the arguments take their marks (`Box(entries.firstOf())` is a box of a marked
+    /// entry). The created object itself is never marked.
+    fn constructor_result_enhancement(
+        &self,
+        e: ExprId,
+        constructor: &ResolvedConstructor,
+    ) -> TypeEnhancement {
+        let member = match constructor {
+            ResolvedConstructor::Plain { member, .. }
+            | ResolvedConstructor::PlainSlots { member, .. } => member,
+            ResolvedConstructor::Synthetic { ctor, .. } => &ctor.declaration,
+            ResolvedConstructor::Source { .. } => return TypeEnhancement::NONE,
+        };
+        let Some(signature) = member.generic_sig.as_ref() else {
+            return TypeEnhancement::NONE;
+        };
+        if self.file.call_type_args.contains_key(&e.0)
+            || self.file.call_arg_names.contains_key(&e.0)
+        {
+            return TypeEnhancement::NONE;
+        }
+        let arguments = self
+            .call_inputs(e)
+            .arguments
+            .iter()
+            .map(|&argument| {
+                (
+                    self.expr_types[argument.0 as usize],
+                    self.value_enhancement(argument),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut bindings = HashMap::new();
+        bind_callable_parameters(self, signature, None, &arguments, &mut bindings);
+        TypeEnhancement::NONE.substitute(signature.ret, &|name| bindings.get(name).cloned())
     }
 
     /// The marks of the value `call` produces on a `receiver` of the given type and marks, its

@@ -2370,12 +2370,30 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `java.lang.annotation.Annotation`) is not a Java declaration in Kotlin's scope — kotlinc's
   `JvmMappedScope` shows the builtin it overrides — so it takes that declaration's rigid result without
   the attribute and is not guarded (`ClassCastException().toString()`). A `@NotNull` Java result is
-  enhanced on its own. Not yet modeled: the attribute travelling through generic inference
-  (`id(sb.toString())`, `sb.toString().also { }`) and through an inferred lambda result, the
-  message-less `checkNotNull` kotlinc puts on an inferred local initialized by an enhanced conditional,
-  type-argument enhancement outside a `for` loop, enhanced Java PROPERTY reads (`map.keys`), and
-  `NULLABLE` enhancement (`HashMap.get` stays `V!`).
+  enhanced on its own. Not yet modeled: the attribute travelling through an inferred lambda result
+  (`sb.toString().also { }`), the message-less `checkNotNull` kotlinc puts on an inferred local
+  initialized by an enhanced conditional, rigid type arguments of an enhanced FUNCTION result (only
+  property reads are made rigid), and `NULLABLE` enhancement (`HashMap.get` stays `V!`).
   Tests: `tests/enhanced_result_null_check_e2e.rs` (per-method differential vs kotlinc and a run).
+- **`EnhancedNullability` travels with the type argument it marks.** `computeIndexedQualifiers`
+  enhances every flexible position of a Java result that an overridden declaration fixes not-null,
+  type arguments included: `HashMap.entrySet()`, read as `entries`, is a rigid set of rigid, marked
+  entries of marked `K` and `V`, and a Java `E` use overriding Kotlin's `E` is marked. `ConeSubstitutor`
+  combines a type argument's attributes into the parameter it replaces, so the mark survives
+  substitution: `entries.iterator().next()`, `entries.firstOf()` (`fun <T> Iterable<T>.firstOf(): T`),
+  an entry's `key`, a `for` variable over `map.keys`, and `Box(map.values.firstOf()).get()` are marked
+  values `insertSpecialCast` guards like any enhanced result, conditional branches included. A type
+  variable fixed from several constraints is marked only where all of them are (`pick(map.keys, set)` is
+  not; `pick(map.keys, map.keys)` is). A local or function whose type is inferred keeps the marks of its
+  type ARGUMENTS but not its head (`val entries = map.entries; entries.firstOf()` checks `firstOf(...)`);
+  a declared type has no marks. The guard reads the UNSUBSTITUTED expected type, so a marked value passed
+  to a parameter of type `T` (a generic constructor's `Box(value: T)`, an extension's `other: B`) is not
+  guarded. krusty carries the marks beside the semantic type as a `TypeEnhancement` layout
+  (`src/libraries/enhanced_nullability.rs`) recorded on the selected declaration, and derives a value's
+  marks from the checked call graph (`src/resolve/enhanced_values.rs`). Not yet modeled: marks through a
+  lambda's inferred result and through an expected type that itself carries the attribute.
+  Tests: `tests/enhanced_type_argument_null_check_e2e.rs` (per-method differential vs kotlinc and a
+  run).
 - **A Java method overriding a builtin property is that property, even under another JVM name.**
   kotlinc's Java scope shows `java.util.HashMap.keySet()` as `Map.keys` and `entrySet()` as
   `Map.entries` (the special realizations of `BuiltinSpecialProperties`), exactly as it shows
@@ -2383,10 +2401,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   realizing method, read through that method, so a read of `hashMap.keys` is the Java result, not the
   builtin declaration, and is guarded with the getter's name (`<get-keys>(...)`) at a declared result,
   an extension receiver (`hashMap.entries.first()`), and an interface-delegation forwarder
-  (`Map<K, V> by HashMap()`). krusty
-  types the read flexible; kotlinc enhances it to the overridden property's not-null type, so an
-  inferred `val keys = hashMap.keys` and the enhanced type arguments (`entries.iterator().next()`)
-  are still unguarded (the enhanced PROPERTY read gap above).
+  (`Map<K, V> by HashMap()`). Like kotlinc, krusty enhances the read to the overridden property's
+  rigid type with marked type arguments (see the `EnhancedNullability` entry above), so an inferred
+  `val keys = hashMap.keys` guards `<get-keys>(...)` at its initializer.
   Tests: `tests/renamed_builtin_property_null_check_e2e.rs` (per-method differential vs kotlinc and a
   run).
 - `try { … } catch (e: E) { … }` (no `finally`): the body value (and each catch value) is stored into a
