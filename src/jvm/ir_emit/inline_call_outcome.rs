@@ -1,16 +1,19 @@
 //! What one inline lowering did with a call, as the call's emission reads it.
 //!
-//! A lowering may decline a call only while nothing of it is decided: before any literal lambda is
-//! selected for placement and before any of the call's code is emitted. Once it owns the call, a
-//! failure is recorded as the run's error and the call is finished; the caller never lowers it
-//! another way.
+//! A lowering may decline a call only before it commits to a placement plan and before any of the
+//! call's code is emitted. Candidate literal positions may already be known while the host plan is
+//! probed, but a literal that cannot legally exist as a real callable (a non-local jump) and an
+//! `@InlineOnly` target make that probe mandatory: an unsupported host is then an error, not a
+//! decline. Once a lowering owns the call, a failure is recorded as the run's error and the caller
+//! never lowers it another way.
 
 /// The result of one inline lowering of a call.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[must_use]
 pub(super) enum InlineCallOutcome {
-    /// The lowering does not apply. Decided before any literal was selected or any code emitted,
-    /// so the caller may lower the call another way.
+    /// The lowering does not apply. Decided before a placement plan was committed or any code was
+    /// emitted, and every literal can legally be materialized, so the caller may lower the call
+    /// another way.
     NotApplicable,
     /// The lowering emitted the call.
     Handled,

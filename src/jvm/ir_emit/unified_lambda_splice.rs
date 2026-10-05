@@ -160,6 +160,8 @@ pub(super) fn unified_splice_plan(
 /// outside the splice; neither is sound with caller operands below the call.
 const OPERANDS_ACROSS_SPLICED_CONTROL: &str =
     "a spliced inline body transfers control with caller operands on the stack";
+const REQUIRED_SPLICE_HAS_UNSUPPORTED_HOST: &str =
+    "an inline body's frame cannot be planned around a lambda that must be placed";
 
 impl Emitter<'_> {
     /// Splice `call`, whose selected literal positions are `positions`, with the host's locals from
@@ -169,12 +171,16 @@ impl Emitter<'_> {
         &mut self,
         call: &bytecode_inline_call::ClasspathInlineCall<'_, '_>,
         positions: &[usize],
+        route: bytecode_inline_call::SpliceReason,
         base: u16,
         code: &mut CodeBuilder,
     ) -> InlineCallOutcome {
         let (params, plan) = match self.plan_unified_splice(call, positions, base, code) {
             Ok((params, UnifiedSplice::Planned(plan))) => (params, plan),
-            Ok((_, UnifiedSplice::UnsupportedHost)) => {
+            Ok((_, UnifiedSplice::UnsupportedHost))
+                if !call.target.inline_only
+                    && !matches!(route, bytecode_inline_call::SpliceReason::NonLocalJump) =>
+            {
                 crate::trace_compiler!(
                     "splice",
                     "unified splice declined before placement: {}.{}{}",
@@ -183,6 +189,11 @@ impl Emitter<'_> {
                     call.target.splice_desc
                 );
                 return InlineCallOutcome::NotApplicable;
+            }
+            Ok((_, UnifiedSplice::UnsupportedHost)) => {
+                self.run
+                    .set_emit_error(REQUIRED_SPLICE_HAS_UNSUPPORTED_HOST.to_string());
+                return InlineCallOutcome::HandledWithError;
             }
             Err(reason) => {
                 self.run.set_emit_error(reason.to_string());
@@ -714,7 +725,10 @@ mod tests {
     /// A classpath `host(block: () -> Unit)` with `code`, over a pool naming
     /// `Function0.invoke()Ljava/lang/Object;` at 6 and `kotlin/_Assertions.$assertionsDisabled Z`
     /// at 12. Reading that field is a callee shape the MethodInliner port leaves to the splice.
-    struct Host(Vec<u8>);
+    struct Host {
+        code: Vec<u8>,
+        private: bool,
+    }
 
     impl crate::jvm::inline::MethodBodies for Host {
         fn body(&self, _owner: &str, _name: &str, _descriptor: &str) -> Option<MethodCode> {
@@ -722,7 +736,7 @@ mod tests {
             Some(MethodCode {
                 max_stack: 1,
                 max_locals: 1,
-                code: self.0.clone(),
+                code: self.code.clone(),
                 source_cp: vec![
                     C::Other,
                     C::Utf8("kotlin/jvm/functions/Function0".to_string()),
@@ -749,6 +763,10 @@ mod tests {
                 bootstrap_methods: Vec::new(),
             })
         }
+
+        fn member_is_private(&self, owner: &str, name: &str, _descriptor: &str) -> bool {
+            self.private && owner == "lib/HostKt" && name == "host"
+        }
     }
 
     /// `invokeinterface Function0.invoke; pop; getstatic $assertionsDisabled; pop; return`.
@@ -758,6 +776,15 @@ mod tests {
     /// legally reach. Returns whether the file was emitted, the run's emission error, and its
     /// inline-failure category.
     fn emit_box_calling(host: Vec<u8>) -> (bool, Option<String>, Option<String>) {
+        emit_box_calling_shape(host, false, false)
+    }
+
+    /// [`emit_box_calling`] with a lambda that leaves its caller, or a private `@InlineOnly` host.
+    fn emit_box_calling_shape(
+        host: Vec<u8>,
+        non_local_return: bool,
+        inline_only: bool,
+    ) -> (bool, Option<String>, Option<String>) {
         let mut ir = IrFile::default();
         let block = ir.add_expr(IrExpr::Block {
             stmts: Vec::new(),
@@ -772,8 +799,9 @@ mod tests {
             dispatch_receiver: None,
             param_checks: Vec::new(),
         });
+        let exit = non_local_return.then(|| ir.add_expr(IrExpr::Return(None)));
         let inline_body = ir.add_expr(IrExpr::Block {
-            stmts: Vec::new(),
+            stmts: exit.into_iter().collect(),
             value: None,
         });
         let lambda = ir.add_expr(IrExpr::Lambda {
@@ -791,7 +819,11 @@ mod tests {
                 owner: crate::types::type_name("lib/HostKt"),
                 name: "host".to_string(),
                 descriptor: "(Lkotlin/jvm/functions/Function0;)V".to_string(),
-                inline: crate::libraries::InlineKind::CanInline,
+                inline: if inline_only {
+                    crate::libraries::InlineKind::MustInline
+                } else {
+                    crate::libraries::InlineKind::CanInline
+                },
             },
             dispatch_receiver: None,
             args: vec![lambda],
@@ -816,7 +848,10 @@ mod tests {
             &ir,
             "CallerKt",
             &run,
-            &Host(host),
+            &Host {
+                code: host,
+                private: inline_only,
+            },
         )
         .is_some();
         (emitted, run.emit_error(), run.inline_bail())
@@ -830,6 +865,34 @@ mod tests {
         let mut host = vec![0x01];
         host.extend(INVOKE_AND_READ_ASSERTIONS);
         assert_eq!(emit_box_calling(host), (true, None, None));
+    }
+
+    #[test]
+    fn a_non_local_jump_never_declines_to_a_real_call() {
+        let mut host = vec![0x01];
+        host.extend(INVOKE_AND_READ_ASSERTIONS);
+        assert_eq!(
+            emit_box_calling_shape(host, true, false),
+            (
+                false,
+                Some(REQUIRED_SPLICE_HAS_UNSUPPORTED_HOST.to_string()),
+                None
+            )
+        );
+    }
+
+    #[test]
+    fn an_inline_only_target_never_declines_to_a_real_call() {
+        let mut host = vec![0x01];
+        host.extend(INVOKE_AND_READ_ASSERTIONS);
+        assert_eq!(
+            emit_box_calling_shape(host, false, true),
+            (
+                false,
+                Some(REQUIRED_SPLICE_HAS_UNSUPPORTED_HOST.to_string()),
+                None
+            )
+        );
     }
 
     /// The literal is selected, placed, and its body built; the host's read of `_Assertions` then

@@ -182,9 +182,10 @@ impl Emitter<'_> {
     /// (`this` = local 0) and `args[0]` is that receiver — so the body's `aload_0`/`aload_1`/… map
     /// to receiver/params.
     ///
-    /// [`InlineCallOutcome::NotApplicable`] only before any literal lambda is selected: no body, a
-    /// body this class cannot reach, or a call without inlined literals the port does not cover.
-    /// Once literals are selected, the chosen route owns the call.
+    /// [`InlineCallOutcome::NotApplicable`] only before a placement plan is committed: no body, a
+    /// body this class cannot reach, a call without inlined literals the port does not cover, or an
+    /// unsupported host whose selected literals can all legally be materialized for a real call.
+    /// A non-local jump and an `@InlineOnly` target can never take that last decline.
     fn try_inline_static_as(
         &mut self,
         call_expression: u32,
@@ -307,7 +308,9 @@ impl Emitter<'_> {
                 return InlineCallOutcome::HandledWithError;
             }
         };
-        // The literals are selected: from here the call is owned, and a failure is an error.
+        // The literal candidates are selected. Planning may still decline an unsupported host only
+        // when every literal can legally become a real callable and the target itself is callable.
+        // Otherwise this route owns the call and a failure is an error.
         // If the body INVOKES the lambda parameter (`FunctionN.invoke`), its lambda bodies replace
         // those invokes. If the lambda is used only as a VALUE, passed to the constructor of an
         // anonymous object the body creates (`Continuation(ctx){…}`'s
@@ -341,7 +344,7 @@ impl Emitter<'_> {
             }
         };
         crate::trace_compiler!("splice", "literal-lambda call spliced: {reason:?}");
-        self.splice_selected_literals(&inline_call, &positions, base, code)
+        self.splice_selected_literals(&inline_call, &positions, reason, base, code)
     }
 
     /// A call whose literal lambdas the callee's body uses only as values: each is passed to the
