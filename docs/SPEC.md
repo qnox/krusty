@@ -13486,6 +13486,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     `constructor()`), so every enum secondary carries one; without it reflection reports the ABI
     prefix as if the source had declared it, and two constructors differing only by the prefix
     become indistinguishable.
+  - A primary or enum constructor signs the same way, through the same writer
+    (`signature_formatter::constructor_positions`, kotlinc's `MethodSignatureMapper` with
+    `BothSignatureWriter`). An inner class's outer instance and an enum's name and ordinal are
+    written into a discarded visitor: they never appear in the `Signature`, but they still decide
+    whether it is written. The enum pair always does, so every enum constructor signs its source
+    parameters (`()V` for none, `(Ljava/lang/String;)V` for `enum class Tone(val label: String)`),
+    and so does an entry subclass's constructor. The outer instance does when its classifier
+    writes type arguments, so `inner class Reader` of `class Holder<T>` signs `()V`. A plain
+    parameter signs only when its source type differs from its descriptor. Covered by
+    `tests/constructor_signature_e2e.rs`, which compares every `<init>` descriptor and `Signature`
+    against kotlinc.
   - The synthetic default overload takes the CONSTRUCTOR's own access, not a fixed
     `PUBLIC|SYNTHETIC`. An enum's constructors are private, and kotlinc marks their overload
     `ACC_SYNTHETIC` alone (`0x1000`); publishing it public would grant a way to build the class
