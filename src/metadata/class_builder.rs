@@ -1333,7 +1333,7 @@ pub fn build_class(
             } else {
                 m.spellings.param(i).clone()
             };
-            let mut ty = crate::metadata::type_encoder::encode_declared_type(
+            let ty = crate::metadata::type_encoder::encode_declared_type(
                 st,
                 *pty,
                 &declared_spelling,
@@ -1347,13 +1347,6 @@ pub fn build_class(
                         )
                     },
                 );
-            if m.no_infer_params.get(i).copied().unwrap_or(false) {
-                let annotation = crate::metadata::type_encoder::encode_annotation(
-                    st,
-                    crate::types::type_name("kotlin/internal/NoInfer"),
-                );
-                ty.field_message(100, &annotation);
-            }
             vp.field_message(3, &ty);
             if m.vararg_index == Some(i) {
                 // ValueParameter.vararg_element_type = 4 — the ELEMENT next to the array type.
