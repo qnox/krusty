@@ -138,3 +138,20 @@ fn a_plain_string_reuses_an_equal_class_id() {
         "Root_class_named_functionKt",
     );
 }
+
+/// Like a top-level one, a member declaration interns its return type before its type parameters,
+/// so `d2` lists the return's class before the parameter names.
+#[test]
+fn a_member_interns_its_return_type_before_its_type_parameters() {
+    const SRC: &str = "package app\n\
+        \n\
+        class Result\n\
+        class Item\n\
+        \n\
+        class Host<T> {\n\
+        \x20   fun <U> made(value: T, other: U) = Result()\n\
+        \x20   fun <V : Item> bounded(value: V): Result = Result()\n\
+        \x20   val <W> W.extension: Item get() = Item()\n\
+        }\n";
+    assert_identical("member_return_before_type_parameters", SRC, "app/Host");
+}
