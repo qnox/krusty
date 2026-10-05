@@ -21,7 +21,7 @@ pub(super) fn is_local(ir: &IrFile, class: &IrClass) -> bool {
             .find_map(|owner| ir.class_id_by_name(owner))
             .is_some_and(|owner| {
                 let owner = &ir.classes[owner as usize];
-                owner.enum_entry_of.is_some() || is_local(ir, owner)
+                owner.is_enum_entry || is_local(ir, owner)
             })
 }
 
@@ -45,7 +45,7 @@ pub(super) fn captured_type_parameters(
 pub(super) fn names(ir: &IrFile) -> HashSet<TypeName> {
     ir.classes
         .iter()
-        .filter(|class| class.enum_entry_of.is_some() || is_local(ir, class))
+        .filter(|class| class.is_enum_entry || is_local(ir, class))
         .map(|class| class.fq_name_id())
         .collect()
 }
@@ -55,7 +55,7 @@ pub(super) fn names(ir: &IrFile) -> HashSet<TypeName> {
 pub(super) fn enum_entry_bodies(ir: &IrFile) -> HashSet<TypeName> {
     ir.classes
         .iter()
-        .filter(|class| class.enum_entry_of.is_some())
+        .filter(|class| class.is_enum_entry)
         .map(|class| class.fq_name_id())
         .collect()
 }

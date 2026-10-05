@@ -251,6 +251,11 @@ impl OwnerConstructorPrefix {
     pub(super) fn len(&self) -> usize {
         self.types.len()
     }
+
+    /// The prefix's debug identities, in parameter order.
+    pub(super) fn identities(&self) -> impl Iterator<Item = Option<String>> + '_ {
+        self.parameters.iter().map(|(name, _)| name.clone())
+    }
 }
 
 pub(super) fn secondary_constructor(

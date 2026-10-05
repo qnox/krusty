@@ -214,7 +214,7 @@ use secondary_constructor::SecondaryConstructorEmitter;
 /// the `INSTANCE` store, and `<init>` is a bare `super()` call. Companions hoist their fields to the
 /// OUTER class instead (not modeled yet), and local/anonymous objects keep instance fields.
 fn object_static_storage(c: &IrClass) -> bool {
-    c.is_object && !c.is_companion && !c.is_local_class && c.enum_entry_of.is_none()
+    c.is_object && !c.is_companion && !c.is_local_class && !c.is_enum_entry
 }
 
 /// Kotlin interfaces and annotation classes are both JVM interfaces. Common IR keeps their source
@@ -2677,8 +2677,8 @@ fn emit_class(
     if c.is_interface {
         return emit_interface_class(ir, c, facade, env, opts, class_meta, extra);
     }
-    if let Some(user_tys) = &c.enum_entry_of {
-        return enum_entry_subclass::emit_enum_entry_subclass(ir, c, facade, env, opts, user_tys);
+    if c.is_enum_entry {
+        return enum_entry_subclass::emit_enum_entry_subclass(ir, c, facade, env, opts);
     }
     if c.prop_ref.is_some() {
         return property_reference_class::emit_prop_ref_class(ir, c, facade, env, opts);
@@ -2762,9 +2762,7 @@ fn emit_class(
                 format!("(Lkotlin/coroutines/Continuation<-L{fq_name};>;)V")
             }
         })
-        .or_else(|| {
-            constructor_signatures::primary_constructor_signature(&signature_formatter, ir, c)
-        });
+        .or_else(|| constructor_signatures::primary_constructor_signature(&signature_formatter, c));
     let value_param_ctor = ir.has_value_param_ctor(&fq_name);
     let ctor_access =
         method_access::primary_constructor_access(ir, c, is_continuation, value_param_ctor);
@@ -4050,7 +4048,7 @@ fn emit_enum_class(
         .chain(all_param_tys.iter().copied())
         .collect();
     let ctor_desc = method_descriptor(&ctor_params, Ty::Unit);
-    let ctor_sig = constructor_signatures::enum_constructor_signature(&signature_formatter, ir, c)
+    let ctor_sig = constructor_signatures::enum_constructor_signature(&signature_formatter, c)
         .expect("an enum constructor always signs its source parameters");
     let ctor_parameters = if env.java_parameters {
         super::method_parameters::enum_constructor(c).to_vec()
@@ -4237,11 +4235,9 @@ fn emit_enum_class(
     ctor.ret_void();
     ctor.ensure_locals(max_locals);
     ctor.link();
-    // A plain enum's constructor is `private` (matching kotlinc — javap then hides the synthetic
-    // `(String,int)` params in its display). A subclassed enum's ctor must be reachable from its entry
-    // subclasses' `<init>` (an `invokespecial` from another class): kotlinc keeps it `private` and relies
-    // on nestmate access, which krusty doesn't emit, so it stays package-private + synthetic here.
-    let base_ctor_acc = if has_subclass { ACC_SYNTHETIC } else { 0x0002 };
+    // An enum's constructor is `private`. An entry subclass reaches it through the marker accessor
+    // emitted with the class's other accessors, or through the `$default` overload.
+    let base_ctor_acc = 0x0002;
     // kotlinc emits a generic `Signature` on the enum ctor listing only the USER params (the synthetic
     // leading `(String, int)` are excluded) — e.g. `()V` for a plain enum, `(I)V` for `E(val n: Int)`.
     // javap reads it to display `Color()` instead of `Color(String, int)`; without it the synthetic
@@ -4311,7 +4307,7 @@ fn emit_enum_class(
             None,
             false,
             false,
-            base_ctor_acc | ACC_SYNTHETIC,
+            ACC_SYNTHETIC,
             &mut cw,
             env,
         );
@@ -4531,6 +4527,7 @@ fn emit_enum_class(
     // before `<clinit>`, forwarders first.
     emit_default_impls_forwarders(ir, c, &mut cw, env);
     bridge_emission::emit_bridges(ir, c, &mut cw, env);
+    constructor_accessors::emit_accessors(ir, c, &fq, &mut cw);
     // `<clinit>` is RESERVED and BUILT here, after the plugin-generated members: kotlinc interns
     // their names, descriptors and body constants between the entry constants and `<clinit>`, so
     // building the initializer earlier claimed those pool slots first.

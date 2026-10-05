@@ -82,22 +82,12 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
             Some(crate::types::Visibility::Protected) => 0x0004,
             _ => 0x0001,
         };
-        let enum_entry_subclass_target = !owner_prefix_tys.is_empty()
-            && c.enum_entries.iter().any(|entry| {
-                entry.subclass.is_some()
-                    && jvm_tys(&entry.constructor_parameter_types) == sc_source_tys
-            });
         let semantically_private =
             super::constructor_accessors::hides_secondary(ir, c, secondary_ordinal)
                 || sc.vc_params
                 || !owner_prefix_tys.is_empty()
                 || declared_access == 0x0002;
-        let sc_access = (if enum_entry_subclass_target {
-            // Kotlin uses nestmate access for an entry-body subclass. Krusty does not emit
-            // nestmate attributes yet, so use the same package-private synthetic bridge contract
-            // as the enum primary constructor instead of emitting an inaccessible private target.
-            0x1000
-        } else if semantically_private {
+        let sc_access = (if semantically_private {
             0x0002
         } else {
             declared_access
