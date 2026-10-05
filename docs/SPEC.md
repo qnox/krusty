@@ -3610,6 +3610,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   same-file inline argument in an initializer; a runtime pin for loops, handlers, `when` merges,
   safe calls and a `finally` inside initializers), and `FrameMap`'s unit tests for the frame size
   below parameter-aligned call-operand holders.
+- **A valued `try`'s lines.** Its value is the reload of the result temporary after the last
+  catch (or `finally`). kotlinc's `visitVariable` marks the initializer's start line before
+  materializing it, so `val x = try {` returns to the declaration's line at that load, and
+  `visitSetValue` marks the assignment's line before its store, so `x = try {` returns to it at the
+  store. krusty kept the last catch's line on the load and gave an assignment's store no line
+  (`TryEmission::initializer`; test `try_value_line_e2e`).
 - **Receiver scope functions `run`/`apply`** (the receiver is `this`, not `it`): the lowerer inlines the
   body binding the receiver to a `this` slot with `cur_class` cleared, so the body's bare member reads
   (getter), writes (setter), and method calls (`invokevirtual`) all resolve against the receiver through

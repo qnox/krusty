@@ -99,7 +99,9 @@ impl Emitter<'_> {
                     // later migration changes which lowering pass creates them.
                     if named {
                         let previous = self.enter_declared_initializer(initializer);
+                        let previous_try = self.enter_try_initializer(initializer);
                         let source = self.emit_consumed_operand(initializer, code);
+                        self.leave_try_initializer(previous_try);
                         self.leave_declared_initializer(previous);
                         source
                     } else {

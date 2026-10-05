@@ -26,6 +26,19 @@ pub(super) struct TryParts<'a> {
     pub(super) result: Ty,
 }
 
+/// The emitter's `try` state.
+#[derive(Default)]
+pub(super) struct TryEmission {
+    /// Protected-region accumulators for the active `try`s, outermost first. A copy of a finalizer
+    /// must not lie inside the ranges of its own `try` or of any `try` nested in it, or an exception
+    /// raised while the finalizer runs re-enters a handler the transfer has already left.
+    regions: Vec<ProtectedRegion>,
+    /// The `try` a source local's initializer is, with that initializer, while it is emitted.
+    /// kotlinc's `visitVariable` marks the initializer's line before materializing its value, and a
+    /// `try`'s value materializes as the reload of its result temporary after the last catch.
+    initializer: Option<(u32, u32)>,
+}
+
 /// One `try`'s protected region while it is being emitted.
 ///
 /// The region covers everything lexically inside the `try` EXCEPT the finalizer copies a transfer
@@ -37,7 +50,7 @@ pub(super) struct TryParts<'a> {
 /// A `try` without a `finally` has a region too, for its typed catches: it lives only while its
 /// body is emitted. An enclosing `try`'s region is unaffected by a nested finalizer copy that does
 /// not leave it: that copy is ordinary code as far as the outer region is concerned.
-pub(super) struct ProtectedRegion {
+struct ProtectedRegion {
     /// The exact finalizer this region belongs to, if the `try` has one; regions are matched by IR
     /// identity, never by nesting depth, so a `return` closes the region of the finalizer it is
     /// actually running.
@@ -53,7 +66,8 @@ impl Emitter<'_> {
     /// pushes the region and the finalizer together and takes the region back only after the last
     /// catch body has popped it, so every finalizer reachable by a transfer has one.
     fn finally_region(&mut self, finalizer: u32) -> usize {
-        self.protected_regions
+        self.tries
+            .regions
             .iter()
             .rposition(|region| region.finalizer == Some(finalizer))
             .expect("an active finalizer owns a protected region")
@@ -61,11 +75,11 @@ impl Emitter<'_> {
 
     /// Start a protected segment in region `index` at the current offset, unless one is open.
     fn open_region_segment(&mut self, index: usize, code: &mut CodeBuilder) {
-        if self.protected_regions[index].open.is_some() {
+        if self.tries.regions[index].open.is_some() {
             return;
         }
         let label = code.new_label();
-        self.protected_regions[index].open = Some(label);
+        self.tries.regions[index].open = Some(label);
         self.bind(label, code);
     }
 
@@ -73,11 +87,11 @@ impl Emitter<'_> {
     /// empty is dropped when the table is resolved: an empty range protects nothing, and kotlinc
     /// emits no entry for one.
     fn close_region_segment(&mut self, index: usize, code: &mut CodeBuilder) {
-        let Some(start) = self.protected_regions[index].open.take() else {
+        let Some(start) = self.tries.regions[index].open.take() else {
             return;
         };
         let label = code.new_label();
-        self.protected_regions[index].segments.push((start, label));
+        self.tries.regions[index].segments.push((start, label));
         self.bind(label, code);
     }
 
@@ -100,7 +114,7 @@ impl Emitter<'_> {
     /// `try` is emitting its normal-path copy — is left as it is.
     pub(super) fn close_left_regions(&mut self, finalizer: u32, code: &mut CodeBuilder) {
         let outermost = self.finally_region(finalizer);
-        for index in outermost..self.protected_regions.len() {
+        for index in outermost..self.tries.regions.len() {
             self.close_region_segment(index, code);
         }
     }
@@ -110,8 +124,8 @@ impl Emitter<'_> {
     /// finalizer's region is active while its finalizer is (its body and catch bodies); a
     /// catch-only region is active for as long as it exists.
     pub(super) fn reopen_finally_segments(&mut self, code: &mut CodeBuilder) {
-        for index in 0..self.protected_regions.len() {
-            let active = self.protected_regions[index]
+        for index in 0..self.tries.regions.len() {
+            let active = self.tries.regions[index]
                 .finalizer
                 .is_none_or(|finalizer| self.return_finalizers.contains(&finalizer));
             if active {
@@ -128,7 +142,35 @@ impl Emitter<'_> {
     ) -> Vec<(Label, Label)> {
         self.close_finally_segment(finalizer, code);
         let index = self.finally_region(finalizer);
-        self.protected_regions.remove(index).segments
+        self.tries.regions.remove(index).segments
+    }
+
+    /// Note the `try` that a source local's `initializer` is, if it is one, for its reload to mark
+    /// the initializer's line. Returns the note this replaces, for [`Self::leave_try_initializer`].
+    pub(super) fn enter_try_initializer(&mut self, initializer: u32) -> Option<(u32, u32)> {
+        let mut e = initializer;
+        loop {
+            e = match self.ir.expr(e) {
+                crate::ir::IrExpr::TypeOp {
+                    op: crate::ir::IrTypeOp::ImplicitCoercion,
+                    arg,
+                    ..
+                } => *arg,
+                crate::ir::IrExpr::Block {
+                    stmts,
+                    value: Some(value),
+                } if stmts.is_empty() => *value,
+                _ => break,
+            };
+        }
+        let note =
+            matches!(self.ir.expr(e), crate::ir::IrExpr::Try { .. }).then_some((e, initializer));
+        std::mem::replace(&mut self.tries.initializer, note)
+    }
+
+    /// Restore the note replaced by [`Self::enter_try_initializer`].
+    pub(super) fn leave_try_initializer(&mut self, previous: Option<(u32, u32)>) {
+        self.tries.initializer = previous;
     }
 
     /// `try { body } catch (v: E) { … } …` (no `finally`). The body value (and each catch value) is
@@ -170,7 +212,7 @@ impl Emitter<'_> {
         } else {
             self.diverges(body)
         };
-        self.protected_regions.push(ProtectedRegion {
+        self.tries.regions.push(ProtectedRegion {
             finalizer: finally,
             segments: Vec::new(),
             open: Some(start),
@@ -224,11 +266,12 @@ impl Emitter<'_> {
         // sibling typed catches. A catch-only region ends here: its catch bodies lie outside it.
         let typed_catch_ranges = if let Some(finalizer) = finally {
             let index = self.finally_region(finalizer);
-            self.protected_regions[index].segments.clone()
+            self.tries.regions[index].segments.clone()
         } else {
-            let index = self.protected_regions.len() - 1;
+            let index = self.tries.regions.len() - 1;
             self.close_region_segment(index, code);
-            self.protected_regions
+            self.tries
+                .regions
                 .pop()
                 .expect("a catch-only try's region is the innermost one at its body's end")
                 .segments
@@ -453,6 +496,13 @@ impl Emitter<'_> {
             let result_lease = result_slot.map(|slot| self.lease_temporary(slot, rt));
             self.bind(after, code);
             if let Some(slot) = result_slot {
+                if let Some((_, initializer)) = self
+                    .tries
+                    .initializer
+                    .filter(|(declared, _)| *declared == expression)
+                {
+                    self.mark_expression_start(initializer, code);
+                }
                 load(rt, slot, code);
             }
             if let Some(lease) = result_lease {
