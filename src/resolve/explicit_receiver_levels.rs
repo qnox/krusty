@@ -121,6 +121,29 @@ impl Checker<'_> {
         receiver: Ty,
         name: &str,
     ) -> Option<Ty> {
+        // Do not type arguments merely to discover that this tower rung has no function value.
+        // Besides doing duplicate work, that commits cast/lowering facts which the eventual member
+        // winner then inherits (for example, `Store.tokens(y as Token)` used to retain a different
+        // cast/null-check sequence). Establish the declaration-owned shape first; arguments are
+        // touched only when this exact value can participate.
+        let (signature, _) = self.receiver_function_value(scope, name)?;
+        let parts = Self::receiver_function_parts(signature)?;
+        if parts.values.len() != args.len()
+            || !self.receiver_is_assignable(receiver, parts.receiver)
+            || !self.receiver_function_context_available(scope, &parts)
+            || self
+                .file
+                .call_type_args
+                .get(&call.0)
+                .is_some_and(|arguments| !arguments.is_empty())
+            || self
+                .file
+                .call_arg_names
+                .get(&call.0)
+                .is_some_and(|names| names.iter().any(Option::is_some))
+        {
+            return None;
+        }
         let partial = args
             .iter()
             .map(|&argument| match self.file.expr(argument) {
@@ -128,8 +151,12 @@ impl Checker<'_> {
                 _ => Some(self.expr(scope, argument)),
             })
             .collect::<Vec<_>>();
-        let params =
-            self.receiver_function_member_call_params(scope, call, receiver, name, args, &partial)?;
+        if !self
+            .receiver_function_value_applicable(scope, call, args, &partial, receiver, signature)
+        {
+            return None;
+        }
+        let params = parts.values.to_vec();
         let arg_tys =
             args.iter()
                 .zip(params)
