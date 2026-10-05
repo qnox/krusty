@@ -492,6 +492,8 @@ mod constant_pool_order_e2e;
 mod construction_argument_labels_e2e;
 #[path = "construction_default_arg_e2e.rs"]
 mod construction_default_arg_e2e;
+#[path = "constructor_argument_specificity_e2e.rs"]
+mod constructor_argument_specificity_e2e;
 mod constructor_continuation_e2e;
 #[path = "constructor_initialization_order_e2e.rs"]
 mod constructor_initialization_order_e2e;
