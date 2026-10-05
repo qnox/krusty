@@ -1127,13 +1127,14 @@ impl ProductionSignatureSemantics<'_> {
         let argument_ordinals = (0..arguments.len())
             .map(|ordinal| crate::ast::ExprId(ordinal as u32))
             .collect::<Vec<_>>();
+        let deferred_type_variables = self.active_postponed_type_variables(scope);
         let selected = super::super::member_extension_function_with(
             &source,
             &oracle,
             &receivers,
             super::super::MemberExtensionProbes {
                 explicit_context_arguments,
-                deferred_type_variables: &[],
+                deferred_type_variables: &deferred_type_variables,
                 select_context_arguments: &|parameters| {
                     super::super::context_argument_types(&[dispatch_receiver], parameters, &oracle)
                         .map(|types| {
