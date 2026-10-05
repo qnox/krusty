@@ -546,10 +546,7 @@ fn function_pb(
                                                             // array, so the element's spelling has to be lifted under the array rather than applied to
                                                             // it — otherwise the record claims `Array` itself was written as the alias.
         let (declared_ty, declared_spelling) = if f.vararg_index == Some(i) {
-            (
-                super::vararg_recorded_type(*pty),
-                f.spellings.param(i).as_array_element(),
-            )
+            super::vararg_recorded_declaration(*pty, f.spellings.param(i))
         } else {
             (*pty, f.spellings.param(i).clone())
         };
