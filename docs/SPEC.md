@@ -11972,6 +11972,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **Multi-line `catch` parameter.** `catch (\n e: Exception\n)` now parses — the parser skips newlines
   around the catch parameter exactly as an ordinary parameter list allows (`multiline_catch_e2e`).
 
+- **Multi-line loop condition.** A newline inside the parentheses of an `if`, `while` or
+  `do … while` condition is insignificant, so `while (\n    true\n)` and `} while (\n    c\n)`
+  parse; the three share one parenthesized-condition parser. The emitted loop is the one-line loop's
+  code with the condition's own line, as kotlinc emits it. Test:
+  `paren_condition_newline_e2e::loop_conditions_on_fresh_lines_are_byte_identical_to_kotlinc`.
+
 - **Exhaustive `when` over a CLASSPATH `sealed` class with no `else`.** A `when (d) { is D.A -> …; is
   D.B -> … }` over a classpath `sealed` `D` is exhaustive (hence an EXPRESSION) when every direct
   subtype is covered — the same rule as a same-module sealed subject, but the subtype set now comes from
