@@ -3074,36 +3074,8 @@ fn emit_class(
                     }
                 }
             }
-            // Debug metadata consumes the position emission actually reached. Reconstructing this
-            // later from constructor parameters, constant-pool widths, or assertion policy makes a
-            // semantic description masquerade as bytecode layout and can point inside an opcode.
-            let mut debug_start = ctor.bytes.len();
             let ctor_param_fields = primary_ctor_parameter_fields(c, param_tys.len());
-            // Store only constructor fields explicitly marked as pre-super: an inner class's
-            // enclosing instance and a local class's captured values, which a superclass argument
-            // may read. Keeping this as ordering metadata avoids interpreting a JVM
-            // field name as source semantics. A `putfield` of the current class's own field on the
-            // still-uninitialized `this` is legal per JVMS 4.10.2.4.
-            for &(param_i, field_i) in &c.pre_super_param_fields {
-                let param_i = param_i as usize;
-                let field = &c.fields[field_i as usize];
-                let param_ty = param_tys[param_i];
-                let param_slot = 1 + param_tys[..param_i]
-                    .iter()
-                    .map(|ty| slot_words(*ty))
-                    .sum::<u16>();
-                ctor.aload(0);
-                load(param_ty, param_slot, &mut ctor);
-                let physical_name = instance_field_jvm_name(ir, c, field);
-                let fref =
-                    e.cw.fieldref(&fq_name, &physical_name, &type_descriptor(field.ty));
-                ctor.putfield(fref, slot_words(field.ty) as i32);
-            }
-            // A local class's captured values are stored without a line; its first line is the
-            // delegation that follows them. An inner class's enclosing-instance store has one.
-            if c.is_local_class {
-                debug_start = ctor.bytes.len();
-            }
+            let debug_start = e.emit_pre_super_field_stores(c, &fq_name, &param_tys, &mut ctor);
             primary_ctor_debug = Some((
                 ctor_desc.clone(),
                 u16::try_from(debug_start).expect("a JVM method body fits in u16"),

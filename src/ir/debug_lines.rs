@@ -6,6 +6,17 @@ use std::collections::{HashMap, HashSet};
 
 use super::{ExprId, IrFile};
 
+/// Where the `return` a `Unit` body is completed with takes its source line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum UnitBodyExit {
+    /// A block body falls off its closing `}` on this line (kotlinc's
+    /// `setExtraLineNumberForVoidReturningFunction`), marked before the return materializes.
+    ClosingBrace(u32),
+    /// An expression body: fir2ir builds the return at the expression's end offset, so it carries
+    /// this end line once the expression has run.
+    ExpressionEnd(u32),
+}
+
 #[derive(Default)]
 pub(super) struct GeneratedLineMarks {
     /// Implicit return identity → the expression body's closing source line.
@@ -17,6 +28,8 @@ pub(super) struct GeneratedLineMarks {
     /// Return a block body falls off its end into → the body's closing `}` line, which kotlinc's
     /// `setExtraLineNumberForVoidReturningFunction` marks BEFORE the returned value is loaded.
     fallthrough_returns: HashMap<ExprId, u32>,
+    /// A `Unit` accessor body → the exit the `return` appended after it takes its line from.
+    accessor_body_exits: HashMap<ExprId, UnitBodyExit>,
     /// Line a generated call enters only where it dispatches: its operands carry no source
     /// position of their own, so nothing marks the line at its start (a callable-reference
     /// carrier's `invoke`, whose stored receiver is read ahead of the call's line).
@@ -54,6 +67,24 @@ impl IrFile {
             .fallthrough_returns
             .get(&returned)
             .copied()
+    }
+
+    /// Mark the line a `Unit` body's appended `return` carries.
+    pub(crate) fn mark_unit_body_exit(&mut self, returned: ExprId, exit: UnitBodyExit) {
+        match exit {
+            UnitBodyExit::ClosingBrace(line) => self.mark_fallthrough_return_line(returned, line),
+            UnitBodyExit::ExpressionEnd(line) => self.mark_implicit_return_end_line(returned, line),
+        }
+    }
+
+    /// Record the exit of a `Unit` accessor body, before the accessor that appends its `return`
+    /// exists.
+    pub(crate) fn record_accessor_body_exit(&mut self, body: ExprId, exit: UnitBodyExit) {
+        self.generated_lines.accessor_body_exits.insert(body, exit);
+    }
+
+    pub(crate) fn accessor_body_exit(&self, body: ExprId) -> Option<UnitBodyExit> {
+        self.generated_lines.accessor_body_exits.get(&body).copied()
     }
 
     pub(crate) fn mark_dispatch_line(&mut self, call: ExprId, line: u32) {

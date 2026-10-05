@@ -771,12 +771,27 @@ fn check_and_dispatch_property_body(
             return Err(CheckedBodyDriverFailure::UnsupportedBodyKind(work.kind));
         }
     }
-    // An initializer or delegate expression, like an expression-bodied getter, is the body's
-    // value: its last root is consumed as that value, never discarded as a statement.
+    let setter_body = property
+        .setter
+        .as_ref()
+        .and_then(|setter| setter.body.as_ref())
+        .filter(|_| work.kind == BodyKind::Setter);
+    // An initializer or delegate expression, like an expression-bodied getter or setter, is the
+    // body's value: its last root is consumed as that value, never discarded as a statement.
     if matches!(work.kind, BodyKind::Initializer | BodyKind::Delegate)
         || (work.kind == BodyKind::Getter && matches!(property.getter, Some(FunBody::Expr(_))))
+        || matches!(setter_body, Some(FunBody::Expr(_)))
     {
         body.set_implicit_return();
+    }
+    // A block-bodied setter falls off its closing `}` into the `return` its accessor appends.
+    if let Some(FunBody::Block(block)) = setter_body {
+        body.set_close_line(
+            file.expr_end_lines
+                .get(block.0 as usize)
+                .copied()
+                .unwrap_or(0),
+        );
     }
     session.absorb_checked_body(&body);
     if let Some(callable) = index.callable_for_declaration(work.declaration) {

@@ -850,13 +850,25 @@ fn directly_shared_locals(
     shared
 }
 
+/// The source line an implicit `Unit` return carries, which depends on the body's shape.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum UnitReturnLine {
+    /// A lambda falls off its closing `}` on this line. kotlinc's
+    /// `setExtraLineNumberForVoidReturningFunction` marks it before the `Unit` the lambda returns.
+    ClosingBrace(u32),
+    /// An expression body `= expression`. fir2ir's `ExpressionBodyTransformer` builds the return
+    /// at the expression's end offset, so the return instruction carries the expression's END
+    /// line once its value has been evaluated.
+    ExpressionEnd,
+}
+
 fn finish_callable_body(
     ir: &mut IrFile,
     mut roots: Vec<ExprId>,
     result: crate::types::Ty,
     implicit_return: bool,
     unit_as_value: bool,
-    close_line: u32,
+    unit_return_line: Option<UnitReturnLine>,
     origin: crate::fir::OriginId,
 ) -> Result<ExprId, FirLoweringFailure> {
     let first_generated = ir.exprs.len();
@@ -869,6 +881,9 @@ fn finish_callable_body(
             value: None,
         })
     } else if result == crate::types::Ty::Unit {
+        let expression_end = roots
+            .last()
+            .and_then(|&trailing| unit_expression_end(ir, trailing));
         consume_trailing_unit_result(ir, &mut roots);
         let return_unit = if unit_as_value {
             let unit = ir.add_expr(crate::ir::IrExpr::UnitInstance);
@@ -876,10 +891,17 @@ fn finish_callable_body(
         } else {
             ir.add_expr(crate::ir::IrExpr::Return(None))
         };
-        // A lambda falls off its closing brace into this return, which kotlinc marks there
-        // before the `Unit` it returns.
-        if close_line != 0 {
-            ir.mark_fallthrough_return_line(return_unit, close_line);
+        let exit = match unit_return_line {
+            Some(UnitReturnLine::ClosingBrace(line)) => {
+                Some(crate::ir::UnitBodyExit::ClosingBrace(line))
+            }
+            Some(UnitReturnLine::ExpressionEnd) => {
+                expression_end.map(crate::ir::UnitBodyExit::ExpressionEnd)
+            }
+            None => None,
+        };
+        if let Some(exit) = exit {
+            ir.mark_unit_body_exit(return_unit, exit);
         }
         roots.push(return_unit);
         ir.add_expr(crate::ir::IrExpr::Block {
@@ -927,6 +949,24 @@ fn finish_callable_body(
         );
     }
     Ok(body)
+}
+
+/// The end line of a `Unit` expression body's trailing root. A checked `CoerceToUnit` wraps the
+/// expression in `Block { effects, value: UnitInstance }`; its last effect is then the expression.
+pub(super) fn unit_expression_end(ir: &IrFile, trailing: ExprId) -> Option<u32> {
+    ir.expr_end_lines.get(&trailing).copied().or_else(|| {
+        let crate::ir::IrExpr::Block {
+            stmts,
+            value: Some(value),
+        } = ir.expr(trailing)
+        else {
+            return None;
+        };
+        if !matches!(ir.expr(*value), crate::ir::IrExpr::UnitInstance) {
+            return None;
+        }
+        ir.expr_end_lines.get(stmts.last()?).copied()
+    })
 }
 
 /// Consume the implicit result of a Unit body before adding the callable's one physical return.

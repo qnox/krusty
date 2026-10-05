@@ -28,7 +28,7 @@ fn implicit_non_unit_callable_result_is_a_terminal_return_statement() {
         lowered.result_type.unwrap(),
         lowered.implicit_return,
         false,
-        0,
+        None,
         origin,
     )
     .unwrap();
@@ -47,9 +47,16 @@ fn implicit_non_unit_callable_result_is_a_terminal_return_statement() {
 fn a_unit_body_falling_off_its_end_marks_its_closing_line_on_the_return() {
     let origin = OriginId::from_raw(0);
     let mut ir = IrFile::default();
-    let callable_body =
-        super::super::finish_callable_body(&mut ir, Vec::new(), Ty::Unit, true, true, 9, origin)
-            .unwrap();
+    let callable_body = super::super::finish_callable_body(
+        &mut ir,
+        Vec::new(),
+        Ty::Unit,
+        true,
+        true,
+        Some(super::super::UnitReturnLine::ClosingBrace(9)),
+        origin,
+    )
+    .unwrap();
 
     let IrExpr::Block { stmts, .. } = ir.expr(callable_body) else {
         panic!("callable body must be a block")
@@ -59,4 +66,36 @@ fn a_unit_body_falling_off_its_end_marks_its_closing_line_on_the_return() {
     };
     assert!(matches!(ir.expr(*returned), IrExpr::Return(Some(_))));
     assert_eq!(ir.fallthrough_return_line(*returned), Some(9));
+}
+
+#[test]
+fn a_unit_expression_body_marks_its_end_line_on_the_return() {
+    let origin = OriginId::from_raw(0);
+    let mut ir = IrFile::default();
+    let expression = ir.add_expr(IrExpr::Block {
+        stmts: Vec::new(),
+        value: None,
+    });
+    ir.expr_end_lines.insert(expression, 13);
+    let callable_body = super::super::finish_callable_body(
+        &mut ir,
+        vec![expression],
+        Ty::Unit,
+        true,
+        false,
+        Some(super::super::UnitReturnLine::ExpressionEnd),
+        origin,
+    )
+    .unwrap();
+
+    let IrExpr::Block { stmts, .. } = ir.expr(callable_body) else {
+        panic!("callable body must be a block")
+    };
+    let [effect, returned] = stmts.as_slice() else {
+        panic!("a Unit expression body keeps its expression and appends its return")
+    };
+    assert_eq!(*effect, expression);
+    assert!(matches!(ir.expr(*returned), IrExpr::Return(None)));
+    assert_eq!(ir.implicit_return_end_line(*returned), Some(13));
+    assert_eq!(ir.fallthrough_return_line(*returned), None);
 }
