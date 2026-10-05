@@ -62,3 +62,30 @@ fn suspend_coroutine_is_inlined_into_the_callers_state_machine_like_kotlinc() {
 fn suspend_coroutine_suspends_and_resumes_like_kotlinc() {
     common::expect_box_same_as_kotlinc(SOURCE, "SuspendCoroutineInline");
 }
+
+/// The resumed result narrowed to the local's type. kotlinc's `visitVariable` marks the
+/// initializer's line before it materializes the inline call's erased result, and the inlined body
+/// left the caller's line forgotten, so the `checkcast` sits on the call's line (behind the `nop`
+/// the resumption keeps for the transformer's own entry on that line).
+const TYPED_SOURCE: &str = r#"import kotlin.coroutines.*
+
+var pending: Any? = null
+
+fun take(value: Any?): String = "K"
+
+suspend fun typed(tail: String): String {
+    val second = suspendCoroutine<String> { continuation ->
+        pending = continuation
+    }
+    return take(second) + tail
+}
+"#;
+
+#[test]
+fn a_resumed_inline_result_is_narrowed_on_the_calls_line_like_kotlinc() {
+    common::assert_classes_identical_to_kotlinc(
+        "SuspendCoroutineTyped",
+        TYPED_SOURCE,
+        &["SuspendCoroutineTypedKt", "SuspendCoroutineTypedKt$typed$1"],
+    );
+}

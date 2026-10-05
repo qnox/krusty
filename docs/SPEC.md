@@ -776,7 +776,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   markers like any other. The literal `Unit` lambda the inlined body invokes marks its closing
   brace on the return it falls into, which the inliner keeps as a `nop` on that line
   (`jvm/ir_emit/bytecode_inline_call.rs`, `jvm/ir_emit/bytecode_inline_call/lambda_node.rs`).
-  Tests: the `coroutines/` box corpus through the kotlinc byte-diff harness, and
+  A used result narrowed after the resumption (`val s = suspendCoroutine<String> { … }`) is cast
+  on the call's line: the inlined body left the caller's line forgotten, and kotlinc's
+  `visitVariable` marks the initializer before materializing its erased value, so the `checkcast`
+  gets an entry of its own behind the transformer's resume entry on the same line, which keeps a
+  `nop` (`jvm/ir_emit/transformed_suspensions.rs`).
+  Tests: `tests/suspend_coroutine_inline_e2e.rs`, the `coroutines/` box corpus through the kotlinc
+  byte-diff harness, and
   `fir/body_check/call_tests.rs::suspend_coroutine_is_an_ordinary_inline_suspend_call`.
 - **An `@InlineOnly` call's last operands are read in place.** kotlinc's
   `InplaceArgumentsMethodTransformer` moves each argument of an `@InlineOnly` callee that passes

@@ -181,9 +181,12 @@ impl Emitter<'_> {
             return;
         }
         let discarded = leave == SuspensionResult::Discarded;
-        // A used result is read as the declared type at the call's own line.
+        // A used result is read as the declared type at the call's own line once an inlined body
+        // ran under its own lines: the block's, or an inline suspend call's, after which the caller's
+        // line was forgotten (kotlinc's `markLineNumberAfterInlineIfNeeded`).
+        let inlined = block || code.line_forgotten();
         match self.ir.expr_source_lines.get(&e) {
-            Some(&line) if block && !discarded && line != 0 => code.mark_line(line),
+            Some(&line) if inlined && !discarded && line != 0 => code.mark_line(line),
             _ => {}
         }
         let target = jvm_declared_ty(&result);
