@@ -494,6 +494,7 @@ fn remap_expression(expression: &mut IrExpr, names: &HashMap<TypeName, TypeName>
         | IrExpr::Block { .. }
         | IrExpr::When { .. }
         | IrExpr::While { .. }
+        | IrExpr::SetFrameResult { .. }
         | IrExpr::Break { .. }
         | IrExpr::Continue { .. }
         | IrExpr::PrimitiveBinOp { .. }
@@ -805,9 +806,6 @@ fn remap_class(class: &mut super::IrClass, names: &HashMap<TypeName, TypeName>) 
             .subclass
             .iter_mut()
             .for_each(|value| name(value, names));
-    }
-    if let Some(parameters) = &mut class.enum_entry_of {
-        tys(parameters, names);
     }
     if let Some(reference) = &mut class.prop_ref {
         reference
@@ -1341,10 +1339,6 @@ impl super::IrFile {
 
         remap_keyed(&mut self.referenced_module_classifiers, names);
         remap_keyed(&mut self.classifier_hierarchies, names);
-        for interfaces in self.superclass_interfaces.values_mut() {
-            interfaces.iter_mut().for_each(|value| name(value, names));
-        }
-        remap_keyed(&mut self.superclass_interfaces, names);
         remap_keyed(&mut self.property_overrides, names);
         remap_keyed(&mut self.function_overrides, names);
         remap_keyed(&mut self.inherited_defaults, names);
