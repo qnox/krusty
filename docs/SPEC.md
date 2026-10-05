@@ -9287,6 +9287,23 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `tests/serialization_tuple_elements_e2e.rs` (runtime for each tuple as a property, nested,
   nullable, over a class type parameter and through a reified call, plus the cached factories,
   cross-checked against the reference compiler).
+- **An enum that is not `@Serializable` serializes through a serializer built at the use site.**
+  Such an enum has no generated accessor, so kotlinc's plugin constructs its serializer in the
+  property's `$childSerializers` slot factory: `EnumsKt.createSimpleEnumSerializer("<serial name>",
+  (Enum[]) E.values())`, the serial name being the enum's class-level `@SerialName` or its dotted
+  qualified name. An entry carrying `@SerialName` selects `createAnnotatedEnumSerializer(name,
+  values, names, entryAnnotations, null)` instead, with `null` for each entry without a name of its
+  own — the same factory selection a `@Serializable` enum's own accessor makes. A nullable property
+  caches the non-null serializer and wraps it with `getNullable` in `childSerializers`; as a
+  `List` element the factory call is the list serializer's operand. krusty only knew how to read a
+  `@Serializable` enum's accessor and rejected the file as an unsupported construct. The plan
+  identifies the enum by its classifier identity and the absence of a resolved `@Serializable`
+  application, never by spelling. kotlinc builds the same shape for an enum from a dependency or a
+  sibling file, reading the entries' `@SerialName`s from that declaration; krusty does not yet have
+  the entry-annotation facts for those and still reports them as unsupported.
+  Tests: `tests/serialization_plain_enum_element_e2e.rs` (slot factories, class initializer and
+  `childSerializers` cross-checked against the reference compiler, plus a JSON round trip under the
+  entries' serial names).
 - **An override of a Java member matches the platform type, and a Java class merges its members by
   erasure.** kotlinc's override checker treats a Java platform type `String!` as equal to either
   bound, so `override fun from(r: String)` and `override fun from(r: String?)` both implement
