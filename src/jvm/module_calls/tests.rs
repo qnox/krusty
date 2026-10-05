@@ -2,6 +2,7 @@ use super::{realize_super_calls, ModuleRealizationTarget};
 use crate::backend::CheckedBackendCallables;
 use crate::fir::{ExternalCallableId, ResolvedFunctionOverrideTarget};
 use crate::ir::{Callee, IrExpr, IrFile, IrSuperCallKind};
+use crate::jvm::property_realizations::PropertyRealizations;
 use crate::libraries::{
     ExternalCallableKind, ExternalCallableRealization, LibraryCallable, MemberRealization,
     NonvirtualCallRealization,
@@ -38,7 +39,11 @@ fn a_dependency_super_call_requires_its_frozen_identity() {
     dependency_super_call(&mut ir, target);
 
     assert_eq!(
-        realize_super_calls(&mut ir, &CheckedBackendCallables::default()),
+        realize_super_calls(
+            &mut ir,
+            &CheckedBackendCallables::default(),
+            &mut PropertyRealizations::default(),
+        ),
         Err(ModuleRealizationTarget::DependencyCallable(target))
     );
 }
@@ -65,6 +70,7 @@ fn a_dependency_super_call_uses_its_frozen_nonvirtual_target() {
     let realization = ExternalCallableRealization {
         callable: declaration,
         kind: ExternalCallableKind::Member,
+        declaration_package: None,
         parameter_identities: Box::new([]),
     };
     let mut facts = CheckedBackendCallables::default();
@@ -74,7 +80,8 @@ fn a_dependency_super_call_uses_its_frozen_nonvirtual_target() {
         })
         .expect("the selected super declaration has a frozen fact");
 
-    realize_super_calls(&mut ir, &facts).expect("the frozen holder realizes the super call");
+    realize_super_calls(&mut ir, &facts, &mut PropertyRealizations::default())
+        .expect("the frozen holder realizes the super call");
     let IrExpr::Call {
         callee:
             Callee::Static {

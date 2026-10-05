@@ -37,6 +37,28 @@ pub(crate) struct DecodedPackageFragment<'a> {
     pub(crate) classes: Vec<&'a [u8]>,
     pub(crate) file_annotations: Vec<&'a [u8]>,
     pub(crate) class_names: Vec<u64>,
+    pub(crate) class_annotations: ClassAnnotationProtocol,
+}
+
+/// The serializer protocol whose extension carries a class's annotations when the class predates
+/// the `ProtoBuf.Class.annotation` field (25). kotlinc reads field 25 first and the protocol
+/// extension only when field 25 is empty.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ClassAnnotationProtocol {
+    /// `KlibMetadataProtoBuf.classAnnotation`.
+    Klib,
+    /// `BuiltInsProtoBuf.classAnnotation`: `.kotlin_builtins` and a JVM module's optional
+    /// annotation classes.
+    BuiltIns,
+}
+
+impl ClassAnnotationProtocol {
+    pub(crate) fn extension_field(self) -> u64 {
+        match self {
+            Self::Klib => 170,
+            Self::BuiltIns => 150,
+        }
+    }
 }
 
 /// One raw `QualifiedNameTable.QualifiedName` entry. Its numeric references remain wire identities;
@@ -122,7 +144,7 @@ impl<'a> Cursor<'a> {
         self.base + self.offset
     }
 
-    fn error(&self, detail: impl Into<String>) -> PackageFragmentDecodeError {
+    pub(crate) fn error(&self, detail: impl Into<String>) -> PackageFragmentDecodeError {
         PackageFragmentDecodeError {
             offset: self.position(),
             detail: detail.into(),
@@ -544,7 +566,7 @@ pub(crate) fn decode_package_fragment(
     }
     let mut cursor = Cursor::new(bytes, 0);
     let mut strings = None;
-    let mut qnames = None;
+    let mut qualified_names = None;
     let mut package = None;
     let mut classes = Vec::new();
     let mut file_annotations = Vec::new();
@@ -554,20 +576,19 @@ pub(crate) fn decode_package_fragment(
         match number {
             1 => {
                 require_wire(&cursor, wire, 2, "package fragment")?;
-                let (body, base) = cursor.length_delimited("package-fragment string table")?;
+                let table = cursor.length_delimited("package-fragment string table")?;
                 if strings.is_some() {
                     return Err(cursor.error("duplicate package-fragment string table"));
                 }
-                strings = Some(decode_string_table(body, base)?);
+                strings = Some(table);
             }
             2 => {
                 require_wire(&cursor, wire, 2, "package fragment")?;
-                let (body, base) =
-                    cursor.length_delimited("package-fragment qualified-name table")?;
-                if qnames.is_some() {
+                let table = cursor.length_delimited("package-fragment qualified-name table")?;
+                if qualified_names.is_some() {
                     return Err(cursor.error("duplicate package-fragment qualified-name table"));
                 }
-                qnames = Some(decode_qualified_names(body, base)?);
+                qualified_names = Some(table);
             }
             3 => {
                 require_wire(&cursor, wire, 2, "package fragment")?;
@@ -614,8 +635,32 @@ pub(crate) fn decode_package_fragment(
             _ => cursor.skip(wire, "package fragment")?,
         }
     }
-    let strings = strings.unwrap_or_default();
-    let qnames = qnames.unwrap_or_default();
+    let (strings, qnames) = decode_name_tables(strings, qualified_names)?;
+    Ok(DecodedPackageFragment {
+        strings,
+        qnames,
+        package,
+        classes,
+        file_annotations,
+        class_names,
+        class_annotations: ClassAnnotationProtocol::Klib,
+    })
+}
+
+/// Decode a string table and qualified-name table (each a length-delimited body and its offset)
+/// and check that every qualified name references a present string and an earlier parent.
+pub(crate) fn decode_name_tables(
+    strings: Option<(&[u8], usize)>,
+    qualified_names: Option<(&[u8], usize)>,
+) -> Result<(Vec<String>, Vec<QName>), PackageFragmentDecodeError> {
+    let strings = match strings {
+        Some((body, base)) => decode_string_table(body, base)?,
+        None => Vec::new(),
+    };
+    let qnames = match qualified_names {
+        Some((body, base)) => decode_qualified_names(body, base)?,
+        None => Vec::new(),
+    };
     for (index, qname) in qnames.iter().enumerate() {
         if qname.short >= strings.len() {
             return Err(PackageFragmentDecodeError {
@@ -645,14 +690,12 @@ pub(crate) fn decode_package_fragment(
             });
         }
     }
-    Ok(DecodedPackageFragment {
-        strings,
-        qnames,
-        package,
-        classes,
-        file_annotations,
-        class_names,
-    })
+    Ok((strings, qnames))
+}
+
+/// Check one `ProtoBuf.Class` message outside a package fragment against the class schema.
+pub(crate) fn validate_class(bytes: &[u8], base: usize) -> Result<(), PackageFragmentDecodeError> {
+    validate_message(bytes, base, MessageKind::Class)
 }
 
 pub fn parse_module_header(bytes: &[u8]) -> Result<KlibModuleHeader, PackageFragmentDecodeError> {

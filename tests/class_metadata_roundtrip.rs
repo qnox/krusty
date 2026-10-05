@@ -7,7 +7,8 @@
 
 use krusty::jvm::classreader::ClassInfo;
 use krusty::jvm::metadata::{
-    class_constructors, class_functions, decode_metadata, package_functions,
+    class_constructors, class_functions, decode_metadata_within, package_functions, RawMetadata,
+    ScopedTypeParameter,
 };
 use krusty::metadata::class_builder::{
     build_class, CapturedTypeParameters, ClassTail, CtorMeta, FnMeta, DEFAULT_CLASS_FLAGS,
@@ -22,7 +23,23 @@ fn class_info(internal: &str, d1: Vec<u8>, d2: Vec<String>) -> ClassInfo {
 }
 
 fn class_info_kind(internal: &str, d1: Vec<u8>, d2: Vec<String>, kind: Option<i32>) -> ClassInfo {
-    let d1_strings = vec![d1.iter().map(|&b| b as char).collect()];
+    class_info_within(internal, d1, d2, kind, &[])
+}
+
+/// A class whose metadata addresses `enclosing` type parameters by id, as an inner class's does.
+fn class_info_within(
+    internal: &str,
+    d1: Vec<u8>,
+    d2: Vec<String>,
+    kind: Option<i32>,
+    enclosing: &[ScopedTypeParameter],
+) -> ClassInfo {
+    let raw = RawMetadata {
+        d1: vec![d1.iter().map(|&b| b as char).collect()],
+        d2,
+        k: kind,
+        package_name: None,
+    };
     ClassInfo {
         major: 52,
         access: 0,
@@ -31,7 +48,7 @@ fn class_info_kind(internal: &str, d1: Vec<u8>, d2: Vec<String>, kind: Option<i3
         interfaces: Vec::<String>::new().into(),
         fields: Vec::new(),
         methods: Vec::new(),
-        meta: decode_metadata(&d1_strings, &d2, kind, internal, None, &[])
+        meta: decode_metadata_within(&raw, internal, &[], enclosing)
             .expect("round-trip metadata decodes"),
         signature: None,
         retention: None,
@@ -39,6 +56,8 @@ fn class_info_kind(internal: &str, d1: Vec<u8>, d2: Vec<String>, kind: Option<i3
         kotlin_targets: Vec::new(),
         java_targets: Vec::new(),
         inner_classes: Vec::new(),
+        annotation_element_defaults: Vec::new(),
+        inner_metadata: None,
     }
 }
 
@@ -124,7 +143,7 @@ fn secondary_constructor_default_flags_round_trip() {
         sig_name: None,
         vararg_index: None,
         flags: krusty::metadata::class_builder::SECONDARY_CTOR_FLAGS,
-        annotations: &[],
+        annotations: &krusty::metadata::NO_ANNOTATIONS,
     }];
     let (d1, d2) = build_class(
         type_name("sample/Secondary"),
@@ -213,6 +232,15 @@ fn class_type_parameter_bound_and_variance_round_trip() {
     );
 }
 
+/// An enclosing class's type parameter as the outer class's own metadata declares it.
+fn scoped(id: u64, name: &str) -> ScopedTypeParameter {
+    ScopedTypeParameter {
+        id,
+        name: name.to_string(),
+        bounds: Vec::new(),
+    }
+}
+
 #[test]
 fn inner_member_metadata_maps_captured_and_own_type_parameters_to_distinct_ids() {
     let outer = "outer-semantic".to_string();
@@ -257,7 +285,7 @@ fn inner_member_metadata_maps_captured_and_own_type_parameters_to_distinct_ids()
         vararg_index: None,
         jvm_sig: None,
         jvm_sig_name: None,
-        annotations: Vec::new(),
+        annotations: Default::default(),
         param_annotations: Vec::new(),
         no_infer_params: Vec::new(),
     }];
@@ -277,7 +305,13 @@ fn inner_member_metadata_maps_captured_and_own_type_parameters_to_distinct_ids()
             ..Default::default()
         },
     );
-    let ci = class_info_kind("sample/Outer$Inner", d1, d2, Some(1));
+    let ci = class_info_within(
+        "sample/Outer$Inner",
+        d1,
+        d2,
+        Some(1),
+        &[scoped(0, "outer-semantic")],
+    );
     assert_eq!(ci.meta.class_type_parameters.type_params(), &["U"]);
     let pair = class_functions(&ci)
         .iter()
@@ -323,7 +357,7 @@ fn nested_inner_metadata_numbers_captures_from_outermost_to_innermost() {
         vararg_index: None,
         jvm_sig: None,
         jvm_sig_name: None,
-        annotations: Vec::new(),
+        annotations: Default::default(),
         param_annotations: Vec::new(),
         no_infer_params: Vec::new(),
     }];
@@ -343,7 +377,13 @@ fn nested_inner_metadata_numbers_captures_from_outermost_to_innermost() {
             ..Default::default()
         },
     );
-    let ci = class_info_kind("sample/Outer$Middle$Inner", d1, d2, Some(1));
+    let ci = class_info_within(
+        "sample/Outer$Middle$Inner",
+        d1,
+        d2,
+        Some(1),
+        &[scoped(0, "outer-semantic"), scoped(1, "middle-semantic")],
+    );
     let signature = class_functions(&ci)
         .iter()
         .find(|function| function.jvm_name == "triple")
@@ -417,7 +457,7 @@ fn package_value_param_defaults_round_trip() {
     // module can omit `b` (the reader's `metadata_param_defaults` drives classpath default-omission).
     let funcs = vec![PkgFnMeta {
         spellings: krusty::spelling::DeclaredSpellings::default(),
-        annotations: Vec::new(),
+        annotations: Default::default(),
         decl_order: 0,
         jvm_name: None,
         name: "host".to_string(),
@@ -472,7 +512,7 @@ fn package_function_type_parameter_bound_round_trips() {
     let t = Ty::ty_param("T", Ty::obj("kotlin/CharSequence"));
     let funcs = vec![PkgFnMeta {
         spellings: krusty::spelling::DeclaredSpellings::default(),
-        annotations: Vec::new(),
+        annotations: Default::default(),
         decl_order: 0,
         jvm_name: None,
         name: "identity".to_string(),
@@ -526,7 +566,7 @@ fn package_extension_receiver_round_trips() {
     // `builder.composable("x")` call.
     let funcs = vec![PkgFnMeta {
         spellings: krusty::spelling::DeclaredSpellings::default(),
-        annotations: Vec::new(),
+        annotations: Default::default(),
         decl_order: 0,
         jvm_name: None,
         name: "composable".to_string(),
@@ -589,7 +629,7 @@ fn package_receiver_function_type_param_round_trips() {
     // dependent recognizes a lambda passed to `builder` binds `this` to NGB (drives classpath lambda_recv).
     let funcs = vec![PkgFnMeta {
         spellings: krusty::spelling::DeclaredSpellings::default(),
-        annotations: Vec::new(),
+        annotations: Default::default(),
         decl_order: 0,
         jvm_name: None,
         name: "NavHost".to_string(),

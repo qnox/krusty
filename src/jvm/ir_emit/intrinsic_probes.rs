@@ -6,7 +6,7 @@
 //! probeCoroutineSuspended; L:`, written at the call's own line.
 
 use super::{load, Emitter};
-use crate::ir::{ExprId, IrIntrinsicSuspensionKind};
+use crate::ir::ExprId;
 use crate::jvm::classfile::CodeBuilder;
 use crate::types::Ty;
 
@@ -15,24 +15,28 @@ const CONTINUATION: &str = "kotlin/coroutines/Continuation";
 impl Emitter<'_> {
     /// Follow `point`, when it is an unintercepted intrinsic suspension point, with its probe.
     pub(super) fn probe_intrinsic_suspension(&mut self, point: ExprId, code: &mut CodeBuilder) {
-        let Some(IrIntrinsicSuspensionKind::Unintercepted) = self
-            .ir
-            .intrinsic_suspension_points
-            .get(&point)
-            .map(|point| point.kind)
-        else {
+        if !self.ir.is_unintercepted_suspension(point) {
             return;
-        };
-        let Some(&continuation) = self.intrinsic_probe_continuations.get(&point) else {
-            self.run.set_emit_error(
-                "an unintercepted suspension point has no CPS continuation binding".to_string(),
-            );
-            return;
-        };
-        let Some(&(slot, ty)) = self.slots.get(&continuation) else {
-            self.run
-                .set_emit_error("a probed continuation has no declared value slot".to_string());
-            return;
+        }
+        // A block the transformer takes probes the fake continuation it was given.
+        let declared = match self.is_transformed_block(point) {
+            true => None,
+            false => {
+                let Some(&continuation) = self.intrinsic_probe_continuations.get(&point) else {
+                    self.run.set_emit_error(
+                        "an unintercepted suspension point has no CPS continuation binding"
+                            .to_string(),
+                    );
+                    return;
+                };
+                let Some(&declared) = self.slots.get(&continuation) else {
+                    self.run.set_emit_error(
+                        "a probed continuation has no declared value slot".to_string(),
+                    );
+                    return;
+                };
+                Some(declared)
+            }
         };
         // The block ran as an inlined body, after which kotlinc writes the call's line afresh.
         if let Some(&line) = self.ir.expr_source_lines.get(&point) {
@@ -57,11 +61,16 @@ impl Emitter<'_> {
         );
         code.invokestatic(suspended, 0, 1);
         code.if_acmpne(resumed);
-        load(ty, slot, code);
-        // A machine's continuation is its own class; the probe takes the interface.
-        if ty != Ty::obj(CONTINUATION) {
-            let interface = self.cw.class_ref(CONTINUATION);
-            code.checkcast(interface);
+        match declared {
+            Some((slot, ty)) => {
+                load(ty, slot, code);
+                // A machine's continuation is its own class; the probe takes the interface.
+                if ty != Ty::obj(CONTINUATION) {
+                    let interface = self.cw.class_ref(CONTINUATION);
+                    code.checkcast(interface);
+                }
+            }
+            None => self.load_fake_continuation(code),
         }
         let probe = self.cw.methodref(
             "kotlin/coroutines/jvm/internal/DebugProbesKt",
@@ -75,9 +84,7 @@ impl Emitter<'_> {
 
 #[cfg(test)]
 mod tests {
-    use crate::ir::{
-        IrConst, IrExpr, IrFile, IrFunction, IrIntrinsicSuspensionKind, IrIntrinsicSuspensionPoint,
-    };
+    use crate::ir::{IrConst, IrExpr, IrFile, IrFunction, IrIntrinsicSuspensionPoint};
     use crate::jvm::ir_emit::invariant_tests::emit_for_test_with_probe_continuations;
     use crate::jvm::ir_emit::EmitRun;
     use crate::types::Ty;
@@ -90,7 +97,6 @@ mod tests {
             point,
             IrIntrinsicSuspensionPoint {
                 result: Ty::nullable(Ty::obj("kotlin/Any")),
-                kind: IrIntrinsicSuspensionKind::Unintercepted,
             },
         );
         ir.add_fun(IrFunction {

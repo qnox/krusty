@@ -323,34 +323,40 @@ pub(super) fn build_class_metadata_with_facts(
                 .backing_field
                 .and_then(|index| c.fields.get(index as usize).map(|field| (index, field)));
             let (default_getter, default_setter) = accessor_jvm_names(c, &property.name);
+            // A getter's descriptor is its physical one: a scalar getter result over a reference-returning overridden
+            // property returns the wrapper (see `jvm::override_results`).
+            let physical_getter = |fid: u32| {
+                let function = &ir.functions[fid as usize];
+                (
+                    function.name.clone(),
+                    ir_method_desc(&function.params, &override_results.physical_result(ir, fid)),
+                )
+            };
             let ordinary_getter = property
                 .getter
-                .and_then(|fid| ir.functions.get(fid as usize))
-                .map(|function| {
-                    (
-                        function.name.clone(),
-                        ir_method_desc(&function.params, &function.ret),
-                    )
-                })
+                .filter(|&fid| (fid as usize) < ir.functions.len())
+                .map(physical_getter)
                 .or_else(|| {
                     c.methods
                         .iter()
-                        .map(|fid| &ir.functions[*fid as usize])
-                        .find(|function| function.name == default_getter)
-                        .map(|function| {
-                            (
-                                function.name.clone(),
-                                ir_method_desc(&function.params, &function.ret),
-                            )
-                        })
+                        .copied()
+                        .find(|&fid| ir.functions[fid as usize].name == default_getter)
+                        .map(physical_getter)
                 })
                 .or_else(|| {
                     backing.and_then(|(_, field)| {
                         // `@JvmField` suppresses the accessor pair entirely, so there is no
                         // synthesized getter to derive from the backing field — kotlinc records the
                         // field alone.
+                        let boxed = override_results
+                            .boxes_member_property(c.fq_name, property_index as u32);
+                        let result = if boxed {
+                            Ty::nullable(property.ty)
+                        } else {
+                            field.ty
+                        };
                         (!visibility.is_private() && !is_jvm_field(c, &property.name))
-                            .then(|| (default_getter, format!("(){}", desc(field.ty))))
+                            .then(|| (default_getter, format!("(){}", desc(result))))
                     })
                 });
             let getter = if c.is_annotation {
@@ -471,7 +477,12 @@ pub(super) fn build_class_metadata_with_facts(
                         .map(|(_, field)| field)
                         .or(delegate)
                         .filter(|field| property.ty != field.ty || names_local(field.ty))
-                        .map(|field| desc(field.ty)),
+                        .map(|field| desc(field.ty))
+                        .or_else(|| {
+                            static_fields::hoisted_static_for(ir, c, property_index)
+                                .filter(|storage| storage.erased_declared_ty.is_some())
+                                .map(|storage| desc(storage.ty))
+                        }),
                     // The PHYSICAL field name when the JVM realization mangles it — an instance
                     // property beside a same-named hoisted companion static (`result` → `result$1`).
                     field_name: backing
@@ -482,7 +493,7 @@ pub(super) fn build_class_metadata_with_facts(
                     // A property-targeted annotation lives on its synthetic marker method; the
                     // record here is what connects the property to it (and the marker's FINAL name,
                     // which the value-class pass may have mangled with the getter's).
-                    annotations: property_marker_annotations(ir, c, &property.name),
+                    annotations: property_metadata_annotations(c, &property.name),
                     field_annotations: property_backing_field_annotations(c, &property.name),
                     synthetic_method: property_marker_signature(ir, c, &property.name),
                     // kotlinc marks an interface companion's `@JvmField` property record: the
@@ -527,7 +538,7 @@ pub(super) fn build_class_metadata_with_facts(
                 setter_parameter_name: None,
                 field_desc: None,
                 field_name: None,
-                annotations: property_marker_annotations(ir, c, &prop.name),
+                annotations: property_metadata_annotations(c, &prop.name),
                 field_annotations: property_backing_field_annotations(c, &prop.name),
                 synthetic_method: property_marker_signature(ir, c, &prop.name),
                 moved_from_interface_companion: false,
@@ -586,8 +597,8 @@ pub(super) fn build_class_metadata_with_facts(
                 .filter(|field| field.ty != ext.ty)
                 .map(|field| desc(field.ty)),
             field_name: ext_delegate.map(|field| instance_field_jvm_name(ir, c, field)),
-            annotations: property_marker_annotations(ir, c, &ext.name),
-            field_annotations: Vec::new(),
+            annotations: property_metadata_annotations(c, &ext.name),
+            field_annotations: Default::default(),
             synthetic_method: property_marker_signature(ir, c, &ext.name),
             moved_from_interface_companion: false,
             companion: false,
@@ -616,16 +627,13 @@ pub(super) fn build_class_metadata_with_facts(
     // Parallel to `named_ctor_args` (hence the SAME unnamed-parameter filter): the class's
     // `ctor_param_annotations` covers every `ctor_args` entry, including the synthetic unnamed ones a
     // metadata constructor record never lists.
-    let named_ctor_param_annotations: Vec<Vec<crate::ir::AppliedAnnotation>> = c
+    let named_ctor_param_annotations: Vec<crate::metadata::MetadataAnnotations> = c
         .ctor_args
         .iter()
         .enumerate()
         .filter(|(_, arg)| arg.name.is_some())
         .map(|(i, _)| {
-            c.ctor_param_annotations
-                .get(i)
-                .map(|anns| anns.iter().map(|a| a.annotation.clone()).collect())
-                .unwrap_or_default()
+            crate::metadata::MetadataAnnotations::of_optional(c.ctor_param_annotations.get(i))
         })
         .collect();
     let ctor_params_with_defaults = if c.ctor_args.is_empty() {
@@ -943,11 +951,9 @@ pub(super) fn build_class_metadata_with_facts(
                     // the two class-file attributes apart (`RuntimeVisible`/`RuntimeInvisible`); the
                     // metadata record keeps ONE list, so they are rejoined here — SOURCE-retained
                     // annotations were dropped during lowering and never reach either.
-                    annotations: ir
-                        .function_annotations
-                        .get(&fid)
-                        .map(|annotations| annotations.applications().cloned().collect())
-                        .unwrap_or_default(),
+                    annotations: crate::metadata::MetadataAnnotations::of_optional(
+                        ir.function_annotations.get(&fid),
+                    ),
                     // `metadata_params` is the DECLARED parameter list (a suspend fn's synthesized
                     // `Continuation` is already dropped), so the side table lines up with it.
                     param_annotations: logical_param_indices
@@ -956,12 +962,7 @@ pub(super) fn build_class_metadata_with_facts(
                             ir.fn_param_annotations
                                 .get(&fid)
                                 .and_then(|table| table.get(metadata_index))
-                                .map(|annotations| {
-                                    annotations
-                                        .iter()
-                                        .map(|annotation| annotation.annotation.clone())
-                                        .collect()
-                                })
+                                .map(crate::metadata::MetadataAnnotations::of)
                                 .unwrap_or_default()
                         })
                         .collect(),
@@ -1012,7 +1013,7 @@ pub(super) fn build_class_metadata_with_facts(
                 param_modifiers: Vec::new(),
                 vararg_index: None,
                 jvm_sig: realization.descriptor,
-                annotations: Vec::new(),
+                annotations: Default::default(),
                 param_annotations: Vec::new(),
                 no_infer_params: Vec::new(),
             });
@@ -1051,7 +1052,7 @@ pub(super) fn build_class_metadata_with_facts(
                 param_modifiers: Vec::new(),
                 vararg_index: None,
                 jvm_sig: realization.descriptor,
-                annotations: Vec::new(),
+                annotations: Default::default(),
                 param_annotations: Vec::new(),
                 no_infer_params: Vec::new(),
             });
@@ -1078,7 +1079,7 @@ pub(super) fn build_class_metadata_with_facts(
                 vararg_index: None,
                 jvm_sig: None,
                 jvm_sig_name: None,
-                annotations: Vec::new(),
+                annotations: Default::default(),
                 param_annotations: Vec::new(),
                 no_infer_params: Vec::new(),
             });
@@ -1105,7 +1106,7 @@ pub(super) fn build_class_metadata_with_facts(
                 vararg_index: None,
                 jvm_sig: None,
                 jvm_sig_name: None,
-                annotations: Vec::new(),
+                annotations: Default::default(),
                 param_annotations: Vec::new(),
                 no_infer_params: Vec::new(),
             });
@@ -1132,7 +1133,7 @@ pub(super) fn build_class_metadata_with_facts(
                 vararg_index: None,
                 jvm_sig: None,
                 jvm_sig_name: None,
-                annotations: Vec::new(),
+                annotations: Default::default(),
                 param_annotations: Vec::new(),
                 no_infer_params: Vec::new(),
             });
@@ -1260,6 +1261,8 @@ pub(super) fn build_class_metadata_with_facts(
         Vec::new()
     };
     let nested_refs: Vec<&str> = nested_names.iter().map(String::as_str).collect();
+    let enclosing_type_parameters =
+        super::super::local_classifiers::enclosing_type_parameters(ir, c);
     let class_type_parameters = ir
         .class_signature(&c.fq_name())
         .map(|signature| signature.type_params.as_slice())
@@ -1280,7 +1283,6 @@ pub(super) fn build_class_metadata_with_facts(
             (!property.visibility.is_public_api()).then_some(property.ty),
         )
     });
-    // Metadata lists the declared superclass before interfaces.
     let superclass = c.superclass;
     let any = crate::types::wk::any();
     let mut supertypes = ir
@@ -1314,7 +1316,18 @@ pub(super) fn build_class_metadata_with_facts(
         .get(&c.fq_name_id())
         .cloned()
         .unwrap_or_default();
-    let supertype_spellings = class_spellings.supertype_spellings(has_declared_superclass);
+    let mut supertype_spellings = class_spellings.supertype_spellings(has_declared_superclass);
+    // Both lists lead with the superclass; `@Metadata` lists it where the source wrote it.
+    let superclass_position = ir.class_superclass_positions.get(&c.fq_name_id());
+    if let Some(position) = superclass_position.filter(|_| has_declared_superclass) {
+        let position = *position as usize;
+        // An interface without a spelling has no entry yet; it must not shift the superclass's.
+        if supertype_spellings.len() <= position {
+            supertype_spellings.resize(position + 1, crate::spelling::Spelled::default());
+        }
+        supertypes[..=position].rotate_left(1);
+        supertype_spellings[..=position].rotate_left(1);
+    }
     let secondary_ctor_shapes =
         super::super::constructor_metadata::secondary_constructor_shapes(ir, c);
     let secondary_ctor_metas: Vec<crate::metadata::class_builder::CtorMeta> = secondary_ctor_shapes
@@ -1329,11 +1342,11 @@ pub(super) fn build_class_metadata_with_facts(
             annotations: &shape.annotations,
         })
         .collect();
-    let metadata_annotations: Vec<crate::ir::AppliedAnnotation> = c
-        .applied_annotations
-        .iter()
-        .map(|retained| retained.annotation.clone())
-        .collect();
+    let metadata_annotations = crate::metadata::MetadataAnnotations::of(&c.applied_annotations);
+    let primary_ctor_metadata_annotations = crate::metadata::MetadataAnnotations::with_records(
+        &c.primary_ctor_annotations,
+        primary_ctor_annotations(c),
+    );
     let signature_formatter = JvmSignatureFormatter::with_symbols(ir, signature_symbols, run);
     let approximate_intersection = |ty| signature_formatter.declaration_approximation(ty);
     let (d1_bytes, d2) = build_class(
@@ -1349,7 +1362,10 @@ pub(super) fn build_class_metadata_with_facts(
             supertype_spellings: &supertype_spellings,
             type_params: &c.type_params,
             type_param_bounds: class_type_parameters,
-            captured_type_params: super::super::local_classifiers::captured_type_parameters(c),
+            captured_type_params: super::super::local_classifiers::captured_type_parameters(
+                c,
+                &enclosing_type_parameters,
+            ),
             ctor_param_tparams: &ctor_param_tparams,
             ctor_param_annotations: &named_ctor_param_annotations,
             flags: class_metadata_flags(ir, c),
@@ -1407,7 +1423,7 @@ pub(super) fn build_class_metadata_with_facts(
             sealed_subclasses: &sealed_sorted,
             supertypes: &supertypes,
             annotations: &metadata_annotations,
-            primary_ctor_annotations: &primary_ctor_annotations(c),
+            primary_ctor_annotations: &primary_ctor_metadata_annotations,
             local_properties: locals.of(c.fq_name_id()),
             local_classifiers: &local_classifiers,
             enum_entry_bodies: &super::super::local_classifiers::enum_entry_bodies(ir),
@@ -1427,4 +1443,32 @@ pub(super) fn build_class_metadata_with_facts(
         d1,
         d2,
     })
+}
+
+/// The `@Metadata` annotations of a PROPERTY's own applications. The records name the same
+/// applications the property's `get<Name>$annotations()` marker carries; a property whose only
+/// application is an erased optional expectation has no marker yet still declares annotations.
+fn property_metadata_annotations(
+    c: &crate::ir::IrClass,
+    property: &str,
+) -> crate::metadata::MetadataAnnotations {
+    crate::metadata::MetadataAnnotations::of_optional(
+        c.property_annotations
+            .iter()
+            .find(|annotations| annotations.property == property)
+            .map(|annotations| &annotations.annotations),
+    )
+}
+
+/// The `@Metadata` annotations that landed on a property's BACKING FIELD.
+fn property_backing_field_annotations(
+    c: &crate::ir::IrClass,
+    property: &str,
+) -> crate::metadata::MetadataAnnotations {
+    crate::metadata::MetadataAnnotations::of_optional(
+        c.field_annotations
+            .iter()
+            .find(|annotations| annotations.field == property)
+            .map(|annotations| &annotations.annotations),
+    )
 }

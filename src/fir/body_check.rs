@@ -38,6 +38,7 @@ mod driver_tests;
 mod enum_entries;
 mod enum_reflection;
 mod failure;
+mod for_each;
 mod inline_body_plan;
 #[cfg(test)]
 mod invoke_tests;
@@ -80,6 +81,7 @@ mod unary_operators;
 mod when_expressions;
 #[cfg(test)]
 mod when_sam_tests;
+mod with_index;
 
 pub(crate) use driver::check_and_dispatch_active_body_in_session;
 pub(crate) use driver::check_and_dispatch_signature_defaults_in_session;
@@ -3378,84 +3380,7 @@ impl BodyFirChecker<'_> {
                 iterable,
                 body,
                 label,
-            } => {
-                let target = self.body.add_control_target(FirControlTarget {
-                    origin,
-                    kind: FirControlTargetKind::Loop,
-                });
-                let iteration_ty = self.info.semantic_ty(*iterable).platform_lower_bound();
-                let element_ty = iteration_ty
-                    .array_read_elem()
-                    .or((iteration_ty == Ty::String).then_some(Ty::Char))
-                    .or_else(|| {
-                        self.info
-                            .iterator_protocol(*iterable)
-                            .map(|protocol| protocol.elem_ty)
-                    })
-                    .ok_or_else(|| {
-                        self.failure(
-                            self.file.stmt_spans.get(statement.0 as usize).copied(),
-                            BodyCheckFailureKind::UnsupportedStatement(StatementForm::ForEach),
-                        )
-                    })?;
-                let element_ty = self.resolved_type(
-                    self.file
-                        .stmt_spans
-                        .get(statement.0 as usize)
-                        .copied()
-                        .ok_or_else(|| {
-                            self.failure(None, BodyCheckFailureKind::MissingSourceSpan)
-                        })?,
-                    element_ty,
-                )?;
-                let variable = self.loop_variable(statement, name);
-                let body = self.checked_loop_body(
-                    target,
-                    label,
-                    Some((
-                        name.as_str(),
-                        LocalBinding {
-                            value: variable,
-                            ty: element_ty,
-                            lateinit: false,
-                        },
-                    )),
-                    *body,
-                )?;
-                let iterable_expression = self.expression(*iterable)?;
-                let header = if iteration_ty.array_elem().is_some() || iteration_ty == Ty::String {
-                    FirLoopHeader::Iterable {
-                        variable,
-                        variable_ty: element_ty,
-                        kind: if iteration_ty == Ty::String {
-                            FirBuiltinIterableKind::String
-                        } else {
-                            FirBuiltinIterableKind::Array
-                        },
-                        iterable: iterable_expression,
-                    }
-                } else if let Some(header) = self.progression_loop_header(
-                    variable,
-                    element_ty,
-                    *iterable,
-                    iterable_expression,
-                )? {
-                    header
-                } else {
-                    self.iterator_loop_header(
-                        statement,
-                        *iterable,
-                        variable,
-                        element_ty,
-                        iterable_expression,
-                    )?
-                };
-                FirStatementKind::Loop {
-                    target,
-                    header,
-                    body,
-                }
-            }
+            } => self.for_each_statement(statement, origin, name, *iterable, *body, label)?,
             Stmt::Expr(expression) => FirStatementKind::Expression(self.expression(*expression)?),
             Stmt::Destructure { entries, init } => {
                 return self.destructure_statement(statement, entries, *init, origin);

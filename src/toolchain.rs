@@ -213,6 +213,46 @@ pub fn box_corpus_dir() -> Option<PathBuf> {
     p.is_dir().then_some(p)
 }
 
+/// The mock JDK `rt.jar` that JetBrains' codegen box tests compile against
+/// (`KtTestUtil.findMockJdkRtJar`), taken from the same JetBrains checkout as the corpus at
+/// `box_dir`. `just box-corpus` provisions both at the corpus tag. JetBrains moved the jar from
+/// `compiler/testData/mockJDK` to `third-party/mockJDKs/mockJDK` (2.4.20); a checkout at one tag
+/// holds exactly one of them. A missing or ambiguous jar is an error, never a reason to compile
+/// against another JDK: the JDK surface changes member resolution.
+pub fn box_mock_jdk_rt_jar(box_dir: &Path) -> Result<PathBuf, String> {
+    const LAYOUTS: [&str; 2] = [
+        "third-party/mockJDKs/mockJDK/jre/lib/rt.jar",
+        "compiler/testData/mockJDK/jre/lib/rt.jar",
+    ];
+    let checkout = box_dir
+        .ancestors()
+        .nth(4)
+        .filter(|_| box_dir.ends_with("compiler/testData/codegen/box"))
+        .ok_or_else(|| {
+            format!(
+                "box corpus {} is not a JetBrains checkout's compiler/testData/codegen/box",
+                box_dir.display()
+            )
+        })?;
+    let present: Vec<PathBuf> = LAYOUTS
+        .iter()
+        .map(|layout| checkout.join(layout))
+        .filter(|jar| jar.is_file())
+        .collect();
+    match present.as_slice() {
+        [jar] => Ok(jar.clone()),
+        [] => Err(format!(
+            "mock JDK missing from the box corpus checkout {} (provision it with `just box-corpus \
+             <version>`)",
+            checkout.display()
+        )),
+        _ => Err(format!(
+            "box corpus checkout {} holds more than one mock JDK layout",
+            checkout.display()
+        )),
+    }
+}
+
 /// Locate a dependency jar, downloading it from **Maven Central** into a local cache if not already
 /// present (so `// WITH_STDLIB` assertions etc. actually have their jars). Returns `None` only if the
 /// download fails (offline) or the process's download budget is spent (see `maven_download`). Cached
@@ -518,6 +558,50 @@ mod tests {
             b,
             Path::new("/m/target/cache/kotlinc/1.9.24/kotlinc/bin/kotlinc")
         );
+    }
+
+    #[test]
+    fn box_mock_jdk_comes_from_the_corpus_checkout() {
+        let root = std::env::temp_dir().join(format!("krusty_mock_jdk_{}", std::process::id()));
+        let box_dir = root.join("compiler/testData/codegen/box");
+        std::fs::create_dir_all(&box_dir).expect("box dir fixture");
+        assert_eq!(
+            box_mock_jdk_rt_jar(&box_dir),
+            Err(format!(
+                "mock JDK missing from the box corpus checkout {} (provision it with `just \
+                 box-corpus <version>`)",
+                root.display()
+            ))
+        );
+        let write_jar = |layout: &str| {
+            let jar = root.join(layout);
+            std::fs::create_dir_all(jar.parent().expect("jar dir")).expect("mock JDK dir");
+            std::fs::write(&jar, b"jar").expect("mock JDK fixture");
+            jar
+        };
+        let legacy = write_jar("compiler/testData/mockJDK/jre/lib/rt.jar");
+        assert_eq!(box_mock_jdk_rt_jar(&box_dir), Ok(legacy));
+        write_jar("third-party/mockJDKs/mockJDK/jre/lib/rt.jar");
+        assert_eq!(
+            box_mock_jdk_rt_jar(&box_dir),
+            Err(format!(
+                "box corpus checkout {} holds more than one mock JDK layout",
+                root.display()
+            ))
+        );
+        std::fs::remove_dir_all(root.join("compiler/testData/mockJDK")).expect("drop legacy");
+        assert_eq!(
+            box_mock_jdk_rt_jar(&box_dir),
+            Ok(root.join("third-party/mockJDKs/mockJDK/jre/lib/rt.jar"))
+        );
+        assert_eq!(
+            box_mock_jdk_rt_jar(&root.join("box")),
+            Err(format!(
+                "box corpus {} is not a JetBrains checkout's compiler/testData/codegen/box",
+                root.join("box").display()
+            ))
+        );
+        std::fs::remove_dir_all(root).expect("remove mock JDK fixture");
     }
 
     #[test]

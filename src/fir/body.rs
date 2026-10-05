@@ -24,6 +24,10 @@ pub use ranges::{
     FirProgressionClass, FirProgressionSource, FirRangeComparisonProvenance, FirRangeCounterKind,
     FirRangeOperation, FirRuntimeFunction,
 };
+mod indexed_iteration;
+pub use indexed_iteration::{FirBuiltinIterableKind, FirCharSequenceIndexing};
+mod with_index;
+pub use with_index::{FirIndexedValueComponent, FirWithIndexLoop};
 mod property_access;
 pub use property_access::{
     FirClassifierProperty, FirInlineAccessorSplice, FirInlineTypeSubstitution, FirPropertyDispatch,
@@ -101,10 +105,8 @@ pub struct FirSamConversion {
     /// is the selected interface method: a non-suspend value adapted to a suspend method keeps its
     /// own `FunctionN`.
     pub source_suspend: bool,
-    /// The method's primitive result replaces a non-primitive result it overrides.
-    pub overrides_non_primitive_result: bool,
-    /// Specialized semantic result contracts whose target bridges reach that primitive method.
-    pub overridden_non_primitive_results: Box<[ResolvedTy]>,
+    /// The distinct own results of the declarations the selected method overrides, unspecialized.
+    pub overridden_results: Box<[ResolvedTy]>,
     /// A nullable function value converts conditionally: `null` remains `null`; only a non-null
     /// function object is wrapped as the selected SAM classifier.
     pub nullable: bool,
@@ -129,7 +131,8 @@ pub enum FirSamMethod {
 /// diagnoses that it cannot support Java platform values.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FirPlatformNarrowing {
-    pub message: Box<str>,
+    /// The checked producer's name; `None` for a value kotlinc cannot name, such as a block's.
+    pub message: Option<Box<str>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -252,10 +255,6 @@ pub enum FirIntrinsic {
     SuspendCoroutineUninterceptedOrReturn {
         callee: Box<str>,
     },
-    /// The selected safe coroutine primitive. This is distinct from the unintercepted primitive:
-    /// target realization must invoke the block with a one-shot safe, intercepted continuation and
-    /// use that continuation's completed value or suspension sentinel as the call result.
-    SuspendCoroutine,
     UnsignedToString {
         source: ResolvedTy,
     },
@@ -786,12 +785,6 @@ pub enum FirBinaryOperation {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum FirBuiltinIterableKind {
-    Array,
-    String,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FirIndexedAccessKind {
     Array,
     String,
@@ -1205,6 +1198,7 @@ pub enum FirExprKind {
         extension_receiver: Option<FirReceiver>,
         substitutions: Box<[FirTypeSubstitution]>,
         adaptation: Option<Box<FirReferenceAdaptation>>,
+        reflection_owner: Option<crate::types::TypeName>,
     },
     LocalCallableReference {
         target: FirLocalCallableRef,
@@ -1625,6 +1619,7 @@ pub enum FirLoopHeader {
         has_next: Box<FirIteratorCall>,
         next: Box<FirIteratorCall>,
     },
+    WithIndex(Box<FirWithIndexLoop>),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1645,6 +1640,9 @@ pub struct FirIteratorCall {
     /// protocol call is not specialized per site, so a substituted receiver (`Int` for `T?`)
     /// crosses into the declared type here.
     pub receiver_conversion: Option<FirConversion>,
+    /// The not-null check of an enhanced Java result the loop stores (`ArrayList.iterator()`, and
+    /// the `next()` of the iterator it returns), named by the protocol call.
+    pub result_check: Option<FirPlatformNarrowingId>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1783,6 +1781,7 @@ pub struct FirBody {
     bodiless_lifting_sites: Vec<FirLiftingSite>,
     /// Target-neutral selected convention plans for local delegated properties declared here.
     local_delegate_plans: Vec<FirLocalDelegatePlan>,
+    pub(super) interface_delegate_calls: Vec<super::FirInterfaceDelegateCalls>,
     context_receiver_types: Vec<ResolvedTy>,
     context_parameter_kinds: Vec<crate::types::ContextParameterKind>,
     /// Declaration-owned inline semantics, in physical parameter order. The checker publishes
@@ -1840,6 +1839,7 @@ impl FirBody {
             lifting_site: None,
             bodiless_lifting_sites: Vec::new(),
             local_delegate_plans: Vec::new(),
+            interface_delegate_calls: Vec::new(),
             context_receiver_types: Vec::new(),
             context_parameter_kinds: Vec::new(),
             inline_parameter_modifiers: Vec::new(),
@@ -2816,7 +2816,12 @@ impl FirBody {
             + self
                 .platform_narrowings
                 .iter()
-                .map(|narrowing| narrowing.message.len())
+                .map(|narrowing| {
+                    narrowing
+                        .message
+                        .as_ref()
+                        .map_or(0, |message| message.len())
+                })
                 .sum::<usize>()
             + self.control_targets.len() * std::mem::size_of::<FirControlTarget>()
             + self.expressions.len() * std::mem::size_of::<FirExpr>()

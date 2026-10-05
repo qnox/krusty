@@ -40,6 +40,16 @@ fn name(name: &mut TypeName, names: &HashMap<TypeName, TypeName>) {
     }
 }
 
+/// A captured enclosing instance names its class by identity, which follows the class's rename.
+fn captured_receiver(
+    receiver: &mut super::IrCapturedReceiver,
+    names: &HashMap<TypeName, TypeName>,
+) {
+    if let super::IrCapturedReceiver::Enclosing { classifier } = receiver {
+        name(classifier, names);
+    }
+}
+
 fn ty(value: Ty, names: &HashMap<TypeName, TypeName>) -> Ty {
     match value {
         Ty::Obj(classifier, arguments) => Ty::obj_args_name(
@@ -283,6 +293,9 @@ fn expression(expression: &mut IrExpr, names: &HashMap<TypeName, TypeName>) {
             reference.function_type = ty(reference.function_type, names);
             tys(&mut reference.declaration_parameters, names);
             reference.declaration_result = ty(reference.declaration_result, names);
+            if let Some(owner) = &mut reference.reflection_owner {
+                name(owner, names);
+            }
         }
         IrExpr::ClassConst {
             internal: Some(classifier),
@@ -386,9 +399,8 @@ fn expression(expression: &mut IrExpr, names: &HashMap<TypeName, TypeName>) {
 
 fn annotation_value(value: &mut super::AnnoValue, names: &HashMap<TypeName, TypeName>) {
     match value {
-        super::AnnoValue::Enum(classifier, _) | super::AnnoValue::Class(classifier) => {
-            name(classifier, names)
-        }
+        super::AnnoValue::Enum(classifier, _) => name(classifier, names),
+        super::AnnoValue::Class(classifier) => *classifier = ty(*classifier, names),
         super::AnnoValue::Annotation(annotation) => annotation_application(annotation, names),
         super::AnnoValue::Array(values) => values
             .iter_mut()
@@ -547,6 +559,9 @@ impl super::IrFile {
             }
             plan.reference.property_type = ty(plan.reference.property_type, names);
             for accessor in std::iter::once(&mut plan.getter).chain(plan.setter.iter_mut()) {
+                for receiver in &mut accessor.captured_receivers {
+                    captured_receiver(receiver, names);
+                }
                 tys(&mut accessor.parameters, names);
                 type_parameters(&mut accessor.type_parameters, names);
                 accessor.result = ty(accessor.result, names);
@@ -586,6 +601,18 @@ impl super::IrFile {
             for argument in &mut class.ctor_args {
                 argument.ty = ty(argument.ty, names);
                 argument.declared_ty = argument.declared_ty.map(|value| ty(value, names));
+                if let Some(receiver) = argument
+                    .capture
+                    .as_mut()
+                    .and_then(|capture| capture.receiver.as_mut())
+                {
+                    captured_receiver(receiver, names);
+                }
+            }
+            if let Some(lambda) = &mut class.lambda {
+                for receiver in &mut lambda.captured_receivers {
+                    captured_receiver(receiver, names);
+                }
             }
             class
                 .annotation_impl_of
@@ -690,6 +717,11 @@ impl super::IrFile {
                 }
             }
         }
+        for parameters in self.fn_params.values_mut() {
+            for receiver in &mut parameters.captured_receivers {
+                captured_receiver(receiver, names);
+            }
+        }
         for annotations_by_function in self.function_annotations.values_mut() {
             annotations(annotations_by_function, names);
         }
@@ -792,8 +824,9 @@ impl super::IrFile {
                 *member = ty(*member, names);
             }
             construction
-                .enclosing_class
+                .scopes
                 .iter_mut()
+                .flatten()
                 .for_each(|value| name(value, names));
         }
         for aliases in self.class_type_aliases.values_mut() {
@@ -844,6 +877,10 @@ impl super::IrFile {
         }
         for underlying in self.external_value_classes.values_mut() {
             *underlying = ty(*underlying, names);
+        }
+        for declaration in self.external_value_class_declarations.values_mut() {
+            declaration.underlying = ty(declaration.underlying, names);
+            tys(&mut declaration.type_parameters, names);
         }
         for substitutions in self.reified_call_subst.values_mut() {
             for (_, substitution) in substitutions {
@@ -980,10 +1017,12 @@ impl super::IrFile {
         remap_keyed(&mut self.super_constructor_default_arguments, names);
         remap_keyed(&mut self.external_super_constructors, names);
         remap_keyed(&mut self.class_declared_spellings, names);
+        remap_keyed(&mut self.class_superclass_positions, names);
         remap_keyed(&mut self.class_ctor_defaults, names);
         remap_keyed(&mut self.class_signatures, names);
         remap_keyed(&mut self.field_signatures, names);
         remap_keyed(&mut self.external_value_classes, names);
+        remap_keyed(&mut self.external_value_class_declarations, names);
 
         remap_first_key(&mut self.synthesized_data_class_members, names);
         remap_first_key(&mut self.generated_secondary_constructors, names);

@@ -8,7 +8,7 @@
 //! markers, builds the machine and deletes them when the class is written.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::scalar_coercion::{semantic_scalar_adapter, unbox_prim_from};
 use super::{jvm_declared_ty, EmitRun, Emitter};
@@ -21,8 +21,13 @@ use crate::jvm::suspend::{ContinuationMetadata, TransformedMachine};
 use crate::types::Ty;
 
 /// The suspension points of the function being emitted, by call, with each callee's declared
-/// result. Empty for every function the transformer does not take.
-pub(super) type TransformedSuspensions = HashMap<ExprId, Ty>;
+/// result, and the continuation reads written as fake continuations. Empty for every function the
+/// transformer does not take.
+#[derive(Default)]
+pub(super) struct TransformedSuspensions {
+    results: HashMap<ExprId, Ty>,
+    fake_continuations: HashSet<ExprId>,
+}
 
 /// What a suspension point leaves on the stack after its invoke.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -38,7 +43,36 @@ pub(super) enum SuspensionResult {
 impl Emitter<'_> {
     /// The declared result of `e` when it is a suspension point the transformer takes.
     pub(super) fn transformed_result(&self, e: ExprId) -> Option<Ty> {
-        self.transformed_suspensions.get(&e).copied()
+        self.transformed_suspensions.results.get(&e).copied()
+    }
+
+    /// Write continuation read `e` as kotlinc's fake continuation, when it is one: the transformer
+    /// replaces it with the machine's continuation. `false`, having written nothing, otherwise.
+    pub(super) fn emit_fake_continuation(&mut self, e: ExprId, code: &mut CodeBuilder) -> bool {
+        if !self.is_fake_continuation(e) {
+            return false;
+        }
+        self.load_fake_continuation(code);
+        true
+    }
+
+    /// Whether `e` reads kotlinc's fake continuation rather than the function's own.
+    pub(super) fn is_fake_continuation(&self, e: ExprId) -> bool {
+        self.transformed_suspensions.fake_continuations.contains(&e)
+    }
+
+    /// kotlinc's fake continuation, cast to the interface the block's parameter and the probe take.
+    pub(super) fn load_fake_continuation(&mut self, code: &mut CodeBuilder) {
+        code.suspend_marker(SuspendMarker::FakeContinuation as i32, self.cw);
+        code.aconst_null();
+        let continuation = self.cw.class_ref("kotlin/coroutines/Continuation");
+        code.checkcast(continuation);
+    }
+
+    /// Whether `e` is a `suspendCoroutineUninterceptedOrReturn` block the transformer takes, whose
+    /// probe reads the fake continuation.
+    pub(super) fn is_transformed_block(&self, e: ExprId) -> bool {
+        self.transformed_result(e).is_some() && self.ir.is_unintercepted_suspension(e)
     }
 
     /// Emit `e`, a value coerced to `target`, leaving the erased `Object` result when it is a
@@ -88,6 +122,7 @@ impl Emitter<'_> {
         let node = self.ir.expr(e).clone();
         self.emit_value_node(e, &node, code);
         self.mark_after_inlined_call(e, code);
+        self.probe_intrinsic_suspension(e, code);
         self.close_transformed_suspension(e, SuspensionResult::Erased, code);
         true
     }
@@ -105,10 +140,17 @@ impl Emitter<'_> {
         }
     }
 
-    /// Open suspension point `e`, before its arguments.
+    /// Open suspension point `e`, before its arguments. A block has no invoke to mark: it is the
+    /// point from its first instruction.
     pub(super) fn open_transformed_suspension(&mut self, e: ExprId, code: &mut CodeBuilder) {
-        if self.transformed_suspensions.contains_key(&e) {
+        if self.transformed_suspensions.results.contains_key(&e) {
             code.inline_call_marker(true);
+        }
+        if self.is_transformed_block(e) {
+            code.suspend_marker(SuspendMarker::BeforeSuspend as i32, self.cw);
+            if self.transformed_result(e) == Some(Ty::Unit) {
+                code.suspend_marker(SuspendMarker::BeforeSuspendUnitCall as i32, self.cw);
+            }
         }
     }
 
@@ -130,10 +172,20 @@ impl Emitter<'_> {
         };
         code.suspend_marker(SuspendMarker::AfterSuspend as i32, self.cw);
         code.inline_call_marker(false);
+        let block = self.is_transformed_block(e);
+        if block {
+            // The block was an inlined body: the line is written afresh after it.
+            code.forget_line();
+        }
         if leave == SuspensionResult::Erased {
             return;
         }
         let discarded = leave == SuspensionResult::Discarded;
+        // A used result is read as the declared type at the call's own line.
+        match self.ir.expr_source_lines.get(&e) {
+            Some(&line) if block && !discarded && line != 0 => code.mark_line(line),
+            _ => {}
+        }
         let target = jvm_declared_ty(&result);
         if discarded || target == Ty::Unit {
             code.pop();
@@ -168,11 +220,14 @@ impl Emitter<'_> {
             self.continuation_slot = Some(slot);
             slot
         });
-        self.transformed_suspensions = machine
-            .suspensions
-            .iter()
-            .map(|suspension| (suspension.call, suspension.result))
-            .collect();
+        self.transformed_suspensions = TransformedSuspensions {
+            results: machine
+                .suspensions
+                .iter()
+                .map(|suspension| (suspension.call, suspension.result))
+                .collect(),
+            fake_continuations: machine.fake_continuations.iter().copied().collect(),
+        };
         self.suspend_lambda_parameter_reads = machine
             .lambda
             .as_ref()
@@ -240,6 +295,7 @@ pub(super) type TransformedCoroutines = RefCell<HashMap<String, CoroutineOutcome
 
 impl EmitRun {
     /// Write `class`, transforming the coroutines its methods asked for, and keep what they found.
+    /// A method whose saved operand stack cannot be normalized fails the compile.
     pub(super) fn finish_class(&self, class: ClassWriter) -> Vec<u8> {
         // A failed method can stop before restoring a valid operand stack. The whole emit pass is
         // discarded once this flag is observed, so do not ask the frame computer to analyze that
@@ -247,9 +303,12 @@ impl EmitRun {
         if self.emission_failed() {
             return Vec::new();
         }
-        let (bytes, coroutines) = class.finish_with_coroutines();
-        self.record_transformed_coroutines(coroutines);
-        bytes
+        let finished = class.finish_with_coroutines();
+        for failure in finished.failures {
+            self.set_emit_error(failure);
+        }
+        self.record_transformed_coroutines(finished.coroutines);
+        finished.bytes
     }
 
     /// Keep what the transformation of a finished class found. A body it could not transform

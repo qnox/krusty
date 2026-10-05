@@ -6,6 +6,9 @@
 //! `<init>` and the underlying getter — is already in the IR by the time this runs.
 
 use super::*;
+use member_signatures::RepresentationMember::*;
+
+mod member_signatures;
 
 /// Exact function identities whose JVM realization this synthesis already finalized, so the
 /// signature pass that follows does not lower them a second time.
@@ -24,9 +27,10 @@ pub(super) struct SynthesizedValueMembers {
     pub(super) constructor_impls: HashMap<(TypeName, u32), u32>,
 }
 
-/// A declaration written in a value class's constructor (a local class, a lambda's class) is
-/// enclosed by the static `constructor-impl` realizing that constructor, as kotlinc's
-/// `EnclosingMethod` names it: the instance constructor does not exist on the JVM. A callable lifted
+/// A declaration written in a value class's constructor or `init` block (a local class, a lambda's
+/// class) is enclosed by the static `constructor-impl` realizing that constructor, the primary's
+/// for an `init` block, as kotlinc's `EnclosingMethod` names it: the instance constructor does not
+/// exist on the JVM. A callable lifted
 /// out of a constructor or an `init` block is likewise contained by that `constructor-impl`, whose
 /// name kotlinc gives it (`constructor_impl$lambda$0`).
 pub(super) fn enclose_in_constructor_impls(ir: &mut IrFile, realized: &SynthesizedValueMembers) {
@@ -47,10 +51,8 @@ pub(super) fn enclose_in_constructor_impls(ir: &mut IrFile, realized: &Synthesiz
         _ => None,
     };
     for declaration in &mut ir.classes {
-        if let Some(crate::ir::IrEnclosure::Constructor { .. }) = declaration.enclosure {
-            if let Some(function) = constructor_impl(declaration.enclosure) {
-                declaration.enclosure = Some(crate::ir::IrEnclosure::Function(function));
-            }
+        if let Some(function) = constructor_impl(declaration.enclosure) {
+            declaration.enclosure = Some(crate::ir::IrEnclosure::Function(function));
         }
     }
     for entry in ir
@@ -146,13 +148,19 @@ pub(super) fn synth_value_members(
                 )
             };
             realized.accessors.insert(getter);
-            let ret = {
+            let (declared, ret) = {
                 let function = &mut ir.functions[getter as usize];
+                let declared = function.params.clone();
                 function.name.clone_from(&jvm_name);
                 function.params.insert(0, u_ir);
                 function.is_static = true;
-                function.ret
+                (declared, function.ret)
             };
+            let member = Receiver {
+                rest: &declared,
+                ret,
+            };
+            member_signatures::record(ir, class_id, getter, member);
             crate::jvm::method_parameters::prepend_value_class_receiver(ir, getter, "arg0");
             ir.classes[class_id as usize].properties[property_index].getter_jvm_name =
                 Some(jvm_name.clone());
@@ -208,12 +216,19 @@ pub(super) fn synth_value_members(
                 )
             };
             realized.accessors.insert(setter);
-            {
+            let (declared, ret) = {
                 let function = &mut ir.functions[setter as usize];
+                let declared = function.params.clone();
                 function.name.clone_from(&jvm_name);
                 function.params.insert(0, u_ir);
                 function.is_static = true;
-            }
+                (declared, function.ret)
+            };
+            let member = Receiver {
+                rest: &declared,
+                ret,
+            };
+            member_signatures::record(ir, class_id, setter, member);
             crate::jvm::method_parameters::prepend_value_class_receiver(ir, setter, "arg0");
             ir.classes[class_id as usize].properties[property_index].setter_jvm_name =
                 Some(jvm_name);
@@ -248,13 +263,16 @@ pub(super) fn synth_value_members(
             _ => None,
         };
         if let Some(name) = custom_impl {
+            let declared = (function.params.clone(), function.ret);
             function.name = name.to_string();
             function.params.insert(0, u_ir);
             function.is_static = true;
-            custom_carrier_functions.push(fid);
+            custom_carrier_functions.push((fid, declared));
         }
     }
-    for function in custom_carrier_functions {
+    for (function, (rest, ret)) in custom_carrier_functions {
+        let member = Receiver { rest: &rest, ret };
+        member_signatures::record(ir, class_id, function, member);
         crate::jvm::method_parameters::prepend_value_class_receiver(ir, function, "arg0");
     }
 
@@ -391,9 +409,11 @@ pub(super) fn synth_value_members(
         stmts.push(ir.add_expr(IrExpr::Return(Some(arg))));
         let body = ir.add_expr(IrExpr::Block { stmts, value: None });
         let cfid = add_static(ir, "constructor-impl", vec![u_ir], u_ir, body);
+        let declared = [ir.classes[class_id as usize].fields[0].ty];
+        member_signatures::record(ir, class_id, cfid, Constructor(&declared));
         ir.jvm_value_class_representation_order.insert(cfid, 0);
         realized.constructor_impls.insert((internal_name, 0), cfid);
-        ir.jvm_value_class_constructor_impls.insert(cfid);
+        ir.jvm_value_class_constructor_impls.insert(cfid, 0);
         crate::jvm::method_parameters::record_function(ir, cfid, &[&fname], &[]);
         // Unlike a source value-class member converted to `member-impl`, this generated function's
         // carrier is its declared constructor parameter, not a former dispatch receiver. Keeping an
@@ -449,6 +469,7 @@ pub(super) fn synth_value_members(
         };
         let body = ret_block(ir, cmp);
         let function = add_static(ir, "equals-impl0", vec![u_ir, u_ir], bool_ir, body);
+        member_signatures::record(ir, class_id, function, SpecializedEquals);
         ir.fn_params.insert(
             function,
             crate::ir::FnParamInfo::identities(
@@ -485,6 +506,11 @@ pub(super) fn synth_value_members(
             let acc = ir.add_expr(IrExpr::StringConcat(vec![prefix, rendered, close]));
             let sbody = ret_block(ir, acc);
             let impl_fid = add_static(ir, "toString-impl", vec![u_ir], str_ir, sbody);
+            let member = Receiver {
+                rest: &[],
+                ret: str_ir,
+            };
+            member_signatures::record(ir, class_id, impl_fid, member);
             crate::jvm::method_parameters::record_function(ir, impl_fid, &["arg0"], &[0]);
             ir.open_methods.insert(impl_fid);
             ir.jvm_nullability_unannotated_methods.insert(impl_fid);
@@ -514,6 +540,11 @@ pub(super) fn synth_value_members(
             let h = property_hash(ir, u_ir);
             let sbody = ret_block(ir, h);
             let impl_fid = add_static(ir, "hashCode-impl", vec![u_ir], int_ir, sbody);
+            let member = Receiver {
+                rest: &[],
+                ret: int_ir,
+            };
+            member_signatures::record(ir, class_id, impl_fid, member);
             crate::jvm::method_parameters::record_function(ir, impl_fid, &["arg0"], &[0]);
             ir.open_methods.insert(impl_fid);
             ir.jvm_nullability_unannotated_methods.insert(impl_fid);
@@ -600,6 +631,12 @@ pub(super) fn synth_value_members(
             stmts.push(ir.add_expr(IrExpr::Return(Some(t))));
             let sbody = ir.add_expr(IrExpr::Block { stmts, value: None });
             let impl_fid = add_static(ir, "equals-impl", vec![u_ir, any_ir], bool_ir, sbody);
+            let other = [Ty::nullable(any_ir)];
+            let member = Receiver {
+                rest: &other,
+                ret: bool_ir,
+            };
+            member_signatures::record(ir, class_id, impl_fid, member);
             crate::jvm::method_parameters::record_function(ir, impl_fid, &["arg0", "other"], &[0]);
             ir.open_methods.insert(impl_fid);
             ir.jvm_nullability_unannotated_methods.insert(impl_fid);
@@ -745,6 +782,7 @@ pub(super) fn synth_value_members(
             stmts.push(fall_through);
             let body = ir.add_expr(IrExpr::Block { stmts, value: None });
             let constructor = add_static(ir, "constructor-impl", sc.params.clone(), u_ir, body);
+            member_signatures::record(ir, class_id, constructor, Constructor(&sc.params));
             if sc.lines.decl_line != 0 {
                 ir.fn_decl_lines.insert(constructor, sc.lines.decl_line);
             }
@@ -755,7 +793,8 @@ pub(super) fn synth_value_members(
             realized
                 .constructor_impls
                 .insert((internal_name, ordinal), constructor);
-            ir.jvm_value_class_constructor_impls.insert(constructor);
+            ir.jvm_value_class_constructor_impls
+                .insert(constructor, ordinal);
             let names = sc
                 .named_params
                 .iter()

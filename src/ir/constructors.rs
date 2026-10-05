@@ -176,10 +176,15 @@ pub struct IrConstructorCapture {
 /// field and constructor parameter differently, so a target formats its names from this.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IrCapturedReceiver {
-    /// The enclosing class instance.
-    Enclosing,
-    /// The extension receiver of the named callable with this source name.
-    Callable(Box<str>),
+    /// The instance of the enclosing class `classifier`: the class whose member the capture is
+    /// written in, or one further out when the capture is in a local class's member.
+    Enclosing { classifier: TypeName },
+    /// The extension receiver of the named callable with this source name, and whether that
+    /// callable is a local function or the declaration the capture is written in.
+    Callable {
+        label: Box<str>,
+        owner: crate::fir::CapturedCallableOwner,
+    },
     /// A lambda's or anonymous function's receiver, with the lambda's label when it has one.
     Lambda(Option<Box<str>>),
     /// A context parameter that is an implicit receiver: its kind, the declared types of its
@@ -264,4 +269,18 @@ impl IrFile {
             .get(&expression)
             .copied()
     }
+}
+
+/// The custom serializer CLASS a source classifier's `@Serializable(with = …)` names, constructed
+/// by the classifier's generated `serializer(…)` accessor through the primary constructor the
+/// serialization frontend selected and validated. A backend plugin realizes exactly this choice;
+/// it never inspects the serializer's constructors itself.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IrCustomSerializerConstruction {
+    pub serializer: TypeName,
+    /// The selected constructor's declared parameter types.
+    pub parameters: Box<[Ty]>,
+    /// The accessor's operand ordinal passed to each constructor parameter, in parameter order.
+    pub operands: Box<[u32]>,
+    pub target: IrConstructorTarget,
 }

@@ -64,6 +64,52 @@ fn partition_interface_delegation(
 }
 
 impl Emitter<'_> {
+    /// Store the constructor fields marked pre-super: an inner class's enclosing instance and a
+    /// local class's captured values, which a superclass argument may read. Keeping this as
+    /// ordering metadata avoids interpreting a JVM field name as source semantics. A `putfield` of
+    /// the current class's own field on the still-uninitialized `this` is legal per JVMS 4.10.2.4.
+    ///
+    /// Returns the offset the constructor's first line starts at. Debug metadata consumes the
+    /// position emission actually reached: reconstructing it later from constructor parameters,
+    /// constant-pool widths, or assertion policy makes a semantic description masquerade as
+    /// bytecode layout and can point inside an opcode.
+    pub(super) fn emit_pre_super_field_stores(
+        &mut self,
+        class: &crate::ir::IrClass,
+        owner: &str,
+        param_tys: &[Ty],
+        code: &mut CodeBuilder,
+    ) -> usize {
+        let mut debug_start = code.bytes.len();
+        for &(param_i, field_i) in &class.pre_super_param_fields {
+            let param_i = param_i as usize;
+            let field = &class.fields[field_i as usize];
+            let param_slot = 1 + param_tys[..param_i]
+                .iter()
+                .map(|ty| slot_words(*ty))
+                .sum::<u16>();
+            code.aload(0);
+            load(param_tys[param_i], param_slot, code);
+            let physical_name = instance_field_jvm_name(self.ir, class, field);
+            let field_ref = self
+                .cw
+                .fieldref(owner, &physical_name, &type_descriptor(field.ty));
+            code.putfield(field_ref, slot_words(field.ty) as i32);
+            // A local class's captured values are stored without a line; its first line is what
+            // follows them: an inner class's enclosing-instance store, else the delegation.
+            let provenance = class
+                .ctor_args
+                .get(param_i)
+                .map(|argument| argument.provenance);
+            if class.is_local_class
+                && provenance != Some(crate::ir::IrCtorParameterProvenance::EnclosingInstance)
+            {
+                debug_start = code.bytes.len();
+            }
+        }
+        debug_start
+    }
+
     /// Emit interface-delegation stores and return the initializer statements that still run after
     /// constructor-property parameters are stored.
     pub(super) fn emit_interface_delegation_initializers(

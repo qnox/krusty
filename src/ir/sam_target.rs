@@ -2,6 +2,18 @@
 
 use crate::types::{Ty, TypeName};
 
+/// Stable declaration identity of the abstract method a SAM conversion implements.
+///
+/// FIR chooses the method; lowering translates that choice once into this IR boundary contract so
+/// a backend never imports the frontend SAM node or reselects the method from its spelling.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IrSamMethod {
+    Module(crate::fir::CallableId),
+    External(crate::fir::ExternalCallableId),
+    /// The `invoke` inherited from a function-type supertype.
+    FunctionTypeInvoke,
+}
+
 /// Checked functional-interface target attached to a lambda after SAM conversion.
 ///
 /// Both the call-site-specialized shape and the declaration shape are retained: the former types
@@ -14,7 +26,7 @@ pub struct IrSamTarget {
     pub method: String,
     /// The abstract method the conversion implements, as the checker selected it. A target that
     /// implements the interface by declaration identity reads this, never the name.
-    pub method_target: crate::fir::FirSamMethod,
+    pub method_target: IrSamMethod,
     pub parameters: Vec<Ty>,
     pub result: Ty,
     pub declared_parameters: Vec<Ty>,
@@ -25,10 +37,9 @@ pub struct IrSamTarget {
     /// The converted value's own callable view is `suspend`. A non-suspend value adapted to a
     /// suspend method is stored as that value's `FunctionN`; the continuation stays on the method.
     pub source_suspend: bool,
-    /// The method's primitive result replaces a non-primitive result it overrides.
-    pub overrides_non_primitive_result: bool,
-    /// Specialized semantic result contracts whose target bridges reach that primitive method.
-    pub overridden_non_primitive_results: Vec<Ty>,
+    /// The distinct own results of the declarations the method overrides, unspecialized. A target
+    /// whose method result or bridges depend on the overridden results realizes them from these.
+    pub overridden_results: Vec<Ty>,
     /// A fun-interface conversion of a callable reference delegates equality/hashCode through
     /// Kotlin's `FunctionAdapter` contract. Ordinary lambdas remain identity objects.
     pub function_adapter: bool,

@@ -169,6 +169,7 @@ fn literal_until_loop_stays_checked_until_backend_realization() {
                 unsigned_compare: None,
                 body,
                 label,
+                with_index: None,
             }) => Some((
                 *variable,
                 variable_name.as_deref(),
@@ -990,6 +991,7 @@ fn external_unbound_reference_trusts_the_checked_receiver_widening() {
             extension_receiver: None,
             substitutions: Box::new([]),
             adaptation: None,
+            reflection_owner: None,
         },
     });
     let root = body.add_statement(FirStatement {

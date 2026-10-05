@@ -306,7 +306,9 @@ fn member_extension_delegate_keeps_its_independent_dispatch_receiver() {
         plan.get_value_dispatch,
         Some(
             crate::fir::FirLocalDelegateDispatchParameter::ImplicitReceiver(
-                crate::fir::FirCapturedReceiver::Enclosing,
+                crate::fir::FirCapturedReceiver::Enclosing {
+                    classifier: crate::types::type_name("Scope"),
+                },
             )
         ),
         "the accessor plan retains the source role of its selected dispatch receiver"

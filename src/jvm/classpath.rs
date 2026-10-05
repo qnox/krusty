@@ -21,6 +21,7 @@ mod class_locations;
 pub mod content_snapshot;
 mod ct_sym_index;
 mod external_identities;
+mod inner_class_scopes;
 mod jimage_catalog;
 mod jimage_locations;
 use builtin_signatures::{
@@ -30,9 +31,12 @@ mod mapped_builtin_realizations;
 mod metadata_indexes;
 mod method_bodies;
 mod method_body_cache;
+mod module_optional_annotations;
 mod package_facades;
 mod property_access;
 mod property_identity;
+mod stub_overlay;
+pub(super) use stub_overlay::StubOverlayGuard;
 #[cfg(test)]
 mod test_support;
 mod value_class_erasure;
@@ -1476,39 +1480,6 @@ const OPEN_ARCHIVE_CAP: usize = 16;
 const ALIAS_PACKAGE_CAP: usize = 1024;
 const GLOBAL_ALIAS_PACKAGE_CAP: usize = 8192;
 const SYMBOLS_CAP: usize = 65536;
-
-/// One lexical layer of in-memory declaration classes. A mixed-source compilation pushes its Java
-/// header classes above any request-local dependency overlay and restores the previous entries when
-/// the source-module provider is dropped. This keeps a reused classpath from leaking declarations
-/// between compilation requests.
-pub(super) struct StubOverlayGuard {
-    classpath: std::rc::Rc<Classpath>,
-    previous: Vec<(TypeName, Option<std::sync::Arc<ClassInfo>>)>,
-}
-
-impl Drop for StubOverlayGuard {
-    fn drop(&mut self) {
-        let affected = self
-            .previous
-            .iter()
-            .map(|(name, _)| *name)
-            .collect::<Vec<_>>();
-        {
-            let mut overlay = self.classpath.stub_overlay.borrow_mut();
-            for (name, previous) in self.previous.drain(..).rev() {
-                match previous {
-                    Some(class) => {
-                        overlay.insert(name, class);
-                    }
-                    None => {
-                        overlay.remove(&name);
-                    }
-                }
-            }
-        }
-        self.classpath.invalidate_overlay_memos(affected);
-    }
-}
 
 pub struct Classpath {
     entries: Vec<Entry>,
@@ -3430,6 +3401,10 @@ impl Classpath {
             }
         }
         cache_stat!(l2_class, all_cached);
+        // The process-global entry cache holds the class exactly as its entry stores it. Decoding an
+        // inner class within its outer depends on which outer this classpath serves, so it happens
+        // per classpath, after the shared entry lookup.
+        let found = found.and_then(|class| self.class_within_outer(internal_id, class));
         if catalog_complete {
             self.local_cache
                 .borrow_mut()
@@ -3460,100 +3435,6 @@ impl Classpath {
         let owner = classifier.nested_owner()?;
         let field = classifier.nested_segment_ref();
         declares(owner, field).then(|| (owner, field.to_string()))
-    }
-
-    /// Replace the in-memory class overlay and invalidate dependent lookups.
-    pub fn set_stub_overlay(&self, classes: Vec<(String, Vec<u8>)>) {
-        let mut map = HashMap::new();
-        for (_, bytes) in classes {
-            if let Ok(ci) = parse_class(&bytes) {
-                map.entry(ci.this_class)
-                    .or_insert_with(|| std::sync::Arc::new(ci));
-            }
-        }
-        let affected = self
-            .stub_overlay
-            .borrow()
-            .keys()
-            .copied()
-            .chain(map.keys().copied())
-            .collect::<std::collections::HashSet<_>>();
-        *self.stub_overlay.borrow_mut() = map;
-        self.invalidate_overlay_memos(affected);
-    }
-
-    /// Push source-module declaration classes without destroying an existing request-local
-    /// overlay. The returned guard restores exactly the shadowed entries on drop.
-    pub(super) fn push_stub_overlay(
-        self: &std::rc::Rc<Self>,
-        classes: Vec<(String, Vec<u8>)>,
-    ) -> StubOverlayGuard {
-        let mut parsed = HashMap::new();
-        for (_, bytes) in classes {
-            if let Ok(class) = parse_class(&bytes) {
-                parsed
-                    .entry(class.this_class)
-                    .or_insert_with(|| std::sync::Arc::new(class));
-            }
-        }
-        let affected = parsed.keys().copied().collect::<Vec<_>>();
-        let mut previous = Vec::with_capacity(parsed.len());
-        {
-            let mut overlay = self.stub_overlay.borrow_mut();
-            for (name, class) in parsed {
-                previous.push((name, overlay.insert(name, class)));
-            }
-        }
-        self.invalidate_overlay_memos(affected);
-        StubOverlayGuard {
-            classpath: self.clone(),
-            previous,
-        }
-    }
-
-    fn invalidate_overlay_memos(&self, classifiers: impl IntoIterator<Item = TypeName>) {
-        let classifiers = classifiers.into_iter().collect::<Vec<_>>();
-        if classifiers.is_empty() {
-            return;
-        }
-        {
-            let mut resolved = self.resolved_types.borrow_mut();
-            for classifier in &classifiers {
-                resolved.remove(classifier);
-            }
-        }
-        let mut symbols = self.symbols_memo.borrow_mut();
-        let mut packages = std::collections::HashSet::new();
-        let mut classifier_namespaces = std::collections::HashSet::new();
-        for classifier in classifiers {
-            let mut outermost = classifier;
-            classifier_namespaces.insert(classifier);
-            while let Some(owner) = outermost.nested_owner() {
-                classifier_namespaces.insert(owner);
-                outermost = owner;
-            }
-            packages.insert(outermost.namespace());
-        }
-        for package in packages {
-            symbols.remove(&SymbolNamespace::Package(package));
-        }
-        for classifier in classifier_namespaces {
-            symbols.remove(&SymbolNamespace::Classifier(classifier));
-        }
-    }
-
-    /// Remove all in-memory classes.
-    pub fn clear_stub_overlay(&self) {
-        if !self.stub_overlay.borrow().is_empty() {
-            let affected = self
-                .stub_overlay
-                .borrow()
-                .keys()
-                .copied()
-                .collect::<Vec<_>>();
-            self.stub_overlay.borrow_mut().clear();
-            self.invalidate_overlay_memos(affected);
-        }
     }
 
     /// The class or builtins jar whose attached sources declare `internal`.
@@ -4466,16 +4347,15 @@ struct JarPackages {
     facades: HashSet<NameId>,
     /// Whether the entire entry was catalogued successfully.
     complete: bool,
+    /// The optional annotation classes of the entry's `META-INF/*.kotlin_module` files.
+    optional_annotations: module_optional_annotations::EntryOptionalAnnotations,
 }
 
 impl JarPackages {
     fn with_names(names: std::sync::Arc<NameTree>) -> Self {
         Self {
             names,
-            packages: HashMap::new(),
-            classes: Vec::new(),
-            facades: HashSet::new(),
-            complete: false,
+            ..Self::default()
         }
     }
 
@@ -4660,22 +4540,6 @@ fn record_pkg_entry_name(name: &str, jp: &mut JarPackages) {
 }
 
 /// Merge a jar's `kotlin_module` bytes into its catalog: each package's facade internal names.
-fn record_kotlin_module(bytes: &[u8], jp: &mut JarPackages) {
-    for (pkg, facades) in super::metadata::read_kotlin_module(bytes) {
-        let pkg_id = jp.names.insert(&pkg);
-        let facades = facades
-            .iter()
-            .map(|facade| jp.names.insert(facade))
-            .collect::<Vec<_>>();
-        jp.facades.extend(facades.iter().copied());
-        jp.packages
-            .entry(pkg_id)
-            .or_default()
-            .facades
-            .extend(facades);
-    }
-}
-
 /// Build one entry's [`JarPackages`] — the only eager per-jar work: a central-directory name pass plus
 /// the shallow `kotlin_module` read(s). The JDK jimage contributes its package membership from the
 /// location table (names only — no class parse), so `find` can scope a JDK type to the jimage instead
@@ -4743,7 +4607,8 @@ fn build_jar_packages_jar(jar: &Path, jp: &mut JarPackages) -> bool {
         };
         let mut buf = Vec::new();
         if e.read_to_end(&mut buf).is_ok() {
-            record_kotlin_module(&buf, jp);
+            let name = e.name().to_string();
+            module_optional_annotations::record_kotlin_module(&name, &buf, jp);
         } else {
             complete = false;
         }
@@ -4793,7 +4658,7 @@ fn build_jar_packages_dir_visited(
         let rel = rel.to_string_lossy().replace('\\', "/");
         if rel.ends_with(".kotlin_module") {
             if let Ok(b) = std::fs::read(&p) {
-                record_kotlin_module(&b, jp);
+                module_optional_annotations::record_kotlin_module(&rel, &b, jp);
             } else {
                 complete = false;
             }
@@ -4942,10 +4807,10 @@ mod fq_tests {
             Ty::String,
             "(I)Ljava/lang/String;",
         );
-        let identity = cp.intern_external_callable(&partial, ExternalCallableKind::Member);
+        let identity = cp.intern_external_callable(&partial, ExternalCallableKind::Member, None);
 
         partial.visibility = crate::types::Visibility::Protected;
-        let reinterned = cp.intern_external_callable(&partial, ExternalCallableKind::Member);
+        let reinterned = cp.intern_external_callable(&partial, ExternalCallableKind::Member, None);
 
         assert_eq!(reinterned, identity);
         assert_eq!(
@@ -5022,7 +4887,11 @@ mod fq_tests {
             [2, 4, 0],
         );
         let mut packages = JarPackages::default();
-        record_kotlin_module(&module, &mut packages);
+        module_optional_annotations::record_kotlin_module(
+            "META-INF/main.kotlin_module",
+            &module,
+            &mut packages,
+        );
 
         assert!(packages.contains_facade("p/Utils"));
         assert!(packages.contains_facade("p/HelpersKt"));

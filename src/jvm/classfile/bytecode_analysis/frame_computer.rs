@@ -24,6 +24,7 @@
 
 use super::control_graph::Handler;
 use super::frame_types::{method_types, step_in_place, FrameState, PoolView, VerificationType};
+use crate::jvm::bytecode::InlineCallBrackets;
 use crate::jvm::inline::{BranchTarget, Insn};
 
 const OBJECT: &str = "java/lang/Object";
@@ -163,6 +164,11 @@ impl FrameComputation<'_> {
                 .sum()
         };
         let mut max_stack = 0;
+        // `beforeInlineCall`/`afterInlineCall` brackets, followed as FixStack rewrites them when
+        // the class is written. The frames are those of the rewritten body, which is what the
+        // class file carries.
+        let brackets = InlineCallBrackets::of_insns(self.insns);
+        let mut saved: Vec<Option<Vec<VerificationType>>> = vec![None; n];
         while let Some(std::cmp::Reverse(b)) = pending.pop() {
             queued[b] = false;
             let block = &blocks[b];
@@ -180,6 +186,12 @@ impl FrameComputation<'_> {
                     Some(self.this_class),
                 )
                 .ok_or(Decline::Unsteppable(index))?;
+                if let Some(opened) = brackets
+                    .follow(index, &mut state.stack, |opening| saved[opening].clone())
+                    .map_err(|_| Decline::Unsteppable(index))?
+                {
+                    saved[index] = Some(opened);
+                }
                 max_stack = max_stack.max(words(&state.stack));
             }
             let mut arrive = |to: usize, arriving: &FrameState| -> Result<(), Decline> {

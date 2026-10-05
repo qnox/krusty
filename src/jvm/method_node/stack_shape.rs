@@ -7,6 +7,10 @@
 //! analysis `FastStackAnalyzer` with `FixStackInterpreter` answers there.
 
 use super::nodes::{Constant, Insn, LabelId, MethodNode, Node};
+use crate::jvm::bytecode::{InlineCallBracket, InlineCallBrackets};
+use crate::jvm::bytecode_passes::coroutines::markers::{
+    is_after_inline_marker, is_before_inline_marker,
+};
 
 /// A stack value's category: which load, store and pop opcodes move it, and how many words it
 /// takes.
@@ -83,6 +87,9 @@ pub enum ShapeError {
     Subroutine(usize),
     /// A label named by a jump, switch or handler is not placed.
     UnplacedLabel(LabelId),
+    /// An `InlineMarker.afterInlineCall` at node `index` with no `beforeInlineCall` that opens it on
+    /// every path reaching it.
+    UnpairedInlineMarker(usize),
 }
 
 fn method_categories(desc: &str) -> Option<(Vec<Category>, Option<Category>)> {
@@ -315,8 +322,21 @@ fn manipulate(op: u8, stack: &mut Vec<Category>, at: usize) -> Result<(), ShapeE
 
 /// The stack before each node of `node`, or `None` for a node no path reaches. Handler entries
 /// start with the caught exception alone.
+///
+/// An `InlineMarker.beforeInlineCall`/`afterInlineCall` pair is followed as FixStack will rewrite it
+/// (`FixStackAnalyzer`): the opening marker saves the stack and clears it, the closing one puts the
+/// saved values back under the bracketed code's result.
 pub fn stack_shapes(node: &MethodNode) -> Result<Vec<Option<Vec<Category>>>, ShapeError> {
     let count = node.nodes.len();
+    let brackets = InlineCallBrackets::pair(node.nodes.iter().map(|entry| {
+        if is_before_inline_marker(entry) {
+            Some(InlineCallBracket::Open)
+        } else if is_after_inline_marker(entry) {
+            Some(InlineCallBracket::Close)
+        } else {
+            None
+        }
+    }));
     let mut position = vec![None; node.label_count as usize];
     for (index, entry) in node.nodes.iter().enumerate() {
         if let Node::Label(label) = entry {
@@ -391,6 +411,9 @@ pub fn stack_shapes(node: &MethodNode) -> Result<Vec<Option<Vec<Category>>>, Sha
                 })
             }
         }
+        brackets
+            .follow(index, &mut stack, |opening| shapes[opening].clone())
+            .map_err(|_| ShapeError::UnpairedInlineMarker(index))?;
         match insn {
             Insn::Jump { target, .. } => enter(&mut shapes, &mut work, at(*target)?, &stack)?,
             Insn::TableSwitch {

@@ -46,8 +46,10 @@ pub(super) fn emit_lambda_class(
     let captures = c
         .fields
         .iter()
-        .map(|field| Capture {
-            name: field.name.as_str(),
+        .enumerate()
+        .map(|(index, field)| Capture {
+            names: crate::jvm::capture_names::lambda_class_capture(ir, lambda, index)
+                .expect("every field of a lambda class stores one of its captures"),
             ty: jvm_declared_ty(&field.ty),
             descriptor: ir_type_desc(&field.ty),
             signature: parameterized_sig(&formatter, &field.ty),
@@ -90,7 +92,7 @@ pub(super) fn emit_lambda_class(
     for capture in &captures {
         code.aload(0);
         load(capture.ty, slot, &mut code);
-        let reference = cw.fieldref(&class, capture.name, &capture.descriptor);
+        let reference = cw.fieldref(&class, &capture.names.field, &capture.descriptor);
         code.putfield(reference, slot_words(capture.ty) as i32 + 1);
         slot += slot_words(capture.ty);
     }
@@ -98,17 +100,13 @@ pub(super) fn emit_lambda_class(
     let object = cw.methodref(OBJECT, "<init>", "()V");
     code.invokespecial(object, 0, 0);
     code.ret_void();
-    // kotlinc names the captured `this` parameter `$receiver`, every other one after its field.
     let parameters = captures
         .iter()
-        .enumerate()
-        .map(|(index, capture)| {
-            let name = if lambda.receiver_captures.contains(&(index as u32)) {
-                "$receiver"
-            } else {
-                capture.name
-            };
-            (name, capture.descriptor.as_str())
+        .map(|capture| {
+            (
+                capture.names.parameter.as_str(),
+                capture.descriptor.as_str(),
+            )
         })
         .collect::<Vec<_>>();
     let locals =
@@ -133,10 +131,18 @@ pub(super) fn emit_lambda_class(
         );
     }
     cw.set_method_debug("<init>", &constructor, None, &locals);
+    if env.java_parameters {
+        // `-java-parameters` reflects each capture under its field's name, compiler-generated.
+        let reflected = captures
+            .iter()
+            .map(|capture| (Some(capture.names.field.clone()), 0x1000))
+            .collect::<Vec<_>>();
+        cw.set_method_parameters("<init>", &constructor, &reflected);
+    }
     for capture in &captures {
         cw.add_field_late_sig(
             0x1010, // FINAL | SYNTHETIC
-            capture.name,
+            &capture.names.field,
             &capture.descriptor,
             capture.signature.as_deref(),
             None,
@@ -251,8 +257,8 @@ fn emit_initialization(
 }
 
 /// A captured value's field, as the constructor and `invoke` spell it.
-struct Capture<'a> {
-    name: &'a str,
+struct Capture {
+    names: crate::jvm::capture_names::CaptureNames,
     ty: Ty,
     descriptor: String,
     signature: Option<String>,
@@ -302,7 +308,7 @@ pub(super) fn sam_bootstrap_descriptors(
     let sam_result = if target.suspend {
         sam_parameters.push(Ty::obj("kotlin/coroutines/Continuation"));
         Ty::obj("java/lang/Object")
-    } else if target.overrides_non_primitive_result {
+    } else if crate::jvm::override_results::boxes_sam_result(target) {
         crate::jvm::method_descriptors::jvm_declared_ty(&Ty::nullable(sam_result))
     } else {
         crate::jvm::method_descriptors::jvm_declared_ty(&sam_result)

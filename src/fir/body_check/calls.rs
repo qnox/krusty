@@ -62,7 +62,6 @@ fn intrinsic_binary_operation(
         | crate::libraries::CompilerIntrinsic::StartCoroutine
         | crate::libraries::CompilerIntrinsic::CoroutineContext
         | crate::libraries::CompilerIntrinsic::CoroutineSuspended
-        | crate::libraries::CompilerIntrinsic::SuspendCoroutine
         | crate::libraries::CompilerIntrinsic::SuspendCoroutineUninterceptedOrReturn
         | crate::libraries::CompilerIntrinsic::EnumValues
         | crate::libraries::CompilerIntrinsic::EnumValueOf
@@ -79,6 +78,7 @@ fn intrinsic_binary_operation(
         | crate::libraries::CompilerIntrinsic::RangeUntil
         | crate::libraries::CompilerIntrinsic::ProgressionStep
         | crate::libraries::CompilerIntrinsic::ProgressionReversed
+        | crate::libraries::CompilerIntrinsic::WithIndex
         | crate::libraries::CompilerIntrinsic::UnsignedCompare { .. }
         | crate::libraries::CompilerIntrinsic::PrimitiveIteratorNext => return None,
     })
@@ -1758,9 +1758,6 @@ impl BodyFirChecker<'_> {
                     crate::types::AssertionMode::Runtime
                 };
                 Some(FirIntrinsic::Assert { mode })
-            }
-            Some(crate::libraries::CompilerIntrinsic::SuspendCoroutine) => {
-                Some(FirIntrinsic::SuspendCoroutine)
             }
             Some(crate::libraries::CompilerIntrinsic::SuspendCoroutineUninterceptedOrReturn) => {
                 Some(FirIntrinsic::SuspendCoroutineUninterceptedOrReturn {

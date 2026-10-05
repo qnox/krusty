@@ -18,9 +18,7 @@
 
 use std::collections::HashSet;
 
-use super::cps::{
-    calls_an_inline_function, spliced_inline_suspensions, TransformedMachine, TransformedSuspension,
-};
+use super::cps::{spliced_inline_suspensions, TransformedMachine, TransformedSuspension};
 use super::emission_facts::{ContinuationMetadata, MachineOutputs};
 use super::spill_layout::{suspension_points_in_order, SpillLayout};
 use super::{
@@ -76,12 +74,18 @@ pub(super) fn route(
     let declared_params = function.params.clone();
     let unit_return = route.context.orig_rets[fid as usize] == Ty::Unit;
 
+    let fake_continuations = unintercepted_continuation_reads(ir, body);
     let completion = adopt_cps_signature(ir, fid);
     shift_locals(ir, body, completion);
     // `coroutineContext` is the context of the continuation kotlinc's transformer puts in place
     // of the fake one: the machine's own, or `$completion` when there is no suspension point.
     realize_coroutine_context(ir, body, IrExpr::CurrentContinuation);
-    for suspension in &suspensions {
+    // A `suspendCoroutineUninterceptedOrReturn` block is given the continuation already: it reads
+    // it as a fake one.
+    let calls = suspensions
+        .iter()
+        .filter(|suspension| !ir.is_unintercepted_suspension(suspension.call));
+    for suspension in calls.collect::<Vec<_>>() {
         let continuation = ir.add_expr(IrExpr::CurrentContinuation);
         // A generated call that enters its line only where its operands begin (a reference
         // carrier's `invoke`) enters it at the continuation it now reads too.
@@ -159,6 +163,7 @@ pub(super) fn route(
             continuation_class,
             suspensions,
             lambda: None,
+            fake_continuations,
         },
     );
     Routed::Taken
@@ -234,14 +239,18 @@ pub(super) fn eligible_points(
             })
         });
     // Shapes the transformer cannot take at all: a suspension spliced in from an inline body, or
-    // a read of the function's own continuation, which kotlinc realizes through a fake one.
+    // a read of the function's own continuation other than a named function's
+    // `suspendCoroutineUninterceptedOrReturn` block, which kotlinc realizes through a fake one.
     let body_declines: [(&dyn Fn() -> bool, &str); 2] = [
         (
             &|| !spliced_inline_suspensions(ir, body, suspend_set).is_empty(),
             "suspends in a spliced inline body",
         ),
         (
-            &|| reads_current_continuation(ir, body),
+            &|| match subject {
+                Subject::NamedFunction => reads_continuation_outside_unintercepted_blocks(ir, body),
+                Subject::SuspendLambda => reads_current_continuation(ir, body),
+            },
             "reads its own continuation",
         ),
     ];
@@ -249,7 +258,7 @@ pub(super) fn eligible_points(
     // `@DebugMetadata`. A named function with no suspension point has none of them, as kotlinc's
     // transformer returns before building them; a suspend lambda's `invokeSuspend` always has its
     // machine.
-    let machine_declines: [(&dyn Fn() -> bool, &str); 6] = [
+    let machine_declines: [(&dyn Fn() -> bool, &str); 5] = [
         (
             &|| !route.context.null_out_dead_spills,
             "no spill clean-up in the runtime",
@@ -270,9 +279,6 @@ pub(super) fn eligible_points(
             &|| ir.jvm_suspend_impl_bodies.contains_key(&fid),
             "an interface body",
         ),
-        // Spliced inline bodies are a later step: the splice does not mark the call's own line
-        // yet, which the transformer's `@DebugMetadata` reads off the body.
-        (&|| splices_inline_code(ir, body), "splices an inline body"),
     ];
     let machine_declines: &[(&dyn Fn() -> bool, &str)] =
         if points.is_empty() && subject == Subject::NamedFunction {
@@ -300,8 +306,8 @@ pub(super) fn eligible_points(
             ir.exprs[call as usize],
             IrExpr::Call { .. } | IrExpr::MethodCall { .. } | IrExpr::InvokeFunction { .. }
         );
-        direct
-            && !ir.intrinsic_suspension_points.contains_key(&call)
+        let block = ir.is_unintercepted_suspension(call) && subject == Subject::NamedFunction;
+        (direct && !ir.intrinsic_suspension_points.contains_key(&call) || block)
             // A boxed result arrives as the box on either path, which the call's own unbox
             // consumes; a carrier result arrives boxed only on resume, which the IR machine handles.
             && !matches!(
@@ -322,16 +328,36 @@ pub(super) fn eligible_points(
     Some(points)
 }
 
-/// Whether the body calls an inline function, whose body the emitter splices into this one.
-fn splices_inline_code(ir: &IrFile, expression: ExprId) -> bool {
-    if calls_an_inline_function(ir, expression) {
+/// Whether the body reads its own continuation outside a `suspendCoroutineUninterceptedOrReturn`
+/// block, the one read the transformer takes.
+fn reads_continuation_outside_unintercepted_blocks(ir: &IrFile, expression: ExprId) -> bool {
+    if ir.is_unintercepted_suspension(expression) {
+        return false;
+    }
+    if let IrExpr::CurrentContinuation = ir.exprs[expression as usize] {
         return true;
     }
     let mut found = false;
     for_each_child(&ir.exprs, expression, &mut |child| {
-        found = found || splices_inline_code(ir, child);
+        found = found || reads_continuation_outside_unintercepted_blocks(ir, child);
     });
     found
+}
+
+/// The continuation reads inside the body's `suspendCoroutineUninterceptedOrReturn` blocks.
+fn unintercepted_continuation_reads(ir: &IrFile, body: ExprId) -> Vec<ExprId> {
+    fn collect(ir: &IrFile, expression: ExprId, inside: bool, reads: &mut Vec<ExprId>) {
+        let inside = inside || ir.is_unintercepted_suspension(expression);
+        if inside && matches!(ir.exprs[expression as usize], IrExpr::CurrentContinuation) {
+            reads.push(expression);
+        }
+        for_each_child(&ir.exprs, expression, &mut |child| {
+            collect(ir, child, inside, reads)
+        });
+    }
+    let mut reads = Vec::new();
+    collect(ir, body, false, &mut reads);
+    reads
 }
 
 /// Whether the body reads its own continuation (`suspendCoroutineUninterceptedOrReturn`), which

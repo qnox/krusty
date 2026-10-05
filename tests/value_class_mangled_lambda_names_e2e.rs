@@ -169,11 +169,10 @@ fn a_lambda_in_a_value_class_mangled_function_is_named_after_its_jvm_name_like_k
             assert_eq!(krusty, reference, "kotlinc's methods of {class}");
         }
     }
-    // The value class's lambdas are compared by name only. kotlinc names a captured receiver
-    // (`m-impl`, `getP-impl`, the `init` block) `$arg0` or `$tmp0` in its debug table where krusty
-    // writes `this$0`, and boxes `n`'s captured `Tag` for its `Any` result where krusty returns the
-    // carrier: gaps in the lambda's body, apart from the name it takes.
-    for (class, declaration) in LIFTED.iter().filter(|(class, _)| *class != "V") {
+    // Every lifted method matches whole, its local-variable table included: a value-class lambda
+    // that captures its receiver names it `$arg0` in a member or accessor and `$tmp0` in the `init`
+    // block, after the value kotlinc's value-class statics realize that receiver as.
+    for (class, declaration) in LIFTED {
         let (reference, krusty) = classes.method_listing(class, declaration);
         assert_eq!(krusty, reference, "{class}: {declaration}");
     }

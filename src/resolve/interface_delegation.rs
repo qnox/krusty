@@ -7,6 +7,10 @@
 
 use std::collections::{HashSet, VecDeque};
 
+mod delegate_calls;
+
+pub(super) use delegate_calls::delegate_member_calls;
+
 use crate::fir::{
     ResolvedDelegatedCall, ResolvedDelegatedCallTarget, ResolvedDelegatedContextParameter,
     ResolvedDelegatedFunction, ResolvedDelegatedFunctionDeclaration, ResolvedDelegatedMember,
@@ -578,7 +582,7 @@ fn property_call(
                 } else {
                     signature.result
                 },
-                interface: true,
+                interface: callable.owner_is_interface,
             },
             None,
         )
@@ -623,9 +627,11 @@ fn property_slot(property: &PropertyInfo) -> Option<PropertySlot> {
 fn delegated_property(
     source: &dyn SymbolSource,
     index: &ResolvedModuleIndex,
+    delegating_classifier: Ty,
     interface: Ty,
     slot: PropertySlot,
     candidates: Vec<&PropertyInfo>,
+    inherited_class_candidates: Vec<&PropertyInfo>,
 ) -> Option<ResolvedDelegatedProperty> {
     let (getter, setter) = effective_property(source, index, interface, candidates)?;
     let (context_parameters, property_type) =
@@ -641,16 +647,50 @@ fn delegated_property(
     };
     let declaration = setter.unwrap_or(getter);
     let declared = super::override_plans::property_declaration(index, declaration)?;
-    let overridden = Box::new(ResolvedDelegatedPropertyDeclaration {
+    let mut overridden = vec![ResolvedDelegatedPropertyDeclaration {
         target: declared.target,
         owner: declaration.owner,
         ty: ResolvedTy::new(declared.ty).ok()?,
+        applied_ty: ResolvedTy::new(property_type).ok()?,
         receiver: match declared.receiver {
             Some(receiver) => Some(ResolvedTy::new(receiver).ok()?),
             None => None,
         },
+        mutable: setter.is_some(),
         interface: declaration.getter.owner_is_interface,
-    });
+        depth: 0,
+    }];
+    let inherited_class = inherited_class_candidates
+        .into_iter()
+        .filter_map(|candidate| {
+            let (_, applied_ty) =
+                applied_property_signature(source, index, delegating_classifier, candidate)?;
+            let compatible = if candidate.setter.is_some() {
+                applied_ty.canonical_semantic() == property_type.canonical_semantic()
+            } else {
+                crate::symbol_resolver::resolution_subtype(source, property_type, applied_ty)
+            };
+            compatible.then_some((candidate, applied_ty))
+        })
+        .min_by_key(|(candidate, _)| candidate.receiver_rank);
+    if let Some((inherited, applied_ty)) = inherited_class {
+        let declared = super::override_plans::property_declaration(index, inherited)?;
+        if !overridden
+            .iter()
+            .any(|known| known.target == declared.target)
+        {
+            overridden.push(ResolvedDelegatedPropertyDeclaration {
+                target: declared.target,
+                owner: inherited.owner,
+                ty: ResolvedTy::new(declared.ty).ok()?,
+                applied_ty: ResolvedTy::new(applied_ty).ok()?,
+                receiver: declared.receiver.map(ResolvedTy::new).transpose().ok()?,
+                mutable: inherited.setter.is_some(),
+                interface: false,
+                depth: inherited.receiver_rank,
+            });
+        }
+    }
     let accessor_call = |property: &PropertyInfo, setter: bool| {
         property_call(
             index,
@@ -665,7 +705,7 @@ fn delegated_property(
         )
     };
     Some(ResolvedDelegatedProperty {
-        overridden,
+        overridden: overridden.into_boxed_slice(),
         name: getter.name.clone().into_boxed_str(),
         type_parameters: match declared.target {
             crate::fir::ResolvedPropertyOverrideTarget::Module(_) => {
@@ -887,12 +927,25 @@ fn delegation_members(
             if own_property_slots.contains(&slot) {
                 continue;
             }
+            let inherited_class_candidates = own_callables
+                .properties()
+                .iter()
+                .filter(|property| property.receiver_rank != 0)
+                .filter(|property| property_slot(property) == Some(slot))
+                .filter(|property| {
+                    source
+                        .classifier(property.owner)
+                        .is_some_and(|classifier| !classifier.is_interface())
+                })
+                .collect();
             members.push(ResolvedDelegatedMember::Property(delegated_property(
                 source,
                 index,
+                own,
                 interface,
                 slot,
                 property_candidates,
+                inherited_class_candidates,
             )?));
         }
     }

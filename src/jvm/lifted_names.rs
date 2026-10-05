@@ -21,7 +21,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::ir::{IrEnclosure, IrFile, IrLiftingSequence};
+use crate::ir::{IrEnclosure, IrFile, IrLiftingRoot, IrLiftingSequence};
 
 /// Number every lifting sequence of the file and record kotlinc's lifted name of each function
 /// lowered from a lambda or local function. A callable inside one that is not lifted (the body of a
@@ -40,7 +40,12 @@ pub(crate) fn number(
     let mut containers = HashMap::<(&IrLiftingSequence, u32), String>::new();
     for (sequence, entries) in &ir.lifting_sequences {
         let mut scopes = HashMap::<(String, Option<u32>), (u32, HashSet<&str>)>::new();
-        for (&position, entry) in entries {
+        // kotlinc's value-class lowering appends the primary `constructor-impl`, which runs the
+        // `init` blocks, after the class's other declarations, so what it lifts numbers after what
+        // a secondary constructor's `constructor-impl` lifts. Positions keep their order otherwise.
+        let mut ordered = entries.iter().collect::<Vec<_>>();
+        ordered.sort_by_key(|(_, entry)| in_primary_value_class_constructor(ir, entry.container));
+        for (&position, entry) in ordered {
             let container = container_segment(ir, entry.container, &sequence.container);
             containers.insert((sequence, position), container.clone());
             if !entry.lifted {
@@ -160,17 +165,118 @@ pub(crate) fn realize(
 /// The outermost declaration's name as the first segment: the JVM name the value-class pass gave
 /// `container`'s function, else the source `name`.
 fn container_segment(ir: &IrFile, container: Option<IrEnclosure>, name: &str) -> String {
-    let function = match container {
-        Some(IrEnclosure::Function(function)) => Some(function),
-        Some(IrEnclosure::PropertyAccessor { property, setter }) => {
-            super::ir_emit::enclosure::realized_property_accessor(ir, property, setter)
-        }
-        _ => None,
-    };
-    let renamed = function
+    let renamed = container
+        .and_then(|container| container_function(ir, container))
         .filter(|function| ir.value_class_renamed_functions.contains(function))
         .map(|function| ir.functions[function as usize].name.as_str());
     segment_spelling(renamed.unwrap_or(name))
+}
+
+/// Whether `container` is the primary `constructor-impl` of a value class.
+fn in_primary_value_class_constructor(ir: &IrFile, container: Option<IrEnclosure>) -> bool {
+    container
+        .and_then(|container| container_function(ir, container))
+        .and_then(|function| ir.jvm_value_class_constructor_impls.get(&function))
+        .is_some_and(|&ordinal| ordinal == 0)
+}
+
+/// The function realizing a lifting container that is a function body or a property accessor.
+fn container_function(ir: &IrFile, container: IrEnclosure) -> Option<crate::ir::FunId> {
+    match container {
+        IrEnclosure::Function(function) => Some(function),
+        IrEnclosure::PropertyAccessor { property, setter } => {
+            super::ir_emit::enclosure::realized_property_accessor(ir, property, setter)
+        }
+        _ => None,
+    }
+}
+
+/// The function whose body the lifted callable `function` is written in, through every enclosing
+/// local callable: the outermost declaration of its lifting site, as the target realized it (a
+/// value-class member's `-impl`, the `constructor-impl` running an `init` block). `None` for a
+/// callable that is not lifted, or whose outermost declaration is no function body.
+pub(super) fn root_container(ir: &IrFile, function: crate::ir::FunId) -> Option<crate::ir::FunId> {
+    root_container_at(ir, &lifting_root(ir, function)?)
+}
+
+/// The outermost position of the path `function` is lifted along, which a lambda realized as a
+/// class keeps after it stops being lifted.
+pub(super) fn lifting_root(ir: &IrFile, function: crate::ir::FunId) -> Option<IrLiftingRoot> {
+    let (sequence, site) = ir.lifted_functions.get(&function)?;
+    Some(IrLiftingRoot {
+        sequence: sequence.clone(),
+        position: site.path.first()?.position,
+    })
+}
+
+/// [`root_container`] from a recorded lifting root.
+pub(super) fn root_container_at(ir: &IrFile, root: &IrLiftingRoot) -> Option<crate::ir::FunId> {
+    let entry = ir
+        .lifting_sequences
+        .get(&root.sequence)?
+        .get(&root.position)?;
+    container_function(ir, entry.container?)
+}
+
+/// The function whose body a class declared in `enclosure` is written in, through every enclosing
+/// lambda and local function, as the target realized it: the [`root_container`] of a local
+/// function or suspend lambda, else the function or accessor itself. A suspend lambda realized as
+/// a class of its own encloses what it declares in its `invokeSuspend`, but that class is no
+/// source declaration, so nothing in it captures its instance: the root is the one the lambda's
+/// class is written in. `None` for an enclosure that is no function body.
+pub(super) fn enclosure_root(ir: &IrFile, enclosure: IrEnclosure) -> Option<crate::ir::FunId> {
+    match enclosure {
+        IrEnclosure::Function(function) => match root_container(ir, function) {
+            Some(root) => Some(root),
+            None => match generated_class_enclosure(ir, function) {
+                Some(outer) => enclosure_root(ir, outer),
+                None => Some(function),
+            },
+        },
+        IrEnclosure::Lambda(lambda) => root_container(ir, lambda)
+            .or_else(|| enclosure_root(ir, *ir.lambda_enclosures.get(&lambda)?)),
+        _ => container_function(ir, enclosure),
+    }
+}
+
+/// The function among `container` and the members of the local or anonymous classes it is written
+/// in, outward, that is a member of `classifier`: where an instance of `classifier` captured in
+/// `container` comes from. `None` when no class in that chain is `classifier`.
+pub(super) fn classifier_member(
+    ir: &IrFile,
+    container: crate::ir::FunId,
+    classifier: crate::types::TypeName,
+) -> Option<crate::ir::FunId> {
+    let mut function = container;
+    loop {
+        let owner = member_owner(ir, function)?;
+        if owner.fq_name == classifier {
+            return Some(function);
+        }
+        function = enclosure_root(ir, owner.enclosure?)?;
+    }
+}
+
+/// The class `function` is a member of, a static realization of a member included.
+fn member_owner(ir: &IrFile, function: crate::ir::FunId) -> Option<&crate::ir::IrClass> {
+    match ir.functions[function as usize].dispatch_receiver {
+        Some(owner) => Some(&ir.classes[ir.class_id_by_name(owner)? as usize]),
+        None => ir
+            .classes
+            .iter()
+            .find(|class| class.methods.contains(&function)),
+    }
+}
+
+/// Where the compiler-generated class whose method `function` is, such as a suspend lambda's class
+/// owning its `invokeSuspend`, is declared; `None` for a method of a source class.
+fn generated_class_enclosure(ir: &IrFile, function: crate::ir::FunId) -> Option<IrEnclosure> {
+    let owner = ir.functions[function as usize].dispatch_receiver?;
+    let class = &ir.classes[ir.class_id_by_name(owner)? as usize];
+    match class.is_source_declared {
+        true => None,
+        false => class.enclosure,
+    }
 }
 
 /// kotlinc replaces the characters a special or mangled name carries (`<init>`, `<get-x>`,

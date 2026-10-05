@@ -178,7 +178,7 @@ pub(super) fn property_declaration(
     })
 }
 
-fn function_target(
+pub(super) fn function_target(
     index: &ResolvedModuleIndex,
     function: &FunctionInfo,
 ) -> Option<ResolvedFunctionOverrideTarget> {
@@ -260,7 +260,7 @@ fn declared_properties(
         .collect()
 }
 
-fn declared_functions(
+pub(super) fn declared_functions(
     source: &dyn crate::symbol_source::SymbolSource,
     receiver: Ty,
     name: &str,
@@ -729,15 +729,44 @@ fn publish_inherited_interface_property_plans(
 }
 
 /// A source property declaration that overrides, as the override edges see it.
-#[derive(Clone, Copy)]
 struct PropertyImplementation<'a> {
     owner: crate::types::TypeName,
     name: &'a str,
     id: crate::fir::PropertyId,
     ty: ResolvedTy,
+    formals: Vec<String>,
+    formal_bounds: Vec<Vec<Ty>>,
+    context_parameters: Vec<Ty>,
     /// The declared receiver of a member-extension property, part of the slot it overrides.
     receiver: Option<ResolvedTy>,
     mutable: bool,
+}
+
+fn property_implementation<'a>(
+    index: &ResolvedModuleIndex,
+    owner: crate::types::TypeName,
+    name: &'a str,
+    declaration: crate::fir::DeclarationId,
+) -> Option<PropertyImplementation<'a>> {
+    let signature = index.signature(declaration)?;
+    let property = index.property(index.property_for_declaration(declaration)?)?;
+    let context_count = usize::try_from(property.context_parameter_count).ok()?;
+    Some(PropertyImplementation {
+        owner,
+        name,
+        id: property.id,
+        ty: signature.result,
+        formals: declaration_formals(index, declaration),
+        formal_bounds: declaration_formal_bounds(index, declaration),
+        context_parameters: signature
+            .parameters
+            .get(..context_count)?
+            .iter()
+            .map(|parameter| parameter.get())
+            .collect(),
+        receiver: property.extension_receiver,
+        mutable: property.mutable,
+    })
 }
 
 fn append_property_override_edges(
@@ -748,14 +777,12 @@ fn append_property_override_edges(
     seen: &mut HashSet<ResolvedPropertyOverrideTarget>,
     overrides: &mut Vec<ResolvedPropertyOverride>,
 ) {
-    let PropertyImplementation {
-        owner: implementation_owner,
-        name,
-        id: implementation_id,
-        ty: implementation_type,
-        receiver: implementation_receiver,
-        mutable: implementation_mutable,
-    } = *implementation;
+    let implementation_owner = implementation.owner;
+    let name = implementation.name;
+    let implementation_id = implementation.id;
+    let implementation_type = implementation.ty;
+    let implementation_receiver = implementation.receiver;
+    let implementation_mutable = implementation.mutable;
     let member_extension = implementation_receiver.is_some();
     let first = overrides.len();
     for supertype in hierarchy.iter().filter(|entry| entry.depth != 0) {
@@ -779,21 +806,60 @@ fn append_property_override_edges(
             let Some(declared) = raw.get(&overridden) else {
                 continue;
             };
+            let applied_formals = applied.formals.as_slice();
+            let applied_bounds = applied
+                .getter
+                .generic_sig
+                .as_ref()
+                .map(|signature| signature.formal_bounds.as_slice())
+                .unwrap_or_default();
+            let applied_context_parameters = applied
+                .getter
+                .params
+                .get(..applied.context_count)
+                .unwrap_or_default();
+            let compatible_inputs = crate::symbol_resolver::override_input_shapes_match(
+                source,
+                crate::symbol_resolver::OverrideInputShape {
+                    params: applied_context_parameters,
+                    receiver: applied.receiver.filter(|_| member_extension),
+                    formals: applied_formals,
+                    formal_bounds: applied_bounds,
+                    context_count: applied.context_count,
+                    suspend: false,
+                },
+                crate::symbol_resolver::OverrideInputShape {
+                    params: &implementation.context_parameters,
+                    receiver: implementation_receiver.map(ResolvedTy::get),
+                    formals: &implementation.formals,
+                    formal_bounds: &implementation.formal_bounds,
+                    context_count: implementation.context_parameters.len(),
+                    suspend: false,
+                },
+            );
             let compatible_type = if applied.setter.is_some() {
-                applied.ty.canonical_semantic() == implementation_type.get().canonical_semantic()
+                crate::symbol_resolver::override_parameter_types_match(
+                    source,
+                    &[applied.ty],
+                    applied_formals,
+                    &[implementation_type.get()],
+                    &implementation.formals,
+                )
             } else {
                 crate::symbol_resolver::resolution_subtype(
                     source,
-                    implementation_type.get().canonical_semantic(),
-                    applied.ty.canonical_semantic(),
+                    crate::types::ty_canonicalize_params(
+                        implementation_type.get().canonical_semantic(),
+                        &implementation.formals,
+                    ),
+                    crate::types::ty_canonicalize_params(
+                        applied.ty.canonical_semantic(),
+                        applied_formals,
+                    ),
                 )
             };
-            // A member extension overrides only the slot over the same receiver type.
-            let same_receiver = !member_extension
-                || applied.receiver.map(Ty::canonical_semantic)
-                    == implementation_receiver.map(|receiver| receiver.get().canonical_semantic());
-            if !compatible_type
-                || !same_receiver
+            if !compatible_inputs
+                || !compatible_type
                 || applied.setter.is_some() && !implementation_mutable
                 || !seen.insert(overridden)
             {
@@ -874,19 +940,14 @@ fn overriding_property<'a>(
     {
         return None;
     }
-    let property = index.property(index.property_for_declaration(declaration)?)?;
-    let canonical = |ty: ResolvedTy| ResolvedTy::new(ty.get().canonical_semantic()).ok();
-    Some(PropertyImplementation {
-        owner,
-        name,
-        id: property.id,
-        ty: canonical(index.signature(declaration)?.result)?,
-        receiver: match property.extension_receiver {
-            Some(receiver) => Some(canonical(receiver)?),
-            None => None,
-        },
-        mutable: property.mutable,
-    })
+    let mut implementation = property_implementation(index, owner, name, declaration)?;
+    implementation.ty = ResolvedTy::new(implementation.ty.get().canonical_semantic()).ok()?;
+    implementation.receiver = implementation
+        .receiver
+        .map(|receiver| ResolvedTy::new(receiver.get().canonical_semantic()))
+        .transpose()
+        .ok()?;
+    Some(implementation)
 }
 
 fn property_override_plans(
@@ -1288,23 +1349,15 @@ fn enum_entry_override_plans(
             };
             match header.kind {
                 DeclarationKind::Property => {
-                    let Some(property) = index.property_for_declaration(member) else {
-                        continue;
-                    };
-                    let Some(property_header) = index.property(property) else {
+                    let Some(implementation) =
+                        property_implementation(index, implementation_owner, name, member)
+                    else {
                         continue;
                     };
                     append_property_override_edges(
                         index,
                         source,
-                        &PropertyImplementation {
-                            owner: implementation_owner,
-                            name,
-                            id: property,
-                            ty: signature.result,
-                            receiver: property_header.extension_receiver,
-                            mutable: property_header.mutable,
-                        },
+                        &implementation,
                         &hierarchy,
                         &mut property_seen,
                         &mut properties,
@@ -1397,24 +1450,18 @@ pub(crate) fn publish_checked_local_override_plans(
                         };
                         match member.kind {
                             crate::fir::DeclarationKind::Property => {
-                                let Some(property) = index.property_for_declaration(declaration)
-                                else {
-                                    continue;
-                                };
-                                let Some(property_header) = index.property(property) else {
+                                let Some(implementation) = property_implementation(
+                                    index,
+                                    implementation_owner,
+                                    name,
+                                    declaration,
+                                ) else {
                                     continue;
                                 };
                                 append_property_override_edges(
                                     index,
                                     &source,
-                                    &PropertyImplementation {
-                                        owner: implementation_owner,
-                                        name,
-                                        id: property,
-                                        ty: signature.result,
-                                        receiver: property_header.extension_receiver,
-                                        mutable: property_header.mutable,
-                                    },
+                                    &implementation,
                                     &hierarchy,
                                     &mut property_seen,
                                     &mut properties,

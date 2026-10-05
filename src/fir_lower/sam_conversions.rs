@@ -4,6 +4,18 @@ use crate::fir::FirSamConversion;
 use crate::ir::{ExprId, IrExpr, IrFunction, IrSamTarget};
 use crate::types::Ty;
 
+pub(super) fn ir_sam_method(method: crate::fir::FirSamMethod) -> crate::ir::IrSamMethod {
+    match method {
+        crate::fir::FirSamMethod::Declared(crate::fir::ResolvedFunctionOverrideTarget::Module(
+            callable,
+        )) => crate::ir::IrSamMethod::Module(callable),
+        crate::fir::FirSamMethod::Declared(
+            crate::fir::ResolvedFunctionOverrideTarget::External(callable),
+        ) => crate::ir::IrSamMethod::External(callable),
+        crate::fir::FirSamMethod::FunctionTypeInvoke => crate::ir::IrSamMethod::FunctionTypeInvoke,
+    }
+}
+
 use super::BodyLowering;
 
 impl BodyLowering<'_> {
@@ -110,7 +122,7 @@ impl BodyLowering<'_> {
                 sam: Some(IrSamTarget {
                     classifier: conversion.classifier,
                     method: conversion.method.to_string(),
-                    method_target: conversion.method_target,
+                    method_target: ir_sam_method(conversion.method_target),
                     parameters: conversion
                         .parameters
                         .iter()
@@ -127,9 +139,8 @@ impl BodyLowering<'_> {
                     has_receiver: conversion.has_receiver,
                     suspend: conversion.suspend,
                     source_suspend: conversion.source_suspend,
-                    overrides_non_primitive_result: conversion.overrides_non_primitive_result,
-                    overridden_non_primitive_results: conversion
-                        .overridden_non_primitive_results
+                    overridden_results: conversion
+                        .overridden_results
                         .iter()
                         .map(|result| result.get())
                         .collect(),

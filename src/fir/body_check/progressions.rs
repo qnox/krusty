@@ -281,7 +281,7 @@ impl BodyFirChecker<'_> {
         let counter = FirRangeCounterKind::of(plan.first.ty)
             .filter(|_| plan.last.ty == plan.first.ty)
             .ok_or_else(missing)?;
-        let member = |member: crate::resolve::ProgressionMember| {
+        let member = |member: crate::resolve::LoopMemberProperty| {
             self.property_target_at(
                 span,
                 None,

@@ -5,9 +5,10 @@
 //! overload selection, or source-spelling recovery.
 
 use crate::fir::{
-    DeclarationId, DeclarationKind, ResolvedDelegatedCall, ResolvedDelegatedCallTarget,
-    ResolvedDelegatedMember, ResolvedDelegatedModuleTarget, ResolvedFunctionOverrideTarget,
-    ResolvedInterfaceDelegateSource, ResolvedInterfaceDelegation, ResolvedModuleIndex,
+    DeclarationId, DeclarationKind, ResolvedDelegateCall, ResolvedDelegateMemberCalls,
+    ResolvedDelegatedCall, ResolvedDelegatedCallTarget, ResolvedDelegatedMember,
+    ResolvedDelegatedModuleTarget, ResolvedFunctionOverrideTarget, ResolvedInterfaceDelegateSource,
+    ResolvedInterfaceDelegation, ResolvedModuleIndex,
 };
 use crate::ir::{
     Callee, IrExpr, IrField, IrFile, IrFunction, IrNodeOrigin, IrProperty, IrTypeOp,
@@ -228,9 +229,18 @@ fn materialize_delegation(
         }
     }
 
-    for member in &delegation.members {
+    let delegate_calls = ir
+        .checked_interface_delegate_calls
+        .get(&(declaration, delegation_ordinal))
+        .cloned()
+        .filter(|calls| calls.len() == delegation.members.len())
+        .ok_or(FirFileLoweringFailure::MissingClassifier(declaration))?;
+    for (member, delegate_call) in delegation.members.iter().zip(delegate_calls.iter()) {
         match member {
             ResolvedDelegatedMember::Function(member) => {
+                let ResolvedDelegateMemberCalls::Function(delegate_call) = delegate_call else {
+                    return Err(FirFileLoweringFailure::MissingClassifier(declaration));
+                };
                 let name = member.name.to_string();
                 let params = member
                     .call
@@ -239,7 +249,7 @@ fn materialize_delegation(
                     .map(|parameter| parameter.get())
                     .collect::<Vec<_>>();
                 let delegate = delegate_field_read(ir, class, field);
-                let result = delegated_call(ir, &member.call, delegate)?;
+                let result = delegate_member_call(ir, delegate_call, delegate)?;
                 let function = add_forwarder(
                     ir,
                     class,
@@ -332,6 +342,13 @@ fn materialize_delegation(
                 }
             }
             ResolvedDelegatedMember::Property(property) => {
+                let ResolvedDelegateMemberCalls::Property {
+                    getter: delegate_getter,
+                    setter: delegate_setter,
+                } = delegate_call
+                else {
+                    return Err(FirFileLoweringFailure::MissingClassifier(declaration));
+                };
                 let name = property.name.to_string();
                 let ty = property.ty.get();
                 let context_params = property
@@ -365,7 +382,7 @@ fn materialize_delegation(
                 let mut getter_parameters = context_types.clone();
                 getter_parameters.extend(extension_receiver);
                 let delegate = delegate_field_read(ir, class, field);
-                let getter_call = delegated_call(ir, &property.getter, delegate)?;
+                let getter_call = delegate_member_call(ir, delegate_getter, delegate)?;
                 let getter = add_forwarder(
                     ir,
                     class,
@@ -374,12 +391,14 @@ fn materialize_delegation(
                     ty,
                     getter_call,
                 );
-                let setter = property
-                    .setter
+                if property.setter.is_some() != delegate_setter.is_some() {
+                    return Err(FirFileLoweringFailure::MissingClassifier(declaration));
+                }
+                let setter = delegate_setter
                     .as_ref()
                     .map(|setter| {
                         let delegate = delegate_field_read(ir, class, field);
-                        delegated_call(ir, setter, delegate).map(|call| {
+                        delegate_member_call(ir, setter, delegate).map(|call| {
                             let mut parameters = getter_parameters.clone();
                             parameters.push(ty);
                             add_forwarder(
@@ -422,33 +441,38 @@ fn materialize_delegation(
                         .insert(setter, crate::ir::FnParamInfo::identities(identities));
                 }
                 let implementation_owner = ir.classes[class as usize].fq_name;
-                ir.property_overrides
-                    .entry(implementation_owner)
-                    .or_default()
-                    .push(crate::ir::IrPropertyOverride {
-                        // As for a delegated function, the forwarders realize this exact interface
-                        // declaration; `implementation_getter` names their generated body.
-                        implementation: property.overridden.target,
-                        implementation_getter: Some(getter),
-                        implementation_setter: setter,
-                        implementation_owner,
-                        overridden: property.overridden.target,
-                        overridden_owner: property.overridden.owner,
-                        overridden_is_interface: property.overridden.interface,
-                        name: name.clone(),
-                        declared_type: property.overridden.ty.get(),
-                        applied_type: ty,
-                        implementation_type: ty,
-                        declared_receiver: property
-                            .overridden
-                            .receiver
-                            .map(crate::fir::ResolvedTy::get),
-                        implementation_receiver: extension_receiver,
-                        overridden_mutable: setter.is_some(),
-                        implementation_mutable: setter.is_some(),
-                        has_kotlin_superclass_override: false,
-                        depth: 0,
-                    });
+                let implementation = property
+                    .overridden
+                    .first()
+                    .ok_or(FirFileLoweringFailure::MissingClassifier(declaration))?
+                    .target;
+                for overridden in &property.overridden {
+                    ir.property_overrides
+                        .entry(implementation_owner)
+                        .or_default()
+                        .push(crate::ir::IrPropertyOverride {
+                            // As for a delegated function, the forwarders realize this exact interface
+                            // declaration; `implementation_getter` names their generated body. One
+                            // generated property can also replace a concrete superclass declaration.
+                            implementation,
+                            implementation_getter: Some(getter),
+                            implementation_setter: setter,
+                            implementation_owner,
+                            overridden: overridden.target,
+                            overridden_owner: overridden.owner,
+                            overridden_is_interface: overridden.interface,
+                            name: name.clone(),
+                            declared_type: overridden.ty.get(),
+                            applied_type: overridden.applied_ty.get(),
+                            implementation_type: ty,
+                            declared_receiver: overridden.receiver.map(crate::fir::ResolvedTy::get),
+                            implementation_receiver: extension_receiver,
+                            overridden_mutable: overridden.mutable,
+                            implementation_mutable: setter.is_some(),
+                            has_kotlin_superclass_override: false,
+                            depth: overridden.depth,
+                        });
+                }
                 let type_params = ir_type_parameters(&property.type_parameters);
                 if !type_params.is_empty() {
                     for accessor in std::iter::once(getter).chain(setter) {
@@ -535,6 +559,30 @@ fn parameter_initializer(
         value,
     });
     Ok(store)
+}
+
+/// Publish the delegate-side calls a checked constructor body carries for its delegations.
+pub(super) fn record_delegate_calls(body: &crate::fir::FirBody, ir: &mut IrFile) {
+    for calls in body.interface_delegate_calls() {
+        ir.checked_interface_delegate_calls
+            .insert((calls.classifier, calls.delegation), calls.members.clone());
+    }
+}
+
+/// A forwarder's call on the delegate, checked as kotlinc's implicit not-null cast checks it.
+fn delegate_member_call(
+    ir: &mut IrFile,
+    call: &ResolvedDelegateCall,
+    receiver: u32,
+) -> Result<u32, FirFileLoweringFailure> {
+    let result = delegated_call(ir, &call.call, receiver)?;
+    Ok(match &call.result_check {
+        Some(name) => ir.add_expr(IrExpr::NotNullAssert {
+            operand: result,
+            check: crate::ir::NullCheck::Named(name.to_string()),
+        }),
+        None => result,
+    })
 }
 
 fn delegated_call(
@@ -646,6 +694,11 @@ fn delegated_call(
         ResolvedDelegatedCallTarget::External(_) => {
             ir.ext_call_source_receiver
                 .insert(expression, call.receiver.get());
+            // The delegate is read from a field of its own static type, which the call dispatches
+            // through as a source call on that value does.
+            if let Some(class) = call.receiver.get().non_null().obj_internal() {
+                ir.dispatch_classes.insert(expression, class);
+            }
             if let Some(declared) = call.declared_result {
                 ir.call_declared_ret.insert(expression, declared.get());
             }

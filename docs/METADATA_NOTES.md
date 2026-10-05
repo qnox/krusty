@@ -181,7 +181,9 @@ Reverse-engineered from kotlinc for `class Point(val x: Int, var y: String)` (se
   `return_type` (f3) precedes its `type_parameter` (f4). Interning order in `d2` is independent of
   it. A `Type` naming a type parameter the declaration being written owns (a member function's or
   property's own, bounds included) uses `type_parameter_name` (f9); an enclosing class's uses
-  `type_parameter` (f7). A setter is a declaration of its own, so its value parameter addresses the
+  `type_parameter` (f7). A class header is the class's own declaration, so its type parameters'
+  bounds and its supertypes name the class's parameters too (`class C<T : Comparable<T>>`,
+  `class E<T> : I<E<T>>`), while its constructors and members address them by id. A setter is a declaration of its own, so its value parameter addresses the
   property's type parameter by id (`var <V> Cell<V>.content: V` names `V` in the return and receiver
   types but writes `type_parameter` in `setter_value_parameter`). krusty builds the record in any
   order and `Pb::canonical` sorts it. Test: `tests/metadata_type_reference_e2e.rs`.
@@ -233,9 +235,16 @@ Reverse-engineered from kotlinc for `class Point(val x: Int, var y: String)` (se
 - Captured type parameters (kotlinc 2.4.20): a local or anonymous class refers to a type parameter
   of an enclosing declaration by id alone (`Type.type_parameter`). Ids come from kotlinc's
   per-declaration interner: the class's own parameters first, then each captured one on first use,
-  and a member's first use is numbered in that member's own scope. An inner class instead keeps its
-  outer classes' parameters at the ids before its own. Test:
+  and a member's first use is numbered in that member's own scope. Test:
   `tests/metadata_captured_type_parameters_e2e.rs`.
+- Nested and inner classes (kotlinc 2.4.0, 2.4.10, 2.4.20): a nested class, inner or not, is
+  serialized under its outer classes, so every enclosing class's parameters hold the ids before its
+  own, outermost first. The class header (type-parameter bounds, supertypes, the inline-class
+  underlying type) names the class's own parameters (`type_parameter_name`) and its members address
+  them by id. An inner class addresses an outer class's parameter by id alone, so the outer name never
+  enters the inner class's `d2`; a reader resolves the id through the outer class's own metadata, as
+  kotlinc's `TypeDeserializer` chains to its parent. Tests: `tests/metadata_type_reference_e2e.rs`,
+  `tests/inner_class_outer_tparam_e2e.rs`.
 - Inline parameter modifiers (kotlinc 2.4.20): `ValueParameter.flags` bit 2 for `crossinline` and
   bit 3 for `noinline`, beside `DECLARES_DEFAULT_VALUE` (bit 1). Also written on a nullable
   function type and on extensions. Test: `tests/metadata_inline_parameter_modifiers_e2e.rs`.
@@ -478,8 +487,10 @@ wrote. A primitive specialized array has no type argument and is recorded unchan
 
 ## Class supertypes: only what source declared
 
-`Class.supertype` (f6) lists the DECLARED supertypes, superclass first. An undeclared `kotlin/Any`
-is never recorded — `class Holder<T>(val t: T) : Iface` writes one supertype record, not two.
+`Class.supertype` (f6) lists the DECLARED supertypes in source order, wherever the superclass is
+written: `class C : I, Base(), J` writes `I, Base, J`, and `d2` interns them in that order. Delegated
+interfaces, parenless superclasses, local classes and anonymous objects follow the same rule. An
+undeclared `kotlin/Any` is never recorded — `class Holder<T>(val t: T) : Iface` writes one supertype record, not two.
 
 This is a trap for a generic class: its supertype list comes from the recorded generic signature
 (`ir.class_signature(..).supers`), which ALWAYS materializes the superclass position because a JVM
@@ -491,3 +502,7 @@ non-generic shape with a superclass slot exactly when one was declared.
 that list. The flag cannot be inferred from the spellings themselves: a declared superclass that
 named no alias spells nothing, yet still occupies the slot, so only the emitter knows. Getting it
 wrong shifts every abbreviation onto the neighbouring supertype.
+
+Both lists lead with the superclass. The emitter then moves it to the slot that resolution recorded
+in `ResolvedClassifierHeader` and lowering published as `IrFile::class_superclass_positions`, so the
+spellings move with it. Tests: `tests/metadata_supertype_order_e2e.rs`.

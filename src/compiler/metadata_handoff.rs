@@ -197,7 +197,7 @@ fn attach_function_metadata(
     };
     let annotations =
         super::declaration_metadata::declaration_annotations(&function.annotations, info);
-    if !annotations.is_empty() {
+    if annotations.declares_annotations() {
         ir.function_annotations.insert(function_id, annotations);
     }
     let mut parameter_annotations = function
@@ -215,7 +215,7 @@ fn attach_function_metadata(
     }
     if parameter_annotations
         .iter()
-        .any(|annotations| !annotations.is_empty())
+        .any(crate::ir::DeclarationAnnotations::declares_annotations)
     {
         ir.fn_param_annotations
             .insert(function_id, parameter_annotations);
@@ -332,6 +332,17 @@ pub(super) fn attach_checked_declaration_metadata(
         };
         checked.annotations =
             super::declaration_metadata::declaration_annotations(&constructor.annotations, info);
+    }
+
+    // The superclass's slot among the declared supertypes, as resolution recorded it.
+    if let Some(header) = index.classifier_header(stable_class) {
+        let position = header.interfaces_written_before_superclass().len();
+        if header.superclass.is_some() && position > 0 {
+            ir.class_superclass_positions.insert(
+                classifier,
+                u32::try_from(position).expect("too many source supertypes"),
+            );
+        }
     }
 
     if let Some(header) = index.declaration_spellings(stable_class) {

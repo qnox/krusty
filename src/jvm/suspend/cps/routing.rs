@@ -37,6 +37,10 @@ pub(crate) struct TransformedMachine {
     pub suspensions: Vec<TransformedSuspension>,
     /// Set for a suspend lambda's `invokeSuspend`, which the transformer takes in its lambda mode.
     pub lambda: Option<SuspendLambdaMachine>,
+    /// The `IrExpr::CurrentContinuation` reads inside its `suspendCoroutineUninterceptedOrReturn`
+    /// blocks. Each is written as kotlinc's fake continuation, which the transformer replaces with
+    /// the machine's continuation, or with `$completion` when every point is a tail call.
+    pub fake_continuations: Vec<ExprId>,
 }
 
 /// What the transformer's lambda mode needs from a suspend lambda's `invokeSuspend` beyond its
@@ -58,8 +62,6 @@ pub(crate) struct SuspendLambdaCapture {
     pub field: u32,
     /// The captured value's type.
     pub ty: crate::types::Ty,
-    /// Whether the constructor names it `$receiver` rather than like its field.
-    pub receiver: bool,
 }
 
 /// A suspend lambda realized as a class of its own (kotlinc's `SuspendLambdaLowering`), which the
@@ -72,6 +74,8 @@ pub(crate) struct SuspendLambdaClass {
     pub function_type: crate::types::Ty,
     /// The captured values, in constructor order.
     pub captures: Vec<SuspendLambdaCapture>,
+    /// What each parameter of the class's constructor, `create` and typed `invoke` is.
+    pub member_parameters: super::SuspendLambdaParameters,
     /// The lambda's own parameters (its receiver first), in order: each one's type, and the field
     /// it is kept in when the body reads it.
     pub parameters: Vec<(crate::types::Ty, Option<u32>)>,

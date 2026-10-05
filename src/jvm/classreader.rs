@@ -7,6 +7,7 @@
 //! string table, which contains type-alias targets used by `classpath.rs` for type resolution.
 
 use crate::kt_string::KtString;
+use crate::libraries::AnnotationElementDefault;
 use crate::types::{TypeName, TypeNameList};
 
 pub const ACC_PUBLIC: u16 = 0x0001;
@@ -125,12 +126,16 @@ struct RawMember {
     attributes: MemberAttributes,
 }
 
+/// The attribute a Java source header stub writes on an annotation element whose `default` it
+/// does not evaluate. It carries no value: the element declares a default, and none is known.
+pub(crate) const UNEVALUATED_ANNOTATION_DEFAULT: &str = "krusty/UnevaluatedAnnotationDefault";
+
 #[derive(Default)]
 struct MemberAttributes {
     signature: Option<String>,
-    /// The method carries an `AnnotationDefault` attribute (JVMS 4.7.22) — it is an annotation
-    /// element with a default, so a use site may omit it.
-    has_annotation_default: bool,
+    /// The default an annotation element declares, which lets a use site omit it: the method's
+    /// `AnnotationDefault` value (JVMS 4.7.22), or a Java source header's unevaluated default.
+    annotation_default: Option<AnnotationElementDefault>,
     const_value: Option<ConstVal>,
     parameter_nullability: Vec<Option<JavaNullability>>,
     declaration_nullability: Option<JavaNullability>,
@@ -174,6 +179,11 @@ pub struct ClassInfo {
     /// constant names). Empty when none is declared.
     pub java_targets: Vec<String>,
     pub inner_classes: Vec<InnerClassRef>,
+    /// For an annotation type: the default each element declares, in method order.
+    pub annotation_element_defaults: Vec<(Box<str>, AnnotationElementDefault)>,
+    /// An inner class's packed `@Metadata`, kept until [`Self::within_outer`] decodes it in its
+    /// outer class's type-parameter scope. `None` for every other class.
+    pub inner_metadata: Option<std::sync::Arc<crate::jvm::metadata::RawMetadata>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -201,6 +211,44 @@ impl ClassInfo {
                 .this_class
                 .parent()
                 .unwrap_or_else(|| crate::types::type_name("")),
+        }
+    }
+
+    /// The outer class an inner Kotlin class's metadata addresses type parameters of, from its
+    /// `InnerClasses` self entry. `None` for every class [`Self::within_outer`] leaves unchanged.
+    pub fn metadata_outer_class(&self) -> Option<TypeName> {
+        self.inner_metadata.as_ref()?;
+        self.inner_class_self()?
+            .outer
+            .as_deref()
+            .map(crate::types::type_name)
+    }
+
+    /// Decode an inner class's metadata in `outer`'s type-parameter scope, so a member that
+    /// addresses an outer parameter by id resolves it as kotlinc's reader does.
+    pub fn within_outer(&self, outer: &ClassInfo) -> Result<ClassInfo, ReadError> {
+        let Some(raw) = self.inner_metadata.as_deref() else {
+            return Ok(self.clone());
+        };
+        let meta = crate::jvm::metadata::decode_metadata_within(
+            raw,
+            &self.this_class(),
+            &self.methods,
+            &outer.meta.type_parameter_scope,
+        )
+        .map_err(ReadError::BadKotlinMetadata)?;
+        Ok(ClassInfo {
+            meta,
+            inner_metadata: None,
+            ..self.clone()
+        })
+    }
+
+    /// This class with no metadata left to decode within an outer class.
+    pub fn without_inner_metadata(self) -> ClassInfo {
+        ClassInfo {
+            inner_metadata: None,
+            ..self
         }
     }
 
@@ -848,7 +896,18 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
             nullability: member.attributes.declaration_nullability,
         })
         .collect();
-    let methods: Vec<MethodSig> = read_members(&mut r)?
+    let raw_methods = read_members(&mut r)?;
+    let annotation_element_defaults = raw_methods
+        .iter()
+        .filter_map(|member| {
+            member
+                .attributes
+                .annotation_default
+                .clone()
+                .map(|value| (Box::from(member.name.as_str()), value))
+        })
+        .collect();
+    let methods: Vec<MethodSig> = raw_methods
         .into_iter()
         .map(|member| MethodSig {
             access: member.access,
@@ -858,7 +917,7 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
             parameter_nullability: member.attributes.parameter_nullability,
             return_nullability: member.attributes.declaration_nullability,
             deprecated_hidden: member.attributes.deprecated_hidden,
-            has_annotation_default: member.attributes.has_annotation_default,
+            has_annotation_default: member.attributes.annotation_default.is_some(),
         })
         .collect();
 
@@ -866,15 +925,16 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
     // (for an annotation class) its `@Retention` policy.
     let attrs = read_class_attrs(&mut r, &cp);
 
-    let meta = crate::jvm::metadata::decode_metadata(
-        &attrs.d1.unwrap_or_default(),
-        &attrs.d2.unwrap_or_default(),
-        attrs.k,
-        &this_class,
-        attrs.pn.as_deref(),
-        &methods,
-    )
-    .map_err(ReadError::BadKotlinMetadata)?;
+    let raw_metadata = crate::jvm::metadata::RawMetadata {
+        d1: attrs.d1.unwrap_or_default(),
+        d2: attrs.d2.unwrap_or_default(),
+        k: attrs.k,
+        package_name: attrs.pn,
+    };
+    let meta =
+        crate::jvm::metadata::decode_metadata_within(&raw_metadata, &this_class, &methods, &[])
+            .map_err(ReadError::BadKotlinMetadata)?;
+    let inner_metadata = meta.is_inner.then(|| std::sync::Arc::new(raw_metadata));
     Ok(ClassInfo {
         major,
         access,
@@ -890,6 +950,8 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
         kotlin_targets: attrs.kotlin_targets,
         java_targets: attrs.java_targets,
         inner_classes: attrs.inner_classes,
+        annotation_element_defaults,
+        inner_metadata,
     })
 }
 
@@ -1162,10 +1224,10 @@ fn read_annotation_value(
             Ok(AnnotationValue::Enum(classifier, constant))
         }
         'c' => {
-            let classifier = cp_utf8(cp, reader.u2()?)
-                .and_then(class_literal_classifier)
+            let represented = cp_utf8(cp, reader.u2()?)
+                .and_then(class_literal_type)
                 .ok_or(ReadError::Truncated)?;
-            Ok(AnnotationValue::Class(classifier))
+            Ok(AnnotationValue::Class(represented))
         }
         '@' => {
             let nested = read_resolved_annotation(reader, cp)?;
@@ -1204,31 +1266,37 @@ fn descriptor_classifier(descriptor: &str) -> Option<TypeName> {
         })
 }
 
-fn class_literal_classifier(descriptor: &str) -> Option<TypeName> {
-    descriptor_classifier(descriptor).or_else(|| {
-        Some(crate::types::type_name(match descriptor {
-            "[B" => "kotlin/ByteArray",
-            "[C" => "kotlin/CharArray",
-            "[D" => "kotlin/DoubleArray",
-            "[F" => "kotlin/FloatArray",
-            "[I" => "kotlin/IntArray",
-            "[J" => "kotlin/LongArray",
-            "[S" => "kotlin/ShortArray",
-            "[Z" => "kotlin/BooleanArray",
-            _ if descriptor.starts_with('[') => "kotlin/Array",
-            _ => match descriptor.as_bytes().first()? {
-                b'B' => "kotlin/Byte",
-                b'C' => "kotlin/Char",
-                b'D' => "kotlin/Double",
-                b'F' => "kotlin/Float",
-                b'I' => "kotlin/Int",
-                b'J' => "kotlin/Long",
-                b'S' => "kotlin/Short",
-                b'Z' => "kotlin/Boolean",
-                b'V' => "kotlin/Unit",
-                _ => return None,
+fn class_literal_type(descriptor: &str) -> Option<crate::types::Ty> {
+    use crate::types::{wk, Ty};
+
+    if let Some(element_descriptor) = descriptor.strip_prefix('[') {
+        let element = class_literal_type(element_descriptor)?;
+        // A reference array keeps the boxed Kotlin element in `Array<T>` even when the mapped
+        // classifier is a scalar (`[Ljava/lang/Integer;` is `Array<Int>`, not `IntArray`).
+        return Some(
+            if element_descriptor.starts_with('L') || element_descriptor.starts_with('[') {
+                Ty::obj_args_name(wk::array(), &[element])
+            } else {
+                Ty::array(element)
             },
-        }))
+        );
+    }
+    if let Some(classifier) = descriptor_classifier(descriptor) {
+        return Some(
+            crate::types::builtin_semantic(classifier).unwrap_or_else(|| Ty::obj_name(classifier)),
+        );
+    }
+    Some(match descriptor.as_bytes() {
+        b"B" => Ty::Byte,
+        b"C" => Ty::Char,
+        b"D" => Ty::Double,
+        b"F" => Ty::Float,
+        b"I" => Ty::Int,
+        b"J" => Ty::Long,
+        b"S" => Ty::Short,
+        b"Z" => Ty::Boolean,
+        b"V" => Ty::Unit,
+        _ => return None,
     })
 }
 
@@ -1390,12 +1458,20 @@ fn read_member_attributes(r: &mut Reader, cp: &[C]) -> Result<MemberAttributes, 
                     &mut attributes.deprecated_hidden,
                 )?;
             }
-            // The default VALUE is not needed: kotlinc never materializes an omitted element into
-            // the use site's annotation, so only its PRESENCE (may this element be omitted?)
-            // matters here.
+            // An omitted element is never written into an applied annotation, but instantiating
+            // the annotation as a value (`Ann()`) evaluates the declaration default.
             Some(C::Utf8(s)) if s == "AnnotationDefault" => {
-                attributes.has_annotation_default = true;
+                let mut body = Reader {
+                    b: r.take(len)?,
+                    i: 0,
+                };
+                attributes.annotation_default = Some(AnnotationElementDefault::Evaluated(
+                    read_annotation_value(&mut body, cp)?,
+                ));
+            }
+            Some(C::Utf8(s)) if s == UNEVALUATED_ANNOTATION_DEFAULT => {
                 r.take(len)?;
+                attributes.annotation_default = Some(AnnotationElementDefault::Unevaluated);
             }
             _ => {
                 r.take(len)?;
@@ -1750,7 +1826,7 @@ mod tests {
                     values: vec![
                         (
                             "target".to_string(),
-                            crate::ir::AnnoValue::Class(crate::types::type_name("demo/Target")),
+                            crate::ir::AnnoValue::Class(crate::types::Ty::obj("demo/Target")),
                         ),
                         (
                             "label".to_string(),
@@ -1760,7 +1836,20 @@ mod tests {
                         ),
                         (
                             "builtin".to_string(),
-                            crate::ir::AnnoValue::Class(crate::types::type_name("kotlin/String")),
+                            crate::ir::AnnoValue::Class(crate::types::Ty::String),
+                        ),
+                        (
+                            "referenceArray".to_string(),
+                            crate::ir::AnnoValue::Class(crate::types::Ty::obj_args(
+                                "kotlin/Array",
+                                &[crate::types::Ty::String],
+                            )),
+                        ),
+                        (
+                            "primitiveArray".to_string(),
+                            crate::ir::AnnoValue::Class(crate::types::Ty::array(
+                                crate::types::Ty::Int,
+                            )),
                         ),
                     ],
                 },
@@ -1776,9 +1865,7 @@ mod tests {
                 arguments: vec![
                     (
                         "target".to_string(),
-                        crate::types::AnnotationValue::Class(crate::types::type_name(
-                            "demo/Target"
-                        )),
+                        crate::types::AnnotationValue::Class(crate::types::Ty::obj("demo/Target")),
                     ),
                     (
                         "label".to_string(),
@@ -1786,8 +1873,19 @@ mod tests {
                     ),
                     (
                         "builtin".to_string(),
-                        crate::types::AnnotationValue::Class(crate::types::type_name(
-                            "kotlin/String",
+                        crate::types::AnnotationValue::Class(crate::types::Ty::String),
+                    ),
+                    (
+                        "referenceArray".to_string(),
+                        crate::types::AnnotationValue::Class(crate::types::Ty::obj_args(
+                            "kotlin/Array",
+                            &[crate::types::Ty::String],
+                        )),
+                    ),
+                    (
+                        "primitiveArray".to_string(),
+                        crate::types::AnnotationValue::Class(crate::types::Ty::array(
+                            crate::types::Ty::Int,
                         )),
                     ),
                 ],

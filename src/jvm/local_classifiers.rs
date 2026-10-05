@@ -27,17 +27,33 @@ pub(super) fn is_local(ir: &IrFile, class: &IrClass) -> bool {
 
 /// How `class`'s `@Metadata` numbers the type parameters it captures. kotlinc serializes a class
 /// declared in executable code with no enclosing serializer, so its captured parameters are
-/// numbered on first use; a class nested in another is serialized under the outer one, whose
-/// parameters keep the ids before its own.
-pub(super) fn captured_type_parameters(
-    class: &IrClass,
-) -> crate::metadata::class_builder::CapturedTypeParameters<'_> {
+/// numbered on first use. A class nested in another is serialized under the outer one, whose
+/// interner already holds every enclosing class's parameters: `enclosing` (see
+/// [`enclosing_type_parameters`]) keep the ids before the nested class's own whether or not an
+/// `inner` class captures them.
+pub(super) fn captured_type_parameters<'a>(
+    class: &'a IrClass,
+    enclosing: &'a [String],
+) -> crate::metadata::class_builder::CapturedTypeParameters<'a> {
     use crate::metadata::class_builder::CapturedTypeParameters;
     if class.is_local_class || class.is_anonymous_object {
         CapturedTypeParameters::NumberedOnUse(&class.captured_type_params)
     } else {
-        CapturedTypeParameters::Reserved(&class.captured_type_params)
+        CapturedTypeParameters::Reserved(enclosing)
     }
+}
+
+/// The semantic identities of every type parameter `class`'s enclosing classes declare, outermost
+/// class first.
+pub(super) fn enclosing_type_parameters(ir: &IrFile, class: &IrClass) -> Vec<String> {
+    let mut owners = class.fq_name_id().existing_nested_owners();
+    owners.reverse();
+    owners
+        .into_iter()
+        .filter_map(|owner| ir.class_signature_name(owner))
+        .flat_map(|signature| &signature.type_params)
+        .map(|parameter| parameter.semantic_name.clone())
+        .collect()
 }
 
 /// Every classifier of the file whose `@Metadata` class id is local: those for which [`is_local`]

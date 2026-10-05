@@ -12,7 +12,7 @@ impl ClassWriter {
     ) {
         if params
             .iter()
-            .all(crate::ir::DeclarationAnnotations::is_empty)
+            .all(crate::ir::DeclarationAnnotations::retains_none)
         {
             return;
         }
