@@ -3370,11 +3370,9 @@ impl Classpath {
                     Err(error @ ReadError::BadKotlinMetadata(_)) => return Err(error),
                     Err(_) => return Ok(None),
                 };
-                if !class.this_class_matches(internal) {
-                    return Ok(None);
-                }
-                self.class_within_outer(class)
-                    .map(|class| Some(std::sync::Arc::new(class)))
+                Ok(class
+                    .this_class_matches(internal)
+                    .then(|| std::sync::Arc::new(class)))
             };
             let parsed = if incomplete {
                 let parsed = read_and_parse();
@@ -3403,6 +3401,10 @@ impl Classpath {
             }
         }
         cache_stat!(l2_class, all_cached);
+        // The process-global entry cache holds the class exactly as its entry stores it. Decoding an
+        // inner class within its outer depends on which outer this classpath serves, so it happens
+        // per classpath, after the shared entry lookup.
+        let found = found.and_then(|class| self.class_within_outer(internal_id, class));
         if catalog_complete {
             self.local_cache
                 .borrow_mut()
