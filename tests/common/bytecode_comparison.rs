@@ -87,25 +87,45 @@ fn compare_with_kotlinc_plugin_full(
         krusty_cp_jars,
         jvm_target,
         kotlinc_extra,
-        metadata_version: None,
+        language_settings: None,
     })
 }
 
-/// [`compare_with_kotlinc_plugin`] with the krusty `@Metadata` `mv` stamp pinned, for fixtures
-/// whose reference recipe passes an older `-language-version` in `kotlinc_extra`: the recorded
-/// reference then carries that level's `mv`, and krusty stamps the same via its internal
-/// `-Xmetadata-version` while compiling its implemented semantics. The JDK modules sit beside the
-/// stdlib on the krusty side only (see [`compare_with_kotlinc_plugin_jdk`]); the reference kotlinc
-/// always has its own JDK, so the recorded dump keeps the requested classpath.
-pub fn compare_with_kotlinc_plugin_metadata_stamp(
+/// [`compare_with_kotlinc_plugin`] under one explicit public language/API configuration supplied
+/// to both compilers. The JDK modules sit beside the stdlib on the krusty side only (see
+/// [`compare_with_kotlinc_plugin_jdk`]); the reference kotlinc always has its own JDK, so the
+/// recorded dump keeps the requested classpath.
+pub fn compare_with_kotlinc_plugin_language_settings(
     name: &str,
     src: &str,
     class: &str,
     cp_jars: &[PathBuf],
     jvm_target: &str,
-    kotlinc_extra: &[String],
-    metadata_version: [i32; 3],
+    language_settings: &krusty::language_settings::LanguageSettings,
 ) -> Option<ReferenceComparison> {
+    let mut kotlinc_extra = vec![
+        "-language-version".to_owned(),
+        language_settings.language_version.to_string(),
+        "-api-version".to_owned(),
+        language_settings.api_version.to_string(),
+    ];
+    let baseline = krusty::features::LangFeatures::for_versions(
+        language_settings.language_version,
+        language_settings.api_version,
+    );
+    let feature_names = baseline
+        .iter()
+        .chain(language_settings.features.iter())
+        .collect::<std::collections::BTreeSet<_>>();
+    for feature in feature_names {
+        let enabled = language_settings.features.has(feature);
+        if enabled != baseline.has(feature) {
+            kotlinc_extra.push(format!(
+                "-XXLanguage:{}{feature}",
+                if enabled { '+' } else { '-' }
+            ));
+        }
+    }
     let mut krusty_cp = cp_jars.to_vec();
     krusty_cp.push(super::common_core::jdk_modules());
     compare_with_kotlinc_plugin_request(ComparisonRequest {
@@ -115,13 +135,13 @@ pub fn compare_with_kotlinc_plugin_metadata_stamp(
         cp_jars,
         krusty_cp_jars: &krusty_cp,
         jvm_target,
-        kotlinc_extra,
-        metadata_version: Some(metadata_version),
+        kotlinc_extra: &kotlinc_extra,
+        language_settings: Some(language_settings),
     })
 }
 
 /// One class compared against the reference compiler: what to build, the classpaths each side
-/// sees, and the recipe knobs the kotlinc invocation and the krusty `@Metadata` stamp take.
+/// sees, and the public language/API settings both compiler invocations take.
 struct ComparisonRequest<'a> {
     name: &'a str,
     src: &'a str,
@@ -130,7 +150,7 @@ struct ComparisonRequest<'a> {
     krusty_cp_jars: &'a [PathBuf],
     jvm_target: &'a str,
     kotlinc_extra: &'a [String],
-    metadata_version: Option<[i32; 3]>,
+    language_settings: Option<&'a krusty::language_settings::LanguageSettings>,
 }
 
 fn compare_with_kotlinc_plugin_request(
@@ -144,7 +164,7 @@ fn compare_with_kotlinc_plugin_request(
         krusty_cp_jars,
         jvm_target,
         kotlinc_extra,
-        metadata_version,
+        language_settings,
     } = request;
     let inputs =
         super::common_core::byte_dump::class_dump_inputs(src, jvm_target, kotlinc_extra, cp_jars);
@@ -211,17 +231,14 @@ fn compare_with_kotlinc_plugin_request(
             .map(|target| target + 44)
             .unwrap_or_else(|| panic!("unknown -jvm-target {other}")),
     };
-    let classes = match metadata_version {
-        // The pinned-stamp recipe goes through the module-wide helper, which already pairs
-        // `with_class_major` with `with_metadata_version`; the plain path keeps its established
-        // single-file entry point.
-        Some(stamp) => super::common_core::source_set_compile::compile(
+    let classes = match language_settings {
+        Some(language_settings) => super::common_core::source_set_compile::compile(
             &[(name, src)],
             krusty_cp_jars,
             None,
             Some(class_major),
-            Some(stamp),
-            &krusty::language_settings::LanguageSettings::default(),
+            Some(language_settings.language_version.metadata_version()),
+            language_settings,
         ),
         None => super::common_core::compile_in_process_metadata_cp_module_target(
             src,

@@ -13,8 +13,8 @@
 //!
 //! The conflicts taken so far: a value class whose declared underlying type is neither nullable
 //! nor primitive, as a parameter or the result (the factory cannot box such a value, and it knows
-//! nothing of the mangled name its specialized method takes); and a `Nothing`/`Nothing?` parameter
-//! or inferred result, which maps to `Void` and has no adaptee at all. The class is realized
+//! nothing of the mangled name its specialized method takes); and, before language level 2.4, a
+//! `Nothing`/`Nothing?` parameter or inferred result, which maps to `Void` and has no adaptee at all. The class is realized
 //! before the lambda gets a lifted name, since kotlinc numbers only the lambdas it lifts, and
 //! before the value-class pass, which erases `invoke` and completes its bridge.
 
@@ -245,6 +245,7 @@ pub(super) fn realize(
     delegates: &super::local_delegate_closures::Requirements,
     current_source: crate::ir::IrModuleSource,
     adapt_factory: bool,
+    legacy_nothing_conflict: bool,
 ) -> Result<LambdaMethods, ()> {
     let methods = LambdaMethods::collect(ir);
     let mut lambdas = ir
@@ -287,7 +288,7 @@ pub(super) fn realize(
                             .iter()
                             .chain([&signature.ret])
                             .any(|&ty| factory_conflict(ir, classifiers, ty))
-                        && !nothing_conflict(ir, fid, signature))))
+                        && !(legacy_nothing_conflict && nothing_conflict(ir, fid, signature)))))
         {
             continue;
         }
@@ -313,7 +314,15 @@ pub(super) fn realize(
             if nests_lifted_functions_with(ir, body, runtime_reified) {
                 return Err(());
             }
-            realize_class(ir, fid, body, &sites[0], signature, &captures);
+            realize_class(
+                ir,
+                fid,
+                body,
+                &sites[0],
+                signature,
+                &captures,
+                legacy_nothing_conflict,
+            );
             if let Some(result) = super::local_delegate_closures::invoke_result(ir, fid) {
                 let signed_result = ir.functions[fid as usize].ret;
                 ir.functions[fid as usize].ret = result;
@@ -342,7 +351,15 @@ pub(super) fn realize(
             continue;
         }
         match class_shape(ir, fid, every_emitted_root, runtime_reified, class_name) {
-            Ok((site, body, captures)) => realize_class(ir, fid, body, &site, signature, &captures),
+            Ok((site, body, captures)) => realize_class(
+                ir,
+                fid,
+                body,
+                &site,
+                signature,
+                &captures,
+                legacy_nothing_conflict,
+            ),
             Err(shape) => {
                 crate::trace_compiler!(
                     "value_classes",
@@ -451,7 +468,7 @@ fn factory_conflict(
         .is_some_and(|underlying| !admits_null(underlying) && !is_primitive(underlying))
 }
 
-/// Whether the lambda's implementation has a `Nothing`/`Nothing?` type the factory cannot adapt
+/// Whether the lambda's implementation has a `Nothing`/`Nothing?` type the pre-2.4 factory cannot adapt
 /// (kotlinc's `computeParameterTypeAdaptationConstraint`: `adapteeType.isNothing() ||
 /// adapteeType.isNullableNothing()` → CONFLICT). A parameter type comes from the selected function
 /// type, but the specialized invoke's RESULT is the body's own inferred type: `{ null }` selected
@@ -480,7 +497,12 @@ fn nothing_conflict(ir: &IrFile, fid: FunId, signature: &crate::types::FnSig) ->
 /// `FunctionN`'s value parameters are `in` — a non-null `Nothing` there keeps the generic
 /// supertype, its argument written as a star (`Function1<*Lkotlin/Unit;>;`) — while its result is
 /// `out`, so any `Nothing`/`Nothing?` inferred result leaves the supertype raw.
-fn raw_supertype(ir: &IrFile, fid: FunId, signature: &crate::types::FnSig) -> bool {
+fn raw_supertype(
+    ir: &IrFile,
+    fid: FunId,
+    signature: &crate::types::FnSig,
+    legacy_nothing_result: bool,
+) -> bool {
     fn is_nothing(ty: Ty) -> bool {
         matches!(ty.non_null(), Ty::Nothing | Ty::Null)
     }
@@ -489,11 +511,12 @@ fn raw_supertype(ir: &IrFile, fid: FunId, signature: &crate::types::FnSig) -> bo
         .iter()
         .copied()
         .any(|ty| is_nothing(ty) && ty.admits_null())
-        || ir
-            .lambda_inferred_results
-            .get(&fid)
-            .copied()
-            .is_some_and(is_nothing)
+        || (legacy_nothing_result
+            && ir
+                .lambda_inferred_results
+                .get(&fid)
+                .copied()
+                .is_some_and(is_nothing))
 }
 
 /// Whether a value class's declared underlying type admits `null`: a nullable type, or a type
@@ -563,8 +586,9 @@ fn realize_class(
     site: &Site,
     signature: &crate::types::FnSig,
     captures: &[Capture],
+    legacy_nothing_result: bool,
 ) {
-    let class = declare_class(ir, fid, site, signature, captures);
+    let class = declare_class(ir, fid, site, signature, captures, legacy_nothing_result);
     // `invoke` takes `this` and the lambda's own parameters; each captured value is read from its
     // field.
     let expressions = crate::ir::value_namespace_expressions(ir, body);
@@ -594,7 +618,12 @@ fn realize_class(
     // boxed, since it overrides the generic `R`. A value class stays its carrier, which the
     // bridge boxes. kotlinc types it by the body's INFERRED result, which a `Nothing`/`Nothing?`
     // body pins to `Void` even when the selected function type's return is wider.
-    let result = match ir.lambda_inferred_results.get(&fid).copied() {
+    let result = match ir
+        .lambda_inferred_results
+        .get(&fid)
+        .copied()
+        .filter(|_| legacy_nothing_result)
+    {
         Some(inferred) if matches!(inferred.non_null(), Ty::Nothing | Ty::Null) => {
             if inferred.admits_null() {
                 Ty::nullable(Ty::Nothing)
@@ -668,6 +697,7 @@ fn declare_class(
     site: &Site,
     signature: &crate::types::FnSig,
     captures: &[Capture],
+    legacy_nothing_result: bool,
 ) -> ClassId {
     let mut class = crate::ir::IrClass::synthetic(site.class);
     class.superclass = crate::types::type_name("java/lang/Object");
@@ -713,7 +743,7 @@ fn declare_class(
         public_inline: false,
         invoke: fid,
         function_type: site.function_type,
-        raw_supertype: raw_supertype(ir, fid, signature),
+        raw_supertype: raw_supertype(ir, fid, signature, legacy_nothing_result),
         captures: captures
             .iter()
             .map(|capture| capture.capture.clone())

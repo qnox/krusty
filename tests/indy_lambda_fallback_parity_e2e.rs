@@ -11,15 +11,12 @@
 //! argument written as a star), a `Nothing?` parameter or a `Nothing`/`Nothing?` result leaves it
 //! raw.
 //!
-//! The reference recipe mirrors how the Kotlin repository builds `core:util.runtime` (its
-//! `@Metadata` stamp is `mv=[2,2,0]`): `-language-version 2.2 -api-version 2.2`, under which the
-//! specialized invoke is typed by the lambda body's inferred result. krusty compiles its
-//! implemented semantics and stamps `mv=[2,2,0]` through its internal `-Xmetadata-version`, so the
-//! classes compare byte for byte.
+//! The behavior is language-level dependent. Kotlin 2.2 types the specialized invoke by the
+//! lambda body's inferred result and takes the class fallback; Kotlin 2.4 types it by the expected
+//! function result and keeps the lambda on indy. Every comparison supplies the same public
+//! language/API settings to kotlinc and krusty.
 
 use super::common;
-
-const LANGUAGE_VERSION_2_2: &[&str] = &["-language-version", "2.2", "-api-version", "2.2"];
 
 const NOTHING_RESULT_SRC: &str = "private val ALWAYS_NULL: (Any?) -> Any? = { null }\n\
     private val BOOM: () -> String = { throw IllegalStateException(\"x\") }\n\
@@ -27,17 +24,19 @@ const NOTHING_RESULT_SRC: &str = "private val ALWAYS_NULL: (Any?) -> Any? = { nu
 
 /// kotlinc and krusty write `class` byte for byte alike, the facade included.
 fn assert_identical(src: &str, stem: &str, class: &str) {
-    let built = common::compare_with_kotlinc_plugin_metadata_stamp(
+    let language_settings = krusty::language_settings::LanguageSettings::new(
+        krusty::language_version::LanguageVersion::V2_2,
+        None,
+        &[],
+    )
+    .expect("Kotlin 2.2 language/API settings");
+    let built = common::compare_with_kotlinc_plugin_language_settings(
         stem,
         src,
         class,
         &[common::stdlib_jar()],
         "1.8",
-        &LANGUAGE_VERSION_2_2
-            .iter()
-            .map(|flag| (*flag).to_string())
-            .collect::<Vec<_>>(),
-        [2, 2, 0],
+        &language_settings,
     )
     .expect("reference kotlinc is provisioned");
     assert!(!built.reference_bytes.is_empty(), "kotlinc writes {class}");
@@ -46,6 +45,41 @@ fn assert_identical(src: &str, stem: &str, class: &str) {
         "{class} differs from kotlinc's:\n{}\n---\n{}",
         built.krusty,
         built.reference
+    );
+}
+
+#[test]
+fn current_language_keeps_the_null_returning_lambda_on_indy() {
+    let built = common::compare_with_kotlinc_plugin(
+        "NothingLambdaCurrent",
+        NOTHING_RESULT_SRC,
+        "NothingLambdaCurrentKt",
+        &[common::stdlib_jar()],
+        "1.8",
+        &[],
+    )
+    .expect("reference kotlinc is provisioned");
+    assert_eq!(built.krusty_bytes, built.reference_bytes);
+
+    let settings = krusty::language_settings::LanguageSettings::default();
+    let classes = common::source_set_compile::compile(
+        &[("NothingLambdaCurrent.kt", NOTHING_RESULT_SRC)],
+        &[common::stdlib_jar()],
+        Some(common::jdk_modules().as_path()),
+        Some(52),
+        Some(settings.language_version.metadata_version()),
+        &settings,
+    )
+    .expect("krusty compiles the current-language fixture");
+    let class_names = classes
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        class_names
+            .iter()
+            .all(|name| !name.contains("$ALWAYS_NULL$") && !name.contains("$BOOM$")),
+        "Kotlin 2.4 keeps the Nothing-result lambdas on indy: {class_names:?}"
     );
 }
 

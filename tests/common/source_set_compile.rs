@@ -64,6 +64,7 @@ pub(crate) fn compile(
     );
     let backend = krusty::jvm::JvmBackend::new(cp)
         .with_class_major(class_major)
+        .with_language_version(language_settings.language_version)
         .with_annotations_in_metadata(language_settings.features.has("AnnotationsInMetadata"))
         .with_metadata_version(metadata_version);
     let outputs = krusty::compiler::emit_analyzed(analysis, &stems, &backend, "main", &mut diags);

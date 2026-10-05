@@ -96,12 +96,3 @@ inliner rather than an emitter.
 - **Class-literal forms rejected as annotation arguments**: `Unit::class`, `UInt::class`,
   `IntArray::class`, `Array<String>::class` all fail to compile; kotlinc accepts all four, encoding
   `Lkotlin/Unit;`, `Lkotlin/UInt;`, `[I`, `[Ljava/lang/String;`.
-- **A lambda whose body infers `Nothing`/`Nothing?` is a class, not indy.** kotlinc's
-  `computeParameterTypeAdaptationConstraint` CONFLICTs on `isNothing() || isNullableNothing()`, so
-  `val f: (Any?) -> Any? = { null }` compiles to a singleton class with a raw `FunctionN` supertype.
-  That is the shape kotlinc writes under `-language-version 2.2` (e.g. the Kotlin repository's
-  `core:util.runtime`, krusty's parity target); DEFAULT kotlinc 2.4 types the impl by the expected
-  type instead (`ResolveTopLevelLambdasAsSyntheticCallArgument`, KT-67869) and keeps such a lambda
-  on indy, so a bytediff run against the default shows krusty's `…$1` class as krusty-only. krusty
-  implements the LV-2.2 rule deliberately (see `docs/SPEC.md`, the Nothing-conflict entry;
-  `tests/indy_lambda_fallback_parity_e2e.rs`).
