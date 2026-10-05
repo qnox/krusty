@@ -29,10 +29,38 @@ impl Emitter<'_> {
                 if !init.is_some_and(|value| self.spills_operand_prefix(value))
                     && !self.inlined_only_cells.contains(&declaration) =>
             {
-                Some((elem, init))
+                Some((elem, self.holder_initial_value(elem, init)))
             }
             _ => None,
         }
+    }
+
+    /// The initial value a new holder's `element` is set to. A constant equal to the field's JVM
+    /// default (zero bits, `false`, `null`) is left unset, as kotlinc's `SharedVariablesManager`
+    /// leaves it: the fresh holder already holds it. kotlinc stores an unsigned zero, whose
+    /// constant it does not read as a default.
+    pub(super) fn holder_initial_value(&self, elem: Ty, init: Option<ExprId>) -> Option<ExprId> {
+        use crate::ir::IrConst;
+        let value = init?;
+        let IrExpr::Const(constant) = self.ir.expr(value) else {
+            return Some(value);
+        };
+        // An `ObjectRef` holds a reference, whose default is `null` whatever value it boxes.
+        if ref_class(&elem).1 == "Ljava/lang/Object;" {
+            return (!matches!(constant, IrConst::Null)).then_some(value);
+        }
+        let default = match constant {
+            IrConst::Boolean(value) => !value,
+            IrConst::Byte(value) => *value == 0,
+            IrConst::Short(value) => *value == 0,
+            IrConst::Int(value) => *value == 0,
+            IrConst::Long(value) => *value == 0,
+            IrConst::Float(value) => value.to_bits() == 0,
+            IrConst::Double(value) => value.to_bits() == 0,
+            IrConst::Char(value) => *value == 0,
+            _ => false,
+        };
+        (!default).then_some(value)
     }
 
     /// Record which of a block's captured-local declarations only inlined lambdas capture: every
@@ -97,7 +125,7 @@ impl Emitter<'_> {
         code: &mut CodeBuilder,
     ) {
         let (class, _) = ref_class(&elem);
-        let Some(init) = init else {
+        let Some(init) = self.holder_initial_value(elem, init) else {
             self.emit_new_holder(class, code);
             return;
         };
