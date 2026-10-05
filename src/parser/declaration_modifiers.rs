@@ -66,8 +66,6 @@ impl Parser<'_> {
                         name: qname,
                         span: annotation_span,
                     };
-                    let policy = self.file.use_site_annotation(annotation.clone(), &args);
-                    self.file.file_annotation_policies.push(policy);
                     self.file.file_annotations.push((annotation, args));
                 }
                 if self.at(TokenKind::Comma) {
@@ -84,8 +82,6 @@ impl Parser<'_> {
                 name: qname.clone(),
                 span: annotation_span,
             };
-            let policy = self.file.use_site_annotation(annotation.clone(), &args);
-            self.file.file_annotation_policies.push(policy);
             self.file.file_annotations.push((annotation, args.clone()));
         }
         if use_site || qname.is_empty() {

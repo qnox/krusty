@@ -343,7 +343,10 @@ impl Parser<'_> {
             while self.at(TokenKind::At) {
                 let (annotation, arguments) = self.parse_annotation();
                 if let Some(annotation) = annotation {
-                    annotations.push(self.file.use_site_annotation(annotation, &arguments));
+                    annotations.push(UseSiteAnnotation {
+                        annotation,
+                        arguments,
+                    });
                 }
                 self.skip_newlines();
             }

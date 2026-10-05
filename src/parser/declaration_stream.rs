@@ -12,17 +12,11 @@ struct DeclarationPrelude {
     imports: Vec<ImportPath>,
     detached_import_types: Vec<TypeRef>,
     detached_import_suppressions: std::collections::HashMap<u32, Vec<String>>,
-    file_annotation_policies: Vec<UseSiteAnnotation>,
 }
 
 impl DeclarationPrelude {
     fn learn_file_prefix(&mut self, file: &File) {
         self.package.clone_from(&file.package);
-        // File annotations precede the first declaration, so only the first unit parses them.
-        if !file.file_annotation_policies.is_empty() {
-            self.file_annotation_policies
-                .clone_from(&file.file_annotation_policies);
-        }
         self.imports.clone_from(&file.import_paths);
         self.detached_import_types = file
             .detached_type_refs
@@ -49,7 +43,6 @@ impl DeclarationPrelude {
             import_paths: self.imports.clone(),
             detached_type_refs: self.detached_import_types.clone(),
             detached_type_ref_suppressions: self.detached_import_suppressions.clone(),
-            file_annotation_policies: self.file_annotation_policies.clone(),
             ..File::default()
         }
     }

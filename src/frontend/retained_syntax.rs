@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::ast::{
     ClassDecl, ClassInit, CtorDelegation, Decl, Expr, ExprId, File, FunBody, FunDecl, Param,
-    PropDecl, Stmt, StmtId, TemplatePart, WhenCondition,
+    PropDecl, Stmt, StmtId, TemplatePart, UseSiteAnnotation, WhenCondition,
 };
 
 const MISSING_EXPR: ExprId = ExprId(u32::MAX);
@@ -46,6 +46,21 @@ impl Reachable {
         if let Some(&declaration) = file.anonymous_object_classes.get(&root) {
             self.declaration(file, declaration);
         }
+        self.use_site_annotation_arguments(file, file.expression_annotations.get(&root));
+    }
+
+    /// The arguments of the annotations on a retained statement or expression: checking it opens
+    /// their policies and checks those applications.
+    fn use_site_annotation_arguments(
+        &mut self,
+        file: &File,
+        annotations: Option<&Vec<UseSiteAnnotation>>,
+    ) {
+        for annotation in annotations.into_iter().flatten() {
+            for &argument in &annotation.arguments {
+                self.expression(file, argument);
+            }
+        }
     }
 
     fn statement(&mut self, file: &File, statement: StmtId) {
@@ -60,6 +75,7 @@ impl Reachable {
         for child in expressions {
             self.expression(file, child);
         }
+        self.use_site_annotation_arguments(file, file.statement_annotations.get(&statement));
         match file.stmt(statement) {
             Stmt::LocalFun(function) => self.function(file, function),
             Stmt::LocalClass(_) => {
@@ -1053,16 +1069,30 @@ pub(super) fn compact(file: &mut File) {
         .into_iter()
         .filter_map(|(old, nested)| statements.get(&old).copied().map(|new| (new, nested)))
         .collect();
+    let remap_annotations = |mut annotations: Vec<UseSiteAnnotation>| {
+        for annotation in &mut annotations {
+            for argument in &mut annotation.arguments {
+                *argument = mapped_expr(&expressions, *argument);
+            }
+        }
+        annotations
+    };
     file.statement_annotations = std::mem::take(&mut file.statement_annotations)
         .into_iter()
         .filter_map(|(old, annotations)| {
-            statements.get(&old).copied().map(|new| (new, annotations))
+            statements
+                .get(&old)
+                .copied()
+                .map(|new| (new, remap_annotations(annotations)))
         })
         .collect();
     file.expression_annotations = std::mem::take(&mut file.expression_annotations)
         .into_iter()
         .filter_map(|(old, annotations)| {
-            expressions.get(&old).copied().map(|new| (new, annotations))
+            expressions
+                .get(&old)
+                .copied()
+                .map(|new| (new, remap_annotations(annotations)))
         })
         .collect();
     file.assignment_target_spans = std::mem::take(&mut file.assignment_target_spans)

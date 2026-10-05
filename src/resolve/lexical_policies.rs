@@ -1,20 +1,43 @@
-//! Policies an annotation opens for everything lexically inside what it annotates.
+//! The lexical policy stack: the policies the annotations around the current checking position
+//! open (see [`crate::lexical_policy`]).
 //!
-//! `@Suppress("NAME")` silences named diagnostics, and an opt-in marker or `@OptIn(Marker::class)`
-//! accepts that marker's requirement (kotlinc's `isExperimentalityAcceptableInContext`). Both hold
-//! for a declaration, an executable statement or an expression, and both nest, so the checker keeps
-//! one stack and truncates it when it leaves the annotated element.
+//! Policies hold for a declaration, an executable statement or an expression, and nest, so the
+//! checker keeps one stack and truncates it when it leaves the annotated element. Each application's
+//! policies are resolved once, from the application checked in its owning scope, and every later
+//! push of that application consumes the published fact.
 
 use super::*;
+pub(crate) use crate::lexical_policy::LexicalPolicy;
 
-/// One policy in force at the current checking position.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum LexicalPolicy {
-    /// Diagnostics with this name are not reported.
-    Suppress(String),
-    /// An enclosing element is annotated with this classifier, or opts in to it with
-    /// `@OptIn(classifier::class)`. Either accepts the opt-in requirement of a marker classifier.
-    OptIn(TypeName),
+/// Resolve each source's file annotation policies once, while Pass 1 still holds the file
+/// annotations' syntax, and publish them for every later checking unit of that source. The
+/// applications' diagnostics belong to the unit that checks them, so this resolution reports none.
+pub(crate) fn publish_file_lexical_policies(
+    files: &[File],
+    symbols: &SymbolTable,
+    index: &mut crate::fir::ResolvedModuleIndex,
+) {
+    for (file_index, file) in files.iter().enumerate() {
+        if file.file_annotations.is_empty() {
+            continue;
+        }
+        let mut diagnostics = DiagSink::new();
+        let policies = make_checker_with_index(
+            file,
+            file_index as u32,
+            Some(files),
+            symbols,
+            None,
+            None,
+            None,
+            &mut diagnostics,
+        )
+        .file_annotation_policies(&CheckerScope::root());
+        index.publish_file_lexical_policies(
+            crate::fir::SourceFileId::from_raw(file_index as u32),
+            policies,
+        );
+    }
 }
 
 impl Checker<'_> {
@@ -32,8 +55,7 @@ impl Checker<'_> {
     /// Whether an enclosing element accepts the opt-in requirement of `marker`.
     pub(super) fn lexically_opted_in(&self, marker: TypeName) -> bool {
         self.active_lexical_policies
-            .iter()
-            .any(|policy| *policy == LexicalPolicy::OptIn(marker))
+            .contains(&LexicalPolicy::OptIn(marker))
     }
 
     /// Open the policies of a declaration's annotations. Returns the depth to truncate back to.
@@ -45,24 +67,43 @@ impl Checker<'_> {
     ) -> usize {
         let depth = self.active_lexical_policies.len();
         for (annotation, arguments) in annotations.iter().zip(arguments) {
-            let strings = arguments
-                .iter()
-                .filter_map(|argument| self.file.const_string_value(*argument))
-                .map(|value| value.to_lossy())
-                .collect::<Vec<_>>();
-            // A restricted pass may reach a declaration whose annotation syntax was released; its
-            // class literals are then out of reach, as they are for the application check.
-            let class_literals = if arguments
-                .iter()
-                .all(|argument| self.file.expr_span(*argument).is_some())
-            {
-                self.file.class_literal_spellings(arguments)
-            } else {
-                Vec::new()
-            };
-            self.push_annotation_policies(scope, annotation, &strings, &class_literals);
+            let policies = self.application_policies(scope, annotation, arguments);
+            self.active_lexical_policies
+                .extend(policies.iter().cloned());
         }
         depth
+    }
+
+    /// The policies one annotation application opens, resolved once per application. The
+    /// application is checked in `scope`, its owning scope, and its policies come from that check:
+    /// the identity it bound and the classes and strings its arguments folded to. The check's own
+    /// diagnostics belong to the element's ordinary application check, which runs inside these
+    /// policies, so they are not reported here.
+    fn application_policies(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        annotation: &AnnotationRef,
+        arguments: &[ExprId],
+    ) -> std::rc::Rc<[LexicalPolicy]> {
+        let key = (annotation.span.lo, annotation.span.hi);
+        if let Some(policies) = self.lexical_policy_facts.get(&key) {
+            return policies.clone();
+        }
+        let diagnostics = self.diags.diags.len();
+        let identity = self.check_annotation_application(scope, annotation, arguments);
+        self.diags.diags.truncate(diagnostics);
+        let policies: std::rc::Rc<[LexicalPolicy]> = identity
+            .map(|identity| {
+                let values = self
+                    .applied_annotations
+                    .get(&key)
+                    .map_or(&[][..], |applied| applied.values.as_slice());
+                LexicalPolicy::of_application(identity, values)
+            })
+            .unwrap_or_default()
+            .into();
+        self.lexical_policy_facts.insert(key, policies.clone());
+        policies
     }
 
     /// Open the policies of the classifiers whose bodies declare `classifier`, outermost first. A
@@ -90,7 +131,8 @@ impl Checker<'_> {
         depth
     }
 
-    /// Open the policies of the annotations written on statement `statement`.
+    /// Open the policies of the annotations written on statement `statement`, and check those
+    /// applications inside them.
     pub(super) fn push_statement_policies(
         &mut self,
         scope: &CheckerScope<'_>,
@@ -98,12 +140,13 @@ impl Checker<'_> {
     ) -> usize {
         let depth = self.active_lexical_policies.len();
         if let Some(annotations) = self.file.statement_annotations.get(&statement).cloned() {
-            self.push_use_site_policies(scope, &annotations);
+            self.open_use_site_policies(scope, &annotations);
         }
         depth
     }
 
-    /// Open the policies of the annotations written on expression `expression`.
+    /// Open the policies of the annotations written on expression `expression`, and check those
+    /// applications inside them.
     pub(super) fn push_expression_policies(
         &mut self,
         scope: &CheckerScope<'_>,
@@ -111,69 +154,48 @@ impl Checker<'_> {
     ) -> usize {
         let depth = self.active_lexical_policies.len();
         if let Some(annotations) = self.file.expression_annotations.get(&expression).cloned() {
-            self.push_use_site_policies(scope, &annotations);
+            self.open_use_site_policies(scope, &annotations);
         }
         depth
     }
 
     /// Open the policies of the file annotations (`@file:OptIn(Marker::class)`,
     /// `@file:Suppress("NAME")`) for the whole checking unit. A bounded unit reparses only its own
-    /// declaration, so these travel from the file prefix with the unit.
-    pub(super) fn push_file_policies(&mut self, scope: &CheckerScope<'_>) {
-        let policies = self.file.file_annotation_policies.clone();
-        self.push_use_site_policies(scope, &policies);
+    /// declaration, so it seeds them from the fact Pass 1 published for its source.
+    pub(super) fn push_file_policies(&mut self, policies: &[LexicalPolicy]) {
+        self.active_lexical_policies
+            .extend(policies.iter().cloned());
     }
 
-    fn push_use_site_policies(
+    /// The policies of every file annotation, resolved in the file scope.
+    pub(super) fn file_annotation_policies(
+        &mut self,
+        scope: &CheckerScope<'_>,
+    ) -> Vec<LexicalPolicy> {
+        let applications = self.file.file_annotations.clone();
+        applications
+            .iter()
+            .flat_map(|(annotation, arguments)| {
+                self.application_policies(scope, annotation, arguments)
+                    .to_vec()
+            })
+            .collect()
+    }
+
+    fn open_use_site_policies(
         &mut self,
         scope: &CheckerScope<'_>,
         annotations: &[UseSiteAnnotation],
     ) {
         for annotation in annotations {
-            self.push_annotation_policies(
-                scope,
-                &annotation.annotation,
-                &annotation.strings,
-                &annotation.class_literals,
-            );
-        }
-    }
-
-    fn push_annotation_policies(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        annotation: &AnnotationRef,
-        strings: &[String],
-        class_literals: &[String],
-    ) {
-        if self.push_opt_in_policies(scope, annotation, class_literals)
-            == Some(type_name("kotlin/Suppress"))
-        {
+            let policies =
+                self.application_policies(scope, &annotation.annotation, &annotation.arguments);
             self.active_lexical_policies
-                .extend(strings.iter().cloned().map(LexicalPolicy::Suppress));
+                .extend(policies.iter().cloned());
         }
-    }
-
-    /// Accept what one annotation opts in to: the annotation classifier itself, and the markers
-    /// an `@OptIn` names. Returns the annotation's identity.
-    fn push_opt_in_policies(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        annotation: &AnnotationRef,
-        class_literals: &[String],
-    ) -> Option<TypeName> {
-        let identity = self.annotation_identity_in_scope(scope, annotation)?;
-        self.active_lexical_policies
-            .push(LexicalPolicy::OptIn(identity));
-        if identity == type_name("kotlin/OptIn") {
-            for spelling in class_literals {
-                if let Some(marker) = self.select_classifier(scope, spelling).found() {
-                    self.active_lexical_policies
-                        .push(LexicalPolicy::OptIn(marker));
-                }
-            }
+        for annotation in annotations {
+            self.check_annotation_application(scope, &annotation.annotation, &annotation.arguments);
         }
-        Some(identity)
     }
 
     pub(super) fn check_annotation_applications_in_declaration_scope(

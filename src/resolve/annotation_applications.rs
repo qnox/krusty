@@ -10,12 +10,14 @@
 use super::*;
 
 impl Checker<'_> {
+    /// Check one application and publish its folded arguments. Returns the annotation identity the
+    /// application binds, also when its arguments are rejected.
     pub(super) fn check_annotation_application(
         &mut self,
         scope: &CheckerScope<'_>,
         annotation: &AnnotationRef,
         arguments: &[ExprId],
-    ) {
+    ) -> Option<TypeName> {
         if arguments
             .iter()
             .any(|argument| self.file.expr_span(*argument).is_none())
@@ -32,20 +34,15 @@ impl Checker<'_> {
                 "a complete pass reached released annotation syntax; fragment={:?}",
                 self.fragment
             );
-            return;
+            return None;
         }
         let internal = if self.fragment.is_classifier_annotations() {
             // Pass 1 already bound this exact occurrence. Metadata publication consumes that
             // identity directly: resolving its spelling again after actualization could resurrect
             // a target-excluded optional-expect annotation or select a different scope rung.
-            let Some(internal) = self
-                .module
+            self.module
                 .legacy_symbols()
-                .and_then(|symbols| symbols.resolved_annotation(self.file_index, annotation))
-            else {
-                return;
-            };
-            internal
+                .and_then(|symbols| symbols.resolved_annotation(self.file_index, annotation))?
         } else {
             // Resolve the application in its owning lexical scope. Pass 1's declaration-header
             // inventory and Pass 2's body checking use the same scope rules.
@@ -58,11 +55,8 @@ impl Checker<'_> {
                 fun_params: Vec::new(),
                 fun_context_count: 0,
             };
-            let ty = self.type_ref_ty_reported(scope, &reference);
-            let Some(internal) = ty.kotlin_class_internal() else {
-                return;
-            };
-            internal
+            self.type_ref_ty_reported(scope, &reference)
+                .kotlin_class_internal()?
         };
         if !self.file.is_common
             && self.is_optional_expectation_classifier(internal)
@@ -75,27 +69,31 @@ impl Checker<'_> {
                  module sources."
                     .to_string(),
             );
-            return;
+            return Some(internal);
         }
         let Some(shape) = self.annotation_shape(internal) else {
             self.diags.error(
                 annotation.span,
                 "resolved annotation has no semantic element declaration".to_string(),
             );
-            return;
+            return Some(internal);
         };
         if !self.check_annotation_arguments(scope, annotation.span, &shape, arguments, None) {
-            return;
+            return Some(internal);
         }
         let Some(applied) = self.fold_annotation_application(internal, arguments) else {
+            if self.report_non_constant_annotation_arguments(arguments) {
+                return Some(internal);
+            }
             self.diags.error(
                 annotation.span,
                 "annotation argument is not a supported compile-time constant".to_string(),
             );
-            return;
+            return Some(internal);
         };
         self.applied_annotations
             .insert((annotation.span.lo, annotation.span.hi), applied);
+        Some(internal)
     }
 
     /// A classifier's own annotations are resolved where the classifier is declared: a nested

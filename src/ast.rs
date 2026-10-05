@@ -1846,8 +1846,6 @@ pub struct File {
     /// argument expressions. Resolution binds the reference span to a semantic classifier identity;
     /// plugins may still use the retained spelling for source-oriented configuration.
     pub file_annotations: Vec<(AnnotationRef, Vec<ExprId>)>,
-    /// What the file annotations' lexical policies read; every bounded declaration unit keeps it.
-    pub file_annotation_policies: Vec<UseSiteAnnotation>,
     /// `ExprId`s of call arguments written with the spread operator (`*arr`). The marked id is the
     /// inner expression (the `arr` of `*arr`), which is what appears in the call's `args`. Lets the
     /// vararg lowering pass the array through (`Arrays.copyOf`) instead of packing it as one element.

@@ -129,6 +129,89 @@ fun use() {
     common::assert_errors_match_kotlinc(&[("main.kt", &src)], &[]);
 }
 
+/// An element's policies cover the arguments of its own annotations, before or after them.
+#[test]
+fn an_elements_own_policies_cover_its_annotation_arguments() {
+    let src = "@RequiresOptIn annotation class M
+@M const val C = \"x\"
+annotation class Foo(val s: String)
+@Foo(C) @OptIn(M::class) fun f() {}
+@OptIn(M::class) @Foo(C) fun g() {}
+@Deprecated(\"d\") const val D = \"y\"
+@Foo(D) @Suppress(\"DEPRECATION\") fun h() {}
+fun s() {
+    @Foo(C) @OptIn(M::class) val x = 1
+}
+";
+    common::assert_sources_accepted_like_kotlinc(&[("main.kt", src)], &[]);
+}
+
+/// A marker in another package, for the opt-ins below that name it through an import alias or a
+/// qualified class literal.
+const PACKAGED_MARKER: &str = "package p
+
+@RequiresOptIn
+annotation class M
+
+@M fun exp() = 1
+";
+
+#[test]
+fn an_opt_in_through_an_import_alias_accepts_the_marker() {
+    let main = "import p.exp
+import p.M as Alias
+
+@OptIn(Alias::class)
+fun viaAlias() = exp()
+
+fun statementAlias() {
+    @OptIn(Alias::class) val x = exp()
+    val y = @OptIn(Alias::class) exp()
+}
+";
+    let file_level = "@file:OptIn(Alias::class)
+
+import p.exp
+import p.M as Alias
+
+fun fileLevel() = exp()
+";
+    common::assert_sources_accepted_like_kotlinc(
+        &[
+            ("markers.kt", PACKAGED_MARKER),
+            ("main.kt", main),
+            ("file_level.kt", file_level),
+        ],
+        &[],
+    );
+}
+
+/// A class literal's receiver is an expression resolved left to right: a local or property named
+/// like the marker's package wins the root, so `p.M::class` names nothing and accepts nothing.
+#[test]
+fn a_value_root_shadows_the_package_of_an_opt_in_marker() {
+    let main = "import p.exp
+
+fun shadowedByLocal() {
+    val p = \"local\"
+    @OptIn(p.M::class) val x = exp()
+}
+
+class Holder {
+    val p = 0
+    fun shadowedByProperty() {
+        @OptIn(p.M::class) val y = exp()
+    }
+    @OptIn(p.M::class)
+    fun declarationShadowedByProperty() = exp()
+}
+
+@OptIn(p.M::class)
+fun qualified() = exp()
+";
+    common::assert_errors_match_kotlinc(&[("markers.kt", PACKAGED_MARKER), ("main.kt", main)], &[]);
+}
+
 #[test]
 fn compiler_opt_in_accepts_the_marker() {
     let src = format!(

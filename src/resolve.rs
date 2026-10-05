@@ -37,6 +37,7 @@ mod access_control;
 mod actualization_names;
 mod alias_constructor_application;
 mod annotation_applications;
+mod annotation_argument_constness;
 mod anonymous_extension_functions;
 mod anonymous_object_capture;
 mod dependency_annotation_defaults;
@@ -56,6 +57,7 @@ pub(crate) use actualization_names::actualization_type_bindings;
 pub(crate) use actualization_names::resolve_actualization_classifier_for_test;
 pub(crate) use checked_annotation_publication::publish_checked_classifier_annotations;
 pub(crate) use checked_constant_publication::publish_checked_compile_time_constants;
+pub(crate) use lexical_policies::publish_file_lexical_policies;
 mod call_constraints;
 mod call_diagnostics;
 mod call_result_constraint;
@@ -36111,6 +36113,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         resolved_type_tys: HashMap::new(),
         unresolved_type_segments: HashMap::new(),
         active_lexical_policies: Vec::new(),
+        lexical_policy_facts: HashMap::new(),
         command_line_opt_ins: std::cell::OnceCell::new(),
         resolved_type_bounds: HashMap::new(),
         resolved_declaration_types: HashMap::new(),
@@ -37333,8 +37336,13 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
             c.check_annotation_application(scope, &annotation, &arguments);
         }
     }
-    if resolved_index.is_some() {
-        c.push_file_policies(scope);
+    if let Some(index) = resolved_index {
+        // Every checking unit of a source opens the file annotations' policies that Pass 1
+        // resolved once for it, whether or not this unit still holds the annotations' syntax.
+        let policies = index
+            .file_lexical_policies(crate::fir::SourceFileId::from_raw(file_index))
+            .to_vec();
+        c.push_file_policies(&policies);
         c.report_unresolved_command_line_opt_ins();
     }
 
@@ -38701,6 +38709,9 @@ struct Checker<'a> {
     /// Lexical policies (`@Suppress`, opt-in acceptance) inherited from annotated enclosing
     /// declarations, statements and expressions.
     active_lexical_policies: Vec<LexicalPolicy>,
+    /// Each annotation application's policies, keyed by the application's span, resolved once
+    /// from its checked application.
+    lexical_policy_facts: HashMap<(u32, u32), std::rc::Rc<[LexicalPolicy]>>,
     /// The markers `-opt-in` names, resolved once from their fully qualified spellings.
     command_line_opt_ins: std::cell::OnceCell<Vec<TypeName>>,
     resolved_type_bounds: HashMap<(u32, u32), (Ty, bool)>,
