@@ -11,7 +11,7 @@
 use std::collections::HashSet;
 
 use crate::fir::{
-    DeclarationFlags, DeclarationId, DeclarationKind, DependencyMemberShape, InheritedDefaultBody,
+    DeclarationFlags, DeclarationId, DeclarationKind, ExternalCallableId, InheritedDefaultBody,
     InheritedMemberName, ResolvedFunctionOverride, ResolvedInheritedDefault, ResolvedModuleIndex,
     ResolvedParameterIdentity, ResolvedPropertyOverride,
 };
@@ -360,9 +360,9 @@ struct SurfaceAccessor {
 }
 
 struct DependencyRealization {
-    shape: DependencyMemberShape,
+    identity: ExternalCallableId,
     realization: crate::libraries::MemberRealization,
-    nonvirtual: Option<Box<crate::libraries::NonvirtualCallRealization>>,
+    has_nonvirtual_realization: bool,
 }
 
 impl SurfaceAccessor {
@@ -370,18 +370,18 @@ impl SurfaceAccessor {
         let Some(dependency) = &self.dependency else {
             return Some(InheritedDefaultBody::Module);
         };
-        match (&dependency.nonvirtual, dependency.realization) {
-            (Some(holder), _) => Some(InheritedDefaultBody::DependencyHolder(
-                dependency.shape.clone(),
-                holder.clone(),
-            )),
-            (None, crate::libraries::MemberRealization::Dispatch) if is_kotlin => Some(
-                InheritedDefaultBody::DependencyInterfaceMethod(dependency.shape.clone()),
+        match (
+            dependency.has_nonvirtual_realization,
+            dependency.realization,
+        ) {
+            (true, _) => Some(InheritedDefaultBody::DependencyHolder(dependency.identity)),
+            (false, crate::libraries::MemberRealization::Dispatch) if is_kotlin => Some(
+                InheritedDefaultBody::DependencyInterfaceMethod(dependency.identity),
             ),
-            (None, crate::libraries::MemberRealization::Dispatch) => {
+            (false, crate::libraries::MemberRealization::Dispatch) => {
                 Some(InheritedDefaultBody::JavaDefaultMethod)
             }
-            (None, _) => None,
+            (false, _) => None,
         }
     }
 }
@@ -656,13 +656,11 @@ fn dependency_surface(
 
 fn dependency_realization(callable: &LibraryCallable) -> DependencyRealization {
     DependencyRealization {
-        shape: DependencyMemberShape {
-            physical_name: callable.physical_name.as_deref().map(Into::into),
-            physical_params: callable.physical_params.clone().into_boxed_slice(),
-            physical_ret: callable.physical_ret,
-        },
+        identity: callable
+            .external_identity
+            .expect("a dependency member has a stable external identity"),
         realization: callable.member_realization,
-        nonvirtual: callable.nonvirtual_realization.clone(),
+        has_nonvirtual_realization: callable.nonvirtual_realization.is_some(),
     }
 }
 

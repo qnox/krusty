@@ -796,13 +796,6 @@ impl super::IrFile {
                 default.result = ty(default.result, names);
                 tys(&mut default.applied_parameters, names);
                 default.applied_result = ty(default.applied_result, names);
-                if let crate::fir::InheritedDefaultBody::DependencyInterfaceMethod(shape)
-                | crate::fir::InheritedDefaultBody::DependencyHolder(shape, _) =
-                    &mut default.body
-                {
-                    tys(&mut shape.physical_params, names);
-                    shape.physical_ret = ty(shape.physical_ret, names);
-                }
             }
         }
         for overrides in self.function_overrides.values_mut() {

@@ -8,7 +8,7 @@
 //! realization (a compatibility forwarder, a holder republication, a value-class static); it never
 //! walks the interface hierarchy or compares members again.
 
-use super::{DeclarationId, ResolvedModuleIndex, ResolvedParameterIdentity};
+use super::{DeclarationId, ExternalCallableId, ResolvedModuleIndex, ResolvedParameterIdentity};
 use crate::types::{Ty, TypeName};
 
 /// The semantic name of an inherited member: a function's declared name, or the property an
@@ -20,28 +20,15 @@ pub enum InheritedMemberName {
     PropertySetter(Box<str>),
 }
 
-/// The physical shape a dependency's provider published for the selected declaration. A
-/// current-module declaration has none: its target shape follows from its semantic types.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DependencyMemberShape {
-    pub physical_name: Option<Box<str>>,
-    /// Physical parameters, the suspend continuation included as the provider published it.
-    pub physical_params: Box<[Ty]>,
-    pub physical_ret: Ty,
-}
-
 /// Where the selected declaration's body lives.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum InheritedDefaultBody {
     /// A body this module compiles.
     Module,
     /// A Kotlin dependency interface that publishes the body as its own interface method.
-    DependencyInterfaceMethod(DependencyMemberShape),
+    DependencyInterfaceMethod(ExternalCallableId),
     /// A Kotlin dependency compiled with a receiver-first compatibility holder as the only body.
-    DependencyHolder(
-        DependencyMemberShape,
-        Box<crate::libraries::NonvirtualCallRealization>,
-    ),
+    DependencyHolder(ExternalCallableId),
     /// A Java interface's default method.
     JavaDefaultMethod,
 }

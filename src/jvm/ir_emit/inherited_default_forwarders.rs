@@ -182,7 +182,14 @@ fn forwarders(ir: &IrFile, c: &crate::ir::IrClass, env: &EmitEnv) -> Vec<Inherit
         .into_iter()
         .flatten()
         .filter_map(|default| {
-            forwarder(ir, &formatter, &class_type_params, default, env.jvm_default)
+            forwarder(
+                ir,
+                &formatter,
+                &class_type_params,
+                default,
+                env.dependency_callables,
+                env.jvm_default,
+            )
         })
         .collect()
 }
@@ -192,17 +199,21 @@ fn forwarder(
     formatter: &JvmSignatureFormatter<'_>,
     class_type_params: &[String],
     default: &crate::fir::ResolvedInheritedDefault,
+    callables: &crate::backend::CheckedBackendCallables,
     jvm_default: JvmDefaultMode,
 ) -> Option<InheritedForwarder> {
     use crate::jvm::inherited_default_realization::ForwarderRealization as Realization;
-    let realization =
-        crate::jvm::inherited_default_realization::forwarder_realization(default, jvm_default)?;
-    let declared = crate::jvm::value_classes::forwarded_member_types(ir, default);
+    let realization = crate::jvm::inherited_default_realization::forwarder_realization(
+        default,
+        callables,
+        jvm_default,
+    )?;
+    let declared = crate::jvm::value_classes::forwarded_member_types(ir, callables, default);
     // A suspend member keeps its declared CPS shape.
     let types = if default.suspend {
-        crate::jvm::value_classes::forwarded_member_types(ir, default)
+        crate::jvm::value_classes::forwarded_member_types(ir, callables, default)
     } else {
-        crate::jvm::value_classes::specialized_member_types(ir, default)
+        crate::jvm::value_classes::specialized_member_types(ir, callables, default)
     };
     let mut param_tys = jvm_tys(&types.physical_params);
     let mut ret = jvm_declared_ty(&types.physical_ret);
@@ -261,7 +272,9 @@ fn forwarder(
         declared_name: crate::jvm::inherited_default_realization::inherited_member_declared_name(
             default,
         ),
-        name: crate::jvm::inherited_default_realization::inherited_member_jvm_name(ir, default),
+        name: crate::jvm::inherited_default_realization::inherited_member_jvm_name(
+            ir, callables, default,
+        ),
         param_tys,
         semantic_params,
         parameter_identities,

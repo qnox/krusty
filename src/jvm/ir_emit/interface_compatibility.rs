@@ -17,6 +17,7 @@ pub(super) fn emit_inherited_default_surface(
     c: &crate::ir::IrClass,
     cw: &mut ClassWriter,
     default_impls: &mut Option<ClassWriter>,
+    callables: &crate::backend::CheckedBackendCallables,
     opts: &EmitOptions,
 ) {
     let fq_name = c.fq_name();
@@ -28,10 +29,11 @@ pub(super) fn emit_inherited_default_surface(
             // default method has no holder to republish under `disable`.
             crate::fir::InheritedDefaultBody::JavaDefaultMethod => continue,
             crate::fir::InheritedDefaultBody::DependencyInterfaceMethod(_) if disable => continue,
-            _ => crate::jvm::value_classes::forwarded_member_types(ir, default),
+            _ => crate::jvm::value_classes::forwarded_member_types(ir, callables, default),
         };
-        let name =
-            crate::jvm::inherited_default_realization::inherited_member_jvm_name(ir, default);
+        let name = crate::jvm::inherited_default_realization::inherited_member_jvm_name(
+            ir, callables, default,
+        );
         let mut param_tys = jvm_tys(&types.physical_params);
         let mut physical_ret = jvm_declared_ty(&types.physical_ret);
         let mut semantic_params = types.semantic_params;
@@ -89,7 +91,11 @@ pub(super) fn emit_inherited_default_surface(
         let module_holder_descriptor;
         let target = match &default.body {
             // The dependency's `disable` realization: its holder static is the only body.
-            crate::fir::InheritedDefaultBody::DependencyHolder(_, holder) => {
+            crate::fir::InheritedDefaultBody::DependencyHolder(declaration) => {
+                let holder = callables
+                    .callable(*declaration)
+                    .and_then(|callable| callable.nonvirtual_realization.as_deref())
+                    .expect("a dependency holder default has frozen nonvirtual facts");
                 JdHolderTarget::DependencyHolder {
                     declaring: interface,
                     holder: holder.owner,

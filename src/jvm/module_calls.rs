@@ -541,6 +541,7 @@ pub(super) fn realize_super_calls(
                 (Some(declaration), false, crate::libraries::MemberRealization::Dispatch) => {
                     crate::jvm::inherited_default_realization::specialized_super_descriptor(
                         ir,
+                        callables,
                         owner,
                         declaration,
                         jvm_default,

@@ -105,6 +105,7 @@ fn dependency_source_physical_params<'a>(
 
 pub(crate) fn forwarded_member_types(
     ir: &IrFile,
+    callables: &crate::backend::CheckedBackendCallables,
     default: &crate::fir::ResolvedInheritedDefault,
 ) -> ForwardedMemberTypes {
     let shape = match &default.body {
@@ -131,8 +132,10 @@ pub(crate) fn forwarded_member_types(
                 semantic_ret: ret,
             };
         }
-        crate::fir::InheritedDefaultBody::DependencyInterfaceMethod(shape)
-        | crate::fir::InheritedDefaultBody::DependencyHolder(shape, _) => shape,
+        crate::fir::InheritedDefaultBody::DependencyInterfaceMethod(declaration)
+        | crate::fir::InheritedDefaultBody::DependencyHolder(declaration) => callables
+            .callable(*declaration)
+            .expect("an inherited dependency default has frozen backend facts"),
         crate::fir::InheritedDefaultBody::JavaDefaultMethod => {
             unreachable!("a Java default method has no Kotlin forwarder")
         }
@@ -159,9 +162,10 @@ pub(crate) fn forwarded_member_types(
 /// forwarder).
 pub(crate) fn specialized_member_types(
     ir: &IrFile,
+    callables: &crate::backend::CheckedBackendCallables,
     default: &crate::fir::ResolvedInheritedDefault,
 ) -> ForwardedMemberTypes {
-    let declared = forwarded_member_types(ir, default);
+    let declared = forwarded_member_types(ir, callables, default);
     // A value-class substitute (`I<Z>`) keeps the declaration's erased shape: kotlinc's typed
     // forwarder would take the mangled carrier signature, which this realization does not model.
     let substitutes_value_class = default
@@ -231,51 +235,19 @@ pub(crate) fn specialized_member_types(
 mod tests {
     use super::*;
 
-    fn dependency_member(
-        physical_params: &[Ty],
-        params: &[Ty],
-        suspend: bool,
-    ) -> crate::fir::ResolvedInheritedDefault {
-        let api = crate::types::type_name("fixture/Api");
-        crate::fir::ResolvedInheritedDefault {
-            name: crate::fir::InheritedMemberName::Function("run".into()),
-            function: None,
-            declaring_interface: api,
-            dispatch_interface: api,
-            parameters: params.into(),
-            parameter_identities: Box::new([]),
-            result: Ty::Unit,
-            applied_parameters: params.into(),
-            applied_result: Ty::Unit,
-            suspend,
-            vararg: false,
-            body: crate::fir::InheritedDefaultBody::DependencyInterfaceMethod(
-                crate::fir::DependencyMemberShape {
-                    physical_name: None,
-                    physical_params: physical_params.into(),
-                    physical_ret: Ty::Unit,
-                },
-            ),
-        }
-    }
-
     #[test]
     fn a_suspend_dependency_keeps_its_source_carrier_and_drops_only_the_cps_tail() {
         let semantic = Ty::obj("fixture/Ticket");
         let continuation = Ty::obj("kotlin/coroutines/Continuation");
-        let member = dependency_member(&[Ty::Int, continuation], &[semantic], true);
+        let physical = [Ty::Int, continuation];
+        let source = dependency_source_physical_params(&physical, &[semantic], true);
 
-        let types = forwarded_member_types(&IrFile::default(), &member);
-
-        assert_eq!(types.physical_params, vec![Ty::Int]);
-        assert_eq!(types.semantic_params, vec![semantic]);
+        assert_eq!(source, &[Ty::Int]);
     }
 
     #[test]
     #[should_panic(expected = "publishes one source physical type per semantic parameter")]
     fn a_dependency_member_without_a_complete_physical_shape_is_rejected() {
-        let member = dependency_member(&[], &[Ty::Int], false);
-
-        forwarded_member_types(&IrFile::default(), &member);
+        dependency_source_physical_params(&[], &[Ty::Int], false);
     }
 }

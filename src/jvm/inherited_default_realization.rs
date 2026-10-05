@@ -29,13 +29,16 @@ pub(crate) fn inherited_member_declared_name(
 /// the value-class hash its declaring file gives it.
 pub(crate) fn inherited_member_jvm_name(
     ir: &IrFile,
+    callables: &crate::backend::CheckedBackendCallables,
     default: &crate::fir::ResolvedInheritedDefault,
 ) -> String {
     let physical_name = match &default.body {
-        crate::fir::InheritedDefaultBody::DependencyInterfaceMethod(shape)
-        | crate::fir::InheritedDefaultBody::DependencyHolder(shape, _) => {
-            shape.physical_name.as_deref()
-        }
+        crate::fir::InheritedDefaultBody::DependencyInterfaceMethod(declaration)
+        | crate::fir::InheritedDefaultBody::DependencyHolder(declaration) => callables
+            .callable(*declaration)
+            .expect("an inherited dependency default has frozen backend facts")
+            .physical_name
+            .as_deref(),
         crate::fir::InheritedDefaultBody::Module
         | crate::fir::InheritedDefaultBody::JavaDefaultMethod => None,
     };
@@ -67,14 +70,20 @@ pub(crate) enum ForwarderRealization<'a> {
 
 /// The forwarder a class writes for `default` under `jvm_default`, or `None`: `no-compatibility`
 /// writes none, and a Java default method never gets one.
-pub(crate) fn forwarder_realization(
+pub(crate) fn forwarder_realization<'a>(
     default: &crate::fir::ResolvedInheritedDefault,
+    callables: &'a crate::backend::CheckedBackendCallables,
     jvm_default: JvmDefaultMode,
-) -> Option<ForwarderRealization<'_>> {
+) -> Option<ForwarderRealization<'a>> {
     use crate::fir::InheritedDefaultBody;
     match (&default.body, jvm_default) {
-        (InheritedDefaultBody::DependencyHolder(_, holder), _) => {
-            Some(ForwarderRealization::DependencyHolder(holder))
+        (InheritedDefaultBody::DependencyHolder(declaration), _) => {
+            Some(ForwarderRealization::DependencyHolder(
+                callables
+                    .callable(*declaration)
+                    .and_then(|callable| callable.nonvirtual_realization.as_deref())
+                    .expect("a dependency holder default has frozen nonvirtual facts"),
+            ))
         }
         (InheritedDefaultBody::Module, JvmDefaultMode::Disable) => {
             Some(ForwarderRealization::DispatchHolder)
@@ -99,6 +108,7 @@ pub(crate) fn forwarder_realization(
 pub(crate) fn inherited_default_bridges(
     ir: &IrFile,
     cid: usize,
+    callables: &crate::backend::CheckedBackendCallables,
     jvm_default: JvmDefaultMode,
 ) -> Vec<Bridge> {
     let class = &ir.classes[cid];
@@ -110,11 +120,12 @@ pub(crate) fn inherited_default_bridges(
     };
     let mut bridges = Vec::new();
     for default in defaults {
-        if default.suspend || forwarder_realization(default, jvm_default).is_none() {
+        if default.suspend || forwarder_realization(default, callables, jvm_default).is_none() {
             continue;
         }
-        let declared = crate::jvm::value_classes::forwarded_member_types(ir, default);
-        let specialized = crate::jvm::value_classes::specialized_member_types(ir, default);
+        let declared = crate::jvm::value_classes::forwarded_member_types(ir, callables, default);
+        let specialized =
+            crate::jvm::value_classes::specialized_member_types(ir, callables, default);
         let erased = crate::jvm::method_descriptors::jvm_tys(&declared.physical_params);
         let concrete = crate::jvm::method_descriptors::jvm_tys(&specialized.physical_params);
         let erased_ret = crate::jvm::method_descriptors::jvm_declared_ty(&declared.physical_ret);
@@ -142,7 +153,7 @@ pub(crate) fn inherited_default_bridges(
                     semantic: *semantic,
                 })
                 .collect(),
-            name: inherited_member_jvm_name(ir, default),
+            name: inherited_member_jvm_name(ir, callables, default),
             erased_params: declared.physical_params,
             erased_ret: declared.physical_ret,
             concrete_params: specialized.physical_params,
@@ -163,6 +174,7 @@ pub(crate) fn inherited_default_bridges(
 /// dispatches virtually back to the typed one. `None` when no such forwarder exists.
 pub(crate) fn specialized_super_descriptor(
     ir: &IrFile,
+    callables: &crate::backend::CheckedBackendCallables,
     owner: crate::types::TypeName,
     declaration: crate::fir::ResolvedFunctionOverrideTarget,
     jvm_default: JvmDefaultMode,
@@ -181,11 +193,13 @@ pub(crate) fn specialized_super_descriptor(
             .flatten()
             .find(|default| default.function == Some(declaration))
         {
-            if default.suspend || forwarder_realization(default, jvm_default).is_none() {
+            if default.suspend || forwarder_realization(default, callables, jvm_default).is_none() {
                 return None;
             }
-            let declared = crate::jvm::value_classes::forwarded_member_types(ir, default);
-            let specialized = crate::jvm::value_classes::specialized_member_types(ir, default);
+            let declared =
+                crate::jvm::value_classes::forwarded_member_types(ir, callables, default);
+            let specialized =
+                crate::jvm::value_classes::specialized_member_types(ir, callables, default);
             let params = crate::jvm::method_descriptors::jvm_tys(&specialized.physical_params);
             let ret = crate::jvm::method_descriptors::jvm_declared_ty(&specialized.physical_ret);
             let unchanged = params

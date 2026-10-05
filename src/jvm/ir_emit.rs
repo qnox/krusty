@@ -473,6 +473,8 @@ pub(super) struct EmitEnv<'a> {
     /// `Signature` attributes. Declaration-site variance is a Kotlin fact; spelling it as JVM
     /// use-site wildcards is owned entirely by this emitter.
     signature_symbols: &'a dyn BackendClassifierSource,
+    /// Provider-normalized JVM facts for dependency identities already selected into common IR.
+    dependency_callables: &'a crate::backend::CheckedBackendCallables,
     /// Exact invocation-owner facts for both the stable module/dependency model and classifiers
     /// whose completed declarations exist only in this common-IR file.
     dispatch_classifiers: std::rc::Rc<crate::jvm::member_dispatch::CheckedDispatchClassifiers<'a>>,
@@ -1493,6 +1495,7 @@ pub(crate) fn emit_all_with_checked_classifiers(
         override_results: facts.metadata.override_results,
         collection_method_entry_barriers: facts.metadata.collection_method_entry_barriers,
         signature_symbols: facts.signature_symbols,
+        dependency_callables: facts.dependency_callables,
         dispatch_classifiers: std::rc::Rc::new(
             crate::jvm::member_dispatch::CheckedDispatchClassifiers::new(
                 ir,
@@ -3749,6 +3752,7 @@ fn emit_interface_class(
             c,
             &mut cw,
             &mut default_impls,
+            env.dependency_callables,
             opts,
         );
     }
@@ -8412,6 +8416,7 @@ mod invariant_tests {
         let collection_method_entry_barriers =
             crate::jvm::collection_barriers::MethodEntryBarriers::default();
         let local_delegate_access = crate::jvm::local_delegate_accessors::HelperAccess::default();
+        let dependency_callables = crate::backend::CheckedBackendCallables::default();
         emit_all_with_checked_classifiers(
             ir,
             (crate::types::type_name(facade), facade),
@@ -8429,6 +8434,7 @@ mod invariant_tests {
                     intrinsic_probe_continuations,
                 },
                 signature_symbols: &NoClassifiers,
+                dependency_callables: &dependency_callables,
                 property_realizations: &property_realizations,
                 property_reference_realizations: &property_reference_realizations,
                 default_call_operands: &default_call_operands,
