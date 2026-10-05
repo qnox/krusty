@@ -89,3 +89,37 @@ fn a_resumed_inline_result_is_narrowed_on_the_calls_line_like_kotlinc() {
         &["SuspendCoroutineTypedKt", "SuspendCoroutineTypedKt$typed$1"],
     );
 }
+
+/// A repository-owned inline suspend function on the classpath, whose erased `T` result the caller
+/// narrows after resuming. The inlined body leaves the caller's line forgotten whatever the callee,
+/// so the cast is on the call's line here too.
+const PARKING: &str = r#"package parking
+
+import kotlin.coroutines.*
+
+var parked: Any? = null
+
+suspend inline fun <T> park(): T = suspendCoroutine { continuation -> parked = continuation }
+"#;
+
+const PARKED_SOURCE: &str = r#"import parking.*
+
+fun take(value: Any?): String = "K"
+
+suspend fun parkedResult(tail: String): String {
+    val second = park<String>()
+    return take(second) + tail
+}
+"#;
+
+#[test]
+fn a_classpath_inline_suspend_result_is_narrowed_on_the_calls_line_like_kotlinc() {
+    let library =
+        common::kotlinc_library(PARKING).expect("reference compiler builds the dependency");
+    common::assert_classes_identical_to_kotlinc_against(
+        "SuspendInlineParked",
+        PARKED_SOURCE,
+        &["SuspendInlineParkedKt", "SuspendInlineParkedKt$parkedResult$1"],
+        &[library],
+    );
+}
