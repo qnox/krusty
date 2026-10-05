@@ -4540,6 +4540,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   parameters (kotlinc's `JvmDefaultConstructorLowering`); a declared `constructor()` owns that
   descriptor. Tests: `tests/constructor_argument_specificity_e2e.rs`.
 
+- **A lambda returns what kotlinc infers for it.** A lambda whose every result is `Unit` (a statement
+  tail such as an assignment, a declaration or an `else`-less `if`, or a `Unit` call) has the result
+  type `Unit` even where the expected function type returns `Any` or `Any?`, so its implementation
+  returns `kotlin.Unit` rather than `Object`. A lambda literal converted to a functional interface
+  whose method returns `Unit` (a Kotlin `fun interface`, `java.lang.Runnable`) implements it with a
+  method returning nothing (`void`); one whose method returns a type parameter instantiated with
+  `Unit` keeps returning the `Unit` value. Tests: `tests/lambda_result_types_e2e.rs`.
+
 - **Method type parameter that shadows its class's (`class Box<T> { fun <T> m(x: T): T }`).** The
   classpath member-return substitution (`JvmLibraries::member_return`) binds a generic class's formal
   type parameters to the receiver's type arguments (`Box<String>` → `{T: String}`) and substitutes a

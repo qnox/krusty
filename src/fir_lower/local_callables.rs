@@ -372,11 +372,14 @@ impl BodyLowering<'_> {
         callable: LocalCallableId,
         body: &FirBody,
         suspend: bool,
+        // Whether the lambda implements a functional interface method that returns `Unit`.
+        unit_method: bool,
     ) -> Result<ExprId, FirLoweringFailure> {
         let (function, owner) = self.predeclare_local_function(body, callable)?;
-        let unit_as_value = body
-            .result_type()
-            .is_some_and(|result| result.get() == Ty::Unit);
+        let unit_as_value = !unit_method
+            && body
+                .result_type()
+                .is_some_and(|result| result.get() == Ty::Unit);
         if unit_as_value {
             self.ir.functions[function as usize].ret = Ty::obj("kotlin/Unit");
         }
