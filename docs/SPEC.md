@@ -2067,7 +2067,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   supplies them from the resolver's list places them (`tests/local_function_signature_e2e.rs`).
   Not yet like kotlinc: kotlinc inlines an immediately invoked lambda literal (`{ … }()`), whose
   reads are then the function's own; krusty still lifts it. An anonymous object's own fields are
-  still ordered by name, and a local function a body only declares still adds its captures.
+  still ordered by name.
 - **Inherited member call owner.** A call to an inherited member, or a read or write through an
   inherited property accessor, names the receiver's own class as the owner, as kotlinc does:
   `Leaf.m`, `Leaf.getBase`, `Leaf.hashCode`. An interface default reached through a class receiver
