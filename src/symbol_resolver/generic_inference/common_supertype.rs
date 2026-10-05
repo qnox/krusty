@@ -33,8 +33,9 @@ pub(super) fn common_super_types(source: &dyn SymbolSource, bounds: &[Ty]) -> Ty
 
 struct CommonSupertypeSolver<'a> {
     source: &'a dyn SymbolSource,
-    active: Vec<Vec<Ty>>,
-    completed: Vec<(Vec<Ty>, Ty)>,
+    active: Vec<(bool, Vec<Ty>)>,
+    active_classifiers: Vec<(TypeName, usize)>,
+    completed: Vec<(bool, Vec<Ty>, Ty)>,
 }
 
 impl<'a> CommonSupertypeSolver<'a> {
@@ -42,12 +43,13 @@ impl<'a> CommonSupertypeSolver<'a> {
         Self {
             source,
             active: Vec::new(),
+            active_classifiers: Vec::new(),
             completed: Vec::new(),
         }
     }
 
     fn common(&mut self, bounds: &[Ty]) -> Ty {
-        self.common_at(bounds)
+        self.common_at(bounds, false)
             .unwrap_or_else(|| Ty::obj_name(crate::types::wk::any()))
     }
 
@@ -55,7 +57,7 @@ impl<'a> CommonSupertypeSolver<'a> {
     /// the classifier candidate that led back to it is recursive and must not participate in this
     /// round. Other shared classifiers still compete, and `Any` remains the sound result when no
     /// acyclic candidate exists.
-    fn common_at(&mut self, bounds: &[Ty]) -> Option<Ty> {
+    fn common_at(&mut self, bounds: &[Ty], permit_intersection: bool) -> Option<Ty> {
         let mut key = Vec::with_capacity(bounds.len());
         for bound in bounds.iter().copied().map(Ty::non_null) {
             if !key.contains(&bound) {
@@ -68,28 +70,26 @@ impl<'a> CommonSupertypeSolver<'a> {
         if rest.iter().all(|bound| *bound == first) {
             return Some(first);
         }
-        if let Some((_, result)) = self
-            .completed
-            .iter()
-            .find(|(known, _)| same_bound_set(known, &key))
-        {
+        if let Some((_, _, result)) = self.completed.iter().find(|(permit, known, _)| {
+            *permit == permit_intersection && same_bound_set(known, &key)
+        }) {
             return Some(*result);
         }
         if self
             .active
             .iter()
-            .any(|active| same_bound_set(active, &key))
+            .any(|(permit, active)| *permit == permit_intersection && same_bound_set(active, &key))
         {
             return None;
         }
-        self.active.push(key.clone());
-        let result = self.common_active(&key);
+        self.active.push((permit_intersection, key.clone()));
+        let result = self.common_active(&key, permit_intersection);
         self.active.pop();
-        self.completed.push((key, result));
+        self.completed.push((permit_intersection, key, result));
         Some(result)
     }
 
-    fn common_active(&mut self, bounds: &[Ty]) -> Ty {
+    fn common_active(&mut self, bounds: &[Ty], permit_intersection: bool) -> Ty {
         let Some((&first, rest)) = bounds.split_first() else {
             return Ty::obj_name(crate::types::wk::any());
         };
@@ -117,6 +117,25 @@ impl<'a> CommonSupertypeSolver<'a> {
             {
                 classifiers.push((*classifier, arguments.len()));
             }
+        }
+
+        // A top-level inference binding must be denotable. Multiple incomparable common views are
+        // retained separately by the call-selection intersection contract; putting their synthetic
+        // intersection into the binding changes ABI decisions such as a generic vararg's array
+        // component. Nested invariant arguments are different: `Inv<A>` plus `Inv<B>` is expressed
+        // as `Inv<out (X & Y)>`, so that argument join explicitly permits the intersection.
+        let dominated_owners = classifiers
+            .iter()
+            .flat_map(|(owner, _)| {
+                closure(self.source, Ty::obj_name(*owner))
+                    .into_iter()
+                    .skip(1)
+            })
+            .filter_map(Ty::obj_internal)
+            .collect::<HashSet<_>>();
+        classifiers.retain(|(owner, _)| !dominated_owners.contains(owner));
+        if !permit_intersection && classifiers.len() > 1 {
+            return Ty::obj_name(crate::types::wk::any());
         }
 
         let mut candidates = Vec::new();
@@ -151,10 +170,28 @@ impl<'a> CommonSupertypeSolver<'a> {
                 most_specific.push(candidate);
             }
         }
+        let any = crate::types::wk::any();
+        let concrete_classes = most_specific
+            .iter()
+            .copied()
+            .filter(|candidate| {
+                candidate.obj_internal().is_some_and(|owner| {
+                    owner != any
+                        && self
+                            .source
+                            .classifier(owner)
+                            .is_some_and(|classifier| !classifier.is_interface())
+                })
+            })
+            .collect::<Vec<_>>();
+        if !concrete_classes.is_empty() {
+            most_specific = concrete_classes;
+        }
         match most_specific.as_slice() {
             [] => Ty::obj("kotlin/Any"),
             [one] => *one,
-            many => Ty::intersection(many),
+            many if permit_intersection => Ty::intersection(many),
+            _ => Ty::obj("kotlin/Any"),
         }
     }
 
@@ -188,6 +225,21 @@ impl<'a> CommonSupertypeSolver<'a> {
     }
 
     fn combine_classifier(&mut self, classifier: TypeName, types: &[Ty]) -> Option<Ty> {
+        let size = types.iter().copied().map(type_size).sum();
+        if self
+            .active_classifiers
+            .iter()
+            .any(|(active, active_size)| *active == classifier && size >= *active_size)
+        {
+            return None;
+        }
+        self.active_classifiers.push((classifier, size));
+        let result = self.combine_classifier_inner(classifier, types);
+        self.active_classifiers.pop();
+        result
+    }
+
+    fn combine_classifier_inner(&mut self, classifier: TypeName, types: &[Ty]) -> Option<Ty> {
         let arguments = types
             .iter()
             .map(|ty| match ty {
@@ -226,7 +278,7 @@ impl<'a> CommonSupertypeSolver<'a> {
                 .iter()
                 .map(|argument| argument.projection_read_ty().non_null())
                 .collect::<Vec<_>>();
-            let joined = self.common_at(&readable)?;
+            let joined = self.common_at(&readable, true)?;
             combined_arguments.push(if variance == TypeVariance::Out {
                 joined
             } else {
@@ -234,6 +286,30 @@ impl<'a> CommonSupertypeSolver<'a> {
             });
         }
         Some(Ty::obj_args_name(classifier, &combined_arguments))
+    }
+}
+
+fn type_size(ty: Ty) -> usize {
+    match ty {
+        Ty::Obj(_, arguments) => 1 + arguments.iter().copied().map(type_size).sum::<usize>(),
+        Ty::Fun(signature) => {
+            1 + signature
+                .params
+                .iter()
+                .copied()
+                .map(type_size)
+                .sum::<usize>()
+                + type_size(signature.ret)
+        }
+        Ty::Nullable(inner)
+        | Ty::PlatformNullable(inner)
+        | Ty::InProjection(inner)
+        | Ty::OutProjection(inner)
+        | Ty::StarProjection(inner)
+        | Ty::DefinitelyNotNull(inner) => 1 + type_size(*inner),
+        Ty::TyParam(_, bound) => 1 + type_size(*bound),
+        Ty::Intersection(parts) => 1 + parts.iter().copied().map(type_size).sum::<usize>(),
+        _ => 1,
     }
 }
 

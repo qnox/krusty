@@ -49,8 +49,15 @@ class R : Base()
 fun <T> sel(a: T, b: T) = a
 inline fun <reified T> T.valueTypeOf() = typeOf<T>()
 
+@Suppress("INVISIBLE_REFERENCE", "INVISIBLE_MEMBER", "UNUSED_PARAMETER")
+private fun <T> checkTypeEquality(
+    first: @kotlin.internal.Exact T,
+    second: @kotlin.internal.Exact T,
+) {}
+
 fun box(): String {
     val pair = sel(A, B)
+    checkTypeEquality(pair, pair)
     if (pair.x() != "x" || pair.y() != "y") return "pair"
     val value = sel(Inv(A), Inv(B)).v
     if (value.x() != "x" || value.y() != "y") return "members"

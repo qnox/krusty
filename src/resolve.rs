@@ -41638,7 +41638,19 @@ impl<'a> Checker<'a> {
                             declared = declared.array_read_elem().unwrap_or(declared);
                         }
                         let mut actual = kind.inference_type(&source, declared);
-                        if !whole_array {
+                        // `@Exact` compares the argument's complete semantic type. Replacing an
+                        // already-recorded intersection with a fresh per-argument witness makes two
+                        // occurrences of the same value look like different types and rejects
+                        // `checkTypeEquality(value, value)`. Flow witnesses are only needed for an
+                        // ordinary parameter that may select one constituent during applicability.
+                        if !whole_array
+                            && !candidate
+                                .call_sig
+                                .exact_params
+                                .get(declaration_parameter)
+                                .copied()
+                                .unwrap_or(false)
+                        {
                             if let Some(Ty::TyParam(formal, _)) = signature
                                 .params
                                 .get(declaration_parameter)
