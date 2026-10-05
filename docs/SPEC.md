@@ -1956,6 +1956,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   instead uses `$$context_receiver_N`. A named context value remains an ordinary value capture.
   A lifted receiver lambda's guard quotes its receiver's local name (`$this$within`), not `<this>`
   (`tests/captured_receiver_names_e2e.rs`).
+- **Lifted type parameters (kotlinc's `ClosureAnnotator`).** A lifted local function declares a
+  copy of each type parameter its closure captures, ahead of its own:
+  `fun <T, S> outer() { fun <U> f(a: U, b: T) }` signs `outer$f` as `<T:…;U:…;>(TU;TT;)I`. The
+  closure sees the function's receiver, parameter and return types, its own type parameters'
+  bounds, then every type in its body, and includes the closure of each local function or lambda
+  it declares or calls; capturing a type parameter also sees its bound. A class type parameter is
+  captured like any other, since the lifted method is static. The function's body is checked
+  against its own type parameters, not their erasure; only the descriptor erases them. An
+  anonymous function is signed the same way, while a lambda literal's method carries no
+  `Signature` (`tests/local_function_signature_e2e.rs`).
 - **Inherited member call owner.** A call to an inherited member, or a read or write through an
   inherited property accessor, names the receiver's own class as the owner, as kotlinc does:
   `Leaf.m`, `Leaf.getBase`, `Leaf.hashCode`. An interface default reached through a class receiver

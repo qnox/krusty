@@ -13,6 +13,8 @@ pub use value_parameters::{FirDefaultValue, FirValueParameter, FirVarargParamete
 pub(crate) mod debug_lines;
 pub use debug_lines::{FirExpressionDebugLines, FirStatementDebugLines};
 mod lifting_sites;
+mod local_type_parameters;
+pub use local_type_parameters::FirLocalTypeParameter;
 pub use lifting_sites::{FirLiftingSite, FirLiftingStep};
 mod origins;
 pub use origins::{Origin, OriginStore, SyntheticOriginKind};
@@ -1789,6 +1791,7 @@ pub struct FirBody {
     pub(super) interface_delegate_calls: Vec<super::FirInterfaceDelegateCalls>,
     context_receiver_types: Vec<ResolvedTy>,
     context_parameter_kinds: Vec<crate::types::ContextParameterKind>,
+    type_parameters: Box<[FirLocalTypeParameter]>,
     /// Declaration-owned inline semantics, in physical parameter order. The checker publishes
     /// this once; common lowering copies it without consulting declaration headers or types.
     inline_parameter_modifiers: Vec<crate::types::InlineParameterModifier>,
@@ -1847,6 +1850,7 @@ impl FirBody {
             interface_delegate_calls: Vec::new(),
             context_receiver_types: Vec::new(),
             context_parameter_kinds: Vec::new(),
+            type_parameters: Box::default(),
             inline_parameter_modifiers: Vec::new(),
             inline_expansion_modes: Vec::new(),
             parameters: Vec::new(),
@@ -2799,6 +2803,7 @@ impl FirBody {
             + self.debug_lines.payload_bytes()
             + self.default_values.len() * std::mem::size_of::<FirDefaultValue>()
             + self.context_receiver_types.len() * std::mem::size_of::<ResolvedTy>()
+            + self.type_parameter_payload_bytes()
             + self.captures.len() * std::mem::size_of::<FirCapture>()
             + self.implicit_receiver_captures.len()
                 * std::mem::size_of::<FirImplicitReceiverCapture>()

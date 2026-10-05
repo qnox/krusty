@@ -25203,9 +25203,8 @@ impl<'a> Checker<'a> {
         // the same spelling, including the constructor parameter a stored property shadows.
         let outer_names = Self::capturable_local_names(scope, &own_params);
 
-        // Captured outer locals: lifted to extra leading parameters. Parameter defaults execute in
-        // the lifted callable's `$default` body, so they are declaration bodies for capture purposes
-        // just like the function body itself.
+        // Captured outer locals become extra leading parameters. Parameter defaults run in the
+        // lifted callable's `$default` body, so they capture like the function body itself.
         let mut captured_locals: Vec<(String, Ty, bool)> = Vec::new();
         if !outer_names.is_empty() {
             let body = match &f.body {
@@ -25243,10 +25242,9 @@ impl<'a> Checker<'a> {
             .receiver
             .as_ref()
             .map(|receiver| self.type_ref_ty(&physical_signature_scope, receiver));
-        // The lifted callable's physical signature uses erased types, but its lexical body and
-        // defaults must see the declaration-owned symbolic parameters. Mixing the two views turns
-        // `fun <T> reference(): List<T>.() -> T = List<T>::item` into an `Any` expectation while
-        // the selected property reference correctly carries the local `T` identity.
+        // The lifted callable's physical signature is erased, but its body and defaults see the
+        // declaration-owned symbolic parameters: otherwise `fun <T> reference(): List<T>.() -> T =
+        // List<T>::item` expects `Any` while the selected reference carries the local `T` identity.
         let semantic_params = if f.type_params.is_empty() {
             params.clone()
         } else {
@@ -25388,7 +25386,9 @@ impl<'a> Checker<'a> {
                     f.type_param_bounds
                         .iter()
                         .filter(|(owner, _)| owner == parameter)
-                        .map(|(_, bound)| self.type_ref_ty(&semantic_signature_scope, bound))
+                        .map(|(_, bound)| {
+                            self.check_type_parameter_bound(&semantic_signature_scope, bound)
+                        })
                         .collect::<Vec<_>>()
                 })
                 .collect::<Vec<_>>();

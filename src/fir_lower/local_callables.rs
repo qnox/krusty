@@ -43,6 +43,8 @@ impl BodyLowering<'_> {
             if *suspend && !self.ir.suspend_funs.contains(&function) {
                 self.ir.suspend_funs.push(function);
             }
+            let captured_type_parameters = self.local_captured_type_parameters(body);
+            self.attach_local_type_parameters(function, body, &captured_type_parameters);
             let realization = LocalCallableRealization {
                 function,
                 suspend: *suspend,
@@ -52,6 +54,7 @@ impl BodyLowering<'_> {
                 implicit_receiver_captures: body.implicit_receiver_captures().to_vec(),
                 context_parameter_count: body.context_receiver_types().len() as u32,
                 has_extension_receiver: body.receiver_type().is_some(),
+                captured_type_parameters,
             };
             let previous = self
                 .local_callable_scopes
@@ -380,6 +383,13 @@ impl BodyLowering<'_> {
         if unit_as_value {
             self.ir.functions[function as usize].ret = Ty::obj("kotlin/Unit");
         }
+        let captured_type_parameters = self.local_captured_type_parameters(body);
+        // A lambda literal's method is signed without generics; an anonymous function's is not.
+        if body.source_lambda().is_some_and(|lambda| {
+            lambda.form() == crate::fir::FirLambdaForm::AnonymousFunction
+        }) {
+            self.attach_local_type_parameters(function, body, &captured_type_parameters);
+        }
         let realization = LocalCallableRealization {
             function,
             suspend,
@@ -389,6 +399,7 @@ impl BodyLowering<'_> {
             implicit_receiver_captures: body.implicit_receiver_captures().to_vec(),
             context_parameter_count: body.context_receiver_types().len() as u32,
             has_extension_receiver: body.receiver_type().is_some(),
+            captured_type_parameters,
         };
         let previous = self
             .local_callable_scopes

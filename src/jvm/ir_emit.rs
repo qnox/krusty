@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use crate::backend::BackendClassifierSource;
 use crate::ir::{
     Callee, ClassId, ExprId, IrBinOp, IrClass, IrConst, IrDataClassMemberRole, IrExpr, IrField,
-    IrFile, IrTypeOp,
+    IrFile, IrLambdaForm, IrTypeOp,
 };
 use crate::jvm::array_representation::prim_newarray_atype;
 use crate::jvm::classfile::{
@@ -5274,9 +5274,12 @@ fn emit_method_inner_with_holder(
     // attribute exists for a source or Java caller, and nothing can name these methods to call
     // them. Keep this scoped to the producer's exact identities; unrelated synthetic methods may
     // still have a source-visible generic contract.
-    // kotlinc maps a lambda body's signature without generics, like any `$lambda$` method.
+    // kotlinc maps a lambda literal's body without generics; an anonymous function's keeps them.
     let method_sig = (!ir.serialization_cache_methods.contains(&fid)
-        && !ir.lambda_origins.contains_key(&fid))
+        && ir
+            .lambda_origins
+            .get(&fid)
+            .is_none_or(|origin| origin.form != IrLambdaForm::Literal))
     .then(|| declared_method_signature(&signature_formatter, ir, env.override_results, fid))
     .flatten();
     let reserved_sig = match holder_receiver {
