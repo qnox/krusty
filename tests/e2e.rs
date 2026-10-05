@@ -913,6 +913,8 @@ mod function_reference_invoke_e2e;
 mod function_scope_locals_e2e;
 #[path = "function_subclass_invoke_e2e.rs"]
 mod function_subclass_invoke_e2e;
+#[path = "function_supertype_inference_e2e.rs"]
+mod function_supertype_inference_e2e;
 #[path = "function_type_is_e2e.rs"]
 mod function_type_is_e2e;
 #[path = "function_type_supertype_e2e.rs"]
@@ -1397,6 +1399,8 @@ mod metadata_enum_entry_classes_e2e;
 mod metadata_enum_supertypes_e2e;
 #[path = "metadata_field_presence_e2e.rs"]
 mod metadata_field_presence_e2e;
+#[path = "metadata_field_signature_e2e.rs"]
+mod metadata_field_signature_e2e;
 #[path = "metadata_function_flags_e2e.rs"]
 mod metadata_function_flags_e2e;
 #[path = "metadata_inline_parameter_modifiers_e2e.rs"]
@@ -1581,6 +1585,8 @@ mod inline_arguments_in_place_e2e;
 mod inline_operand_copies_e2e;
 #[path = "intrinsic_suspension_probes_e2e.rs"]
 mod intrinsic_suspension_probes_e2e;
+#[path = "lambda_result_types_e2e.rs"]
+mod lambda_result_types_e2e;
 #[path = "multi_index_operator_e2e.rs"]
 mod multi_index_operator_e2e;
 #[path = "multiline_catch_e2e.rs"]
@@ -1918,6 +1924,8 @@ mod operator_expected_result_seeding_e2e;
 mod operator_inc_dec_e2e;
 #[path = "operator_index_e2e.rs"]
 mod operator_index_e2e;
+#[path = "opt_in_usage_e2e.rs"]
+mod opt_in_usage_e2e;
 #[path = "optimization_gate_e2e.rs"]
 mod optimization_gate_e2e;
 #[path = "overload_declaration_specificity_e2e.rs"]
@@ -2429,6 +2437,8 @@ mod toplevel_property_ref_e2e;
 
 #[path = "erased_parameter_boxing_e2e.rs"]
 mod erased_parameter_boxing_e2e;
+#[path = "function_type_parameter_name_e2e.rs"]
+mod function_type_parameter_name_e2e;
 #[path = "hidden_deprecation_overload_e2e.rs"]
 mod hidden_deprecation_overload_e2e;
 #[path = "super_argument_outer_receiver_e2e.rs"]
