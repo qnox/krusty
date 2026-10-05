@@ -1421,6 +1421,8 @@ mod same_module_inline_frame_markers_e2e;
 mod setter_return_line_e2e;
 #[path = "splice_nullable_value_class_lambda_e2e.rs"]
 mod splice_nullable_value_class_lambda_e2e;
+#[path = "super_delegation_line_e2e.rs"]
+mod super_delegation_line_e2e;
 #[path = "suspend_coroutine_inline_e2e.rs"]
 mod suspend_coroutine_inline_e2e;
 #[path = "suspend_function_boxing_e2e.rs"]
