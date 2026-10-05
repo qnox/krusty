@@ -51,8 +51,7 @@ pub enum KindBinding {
 pub trait DescriptionBinder {
     fn bind_call(&mut self, description: &Description, call: TermId) -> CallBinding;
     /// The invocation kind argument `kind` of the `callsInPlace` call `call` selected.
-    fn bind_kind(&mut self, description: &Description, call: TermId, kind: TermId)
-        -> KindBinding;
+    fn bind_kind(&mut self, description: &Description, call: TermId, kind: TermId) -> KindBinding;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -214,7 +213,11 @@ impl Description {
     }
 
     /// Decode the description against `owner`, asking `binder` what each call selected.
-    pub fn decode(&self, owner: &DescriptionOwner<'_>, binder: &mut dyn DescriptionBinder) -> Decoded {
+    pub fn decode(
+        &self,
+        owner: &DescriptionOwner<'_>,
+        binder: &mut dyn DescriptionBinder,
+    ) -> Decoded {
         let mut effects = Vec::new();
         let mut errors = Vec::new();
         let mut valid = true;

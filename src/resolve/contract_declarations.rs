@@ -94,10 +94,9 @@ impl Checker<'_> {
         match self.file.expr(element) {
             Expr::Call { callee, .. } if !self.file.infix_calls.contains(&element.0) => {
                 match self.file.expr(*callee) {
-                    Expr::Member { name, .. } => crate::diag::Span::new(
-                        self.member_name_span(*callee, name).lo,
-                        span.hi,
-                    ),
+                    Expr::Member { name, .. } => {
+                        crate::diag::Span::new(self.member_name_span(*callee, name).lo, span.hi)
+                    }
                     _ => span,
                 }
             }
@@ -214,7 +213,11 @@ impl DescriptionBinder for CheckedDescriptionBinder<'_, '_> {
         let TermKind::Call { name, .. } = &description.term(call).kind else {
             return CallBinding::Unresolved;
         };
-        match self.checker.resolved_calls.get(&description.term(call).origin) {
+        match self
+            .checker
+            .resolved_calls
+            .get(&description.term(call).origin)
+        {
             Some(ResolvedCall::Member(selected)) => {
                 let Some(owner) = selected.member.owner else {
                     return CallBinding::Unresolved;
@@ -227,25 +230,25 @@ impl DescriptionBinder for CheckedDescriptionBinder<'_, '_> {
                         CallBinding::Dsl,
                     )
             }
-            Some(ResolvedCall::Companion(member)) => member
-                .owner
-                .map_or(CallBinding::Unresolved, |owner| {
+            Some(ResolvedCall::Companion(member)) => {
+                member.owner.map_or(CallBinding::Unresolved, |owner| {
                     CallBinding::Foreign(member_callable_id(owner, &member.name))
-                }),
-            Some(ResolvedCall::TopLevel(selected)) => CallBinding::Foreign(
-                self.top_level_callable_id(
+                })
+            }
+            Some(ResolvedCall::TopLevel(selected)) => {
+                CallBinding::Foreign(self.top_level_callable_id(
                     &selected.callable,
                     selected.stable_declaration,
                     &selected.callable.name,
-                ),
-            ),
-            Some(ResolvedCall::Extension(selected)) => CallBinding::Foreign(
-                self.top_level_callable_id(
+                ))
+            }
+            Some(ResolvedCall::Extension(selected)) => {
+                CallBinding::Foreign(self.top_level_callable_id(
                     &selected.callable,
                     selected.stable_declaration,
                     &selected.callable.name,
-                ),
-            ),
+                ))
+            }
             Some(ResolvedCall::MemberExtension { owner, name, .. }) => {
                 CallBinding::Foreign(member_callable_id(*owner, name))
             }
@@ -293,12 +296,13 @@ impl CheckedDescriptionBinder<'_, '_> {
         declaration: Option<crate::fir::DeclarationId>,
         name: &str,
     ) -> String {
-        let source_package = self.checker.resolved_index.zip(declaration).and_then(
-            |(index, declaration)| {
-                index
-                    .source_package(index.declaration_anchor(declaration)?.source)
-            },
-        );
+        let source_package =
+            self.checker
+                .resolved_index
+                .zip(declaration)
+                .and_then(|(index, declaration)| {
+                    index.source_package(index.declaration_anchor(declaration)?.source)
+                });
         let package = source_package
             .unwrap_or_else(|| self.checker.libraries.top_level_callable_package(callable));
         format!("{}/{name}", package.render())

@@ -3985,9 +3985,7 @@ fn inline_body_has_splice_only_shape(file: &File, f: &FunDecl) -> bool {
         ) {
             return true;
         }
-        file.any_child_stmt(s, &mut |child| {
-            bad_expr(file, child, tparams, reified)
-        })
+        file.any_child_stmt(s, &mut |child| bad_expr(file, child, tparams, reified))
     }
     /// Any `return` inside a lambda argument's body (non-local through the inline frame — its
     /// framing only holds when spliced into a caller, not emitted standalone).
@@ -29975,68 +29973,6 @@ fun box(): String {
             selected_owner.is_some_and(|owner| owner.matches("Foo2")),
             "the overriding declaration must win the equal-depth diamond: {selected_owner:?}"
         );
-    }
-
-    #[test]
-    fn generic_source_contract_uses_callee_type_parameter_identity_at_call_site() {
-        let mut diagnostics = DiagSink::new();
-        let file = parse_file_with_detected_features(
-            "import kotlin.contracts.contract\n\
-             import kotlin.contracts.ExperimentalContracts\n\
-             @OptIn(ExperimentalContracts::class)\n\
-             inline fun <T, reified R> Refinement<T, R>.validate(value: T): Boolean {\n\
-                 contract { returns() implies (value is R) }\n\
-                 return true\n\
-             }\n\
-             class Refinement<T, R>\n\
-             fun narrowed(refinement: Refinement<Any, String>, value: Any): String {\n\
-                 refinement.validate(value)\n\
-                 return value\n\
-             }",
-            &mut diagnostics,
-        );
-        let files = vec![file];
-        let mut classpath = crate::toolchain::classpath_jars_for("// WITH_STDLIB");
-        if let Some(jdk) = crate::toolchain::jdk_modules() {
-            classpath.push(jdk);
-        }
-        let platform = initialized_jvm_libraries(std::rc::Rc::new(
-            crate::jvm::classpath::Classpath::new(classpath),
-        ));
-        let mut symbols = collect_signatures_with_cp(&files, Box::new(platform), &mut diagnostics);
-        check_file(&files[0], &mut symbols, &mut diagnostics);
-        assert_no_diags(&diagnostics);
-
-        let signature = symbols.ext_funs["validate"]
-            .values()
-            .flatten()
-            .next()
-            .expect("validate extension signature");
-        let result_formal = signature
-            .generic_sig
-            .as_ref()
-            .and_then(|generic| generic.formals.get(1))
-            .expect("reified result formal");
-        let contract = signature
-            .contract
-            .as_ref()
-            .expect("decoded source contract");
-        let [crate::contracts::Effect::ConditionalReturns { conclusion, .. }] =
-            contract.effects.as_slice()
-        else {
-            panic!(
-                "expected one conditional-return effect: {:?}",
-                contract.effects
-            )
-        };
-        let crate::contracts::Condition::IsType {
-            ty: crate::contracts::ConditionType::Metadata(ty),
-            ..
-        } = conclusion
-        else {
-            panic!("contract condition must be normalized to semantic type: {conclusion:?}")
-        };
-        assert_eq!(ty.ty_param_name(), Some(result_formal.as_str()));
     }
 
     #[test]

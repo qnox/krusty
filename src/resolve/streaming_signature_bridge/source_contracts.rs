@@ -212,7 +212,11 @@ impl ProductionSignatureSemantics<'_> {
                 let member = self.with_resolver(scope, |resolver| {
                     let callables = resolver.receiver_callables(receiver, name);
                     resolver.select_receiver_function_with_params(
-                        receiver, name, &arguments, &[], &callables,
+                        receiver,
+                        name,
+                        &arguments,
+                        &[],
+                        &callables,
                     )
                 });
                 if member.is_ok() {
@@ -281,7 +285,11 @@ impl SignatureDescriptionBinder<'_, '_> {
         selected
     }
 
-    fn select_uncached(&mut self, description: &Description, call: TermId) -> Option<SelectedDslCall> {
+    fn select_uncached(
+        &mut self,
+        description: &Description,
+        call: TermId,
+    ) -> Option<SelectedDslCall> {
         let TermKind::Call {
             receiver,
             name,
@@ -303,7 +311,12 @@ impl SignatureDescriptionBinder<'_, '_> {
             .with_resolver(self.scope, |resolver| {
                 let callables = resolver.receiver_callables(receiver, name);
                 match resolver.select_receiver_function_with_params_tracking(
-                    receiver, name, &arguments, &[], &callables, None,
+                    receiver,
+                    name,
+                    &arguments,
+                    &[],
+                    &callables,
+                    None,
                 ) {
                     CandidateSelection::Selected((function, params, ret)) => {
                         Some(SelectedDslCall {
@@ -362,12 +375,15 @@ impl SignatureDescriptionBinder<'_, '_> {
                     return None;
                 }
                 let qualifier = segments[..segments.len() - 1].join(".");
-                let owner = semantics.qualified_classifier_or_source_alias(self.scope, &qualifier)?;
+                let owner =
+                    semantics.qualified_classifier_or_source_alias(self.scope, &qualifier)?;
                 (owner, entry.clone())
             }
         };
-        let module =
-            crate::module_symbols::ModuleSymbols::for_file(semantics.table, self.scope.source.raw());
+        let module = crate::module_symbols::ModuleSymbols::for_file(
+            semantics.table,
+            self.scope.source.raw(),
+        );
         let source = crate::symbol_source::CompositeSource::new(vec![
             &module as &dyn crate::symbol_source::SymbolSource,
             &*semantics.table.libraries as &dyn crate::symbol_source::SymbolSource,

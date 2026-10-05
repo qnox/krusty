@@ -1418,7 +1418,12 @@ pub fn build_class(
                 )
             })
         };
-        let early_contract = m.annotations.records().is_empty().then(|| contract(st)).flatten();
+        let early_contract = m
+            .annotations
+            .records()
+            .is_empty()
+            .then(|| contract(st))
+            .flatten();
         let sig = (m.jvm_sig.is_some() || m.jvm_sig_name.is_some()).then(|| {
             let mut p = Pb::new();
             if let Some(n) = m.jvm_sig_name.as_deref() {

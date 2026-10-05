@@ -113,5 +113,5 @@ fun use(a: Any?): Int = if (qualified(a)) a.length else 0
 
 #[test]
 fn qualified_and_aliased_spellings_declare_the_same_contract() {
-    byte_identical("qualified_spellings", QUALIFIED_SPELLINGS, "MainKt");
+    byte_identical("Qualified", QUALIFIED_SPELLINGS, "QualifiedKt");
 }

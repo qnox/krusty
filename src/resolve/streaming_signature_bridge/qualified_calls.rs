@@ -134,36 +134,46 @@ impl ProductionSignatureSemantics<'_> {
     ) -> Result<Box<[Option<crate::fir::ResolvedTy>]>, crate::fir::DiagnosticId> {
         let (qualifier, name) = spelling.rsplit_once('.').ok_or_else(Self::failure)?;
         self.with_qualified_package_resolver(scope, qualifier, |_, resolver| {
-        let candidates = self.implicit_context_candidates(
-            scope,
-            resolver.accessible_top_level_candidates(name).into_iter(),
-        );
-        let (kinds, _slots) = Self::probe_call_arguments(&candidates, arguments, trailing_lambda)
-            .ok_or_else(Self::failure)?;
-        let type_arguments = type_arguments
-            .iter()
-            .map(|argument| argument.get())
-            .collect::<Vec<_>>();
-        let selected = resolver
-            .select_top_level_function_candidates(name, candidates.clone(), &kinds, &type_arguments)
-            .map(|(selected, _)| selected)
-            .or_else(|| match candidates.as_slice() {
-                [only] => Some(only.clone()),
-                [] | [_, _, ..] => None,
-            })
-            .ok_or_else(Self::failure)?;
-        let parameters = Self::functional_parameter_shapes(
-            resolver,
-            &selected,
-            crate::symbol_resolver::specialized_function_params(&selected, &kinds, &type_arguments),
-        );
-        Self::postponed_call_expectations(
-            arguments,
-            &parameters,
-            &selected.call_sig,
-            trailing_lambda,
-        )
-        .ok_or_else(Self::failure)
+            let candidates = self.implicit_context_candidates(
+                scope,
+                resolver.accessible_top_level_candidates(name).into_iter(),
+            );
+            let (kinds, _slots) =
+                Self::probe_call_arguments(&candidates, arguments, trailing_lambda)
+                    .ok_or_else(Self::failure)?;
+            let type_arguments = type_arguments
+                .iter()
+                .map(|argument| argument.get())
+                .collect::<Vec<_>>();
+            let selected = resolver
+                .select_top_level_function_candidates(
+                    name,
+                    candidates.clone(),
+                    &kinds,
+                    &type_arguments,
+                )
+                .map(|(selected, _)| selected)
+                .or_else(|| match candidates.as_slice() {
+                    [only] => Some(only.clone()),
+                    [] | [_, _, ..] => None,
+                })
+                .ok_or_else(Self::failure)?;
+            let parameters = Self::functional_parameter_shapes(
+                resolver,
+                &selected,
+                crate::symbol_resolver::specialized_function_params(
+                    &selected,
+                    &kinds,
+                    &type_arguments,
+                ),
+            );
+            Self::postponed_call_expectations(
+                arguments,
+                &parameters,
+                &selected.call_sig,
+                trailing_lambda,
+            )
+            .ok_or_else(Self::failure)
         })
     }
 }
