@@ -27,6 +27,7 @@ pub(crate) struct EmitMetadata<'a> {
 pub(crate) struct CheckedEmitFacts<'a> {
     pub(crate) metadata: EmitMetadata<'a>,
     pub(crate) signature_symbols: &'a dyn BackendClassifierSource,
+    pub(crate) dependency_callables: &'a crate::backend::CheckedBackendCallables,
     pub(crate) property_realizations: &'a crate::jvm::property_realizations::PropertyRealizations,
     pub(crate) property_reference_realizations:
         &'a crate::jvm::property_references::PropertyReferenceRealizations,

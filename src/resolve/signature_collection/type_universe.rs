@@ -7,6 +7,7 @@
 //! in the same pass, because a source declaration shadows a classpath type of the same simple name.
 
 use super::*;
+use crate::spelling::Spelled;
 
 struct BootstrapSymbolSource<'a> {
     declarations: &'a std::collections::HashSet<TypeName>,
