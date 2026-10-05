@@ -2525,7 +2525,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   carrier, a reference array and a delegate field. One rule serves class, companion and facade
   properties. Tests: `tests/metadata_field_signature_e2e.rs`.
 - **`HAS_CONSTANT` follows kotlinc's serializer exactly.** A `val` records it when its declared
-  type could be a `const val` type (a non-null primitive, unsigned integer or `String`) and its
+  type could be a `const val` type (a non-null built-in scalar or `String`) and its
   initializer passes `FirToConstantValueChecker`: a literal, a string template or concatenation of
   string literals over constants, a `const val` read, or a number conversion (`toByte` …
   `toDouble`, `toChar`) or `unaryMinus` applied to a constant. `val x: Any = "s"`, `1 + 2` and

@@ -18,7 +18,7 @@ pub(super) fn has_constant_initializer(body: &FirBody, declared: Ty) -> bool {
         && initializer(body).is_some_and(|initializer| has_constant_value(body, initializer))
 }
 
-/// kotlinc's `canBeUsedForConstVal`: a non-null primitive, unsigned integer or `String`.
+/// kotlinc's `canBeUsedForConstVal`: a non-null built-in scalar or `String`.
 fn can_be_used_for_const_val(ty: Ty) -> bool {
     matches!(
         ty,
