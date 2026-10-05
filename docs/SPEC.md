@@ -12409,6 +12409,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   whose argument descriptor cannot be `V`. Test:
   `tests/unit_value_e2e.rs::unit_expression_in_a_string_template_appends_the_singleton`.
 
+- **A concatenation appends a `toString()` operand's receiver** (kotlinc's
+  `FlattenStringConcatenationLowering.isToStringCall`). An argument-free virtual call that plays
+  the `Any.toString` role is dropped from a string concatenation and its receiver is appended at
+  its own type (`append(Object)` for a class, `append(String)` for a `String`); a receiver that is
+  itself a concatenation contributes its parts. The role is the frontend's: a dependency call keeps
+  the role its provider published, and a current-module function inherits the role of the nearest
+  declaration it overrides (`InheritedCallableStatus.semantic_role`), so an override, an inherited
+  override and a data class's generated `toString` all qualify. A `super.toString()` keeps its
+  call. On the JVM this runs after value-class lowering, as kotlinc's does, so a value class's
+  `toString()` (by then a static `toString-impl` call) keeps its call. Tests:
+  `tests/string_concat_to_string_operand_e2e.rs`,
+  `fir_lower::tests::checked_hierarchy`.
+
 - **Equality with an enum operand compares references** (kotlinc's `Equals`, which takes
   `referenceEquals` when `a.isEnumValue || b.isEnumValue`). `==`/`!=` where either operand's type
   names an enum class — nullable or not, source-declared or from a library, the other side any

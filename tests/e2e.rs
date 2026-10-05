@@ -2265,6 +2265,8 @@ mod stdlib_ifblank_null_e2e;
 mod string_concat_append_overload_e2e;
 #[path = "string_concat_pool_order_e2e.rs"]
 mod string_concat_pool_order_e2e;
+#[path = "string_concat_to_string_operand_e2e.rs"]
+mod string_concat_to_string_operand_e2e;
 #[path = "string_concatenation_e2e.rs"]
 mod string_concatenation_e2e;
 #[path = "string_plus_indy_e2e.rs"]

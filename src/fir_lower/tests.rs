@@ -15,6 +15,7 @@ use crate::types::Ty;
 
 mod callable_body_returns;
 mod catch_clauses;
+mod checked_hierarchy;
 mod checked_substitutions;
 mod integral_constants;
 mod local_classifier_provenance;
@@ -440,39 +441,6 @@ fn disabled_assertion_drops_its_unlowered_operand_graph() {
             args,
         } if args.is_empty()
     ));
-}
-
-#[test]
-fn common_ir_receives_the_complete_applied_classifier_hierarchy() {
-    let ir = lower_single_source(
-        "interface Root<T>\n\
-         interface Middle<U> : Root<U>\n\
-         class Leaf : Middle<String>\n",
-        "Hierarchy",
-    );
-    let leaf = crate::types::type_name("Leaf");
-    let middle = crate::types::type_name("Middle");
-    let root = crate::types::type_name("Root");
-    let hierarchy = ir
-        .classifier_hierarchies
-        .get(&leaf)
-        .expect("source class hierarchy must cross the FIR/common-IR boundary");
-
-    assert_eq!(
-        hierarchy
-            .iter()
-            .map(|entry| (entry.classifier, entry.applied, entry.depth))
-            .collect::<Vec<_>>(),
-        vec![
-            (leaf, Ty::obj("Leaf"), 0),
-            (middle, Ty::obj_args("Middle", &[Ty::String]), 1),
-            (root, Ty::obj_args("Root", &[Ty::String]), 2),
-            // A classifier that declares no supertype still has Kotlin's implicit root.
-            (crate::types::wk::any(), Ty::obj("kotlin/Any"), 3),
-        ]
-    );
-    ir.validate_determined_types()
-        .expect("applied hierarchy types must be pending-free");
 }
 
 #[test]
