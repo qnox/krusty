@@ -107,12 +107,26 @@ pub(crate) fn publish_checked_classifier_annotations(
             if class.kind != crate::ast::ClassKind::Annotation {
                 continue;
             }
-            if let Some(targets) =
-                checked_declared_targets(file, file_index as u32, table, &info, class)
-            {
-                table.annotation_targets.insert(internal, targets);
-                index.publish_annotation_targets(internal, targets);
-            }
+            let Some(policy) = checked_target_policy(file, file_index as u32, table, &info, class)
+            else {
+                continue;
+            };
+            let published = match policy {
+                CheckedTargetPolicy::Valid(targets) => {
+                    index.publish_annotation_targets(internal, targets, true);
+                    table.annotation_targets.publish_valid(internal, targets)
+                }
+                CheckedTargetPolicy::InvalidRecovery(targets) => {
+                    index.publish_annotation_targets(internal, targets, false);
+                    table
+                        .annotation_targets
+                        .publish_invalid_recovery(internal, targets)
+                }
+            };
+            assert!(
+                published,
+                "an annotation classifier may publish one target policy"
+            );
         }
         for &(internal, declaration) in &declarations {
             let Decl::Class(class) = file.decl(declaration) else {
@@ -156,56 +170,81 @@ pub(crate) fn publish_checked_classifier_annotations(
     }
 }
 
-/// The targets an annotation class's checked `@Target` application lists, in declared order; `None`
-/// when it declares no `@Target`.
-///
-/// Like kotlinc's `getAllowedAnnotationTargets`, this reads each argument's SELECTED enum entry and
-/// takes the target that entry's declared name denotes. The entry is the one the checker bound
-/// through the ordinary scope and import rules, so an aliased or unqualified import names the entry
-/// it selects, never its spelling. kotlinc does not filter the entry's enum class: an argument of
-/// another enum is an argument type mismatch, and the entry it selected still counts.
-fn checked_declared_targets(
+/// What an annotation class's own checked `@Target` application declares.
+enum CheckedTargetPolicy {
+    /// The application checked: its arguments are `kotlin.annotation.AnnotationTarget` entries, and
+    /// the targets they denote are the class's semantic policy.
+    Valid(crate::types::AnnotationTargets),
+    /// The application did not check (an argument of another enum is an argument type mismatch).
+    /// kotlinc still lists the entries it selected, by declared name, in the secondary
+    /// WRONG_ANNOTATION_TARGET diagnostics; the class has no semantic policy.
+    InvalidRecovery(crate::types::AnnotationTargets),
+}
+
+/// The class's `@Target` policy from its checked application, in declared order; `None` when it
+/// declares no `@Target`. Each argument is the enum entry the checker selected through the ordinary
+/// scope and import rules, so an unqualified or aliased import names the entry it selects, never
+/// its spelling.
+fn checked_target_policy(
     file: &File,
     file_index: u32,
     table: &SymbolTable,
     info: &TypeInfo,
     class: &ClassDecl,
-) -> Option<crate::types::AnnotationTargets> {
-    let (_, arguments) = class
-        .annotations
-        .iter()
-        .zip(&class.annotation_args)
-        .find(|(annotation, _)| {
-            table
-                .resolved_annotation(file_index, annotation)
-                .is_some_and(|name| name == type_name("kotlin/annotation/Target"))
-        })?;
-    let mut targets = Vec::new();
-    for &argument in arguments {
-        selected_target_entries(file, info, argument, &mut targets);
+) -> Option<CheckedTargetPolicy> {
+    let target = type_name("kotlin/annotation/Target");
+    let annotation_target = type_name("kotlin/annotation/AnnotationTarget");
+    let is_target = |annotation: &AnnotationRef| {
+        table.resolved_annotation(file_index, annotation) == Some(target)
+    };
+    let index = class.annotations.iter().position(is_target)?;
+    let mut leaves = Vec::new();
+    for &argument in &class.annotation_args[index] {
+        selected_entries(file, info, argument, &mut leaves);
     }
-    Some(crate::types::AnnotationTargets::kotlin(targets))
+    // Valid only when the application checked and every argument selected an entry declared by
+    // `kotlin.annotation.AnnotationTarget` itself.
+    let valid = info.applied_annotation(&class.annotations[index]).is_some()
+        && leaves
+            .iter()
+            .all(|leaf| leaf.is_some_and(|entry| entry.classifier == annotation_target));
+    let entries = leaves.into_iter().flatten();
+    Some(if valid {
+        CheckedTargetPolicy::Valid(crate::types::AnnotationTargets::kotlin(entries.filter_map(
+            |entry| crate::types::KotlinTarget::of_entry(entry.classifier, &entry.name),
+        )))
+    } else {
+        CheckedTargetPolicy::InvalidRecovery(crate::types::AnnotationTargets::kotlin(
+            entries.filter_map(|entry| {
+                crate::types::KotlinTarget::recovered_from_invalid_entry(&entry.name)
+            }),
+        ))
+    })
 }
 
-/// `@Target` takes a `vararg` of entries; the named form spells the same list as an array literal
-/// or `arrayOf`, so both flatten here.
-fn selected_target_entries(
+/// Each argument leaf's selected enum entry, `None` for a leaf that selected none. `@Target` takes
+/// a `vararg` of entries; the named form spells the same list as an array literal or `arrayOf`, so
+/// both flatten here.
+fn selected_entries<'i>(
     file: &File,
-    info: &TypeInfo,
+    info: &'i TypeInfo,
     argument: ExprId,
-    targets: &mut Vec<crate::types::KotlinTarget>,
+    leaves: &mut Vec<Option<&'i ResolvedEnumEntry>>,
 ) {
     if let Some(entry) = info.resolved_enum_entry(argument) {
-        targets.extend(crate::types::KotlinTarget::from_entry(&entry.name));
+        leaves.push(Some(entry));
         return;
     }
     let elements = match file.expr(argument) {
         Expr::AnnotationArrayLiteral(elements) => elements.as_slice(),
         Expr::Call { args, .. } => args.as_slice(),
-        _ => return,
+        _ => {
+            leaves.push(None);
+            return;
+        }
     };
     for &element in elements {
-        selected_target_entries(file, info, element, targets);
+        selected_entries(file, info, element, leaves);
     }
 }
 
@@ -413,13 +452,32 @@ impl Checker<'_> {
             });
     }
 
+    /// The targets WRONG_ANNOTATION_TARGET names for `internal`: its declared targets, or for a
+    /// source class whose own `@Target` application is invalid, kotlinc's recovery from it.
+    pub(super) fn diagnostic_annotation_targets(
+        &self,
+        internal: TypeName,
+    ) -> Option<crate::types::AnnotationTargets> {
+        if self.module.annotation_retention(internal).is_some() {
+            if let Some(targets) = self.module.annotation_targets().diagnostic(internal) {
+                return Some(targets);
+            }
+        }
+        self.declared_annotation_targets(internal)
+    }
+
     /// The targets `internal` declares, whether this module or a library declares the class.
     pub(super) fn declared_annotation_targets(
         &self,
         internal: TypeName,
     ) -> Option<crate::types::AnnotationTargets> {
         if self.module.annotation_retention(internal).is_some() {
-            return Some(self.module.annotation_targets(internal));
+            return Some(
+                self.module
+                    .annotation_targets()
+                    .semantic(internal)
+                    .unwrap_or(crate::types::AnnotationTargets::DEFAULT),
+            );
         }
         Some(
             self.resolver()

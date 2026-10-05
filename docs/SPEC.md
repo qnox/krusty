@@ -6394,18 +6394,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   classifier-annotation pass has bound each argument to an enum entry through the ordinary
   scope/import rules (kotlinc resolves `@Target` arguments before its target checker): `import
   kotlin.annotation.AnnotationTarget.PROPERTY_GETTER` then `@Target(PROPERTY_GETTER)` lists
-  `getter`, and an aliased import names the entry it selects, not its spelling. As in kotlinc, the
-  target is the selected entry's declared name whatever its enum:
-  `@Target(MyTarget.PROPERTY_GETTER)` is an argument type mismatch and still lists `getter`, and an
-  entry no target is named after lists nothing (`Applicable targets: ` with an empty list). A
-  mismatch is kotlinc's WRONG_ANNOTATION_TARGET at the `@`: `this annotation is not applicable to
-  target 'getter'. Applicable targets: <list>`, the Kotlin `@Target` entries in declared order
-  without duplicates, or for a Java `@Target` the union of each `ElementType`'s Kotlin targets in
-  Kotlin target order followed by `expression` (identical on 2.4.0, 2.4.10 and 2.4.20). Retained
-  applications are written on the getter/setter method (and the setter's parameter) by retention,
-  for member, top-level and companion properties, declared or default accessors alike. `@Metadata`
-  sets `HAS_ANNOTATIONS` on the accessor's flags word (`getter_flags` f7, `setter_flags` f8) and on
-  the setter value parameter, and writes the records to `Property.getter_annotation` (f15),
+  `getter`, and an aliased import names the entry it selects, not its spelling. Only an entry whose
+  resolved owner is exactly `kotlin.annotation.AnnotationTarget` denotes a target, and only a valid
+  application publishes the class's semantic policy. `@Target(MyTarget.PROPERTY_GETTER)` is an
+  argument type mismatch and leaves the class with none; kotlinc nevertheless reports secondary
+  WRONG_ANNOTATION_TARGET diagnostics from the entries the invalid argument selected, by declared
+  name (`getter` here, an empty list for an entry no target is named after), so that recovery is
+  kept as a separate, diagnostic-only record. The classfile and KLIB providers likewise keep only
+  `AnnotationTarget` (Kotlin) and `ElementType` (Java) elements. A mismatch is kotlinc's
+  WRONG_ANNOTATION_TARGET at the `@`: `this annotation is not applicable to target 'getter'.
+  Applicable targets: <list>`, the Kotlin `@Target` entries in declared order without duplicates, or
+  for a Java `@Target` the union of each `ElementType`'s Kotlin targets in Kotlin target order
+  followed by `expression` (identical on 2.4.0, 2.4.10 and 2.4.20). Retained applications are
+  written on the getter/setter method (and the setter's parameter) by retention, for member,
+  top-level and companion properties, declared or default accessors alike. `@Metadata` sets
+  `HAS_ANNOTATIONS` on the accessor's flags word (`getter_flags` f7, `setter_flags` f8) and on the
+  setter value parameter, and writes the records to `Property.getter_annotation` (f15),
   `setter_annotation` (f16) and the value parameter's `annotation` (f7), with arguments. A setter
   falls off the end of its body into its implicit `return`, which is marked on the body's last line
   (a block's closing `}`, an expression body's last line), as kotlinc does. Known gaps, independent

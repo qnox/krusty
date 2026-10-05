@@ -1572,7 +1572,7 @@ pub struct ResolvedModuleIndex {
     /// Resolved source annotation policies keyed by classifier identity. These are declaration
     /// header facts; no annotation syntax or source coordinate survives finalization.
     annotation_retentions: HashMap<TypeName, crate::types::AnnotationRetention>,
-    annotation_targets: HashMap<TypeName, crate::types::AnnotationTargets>,
+    annotation_targets: crate::types::DeclaredTargetPolicies,
     /// Stable resolved identity of every source classifier. Identity belongs to the declaration
     /// inventory and may be known before an ordinary body-local classifier's lexical parent header
     /// is checked in Pass 2.
@@ -2034,21 +2034,27 @@ impl ResolvedModuleIndex {
         );
     }
 
-    /// The targets a source annotation class's checked `@Target` application selected. Published
-    /// after the classifier-annotation pass has resolved the application's enum-entry arguments.
+    /// A source annotation class's `@Target` policy, published once the classifier-annotation pass
+    /// has checked the application: `valid` decides applicability, an invalid application only
+    /// supplies kotlinc's recovery for diagnostics (see [`crate::types::DeclaredTargetPolicies`]).
     pub(crate) fn publish_annotation_targets(
         &mut self,
         classifier: TypeName,
         targets: crate::types::AnnotationTargets,
+        valid: bool,
     ) {
         assert!(
             self.annotation_retentions.contains_key(&classifier),
             "annotation targets require the classifier's published annotation policy"
         );
-        assert!(
+        let published = if valid {
+            self.annotation_targets.publish_valid(classifier, targets)
+        } else {
             self.annotation_targets
-                .insert(classifier, targets)
-                .is_none(),
+                .publish_invalid_recovery(classifier, targets)
+        };
+        assert!(
+            published,
             "an annotation classifier may publish one target policy"
         );
     }
@@ -2060,14 +2066,8 @@ impl ResolvedModuleIndex {
         self.annotation_retentions.get(&classifier).copied()
     }
 
-    pub(crate) fn annotation_targets(
-        &self,
-        classifier: TypeName,
-    ) -> crate::types::AnnotationTargets {
-        self.annotation_targets
-            .get(&classifier)
-            .copied()
-            .unwrap_or(crate::types::AnnotationTargets::DEFAULT)
+    pub(crate) fn annotation_targets(&self) -> &crate::types::DeclaredTargetPolicies {
+        &self.annotation_targets
     }
 
     pub fn classifier_header(

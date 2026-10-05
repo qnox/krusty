@@ -5576,11 +5576,15 @@ fn classpath_annotation_targets(
     ci: &crate::jvm::classreader::ClassInfo,
 ) -> crate::types::AnnotationTargets {
     if !ci.kotlin_targets.is_empty() {
-        return crate::types::AnnotationTargets::kotlin(
-            ci.kotlin_targets
-                .iter()
-                .filter_map(|entry| crate::types::KotlinTarget::from_entry(entry)),
-        );
+        return crate::types::AnnotationTargets::kotlin(ci.kotlin_targets.iter().filter_map(
+            |entry| {
+                // The class reader kept only `kotlin.annotation.AnnotationTarget` elements.
+                crate::types::KotlinTarget::of_entry(
+                    crate::types::type_name("kotlin/annotation/AnnotationTarget"),
+                    entry,
+                )
+            },
+        ));
     }
     // A Kotlin annotation is identified by its own `@Metadata`; without a declared `@Target` it is
     // applicable everywhere.

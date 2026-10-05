@@ -54,7 +54,7 @@ impl Checker<'_> {
             else {
                 continue;
             };
-            let Some(targets) = self.declared_annotation_targets(classifier) else {
+            let Some(targets) = self.diagnostic_annotation_targets(classifier) else {
                 continue;
             };
             if targets.allows(target) || self.suppresses_diagnostic("WRONG_ANNOTATION_TARGET") {

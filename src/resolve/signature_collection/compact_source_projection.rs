@@ -406,10 +406,8 @@ pub(in crate::resolve) fn normalize_referenced_library_annotations(
             continue;
         }
         if let Some(targets) = library.annotation_targets {
-            table
-                .annotation_targets
-                .entry(annotation)
-                .or_insert(targets);
+            // A policy published earlier for the identity stays.
+            table.annotation_targets.publish_valid(annotation, targets);
         }
         let retention = match library.retention.as_deref() {
             Some("RUNTIME") => crate::types::AnnotationRetention::Runtime,

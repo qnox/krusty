@@ -1061,7 +1061,12 @@ fn read_class_attrs(r: &mut Reader, cp: &[C]) -> ClassAttrs {
                 if (is_kotlin_target && ename == "allowedTargets")
                     || (is_java_target && ename == "value")
                 {
-                    match read_element_value(&mut attr, cp, ElementValueExtract::EnumConstants) {
+                    let entries = ElementValueExtract::EnumConstants(if is_kotlin_target {
+                        "Lkotlin/annotation/AnnotationTarget;"
+                    } else {
+                        "Ljava/lang/annotation/ElementType;"
+                    });
+                    match read_element_value(&mut attr, cp, entries) {
                         Ok(Some(constants)) if is_kotlin_target => out.kotlin_targets = constants,
                         Ok(Some(constants)) => out.java_targets = constants,
                         Ok(None) => {}
@@ -1264,9 +1269,10 @@ enum ElementValueExtract {
     Skip,
     /// String elements (`s`) — `@Metadata`'s `d1`/`d2`.
     Strings,
-    /// Enum-constant elements (`e`) — an annotation's `@Target` entries, of which only the CONSTANT
-    /// name is kept (the enum type is implied by the element).
-    EnumConstants,
+    /// Enum-constant elements (`e`) of exactly the enum whose type descriptor is given — an
+    /// annotation's `@Target` entries (`AnnotationTarget` for Kotlin, `ElementType` for Java). Only
+    /// the constant name of a matching element is kept; an element of another enum is no entry.
+    EnumConstants(&'static str),
 }
 
 /// Skip an element_value, extracting an array's elements when `extract` asks for their shape.
@@ -1325,7 +1331,7 @@ fn read_element_value_body(
                 }
                 // An enum element is `e` + type descriptor + constant name, two indices where a
                 // string element has one — reading it as a string array would desync the walk.
-                ElementValueExtract::EnumConstants => {
+                ElementValueExtract::EnumConstants(descriptor) => {
                     let mut result = Vec::with_capacity(n);
                     for _ in 0..n {
                         let t = r.u1()? as char;
@@ -1333,9 +1339,11 @@ fn read_element_value_body(
                             read_element_value_body(r, cp, t, ElementValueExtract::Skip)?;
                             continue;
                         }
-                        r.u2()?; // enum type descriptor
+                        let owner = r.u2()?;
                         let constant = r.u2()?;
-                        result.push(utf8(constant));
+                        if utf8(owner) == descriptor {
+                            result.push(utf8(constant));
+                        }
                     }
                     return Ok(Some(result));
                 }

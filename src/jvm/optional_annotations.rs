@@ -254,8 +254,8 @@ fn declared_targets(declaration: &semantic::KotlinClass) -> crate::types::Annota
         single => std::slice::from_ref(single),
     };
     crate::types::AnnotationTargets::kotlin(entries.iter().filter_map(|element| match element {
-        semantic::AnnotationArgument::Enum { entry, .. } => {
-            crate::types::KotlinTarget::from_entry(entry)
+        semantic::AnnotationArgument::Enum { class, entry } => {
+            crate::types::KotlinTarget::of_entry(*class, entry)
         }
         _ => None,
     }))

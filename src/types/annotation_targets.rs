@@ -46,8 +46,26 @@ impl KotlinTarget {
         Self::Typealias,
     ];
 
-    /// The target an `AnnotationTarget` entry names.
-    pub fn from_entry(entry: &str) -> Option<Self> {
+    /// The target an enum entry denotes when its declaring enum is exactly
+    /// `kotlin.annotation.AnnotationTarget`. An entry of any other enum, whatever its name, is no
+    /// target. `owner` is the resolved or provider-normalized declaring classifier; `entry` is the
+    /// entry's declared name.
+    pub fn of_entry(owner: crate::types::TypeName, entry: &str) -> Option<Self> {
+        if owner != crate::types::type_name("kotlin/annotation/AnnotationTarget") {
+            return None;
+        }
+        Self::named(entry)
+    }
+
+    /// kotlinc's recovery for an INVALID `@Target` application, used only to reproduce the
+    /// secondary diagnostics kotlinc reports for it: `getAllowedAnnotationTargets` reads every
+    /// argument's selected entry by its declared name, ignoring the enum that declares it. Never a
+    /// semantic target policy.
+    pub fn recovered_from_invalid_entry(entry: &str) -> Option<Self> {
+        Self::named(entry)
+    }
+
+    fn named(entry: &str) -> Option<Self> {
         Some(match entry {
             "CLASS" => Self::Class,
             "ANNOTATION_CLASS" => Self::AnnotationClass,
@@ -82,6 +100,33 @@ impl KotlinTarget {
             "TYPE_USE" => &[Self::Type],
             _ => &[],
         }
+    }
+
+    /// Index into [`super::JAVA_ELEMENT_TYPES`] of the `ElementType` kotlinc mirrors this target
+    /// onto. `None` for a Kotlin-only target (`PROPERTY`, `FILE`, `TYPEALIAS`, `EXPRESSION`, which
+    /// the JVM cannot express); such a target contributes nothing to the mirror, though the mirror
+    /// itself is still emitted — a set of only Kotlin-only targets mirrors to an EMPTY array,
+    /// matching kotlinc, rather than being omitted.
+    ///
+    /// The rows are measured against kotlinc, not derived: the mapping is neither an identity
+    /// (`CLASS` becomes `TYPE`, `VALUE_PARAMETER` becomes `PARAMETER`) nor injective (`FUNCTION`,
+    /// `PROPERTY_GETTER` and `PROPERTY_SETTER` all become `METHOD`, and collapse to one entry).
+    pub fn java_element_type(self) -> Option<usize> {
+        let element = match self {
+            Self::Class => "TYPE",
+            Self::AnnotationClass => "ANNOTATION_TYPE",
+            Self::TypeParameter => "TYPE_PARAMETER",
+            Self::Field => "FIELD",
+            Self::LocalVariable => "LOCAL_VARIABLE",
+            Self::ValueParameter => "PARAMETER",
+            Self::Constructor => "CONSTRUCTOR",
+            Self::Function | Self::PropertyGetter | Self::PropertySetter => "METHOD",
+            Self::Type => "TYPE_USE",
+            Self::Property | Self::File | Self::Typealias | Self::Expression => return None,
+        };
+        super::JAVA_ELEMENT_TYPES
+            .iter()
+            .position(|&java| java == element)
     }
 
     /// The target's name in kotlinc's diagnostics.
@@ -220,6 +265,54 @@ impl AnnotationTargets {
         }
         self.allows(KotlinTarget::Field)
             .then_some(PropertyAnnotationSite::Field)
+    }
+}
+
+/// The `@Target` policies published for annotation classes, keyed by classifier identity.
+///
+/// Only a VALID policy is semantic: it decides where an application may sit and where an
+/// unprefixed property application lands. A source class whose `@Target` application is itself
+/// invalid (an argument type mismatch) has no semantic policy; kotlinc still derives secondary
+/// WRONG_ANNOTATION_TARGET diagnostics from it, so that recovery is kept apart and is consulted only
+/// when reporting them.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DeclaredTargetPolicies {
+    valid: std::collections::HashMap<super::TypeName, AnnotationTargets>,
+    invalid_recovery: std::collections::HashMap<super::TypeName, AnnotationTargets>,
+}
+
+impl DeclaredTargetPolicies {
+    /// Publish a valid policy; false when the classifier already has one.
+    pub fn publish_valid(
+        &mut self,
+        classifier: super::TypeName,
+        targets: AnnotationTargets,
+    ) -> bool {
+        !self.invalid_recovery.contains_key(&classifier)
+            && self.valid.insert(classifier, targets).is_none()
+    }
+
+    /// Record kotlinc's diagnostic recovery for an invalid `@Target` application; false when the
+    /// classifier already has a policy.
+    pub fn publish_invalid_recovery(
+        &mut self,
+        classifier: super::TypeName,
+        targets: AnnotationTargets,
+    ) -> bool {
+        !self.valid.contains_key(&classifier)
+            && self.invalid_recovery.insert(classifier, targets).is_none()
+    }
+
+    /// The semantic policy, when the classifier declares a valid `@Target`.
+    pub fn semantic(&self, classifier: super::TypeName) -> Option<AnnotationTargets> {
+        self.valid.get(&classifier).copied()
+    }
+
+    /// The targets WRONG_ANNOTATION_TARGET names: the valid policy, or for an invalid `@Target`
+    /// application kotlinc's recovery from it.
+    pub fn diagnostic(&self, classifier: super::TypeName) -> Option<AnnotationTargets> {
+        self.semantic(classifier)
+            .or_else(|| self.invalid_recovery.get(&classifier).copied())
     }
 }
 

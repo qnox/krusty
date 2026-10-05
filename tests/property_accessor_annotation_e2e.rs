@@ -330,9 +330,11 @@ fn an_imported_target_entry_is_checked_by_the_entry_it_selects_like_kotlinc() {
     common::assert_errors_match_kotlinc(&sources, &[]);
 }
 
-/// An entry of a repository-owned enum is an argument type mismatch. kotlinc's target policy still
-/// reads the entry the argument selected by its declared name, so `MyTarget.PROPERTY_GETTER` lists
-/// `getter`, and an entry no target is named after lists nothing.
+/// An entry of a repository-owned enum is an argument type mismatch, and the class gets no target
+/// policy. kotlinc (2.4.0, 2.4.10 and 2.4.20 alike) still reports secondary WRONG_ANNOTATION_TARGET
+/// diagnostics from the entry the invalid argument selected, by its declared name:
+/// `MyTarget.PROPERTY_GETTER` lists `getter`, and an entry no target is named after lists nothing.
+/// That recovery is diagnostic-only (see `frontend::tests::annotation_publication`).
 #[test]
 fn a_same_named_entry_of_another_enum_is_rejected_like_kotlinc() {
     use krusty::kotlin_version::KotlinVersion;
