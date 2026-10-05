@@ -1250,6 +1250,8 @@ pub(super) fn build_class_metadata_with_facts(
         Vec::new()
     };
     let nested_refs: Vec<&str> = nested_names.iter().map(String::as_str).collect();
+    let enclosing_type_parameters =
+        super::super::local_classifiers::enclosing_type_parameters(ir, c);
     let class_type_parameters = ir
         .class_signature(&c.fq_name())
         .map(|signature| signature.type_params.as_slice())
@@ -1339,7 +1341,10 @@ pub(super) fn build_class_metadata_with_facts(
             supertype_spellings: &supertype_spellings,
             type_params: &c.type_params,
             type_param_bounds: class_type_parameters,
-            captured_type_params: super::super::local_classifiers::captured_type_parameters(ir, c),
+            captured_type_params: super::super::local_classifiers::captured_type_parameters(
+                c,
+                &enclosing_type_parameters,
+            ),
             ctor_param_tparams: &ctor_param_tparams,
             ctor_param_annotations: &named_ctor_param_annotations,
             flags: class_metadata_flags(ir, c),

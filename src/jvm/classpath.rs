@@ -21,6 +21,7 @@ mod class_locations;
 pub mod content_snapshot;
 mod ct_sym_index;
 mod external_identities;
+mod inner_class_scopes;
 mod jimage_catalog;
 mod jimage_locations;
 use builtin_signatures::{
@@ -34,6 +35,8 @@ mod module_optional_annotations;
 mod package_facades;
 mod property_access;
 mod property_identity;
+mod stub_overlay;
+pub(super) use stub_overlay::StubOverlayGuard;
 #[cfg(test)]
 mod test_support;
 mod value_class_erasure;
@@ -1477,39 +1480,6 @@ const OPEN_ARCHIVE_CAP: usize = 16;
 const ALIAS_PACKAGE_CAP: usize = 1024;
 const GLOBAL_ALIAS_PACKAGE_CAP: usize = 8192;
 const SYMBOLS_CAP: usize = 65536;
-
-/// One lexical layer of in-memory declaration classes. A mixed-source compilation pushes its Java
-/// header classes above any request-local dependency overlay and restores the previous entries when
-/// the source-module provider is dropped. This keeps a reused classpath from leaking declarations
-/// between compilation requests.
-pub(super) struct StubOverlayGuard {
-    classpath: std::rc::Rc<Classpath>,
-    previous: Vec<(TypeName, Option<std::sync::Arc<ClassInfo>>)>,
-}
-
-impl Drop for StubOverlayGuard {
-    fn drop(&mut self) {
-        let affected = self
-            .previous
-            .iter()
-            .map(|(name, _)| *name)
-            .collect::<Vec<_>>();
-        {
-            let mut overlay = self.classpath.stub_overlay.borrow_mut();
-            for (name, previous) in self.previous.drain(..).rev() {
-                match previous {
-                    Some(class) => {
-                        overlay.insert(name, class);
-                    }
-                    None => {
-                        overlay.remove(&name);
-                    }
-                }
-            }
-        }
-        self.classpath.invalidate_overlay_memos(affected);
-    }
-}
 
 pub struct Classpath {
     entries: Vec<Entry>,
@@ -3400,9 +3370,11 @@ impl Classpath {
                     Err(error @ ReadError::BadKotlinMetadata(_)) => return Err(error),
                     Err(_) => return Ok(None),
                 };
-                Ok(class
-                    .this_class_matches(internal)
-                    .then(|| std::sync::Arc::new(class)))
+                if !class.this_class_matches(internal) {
+                    return Ok(None);
+                }
+                self.class_within_outer(class)
+                    .map(|class| Some(std::sync::Arc::new(class)))
             };
             let parsed = if incomplete {
                 let parsed = read_and_parse();
@@ -3461,100 +3433,6 @@ impl Classpath {
         let owner = classifier.nested_owner()?;
         let field = classifier.nested_segment_ref();
         declares(owner, field).then(|| (owner, field.to_string()))
-    }
-
-    /// Replace the in-memory class overlay and invalidate dependent lookups.
-    pub fn set_stub_overlay(&self, classes: Vec<(String, Vec<u8>)>) {
-        let mut map = HashMap::new();
-        for (_, bytes) in classes {
-            if let Ok(ci) = parse_class(&bytes) {
-                map.entry(ci.this_class)
-                    .or_insert_with(|| std::sync::Arc::new(ci));
-            }
-        }
-        let affected = self
-            .stub_overlay
-            .borrow()
-            .keys()
-            .copied()
-            .chain(map.keys().copied())
-            .collect::<std::collections::HashSet<_>>();
-        *self.stub_overlay.borrow_mut() = map;
-        self.invalidate_overlay_memos(affected);
-    }
-
-    /// Push source-module declaration classes without destroying an existing request-local
-    /// overlay. The returned guard restores exactly the shadowed entries on drop.
-    pub(super) fn push_stub_overlay(
-        self: &std::rc::Rc<Self>,
-        classes: Vec<(String, Vec<u8>)>,
-    ) -> StubOverlayGuard {
-        let mut parsed = HashMap::new();
-        for (_, bytes) in classes {
-            if let Ok(class) = parse_class(&bytes) {
-                parsed
-                    .entry(class.this_class)
-                    .or_insert_with(|| std::sync::Arc::new(class));
-            }
-        }
-        let affected = parsed.keys().copied().collect::<Vec<_>>();
-        let mut previous = Vec::with_capacity(parsed.len());
-        {
-            let mut overlay = self.stub_overlay.borrow_mut();
-            for (name, class) in parsed {
-                previous.push((name, overlay.insert(name, class)));
-            }
-        }
-        self.invalidate_overlay_memos(affected);
-        StubOverlayGuard {
-            classpath: self.clone(),
-            previous,
-        }
-    }
-
-    fn invalidate_overlay_memos(&self, classifiers: impl IntoIterator<Item = TypeName>) {
-        let classifiers = classifiers.into_iter().collect::<Vec<_>>();
-        if classifiers.is_empty() {
-            return;
-        }
-        {
-            let mut resolved = self.resolved_types.borrow_mut();
-            for classifier in &classifiers {
-                resolved.remove(classifier);
-            }
-        }
-        let mut symbols = self.symbols_memo.borrow_mut();
-        let mut packages = std::collections::HashSet::new();
-        let mut classifier_namespaces = std::collections::HashSet::new();
-        for classifier in classifiers {
-            let mut outermost = classifier;
-            classifier_namespaces.insert(classifier);
-            while let Some(owner) = outermost.nested_owner() {
-                classifier_namespaces.insert(owner);
-                outermost = owner;
-            }
-            packages.insert(outermost.namespace());
-        }
-        for package in packages {
-            symbols.remove(&SymbolNamespace::Package(package));
-        }
-        for classifier in classifier_namespaces {
-            symbols.remove(&SymbolNamespace::Classifier(classifier));
-        }
-    }
-
-    /// Remove all in-memory classes.
-    pub fn clear_stub_overlay(&self) {
-        if !self.stub_overlay.borrow().is_empty() {
-            let affected = self
-                .stub_overlay
-                .borrow()
-                .keys()
-                .copied()
-                .collect::<Vec<_>>();
-            self.stub_overlay.borrow_mut().clear();
-            self.invalidate_overlay_memos(affected);
-        }
     }
 
     /// The class or builtins jar whose attached sources declare `internal`.

@@ -5422,6 +5422,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   keeps its plain erased `Ty` (mirrors the suspend/`resolve_ty` policy above). This is why `m[k] ?: continue`
   correctly skips absent keys. NOT a hardcoded method list — the flag is read from `@Metadata`. Test:
   `tests/map_get_nullable_elvis_e2e.rs`.
+- **An inner class's metadata resolves its outer classes' type parameters through the outer class.**
+  kotlinc writes an outer parameter in an inner class's `@Metadata` by its joint id alone. The
+  classpath decodes an inner class (`Class.flags.IS_INNER`) within the type-parameter scope of the
+  outer class its `InnerClasses` entry names, so `inner class Inner { fun get(): P }` keeps its member
+  instead of dropping it for an unknown id. Test: `tests/inner_class_outer_tparam_e2e.rs`.
 - **`.kotlin_builtins` types decode in full — type parameters AND type arguments.** A builtins `Type` is
   either a `class_name` with `argument`s, or a reference to a declared `type_parameter` (by id, or by
   `type_parameter_name`); the decoder resolves all three, and each `Class`/`Function`/`Property` carries

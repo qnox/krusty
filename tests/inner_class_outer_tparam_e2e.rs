@@ -116,3 +116,36 @@ fun box(): String {
 
     common::expect_box_ok_with_stdlib(src, "ThreeLevelInnerTypeParameters");
 }
+
+/// A kotlinc-compiled library whose inner classes address the outer `P` by id alone.
+const KOTLINC_LIB: &str = "package lib\n\
+    class Outer<P>(val p: P) {\n\
+    \x20   inner class Inner {\n\
+    \x20       fun get(): P = p\n\
+    \x20       inner class Leaf {\n\
+    \x20           fun outer(): P = p\n\
+    \x20       }\n\
+    \x20   }\n\
+    }\n";
+
+const KOTLINC_LIB_USE: &str = "import lib.*\n\
+    fun first(o: Outer<String>): Any? = o.Inner().get()\n\
+    fun second(o: Outer<String>): Any? = o.Inner().Leaf().outer()\n\
+    fun box(): String {\n\
+    \x20   val o = Outer(\"O\")\n\
+    \x20   return (first(o) as String) + (second(Outer(\"K\")) as String)\n\
+    }\n";
+
+/// The consumer resolves an inner class's outer-parameter ids through the outer class's own
+/// metadata, at one and two levels of nesting.
+#[test]
+fn a_kotlinc_inner_class_member_returns_its_outer_parameter() {
+    let lib = common::kotlinc_lib_out(&[("Lib.kt", KOTLINC_LIB)])
+        .expect("reference kotlinc is provisioned");
+    let output =
+        common::compile_and_run_box(KOTLINC_LIB_USE, "Main", &[lib, common::stdlib_jar()], None)
+            .expect(
+                "krusty compiles against the kotlinc library and the JVM runs the box function",
+            );
+    assert_eq!(output, "OK");
+}

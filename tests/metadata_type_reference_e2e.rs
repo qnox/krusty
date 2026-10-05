@@ -172,3 +172,38 @@ fn a_nested_class_numbers_its_type_parameters_after_its_outer_classes() {
     assert_identical("nested_type_parameter_ids", SRC, "app/Outer$Middle$Leaf");
     assert_identical("nested_type_parameter_ids", SRC, "app/Outer$Middle");
 }
+
+/// An inner class's own bound on an outer parameter (`Q : P`) addresses `P` by its joint id alone:
+/// the outer serializer owns it, so its name never enters the inner class's string table.
+#[test]
+fn an_inner_class_bound_addresses_an_outer_parameter_by_id() {
+    const SRC: &str = "package app\n\
+        \n\
+        open class Base<X>\n\
+        \n\
+        class Outer<P> {\n\
+        \x20   inner class Inner<Q : P> : Base<P>() {\n\
+        \x20       fun pick(p: P, q: Q): P = p\n\
+        \x20   }\n\
+        }\n";
+    assert_identical("inner_outer_bound", SRC, "app/Outer$Inner");
+}
+
+/// An inner class two levels down addresses both outer classes' parameters by joint id and names
+/// only its own.
+#[test]
+fn a_doubly_inner_class_addresses_both_outer_parameters_by_id() {
+    const SRC: &str = "package app\n\
+        \n\
+        interface Link<A, B>\n\
+        \n\
+        class Outer<P> {\n\
+        \x20   inner class Middle<M : P> {\n\
+        \x20       inner class Leaf<L : M> : Link<P, M> {\n\
+        \x20           fun all(p: P, m: M, l: L): L = l\n\
+        \x20       }\n\
+        \x20   }\n\
+        }\n";
+    assert_identical("doubly_inner_ids", SRC, "app/Outer$Middle$Leaf");
+    assert_identical("doubly_inner_ids", SRC, "app/Outer$Middle");
+}

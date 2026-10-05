@@ -28,27 +28,32 @@ pub(super) fn is_local(ir: &IrFile, class: &IrClass) -> bool {
 /// How `class`'s `@Metadata` numbers the type parameters it captures. kotlinc serializes a class
 /// declared in executable code with no enclosing serializer, so its captured parameters are
 /// numbered on first use. A class nested in another is serialized under the outer one, whose
-/// interner already holds every enclosing class's parameters: those keep the ids before the nested
-/// class's own whether or not an `inner` class captures them.
+/// interner already holds every enclosing class's parameters: `enclosing` (see
+/// [`enclosing_type_parameters`]) keep the ids before the nested class's own whether or not an
+/// `inner` class captures them.
 pub(super) fn captured_type_parameters<'a>(
-    ir: &IrFile,
     class: &'a IrClass,
+    enclosing: &'a [String],
 ) -> crate::metadata::class_builder::CapturedTypeParameters<'a> {
     use crate::metadata::class_builder::CapturedTypeParameters;
     if class.is_local_class || class.is_anonymous_object {
-        return CapturedTypeParameters::NumberedOnUse(&class.captured_type_params);
+        CapturedTypeParameters::NumberedOnUse(&class.captured_type_params)
+    } else {
+        CapturedTypeParameters::Reserved(enclosing)
     }
-    let enclosing = class
-        .fq_name_id()
-        .existing_nested_owners()
+}
+
+/// The semantic identities of every type parameter `class`'s enclosing classes declare, outermost
+/// class first.
+pub(super) fn enclosing_type_parameters(ir: &IrFile, class: &IrClass) -> Vec<String> {
+    let mut owners = class.fq_name_id().existing_nested_owners();
+    owners.reverse();
+    owners
         .into_iter()
-        .filter_map(|owner| ir.class_id_by_name(owner))
-        .map(|owner| ir.classes[owner as usize].type_params.len())
-        .sum();
-    CapturedTypeParameters::Reserved {
-        enclosing,
-        captured: &class.captured_type_params,
-    }
+        .filter_map(|owner| ir.class_signature_name(owner))
+        .flat_map(|signature| &signature.type_params)
+        .map(|parameter| parameter.semantic_name.clone())
+        .collect()
 }
 
 /// Every classifier of the file whose `@Metadata` class id is local: those for which [`is_local`]
