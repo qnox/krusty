@@ -947,16 +947,9 @@ impl<'a> CommonIrBodySink<'a> {
                     .declaration_name(entry)
                     .ok_or(FirFileLoweringFailure::UnsupportedCallableOwner(entry))?
                     .to_owned();
-                let has_body = (0..index.declaration_count()).any(|child_raw| {
-                    let child = DeclarationId::from_raw(
-                        u32::try_from(child_raw)
-                            .expect("too many stable declarations for a packed id"),
-                    );
-                    index
-                        .declaration_anchor(child)
-                        .is_some_and(|child_anchor| child_anchor.owner == Some(entry))
-                });
-                let subclass = has_body.then(|| header.classifier.nested_child(&name));
+                let subclass = index
+                    .enum_entry_has_body(entry)
+                    .then(|| header.classifier.nested_child(&name));
                 let source_order = index
                     .source_order(entry)
                     .ok_or(FirFileLoweringFailure::MissingSourceOrder(entry))?;
@@ -979,7 +972,7 @@ impl<'a> CommonIrBodySink<'a> {
                     // constructor with a different parameter list. Finalization installs that
                     // already-selected list after the entry body arrives; predeclaration only marks
                     // this skeleton as an enum-entry subclass.
-                    entry_class.enum_entry_of = Some(Vec::new());
+                    entry_class.is_enum_entry = true;
                     let entry_class = self.ir.add_class(entry_class);
                     assert!(
                         self.ir

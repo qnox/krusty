@@ -133,19 +133,13 @@ fn write_u32(bytes: &mut [u8], offset: u32, value: u32) {
     bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
 }
 
-/// The parameters a class's primary constructor takes, beyond `this`.
+/// The parameters a class's primary constructor takes, beyond `this`: its `ctor_args`.
 ///
-/// Normally its `ctor_args`. A synthesized ENUM-ENTRY SUBCLASS is the exception: `Op.ADD { … }` is
-/// an instance of `Op$ADD`, which declares no constructor parameters of its own because the JVM's
-/// enum ABI gives it `(String name, int ordinal, <user>)` — a realization, not a Kotlin fact, which
-/// is why common IR records only the user types (`IrClass::enum_entry_of`). This generator stores
-/// the name and ordinal itself, at the layout `kotlin.Enum` contributes, so the subclass's
-/// constructor takes exactly those user parameters and passes them to the enum's.
+/// A synthesized ENUM-ENTRY SUBCLASS (`Op.ADD { … }` is an instance of `Op$ADD`) declares none: its
+/// superclass call carries the constant's arguments. This generator stores the name and ordinal
+/// itself, at the layout `kotlin.Enum` contributes, so neither constructor takes them.
 pub(super) fn constructor_parameters(ir: &IrFile, class: ClassId) -> Vec<Ty> {
     let declaration = &ir.classes[class as usize];
-    if let Some(user) = &declaration.enum_entry_of {
-        return user.clone();
-    }
     declaration
         .ctor_args
         .iter()
@@ -1819,11 +1813,6 @@ impl<'a> FileLowering<'a> {
         let mut slots = vec![Ty::Obj(declaration.fq_name_id(), &[])];
         slots.extend(constructor_parameters(self.ir, class));
         let signature = self.signature_of(&slots, Ty::Unit)?;
-        // An enum-entry subclass has no `super(…)` written anywhere: it passes on exactly the
-        // parameters it was given, which is the whole of what its constructor does beyond running
-        // the constant's own body.
-        let forwards_to_parent = declaration.enum_entry_of.is_some();
-
         let parent = match layout.superclass {
             Some(parent) => {
                 let parent_declaration = &self.ir.classes[parent as usize];
@@ -1832,22 +1821,18 @@ impl<'a> FileLowering<'a> {
                 // shape. Reading the primary's parameter list for every base call made the arity
                 // disagree and declined the file. Kotlin admits no two constructors of one class
                 // with the same parameter list, so a secondary matching the selection is it.
-                let sibling = if forwards_to_parent {
-                    None
-                } else {
-                    parent_declaration
-                        .secondary_ctors
-                        .iter()
-                        .position(|candidate| {
-                            candidate.prefix_params.is_empty()
-                                && candidate.params == declaration.super_ctor_params
-                        })
-                };
+                let sibling = parent_declaration
+                    .secondary_ctors
+                    .iter()
+                    .position(|candidate| {
+                        candidate.prefix_params.is_empty()
+                            && candidate.params == declaration.super_ctor_params
+                    });
                 let params: Vec<Ty> = match sibling {
                     Some(sibling) => parent_declaration.secondary_ctors[sibling].params.clone(),
                     None => constructor_parameters(self.ir, parent),
                 };
-                if !forwards_to_parent && declaration.super_args.len() != params.len() {
+                if declaration.super_args.len() != params.len() {
                     return Err(format!(
                         "a superclass constructor call of a different arity (`{}`)",
                         declaration.fq_name()
@@ -1953,20 +1938,16 @@ impl<'a> FileLowering<'a> {
             }
             if let Some((constructor, parent_params, omitted)) = &parent {
                 let mut arguments = vec![this];
-                if forwards_to_parent {
-                    arguments.extend_from_slice(&params[1..]);
-                } else {
-                    for (ordinal, (&argument, ty)) in
-                        declaration.super_args.iter().zip(parent_params).enumerate()
-                    {
-                        if omitted.contains(&(ordinal as u32)) {
-                            continue;
-                        }
-                        let Some(value) = body.coerce(argument, *ty)? else {
-                            return Err("a `Unit` superclass constructor argument".to_string());
-                        };
-                        arguments.push(value);
+                for (ordinal, (&argument, ty)) in
+                    declaration.super_args.iter().zip(parent_params).enumerate()
+                {
+                    if omitted.contains(&(ordinal as u32)) {
+                        continue;
                     }
+                    let Some(value) = body.coerce(argument, *ty)? else {
+                        return Err("a `Unit` superclass constructor argument".to_string());
+                    };
+                    arguments.push(value);
                 }
                 let func_ref = body.func_ref(*constructor);
                 body.emit_call(func_ref, &arguments)?;

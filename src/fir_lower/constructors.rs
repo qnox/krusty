@@ -1298,10 +1298,11 @@ pub(super) fn accept_constructor_body(
 }
 
 /// The declaration facts of a selected module constructor: its place among its class's constructors, and
-/// who may call it, from its class's modality and its declared visibility. Every source constructor
-/// of a sealed class is restricted, whatever its modifier says: Kotlin makes an unmodified one
-/// `protected` and rejects a public one. `None` when a header is missing, which a checked selection
-/// never leaves.
+/// who may call it, from its class's kind and modality and its declared visibility. Every source
+/// constructor of a sealed class is restricted, whatever its modifier says: Kotlin makes an
+/// unmodified one `protected` and rejects a public one. An enum class's constructors are private,
+/// whatever their modifier says. `None` when a header is missing, which a checked selection never
+/// leaves.
 pub(super) fn module_constructor_target(
     index: &ResolvedModuleIndex,
     constructor: DeclarationId,
@@ -1309,13 +1310,12 @@ pub(super) fn module_constructor_target(
     let ordinal = index.declaration_anchor(constructor)?.sibling;
     let classifier = index.enclosing_classifier(constructor)?;
     let visibility = index.declaration_header(constructor)?.visibility;
-    let sealed = index
-        .declaration_header(classifier.declaration)?
-        .flags
-        .has(crate::fir::DeclarationFlags::SEALED);
-    let access = if sealed {
+    let flags = index.declaration_header(classifier.declaration)?.flags;
+    let access = if flags.has(crate::fir::DeclarationFlags::SEALED) {
         IrConstructorAccess::SealedClass
-    } else if visibility == crate::types::Visibility::Private {
+    } else if flags.has(crate::fir::DeclarationFlags::ENUM)
+        || visibility == crate::types::Visibility::Private
+    {
         IrConstructorAccess::Private
     } else {
         IrConstructorAccess::Unrestricted
