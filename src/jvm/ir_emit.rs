@@ -5248,11 +5248,10 @@ fn emit_method_inner_with_holder(
     // attribute exists for a source or Java caller, and nothing can name these methods to call
     // them. Keep this scoped to the producer's exact identities; unrelated synthetic methods may
     // still have a source-visible generic contract.
-    // kotlinc maps a lambda body's signature without generics, like any `$lambda$` method.
-    let method_sig = (!ir.serialization_cache_methods.contains(&fid)
-        && !ir.lambda_origins.contains_key(&fid))
-    .then(|| declared_method_signature(&signature_formatter, ir, env.override_results, fid))
-    .flatten();
+    // kotlinc maps a lambda literal's body without generics; an anonymous function's keeps them.
+    let method_sig = (!ir.serialization_cache_methods.contains(&fid) && !ir.is_lambda_literal(fid))
+        .then(|| declared_method_signature(&signature_formatter, ir, env.override_results, fid))
+        .flatten();
     let reserved_sig = match holder_receiver {
         Some(receiver) => default_impls::holder_method_signature(
             &signature_formatter,
