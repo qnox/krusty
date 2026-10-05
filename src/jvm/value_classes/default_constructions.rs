@@ -68,7 +68,7 @@ fn sibling_call(
         .expect("a checked construction records its declared parameters");
     let physical = declared.iter().map(|p| erase(p, under)).collect();
     let (mut parameters, args, _) =
-        crate::jvm::module_calls::realize_default_arguments(ir, physical, args, omitted, None)
+        crate::jvm::module_calls::realize_default_arguments(ir, physical, args, omitted, None, &[])
             .expect("a checked construction's omissions fit its constructor's parameters");
     *parameters
         .last_mut()

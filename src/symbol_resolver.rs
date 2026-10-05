@@ -2014,7 +2014,22 @@ impl<'a> SymbolResolver<'a> {
             .module
             .is_some_and(|module| module.classifier(internal).is_some())
         {
-            let declaring_owner = internal.nested_owner();
+            // A private member of a companion object is visible throughout the class that owns the
+            // companion (kotlinc's private visibility treats the companion's containing class as
+            // the declaring scope), so `Outer` may name `Outer$Companion$Hidden`.
+            let declaring_owner = internal.nested_owner().map(|declaring_owner| {
+                match declaring_owner.nested_owner() {
+                    Some(outer)
+                        if visibility == crate::types::Visibility::Private
+                            && self.src.classifier(outer).and_then(|outer| {
+                                outer.companion_object.as_ref().map(|(_, name)| *name)
+                            }) == Some(declaring_owner) =>
+                    {
+                        outer
+                    }
+                    _ => declaring_owner,
+                }
+            });
             if declaring_owner.is_some_and(|declaring_owner| {
                 self.lexical_classes
                     .iter()
