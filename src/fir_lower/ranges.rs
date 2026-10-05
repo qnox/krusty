@@ -171,12 +171,7 @@ impl BodyLowering<'_> {
                 end_slot,
                 value_slot,
             );
-            let false_value = self.ir.add_expr(IrExpr::Const(IrConst::Boolean(false)));
-            return self.ir.add_expr(IrExpr::PrimitiveBinOp {
-                op: IrBinOp::Eq,
-                lhs: contained,
-                rhs: false_value,
-            });
+            return self.ir.add_negation(contained);
         }
         let (low, high, high_strict) = match operation {
             FirRangeOperation::Through => (start_slot, end_slot, false),

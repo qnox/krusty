@@ -102,6 +102,8 @@ mod bare_accessor_and_setter_bridge_e2e;
 mod bazel_cli_contract_e2e;
 #[path = "block_slot_reuse_e2e.rs"]
 mod block_slot_reuse_e2e;
+#[path = "boolean_literal_equality_e2e.rs"]
+mod boolean_literal_equality_e2e;
 #[path = "bound_expr_ref_e2e.rs"]
 mod bound_expr_ref_e2e;
 #[path = "bound_library_ref_e2e.rs"]

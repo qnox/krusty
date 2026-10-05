@@ -9970,6 +9970,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   every protected range and local variable left with no instruction even when nothing is dead at
   that point, as kotlinc's `removeEmptyCatchBlocks` and `prepareForEmitting` do
   (`dead_code::tests::a_range_an_earlier_pass_emptied_goes_though_nothing_is_dead`).
+- **A `Boolean` compared with a `Boolean` literal is an ordinary two-operand comparison; only a
+  negation is a polarity.** kotlinc's `Equals` sends two primitive `Boolean` operands to
+  `BooleanComparison`, which materializes both and jumps with `if_icmp<cond>`; it never reads a
+  literal operand as a polarity. Only the constant pass above changes the shape afterwards, and only
+  for a known `0` on top: `b == false` and `b != false` become `ifne`/`ifeq` on `b`, while
+  `b == true` keeps `iconst_1; if_icmpne`, `false == b` keeps `iconst_0; iload; if_icmpne`,
+  `(x == y) == false` materializes `x == y` before the folded `ifne` tests it, and a subject
+  `when (b) { true -> … }` compares like `b == true`. kotlinc's `not` (a source `!`, `!in`, a
+  negated `!=` that is built as `!(a == b)`, a data class `equals` guard's `irNotEquals`) instead
+  jumps on its operand with the opposite sense. Common IR spells a negation as the same
+  `operand == false` comparison, so lowering records it (`IrFile::add_negation`,
+  `IrFile::negations`, copied with the expression), and the JVM condition emitter flips the jump
+  only for a recorded negation. Test: `tests/boolean_literal_equality_e2e.rs`.
 - **A discarded value whose pushers are all loads or constants is not pushed, as kotlinc's
   `PopBackwardPropagationTransformer` does, and dead code goes before the `goto` and `nop` steps.**
   The pass runs after StackPeephole (step `PopBackwardPropagation`,
