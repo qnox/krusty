@@ -2975,6 +2975,15 @@ impl StreamedHeaderModule {
         self.type_use_annotations.occurrences(source)
     }
 
+    /// Each named function-type parameter of `source`: its type's start offset and its name, which
+    /// `@Metadata` records as a `@ParameterName` annotation on that type.
+    pub(crate) fn function_type_parameter_names(
+        &self,
+        source: SourceFileId,
+    ) -> impl Iterator<Item = (u32, &str)> + '_ {
+        self.type_use_annotations.parameter_names(source)
+    }
+
     pub(crate) fn detached_type_roots(
         &self,
         source: SourceFileId,

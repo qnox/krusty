@@ -2391,6 +2391,8 @@ mod toplevel_property_ref_e2e;
 
 #[path = "erased_parameter_boxing_e2e.rs"]
 mod erased_parameter_boxing_e2e;
+#[path = "function_type_parameter_name_e2e.rs"]
+mod function_type_parameter_name_e2e;
 #[path = "hidden_deprecation_overload_e2e.rs"]
 mod hidden_deprecation_overload_e2e;
 #[path = "super_argument_outer_receiver_e2e.rs"]
