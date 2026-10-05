@@ -51,33 +51,72 @@ pub struct PropertyAnnotations {
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct DeclarationAnnotations(Vec<RetainedAnnotation>);
+pub struct DeclarationAnnotations {
+    retained: Vec<RetainedAnnotation>,
+    /// The declaration also carried non-SOURCE `@OptionalExpectation` applications with no actual
+    /// on this platform. kotlinc removes them from IR with their `expect` classes, so no class
+    /// file or metadata record names them, yet the declaration's metadata flags still report
+    /// `hasAnnotations` (kotlinc derives that flag from FIR, before the removal).
+    erased_optional_expectations: bool,
+}
 
 impl DeclarationAnnotations {
     pub fn new(annotations: Vec<RetainedAnnotation>) -> Self {
-        Self(annotations)
+        Self {
+            retained: annotations,
+            erased_optional_expectations: false,
+        }
+    }
+
+    /// Partition checked applications for one declaration: SOURCE retention is dropped, an
+    /// optional expectation leaves only the [`Self::declares_annotations`] fact, and every other
+    /// application is retained.
+    pub fn from_checked<'a>(
+        applications: impl IntoIterator<Item = (&'a crate::types::AppliedAnnotation, AppliedAnnotation)>,
+    ) -> Self {
+        let mut annotations = Self::default();
+        for (checked, annotation) in applications {
+            if checked.retention == crate::types::AnnotationRetention::Source {
+                continue;
+            }
+            if checked.facts.optional_expectation {
+                annotations.erased_optional_expectations = true;
+                continue;
+            }
+            annotations.retained.push(RetainedAnnotation {
+                retention: checked.retention,
+                annotation,
+                facts: checked.facts,
+            });
+        }
+        annotations
+    }
+
+    /// Whether the declaration declares annotations — the `hasAnnotations` fact its metadata
+    /// reports: a retained application or an erased optional expectation. Never derive it from
+    /// [`Self::retains_none`].
+    pub fn declares_annotations(&self) -> bool {
+        !self.retained.is_empty() || self.erased_optional_expectations
     }
 
     pub fn iter(&self) -> std::slice::Iter<'_, RetainedAnnotation> {
-        self.0.iter()
+        self.retained.iter()
     }
 
     pub(super) fn iter_mut(&mut self) -> std::slice::IterMut<'_, RetainedAnnotation> {
-        self.0.iter_mut()
+        self.retained.iter_mut()
     }
 
     /// Applied annotation payloads in declaration order, independent of the physical retention
     /// partition a backend may later require.
     pub fn applications(&self) -> impl Iterator<Item = &AppliedAnnotation> {
-        self.0.iter().map(|retained| &retained.annotation)
+        self.retained.iter().map(|retained| &retained.annotation)
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    pub fn len(&self) -> usize {
-        self.0.len()
+    /// Whether no application survives into the class file. This is a physical fact; whether the
+    /// declaration declares annotations is [`Self::declares_annotations`].
+    pub fn retains_none(&self) -> bool {
+        self.retained.is_empty()
     }
 
     /// Whether these annotations include `@kotlin.Deprecated` at any level. kotlinc additionally
@@ -93,6 +132,72 @@ impl DeclarationAnnotations {
     /// `ACC_SYNTHETIC`; both facts follow from this one annotation.
     pub fn deprecated_hidden(&self) -> bool {
         self.iter().any(|retained| retained.facts.deprecated_hidden)
+    }
+}
+
+/// Annotations written on one property's accessors (`@A get()`, `@A set(v)`) and on its setter's
+/// value parameter (`set(@A v)`).
+#[derive(Clone, Debug, Default)]
+pub struct AccessorAnnotations {
+    pub getter: DeclarationAnnotations,
+    pub setter: DeclarationAnnotations,
+    pub setter_parameter: DeclarationAnnotations,
+}
+
+impl AccessorAnnotations {
+    pub fn declares_annotations(&self) -> bool {
+        self.getter.declares_annotations()
+            || self.setter.declares_annotations()
+            || self.setter_parameter.declares_annotations()
+    }
+}
+
+/// A frontend-checked annotation argument, as the constant the backends encode.
+impl From<&crate::types::AnnotationValue> for AnnoValue {
+    fn from(value: &crate::types::AnnotationValue) -> Self {
+        use crate::types::AnnotationValue;
+        match value {
+            AnnotationValue::Int(value) => AnnoValue::Const(IrConst::Int(*value)),
+            AnnotationValue::Byte(value) => AnnoValue::Const(IrConst::Byte(*value)),
+            AnnotationValue::Short(value) => AnnoValue::Const(IrConst::Short(*value)),
+            AnnotationValue::Long(value) => AnnoValue::Const(IrConst::Long(*value)),
+            AnnotationValue::Float(value) => AnnoValue::Const(IrConst::Float(*value)),
+            AnnotationValue::Double(value) => AnnoValue::Const(IrConst::Double(*value)),
+            AnnotationValue::Boolean(value) => AnnoValue::Const(IrConst::Boolean(*value)),
+            AnnotationValue::Char(value) => AnnoValue::Const(IrConst::Char(*value)),
+            AnnotationValue::String(value) => AnnoValue::Const(IrConst::String(value.clone())),
+            AnnotationValue::Enum(internal, constant) => {
+                AnnoValue::Enum(*internal, constant.clone())
+            }
+            AnnotationValue::Class(ty) => AnnoValue::Class(*ty),
+            AnnotationValue::Annotation { internal, values } => {
+                AnnoValue::Annotation(AppliedAnnotation {
+                    internal: *internal,
+                    values: values
+                        .iter()
+                        .map(|(name, value)| (name.clone(), AnnoValue::from(value)))
+                        .collect(),
+                })
+            }
+            AnnotationValue::Array(values) => {
+                AnnoValue::Array(values.iter().map(AnnoValue::from).collect())
+            }
+        }
+    }
+}
+
+/// A provider-normalized annotation application (a checked source one, or one decoded from a
+/// dependency), as the applied annotation the backends encode.
+impl From<&crate::types::ResolvedAnnotation> for AppliedAnnotation {
+    fn from(annotation: &crate::types::ResolvedAnnotation) -> Self {
+        Self {
+            internal: annotation.annotation,
+            values: annotation
+                .arguments
+                .iter()
+                .map(|(name, value)| (name.clone(), AnnoValue::from(value)))
+                .collect(),
+        }
     }
 }
 

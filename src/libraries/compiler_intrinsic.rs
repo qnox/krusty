@@ -45,6 +45,9 @@ pub enum CompilerIntrinsic {
     /// `hashCode()` as a builtin scalar class declares it (`Int.hashCode(): Int`). kotlinc's `HashCode`
     /// intrinsic hashes the unboxed value through its wrapper's static `hashCode`, never boxing it.
     PrimitiveHashCode,
+    /// `equals(Any?)` as a builtin scalar class declares it (`Int.equals(Any?): Boolean`). kotlinc's
+    /// `ExplicitEquals` intrinsic compares both operands as objects through `Object.equals`.
+    PrimitiveEquals,
     /// Exact builtin `Boolean.not()` declaration. Kotlin exposes it as an ordinary member, but the
     /// target realizes logical negation directly because no platform method implements it.
     BooleanNot,
@@ -66,7 +69,6 @@ pub enum CompilerIntrinsic {
     /// `@InlineOnly` suspend property whose private throwing accessor is never invoked directly.
     CoroutineContext,
     CoroutineSuspended,
-    SuspendCoroutine,
     SuspendCoroutineUninterceptedOrReturn,
     EnumValues,
     EnumValueOf,

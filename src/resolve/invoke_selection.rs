@@ -137,6 +137,36 @@ impl Checker<'_> {
         }
     }
 
+    /// The function type an invoked value is called as, if it is called as a function value at all.
+    /// A value of a classifier type that implements a function type (`class F : (Int) -> Int`) is
+    /// not: its `invoke` member, declared or inherited, is the call target, as in kotlinc, which
+    /// calls `F.invoke` rather than `Function1.invoke`. The builtin function classifiers
+    /// (`KFunction0`, `KSuspendFunction1`) are function types of a reflective kind, so a value of
+    /// one is still invoked as its function type.
+    pub(super) fn invoke_function_view(
+        &self,
+        scope: &CheckerScope<'_>,
+        receiver: ExprId,
+        receiver_ty: Ty,
+    ) -> Option<Ty> {
+        let callable_object = match receiver_ty.non_null() {
+            Ty::Obj(classifier, _) => {
+                crate::libraries::function_classifiers::classifier(classifier).is_none()
+            }
+            _ => false,
+        };
+        if callable_object {
+            // Only a callable reference carries an exact function shape beside its nominal
+            // reflection type; any other classifier value is invoked through its member.
+            return self
+                .callable_reference_types
+                .get(&receiver)
+                .or_else(|| self.read_callable_reference_types.get(&receiver))
+                .copied();
+        }
+        self.expression_function_type(scope, receiver, receiver_ty)
+    }
+
     /// Whether invoking a type-parameter value selects a function constituent other than the one its
     /// first bound (followed through bounds that are type parameters) already denotes. The value is
     /// then viewed as that constituent, as a member declared only on a later bound is
@@ -662,15 +692,12 @@ impl Checker<'_> {
         ) {
             return InvokeResolution::Selected(Ty::Error);
         }
-        let context_args = shape
-            .context_sources
-            .iter()
-            .flatten()
-            .cloned()
-            .collect::<Vec<_>>();
-        if !context_args.is_empty() {
-            self.context_args.insert(call, context_args.clone());
-            self.mark_context_extension_receiver_used(scope, call, &context_args);
+        let context_args = shape.context_sources.clone();
+        let implicit_context_args = context_args.iter().flatten().cloned().collect::<Vec<_>>();
+        if !implicit_context_args.is_empty() {
+            self.context_args
+                .insert(call, implicit_context_args.clone());
+            self.mark_context_extension_receiver_used(scope, call, &implicit_context_args);
         }
         let ret = selected.callable.ret;
         let target = if extension_receiver.is_none() {
@@ -985,7 +1012,7 @@ impl Checker<'_> {
         let semantic_receiver_ty = if let Some(value_class) = value_class_receiver {
             value_class
         } else {
-            self.expression_function_type(scope, receiver, receiver_ty)
+            self.invoke_function_view(scope, receiver, receiver_ty)
                 .unwrap_or(receiver_ty)
         };
         crate::trace_compiler!(
@@ -1283,15 +1310,17 @@ impl Checker<'_> {
                     ) {
                         return InvokeResolution::Selected(Ty::Error);
                     }
-                    let context_args = shape
-                        .context_sources
-                        .iter()
-                        .flatten()
-                        .cloned()
-                        .collect::<Vec<_>>();
-                    if !context_args.is_empty() {
-                        self.context_args.insert(call, context_args.clone());
-                        self.mark_context_extension_receiver_used(scope, call, &context_args);
+                    let context_args = shape.context_sources.clone();
+                    let implicit_context_args =
+                        context_args.iter().flatten().cloned().collect::<Vec<_>>();
+                    if !implicit_context_args.is_empty() {
+                        self.context_args
+                            .insert(call, implicit_context_args.clone());
+                        self.mark_context_extension_receiver_used(
+                            scope,
+                            call,
+                            &implicit_context_args,
+                        );
                     }
                     let ret = selected.callable.ret;
                     let target =

@@ -240,3 +240,219 @@ fn a_value_class_lambda_class_stores_its_captured_receiver_like_kotlinc() {
         );
     }
 }
+
+/// An anonymous object or local class written in a value class is lifted with the member's static
+/// too, so the receiver it captures is that static's value: its field, constructor parameter and
+/// local-variable row are `$arg0` in a member's or accessor's `-impl`, `$tmp0` in the primary
+/// `constructor-impl` and `$tmp0_$this` in a secondary one, also through an enclosing lambda or
+/// local function. An ordinary class's instance stays `this$0`, passed as `$receiver`.
+const OBJECTS: &str = "interface Box { fun get(): Any }\n\
+    @JvmInline value class Tag(val s: String)\n\
+    @JvmInline value class O(val s: String) {\n\
+    \x20   init {\n\
+    \x20       val o = object : Box { override fun get(): Any = this@O }\n\
+    \x20       o.get()\n\
+    \x20   }\n\
+    \x20   init {\n\
+    \x20       fun li(): Any = object : Box { override fun get(): Any = this@O }\n\
+    \x20       li()\n\
+    \x20   }\n\
+    \x20   constructor(t: Tag, u: Tag) : this(u.s) {\n\
+    \x20       val o2 = object : Box { override fun get(): Any = this@O }\n\
+    \x20       o2.get()\n\
+    \x20   }\n\
+    \x20   fun m(): Box = object : Box { override fun get(): Any = this@O }\n\
+    \x20   val p: Box get() = object : Box { override fun get(): Any = this@O }\n\
+    \x20   var q: Box\n\
+    \x20       get() = object : Box { override fun get(): Any = this@O }\n\
+    \x20       set(v) { object : Box { override fun get(): Any = this@O }.get() }\n\
+    \x20   fun mx(x: Int): Box = object : Box { override fun get(): Any = this@O.s + x }\n\
+    \x20   fun loc(): Box {\n\
+    \x20       class L : Box { override fun get(): Any = this@O }\n\
+    \x20       return L()\n\
+    \x20   }\n\
+    \x20   fun inLam(): () -> Box = { object : Box { override fun get(): Any = this@O } }\n\
+    \x20   fun inLoc(): Box {\n\
+    \x20       fun lf(): Box = object : Box { override fun get(): Any = this@O }\n\
+    \x20       return lf()\n\
+    \x20   }\n\
+    }\n\
+    class Plain(val s: String) {\n\
+    \x20   fun m(): Box = object : Box { override fun get(): Any = this@Plain }\n\
+    }\n";
+
+#[test]
+fn a_value_class_anonymous_object_stores_its_captured_receiver_like_kotlinc() {
+    let classes = common::classes_against_kotlinc_module(&[("Objects.kt", OBJECTS)]);
+    for class in [
+        "O$o$1",
+        "O$li$1",
+        "O$o2$1",
+        "O$m$1",
+        "O$p$1",
+        "O$q$1",
+        "O$q$2",
+        "O$mx$1",
+        "O$loc$L",
+        "O$inLam$1$1",
+        "O$inLoc$lf$1",
+        "Plain$m$1",
+    ] {
+        let (reference, krusty) = classes.class_listing(class);
+        assert_eq!(
+            krusty, reference,
+            "{class}: kotlinc's fields, code, debug tables and enclosing method"
+        );
+    }
+}
+
+/// kotlinc lowers a value class's member or accessor to a static before it lifts what the
+/// declaration contains, so the declaration's own extension receiver is an ordinary parameter of
+/// that static, `$this$mext`, which a lambda, suspend lambda, anonymous object or local class
+/// captures like any value: its field and constructor parameter are both `$this_mext`, where an
+/// ordinary class's member extension passes its field as `$receiver`. A local extension function is
+/// lifted, not lowered to a static, so its receiver stays a receiver, passed as `$receiver`. A
+/// suspend lambda is no source class: an object it declares captures what the lambda captured, the
+/// value-class static's `$arg0`.
+const MEMBER_EXTENSIONS: &str = "interface Box { fun get(): Any }\n\
+    class Two(val first: Any, val second: Any)\n\
+    @JvmInline value class Tag(val s: String)\n\
+    @JvmInline value class W(val s: String) {\n\
+    \x20   fun Tag.mext(): () -> W = { W(this.s + this@W.s) }\n\
+    \x20   val Tag.pe: () -> W get() = { W(this.s + this@W.s) }\n\
+    \x20   fun Tag.msus(): suspend () -> Two = { Two(this, this@W) }\n\
+    \x20   fun Tag.mo(): Box = object : Box { override fun get(): Any = this@mo }\n\
+    \x20   val Tag.extObj: Box get() = object : Box { override fun get(): Any = this@extObj }\n\
+    \x20   fun Tag.mlc(): Box {\n\
+    \x20       class LL : Box { override fun get(): Any = this@mlc }\n\
+    \x20       return LL()\n\
+    \x20   }\n\
+    \x20   fun Tag.inLoc(): Box {\n\
+    \x20       fun lf(): Box = object : Box { override fun get(): Any = this@inLoc }\n\
+    \x20       return lf()\n\
+    \x20   }\n\
+    \x20   fun m(): Any {\n\
+    \x20       fun Tag.loc(): () -> W = { W(this.s + this@W.s) }\n\
+    \x20       return Tag(\"\").loc()\n\
+    \x20   }\n\
+    \x20   fun su(): suspend () -> Box = { object : Box { override fun get(): Any = this@W } }\n\
+    \x20   fun Tag.esu(): suspend () -> Box = { object : Box { override fun get(): Any = this@esu } }\n\
+    }\n\
+    class Plain(val s: String) {\n\
+    \x20   fun Tag.pext(): () -> W = { W(this.s + this@Plain.s) }\n\
+    \x20   fun Tag.po(): Box = object : Box { override fun get(): Any = this@po }\n\
+    }\n";
+
+#[test]
+fn a_value_class_member_extension_receiver_capture_is_a_captured_value_like_kotlinc() {
+    let classes =
+        common::classes_against_kotlinc_module(&[("MemberExtensions.kt", MEMBER_EXTENSIONS)]);
+    for class in [
+        "W$mext$1",
+        "W$pe$1",
+        "W$mo$1",
+        "W$extObj$1",
+        "W$mlc$LL",
+        "W$inLoc$lf$1",
+        "W$m$loc$1",
+        "Plain$pext$1",
+        "Plain$po$1",
+    ] {
+        let (reference, krusty) = classes.class_listing(class);
+        assert_eq!(
+            krusty, reference,
+            "{class}: kotlinc's fields, code, debug tables and enclosing method"
+        );
+    }
+    // A suspend lambda's annotations are laid out from its own pool, and krusty orders the
+    // `InnerClasses` rows of an object declared in one apart from kotlinc; those classes are
+    // compared by their members and their constructor: the fields it stores and their
+    // local-variable rows.
+    for (class, constructor) in [
+        (
+            "W$msus$1",
+            "W$msus$1(java.lang.String, java.lang.String, kotlin.coroutines.Continuation<? super W$msus$1>);",
+        ),
+        ("W$su$1$1", "W$su$1$1(java.lang.String);"),
+        ("W$esu$1$1", "W$esu$1$1(java.lang.String);"),
+    ] {
+        let reference = classes
+            .reference
+            .get(class)
+            .unwrap_or_else(|| panic!("kotlinc writes {class}"));
+        let krusty = classes
+            .krusty
+            .get(class)
+            .unwrap_or_else(|| panic!("krusty writes {class}"));
+        assert_eq!(
+            common::member_table(krusty),
+            common::member_table(reference),
+            "{class}: kotlinc's fields and methods"
+        );
+        let (reference, krusty) = classes.method_listing(class, constructor);
+        assert_eq!(krusty, reference, "{class}: {constructor}");
+    }
+}
+
+/// The value-class static's value is captured into each local or anonymous class in turn, so an
+/// object written in a member of a local class or anonymous object inside a value-class member
+/// captures the value class's instance as that value too: field, constructor parameter and
+/// local-variable row are `$arg0`, read from the enclosing class's own `$arg0`, ahead of the
+/// enclosing class's instance `this$0` when it uses that as well. An ordinary class's instance
+/// stays `this$0` however deep.
+const NESTED_OBJECTS: &str = "interface Box { fun get(): Any }\n\
+    @JvmInline value class W(val s: String) {\n\
+    \x20   fun inObj(): Box = object : Box {\n\
+    \x20       override fun get(): Any {\n\
+    \x20           val o = object : Box { override fun get(): Any = this@W }\n\
+    \x20           return o.get()\n\
+    \x20       }\n\
+    \x20   }\n\
+    \x20   fun inLocal(): Box {\n\
+    \x20       class L : Box {\n\
+    \x20           override fun get(): Any {\n\
+    \x20               val o = object : Box { override fun get(): Any = this@W }\n\
+    \x20               return o.get()\n\
+    \x20           }\n\
+    \x20       }\n\
+    \x20       return L()\n\
+    \x20   }\n\
+    \x20   fun inLocalBoth(): Box {\n\
+    \x20       class L(val n: Int) : Box {\n\
+    \x20           override fun get(): Any {\n\
+    \x20               val o = object : Box { override fun get(): Any = this@W.s + this@L.n }\n\
+    \x20               return o.get()\n\
+    \x20           }\n\
+    \x20       }\n\
+    \x20       return L(1)\n\
+    \x20   }\n\
+    }\n\
+    class Plain(val s: String) {\n\
+    \x20   fun inObj(): Box = object : Box {\n\
+    \x20       override fun get(): Any {\n\
+    \x20           val o = object : Box { override fun get(): Any = this@Plain }\n\
+    \x20           return o.get()\n\
+    \x20       }\n\
+    \x20   }\n\
+    }\n";
+
+#[test]
+fn an_object_nested_in_a_value_class_members_local_class_captures_the_static_value_like_kotlinc() {
+    let classes = common::classes_against_kotlinc_module(&[("NestedObjects.kt", NESTED_OBJECTS)]);
+    for class in [
+        "W$inObj$1",
+        "W$inObj$1$get$o$1",
+        "W$inLocal$L",
+        "W$inLocal$L$get$o$1",
+        "W$inLocalBoth$L",
+        "W$inLocalBoth$L$get$o$1",
+        "Plain$inObj$1",
+        "Plain$inObj$1$get$o$1",
+    ] {
+        let (reference, krusty) = classes.class_listing(class);
+        assert_eq!(
+            krusty, reference,
+            "{class}: kotlinc's fields, code, debug tables and enclosing method"
+        );
+    }
+}

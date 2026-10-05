@@ -2,6 +2,7 @@
 //! and the JDK wrapper on the `$default` stub. `T : Char` therefore calls
 //! `test$nested$default(Test, Character, int, Object)` with `Character.valueOf`, and the stub
 //! unboxes with `charValue` before the real `char` method. The same boundary holds for a member.
+//! Only a parameter with a default is the wrapper on the stub; one without stays the primitive.
 
 use super::common;
 
@@ -138,4 +139,82 @@ fn a_supplied_primitive_bound_argument_uses_the_sibling_default_stub_wrapper() {
         "OK",
         "kotlinc reference for a sibling primitive-bound default call",
     );
+}
+
+const MIXED_LIBRARY: &str = "package mixedbounds\n\
+fun <C : Char, I : Int> pick(fixed: C, count: I, other: C = fixed, n: I = count): String =\n\
+    \"\" + fixed + count + other + n\n\
+class Host {\n\
+    fun <L : Long> member(keep: L, given: L = keep): String = \"\" + keep + given\n\
+}\n";
+
+const MIXED_USE: &str = "package mixedbounds\n\
+fun <T : Char> outer(seed: T): String {\n\
+    fun <I : Int> local(keep: I, chosen: T = seed, n: I = keep): String = \"\" + keep + chosen + n\n\
+    return local(1) + local(2, seed, 3)\n\
+}\n\
+fun box(): String {\n\
+    val joined = pick('a', 2) + pick('b', 3, 'c') + Host().member(4L) + outer('x')\n\
+    return if (joined == \"a2a2b3c3441x12x3\") \"OK\" else joined\n\
+}\n";
+
+#[test]
+fn only_defaulted_primitive_bound_parameters_are_boxed_like_kotlinc() {
+    let sources = [("Library.kt", MIXED_LIBRARY), ("Use.kt", MIXED_USE)];
+    let classes = common::classes_against_kotlinc_module(&sources);
+    let members: [(&str, &[&str]); 3] = [
+        (
+            "mixedbounds/LibraryKt",
+            &["java.lang.String pick$default(char, int, java.lang.Character, java.lang.Integer, int, java.lang.Object);"],
+        ),
+        (
+            "mixedbounds/Host",
+            &["java.lang.String member$default(mixedbounds.Host, long, java.lang.Long, int, java.lang.Object);"],
+        ),
+        (
+            "mixedbounds/UseKt",
+            &[
+                "java.lang.String box();",
+                "java.lang.String outer(T);",
+                "java.lang.String outer$local$default(char, int, java.lang.Character, java.lang.Integer, int, java.lang.Object);",
+            ],
+        ),
+    ];
+    for (class, markers) in members {
+        let reference = disassemble(&classes.reference, class);
+        let emitted = disassemble(&classes.krusty, class);
+        for marker in markers {
+            let expected = common::method_instructions(&reference, marker);
+            assert!(!expected.is_empty(), "kotlinc emits {class}.{marker}");
+            assert_eq!(
+                common::method_instructions(&emitted, marker),
+                expected,
+                "{class}.{marker}"
+            );
+        }
+    }
+}
+
+#[test]
+fn only_defaulted_primitive_bound_parameters_are_boxed_and_run() {
+    let sources = [("Library.kt", MIXED_LIBRARY), ("Use.kt", MIXED_USE)];
+    common::expect_box_ok_files_with_stdlib(&sources, "defaulted and plain primitive bounds");
+    assert_eq!(
+        common::kotlinc_box_files_result(&sources, "mixedbounds.UseKt"),
+        "OK",
+        "kotlinc reference for defaulted and plain primitive bounds",
+    );
+}
+
+/// `javap -c -p` of `class` from one compiler's output.
+fn disassemble(classes: &std::collections::BTreeMap<String, Vec<u8>>, class: &str) -> String {
+    let bytes = classes
+        .iter()
+        .find(|(name, _)| name.trim_end_matches(".class") == class)
+        .map(|(_, bytes)| bytes)
+        .unwrap_or_else(|| panic!("{class} was not emitted: {:?}", classes.keys()));
+    let dir = common::scratch_dir().expect("scratch directory");
+    let path = dir.join("Disassembled.class");
+    std::fs::write(&path, bytes).expect("write class");
+    common::javap(&["-c", "-p", &path.to_string_lossy()]).expect("javap runs")
 }

@@ -104,6 +104,27 @@ pub(super) fn named_type_parameters(
     parameters
 }
 
+pub(super) fn type_parameters_by_identity(
+    index: &ResolvedModuleIndex,
+    parameters: &[TypeParameterId],
+) -> Vec<IrTypeParameter> {
+    parameters
+        .iter()
+        .copied()
+        .map(|parameter| type_parameter(index, parameter))
+        .collect()
+}
+
+/// The declaration of the module type parameter a type names by `semantic_name`, if one does.
+pub(super) fn module_type_parameter(
+    index: &ResolvedModuleIndex,
+    semantic_name: &str,
+) -> Option<IrTypeParameter> {
+    index
+        .type_parameter_by_semantic_name(semantic_name)
+        .map(|parameter| type_parameter(index, parameter))
+}
+
 fn type_parameter(index: &ResolvedModuleIndex, parameter: TypeParameterId) -> IrTypeParameter {
     let header = index
         .type_parameter_header(parameter)

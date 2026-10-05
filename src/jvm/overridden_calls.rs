@@ -242,13 +242,13 @@ mod tests {
             is_abstract: false,
             is_extensible: true,
             supertypes: supertypes.into(),
-            surface: Box::new([]),
             annotations: Box::new([]),
             own_type_parameter_count: 0,
             type_param_variances: Box::new([]),
             value_underlying: None,
-            value_underlying_property: None,
+            value_declaration: None,
             role: None,
+            companion: None,
         })
     }
 

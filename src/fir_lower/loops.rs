@@ -601,13 +601,25 @@ impl BodyLowering<'_> {
                 Some(receiver),
             ),
         };
-        self.loop_call(
+        let result = self.loop_call(
             &call.target,
             dispatch_receiver,
             extension_receiver,
             &arguments,
             &context_parameter_types,
-        )
+        )?;
+        let Some(check) = call.result_check else {
+            return Ok(result);
+        };
+        let check = self
+            .body
+            .platform_narrowing(check)
+            .map(super::expression::platform_null_check)
+            .ok_or(FirLoweringFailure::UnsupportedIntrinsicCall)?;
+        Ok(self.ir.add_expr(IrExpr::NotNullAssert {
+            operand: result,
+            check,
+        }))
     }
 
     /// A call a loop makes on its own to a selected `target`, with its receivers and arguments

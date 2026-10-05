@@ -201,13 +201,15 @@ fn realize_declared_function_names(ir: &mut IrFile) -> Result<(), ModuleRealizat
 
 /// Materialize Kotlin/JVM's default bridge operands from one checked semantic call. Common IR
 /// carries only supplied arguments plus omitted parameter ordinals; mask words, zero placeholders,
-/// and the marker are exclusively JVM ABI.
+/// and the marker are exclusively JVM ABI. `parameters` are the real method's; `stub_boxed` names
+/// each one the `$default` stub takes boxed instead.
 pub(super) fn realize_default_arguments(
     ir: &mut IrFile,
     mut parameters: Vec<crate::types::Ty>,
     arguments: Vec<ExprId>,
     defaults: &[u32],
     extension_receiver_parameter: Option<u32>,
+    stub_boxed: &[(usize, crate::types::Ty)],
 ) -> Option<(Vec<crate::types::Ty>, Vec<ExprId>, Vec<DefaultCallOperand>)> {
     if defaults.is_empty() {
         return None;
@@ -240,10 +242,10 @@ pub(super) fn realize_default_arguments(
                 _ => parameter,
             } as usize;
             masks[logical / 32] |= 1i32 << (logical % 32);
-            // A non-null type parameter bounded by a JVM primitive is that primitive on the real
-            // method and the JDK wrapper on `$default`. The omitted slot is the primitive zero;
-            // emission boxes it with `valueOf`, which is what kotlinc writes even though the stub
-            // overwrites the slot when the mask bit is set.
+            // A defaulted non-null type parameter bounded by a JVM primitive is that primitive on
+            // the real method and the JDK wrapper on `$default`. The omitted slot is the primitive
+            // zero; emission boxes it with `valueOf`, which is what kotlinc writes even though the
+            // stub overwrites the slot when the mask bit is set.
             let produced = primitive_bounds[parameter as usize]
                 .map(|(primitive, _)| primitive)
                 .unwrap_or(ty);
@@ -258,10 +260,8 @@ pub(super) fn realize_default_arguments(
             plan.push(DefaultCallOperand::supplied(argument));
         }
     }
-    for (parameter, primitive_bound) in parameters.iter_mut().zip(primitive_bounds) {
-        if let Some((_, wrapper)) = primitive_bound {
-            *parameter = wrapper;
-        }
+    for &(parameter, boxed) in stub_boxed {
+        *parameters.get_mut(parameter)? = boxed;
     }
     if supplied.next().is_some() {
         return None;
@@ -279,33 +279,23 @@ pub(super) fn realize_default_arguments(
     Some((parameters, physical, plan))
 }
 
-fn local_default_parameters(
-    ir: &IrFile,
-    function: crate::ir::FunId,
-) -> Result<Vec<crate::types::Ty>, ModuleRealizationTarget> {
-    let mut parameters = ir
-        .functions
-        .get(function as usize)
-        .ok_or(ModuleRealizationTarget::Function(function))?
-        .params
-        .clone();
-    if let Some(boxed) = ir.default_stub_boxed_params.get(&function) {
-        for &(parameter, ty) in boxed {
-            *parameters
-                .get_mut(parameter)
-                .ok_or(ModuleRealizationTarget::Function(function))? = ty;
-        }
-    }
-    Ok(parameters)
-}
-
 fn realize_local_default_arguments(
     ir: &mut IrFile,
     function: crate::ir::FunId,
     defaults: &[u32],
     args: Vec<ExprId>,
 ) -> Result<(Vec<ExprId>, Vec<DefaultCallOperand>), ModuleRealizationTarget> {
-    let parameters = local_default_parameters(ir, function)?;
+    let parameters = ir
+        .functions
+        .get(function as usize)
+        .ok_or(ModuleRealizationTarget::Function(function))?
+        .params
+        .clone();
+    let stub_boxed = ir
+        .default_stub_boxed_params
+        .get(&function)
+        .cloned()
+        .unwrap_or_default();
     let extension_receiver_parameter = ir.extension_receiver_fns.contains(&function).then(|| {
         u32::try_from(
             ir.fn_context_counts
@@ -315,9 +305,16 @@ fn realize_local_default_arguments(
         )
         .expect("too many context parameters")
     });
-    realize_default_arguments(ir, parameters, args, defaults, extension_receiver_parameter)
-        .map(|(_, args, plan)| (args, plan))
-        .ok_or(ModuleRealizationTarget::Function(function))
+    realize_default_arguments(
+        ir,
+        parameters,
+        args,
+        defaults,
+        extension_receiver_parameter,
+        &stub_boxed,
+    )
+    .map(|(_, args, plan)| (args, plan))
+    .ok_or(ModuleRealizationTarget::Function(function))
 }
 
 /// Materialize checked default omissions after representation lowering has finalized every JVM
@@ -410,12 +407,18 @@ pub(super) fn realize_default_calls(
                         static_owner(provider.placement, provider.source, stems).ok_or(failure)?
                     }
                 };
+                let stub_boxed =
+                    super::default_parameter_representation::defaulted_primitive_bounds(
+                        &params,
+                        &provider.default_parameters,
+                    );
                 let (mut params, mut args, mut plan) = realize_default_arguments(
                     ir,
                     params,
                     args,
                     &defaults,
                     extension_receiver_parameter,
+                    &stub_boxed,
                 )
                 .ok_or(failure)?;
                 if let Some(receiver) = dispatch_receiver {
@@ -458,6 +461,8 @@ pub(super) fn realize_default_calls(
 pub(super) fn realize_super_calls(
     ir: &mut IrFile,
     callables: &crate::backend::CheckedBackendCallables,
+    property_realizations: &mut PropertyRealizations,
+    jvm_default: crate::jvm::ir_emit::JvmDefaultMode,
 ) -> Result<(), ModuleRealizationTarget> {
     for raw in 0..ir.exprs.len() {
         // `super` dispatch: the checker fixed the supertype declaration, so only the PHYSICAL
@@ -530,11 +535,27 @@ pub(super) fn realize_super_calls(
             // class declares: `super<Base>@Outer.value` died at its first read with a
             // `NoSuchMethodError`. `kind` remains the semantic fact for targets that need it;
             // nothing about the JVM spelling is derived from it.
-            let _ = kind;
-            let descriptor = if descriptor.is_empty() {
-                crate::jvm::names::method_descriptor(&params, ret)
-            } else {
-                descriptor
+            if let crate::ir::IrSuperCallKind::PropertyGetter(property) = kind {
+                property_realizations.record_super_getter(raw as ExprId, property);
+            }
+            // A class that inherits the selected declaration as a specialized default answers the
+            // call with its typed forwarder; its erased entry is a bridge back to that forwarder.
+            let specialized = match (declaration, interface, &realization) {
+                (Some(declaration), false, crate::libraries::MemberRealization::Dispatch) => {
+                    crate::jvm::inherited_default_realization::specialized_super_descriptor(
+                        ir,
+                        callables,
+                        owner,
+                        declaration,
+                        jvm_default,
+                    )
+                }
+                _ => None,
+            };
+            let descriptor = match specialized {
+                Some(specialized) => specialized,
+                None if descriptor.is_empty() => crate::jvm::names::method_descriptor(&params, ret),
+                None => descriptor,
             };
             if enclosing_dispatch {
                 let class = ir
@@ -679,12 +700,13 @@ pub(super) fn realize_super_calls(
 pub(super) fn realize(
     ir: &mut IrFile,
     stems: &[String],
-    classpath: &crate::jvm::classpath::Classpath,
+    classifiers: &dyn crate::backend::BackendClassifierSource,
     callables: &crate::backend::CheckedBackendCallables,
     property_realizations: &mut PropertyRealizations,
+    jvm_default: crate::jvm::ir_emit::JvmDefaultMode,
 ) -> Result<(), ModuleRealizationTarget> {
     realize_declared_function_names(ir)?;
-    realize_super_calls(ir, callables)?;
+    realize_super_calls(ir, callables, property_realizations, jvm_default)?;
     prepare_inherited_default_calls(ir)?;
     for raw in 0..ir.exprs.len() {
         // A property accessor call keeps its declaration's parameter vector (contexts, receiver,
@@ -839,20 +861,8 @@ pub(super) fn realize(
             }
             IrExpr::SingletonValue { classifier } => {
                 let failure = ModuleRealizationTarget::Classifier(classifier);
-                let (owner, field) = if let Some(declaration) =
-                    ir.referenced_module_classifiers.get(&classifier).copied()
-                {
-                    if !declaration.singleton {
-                        return Err(failure);
-                    }
-                    if let Some(owner) = declaration.companion_owner {
-                        (owner, classifier.nested_segment_ref().to_owned())
-                    } else {
-                        (classifier, "INSTANCE".to_string())
-                    }
-                } else {
-                    classpath.singleton_storage(classifier).ok_or(failure)?
-                };
+                let (owner, field) =
+                    super::singleton_storage::of(classifiers, classifier).ok_or(failure)?;
                 Some(IrExpr::ExternalStaticInstance {
                     owner,
                     ty: classifier,

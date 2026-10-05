@@ -319,14 +319,23 @@ fn compile_source(
     (!diags.has_errors() && !classes.is_empty()).then_some(classes)
 }
 
-/// `-Xsam-conversions` for a box file. `// SAM_CONVERSIONS: CLASS` selects the shared Java wrapper;
-/// anything else keeps kotlinc's default `indy`. Lambda literals stay on `-Xlambdas=indy`.
+/// `-Xlambdas` and `-Xsam-conversions` for a box file. `// LAMBDAS: CLASS` and
+/// `// SAM_CONVERSIONS: CLASS` select the class strategy; anything else keeps kotlinc's default
+/// `indy`.
 fn box_lambda_modes<'a>(
     sources: impl IntoIterator<Item = &'a str>,
 ) -> krusty::jvm::ir_emit::LambdaModes {
+    let sources = sources.into_iter().collect::<Vec<_>>();
     let mut modes = krusty::jvm::ir_emit::LambdaModes::default();
+    modes.lambdas = sources
+        .iter()
+        .copied()
+        .map(krusty::conformance::lambda_mode)
+        .find(|mode| *mode != krusty::jvm::ir_emit::LambdaMode::Indy)
+        .unwrap_or_default();
     modes.sam_conversions = sources
-        .into_iter()
+        .iter()
+        .copied()
         .map(krusty::conformance::sam_conversion_mode)
         .find(|mode| *mode != krusty::jvm::ir_emit::LambdaMode::Indy)
         .unwrap_or_default();
@@ -434,7 +443,14 @@ fn compile_multifile(
                 }
                 java_classes = classes;
             }
-            None => return compile_kotlin_first(src, &blocks, &java_blocks, cp_jars, jdk_modules),
+            None => {
+                let sources = UnitSources {
+                    kotlin: &blocks,
+                    common: 0,
+                    java: &java_blocks,
+                };
+                return compile_kotlin_first(src, sources, cp_jars, jdk_modules);
+            }
         }
     }
 
@@ -461,22 +477,14 @@ fn compile_multifile(
 /// ship. Header installation or javac failure means the corpus case failed to compile.
 fn compile_kotlin_first(
     src: &str,
-    blocks: &[(String, String)],
-    java_blocks: &[(String, String)],
+    sources: UnitSources<'_>,
     cp_jars: &[std::path::PathBuf],
     jdk_modules: Option<&std::path::Path>,
 ) -> Option<Vec<(String, Vec<u8>)>> {
+    let java_blocks = sources.java;
     let features = krusty::features::LangFeatures::from_source(src);
-    let kotlin_classes = compile_blocks_mixed(
-        blocks,
-        java_blocks,
-        cp_jars,
-        &[],
-        jdk_modules,
-        &features,
-        None,
-        &[],
-    )?;
+    let kotlin_classes =
+        compile_blocks_mixed(sources, cp_jars, &[], jdk_modules, &features, None, &[])?;
 
     static UID: AtomicU64 = AtomicU64::new(0);
     let uid = UID.fetch_add(1, Ordering::Relaxed);
@@ -515,8 +523,11 @@ fn compile_blocks(
     overlay: &[(String, Vec<u8>)],
 ) -> Option<Vec<(String, Vec<u8>)>> {
     compile_blocks_mixed(
-        blocks,
-        &[],
+        UnitSources {
+            kotlin: blocks,
+            common: 0,
+            java: &[],
+        },
         cp_jars,
         friend_paths,
         jdk_modules,
@@ -526,9 +537,17 @@ fn compile_blocks(
     )
 }
 
+/// One krusty compilation unit's sources. The first `common` Kotlin blocks are common (`dependsOn`)
+/// sources, exactly as `krusty::conformance::module_units` orders a unit's chain.
+#[derive(Clone, Copy)]
+struct UnitSources<'a> {
+    kotlin: &'a [(String, String)],
+    common: usize,
+    java: &'a [(String, String)],
+}
+
 fn compile_blocks_mixed(
-    blocks: &[(String, String)],
-    java_blocks: &[(String, String)],
+    sources: UnitSources<'_>,
     cp_jars: &[std::path::PathBuf],
     friend_paths: &[std::path::PathBuf],
     jdk_modules: Option<&std::path::Path>,
@@ -536,6 +555,11 @@ fn compile_blocks_mixed(
     progress: Option<&dyn Fn(&str)>,
     overlay: &[(String, Vec<u8>)],
 ) -> Option<Vec<(String, Vec<u8>)>> {
+    let UnitSources {
+        kotlin: blocks,
+        java: java_blocks,
+        ..
+    } = sources;
     let report = |phase: &str| {
         if let Some(progress) = progress {
             progress(phase);
@@ -561,7 +585,15 @@ fn compile_blocks_mixed(
         .collect();
     let mut inputs = blocks
         .iter()
-        .map(|(stem, content)| krusty::source::SourceInput::kotlin(content).with_file_stem(stem))
+        .enumerate()
+        .map(|(index, (stem, content))| {
+            let input = krusty::source::SourceInput::kotlin(content).with_file_stem(stem);
+            if index < sources.common {
+                input.common()
+            } else {
+                input
+            }
+        })
         .collect::<Vec<_>>();
     inputs.extend(
         java_blocks
@@ -656,6 +688,13 @@ fn compile_module_test(
             break;
         }
         let (files, java_files) = (&m.files, &m.java_files);
+        // The unit's `dependsOn` chain sources come first and are common sources, as in kotlinc's
+        // `-Xcommon-sources` compilation of one platform module.
+        let kotlin_only = UnitSources {
+            kotlin: files,
+            common: m.common_file_count,
+            java: &[],
+        };
         let report = |phase: &str| progress(&format!("module {}: {phase}", m.name));
         // A source-less unit (an empty hmpp intermediate built standalone) emits nothing; it still
         // gets a (created, empty) classpath dir so dependents resolve it.
@@ -672,8 +711,8 @@ fn compile_module_test(
         // only deps/JDK); when that fails — the Java references THIS module's Kotlin — fall back to
         // the Kotlin-first stub pipeline, exactly like the single-module path.
         let classes = if java_files.is_empty() {
-            compile_blocks(
-                files,
+            compile_blocks_mixed(
+                kotlin_only,
                 &cp,
                 &friend_paths,
                 jdk_modules,
@@ -696,8 +735,8 @@ fn compile_module_test(
                         // top-level functions resolve through the package catalog, which only
                         // directory/jar entries contribute to — an overlaid dependency module
                         // loses them (measured: -95 box passes).
-                        compile_blocks(
-                            files,
+                        compile_blocks_mixed(
+                            kotlin_only,
                             &cp,
                             &friend_paths,
                             jdk_modules,
@@ -711,7 +750,15 @@ fn compile_module_test(
                         k
                     })
                 }
-                None => compile_kotlin_first(src, files, java_files, &cp, jdk_modules),
+                None => compile_kotlin_first(
+                    src,
+                    UnitSources {
+                        java: java_files,
+                        ..kotlin_only
+                    },
+                    &cp,
+                    jdk_modules,
+                ),
             }
         };
         let Some(classes) = classes else {
@@ -1172,6 +1219,75 @@ fn a_single_file_marker_compiles_under_its_declared_stem() {
     assert_eq!(find_box_class(&classes).as_deref(), Some("DeclaredKt"));
 }
 
+/// The repository-owned regression for folded common sources must enter through the same
+/// `// MODULE:` path as the box corpus. That path alone turns `ModuleUnit.common_file_count` into
+/// the dependency-first `SourceInput::common()` prefix.
+#[test]
+fn folded_common_optional_expectation_uses_module_harness() {
+    const COMMON: &str = "package folded\n\
+class Registry {\n\
+    companion object {\n\
+        @kotlin.js.JsStatic\n\
+        fun value(): String = \"OK\"\n\
+    }\n\
+}\n";
+    const PLATFORM: &str = "package folded\n\
+fun box(): String = Registry.value()\n";
+    let source = format!(
+        "// WITH_STDLIB\n\
+         // LANGUAGE: +MultiPlatformProjects\n\
+         // MODULE: common\n\
+         // FILE: Common.kt\n\
+         {COMMON}\
+         // MODULE: platform()()(common)\n\
+         // FILE: Platform.kt\n\
+         {PLATFORM}"
+    );
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let classpath = common::classpath_jars_for(&source);
+    let classes = compile_module_test(&source, &classpath, Some(jdk.as_path()), &|_| {})
+        .expect("the folded common source compiles through the module harness");
+    let classes: Vec<_> = classes
+        .into_iter()
+        .filter(|(_, bytes)| bytes.starts_with(&[0xCA, 0xFE, 0xBA, 0xBE]))
+        .collect();
+
+    let reference_root = common::scratch_dir().expect("allocate reference source-set directory");
+    let reference_output = reference_root.join("classes");
+    let common_path = reference_root.join("Common.kt");
+    let platform_path = reference_root.join("Platform.kt");
+    fs::write(&common_path, COMMON).expect("write common reference source");
+    fs::write(&platform_path, PLATFORM).expect("write platform reference source");
+    let arguments = vec![
+        "-d".to_string(),
+        reference_output.to_string_lossy().into_owned(),
+        "-Xmulti-platform".to_string(),
+        format!("-Xcommon-sources={}", common_path.to_string_lossy()),
+        common_path.to_string_lossy().into_owned(),
+        platform_path.to_string_lossy().into_owned(),
+    ];
+    let (reference_status, reference_diagnostics) =
+        common::kotlinc_compile(&arguments).expect("reference compiler is provisioned");
+    assert_eq!(
+        reference_status, 0,
+        "kotlinc rejected the folded source-set fixture: {reference_diagnostics}"
+    );
+    let reference = read_class_tree(&reference_output).expect("read reference classes");
+    let _ = fs::remove_dir_all(reference_root);
+    assert_eq!(
+        compare_class_sets(&classes, &reference),
+        Ok(()),
+        "the module-harness output must be byte-identical to kotlinc"
+    );
+
+    let box_class = find_box_class(&classes).expect("the platform source emits box()");
+    assert_eq!(
+        common::run_box(&classes, &box_class, std::slice::from_ref(&stdlib)),
+        Some("OK".to_string())
+    );
+}
+
 #[test]
 #[cfg(unix)]
 fn peak_process_rss_is_observable() {
@@ -1191,12 +1307,13 @@ fn kotlin_codegen_box_conformance() {
         return;
     };
     let java = format!("{java_home}/bin/java");
-    // The JDK bootclasspath as an explicit `-classpath` entry: the running JDK's `lib/modules`
-    // jimage, so JDK types (`StringBuilder`, …) resolve like any classpath type.
-    let jdk_modules: Option<std::path::PathBuf> = {
-        let p = Path::new(&java_home).join("lib").join("modules");
-        p.is_file().then_some(p)
-    };
+    // The JDK bootclasspath as an explicit `-classpath` entry, selected per test like JetBrains'
+    // runner: the corpus checkout's mock `rt.jar` unless the test declares `// FULL_JDK`, which
+    // selects the running JDK's `lib/modules` jimage. Tests always run on the real JVM.
+    let jdk_roots = krusty::conformance::BoxJdkRoots::new(
+        krusty::toolchain::box_mock_jdk_rt_jar(&box_dir).unwrap_or_else(|error| panic!("{error}")),
+        Some(Path::new(&java_home).join("lib").join("modules")).filter(|p| p.is_file()),
+    );
     // Locate a real kotlin-stdlib jar (drop-in `-classpath`), used for `// WITH_STDLIB` tests at
     // compile time and on the JVM at runtime. No bespoke env var.
     eprintln!("box setup: locate Kotlin runtime jars");
@@ -1408,14 +1525,16 @@ fn kotlin_codegen_box_conformance() {
                     mark_box_case_phase(&active, tid, file, "compile");
                     // A `// FILE:` multi-file test, OR a `// WITH_COROUTINES` test (which needs the
                     // generated `helpers` source compiled alongside it), goes through the multi-block path.
+                    let jdk = jdk_roots.select(&src);
+                    let jdk_modules = jdk.classpath_root();
                     let compiled = if src.contains("// MODULE:") {
-                        compile_module_test(&src, &compile_cp, jdk_modules.as_deref(), &|phase| {
+                        compile_module_test(&src, &compile_cp, jdk_modules, &|phase| {
                             mark_box_case_phase(&active, tid, file, phase)
                         })
                     } else if src.contains("// FILE:") || src.contains("// WITH_COROUTINES") {
-                        compile_multifile(&src, &stem, &compile_cp, jdk_modules.as_deref())
+                        compile_multifile(&src, &stem, &compile_cp, jdk_modules)
                     } else {
-                        compile_source(&src, &stem, &compile_cp, jdk_modules.as_deref(), &|phase| {
+                        compile_source(&src, &stem, &compile_cp, jdk_modules, &|phase| {
                             mark_box_case_phase(&active, tid, file, phase)
                         })
                     };
@@ -1439,7 +1558,7 @@ fn kotlin_codegen_box_conformance() {
                         }
                     }
                     if byte_diff_on {
-                        let outcome = byte_diff_file(&src, &stem, &compile_cp, &classes);
+                        let outcome = byte_diff_file(&src, &stem, &compile_cp, jdk, &classes);
                         byte_diffs.lock().unwrap().push((file.clone(), outcome));
                     }
                     let box_class = match find_box_class(&classes) {
@@ -1874,7 +1993,10 @@ fn reference_compile(
     src: &str,
     stem: &str,
     cp_jars: &[PathBuf],
+    jdk: krusty::conformance::BoxJdk<'_>,
 ) -> Result<std::collections::BTreeMap<String, Vec<u8>>, String> {
+    // The same JDK selection krusty compiled the test against.
+    let classpath_args = jdk.kotlinc_args(cp_jars)?;
     let mut key_material: Vec<u8> = Vec::new();
     let push = |k: &mut Vec<u8>, part: &[u8]| {
         k.extend_from_slice(&(part.len() as u64).to_le_bytes());
@@ -1884,8 +2006,8 @@ fn reference_compile(
     push(&mut key_material, src.as_bytes());
     push(&mut key_material, stem.as_bytes());
     push(&mut key_material, COROUTINE_HELPERS.as_bytes());
-    for j in cp_jars {
-        push(&mut key_material, j.to_string_lossy().as_bytes());
+    for arg in &classpath_args {
+        push(&mut key_material, arg.as_bytes());
     }
     if let Some(jar) = common::kotlin_compiler_jar() {
         push(&mut key_material, jar.to_string_lossy().as_bytes());
@@ -1924,18 +2046,17 @@ fn reference_compile(
         "krusty_refc_{key:016x}_{}_{seq}",
         std::process::id()
     ));
-    let result = reference_compile_in(&work, &blocks, src, cp_jars, &cache, key, seq);
+    let result = reference_compile_in(&work, &blocks, src, &classpath_args, &cache, key, seq);
     let _ = fs::remove_dir_all(&work);
     result
 }
 
 /// The work-dir-scoped body of [`reference_compile`] — the caller removes `work` unconditionally.
-#[allow(clippy::too_many_arguments)]
 fn reference_compile_in(
     work: &Path,
     blocks: &[(String, String)],
     src: &str,
-    cp_jars: &[PathBuf],
+    classpath_args: &[String],
     cache: &Path,
     key: u64,
     seq: u64,
@@ -1943,15 +2064,7 @@ fn reference_compile_in(
     let out_dir = work.join("out");
     fs::create_dir_all(&out_dir).map_err(|e| e.to_string())?;
     let mut args: Vec<String> = vec!["-d".into(), out_dir.to_string_lossy().into_owned()];
-    if !cp_jars.is_empty() {
-        let joined = cp_jars
-            .iter()
-            .map(|p| p.to_string_lossy().into_owned())
-            .collect::<Vec<_>>()
-            .join(":");
-        args.push("-cp".into());
-        args.push(joined);
-    }
+    args.extend_from_slice(classpath_args);
     args.extend(common::language_directives::kotlinc_args(src));
     for (i, (name, content)) in blocks.iter().enumerate() {
         // The FILE NAME decides kotlinc's file-facade class name (`arrayElement.kt` →
@@ -2069,6 +2182,7 @@ fn byte_diff_file(
     src: &str,
     stem: &str,
     cp_jars: &[PathBuf],
+    jdk: krusty::conformance::BoxJdk<'_>,
     classes: &[(String, Vec<u8>)],
 ) -> ByteDiff {
     if src.contains("// MODULE:") {
@@ -2077,7 +2191,7 @@ fn byte_diff_file(
     if !krusty::conformance::split_files(src).1.is_empty() {
         return ByteDiff::NotDiffed("mixed-java");
     }
-    match reference_compile(src, stem, cp_jars) {
+    match reference_compile(src, stem, cp_jars, jdk) {
         Err(e) => ByteDiff::RefFail(e),
         Ok(ref_classes) => match compare_class_sets(classes, &ref_classes) {
             Ok(()) => ByteDiff::Identical,
@@ -2162,7 +2276,12 @@ fun callableNamedClass(): Any {
         &[],
     )
     .expect("the production JVM path must compile the local-class naming fixture");
-    let reference = match reference_compile(source, stem, &classpath) {
+    let reference = match reference_compile(
+        source,
+        stem,
+        &classpath,
+        krusty::conformance::BoxJdk::Full { root: None },
+    ) {
         Ok(reference) => reference,
         Err(error) if error == "kotlinc unavailable" => return,
         Err(error) => panic!("reference compiler rejected local-class naming fixture: {error}"),

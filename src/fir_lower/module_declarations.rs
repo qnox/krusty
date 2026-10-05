@@ -65,15 +65,19 @@ fn publish_callable(
         .transpose()?;
     // Only the edges the owner publishes for its own declaration say what this one overrides: a
     // subclass's edge for an inherited implementation belongs to the subclass.
-    let overrides_non_primitive_result = owner.is_some_and(|classifier| {
-        index
-            .function_overrides(classifier.declaration)
-            .iter()
-            .any(|edge| {
-                edge.implementation == crate::fir::ResolvedFunctionOverrideTarget::Module(target)
-                    && !crate::ir::is_kotlin_primitive(edge.declared_result.get())
-            })
-    });
+    let overridden_results = owner
+        .map(|classifier| {
+            index
+                .function_overrides(classifier.declaration)
+                .iter()
+                .filter(|edge| {
+                    edge.implementation
+                        == crate::fir::ResolvedFunctionOverrideTarget::Module(target)
+                })
+                .map(|edge| edge.declared_result.get())
+                .collect()
+        })
+        .unwrap_or_default();
     let owner = owner.map(|classifier| classifier.classifier);
     let placement = super::companion_blocks::static_placement(
         flags,
@@ -91,14 +95,21 @@ fn publish_callable(
         .iter()
         .map(|parameter| parameter.get())
         .collect::<Vec<_>>();
+    let mut defaulted =
+        index
+            .callable_default_bitmap(target)
+            .ok_or(FirFileLoweringFailure::MissingCallable(
+                callable.declaration,
+            ))?;
     if let Some(receiver) = callable.shape.extension_receiver {
         let position = callable.shape.context_parameter_count as usize;
-        if position > parameters.len() {
+        if position > parameters.len() || position > defaulted.len() {
             return Err(FirFileLoweringFailure::MissingCallable(
                 callable.declaration,
             ));
         }
         parameters.insert(position, receiver.get());
+        defaulted.insert(position, false);
     }
     ir.referenced_module_callables.insert(
         target,
@@ -124,6 +135,11 @@ fn publish_callable(
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
             parameters: parameters.into_boxed_slice(),
+            default_parameters: defaulted
+                .iter()
+                .enumerate()
+                .filter_map(|(position, &default)| default.then_some(position))
+                .collect(),
             type_parameters: super::generics::declaration_type_parameters(
                 index,
                 callable.declaration,
@@ -153,7 +169,7 @@ fn publish_callable(
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
             placement,
-            overrides_non_primitive_result,
+            overridden_results,
         },
     );
     Ok(())
@@ -219,6 +235,20 @@ fn publish_property(
     let header = index.declaration_header(property.declaration).ok_or(
         FirFileLoweringFailure::MissingProperty(property.declaration),
     )?;
+    // As for a function, only the owner's edges for its own declaration say what it overrides.
+    let overridden_types = owner
+        .map(|classifier| {
+            index
+                .property_overrides(classifier.declaration)
+                .iter()
+                .filter(|edge| {
+                    edge.implementation
+                        == crate::fir::ResolvedPropertyOverrideTarget::Module(target)
+                })
+                .map(|edge| edge.declared_type.get())
+                .collect()
+        })
+        .unwrap_or_default();
     ir.referenced_module_properties.insert(
         target,
         IrModuleProperty {
@@ -259,6 +289,7 @@ fn publish_property(
                 property.extension_receiver.map(ResolvedTy::get),
                 FirFileLoweringFailure::MissingProperty(property.declaration),
             )?,
+            overridden_types,
         },
     );
     Ok(())
@@ -394,6 +425,12 @@ pub(super) fn publish_referenced(
         match edge.overridden {
             crate::fir::ResolvedFunctionOverrideTarget::Module(target) => Some(target),
             crate::fir::ResolvedFunctionOverrideTarget::External(_) => None,
+        }
+    }));
+    properties.extend(ir.property_overrides.values().flatten().filter_map(|edge| {
+        match edge.overridden {
+            crate::fir::ResolvedPropertyOverrideTarget::Module(target) => Some(target),
+            crate::fir::ResolvedPropertyOverrideTarget::External(_) => None,
         }
     }));
     for callable in callables {

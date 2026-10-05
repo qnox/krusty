@@ -74,13 +74,14 @@ pub(super) fn seed_plain_constructor_tail(seed: PlainClassPoolSeed<'_>, cw: &mut
                 primary_ctor_parameter_descs(c)
             )
         });
-    let parameter_locals = constructor_parameter_locals(c);
+    let parameter_locals = constructor_parameter_locals(ir, c);
     cw.seed_plain_constructor_tail(fq_name, &parameter_locals, default_marker_desc.as_deref());
 }
 
 /// Seed an enum constructor's LocalVariableTable strings, which kotlinc interns with the constructor,
 /// before `values`: `this`, the two synthetic `Enum` parameters, then every declared parameter.
 pub(super) fn seed_enum_constructor_locals(
+    ir: &IrFile,
     c: &crate::ir::IrClass,
     self_desc: &str,
     cw: &mut ClassWriter,
@@ -90,7 +91,10 @@ pub(super) fn seed_enum_constructor_locals(
         ("$enum$name".to_string(), "Ljava/lang/String;".to_string()),
         ("$enum$ordinal".to_string(), "I".to_string()),
     ];
-    for (name, desc) in synthetic.into_iter().chain(constructor_parameter_locals(c)) {
+    for (name, desc) in synthetic
+        .into_iter()
+        .chain(constructor_parameter_locals(ir, c))
+    {
         cw.reserve_method_name(&name);
         cw.reserve_descriptor(&desc);
     }
@@ -99,11 +103,11 @@ pub(super) fn seed_enum_constructor_locals(
 /// The constructor's LocalVariableTable rows after its receiver and synthetic prefix: every named
 /// parameter, property-backed or plain (`enum class E(value: Int)` has no field `value`, but its
 /// constructor still lists it).
-fn constructor_parameter_locals(c: &crate::ir::IrClass) -> Vec<(String, String)> {
+fn constructor_parameter_locals(ir: &IrFile, c: &crate::ir::IrClass) -> Vec<(String, String)> {
     c.ctor_args
         .iter()
         .zip(crate::jvm::parameter_names::constructor_local_variables(
-            &c.ctor_args,
+            ir, c,
         ))
         .filter_map(|(argument, name)| {
             Some((name?, crate::jvm::names::type_descriptor(argument.ty)))

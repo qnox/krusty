@@ -12,8 +12,11 @@ pub(super) mod value_parameters;
 pub use value_parameters::{FirDefaultValue, FirValueParameter, FirVarargParameter};
 pub(crate) mod debug_lines;
 pub use debug_lines::{FirExpressionDebugLines, FirStatementDebugLines};
+mod capture_order;
 mod lifting_sites;
+mod local_type_parameters;
 pub use lifting_sites::{FirLiftingSite, FirLiftingStep};
+pub use local_type_parameters::FirLocalTypeParameter;
 mod origins;
 pub use origins::{Origin, OriginStore, SyntheticOriginKind};
 mod branches;
@@ -105,10 +108,8 @@ pub struct FirSamConversion {
     /// is the selected interface method: a non-suspend value adapted to a suspend method keeps its
     /// own `FunctionN`.
     pub source_suspend: bool,
-    /// The method's primitive result replaces a non-primitive result it overrides.
-    pub overrides_non_primitive_result: bool,
-    /// Specialized semantic result contracts whose target bridges reach that primitive method.
-    pub overridden_non_primitive_results: Box<[ResolvedTy]>,
+    /// The distinct own results of the declarations the selected method overrides, unspecialized.
+    pub overridden_results: Box<[ResolvedTy]>,
     /// A nullable function value converts conditionally: `null` remains `null`; only a non-null
     /// function object is wrapped as the selected SAM classifier.
     pub nullable: bool,
@@ -133,7 +134,8 @@ pub enum FirSamMethod {
 /// diagnoses that it cannot support Java platform values.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FirPlatformNarrowing {
-    pub message: Box<str>,
+    /// The checked producer's name; `None` for a value kotlinc cannot name, such as a block's.
+    pub message: Option<Box<str>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -252,10 +254,6 @@ pub enum FirIntrinsic {
     SuspendCoroutineUninterceptedOrReturn {
         callee: Box<str>,
     },
-    /// The selected safe coroutine primitive. This is distinct from the unintercepted primitive:
-    /// target realization must invoke the block with a one-shot safe, intercepted continuation and
-    /// use that continuation's completed value or suspension sentinel as the call result.
-    SuspendCoroutine,
     UnsignedToString {
         source: ResolvedTy,
     },
@@ -416,6 +414,8 @@ pub struct FirCall {
 pub(crate) struct LocalBinding {
     pub(crate) value: LocalValueId,
     pub(crate) ty: ResolvedTy,
+    /// A `var` (or `lateinit var`): the binding can be reassigned after it is read.
+    pub(crate) mutable: bool,
     pub(crate) lateinit: bool,
 }
 
@@ -1199,6 +1199,7 @@ pub enum FirExprKind {
         extension_receiver: Option<FirReceiver>,
         substitutions: Box<[FirTypeSubstitution]>,
         adaptation: Option<Box<FirReferenceAdaptation>>,
+        reflection_owner: Option<crate::types::TypeName>,
     },
     LocalCallableReference {
         target: FirLocalCallableRef,
@@ -1344,6 +1345,9 @@ pub enum FirExprKind {
     },
     Lambda {
         callable: LocalCallableId,
+        /// Declaration-owned type parameters the checked function type names, closed over their
+        /// bounds in first-use order. An inference variable has no stable declaration and is absent.
+        type_parameters: Box<[TypeParameterId]>,
         body: Box<FirBody>,
     },
     Try {
@@ -1553,8 +1557,14 @@ impl FirExprKind {
             } => target_parameters.len() * std::mem::size_of::<ResolvedTy>(),
             FirExprKind::ComparisonCall { call, .. }
             | FirExprKind::ContainmentCall { call, .. } => call.storage_payload_bytes(),
-            FirExprKind::Lambda { body, .. } => {
-                std::mem::size_of::<FirBody>() + body.storage_payload_bytes()
+            FirExprKind::Lambda {
+                type_parameters,
+                body,
+                ..
+            } => {
+                type_parameters.len() * std::mem::size_of::<TypeParameterId>()
+                    + std::mem::size_of::<FirBody>()
+                    + body.storage_payload_bytes()
             }
             FirExprKind::Try { catches, .. } => catches.len() * std::mem::size_of::<FirCatch>(),
             FirExprKind::When { branches, .. } => {
@@ -1640,6 +1650,9 @@ pub struct FirIteratorCall {
     /// protocol call is not specialized per site, so a substituted receiver (`Int` for `T?`)
     /// crosses into the declared type here.
     pub receiver_conversion: Option<FirConversion>,
+    /// The not-null check of an enhanced Java result the loop stores (`ArrayList.iterator()`, and
+    /// the `next()` of the iterator it returns), named by the protocol call.
+    pub result_check: Option<FirPlatformNarrowingId>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1778,8 +1791,10 @@ pub struct FirBody {
     bodiless_lifting_sites: Vec<FirLiftingSite>,
     /// Target-neutral selected convention plans for local delegated properties declared here.
     local_delegate_plans: Vec<FirLocalDelegatePlan>,
+    pub(super) interface_delegate_calls: Vec<super::FirInterfaceDelegateCalls>,
     context_receiver_types: Vec<ResolvedTy>,
     context_parameter_kinds: Vec<crate::types::ContextParameterKind>,
+    type_parameters: Box<[FirLocalTypeParameter]>,
     /// Declaration-owned inline semantics, in physical parameter order. The checker publishes
     /// this once; common lowering copies it without consulting declaration headers or types.
     inline_parameter_modifiers: Vec<crate::types::InlineParameterModifier>,
@@ -1787,6 +1802,7 @@ pub struct FirBody {
     parameters: Vec<FirValueParameter>,
     default_values: Vec<FirDefaultValue>,
     captures: Vec<FirCapture>,
+    capture_declaration_ordinals: Box<[u32]>,
     implicit_receiver_captures: Vec<FirImplicitReceiverCapture>,
     sam_conversions: Vec<FirSamConversion>,
     platform_narrowings: Vec<FirPlatformNarrowing>,
@@ -1835,13 +1851,16 @@ impl FirBody {
             lifting_site: None,
             bodiless_lifting_sites: Vec::new(),
             local_delegate_plans: Vec::new(),
+            interface_delegate_calls: Vec::new(),
             context_receiver_types: Vec::new(),
             context_parameter_kinds: Vec::new(),
+            type_parameters: Box::default(),
             inline_parameter_modifiers: Vec::new(),
             inline_expansion_modes: Vec::new(),
             parameters: Vec::new(),
             default_values: Vec::new(),
             captures: Vec::new(),
+            capture_declaration_ordinals: Box::default(),
             implicit_receiver_captures: Vec::new(),
             sam_conversions: Vec::new(),
             platform_narrowings: Vec::new(),
@@ -1995,43 +2014,12 @@ impl FirBody {
         self.debug_name.as_deref()
     }
 
-    pub fn set_lifting_site(&mut self, site: FirLiftingSite) {
-        assert!(
-            self.lifting_site.replace(site).is_none(),
-            "a FIR body has one lifting site"
-        );
-    }
-
-    pub fn lifting_site(&self) -> Option<&FirLiftingSite> {
-        self.lifting_site.as_ref()
-    }
-
-    pub fn add_bodiless_lifting_site(&mut self, site: FirLiftingSite) {
-        self.bodiless_lifting_sites.push(site);
-    }
-
     pub(crate) fn add_local_delegate_plan(&mut self, plan: FirLocalDelegatePlan) {
         self.local_delegate_plans.push(plan);
     }
 
     pub(crate) fn local_delegate_plans(&self) -> &[FirLocalDelegatePlan] {
         &self.local_delegate_plans
-    }
-
-    /// Every lifting site this body and the callables nested in it declare, its own included.
-    pub fn collect_lifting_sites<'a>(&'a self, out: &mut Vec<&'a FirLiftingSite>) {
-        out.extend(self.lifting_site.iter());
-        out.extend(self.bodiless_lifting_sites.iter());
-        for statement in &self.statements {
-            if let FirStatementKind::LocalFunction { body, .. } = &statement.kind {
-                body.collect_lifting_sites(out);
-            }
-        }
-        for expression in &self.expressions {
-            if let FirExprKind::Lambda { body, .. } = &expression.kind {
-                body.collect_lifting_sites(out);
-            }
-        }
     }
 
     pub fn mark_source_lambda(&mut self, lambda: FirSourceLambda) {
@@ -2445,7 +2433,7 @@ impl FirBody {
             );
         }
         for expression in &self.expressions {
-            let FirExprKind::Lambda { callable, body } = &expression.kind else {
+            let FirExprKind::Lambda { callable, body, .. } = &expression.kind else {
                 continue;
             };
             let previous = scope.insert(
@@ -2789,7 +2777,9 @@ impl FirBody {
             + self.debug_lines.payload_bytes()
             + self.default_values.len() * std::mem::size_of::<FirDefaultValue>()
             + self.context_receiver_types.len() * std::mem::size_of::<ResolvedTy>()
+            + self.type_parameter_payload_bytes()
             + self.captures.len() * std::mem::size_of::<FirCapture>()
+            + self.capture_declaration_ordinals.len() * std::mem::size_of::<u32>()
             + self.implicit_receiver_captures.len()
                 * std::mem::size_of::<FirImplicitReceiverCapture>()
             + self
@@ -2811,7 +2801,12 @@ impl FirBody {
             + self
                 .platform_narrowings
                 .iter()
-                .map(|narrowing| narrowing.message.len())
+                .map(|narrowing| {
+                    narrowing
+                        .message
+                        .as_ref()
+                        .map_or(0, |message| message.len())
+                })
                 .sum::<usize>()
             + self.control_targets.len() * std::mem::size_of::<FirControlTarget>()
             + self.expressions.len() * std::mem::size_of::<FirExpr>()

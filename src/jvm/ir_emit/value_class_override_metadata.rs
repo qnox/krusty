@@ -25,9 +25,10 @@ pub(super) fn functions(underlying: &str) -> Vec<FnMeta> {
             vararg_index: None,
             jvm_sig: Some(format!("({underlying}Ljava/lang/Object;)Z")),
             jvm_sig_name: Some("equals-impl".into()),
-            annotations: Vec::new(),
+            annotations: Default::default(),
             param_annotations: Vec::new(),
             no_infer_params: Vec::new(),
+            contract: None,
         },
         FnMeta {
             context_count: 0,
@@ -47,9 +48,10 @@ pub(super) fn functions(underlying: &str) -> Vec<FnMeta> {
             vararg_index: None,
             jvm_sig: Some(format!("({underlying})I")),
             jvm_sig_name: Some("hashCode-impl".into()),
-            annotations: Vec::new(),
+            annotations: Default::default(),
             param_annotations: Vec::new(),
             no_infer_params: Vec::new(),
+            contract: None,
         },
         FnMeta {
             context_count: 0,
@@ -69,9 +71,10 @@ pub(super) fn functions(underlying: &str) -> Vec<FnMeta> {
             vararg_index: None,
             jvm_sig: Some(format!("({underlying})Ljava/lang/String;")),
             jvm_sig_name: Some("toString-impl".into()),
-            annotations: Vec::new(),
+            annotations: Default::default(),
             param_annotations: Vec::new(),
             no_infer_params: Vec::new(),
+            contract: None,
         },
     ]
 }

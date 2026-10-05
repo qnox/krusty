@@ -618,7 +618,7 @@ impl BodyFirChecker<'_> {
                         value: receiver,
                         conversion: None,
                     }),
-                    extension.context_args.into_iter().map(Some).collect(),
+                    extension.context_args,
                     extension.vararg_index,
                     parameters,
                     None,

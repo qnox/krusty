@@ -114,6 +114,25 @@ impl Emitter<'_> {
         }
     }
 
+    /// The call and erased `Object` slot of a generic result that checked IR narrows to a scalar
+    /// (`Holder<Int>.get()` read as `Int`). Its value is already the box a reference consumer takes.
+    pub(super) fn erased_scalar_result(
+        &self,
+        expression: crate::ir::ExprId,
+    ) -> Option<(crate::ir::ExprId, Ty)> {
+        let crate::ir::IrExpr::TypeOp {
+            op: crate::ir::IrTypeOp::ImplicitCoercion,
+            arg,
+            type_operand,
+        } = self.ir.expr(expression)
+        else {
+            return None;
+        };
+        let slot = *self.ir.physical_types.get(arg)?;
+        (jvm_is_erased_top(ir_ty_to_jvm(&slot)) && ir_ty_to_jvm(type_operand).is_jvm_scalar())
+            .then_some((*arg, slot))
+    }
+
     /// Whether `ty` names a `@JvmInline value class`, whose values use a backend-owned carrier.
     pub(super) fn is_value_class_ty(&self, ty: &Ty) -> bool {
         ty.non_null().obj_internal().is_some_and(|fq_name| {

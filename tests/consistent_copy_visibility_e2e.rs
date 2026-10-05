@@ -246,14 +246,11 @@ fn private_ctor_copy_deltas_hold_in_krustys_own_output() {
     );
 }
 
-/// An INTERNAL primary ctor with the feature: kotlinc mangles the JVM methods (`copy$<module>`)
-/// while keeping them public, and records internal visibility in `@Metadata`. krusty does not
-/// mangle internal member functions AT ALL yet (a declared `internal fun` also emits under its
-/// plain name), so `copy` follows that systemic convention — public, unmangled JVM — while
-/// `@Metadata` carries the internal visibility that actually enforces the module boundary.
-/// Byte-parity with kotlinc's mangled form is deferred until internal mangling lands module-wide.
+/// An INTERNAL primary ctor with the feature: the JVM methods are public `copy$<module>` and
+/// `copy$<module>$default` (the default module is `main`), and `@Metadata` records internal
+/// visibility under the Kotlin name `copy`.
 #[test]
-fn internal_ctor_copy_is_public_unmangled_with_internal_metadata() {
+fn internal_ctor_copy_is_public_and_module_mangled() {
     let src = "\
 // LANGUAGE: +DataClassCopyRespectsConstructorVisibility
 package demo
@@ -265,17 +262,17 @@ data class E internal constructor(val x: Int)
     let copy = ci
         .methods
         .iter()
-        .find(|m| m.name == "copy")
-        .expect("`copy` must keep its unmangled JVM name");
+        .find(|m| m.name == "copy$main")
+        .expect("`copy` is public `copy$main`");
     assert_eq!(
         copy.access, 0x0011,
-        "internal-ctor `copy` stays ACC_PUBLIC|ACC_FINAL (krusty's internal-member convention)"
+        "internal-ctor `copy$main` stays ACC_PUBLIC|ACC_FINAL"
     );
     let copy_default = ci
         .methods
         .iter()
-        .find(|m| m.name == "copy$default")
-        .expect("`copy$default` must keep its unmangled JVM name");
+        .find(|m| m.name == "copy$main$default")
+        .expect("`copy$main$default` is the default-argument stub");
     assert_eq!(
         copy_default.access, 0x1009,
         "internal-ctor `copy$default` stays ACC_PUBLIC|ACC_STATIC|ACC_SYNTHETIC"

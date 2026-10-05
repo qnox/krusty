@@ -9,7 +9,6 @@ use crate::ir::{
     IrParameterIdentity, IrParameterRole,
 };
 use crate::jvm::anonymous_context_labels;
-use crate::jvm::capture_names::capture_parameter_local;
 
 /// Name of a JVM `LocalVariableTable` entry, or `None` for a genuinely unnamed parameter.
 pub(super) fn local_variable(
@@ -61,6 +60,11 @@ pub(super) fn local_variable(
             IrGeneratedParameterRole::ReferenceInvokeValue { ordinal } => {
                 Some(format!("p{ordinal}"))
             }
+            // kotlinc's built-in `FunctionN.invoke` numbers its parameters from one.
+            IrGeneratedParameterRole::FunctionInvokeValue { ordinal } => {
+                Some(format!("p{}", ordinal + 1))
+            }
+            IrGeneratedParameterRole::SuspendLambdaCreateValue => Some("value".to_string()),
             IrGeneratedParameterRole::InterfaceDelegationValue { ordinal } => {
                 Some(format!("p{ordinal}"))
             }
@@ -82,10 +86,32 @@ pub(super) fn reference_invoke_bridge_parameter(ordinal: u16, continuation: bool
     format!("p{}", ordinal + 1)
 }
 
-/// A value parameter of a suspend lambda's typed `invoke` or of its erased bridge, the
-/// continuation included. kotlinc numbers both from one.
-pub(super) fn suspend_lambda_invoke_parameter(ordinal: u16) -> String {
-    format!("p{}", ordinal + 1)
+/// `LocalVariableTable` names of a suspend lambda class's generated `member`, formatted from the
+/// parameter identities its realization recorded and checked against `physical_parameters`: a
+/// captured value or receiver as its constructor parameter is spelled (`$receiver` where kotlinc's
+/// receiver convention applies), the generated roles as they are spelled everywhere.
+pub(super) fn suspend_lambda_member(
+    ir: &IrFile,
+    parameters: &crate::jvm::suspend::cps::SuspendLambdaParameters,
+    member: crate::jvm::suspend::cps::SuspendLambdaMember,
+    physical_parameters: &[crate::types::Ty],
+) -> Vec<String> {
+    parameters
+        .physical(member, physical_parameters.len())
+        .iter()
+        .map(|identity| match identity.role {
+            IrParameterRole::CapturedValue { .. } | IrParameterRole::CapturedReceiver { .. } => {
+                super::capture_names::suspend_lambda_capture(ir, parameters, identity).parameter
+            }
+            IrParameterRole::Generated(
+                IrGeneratedParameterRole::Continuation
+                | IrGeneratedParameterRole::SuspendLambdaCreateValue
+                | IrGeneratedParameterRole::FunctionInvokeValue { .. },
+            ) => local_variable(identity, "")
+                .expect("a suspend lambda's generated parameter role has a JVM name"),
+            role => panic!("a suspend lambda's {member:?} declares no {role:?} parameter"),
+        })
+        .collect()
 }
 
 pub(super) fn value_class_equals_operand(ordinal: u8) -> &'static str {
@@ -139,6 +165,18 @@ fn anonymous_context_parameters_are_locals() -> bool {
     crate::kotlin_version::at_least(crate::kotlin_version::KotlinVersion::V2_4_20)
 }
 
+/// kotlinc's spelling of the extension receiver of a value class's interface entry. The entry is a
+/// fresh member on the box under its own JVM name (`f-<hash>`, `getC`) that keeps its receiver as
+/// an extension receiver, so the receiver is labeled after that name with its non-identifier
+/// characters escaped (`$this$f_u2d<hash>`), never after the source declaration or its property.
+/// Its local-variable row and its `MethodParameters` name agree.
+pub(super) fn value_class_interface_entry_receiver(entry_name: &str) -> String {
+    format!(
+        "$this${}",
+        crate::jvm::debug_local_names::escaped(entry_name)
+    )
+}
+
 /// kotlinc's spelling of a source lambda's extension receiver: `$this$<label>` after the lambda's
 /// label, and `<this>` for a lambda without one.
 pub(super) fn lambda_receiver(origin: &crate::ir::IrLambdaOrigin) -> String {
@@ -173,6 +211,14 @@ fn function_local_variable(
                 .get(&function)
                 .expect("a lambda's extension receiver belongs to a source lambda");
             return Some(lambda_receiver(origin));
+        }
+        // kotlinc names the receiver after the function's IR name when it writes the method. A
+        // local function has its lifted name by then (`top$wrap`), mangled for a JVM local.
+        if let Some(lifted) = ir.lifted_names.get(&function) {
+            return Some(format!(
+                "$this${}",
+                super::debug_local_names::escaped(lifted)
+            ));
         }
         let source_name = ir
             .fn_source_names
@@ -419,10 +465,12 @@ pub(super) fn constructor_method_parameters(
 
 /// A primary constructor's LocalVariableTable names. kotlinc names a local or anonymous class's
 /// captured-value parameter like the field it stores into, and a captured receiver as
-/// [`capture_parameter_local`] says.
+/// [`super::capture_names::class_capture`] says.
 pub(super) fn constructor_local_variables(
-    arguments: &[crate::ir::IrCtorArg],
+    ir: &IrFile,
+    class: &crate::ir::IrClass,
 ) -> Vec<Option<String>> {
+    let arguments = &class.ctor_args;
     let identities = constructor_identities(arguments);
     let anonymous = if anonymous_context_parameters_are_locals() {
         constructor_anonymous_labels(arguments, &identities)
@@ -437,7 +485,7 @@ pub(super) fn constructor_local_variables(
             argument
                 .capture
                 .as_ref()
-                .map(capture_parameter_local)
+                .map(|capture| super::capture_names::class_capture(ir, class, capture).parameter)
                 .or(anonymous)
                 .or_else(|| local_variable(identity, "<init>"))
                 .or_else(|| {
@@ -518,6 +566,79 @@ pub(super) fn function_assertions(
             })
             .collect(),
     )
+}
+
+/// kotlinc's name for an extension receiver that a static taking the interface instance first
+/// (`DefaultImpls`, `access$<name>$jd`) receives as an ordinary parameter.
+const HOLDER_EXTENSION_RECEIVER: &str = "$receiver";
+
+/// One surface's spellings of `function`'s parameters where its body is emitted. kotlinc writes a
+/// static that takes a member's dispatch receiver first — an interface member's body on
+/// `DefaultImpls` (`holder_receiver`) or `access$<name>$jd`, a suspend member's body moved to
+/// `<name>$suspendImpl` (a recorded holder receiver) — with the interface or class instance as
+/// `$this` and the extension receiver moved into an ordinary parameter named `$receiver`, which its
+/// local-variable row, null check and reflection name all read. Elsewhere `names` stand.
+pub(super) fn placed(
+    ir: &IrFile,
+    function: u32,
+    holder_receiver: Option<crate::types::TypeName>,
+    names: Option<Vec<Option<String>>>,
+) -> Option<Vec<Option<String>>> {
+    let mut names = names?;
+    if !takes_dispatch_receiver_first(ir, function, holder_receiver) {
+        return Some(names);
+    }
+    let identities = ir
+        .function_parameter_identities(function)
+        .expect("parameter spellings are projected from recorded parameter identities");
+    assert_eq!(
+        identities.len(),
+        names.len(),
+        "one spelling per recorded parameter identity"
+    );
+    for (name, identity) in names.iter_mut().zip(identities) {
+        if identity.role == IrParameterRole::ExtensionReceiver {
+            *name = Some(HOLDER_EXTENSION_RECEIVER.to_string());
+        }
+    }
+    Some(names)
+}
+
+/// Whether `function` is emitted as a static taking its member's dispatch receiver as `$this`:
+/// written onto an interface's holder, or recorded with a holder receiver of its own.
+pub(super) fn takes_dispatch_receiver_first(
+    ir: &IrFile,
+    function: u32,
+    holder_receiver: Option<crate::types::TypeName>,
+) -> bool {
+    holder_receiver.is_some()
+        || ir
+            .function_parameter_identities(function)
+            .and_then(<[IrParameterIdentity]>::first)
+            .is_some_and(|identity| {
+                identity.role
+                    == IrParameterRole::Generated(IrGeneratedParameterRole::HolderReceiver)
+            })
+}
+
+/// [`placed`] for a provider-published parameter list republished on a `DefaultImpls` holder.
+pub(super) fn resolved_on_holder(
+    identities: &[crate::fir::ResolvedParameterIdentity],
+    names: &mut [Option<String>],
+) {
+    assert_eq!(
+        identities.len(),
+        names.len(),
+        "one spelling per provider-published parameter identity"
+    );
+    for (name, identity) in names.iter_mut().zip(identities) {
+        if matches!(
+            identity,
+            crate::fir::ResolvedParameterIdentity::ExtensionReceiver
+        ) {
+            *name = Some(HOLDER_EXTENSION_RECEIVER.to_string());
+        }
+    }
 }
 
 /// Text passed to `Intrinsics.checkNotNullParameter` for one checked parameter.
@@ -1047,6 +1168,99 @@ mod tests {
                 Some("p2".to_string()),
                 Some("$completion".to_string()),
             ]
+        );
+    }
+}
+
+#[cfg(test)]
+mod suspend_lambda_member_tests {
+    use super::suspend_lambda_member as local_variables;
+    use crate::ir::{
+        IrCapturedDeclaration, IrCapturedReceiver, IrCapturingCallable, IrFile,
+        IrParameterIdentity, IrValueCapture,
+    };
+    use crate::jvm::method_parameters::suspend_lambda_member as method_parameters;
+    use crate::jvm::suspend::cps::{SuspendLambdaMember, SuspendLambdaParameters};
+    use crate::types::Ty;
+
+    const SYNTHETIC: u16 = 0x1000;
+
+    fn named(names: &[&str], flags: &[u16]) -> Vec<(Option<String>, u16)> {
+        assert_eq!(names.len(), flags.len());
+        names
+            .iter()
+            .zip(flags)
+            .map(|(name, &flags)| (Some((*name).to_string()), flags))
+            .collect()
+    }
+
+    /// A suspend lambda class's generated members are named on both class-file surfaces from the
+    /// identities its realization recorded, and only from them: neither planner takes the other's
+    /// rows or a descriptor position. They agree where kotlinc spells a parameter alike and differ
+    /// exactly where it does not: a captured enclosing instance is `$receiver` in the
+    /// constructor's local-variable table and `this$0`, its field, in `MethodParameters`.
+    #[test]
+    fn both_surfaces_format_the_recorded_suspend_lambda_identities() {
+        let ir = IrFile::default();
+        let captured = IrParameterIdentity::captured_value(
+            Some("x".to_string()),
+            0,
+            IrValueCapture {
+                declaration: IrCapturedDeclaration::Variable,
+                capturer: IrCapturingCallable::Lambda,
+            },
+        );
+        let lambda = SuspendLambdaParameters::new(
+            vec![captured, IrParameterIdentity::captured_receiver(0)],
+            1,
+            vec![IrCapturedReceiver::Enclosing {
+                classifier: crate::types::type_name("Outer"),
+            }],
+            None,
+        );
+        let constructor = [Ty::Long, Ty::obj("Outer"), Ty::obj("Continuation")];
+        assert_eq!(
+            method_parameters(&ir, &lambda, SuspendLambdaMember::Constructor, &constructor),
+            named(&["$x", "this$0", "$completion"], &[SYNTHETIC, SYNTHETIC, 0])
+        );
+        assert_eq!(
+            local_variables(&ir, &lambda, SuspendLambdaMember::Constructor, &constructor),
+            ["$x", "$receiver", "$completion"]
+        );
+        let create = [Ty::obj("Object"), Ty::obj("Continuation")];
+        assert_eq!(
+            method_parameters(&ir, &lambda, SuspendLambdaMember::Create, &create),
+            named(&["value", "$completion"], &[0, 0])
+        );
+        assert_eq!(
+            local_variables(&ir, &lambda, SuspendLambdaMember::Create, &create),
+            ["value", "$completion"]
+        );
+        let invoke = [Ty::Int, Ty::obj("Continuation")];
+        assert_eq!(
+            method_parameters(&ir, &lambda, SuspendLambdaMember::Invoke, &invoke),
+            named(&["p1", "p2"], &[0, 0])
+        );
+        assert_eq!(
+            local_variables(&ir, &lambda, SuspendLambdaMember::Invoke, &invoke),
+            ["p1", "p2"]
+        );
+    }
+
+    /// The typed `invoke`'s continuation is the overridden `FunctionN.invoke`'s last parameter, so
+    /// it takes that role's spelling, not the completion's.
+    #[test]
+    fn typed_invoke_names_its_function_invoke_values_from_one() {
+        let lambda = SuspendLambdaParameters::new(Vec::new(), 2, Vec::new(), None);
+        let invoke = [Ty::Int, Ty::String, Ty::obj("Continuation")];
+        assert_eq!(
+            method_parameters(
+                &IrFile::default(),
+                &lambda,
+                SuspendLambdaMember::Invoke,
+                &invoke
+            ),
+            named(&["p1", "p2", "p3"], &[0, 0, 0])
         );
     }
 }

@@ -13,7 +13,7 @@ use crate::libraries::{
     LibraryType,
 };
 use crate::symbol_source::SymbolSource;
-use crate::types::{Ty, TypeName, TypeVariance, Visibility};
+use crate::types::{Ty, TypeName, TypeVariance};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BackendFactError {
@@ -49,8 +49,6 @@ pub struct BackendClassifierFact {
     pub is_abstract: bool,
     pub is_extensible: bool,
     pub supertypes: Box<[TypeName]>,
-    /// Functions and property accessors in semantic declaration order.
-    pub surface: Box<[BackendMemberFact]>,
     /// Resolved declaration annotations. A backend reads these to answer questions a plugin cannot
     /// answer for itself — whether ANOTHER file of this module carries an annotation whose generated
     /// declarations this file's emission must name.
@@ -61,9 +59,12 @@ pub struct BackendClassifierFact {
     pub own_type_parameter_count: usize,
     pub type_param_variances: Box<[TypeVariance]>,
     pub value_underlying: Option<Ty>,
-    pub value_underlying_property: Option<Box<str>>,
+    pub value_declaration: Option<crate::types::DeclaredValueClass>,
     /// The role its provider published for the declaration in type checks and casts.
     pub role: Option<crate::types::ClassifierRole>,
+    /// The declared companion object: the name of the static field holding it and its classifier.
+    /// Kotlin metadata publishes it for a dependency and the source declaration for this module.
+    pub companion: Option<(Box<str>, TypeName)>,
 }
 
 /// Declaration facts of a current-module classifier that a dependency's classifier record carries
@@ -79,73 +80,8 @@ struct SourceDeclaration {
     serialization_companion_accessor: Option<(Box<str>, TypeName, usize)>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BackendMemberFact {
-    pub name: BackendMemberName,
-    pub physical_name: Option<Box<str>>,
-    pub owner: Option<TypeName>,
-    pub physical_params: Box<[Ty]>,
-    pub params: Box<[Ty]>,
-    pub ret: Ty,
-    pub physical_ret: Ty,
-    pub descriptor: Box<str>,
-    pub realization: crate::libraries::MemberRealization,
-    /// A legacy interface body's receiver-first holder, the target of a nonvirtual call.
-    pub nonvirtual: Option<Box<crate::libraries::NonvirtualCallRealization>>,
-    pub suspend: bool,
-    pub abstract_member: bool,
-    pub visibility: Visibility,
-    pub parameter_identities: Box<[crate::fir::ResolvedParameterIdentity]>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum BackendMemberName {
-    Declared(Box<str>),
-    PropertyGetter(Box<str>),
-    PropertySetter(Box<str>),
-}
-
-fn erase_backend_parameter(ty: Ty) -> Ty {
-    ty.ty_param_bound().map_or(ty, Ty::non_null)
-}
-
 impl BackendClassifierFact {
     fn from_library(shape: &LibraryType) -> Self {
-        let mut surface = Vec::new();
-        for name in &shape.declared_callable_order {
-            let Some(callables) = shape.declared_callables.get(name) else {
-                continue;
-            };
-            surface.extend(
-                callables
-                    .functions()
-                    .iter()
-                    .map(BackendMemberFact::from_function),
-            );
-            for property in callables.properties() {
-                surface.push(BackendMemberFact::from_callable_named(
-                    &property.getter,
-                    property.visibility,
-                    &property.context_parameter_identities,
-                    None,
-                    property.receiver.is_some(),
-                    BackendMemberName::PropertyGetter(property.name.as_str().into()),
-                ));
-                if let Some(setter) = &property.setter {
-                    surface.push(BackendMemberFact::from_callable_named(
-                        setter,
-                        property.setter_visibility,
-                        &property.context_parameter_identities,
-                        property.setter_parameter_name.as_deref(),
-                        property.receiver.is_some(),
-                        BackendMemberName::PropertySetter(property.name.as_str().into()),
-                    ));
-                }
-            }
-        }
-        if surface.is_empty() {
-            surface.extend(shape.members.iter().map(BackendMemberFact::from_member));
-        }
         Self {
             access: shape.access,
             is_kotlin: shape.is_kotlin,
@@ -159,16 +95,16 @@ impl BackendClassifierFact {
                 .iter_ids()
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
-            surface: surface.into_boxed_slice(),
             annotations: shape.annotations.clone().into_boxed_slice(),
             own_type_parameter_count: shape.own_type_parameter_count,
             type_param_variances: shape.type_param_variances().to_vec().into_boxed_slice(),
             value_underlying: shape.value_underlying,
-            value_underlying_property: shape
-                .value_underlying_property
-                .as_deref()
-                .map(Box::<str>::from),
+            value_declaration: shape.value_declaration.clone(),
             role: shape.classifier_role(),
+            companion: shape
+                .companion_object
+                .as_ref()
+                .map(|(field, companion)| (Box::from(field.as_str()), *companion)),
         }
     }
 
@@ -185,124 +121,6 @@ impl BackendClassifierFact {
 
     pub fn is_enum(&self) -> bool {
         self.kind == crate::libraries::TypeKind::Enum
-    }
-}
-
-impl BackendMemberFact {
-    fn from_function(function: &crate::libraries::FunctionInfo) -> Self {
-        let callable = &function.callable;
-        Self {
-            name: BackendMemberName::Declared(callable.name.as_str().into()),
-            physical_name: callable.physical_name.as_deref().map(Into::into),
-            owner: Some(callable.owner),
-            physical_params: callable.physical_params.clone().into_boxed_slice(),
-            params: callable.params.clone().into_boxed_slice(),
-            ret: callable.ret,
-            physical_ret: callable.physical_ret,
-            descriptor: callable.descriptor.as_str().into(),
-            realization: callable.member_realization,
-            nonvirtual: callable.nonvirtual_realization.clone(),
-            suspend: function.flags.suspend,
-            abstract_member: function.flags.is_abstract,
-            visibility: function.visibility,
-            parameter_identities: function
-                .call_sig
-                .physical_parameter_identities(
-                    callable.params.len(),
-                    function.context_count,
-                    (function.is_extension()
-                        && callable.params.len()
-                            == function.call_sig.parameter_identities.len() + 1)
-                        .then_some(function.context_count),
-                )
-                .expect("a normalized function publishes every typed parameter identity"),
-        }
-    }
-
-    fn from_member(member: &LibraryMember) -> Self {
-        Self {
-            name: BackendMemberName::Declared(member.name.as_str().into()),
-            physical_name: member.physical_name.as_deref().map(Into::into),
-            owner: member.owner,
-            physical_params: member.physical_params.clone().into_boxed_slice(),
-            params: member.params.clone().into_boxed_slice(),
-            ret: member.ret,
-            physical_ret: member.physical_ret,
-            descriptor: member.descriptor.as_str().into(),
-            realization: member.realization,
-            nonvirtual: member.nonvirtual_realization.clone(),
-            suspend: member.suspend(),
-            abstract_member: member.is_abstract(),
-            visibility: member.visibility,
-            parameter_identities: member
-                .call_sig
-                .physical_parameter_identities(
-                    member.params.len(),
-                    member.context_count,
-                    (member.is_member_extension()
-                        && member.params.len() == member.call_sig.parameter_identities.len() + 1)
-                        .then_some(member.context_count),
-                )
-                .expect("a normalized member publishes every typed parameter identity"),
-        }
-    }
-
-    fn from_callable_named(
-        callable: &LibraryCallable,
-        visibility: Visibility,
-        context_parameter_identities: &[crate::fir::ResolvedParameterIdentity],
-        setter_parameter_name: Option<&str>,
-        extension_receiver: bool,
-        name: BackendMemberName,
-    ) -> Self {
-        let setter = matches!(name, BackendMemberName::PropertySetter(_));
-        let mut logical_identities = context_parameter_identities.to_vec();
-        if setter {
-            logical_identities.push(setter_parameter_name.map_or(
-                crate::fir::ResolvedParameterIdentity::PropertySetterValue,
-                |name| crate::fir::ResolvedParameterIdentity::Source(name.into()),
-            ));
-        }
-        // An associated/companion extension participates in source lookup through a receiver but
-        // its accessor has no physical receiver parameter. Preserve only receivers actually present
-        // in this target-facing parameter list.
-        let extension_receiver =
-            extension_receiver && callable.params.len() == logical_identities.len() + 1;
-        if extension_receiver {
-            logical_identities.insert(
-                callable.context_count,
-                crate::fir::ResolvedParameterIdentity::ExtensionReceiver,
-            );
-        }
-        assert_eq!(
-            callable.params.len(),
-            logical_identities.len(),
-            "a normalized property accessor publishes every typed parameter identity"
-        );
-        Self {
-            name,
-            physical_name: None,
-            owner: Some(callable.owner),
-            physical_params: callable.physical_params.clone().into_boxed_slice(),
-            params: callable.params.clone().into_boxed_slice(),
-            ret: callable.ret,
-            physical_ret: callable.physical_ret,
-            descriptor: callable.descriptor.as_str().into(),
-            realization: callable.member_realization,
-            nonvirtual: callable.nonvirtual_realization.clone(),
-            suspend: callable.suspend,
-            abstract_member: callable.is_abstract,
-            visibility,
-            parameter_identities: logical_identities.into_boxed_slice(),
-        }
-    }
-
-    pub fn suspend(&self) -> bool {
-        self.suspend
-    }
-
-    pub fn is_abstract(&self) -> bool {
-        self.abstract_member
     }
 }
 
@@ -413,188 +231,39 @@ impl BackendModuleFacts {
                 .ok_or(BackendFactError::IncompleteClassifier(
                     classifier.classifier,
                 ))? as usize;
-            let mut surface = Vec::new();
             let mut value_underlying = None;
-            let mut value_underlying_property = None;
-            for child_raw in 0..index.declaration_count() {
-                let child = crate::fir::DeclarationId::from_raw(
-                    u32::try_from(child_raw).expect("too many stable declarations for a packed id"),
-                );
-                let Some(anchor) = index.declaration_anchor(child) else {
-                    continue;
-                };
-                if anchor.owner != Some(declaration) {
-                    continue;
-                }
-                let Some(child_header) = index.declaration_header(child) else {
-                    continue;
-                };
-                match anchor.kind {
-                    crate::fir::DeclarationKind::Function => {
-                        if index.is_suppressed_generated_callable(child) {
-                            continue;
-                        }
-                        let signature = index.signature(child).ok_or(
-                            BackendFactError::IncompleteClassifier(classifier.classifier),
-                        )?;
-                        let callable = index.callable_for_declaration(child).ok_or(
-                            BackendFactError::IncompleteClassifier(classifier.classifier),
-                        )?;
-                        let mut parameters = signature
-                            .parameters
-                            .iter()
-                            .map(|parameter| erase_backend_parameter(parameter.get()))
-                            .collect::<Vec<_>>();
-                        if let Some(receiver) = callable.shape.extension_receiver {
-                            parameters.insert(
-                                (callable.shape.context_parameter_count as usize)
-                                    .min(parameters.len()),
-                                receiver.get(),
-                            );
-                        }
-                        let parameter_identities = index
-                            .callable_parameter_identities(callable.id, parameters.len())
+            let mut value_declaration = None;
+            if flags.has(crate::fir::DeclarationFlags::VALUE) {
+                for child in index.owned_declarations(declaration).iter().copied() {
+                    let Some(child_header) = index.declaration_header(child) else {
+                        continue;
+                    };
+                    if child_header.kind != crate::fir::DeclarationKind::Property
+                        || !child_header
+                            .flags
+                            .has(crate::fir::DeclarationFlags::PROPERTY_PARAMETER)
+                    {
+                        continue;
+                    }
+                    let signature =
+                        index
+                            .signature(child)
                             .ok_or(BackendFactError::IncompleteClassifier(
                                 classifier.classifier,
                             ))?;
-                        surface.push((
-                            index.source_order(child).unwrap_or(u32::MAX),
-                            BackendMemberFact {
-                                name: BackendMemberName::Declared(
-                                    index
-                                        .declaration_name(child)
-                                        .ok_or(BackendFactError::IncompleteClassifier(
-                                            classifier.classifier,
-                                        ))?
-                                        .into(),
-                                ),
-                                physical_name: None,
-                                owner: Some(classifier.classifier),
-                                physical_params: parameters.clone().into_boxed_slice(),
-                                params: parameters.into_boxed_slice(),
-                                ret: signature.result.get(),
-                                physical_ret: signature.result.get(),
-                                descriptor: "".into(),
-                                realization: crate::libraries::MemberRealization::Dispatch,
-                                nonvirtual: None,
-                                suspend: child_header
-                                    .flags
-                                    .has(crate::fir::DeclarationFlags::SUSPEND),
-                                abstract_member: child_header
-                                    .flags
-                                    .has(crate::fir::DeclarationFlags::ABSTRACT),
-                                visibility: child_header.visibility,
-                                parameter_identities,
-                            },
-                        ));
-                    }
-                    crate::fir::DeclarationKind::Property => {
-                        let signature = index.signature(child).ok_or(
+                    let name = index.declaration_name(child).ok_or(
+                        BackendFactError::IncompleteClassifier(classifier.classifier),
+                    )?;
+                    value_underlying = Some(signature.result.get());
+                    value_declaration = Some(crate::types::DeclaredValueClass {
+                        property: name.into(),
+                        underlying: signature.result.get(),
+                        type_parameters: index.own_type_parameter_types(declaration).ok_or(
                             BackendFactError::IncompleteClassifier(classifier.classifier),
-                        )?;
-                        let property_id = index.property_for_declaration(child).ok_or(
-                            BackendFactError::IncompleteClassifier(classifier.classifier),
-                        )?;
-                        let property = index.property(property_id).ok_or(
-                            BackendFactError::IncompleteClassifier(classifier.classifier),
-                        )?;
-                        let name = index.declaration_name(child).ok_or(
-                            BackendFactError::IncompleteClassifier(classifier.classifier),
-                        )?;
-                        if flags.has(crate::fir::DeclarationFlags::VALUE)
-                            && child_header
-                                .flags
-                                .has(crate::fir::DeclarationFlags::PROPERTY_PARAMETER)
-                        {
-                            value_underlying = Some(signature.result.get());
-                            value_underlying_property = Some(Box::<str>::from(name));
-                        }
-                        let mut parameters = signature
-                            .parameters
-                            .iter()
-                            .take(property.context_parameter_count as usize)
-                            .map(|parameter| parameter.get())
-                            .collect::<Vec<_>>();
-                        if let Some(receiver) = property.extension_receiver {
-                            parameters.push(receiver.get());
-                        }
-                        let abstract_member = child_header
-                            .flags
-                            .has(crate::fir::DeclarationFlags::ABSTRACT);
-                        let mut getter_parameter_identities = index
-                            .property_context_parameter_identities(property_id)
-                            .ok_or(BackendFactError::IncompleteClassifier(
-                                classifier.classifier,
-                            ))?
-                            .into_vec();
-                        if property.extension_receiver.is_some() {
-                            getter_parameter_identities
-                                .push(crate::fir::ResolvedParameterIdentity::ExtensionReceiver);
-                        }
-                        let getter_parameter_identities =
-                            getter_parameter_identities.into_boxed_slice();
-                        surface.push((
-                            index.source_order(child).unwrap_or(u32::MAX),
-                            BackendMemberFact {
-                                name: BackendMemberName::PropertyGetter(name.into()),
-                                physical_name: None,
-                                owner: Some(classifier.classifier),
-                                physical_params: parameters.clone().into_boxed_slice(),
-                                params: parameters.clone().into_boxed_slice(),
-                                ret: signature.result.get(),
-                                physical_ret: signature.result.get(),
-                                descriptor: "".into(),
-                                realization: crate::libraries::MemberRealization::Dispatch,
-                                nonvirtual: None,
-                                suspend: false,
-                                abstract_member,
-                                visibility: child_header.visibility,
-                                parameter_identities: getter_parameter_identities.clone(),
-                            },
-                        ));
-                        if property.mutable {
-                            parameters.push(signature.result.get());
-                            let mut setter_parameter_identities =
-                                getter_parameter_identities.to_vec();
-                            setter_parameter_identities.push(
-                                index
-                                    .property_setter_parameter_identity(property_id)
-                                    .ok_or(BackendFactError::IncompleteClassifier(
-                                        classifier.classifier,
-                                    ))?
-                                    .clone(),
-                            );
-                            let setter_parameter_identities =
-                                setter_parameter_identities.into_boxed_slice();
-                            let setter_visibility = index
-                                .owned_declaration(child, crate::fir::DeclarationKind::Accessor, 1)
-                                .and_then(|setter| index.declaration_header(setter))
-                                .map_or(child_header.visibility, |setter| setter.visibility);
-                            surface.push((
-                                index.source_order(child).unwrap_or(u32::MAX),
-                                BackendMemberFact {
-                                    name: BackendMemberName::PropertySetter(name.into()),
-                                    physical_name: None,
-                                    owner: Some(classifier.classifier),
-                                    physical_params: parameters.clone().into_boxed_slice(),
-                                    params: parameters.into_boxed_slice(),
-                                    ret: Ty::Unit,
-                                    physical_ret: Ty::Unit,
-                                    descriptor: "".into(),
-                                    realization: crate::libraries::MemberRealization::Dispatch,
-                                    nonvirtual: None,
-                                    suspend: false,
-                                    abstract_member,
-                                    visibility: setter_visibility,
-                                    parameter_identities: setter_parameter_identities,
-                                },
-                            ));
-                        }
-                    }
-                    _ => {}
+                        )?,
+                    });
                 }
             }
-            surface.sort_by_key(|(order, _)| *order);
             let companion = source_companion(index, declaration);
             let qualified_name = source_qualified_name(index, declaration);
             let fact = BackendClassifierFact {
@@ -606,11 +275,6 @@ impl BackendModuleFacts {
                 is_abstract: flags.has(crate::fir::DeclarationFlags::ABSTRACT) || is_interface,
                 is_extensible: !is_interface && !flags.has(crate::fir::DeclarationFlags::FINAL),
                 supertypes: direct_supertypes.into_boxed_slice(),
-                surface: surface
-                    .into_iter()
-                    .map(|(_, member)| member)
-                    .collect::<Vec<_>>()
-                    .into_boxed_slice(),
                 annotations: index
                     .declaration_applied_annotations(declaration)
                     .to_vec()
@@ -618,9 +282,10 @@ impl BackendModuleFacts {
                 own_type_parameter_count,
                 type_param_variances,
                 value_underlying,
-                value_underlying_property,
+                value_declaration,
                 // A source declaration is neither a mapped collection builtin nor a `FunctionN`.
                 role: None,
+                companion: companion.clone(),
             };
             source_declarations.insert(
                 classifier.classifier,
@@ -935,7 +600,16 @@ impl crate::types::ClassifierFactSource for CheckedBackendClassifiers<'_> {
 
     fn classifier_value_property(&self, classifier: TypeName) -> Option<String> {
         BackendClassifierSource::classifier(self, classifier)
-            .and_then(|fact| fact.value_underlying_property.as_deref().map(str::to_owned))
+            .and_then(|fact| Some(fact.value_declaration.as_ref()?.property.to_string()))
+    }
+
+    fn classifier_value_declaration(
+        &self,
+        classifier: TypeName,
+    ) -> Option<crate::types::DeclaredValueClass> {
+        BackendClassifierSource::classifier(self, classifier)?
+            .value_declaration
+            .clone()
     }
 
     fn classifier_role(&self, classifier: TypeName) -> Option<crate::types::ClassifierRole> {
@@ -1136,7 +810,6 @@ fn visit_inline_plan(plan: &InlineBodyPlan, visit: &mut impl FnMut(Ty)) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::libraries::SourceMember;
     use crate::symbol_source::SymbolSource;
 
     #[test]
@@ -1172,39 +845,6 @@ mod tests {
                 UndeterminedType::Error,
             ))
         );
-    }
-
-    #[test]
-    fn backend_facts_project_only_the_exact_member_surface() {
-        let classifier = crate::types::type_name("sample/Owner");
-        let mut shape = LibraryType::declaration_header();
-        let mut member = LibraryMember::new("run".to_owned(), Vec::new(), Ty::Unit, String::new());
-        member.source_member = Some(SourceMember::Class {
-            file: 4,
-            owner: 8,
-            method: 15,
-        });
-        member.inline_body_plan = Some(Box::new(InlineBodyPlan::InvokeLambda {
-            lambda_parameter: 0,
-            arguments: Vec::new(),
-            prologue: Vec::new(),
-            cleanup: Vec::new(),
-            cause: None,
-            recovery: None,
-            defaults: Vec::new(),
-            result: None,
-        }));
-        shape.members.push(member);
-
-        let facts = BackendModuleFacts::from_classifiers([(classifier, shape)], []).unwrap();
-        let frozen = facts.classifier(classifier).unwrap();
-        assert_eq!(frozen.surface.len(), 1);
-        assert_eq!(
-            frozen.surface[0].name,
-            BackendMemberName::Declared("run".into())
-        );
-        assert!(frozen.surface[0].params.is_empty());
-        assert_eq!(frozen.surface[0].ret, Ty::Unit);
     }
 
     #[test]

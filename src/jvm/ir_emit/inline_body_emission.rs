@@ -6,9 +6,11 @@ use crate::ir::{IrExpr, IrFile};
 use crate::jvm::classfile::CodeBuilder;
 use crate::types::Ty;
 
-use super::{ir_ty_to_jvm, Emitter};
+use super::inline_lambda_aliases::InlineLambdaAlias;
+use super::local_variable_representation::slot_type;
+use super::Emitter;
 
-/// Map each declaration index reachable inside one body to its physical JVM type.
+/// Map each declaration index reachable inside one body to the JVM type of the slot it owns.
 ///
 /// Value indices restart for every body. A lambda construction belongs to the current body through
 /// its capture expressions, but its `inline_body` is a separate numbering domain and must not be
@@ -25,8 +27,10 @@ pub(super) fn collect_body_var_types(
         if !seen.insert(expression) {
             continue;
         }
+        // The slot the declaration owns, exactly as its emission enters it: a `Unit` declaration
+        // is a `kotlin/Unit` reference, and reading it pushes one operand.
         if let IrExpr::Variable { index, ty, .. } = ir.expr(expression) {
-            declarations.insert(*index, ir_ty_to_jvm(ty));
+            declarations.insert(*index, slot_type(ir, expression, *ty));
         }
         match ir.expr(expression) {
             IrExpr::Lambda { captures, .. } => pending.extend(captures.iter().copied()),
@@ -45,7 +49,20 @@ impl Emitter<'_> {
         param_slots: &[(u16, Ty)],
         code: &mut CodeBuilder,
     ) -> Ty {
-        self.in_inline_body_scope(inline_body, param_slots, |emitter| {
+        self.emit_fn_body_inline_with_aliases(inline_body, param_slots, HashMap::new(), code)
+    }
+
+    /// [`Self::emit_fn_body_inline`] for a body some of whose captures are literal lambdas it
+    /// only invokes: `aliases` maps each such capture to the literal, whose body each invocation
+    /// places in turn. An aliased capture has no slot.
+    pub(super) fn emit_fn_body_inline_with_aliases(
+        &mut self,
+        inline_body: u32,
+        param_slots: &[(u16, Ty)],
+        aliases: HashMap<u32, InlineLambdaAlias>,
+        code: &mut CodeBuilder,
+    ) -> Ty {
+        self.in_inline_body_scope(inline_body, param_slots, aliases, |emitter| {
             let result = emitter.value_ty(inline_body);
             emitter.emit_value(inline_body, code);
             result
@@ -59,7 +76,7 @@ impl Emitter<'_> {
         inline_body: u32,
         param_slots: &[(u16, Ty)],
     ) -> Ty {
-        self.in_inline_body_scope(inline_body, param_slots, |emitter| {
+        self.in_inline_body_scope(inline_body, param_slots, HashMap::new(), |emitter| {
             emitter.value_ty(inline_body)
         })
     }
@@ -68,17 +85,26 @@ impl Emitter<'_> {
         &mut self,
         inline_body: u32,
         param_slots: &[(u16, Ty)],
+        aliases: HashMap<u32, InlineLambdaAlias>,
         within: impl FnOnce(&mut Self) -> R,
     ) -> R {
         let saved_slots = std::mem::take(&mut self.slots);
+        // The body numbers its values from zero again: none of them is a constructor-property
+        // parameter of the class whose initializer hosts the call.
+        let saved_initializer_class = self.constructor_initializer_class.take();
         let saved_var_types = std::mem::replace(
             &mut self.var_types,
             collect_body_var_types(self.ir, std::iter::once(inline_body)),
         );
         for (index, &(slot, ty)) in param_slots.iter().enumerate() {
-            self.slots.insert(index as u32, (slot, ty));
+            if !aliases.contains_key(&(index as u32)) {
+                self.slots.insert(index as u32, (slot, ty));
+            }
         }
+        let saved_aliases = std::mem::replace(&mut self.inline_lambda_aliases, aliases);
         let result = within(self);
+        self.inline_lambda_aliases = saved_aliases;
+        self.constructor_initializer_class = saved_initializer_class;
         self.slots = saved_slots;
         self.var_types = saved_var_types;
         result
@@ -129,6 +155,24 @@ mod tests {
             collect_body_var_types(&ir, [nested_body]).get(&0),
             Some(&Ty::String),
             "the nested body owns its same-numbered declaration"
+        );
+    }
+
+    #[test]
+    fn a_unit_declaration_is_typed_as_the_reference_slot_it_owns() {
+        let mut ir = IrFile::default();
+        let unit = ir.add_expr(IrExpr::UnitInstance);
+        let declaration = ir.add_expr(IrExpr::Variable {
+            index: 0,
+            ty: Ty::Unit,
+            init: Some(unit),
+            named: false,
+        });
+
+        assert_eq!(
+            collect_body_var_types(&ir, [declaration]).get(&0),
+            Some(&Ty::obj("kotlin/Unit")),
+            "a read of the declaration pushes the reference its slot holds"
         );
     }
 

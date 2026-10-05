@@ -8,6 +8,7 @@
 //! `create` or inline in `invoke`, keeps each parameter the body reads in its field.
 
 use super::*;
+use crate::jvm::suspend::cps::SuspendLambdaMember;
 use crate::jvm::suspend::SuspendLambdaClass;
 
 const SUSPEND_LAMBDA: &str = "kotlin/coroutines/jvm/internal/SuspendLambda";
@@ -32,10 +33,12 @@ struct Parameter {
     field: Option<Field>,
 }
 
-/// A captured value's field, and the name the constructor's parameter takes.
+/// A captured value's field.
 struct Capture {
     field: Field,
-    parameter: String,
+    /// The semantic captured type, retained independently from the field's physical descriptor so
+    /// its generic `Signature` never has to be recovered from a parallel class-field table.
+    semantic: Ty,
 }
 
 /// The facts every member of the class is written from.
@@ -89,14 +92,9 @@ impl Shape {
             captures: lambda
                 .captures
                 .iter()
-                .map(|capture| {
-                    let field = field(capture.field);
-                    let parameter = if capture.receiver {
-                        "$receiver".to_string()
-                    } else {
-                        field.name.clone()
-                    };
-                    Capture { field, parameter }
+                .map(|capture| Capture {
+                    field: field(capture.field),
+                    semantic: capture.ty,
                 })
                 .collect(),
             arity: u8::try_from(parameters.len() + 1)
@@ -104,6 +102,82 @@ impl Shape {
             parameters,
             result: signature.ret,
         }
+    }
+
+    /// The physical parameters of `member`, each with its descriptor, in descriptor order.
+    fn physical_parameters(&self, member: SuspendLambdaMember) -> Vec<(Ty, String)> {
+        let object = || (Ty::obj("java/lang/Object"), OBJECT_DESC.to_string());
+        let leading: Vec<(Ty, String)> = match member {
+            SuspendLambdaMember::Constructor => self
+                .captures
+                .iter()
+                .map(|capture| (capture.field.ty, capture.field.descriptor.clone()))
+                .collect(),
+            SuspendLambdaMember::Create => self
+                .parameters
+                .first()
+                .map(|_| object())
+                .into_iter()
+                .collect(),
+            SuspendLambdaMember::Invoke => self
+                .parameters
+                .iter()
+                .map(|parameter| (parameter.physical, type_descriptor(parameter.physical)))
+                .collect(),
+        };
+        leading
+            .into_iter()
+            .chain(std::iter::once((
+                Ty::obj(CONTINUATION),
+                CONTINUATION_DESC.to_string(),
+            )))
+            .collect()
+    }
+
+    /// `member`'s local-variable table rows for `this` and its parameters: each parameter named
+    /// from the identities the lambda's realization recorded, never from its position.
+    fn parameter_locals(
+        &self,
+        ir: &IrFile,
+        lambda: &SuspendLambdaClass,
+        member: SuspendLambdaMember,
+    ) -> Vec<(String, String, u16)> {
+        let physical = self.physical_parameters(member);
+        let types = physical.iter().map(|(ty, _)| *ty).collect::<Vec<_>>();
+        let names = crate::jvm::parameter_names::suspend_lambda_member(
+            ir,
+            &lambda.member_parameters,
+            member,
+            &types,
+        );
+        let mut locals = vec![("this".to_string(), self.self_desc(), 0u16)];
+        let mut slot = 1u16;
+        for (name, (ty, descriptor)) in names.into_iter().zip(physical) {
+            locals.push((name, descriptor, slot));
+            slot += slot_words(ty);
+        }
+        locals
+    }
+
+    /// `member`'s `MethodParameters`, planned from the same recorded identities as its locals but
+    /// independently of them.
+    fn method_parameters(
+        &self,
+        ir: &IrFile,
+        lambda: &SuspendLambdaClass,
+        member: SuspendLambdaMember,
+    ) -> Vec<(Option<String>, u16)> {
+        let types = self
+            .physical_parameters(member)
+            .into_iter()
+            .map(|(ty, _)| ty)
+            .collect::<Vec<_>>();
+        crate::jvm::method_parameters::suspend_lambda_member(
+            ir,
+            &lambda.member_parameters,
+            member,
+            &types,
+        )
     }
 
     fn self_desc(&self) -> String {
@@ -188,11 +262,29 @@ pub(super) fn emit_suspend_lambda_class(
             cw.add_field_late(access, &field.name, &field.descriptor, None, None);
         }
     }
-    for Capture { field, .. } in &shape.captures {
-        cw.add_field_late(0x1010, &field.name, &field.descriptor, None, None);
+    // A captured value's field carries its type's generic `Signature`, as a shared cell's
+    // `Ref$ObjectRef<T>` does.
+    for Capture { field, semantic } in &shape.captures {
+        let signature = parameterized_sig(&formatter, semantic);
+        cw.add_field_late_sig(
+            0x1010,
+            &field.name,
+            &field.descriptor,
+            signature.as_deref(),
+            None,
+            None,
+        );
     }
 
-    emit_constructor(&mut cw, &formatter, &shape, lambda, public);
+    emit_constructor(
+        ir,
+        &mut cw,
+        &formatter,
+        &shape,
+        lambda,
+        public,
+        env.java_parameters,
+    );
     emit_method(
         ir,
         lambda.invoke_suspend,
@@ -213,12 +305,26 @@ pub(super) fn emit_suspend_lambda_class(
         ],
     );
     if shape.has_create() {
-        emit_create(&mut cw, &shape);
+        emit_create(ir, &mut cw, &shape, lambda, env.java_parameters);
     }
-    emit_invoke(&mut cw, &formatter, &shape, &result);
-    emit_bridge(&mut cw, &shape);
+    emit_invoke(
+        ir,
+        &mut cw,
+        &formatter,
+        &shape,
+        lambda,
+        &result,
+        env.java_parameters,
+    );
+    emit_bridge(ir, &mut cw, &shape, lambda);
     // A lambda class is local to the scope it was written in.
-    let (d1, d2) = lambda_metadata(ir, lambda, &formatter);
+    let (d1, d2) = match lambda_metadata(ir, lambda, &formatter) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            env.run.set_emit_error(error);
+            return Vec::new();
+        }
+    };
     cw.set_kotlin_metadata(
         3,
         &opts.metadata_version(),
@@ -235,8 +341,12 @@ fn lambda_metadata(
     ir: &IrFile,
     lambda: &SuspendLambdaClass,
     formatter: &JvmSignatureFormatter<'_>,
-) -> (Vec<String>, Vec<String>) {
-    let Ty::Fun(signature) = lambda.function_type.non_null() else {
+) -> Result<(Vec<String>, Vec<String>), String> {
+    let function_type = super::class_lambda_reflection::approximate_unpublished_type_parameters(
+        lambda.function_type,
+        &lambda.type_parameters,
+    );
+    let Ty::Fun(signature) = function_type.non_null() else {
         unreachable!("a suspend lambda has a function type")
     };
     let own = &signature.params[signature.context_count..];
@@ -260,6 +370,8 @@ fn lambda_metadata(
     let approximate_intersection = |ty| formatter.declaration_approximation(ty);
     let (bytes, strings) = crate::metadata::lambda_function::build(
         &crate::metadata::lambda_function::LambdaFunction {
+            function_name: crate::metadata::lambda_function::function_name(lambda.form),
+            jvm_method: None,
             receiver,
             parameters: &parameters,
             result: signature.ret,
@@ -268,8 +380,8 @@ fn lambda_metadata(
             enum_entry_bodies: &enum_entry_bodies,
             intersection_approximation: &approximate_intersection,
         },
-    );
-    (crate::metadata::encoding::bytes_to_strings(&bytes), strings)
+    )?;
+    Ok((crate::metadata::encoding::bytes_to_strings(&bytes), strings))
 }
 
 /// `SuspendLambda` and the lambda's `FunctionN` over its parameters, its continuation and `Object`.
@@ -290,13 +402,16 @@ fn class_signature(formatter: &JvmSignatureFormatter, shape: &Shape, result: &st
 }
 
 /// `<init>(captures…, Continuation)`: store each captured value, then call
-/// `SuspendLambda(arity, completion)`.
+/// `SuspendLambda(arity, completion)`. `-java-parameters` reflects each capture under its field's
+/// name, compiler-generated, also where the local-variable table calls it `$receiver`.
 fn emit_constructor(
+    ir: &IrFile,
     cw: &mut ClassWriter,
     formatter: &JvmSignatureFormatter,
     shape: &Shape,
     lambda: &SuspendLambdaClass,
     public: bool,
+    java_parameters: bool,
 ) {
     let descriptor = shape.constructor_desc();
     let mut signature = String::from("(");
@@ -313,14 +428,12 @@ fn emit_constructor(
     cw.seed_utf8(&signature);
     let completion = 1 + shape.capture_words();
     let mut code = CodeBuilder::new(completion + 1);
-    let mut locals = vec![("this".to_string(), shape.self_desc(), 0u16)];
     let mut slot = 1u16;
-    for Capture { field, parameter } in &shape.captures {
+    for Capture { field, .. } in &shape.captures {
         code.aload(0);
         load(field.ty, slot, &mut code);
         let reference = cw.fieldref(&shape.class, &field.name, &field.descriptor);
         code.putfield(reference, slot_words(field.ty) as i32);
-        locals.push((parameter.clone(), field.descriptor.clone(), slot));
         slot += slot_words(field.ty);
     }
     code.aload(0);
@@ -333,11 +446,7 @@ fn emit_constructor(
     );
     code.invokespecial(super_constructor, 2, 0);
     code.ret_void();
-    locals.push((
-        "$completion".to_string(),
-        CONTINUATION_DESC.to_string(),
-        completion,
-    ));
+    let locals = shape.parameter_locals(ir, lambda, SuspendLambdaMember::Constructor);
     cw.reserve_method_lvt(&locals);
     if public {
         finish_code_sig::<0x0001>(
@@ -359,6 +468,10 @@ fn emit_constructor(
         );
     }
     cw.set_method_debug("<init>", &descriptor, None, &locals);
+    if java_parameters {
+        let reflected = shape.method_parameters(ir, lambda, SuspendLambdaMember::Constructor);
+        cw.set_method_parameters("<init>", &descriptor, &reflected);
+    }
 }
 
 /// `new Self(captures…, completion)`, left on the stack: the fresh copy `create` and `invoke`
@@ -395,7 +508,13 @@ fn store_parameter(
 
 /// `create([Object value,] Continuation)`: a fresh copy of the lambda with its parameter stored,
 /// as a `Continuation<Unit>`.
-fn emit_create(cw: &mut ClassWriter, shape: &Shape) {
+fn emit_create(
+    ir: &IrFile,
+    cw: &mut ClassWriter,
+    shape: &Shape,
+    lambda: &SuspendLambdaClass,
+    java_parameters: bool,
+) {
     let descriptor = shape.create_desc();
     let parameter = shape.parameters.first();
     let signature = format!(
@@ -428,15 +547,7 @@ fn emit_create(cw: &mut ClassWriter, shape: &Shape) {
     let continuation = cw.class_ref(CONTINUATION);
     code.checkcast(continuation);
     code.areturn();
-    let mut locals = vec![("this".to_string(), shape.self_desc(), 0u16)];
-    if parameter.is_some() {
-        locals.push(("value".to_string(), OBJECT_DESC.to_string(), 1));
-    }
-    locals.push((
-        "$completion".to_string(),
-        CONTINUATION_DESC.to_string(),
-        completion,
-    ));
+    let locals = shape.parameter_locals(ir, lambda, SuspendLambdaMember::Create);
     cw.reserve_method_lvt(&locals);
     let max_locals = if parameter.is_some_and(|parameter| parameter.field.is_some()) {
         copy + 1
@@ -452,15 +563,22 @@ fn emit_create(cw: &mut ClassWriter, shape: &Shape) {
         Some(&signature),
     );
     cw.set_method_debug("create", &descriptor, None, &locals);
+    if java_parameters {
+        let reflected = shape.method_parameters(ir, lambda, SuspendLambdaMember::Create);
+        cw.set_method_parameters("create", &descriptor, &reflected);
+    }
 }
 
 /// The typed `invoke(parameters…, Continuation)`: start a fresh copy of the lambda with `Unit`.
 /// With `create`, the copy is `create`'s; otherwise it is built and filled in place.
 fn emit_invoke(
+    ir: &IrFile,
     cw: &mut ClassWriter,
     formatter: &JvmSignatureFormatter,
     shape: &Shape,
+    lambda: &SuspendLambdaClass,
     result: &str,
+    java_parameters: bool,
 ) {
     let descriptor = shape.invoke_desc();
     let mut signature = String::from("(");
@@ -519,19 +637,7 @@ fn emit_invoke(
     let invoke_suspend = cw.methodref(&shape.class, "invokeSuspend", INVOKE_SUSPEND_DESC);
     code.invokevirtual(invoke_suspend, 1, 1);
     code.areturn();
-    let mut locals = vec![("this".to_string(), shape.self_desc(), 0u16)];
-    for (index, (parameter, &slot)) in shape.parameters.iter().zip(&slots).enumerate() {
-        locals.push((
-            crate::jvm::parameter_names::suspend_lambda_invoke_parameter(index as u16),
-            type_descriptor(parameter.physical),
-            slot,
-        ));
-    }
-    locals.push((
-        crate::jvm::parameter_names::suspend_lambda_invoke_parameter(shape.parameters.len() as u16),
-        CONTINUATION_DESC.to_string(),
-        completion,
-    ));
+    let locals = shape.parameter_locals(ir, lambda, SuspendLambdaMember::Invoke);
     cw.reserve_method_lvt(&locals);
     finish_code_sig::<0x0011>(
         cw,
@@ -542,10 +648,15 @@ fn emit_invoke(
         Some(&signature),
     );
     cw.set_method_debug("invoke", &descriptor, None, &locals);
+    if java_parameters {
+        let reflected = shape.method_parameters(ir, lambda, SuspendLambdaMember::Invoke);
+        cw.set_method_parameters("invoke", &descriptor, &reflected);
+    }
 }
 
-/// The erased `FunctionN.invoke(Object…)` bridge to the typed `invoke`.
-fn emit_bridge(cw: &mut ClassWriter, shape: &Shape) {
+/// The erased `FunctionN.invoke(Object…)` bridge to the typed `invoke`. Its parameters are the
+/// typed `invoke`'s recorded `FunctionN` values, erased.
+fn emit_bridge(ir: &IrFile, cw: &mut ClassWriter, shape: &Shape, lambda: &SuspendLambdaClass) {
     let descriptor = jvm_function_invoke_descriptor(shape.arity);
     cw.seed_utf8("invoke");
     cw.seed_utf8(&descriptor);
@@ -579,13 +690,20 @@ fn emit_bridge(cw: &mut ClassWriter, shape: &Shape) {
     code.invokevirtual(invoke, argument_words as i32, 1);
     code.areturn();
     finish_code::<0x1041>(cw, "invoke", &descriptor, &mut code, locals_count);
-    let mut locals = vec![("this".to_string(), shape.self_desc(), 0u16)];
-    for index in 0..u16::from(shape.arity) {
-        locals.push((
-            crate::jvm::parameter_names::suspend_lambda_invoke_parameter(index),
-            OBJECT_DESC.to_string(),
-            index + 1,
-        ));
-    }
+    let erased = vec![Ty::obj("java/lang/Object"); usize::from(shape.arity)];
+    let names = crate::jvm::parameter_names::suspend_lambda_member(
+        ir,
+        &lambda.member_parameters,
+        SuspendLambdaMember::Invoke,
+        &erased,
+    );
+    let locals = std::iter::once(("this".to_string(), shape.self_desc(), 0u16))
+        .chain(
+            names
+                .into_iter()
+                .zip(1u16..)
+                .map(|(name, slot)| (name, OBJECT_DESC.to_string(), slot)),
+        )
+        .collect::<Vec<_>>();
     cw.set_method_debug("invoke", &descriptor, None, &locals);
 }

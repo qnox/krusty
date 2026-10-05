@@ -159,7 +159,6 @@ pub(super) fn hoist_spliced_inline_bodies(
     hoist_spliced_walk(ir, body, suspend_set, orig_rets, ret, &mut seen);
 }
 
-#[allow(clippy::too_many_arguments)]
 fn hoist_spliced_walk(
     ir: &mut IrFile,
     expression: ExprId,
@@ -186,6 +185,11 @@ fn hoist_spliced_walk(
         if rewritten != inner {
             if let IrExpr::Lambda { inline_body, .. } = &mut ir.exprs[expression as usize] {
                 *inline_body = Some(rewritten);
+            }
+            // The rewritten body computes the same value, so it carries the checked result type
+            // the backend places the literal by.
+            if let Some(&result) = ir.logical_types.get(&inner) {
+                ir.logical_types.insert(rewritten, result);
             }
         }
         for capture in captures {
@@ -222,6 +226,7 @@ fn desugar_spliced_value_try(
     suspend_set: &HashSet<u32>,
     ret: &Ty,
 ) -> ExprId {
+    let body = sink_result_coercion_into_block(ir, body, suspend_set);
     let (mut stmts, value) = match ir.exprs[body as usize].clone() {
         IrExpr::Block { stmts, value } => (stmts, value),
         _ => (Vec::new(), Some(body)),
@@ -256,6 +261,52 @@ fn desugar_spliced_value_try(
     // body yields is a consumer here.
     normalize_statement_try_results(ir, block, false);
     block
+}
+
+/// A lambda whose declared result is wider than its body (`(T) -> R?` given an `Out` body, as
+/// `mapNotNull` passes it) carries the result coercion around its WHOLE body block:
+/// `coerce(Block { …; try { … } })`. The coercion converts only the block's value, so it is moved
+/// onto that value, where the tail value-`try` is recognized with the coercion applied to each arm,
+/// exactly as for an expression body. Left outside, the `try` stayed a value whose arm stored the
+/// call's raw `Object`, and the body was declined; the function was then emitted with no
+/// continuation to pass (`call arity mismatch`).
+///
+/// Rewritten only when that value is a suspending `try`, into a NEW block: the original nodes may be
+/// shared with the lambda's standalone body.
+fn sink_result_coercion_into_block(
+    ir: &mut IrFile,
+    body: ExprId,
+    suspend_set: &HashSet<u32>,
+) -> ExprId {
+    let IrExpr::TypeOp {
+        op,
+        arg,
+        type_operand,
+    } = ir.exprs[body as usize].clone()
+    else {
+        return body;
+    };
+    let IrExpr::Block {
+        stmts,
+        value: Some(value),
+    } = ir.exprs[arg as usize].clone()
+    else {
+        return body;
+    };
+    if !matches!(ir.exprs[value as usize], IrExpr::Try { .. })
+        || suspending_value_try(ir, value, suspend_set).is_none()
+    {
+        return body;
+    }
+    let coerced = ir.add_expr(IrExpr::TypeOp {
+        op,
+        arg: value,
+        type_operand,
+    });
+    ir.add_expr(IrExpr::Block {
+        stmts,
+        value: Some(coerced),
+    })
 }
 
 /// The type a spliced body's tail value-`try` binds to, when that value is a suspending `try`
@@ -949,9 +1000,9 @@ fn hoist_expr(
             };
             e
         }
-        IrExpr::NotNullAssert { operand, message } => {
+        IrExpr::NotNullAssert { operand, check } => {
             let operand = hoist_expr(ir, operand, suspend_set, orig_rets, value_types, prelude);
-            ir.exprs[e as usize] = IrExpr::NotNullAssert { operand, message };
+            ir.exprs[e as usize] = IrExpr::NotNullAssert { operand, check };
             e
         }
         IrExpr::LateinitCheck { operand, name } => {
@@ -1614,7 +1665,7 @@ fn hoisted_value_ty(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{IrIntrinsicSuspensionKind, IrIntrinsicSuspensionPoint};
+    use crate::ir::IrIntrinsicSuspensionPoint;
 
     #[test]
     fn a_shared_operand_is_hoisted_independently_at_each_use() {
@@ -1622,10 +1673,7 @@ mod tests {
         let suspension = ir.add_expr(IrExpr::UnitInstance);
         ir.intrinsic_suspension_points.insert(
             suspension,
-            IrIntrinsicSuspensionPoint {
-                result: Ty::String,
-                kind: IrIntrinsicSuspensionKind::Safe,
-            },
+            IrIntrinsicSuspensionPoint { result: Ty::String },
         );
         let shared = ir.add_expr(IrExpr::EnumValueOf {
             classifier: type_name("example/Level"),
@@ -1665,6 +1713,57 @@ mod tests {
     }
 
     #[test]
+    fn a_rewritten_spliced_body_keeps_its_checked_result_type() {
+        let mut ir = IrFile::default();
+        let impl_fn = ir.add_fun(crate::ir::IrFunction {
+            name: "caller$lambda".to_string(),
+            params: Vec::new(),
+            ret: Ty::String,
+            body: None,
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: Vec::new(),
+        });
+        let mut level = || {
+            let suspension = ir.add_expr(IrExpr::UnitInstance);
+            ir.intrinsic_suspension_points.insert(
+                suspension,
+                IrIntrinsicSuspensionPoint { result: Ty::String },
+            );
+            ir.add_expr(IrExpr::EnumValueOf {
+                classifier: type_name("example/Level"),
+                arg: suspension,
+                declaration: crate::ir::EnumValueOfDeclaration::Member,
+            })
+        };
+        let operands = vec![level(), level()];
+        let body = ir.add_expr(IrExpr::StringConcat(operands));
+        ir.logical_types.insert(body, Ty::String);
+        let lambda = ir.add_expr(IrExpr::Lambda {
+            impl_fn,
+            arity: 0,
+            captures: Vec::new(),
+            sam: None,
+            inline_body: Some(body),
+        });
+
+        hoist_spliced_inline_bodies(&mut ir, lambda, &HashSet::new(), &[], &Ty::Unit);
+
+        let IrExpr::Lambda {
+            inline_body: Some(rewritten),
+            ..
+        } = ir.exprs[lambda as usize]
+        else {
+            panic!("hoisting must keep the literal's inline body")
+        };
+        assert_ne!(
+            rewritten, body,
+            "the suspension is hoisted out of the operand"
+        );
+        assert_eq!(ir.logical_types.get(&rewritten), Some(&Ty::String));
+    }
+
+    #[test]
     fn a_static_instance_uses_the_stored_class_identity() {
         let mut ir = IrFile::default();
         ir.classes
@@ -1686,10 +1785,7 @@ mod tests {
             let suspension = ir.add_expr(IrExpr::UnitInstance);
             ir.intrinsic_suspension_points.insert(
                 suspension,
-                IrIntrinsicSuspensionPoint {
-                    result: Ty::String,
-                    kind: IrIntrinsicSuspensionKind::Safe,
-                },
+                IrIntrinsicSuspensionPoint { result: Ty::String },
             );
             let expression = match shape {
                 "ref-get" => IrExpr::RefGet {

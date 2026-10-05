@@ -22,6 +22,12 @@ pub(super) struct CheckedCallableReference<'a> {
     pub(super) adaptation: Option<&'a crate::fir::FirReferenceAdaptation>,
     pub(super) reference_ty: crate::types::Ty,
     pub(super) reflective: bool,
+    pub(super) reflection_owner: Option<crate::types::TypeName>,
+}
+
+struct MaterializedCallableReference {
+    ty: crate::types::Ty,
+    reflection_owner: Option<crate::types::TypeName>,
 }
 
 impl BodyLowering<'_> {
@@ -150,6 +156,7 @@ impl BodyLowering<'_> {
             adaptation,
             reference_ty,
             reflective,
+            reflection_owner,
         } = reference;
         if let crate::fir::FirCallableReferenceTarget::Constructor {
             target,
@@ -226,7 +233,10 @@ impl BodyLowering<'_> {
                 extension_receiver,
                 substitutions,
                 adaptation,
-                reference_ty,
+                super::external_references::CheckedExternalReference {
+                    ty: reference_ty,
+                    reflection_owner,
+                },
             );
         };
         let callable = self
@@ -242,7 +252,10 @@ impl BodyLowering<'_> {
             extension_receiver,
             substitutions,
             adaptation,
-            reference_ty,
+            MaterializedCallableReference {
+                ty: reference_ty,
+                reflection_owner,
+            },
         )? {
             return Ok(reference);
         }
@@ -257,8 +270,12 @@ impl BodyLowering<'_> {
         extension_capture: Option<ExprId>,
         substitutions: &[FirTypeSubstitution],
         adaptation: Option<&crate::fir::FirReferenceAdaptation>,
-        reference_ty: crate::types::Ty,
+        reference: MaterializedCallableReference,
     ) -> Result<Option<ExprId>, FirLoweringFailure> {
+        let MaterializedCallableReference {
+            ty: reference_ty,
+            reflection_owner,
+        } = reference;
         let crate::types::Ty::Fun(reference) = reference_ty.non_null() else {
             return Ok(None);
         };
@@ -509,6 +526,7 @@ impl BodyLowering<'_> {
                 declaration_result: signature_result,
                 declaration_suspend,
                 adaptation: adaptation.cloned().map(Box::new),
+                reflection_owner,
             },
         ))))
     }
@@ -760,8 +778,7 @@ impl BodyLowering<'_> {
                 }
                 if matches!(
                     operation,
-                    crate::fir::FirIntrinsic::SuspendCoroutine
-                        | crate::fir::FirIntrinsic::SuspendCoroutineUninterceptedOrReturn { .. }
+                    crate::fir::FirIntrinsic::SuspendCoroutineUninterceptedOrReturn { .. }
                 ) {
                     return self
                         .suspend_coroutine_primitive(
@@ -947,16 +964,10 @@ impl BodyLowering<'_> {
     ) -> Result<ExprId, FirLoweringFailure> {
         let (target, parameter_types, mut arguments) =
             self.constructor_target_and_arguments(call)?;
-        let reordered = arguments
-            .iter()
-            .map(|argument| match argument {
-                IrCheckedArgument::Expression { parameter, .. }
-                | IrCheckedArgument::Default { parameter }
-                | IrCheckedArgument::Vararg { parameter, .. } => *parameter,
-            })
-            .collect::<Vec<_>>()
-            .windows(2)
-            .any(|pair| pair[0] > pair[1]);
+        // Like a call's, only supplied operands evaluated out of parameter order are held in
+        // temporaries; an omitted default is filled by the callee and orders nothing.
+        let reordered =
+            !super::source_calls::argument_boundaries::follow_parameter_order(&arguments, None);
         let mut prelude = Vec::new();
         if reordered {
             for argument in &mut arguments {
@@ -1391,11 +1402,6 @@ pub(super) fn lower_fir_intrinsic(operation: &crate::fir::FirIntrinsic) -> crate
             }
         }
         crate::fir::FirIntrinsic::CoroutineContext => crate::ir::IrIntrinsic::CoroutineContext,
-        crate::fir::FirIntrinsic::SuspendCoroutine => {
-            unreachable!(
-                "safe suspend coroutine blocks are structurally lowered before this mapping"
-            )
-        }
         crate::fir::FirIntrinsic::SuspendCoroutineUninterceptedOrReturn { .. } => {
             unreachable!("suspend coroutine blocks are structurally lowered before this mapping")
         }

@@ -6,7 +6,11 @@
 
 use std::collections::{HashMap, HashSet};
 
+mod inherited_defaults;
 mod inherited_status;
+mod published_recheck;
+
+pub(super) use published_recheck::published_function_override_matches;
 
 use super::SymbolTable;
 use crate::fir::{
@@ -178,7 +182,7 @@ pub(super) fn property_declaration(
     })
 }
 
-fn function_target(
+pub(super) fn function_target(
     index: &ResolvedModuleIndex,
     function: &FunctionInfo,
 ) -> Option<ResolvedFunctionOverrideTarget> {
@@ -260,7 +264,7 @@ fn declared_properties(
         .collect()
 }
 
-fn declared_functions(
+pub(super) fn declared_functions(
     source: &dyn crate::symbol_source::SymbolSource,
     receiver: Ty,
     name: &str,
@@ -445,8 +449,8 @@ fn declaration_formal_bounds(
 ///
 /// This is path provenance, not another member lookup: the full applied hierarchy is already a
 /// stable FIR fact, but flattening it loses whether an interface arrived through the superclass or
-/// through a directly declared interface. Compatibility emitters need that distinction without
-/// reopening providers after checking.
+/// through a directly declared interface. Inherited-default selection needs that distinction: the
+/// superclass already realizes every member of an interface it reaches.
 fn inherited_superclass_interfaces(
     index: &ResolvedModuleIndex,
     source: &dyn SymbolSource,
@@ -469,6 +473,34 @@ fn inherited_superclass_interfaces(
             .then_some(candidate)
         })
         .collect()
+}
+
+/// The interface defaults one classifier inherits without overriding, selected from its frozen
+/// override plan while the hierarchy providers are live.
+fn classifier_inherited_defaults(
+    index: &ResolvedModuleIndex,
+    source: &dyn SymbolSource,
+    classifier: DeclarationId,
+    properties: &[ResolvedPropertyOverride],
+    functions: &[ResolvedFunctionOverride],
+) -> (DeclarationId, Vec<crate::fir::ResolvedInheritedDefault>) {
+    let hierarchy = with_function_supertypes(
+        source,
+        index.classifier_hierarchy(classifier).unwrap_or_default(),
+    );
+    let superclass_interfaces = inherited_superclass_interfaces(index, source, classifier);
+    let defaults = inherited_defaults::inherited_defaults(
+        index,
+        source,
+        &inherited_defaults::ClassifierPlan {
+            classifier,
+            hierarchy: &hierarchy,
+            superclass_interfaces: &superclass_interfaces,
+            functions,
+            properties,
+        },
+    );
+    (classifier, defaults)
 }
 
 fn publish_inherited_interface_function_plans(
@@ -608,6 +640,7 @@ fn publish_inherited_interface_function_plans(
                     overridden_return_value_status: applied.flags.return_value_status,
                     overridden_operator: applied.flags.operator,
                     overridden_infix: applied.flags.infix,
+                    overridden_visibility: applied.visibility,
                     suspend: implementation.flags.suspend,
                     has_kotlin_superclass_override: false,
                     depth: supertype.depth,
@@ -720,6 +753,7 @@ fn publish_inherited_interface_property_plans(
                     implementation_receiver: None,
                     implementation_mutable: implementation.setter.is_some(),
                     overridden_return_value_status: applied.return_value_status,
+                    overridden_visibility: applied.visibility,
                     has_kotlin_superclass_override: false,
                     depth: supertype.depth,
                 });
@@ -891,6 +925,7 @@ fn append_property_override_edges(
                 overridden_mutable: applied.setter.is_some(),
                 implementation_mutable,
                 overridden_return_value_status: applied.return_value_status,
+                overridden_visibility: applied.visibility,
                 has_kotlin_superclass_override: false,
                 depth: supertype.depth,
             });
@@ -1172,6 +1207,7 @@ fn append_function_override_edges(
                 overridden_return_value_status: applied.flags.return_value_status,
                 overridden_operator: applied.flags.operator,
                 overridden_infix: applied.flags.infix,
+                overridden_visibility: applied.visibility,
                 suspend: implementation.suspend,
                 has_kotlin_superclass_override: false,
                 depth: supertype.depth,
@@ -1410,7 +1446,7 @@ pub(crate) fn publish_checked_local_override_plans(
     source_file: u32,
     classifiers: &[crate::fir::DeclarationId],
 ) {
-    let (plans, preorders, superclass_interfaces) = {
+    let (plans, preorders, inherited_defaults) = {
         let module = crate::fir::StreamedModuleSymbols::for_file(index, source_file);
         let source = CompositeSource::new(vec![
             &module as &dyn SymbolSource,
@@ -1523,30 +1559,40 @@ pub(crate) fn publish_checked_local_override_plans(
             .flat_map(|(_, _, functions)| functions.iter().cloned())
             .collect::<Vec<_>>();
         let preorders = default_supertype_orders(&source, &function_edges);
-        let superclass_interfaces = plans
+        let inherited_defaults = plans
             .iter()
-            .map(|(classifier, _, _)| {
-                (
-                    *classifier,
-                    inherited_superclass_interfaces(index, &source, *classifier),
-                )
+            .filter(|(classifier, _, _)| index.inherited_defaults(*classifier).is_none())
+            .map(|(classifier, properties, functions)| {
+                classifier_inherited_defaults(index, &source, *classifier, properties, functions)
             })
             .collect::<Vec<_>>();
-        (plans, preorders, superclass_interfaces)
+        (plans, preorders, inherited_defaults)
     };
     let function_edges = plans
         .iter()
         .flat_map(|(_, _, functions)| functions.iter().cloned())
         .collect::<Vec<_>>();
     publish_inherited_function_defaults(index, &preorders, &function_edges);
-    for (classifier, interfaces) in superclass_interfaces {
-        if index.superclass_interfaces(classifier).is_none() {
-            index.publish_superclass_interfaces(classifier, interfaces);
-        }
+    for (classifier, defaults) in inherited_defaults {
+        index.publish_inherited_defaults(classifier, defaults);
     }
     // A local classifier's plan is published once, by the first body that checks it (a default
     // argument's object is checked for each function that carries the default); its statuses go
     // with that first publication.
+    crate::trace_compiler!(
+        "override",
+        "local override plans classifiers={:?} plans={:?}",
+        classifiers,
+        plans
+            .iter()
+            .map(|(classifier, properties, functions)| (
+                classifier,
+                properties.len(),
+                functions.len(),
+                index.has_function_override_plan(*classifier),
+            ))
+            .collect::<Vec<_>>(),
+    );
     let unpublished = plans
         .iter()
         .map(|(classifier, properties, functions)| {
@@ -1565,7 +1611,9 @@ pub(crate) fn publish_checked_local_override_plans(
             )
         })
         .collect::<Vec<_>>();
-    publish_inherited_statuses(index, &unpublished);
+    // A local classifier's members are projected from the FIR headers the visibility publication
+    // just corrected; there is no module symbol table copy to follow.
+    let _ = publish_inherited_statuses(index, &unpublished);
 
     for (classifier, properties, functions) in plans {
         if !index.has_property_override_plan(classifier) {
@@ -1584,7 +1632,7 @@ fn publish_inherited_statuses(
         Vec<ResolvedPropertyOverride>,
         Vec<ResolvedFunctionOverride>,
     )],
-) {
+) -> Vec<(crate::fir::DeclarationId, Visibility)> {
     let classifiers = plans
         .iter()
         .map(
@@ -1595,7 +1643,75 @@ fn publish_inherited_statuses(
             },
         )
         .collect::<Vec<_>>();
-    inherited_status::publish_inherited_statuses(index, &classifiers);
+    inherited_status::publish_inherited_statuses(index, &classifiers)
+}
+
+/// Record an override's inherited visibility on the module's projected member signatures, so Pass
+/// 2 access checks and call routing see the same visibility the FIR header (and with it every
+/// backend) now records. Streamed local members have no projected signatures; their providers read
+/// the corrected header directly.
+fn publish_inherited_visibilities_to_symbols(
+    table: &mut SymbolTable,
+    inherited: &[(crate::fir::DeclarationId, Visibility)],
+) {
+    if inherited.is_empty() {
+        return;
+    }
+    let inherited: HashMap<crate::fir::DeclarationId, Visibility> =
+        inherited.iter().copied().collect();
+    table.begin_module_mutation();
+    for class in table.classes.values_mut() {
+        for overloads in class.methods.values_mut() {
+            for signature in overloads.iter_mut() {
+                if let Some(visibility) = signature
+                    .stable_declaration
+                    .and_then(|declaration| inherited.get(&declaration))
+                {
+                    signature.visibility = *visibility;
+                }
+            }
+        }
+        for overloads in class.member_ext_funs.values_mut() {
+            for member in overloads.iter_mut() {
+                if let Some(visibility) = member
+                    .signature
+                    .stable_declaration
+                    .and_then(|declaration| inherited.get(&declaration))
+                {
+                    member.signature.visibility = *visibility;
+                }
+            }
+        }
+        for property in class.declared_props.values_mut() {
+            if let Some(visibility) = property
+                .stable_declaration
+                .and_then(|declaration| inherited.get(&declaration))
+            {
+                property.visibility = *visibility;
+            }
+        }
+        for overloads in class.contextual_props.values_mut() {
+            for property in overloads.iter_mut() {
+                if let Some(visibility) = property
+                    .stable_declaration
+                    .and_then(|declaration| inherited.get(&declaration))
+                {
+                    property.visibility = *visibility;
+                }
+            }
+        }
+        for overloads in class.member_ext_props.values_mut() {
+            for property in overloads.iter_mut() {
+                if let Some(visibility) = property
+                    .stable_declaration
+                    .and_then(|declaration| inherited.get(&declaration))
+                {
+                    property.visibility = *visibility;
+                }
+            }
+        }
+    }
+    table.finish_module_mutation();
 }
 
 /// Freeze every override edge before publishing an inherited default. Declaration and classifier
@@ -1800,8 +1916,8 @@ fn publish_inherited_function_defaults(
     }
 }
 
-pub(crate) fn publish_override_plans(index: &mut ResolvedModuleIndex, table: &SymbolTable) {
-    let (plans, preorders, superclass_interfaces) = {
+pub(crate) fn publish_override_plans(index: &mut ResolvedModuleIndex, table: &mut SymbolTable) {
+    let (plans, preorders, inherited_defaults) = {
         let module = ModuleSymbols::new(table);
         let source =
             CompositeSource::new(vec![&module as &dyn SymbolSource, table.libraries.as_ref()]);
@@ -1843,28 +1959,25 @@ pub(crate) fn publish_override_plans(index: &mut ResolvedModuleIndex, table: &Sy
             .flat_map(|(_, _, functions)| functions.iter().cloned())
             .collect::<Vec<_>>();
         let preorders = default_supertype_orders(&source, &function_edges);
-        let superclass_interfaces = plans
+        let inherited_defaults = plans
             .iter()
-            .filter_map(|(classifier, _, _)| {
-                index.classifier_header(*classifier).map(|_| {
-                    (
-                        *classifier,
-                        inherited_superclass_interfaces(index, &source, *classifier),
-                    )
-                })
+            .filter(|(classifier, _, _)| index.classifier_header(*classifier).is_some())
+            .map(|(classifier, properties, functions)| {
+                classifier_inherited_defaults(index, &source, *classifier, properties, functions)
             })
             .collect::<Vec<_>>();
-        (plans, preorders, superclass_interfaces)
+        (plans, preorders, inherited_defaults)
     };
     let function_edges = plans
         .iter()
         .flat_map(|(_, _, functions)| functions.iter().cloned())
         .collect::<Vec<_>>();
     publish_inherited_function_defaults(index, &preorders, &function_edges);
-    for (classifier, interfaces) in superclass_interfaces {
-        index.publish_superclass_interfaces(classifier, interfaces);
+    for (classifier, defaults) in inherited_defaults {
+        index.publish_inherited_defaults(classifier, defaults);
     }
-    publish_inherited_statuses(index, &plans);
+    let inherited = publish_inherited_statuses(index, &plans);
+    publish_inherited_visibilities_to_symbols(table, &inherited);
     for (classifier, properties, functions) in plans {
         index.publish_property_overrides(classifier, properties);
         index.publish_function_overrides(classifier, functions);

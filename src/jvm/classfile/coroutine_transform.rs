@@ -147,16 +147,23 @@ impl ClassWriter {
             let machine =
                 transform_suspend_lambda(node, &lambda).map_err(|error| describe(&error))?;
             // The lambda's class is its continuation: it declares the spill fields ahead of its own,
-            // and its `@DebugMetadata` leads its annotations, as kotlinc writes them.
-            for field in machine.layout.fields.iter().rev() {
-                self.add_leading_field(0, &field.name, &field.descriptor);
+            // and its `@DebugMetadata` leads its annotations, as kotlinc writes them. kotlinc's
+            // transformer visits both as it writes `invokeSuspend`, so the pool entries they name lead
+            // the transformed body's.
+            self.cp.start_noting();
+            for (position, field) in machine.layout.fields.iter().enumerate() {
+                self.add_leading_field(position, 0, &field.name, &field.descriptor);
             }
             self.lead_with_debug_metadata(&machine.debug_metadata);
+            let leading = self.cp.take_noted();
             let outcome = CoroutineOutcome::StateMachine {
                 fields: machine.layout.fields,
                 debug_metadata: machine.debug_metadata,
             };
             self.install_transformed(index, access, &method_name, &method_desc, machine.method)?;
+            if let Some(source) = self.methods[index].rewrite_source.as_mut() {
+                source.transformed_leading = leading;
+            }
             return Ok(outcome);
         }
         let function = NamedFunction {
@@ -179,12 +186,37 @@ impl ClassWriter {
                 ),
             };
         self.install_transformed(index, access, &method_name, &method_desc, node)?;
+        if matches!(outcome, CoroutineOutcome::StateMachine { .. }) {
+            // kotlinc generates the state machine's continuation class from this class, which
+            // lists it, although only the transformer's raw instructions construct it.
+            self.class_ref(&request.continuation_class);
+        }
         Ok(outcome)
     }
 
+    /// Declare a field at `position`, ahead of the fields declared so far (a suspend lambda's
+    /// spill fields, which the coroutine transformer adds after the class's own).
+    fn add_leading_field(&mut self, position: usize, access: u16, name: &str, desc: &str) {
+        let n = self.cp.utf8(name);
+        let d = self.cp.utf8(desc);
+        self.fields.insert(
+            position,
+            super::FieldInfo {
+                access,
+                name: n,
+                desc: d,
+                signature: None,
+                const_value: None,
+                visible_anns: Vec::new(),
+                invisible_anns: Vec::new(),
+            },
+        );
+    }
+
     /// Replace method `index` with its transformed body, then run kotlinc's optimizer over it, as
-    /// kotlinc's visitor chain hands the transformer's method on.
-    fn install_transformed(
+    /// kotlinc's visitor chain hands the transformer's method on. A body whose inline calls saved
+    /// the operand stack (see [`super::inline_call_stacks`]) is installed the same way.
+    pub(super) fn install_transformed(
         &mut self,
         index: usize,
         access: u16,
@@ -195,8 +227,11 @@ impl ClassWriter {
         // The transformed body's constants intern here; the class's pool layout later places them
         // where kotlinc's writer interns them when the transformed method is visited.
         let interned_after = self.cp.slot_count();
-        let assembled = node
-            .assemble(self)
+        // kotlinc's transformer rewrites the generated method node with raw ASM, so its own
+        // references never pass through the type mapper. Re-encoding copies them: a reference the
+        // class's code named stays mapped, one only inlined code named stays copied.
+        let assembled = self
+            .copying(|writer| node.assemble(writer))
             .map_err(|error| format!("the transformed body does not assemble: {error:?}"))?;
         let lvt = assembled
             .local_variables

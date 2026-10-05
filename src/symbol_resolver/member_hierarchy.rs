@@ -1,6 +1,7 @@
 //! Declared and inherited member lookup over applied classifier hierarchies.
 
 mod bound_inner_constructors;
+mod result_enhancement;
 
 pub(crate) use bound_inner_constructors::bound_inner_constructor_candidates;
 
@@ -88,6 +89,48 @@ pub(crate) fn override_input_shapes_match(
             }
             (None, Some(_)) | (Some(_), None) => false,
         }
+}
+
+/// The override input shape of one function as its provider published it. A provider publishes a
+/// generic signature for every callable that declares type parameters (module symbols, Kotlin
+/// metadata, and a Java `Signature` attribute alike), so a callable without one declares none.
+fn function_override_input_shape<'a>(
+    function: &'a FunctionInfo,
+    params: &'a [Ty],
+) -> OverrideInputShape<'a> {
+    let (formals, formal_bounds) = match function.generic_sig.as_ref() {
+        Some(signature) => (
+            signature.formals.as_slice(),
+            signature.formal_bounds.as_slice(),
+        ),
+        None => (&[][..], &[][..]),
+    };
+    OverrideInputShape {
+        params,
+        receiver: function
+            .semantic_receiver()
+            .filter(|_| function.is_extension()),
+        formals,
+        formal_bounds,
+        context_count: function.context_count,
+        suspend: function.flags.suspend,
+    }
+}
+
+/// Whether `implementation` and `inherited`, both viewed as members of one receiver type, share
+/// one override slot: [`override_input_shapes_match`] over each function's published shape.
+pub(crate) fn function_input_shapes_match(
+    source: &dyn SymbolSource,
+    inherited: &FunctionInfo,
+    implementation: &FunctionInfo,
+) -> bool {
+    let inherited_params = inherited.semantic_params();
+    let implementation_params = implementation.semantic_params();
+    override_input_shapes_match(
+        source,
+        function_override_input_shape(inherited, &inherited_params),
+        function_override_input_shape(implementation, &implementation_params),
+    )
 }
 
 /// A declaration overrides only one whose type parameters carry the same upper bounds, compared
@@ -229,6 +272,16 @@ pub(crate) fn specialize_member_function(
             });
         }
         FnKind::TopLevel => {}
+    }
+    let declared_result = function
+        .generic_sig
+        .as_ref()
+        .map_or(function.callable.ret, |signature| signature.ret);
+    if let Ty::PlatformNullable(rigid) = declared_result {
+        result_enhancement::publish_flexible_result(
+            &mut function.call_sig.result_enhancement,
+            specialize_member_type(source, *rigid, &bindings, TypePosition::Out),
+        );
     }
     specialize_callable(source, &mut function.callable, &bindings);
     function.ret.class = function
@@ -469,6 +522,7 @@ fn normalize_inherited_member_functions_with_family(
         }
     }
     inherit_overridden_semantic_roles(source, functions, intersection_parts);
+    result_enhancement::enhance_overriding_flexible_results(source, functions);
     inherit_overridden_default_arguments(source, functions);
     inherit_overridden_results(source, functions);
     retain_covariant_inherited_overrides(source, functions, intersection_parts);
@@ -490,17 +544,6 @@ fn inherit_overridden_semantic_roles(
         if implementation.callable.semantic_role.is_some() {
             continue;
         }
-        let implementation_params = implementation.semantic_params();
-        let implementation_formals = implementation
-            .generic_sig
-            .as_ref()
-            .map(|signature| signature.formals.as_slice())
-            .unwrap_or_default();
-        let implementation_bounds = implementation
-            .generic_sig
-            .as_ref()
-            .map(|signature| signature.formal_bounds.as_slice())
-            .unwrap_or_default();
         let mut inherited_role = None;
         let mut conflicting = false;
         for inherited in &declarations {
@@ -519,44 +562,13 @@ fn inherit_overridden_semantic_roles(
             {
                 continue;
             }
-            let inherited_params = inherited.semantic_params();
-            let inherited_formals = inherited
-                .generic_sig
-                .as_ref()
-                .map(|signature| signature.formals.as_slice())
-                .unwrap_or_default();
-            let inherited_bounds = inherited
-                .generic_sig
-                .as_ref()
-                .map(|signature| signature.formal_bounds.as_slice())
-                .unwrap_or_default();
-            if !override_input_shapes_match(
-                source,
-                OverrideInputShape {
-                    params: &inherited_params,
-                    receiver: inherited
-                        .semantic_receiver()
-                        .filter(|_| inherited.is_extension()),
-                    formals: inherited_formals,
-                    formal_bounds: inherited_bounds,
-                    context_count: inherited.context_count,
-                    suspend: inherited.flags.suspend,
-                },
-                OverrideInputShape {
-                    params: &implementation_params,
-                    receiver: implementation
-                        .semantic_receiver()
-                        .filter(|_| implementation.is_extension()),
-                    formals: implementation_formals,
-                    formal_bounds: implementation_bounds,
-                    context_count: implementation.context_count,
-                    suspend: implementation.flags.suspend,
-                },
-            ) || !resolution_subtype(
-                source,
-                implementation.ret.apply(implementation.callable.ret),
-                inherited.ret.apply(inherited.callable.ret),
-            ) {
+            if !function_input_shapes_match(source, inherited, implementation)
+                || !resolution_subtype(
+                    source,
+                    implementation.ret.apply(implementation.callable.ret),
+                    inherited.ret.apply(inherited.callable.ret),
+                )
+            {
                 continue;
             }
             match inherited_role {

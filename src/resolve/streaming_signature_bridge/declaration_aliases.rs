@@ -1,8 +1,7 @@
 //! Nested source type-alias publication from stable compact headers.
 
 use super::super::{
-    compact_classifier_identity, resolve_source_alias_expansion, ClassNames,
-    PassOneLocalClassContext, SymbolTable,
+    compact_classifier_identity, ClassNames, PassOneLocalClassContext, SymbolTable,
 };
 use super::streamed_type_alias_header_by_declaration;
 use crate::diag::DiagSink;
@@ -35,6 +34,9 @@ pub(in crate::resolve) fn publish_compact_nested_aliases(
         return;
     };
     let context = local_contexts.and_then(|contexts| contexts.get(source.raw() as usize));
+    let annotations = crate::resolve::signature_collection::compact_source_type_annotations(
+        table, headers, source,
+    );
 
     for (_, owner, alias, formals, target) in &aliases {
         let Some(owner_stub) = headers.stub(*owner) else {
@@ -87,28 +89,19 @@ pub(in crate::resolve) fn publish_compact_nested_aliases(
             }
         }
 
-        let Some((expansion, expansion_spelling)) = resolve_source_alias_expansion(
-            target,
-            formals,
-            &visible_aliases,
-            &names,
-            &table.alias_expansion_spellings,
-            diags,
-        ) else {
-            continue;
-        };
         // A type alias is a declaration in the classifier's Kotlin type namespace, not a runtime
         // nested class. Its qualified identity therefore uses an ordinary name-tree child (`/`),
         // never the backend nested-class (`$`) relation.
-        let identity = crate::types::type_name_child(owner_identity, alias);
-        if let Some(target) = crate::libraries::type_alias_target_classifier(expansion) {
-            table.source_alias_fqns.insert(identity, target);
-        }
-        table
-            .source_alias_expansions
-            .insert(identity, (formals.clone(), expansion));
-        table
-            .alias_expansion_spellings
-            .insert(identity, (expansion_spelling, formals.clone(), expansion));
+        let alias = crate::resolve::signature_collection::SourceAlias {
+            identity: crate::types::type_name_child(owner_identity, alias),
+            formals,
+            target,
+        };
+        let scope = crate::resolve::signature_collection::SourceAliasScope {
+            visible_aliases: &visible_aliases,
+            names: &names,
+            annotations: &annotations,
+        };
+        crate::resolve::signature_collection::publish_source_alias(table, alias, scope, diags);
     }
 }

@@ -104,6 +104,10 @@ pub struct ResolvedPropertyOverride {
     /// current-module declaration, whose status is derived from its own edges, and for a Java
     /// declaration, which records none; see [`crate::libraries::LibraryMember::return_value_status`].
     pub overridden_return_value_status: Option<crate::types::ReturnValueStatus>,
+    /// The overridden declaration's visibility as its provider records it. An override written
+    /// without a visibility modifier keeps it: the effective visibility is the most permissive of
+    /// the declarations it overrides, transitively.
+    pub overridden_visibility: crate::types::Visibility,
     /// Whether a Kotlin superclass declaration among the implementation's other overridden
     /// properties itself overrides `overridden`. A target realization of `overridden` (such as a
     /// JVM renamed-builtin bridge) may therefore already be owned by that superclass.
@@ -113,12 +117,15 @@ pub struct ResolvedPropertyOverride {
 
 /// Declaration status a function takes from the declarations it overrides, as kotlinc's status
 /// resolution derives it: the return-value status of the first overridden declaration that records
-/// one, and the `operator` / `infix` modifiers when any overridden declaration has them.
+/// one, and the `operator` / `infix` modifiers when any overridden declaration has them. The
+/// language role travels the same way: an override of `Any.toString` is a `toString` too.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct InheritedCallableStatus {
     pub return_value: crate::types::ReturnValueStatus,
     pub operator: bool,
     pub infix: bool,
+    /// The language role of the nearest overridden declaration that has one.
+    pub semantic_role: Option<crate::types::SemanticCallRole>,
 }
 
 /// Stable identity of the overridden function declaration.
@@ -174,6 +181,8 @@ pub struct ResolvedFunctionOverride {
     /// records it. An override inherits both modifiers, so its own metadata repeats them.
     pub overridden_operator: bool,
     pub overridden_infix: bool,
+    /// See [`ResolvedPropertyOverride::overridden_visibility`].
+    pub overridden_visibility: crate::types::Visibility,
     pub suspend: bool,
     /// Whether a Kotlin superclass declaration among the implementation's other overridden
     /// functions itself overrides `overridden`; see
@@ -183,34 +192,6 @@ pub struct ResolvedFunctionOverride {
 }
 
 impl ResolvedModuleIndex {
-    /// Interfaces reached through this classifier's direct superclass, in the superclass
-    /// hierarchy's semantic order. An empty published slice means there is no such interface;
-    /// absence means the classifier's override plan has not been finalized yet.
-    pub fn superclass_interfaces(&self, classifier: DeclarationId) -> Option<&[TypeName]> {
-        self.superclass_interfaces.get(&classifier).map(Box::as_ref)
-    }
-
-    pub(crate) fn publish_superclass_interfaces(
-        &mut self,
-        classifier: DeclarationId,
-        interfaces: impl IntoIterator<Item = TypeName>,
-    ) {
-        assert!(
-            self.classifier_header(classifier).is_some(),
-            "superclass interface facts require a published classifier"
-        );
-        let interfaces = interfaces
-            .into_iter()
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
-        assert!(
-            self.superclass_interfaces
-                .insert(classifier, interfaces)
-                .is_none(),
-            "a source classifier may publish superclass interfaces only once"
-        );
-    }
-
     pub fn property_overrides(&self, classifier: DeclarationId) -> &[ResolvedPropertyOverride] {
         self.property_overrides
             .get(&classifier)
@@ -277,6 +258,15 @@ impl ResolvedModuleIndex {
             .get(&callable)
             .copied()
             .unwrap_or_default()
+    }
+
+    /// Every current-module function that inherits a language role, with that role.
+    pub fn inherited_semantic_roles(
+        &self,
+    ) -> impl Iterator<Item = (CallableId, crate::types::SemanticCallRole)> + '_ {
+        self.callable_inherited_statuses
+            .iter()
+            .filter_map(|(&callable, status)| status.semantic_role.map(|role| (callable, role)))
     }
 
     pub fn property_return_value_status(

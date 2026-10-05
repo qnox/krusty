@@ -6,6 +6,8 @@ pub(crate) mod anonymous_origin;
 pub use inline_class::InlineClass;
 pub(super) mod builtin_bridge;
 mod class_identity;
+mod contract;
+mod enclosing_type_parameters;
 mod function;
 mod inline_class;
 mod property_declarations;
@@ -27,6 +29,8 @@ use string_table::{
     decode_d1, parse_string_table, resolve_class_name, resolve_string, split_d1, Rec,
 };
 use type_aliases::decode_type_aliases;
+
+pub use enclosing_type_parameters::{RawMetadata, ScopedTypeParameter};
 pub use type_aliases::MetaTypeAlias;
 pub use value_parameter::{MetaValueParam, MvpFlags};
 
@@ -531,265 +535,6 @@ fn parse_function(body: &[u8]) -> MetadataResult<ParsedFunction> {
         context_receiver_type_ids,
         context_params,
     })
-}
-
-// ---------------------------------------------------------------------------
-// Contract decoding (`Function.contract`, field 32)
-// ---------------------------------------------------------------------------
-//
-// Proto (`core/metadata/src/metadata.proto`): `Contract.effect` = 1 (repeated `Effect`).
-// `Effect.effect_type` = 1: RETURNS_CONSTANT = 0 / CALLS = 1 / RETURNS_NOT_NULL = 2 /
-// RETURNS_RESULT_OF = 3 — there is NO conditional type: `conclusion_of_conditional_effect` = 3
-// being present (with `condition_kind` = 5 absent/CONCLUSION_CONDITION = 0) makes the whole
-// message `<returns-effect> implies <conclusion>`. `Effect.kind` = 4: `InvocationKind`
-// AT_MOST_ONCE = 0 / EXACTLY_ONCE = 1 / AT_LEAST_ONCE = 2 (the enum order is NOT the Kotlin
-// declaration order — verified against kotlin-stdlib's `run`, which is EXACTLY_ONCE = 1).
-// `Expression.flags` = 1 (bit 0 = negated, bit 1 = null-check predicate),
-// `value_parameter_reference` = 2 (0 = extension receiver, else the 1-based value-parameter
-// index), `constant_value` = 3 (TRUE = 0 / FALSE = 1 / NULL = 2), `is_instance_type` = 4
-// (inline `Type`), `and_argument` = 6 / `or_argument` = 7 (repeated `Expression`; the FIRST
-// operand of the formula is embedded inline in the parent when it is primitive).
-
-/// Decode a `Contract` message body into the shared contract IR. `tparams` maps the function's
-/// type-parameter ids to names (for an `is R` conclusion over a generic parameter).
-fn decode_contract(
-    body: &[u8],
-    records: &[Rec],
-    d2: &[String],
-    tparams: &HashMap<u64, String>,
-    type_table: Option<&[u8]>,
-) -> Option<crate::contracts::Contract> {
-    let mut pb = Pb::new(body);
-    let mut effects = Vec::new();
-    while !pb.at_end() {
-        let tag = pb.varint()?;
-        match (tag >> 3, tag & 7) {
-            (1, 2) => {
-                let n = pb.varint()? as usize;
-                effects.push(decode_effect(
-                    pb.bytes(n)?,
-                    records,
-                    d2,
-                    tparams,
-                    type_table,
-                )?);
-            }
-            (_, w) => pb.skip(w)?,
-        }
-    }
-    (!effects.is_empty()).then_some(crate::contracts::Contract { effects })
-}
-
-fn decode_effect(
-    body: &[u8],
-    records: &[Rec],
-    d2: &[String],
-    tparams: &HashMap<u64, String>,
-    type_table: Option<&[u8]>,
-) -> Option<crate::contracts::Effect> {
-    use crate::contracts::{Effect, InvocationKind};
-    let mut pb = Pb::new(body);
-    let mut effect_type = 0u64;
-    let mut args: Vec<Vec<u8>> = Vec::new();
-    let mut conclusion: Option<Vec<u8>> = None;
-    let mut kind = 0u64;
-    let mut condition_kind = 0u64;
-    while !pb.at_end() {
-        let tag = pb.varint()?;
-        match (tag >> 3, tag & 7) {
-            (1, 0) => effect_type = pb.varint()?,
-            (2, 2) => {
-                let n = pb.varint()? as usize;
-                args.push(pb.bytes(n)?.to_vec());
-            }
-            (3, 2) => {
-                let n = pb.varint()? as usize;
-                conclusion = Some(pb.bytes(n)?.to_vec());
-            }
-            (4, 0) => kind = pb.varint()?,
-            (5, 0) => condition_kind = pb.varint()?,
-            (_, w) => pb.skip(w)?,
-        }
-    }
-    let base = match effect_type {
-        // RETURNS_CONSTANT — returns()/returns(c) (the constant is the argument, if any).
-        0 => Effect::Returns(returns_constant(args.first())),
-        // CALLS — callsInPlace(param, kind).
-        1 => Effect::CallsInPlace {
-            param: crate::contracts::ParamRef::from_wire(expression_param_ref(args.first()?)?),
-            kind: InvocationKind::from_wire(kind),
-        },
-        // RETURNS_NOT_NULL — returnsNotNull().
-        2 => Effect::Returns(crate::contracts::ReturnsValue::NotNull),
-        // RETURNS_RESULT_OF — not modeled.
-        _ => return None,
-    };
-    // `conclusion_of_conditional_effect` with the default CONCLUSION_CONDITION kind turns the
-    // returns-effect into `<returns> implies <conclusion>`. (RETURNS_CONDITION / HOLDSIN forms
-    // are not modeled.)
-    if condition_kind == 0 {
-        if let Some(cb) = conclusion {
-            if let Effect::Returns(returns) = base {
-                return Some(Effect::ConditionalReturns {
-                    returns,
-                    conclusion: decode_expression(&cb, records, d2, tparams, type_table)?,
-                });
-            }
-        }
-    }
-    Some(base)
-}
-
-/// The `returns(…)` constant of a RETURNS_CONSTANT effect: an `Expression` whose `constant_value`
-/// is the returned literal; no argument at all spells `returns()`.
-fn returns_constant(arg: Option<&Vec<u8>>) -> crate::contracts::ReturnsValue {
-    use crate::contracts::ReturnsValue;
-    let Some(body) = arg else {
-        return ReturnsValue::Any;
-    };
-    let mut pb = Pb::new(body);
-    let mut constant = None;
-    while !pb.at_end() {
-        let Some(tag) = pb.varint() else { break };
-        match (tag >> 3, tag & 7) {
-            (3, 0) => constant = pb.varint(),
-            (_, w) => {
-                if pb.skip(w).is_none() {
-                    break;
-                }
-            }
-        }
-    }
-    match constant {
-        Some(0) => ReturnsValue::Bool(true),
-        Some(1) => ReturnsValue::Bool(false),
-        Some(2) => ReturnsValue::Null,
-        _ => ReturnsValue::Any,
-    }
-}
-
-/// The `value_parameter_reference` of an `Expression` body, when present.
-fn expression_param_ref(body: &[u8]) -> Option<u64> {
-    let mut pb = Pb::new(body);
-    while !pb.at_end() {
-        let tag = pb.varint()?;
-        match (tag >> 3, tag & 7) {
-            (2, 0) => return pb.varint(),
-            (_, w) => pb.skip(w)?,
-        }
-    }
-    None
-}
-
-/// Decode an `Expression` in conclusion position into a [`crate::contracts::Condition`]. A
-/// boolean formula embeds its FIRST operand inline in this message when it is primitive, with
-/// the rest in `and_argument` (field 6) / `or_argument` (field 7).
-fn decode_expression(
-    body: &[u8],
-    records: &[Rec],
-    d2: &[String],
-    tparams: &HashMap<u64, String>,
-    type_table: Option<&[u8]>,
-) -> Option<crate::contracts::Condition> {
-    use crate::contracts::{Condition, ConditionType};
-    let mut pb = Pb::new(body);
-    let mut flags = 0u64;
-    let mut vpr = None;
-    let mut constant = None;
-    let mut instance_body = None;
-    let mut instance_id = None;
-    let mut ands: Vec<Condition> = Vec::new();
-    let mut ors: Vec<Condition> = Vec::new();
-    while !pb.at_end() {
-        let tag = pb.varint()?;
-        match (tag >> 3, tag & 7) {
-            (1, 0) => flags = pb.varint()?,
-            (2, 0) => vpr = Some(pb.varint()?),
-            (3, 0) => constant = Some(pb.varint()?),
-            (4, 2) => {
-                let n = pb.varint()? as usize;
-                instance_body = Some(pb.bytes(n)?.to_vec());
-            }
-            (5, 0) => instance_id = Some(pb.varint()?),
-            (6, 2) => {
-                let n = pb.varint()? as usize;
-                ands.push(decode_expression(
-                    pb.bytes(n)?,
-                    records,
-                    d2,
-                    tparams,
-                    type_table,
-                )?);
-            }
-            (7, 2) => {
-                let n = pb.varint()? as usize;
-                ors.push(decode_expression(
-                    pb.bytes(n)?,
-                    records,
-                    d2,
-                    tparams,
-                    type_table,
-                )?);
-            }
-            (_, w) => pb.skip(w)?,
-        }
-    }
-    // The primitive condition embedded inline in this message, if any.
-    let negated = flags & 1 != 0;
-    let null_check = flags & 2 != 0;
-    let self_cond = if null_check {
-        Some(Condition::IsNull {
-            param: crate::contracts::ParamRef::from_wire(vpr?),
-            negated,
-        })
-    } else if instance_body.is_some() || instance_id.is_some() {
-        // `is_instance_type` may INLINE the `Type` (field 4) or reference the function's
-        // `TypeTable` by id (field 5) — kotlinc writes the table form.
-        let (tb, table_nullable) = match (instance_body, instance_id) {
-            (Some(tb), _) => (tb, false),
-            (None, Some(id)) => {
-                let (tb, nullable) = type_table_entry(type_table?, id as usize)?;
-                (tb.to_vec(), nullable)
-            }
-            _ => return None,
-        };
-        let ty = decode_metadata_type(
-            &tb,
-            type_table,
-            records,
-            d2,
-            tparams,
-            &HashMap::new(),
-            table_nullable,
-            0,
-        )?;
-        Some(Condition::IsType {
-            param: crate::contracts::ParamRef::from_wire(vpr?),
-            ty: ConditionType::Metadata(ty),
-            negated,
-        })
-    } else {
-        match constant {
-            Some(0) => Some(Condition::Const(true)),
-            Some(1) => Some(Condition::Const(false)),
-            _ => vpr.map(|v| Condition::BoolParam(crate::contracts::ParamRef::from_wire(v))),
-        }
-    };
-    fn fold(
-        cs: Vec<Condition>,
-        mk: fn(Box<Condition>, Box<Condition>) -> Condition,
-    ) -> Option<Condition> {
-        let mut it = cs.into_iter();
-        let first = it.next()?;
-        Some(it.fold(first, |acc, c| mk(Box::new(acc), Box::new(c))))
-    }
-    if !ands.is_empty() {
-        return fold(self_cond.into_iter().chain(ands).collect(), Condition::And);
-    }
-    if !ors.is_empty() {
-        return fold(self_cond.into_iter().chain(ors).collect(), Condition::Or);
-    }
-    self_cond
 }
 
 /// The `@kotlin.jvm.JvmName("...")` value from a function's decoded annotation bodies, if present. The
@@ -1542,6 +1287,12 @@ pub struct KotlinMeta {
     pub type_aliases: Vec<MetaTypeAlias>,
     /// `Class.constructor` (field 8): named-parameter lists in declaration order.
     pub constructors: std::sync::Arc<[MetaConstructor]>,
+    /// `Class.flags.IS_INNER`: the class's metadata addresses its outer classes' type parameters
+    /// by id, so it decodes completely only within [`Self::type_parameter_scope`] of its outer.
+    pub is_inner: bool,
+    /// Every type parameter this class's members may address by id: its outer classes' (for an
+    /// inner class) and then its own, with their ids and bounds.
+    pub type_parameter_scope: Vec<ScopedTypeParameter>,
     /// `Class.fq_name` (field 3), the class's Kotlin qualified name with every boundary dotted
     /// (`lib.Outer.Nested`). Present only for class metadata.
     pub class_qualified_name: Option<String>,
@@ -1576,6 +1327,8 @@ impl Default for KotlinMeta {
             package_properties: std::sync::Arc::from([]),
             type_aliases: Vec::new(),
             constructors: std::sync::Arc::from([]),
+            is_inner: false,
+            type_parameter_scope: Vec::new(),
             class_qualified_name: None,
             companion_name: None,
             sealed_subclasses: Vec::new(),
@@ -1611,6 +1364,8 @@ struct MetaCtx<'a> {
     msg: &'a [u8],
     records: &'a [Rec],
     d2: &'a [String],
+    /// The type parameters an inner class addresses by id from its enclosing classes.
+    enclosing: &'a [ScopedTypeParameter],
 }
 
 /// Decode a classfile's `@Metadata` into [`KotlinMeta`] — the ONE place the packed representation is
@@ -1625,6 +1380,33 @@ pub fn decode_metadata(
     package_name: Option<&str>,
     methods: &[super::classreader::MethodSig],
 ) -> MetadataResult<KotlinMeta> {
+    decode_metadata_within(
+        &RawMetadata {
+            d1: d1.to_vec(),
+            d2: d2.to_vec(),
+            k,
+            package_name: package_name.map(str::to_owned),
+        },
+        this_class,
+        methods,
+        &[],
+    )
+}
+
+/// [`decode_metadata`] for a class whose metadata addresses `enclosing` type parameters by id: an
+/// inner class's outer classes' parameters (see [`ScopedTypeParameter`]).
+pub fn decode_metadata_within(
+    raw: &RawMetadata,
+    this_class: &str,
+    methods: &[super::classreader::MethodSig],
+    enclosing: &[ScopedTypeParameter],
+) -> MetadataResult<KotlinMeta> {
+    let (d1, d2, k, package_name) = (
+        raw.d1.as_slice(),
+        raw.d2.as_slice(),
+        raw.k,
+        raw.package_name.as_deref(),
+    );
     let package = package_name.map(|pn| pn.replace('.', "/"));
     if k == Some(3) {
         return Ok(KotlinMeta {
@@ -1653,6 +1435,7 @@ pub fn decode_metadata(
         msg,
         records: &records,
         d2,
+        enclosing,
     };
     // A class-body extension may use an ENCLOSING class parameter as its extension receiver
     // (`class Scope<T> { fun T.f() }`). Function metadata stores only the parameter id; decoding it
@@ -1692,6 +1475,9 @@ pub fn decode_metadata(
         Vec::new()
     };
     let class_flags = (k == Some(1)).then(|| class_identity::class_flags(&ctx));
+    let scope =
+        enclosing_type_parameters::class_scope(enclosing, &class_tparams, &class_type_param_bounds);
+    let (scope_tparams, scope_bounds) = enclosing_type_parameters::split(&scope);
     // `@Deprecated(level = HIDDEN)` lives on the JVM realization (a `kotlin.Deprecated` runtime
     // annotation), not in the protobuf. A declaration whose realization method carries it exists
     // for binary compatibility only — kotlinc drops it from resolution — so stamp the fact here,
@@ -1720,8 +1506,8 @@ pub fn decode_metadata(
     let class_functions = stamp_functions(decode_functions(
         &ctx,
         9,
-        &class_tparams,
-        &class_type_param_bounds,
+        &scope_tparams,
+        &scope_bounds,
         data_equality_bound,
     )?)
     .into();
@@ -1737,8 +1523,7 @@ pub fn decode_metadata(
         constructor.deprecated_hidden =
             realization_hidden(constructor.jvm_name, constructor.jvm_desc);
     }
-    let class_properties =
-        decode_properties(&ctx, 10, &class_tparams, &class_type_param_bounds)?.into();
+    let class_properties = decode_properties(&ctx, 10, &scope_tparams, &scope_bounds)?.into();
     Ok(KotlinMeta {
         class_visibility: class_flags
             .map(flags_visibility)
@@ -1757,6 +1542,8 @@ pub fn decode_metadata(
         package_properties: decode_properties(&ctx, 4, &[], &[])?.into(),
         type_aliases: decode_type_aliases(&ctx, package.as_deref(), this_class, k == Some(1))?,
         constructors: constructors.into(),
+        is_inner: class_flags.is_some_and(enclosing_type_parameters::is_inner),
+        type_parameter_scope: scope,
         class_qualified_name: if k == Some(1) {
             class_identity::class_qualified_name(&ctx)
         } else {
@@ -1820,9 +1607,15 @@ fn decode_class_signature(ctx: &MetaCtx<'_>) -> MetadataResult<ClassSignature> {
             }
         }
     }
-    let Some(parameters) =
-        type_parameter_context(&[], &[], &parsed_params, ctx.records, ctx.d2, table)
-    else {
+    let (enclosing, enclosing_bounds) = enclosing_type_parameters::split(ctx.enclosing);
+    let Some(parameters) = type_parameter_context(
+        &enclosing,
+        &enclosing_bounds,
+        &parsed_params,
+        ctx.records,
+        ctx.d2,
+        table,
+    ) else {
         return Ok((Vec::new(), Vec::new(), Vec::new()));
     };
 
@@ -1855,7 +1648,12 @@ fn decode_class_signature(ctx: &MetaCtx<'_>) -> MetadataResult<ClassSignature> {
             )
         }))
         .collect();
-    Ok((parameters.formals, parameters.formal_bounds, supertypes))
+    let own = enclosing.len();
+    Ok((
+        parameters.formals[own..].to_vec(),
+        parameters.formal_bounds[own..].to_vec(),
+        supertypes,
+    ))
 }
 
 fn decode_metadata_type(
@@ -2301,7 +2099,7 @@ fn decode_functions(
                         .map(|c| c.names)
                         .unwrap_or_default();
                         // Function-level table wins if present; the container's otherwise.
-                        decode_contract(body, records, d2, &tparams, function_type_table)
+                        contract::decode_contract(body, records, d2, &tparams, function_type_table)
                             .map(std::sync::Arc::new)
                     });
                     if pf.contract_body.is_some() {
@@ -2494,9 +2292,10 @@ fn ctor_params(ctx: &MetaCtx) -> MetadataResult<Vec<MetaConstructor>> {
         .into_iter()
         .map(parse_type_param)
         .collect::<Result<Vec<_>, _>>()?;
+    let (enclosing, enclosing_bounds) = enclosing_type_parameters::split(ctx.enclosing);
     let type_context = type_parameter_context(
-        &[],
-        &[],
+        &enclosing,
+        &enclosing_bounds,
         &parsed_type_params,
         records,
         d2,
@@ -3416,6 +3215,7 @@ mod module_reader_tests {
             msg: &message,
             records: &[],
             d2: &d2,
+            enclosing: &[],
         };
         let decoded =
             super::decode_functions(&ctx, 3, &[], &[], None).expect("function metadata decodes");
@@ -3703,6 +3503,7 @@ mod module_reader_tests {
             msg: &msg,
             records: &[],
             d2: &d2,
+            enclosing: &[],
         };
 
         let properties = decode_properties(&ctx, 4, &[], &[]).expect("property metadata decodes");
@@ -3744,6 +3545,7 @@ mod module_reader_tests {
             msg: &msg,
             records: &[],
             d2: &d2,
+            enclosing: &[],
         };
 
         let properties = decode_properties(&ctx, 4, &[], &[]).expect("property metadata decodes");
@@ -3822,6 +3624,7 @@ mod module_reader_tests {
             msg: &msg,
             records: &[],
             d2: &d2,
+            enclosing: &[],
         };
 
         let properties = decode_properties(&ctx, 4, &[], &[]).expect("property metadata decodes");

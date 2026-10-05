@@ -371,11 +371,10 @@ pub fn compile_in_process(
     jdk_modules: Option<&std::path::Path>,
 ) -> Option<Vec<(String, Vec<u8>)>> {
     let report = compile_in_process_report(src, stem, cp_jars, jdk_modules);
-    (report.diagnostics.is_empty() && !report.classes.is_empty()).then_some(report.classes)
+    (!report.has_errors && !report.classes.is_empty()).then_some(report.classes)
 }
 
-/// The complete diagnostics of an in-process compile of `src`, in emission order; empty when it
-/// compiled.
+/// The complete diagnostics of an in-process compile of `src`, in emission order.
 pub fn compile_in_process_diagnostics(
     src: &str,
     stem: &str,
@@ -388,6 +387,7 @@ pub fn compile_in_process_diagnostics(
 struct InProcessEmissionReport {
     artifacts: Vec<krusty::compiler::Artifact>,
     diagnostics: Vec<String>,
+    has_errors: bool,
 }
 
 /// What in-process compiles analyze against: `platform` plus every native compiler plugin krusty
@@ -425,6 +425,7 @@ fn emit_in_process<B: krusty::compiler::Backend>(
         &mut diags,
     );
     let artifacts = krusty::compiler::emit_analyzed(analysis, &stems, backend, "main", &mut diags);
+    let has_errors = diags.has_errors();
     InProcessEmissionReport {
         artifacts,
         diagnostics: diags
@@ -432,6 +433,7 @@ fn emit_in_process<B: krusty::compiler::Backend>(
             .into_iter()
             .map(|diagnostic| diagnostic.msg)
             .collect(),
+        has_errors,
     }
 }
 
@@ -477,6 +479,7 @@ pub fn capture_common_ir(
 struct InProcessCompileReport {
     classes: Vec<(String, Vec<u8>)>,
     diagnostics: Vec<String>,
+    has_errors: bool,
 }
 
 /// Run the production streaming compiler once while retaining its diagnostics. Test helpers that
@@ -510,6 +513,7 @@ fn compile_in_process_report(
     InProcessCompileReport {
         classes,
         diagnostics: report.diagnostics,
+        has_errors: report.has_errors,
     }
 }
 

@@ -104,28 +104,43 @@ pub(super) fn emit_accessors(ir: &IrFile, class: &IrClass, owner: &str, cw: &mut
             .collect()
     };
     for ordinal in ordinals {
-        emit_accessor(class, ordinal, owner, cw);
+        emit_accessor(ir, class, ordinal, owner, cw);
     }
 }
 
-fn emit_accessor(class: &IrClass, ordinal: u32, owner: &str, cw: &mut ClassWriter) {
+fn emit_accessor(ir: &IrFile, class: &IrClass, ordinal: u32, owner: &str, cw: &mut ClassWriter) {
+    // An enum's constructors all take the constant's name and ordinal first, and so do their
+    // accessors.
+    let owner_prefix = if class.is_enum {
+        OwnerConstructorPrefix::enum_class()
+    } else {
+        OwnerConstructorPrefix::none()
+    };
     let Some(secondary) = ordinal.checked_sub(1) else {
-        let parameters = class_ctor_jvm_tys(class);
-        let identities = primary_constructor_identities(class, &parameters);
+        let declared = class_ctor_jvm_tys(class);
+        let identities = owner_prefix
+            .identities()
+            .chain(primary_constructor_identities(ir, class, &declared))
+            .collect::<Vec<_>>();
+        let parameters = owner_prefix
+            .types
+            .iter()
+            .copied()
+            .chain(declared)
+            .collect::<Vec<_>>();
         emit_ctor_marker_accessor(owner, &parameters, &identities, cw);
         return;
     };
     let constructor = &class.secondary_ctors[secondary as usize];
-    let parameters = jvm_tys(&constructor.prefix_params)
-        .into_iter()
+    let parameters = owner_prefix
+        .types
+        .iter()
+        .copied()
+        .chain(jvm_tys(&constructor.prefix_params))
         .chain(jvm_tys(&constructor.params))
         .collect::<Vec<_>>();
-    let identities = secondary_constructor_identities(
-        class,
-        constructor,
-        &OwnerConstructorPrefix::none(),
-        &parameters,
-    );
+    let identities =
+        secondary_constructor_identities(ir, class, constructor, &owner_prefix, &parameters);
     emit_ctor_marker_accessor(owner, &parameters, &identities, cw);
 }
 

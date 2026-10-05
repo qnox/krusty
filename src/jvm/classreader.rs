@@ -181,6 +181,9 @@ pub struct ClassInfo {
     pub inner_classes: Vec<InnerClassRef>,
     /// For an annotation type: the default each element declares, in method order.
     pub annotation_element_defaults: Vec<(Box<str>, AnnotationElementDefault)>,
+    /// An inner class's packed `@Metadata`, kept until [`Self::within_outer`] decodes it in its
+    /// outer class's type-parameter scope. `None` for every other class.
+    pub inner_metadata: Option<std::sync::Arc<crate::jvm::metadata::RawMetadata>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -208,6 +211,44 @@ impl ClassInfo {
                 .this_class
                 .parent()
                 .unwrap_or_else(|| crate::types::type_name("")),
+        }
+    }
+
+    /// The outer class an inner Kotlin class's metadata addresses type parameters of, from its
+    /// `InnerClasses` self entry. `None` for every class [`Self::within_outer`] leaves unchanged.
+    pub fn metadata_outer_class(&self) -> Option<TypeName> {
+        self.inner_metadata.as_ref()?;
+        self.inner_class_self()?
+            .outer
+            .as_deref()
+            .map(crate::types::type_name)
+    }
+
+    /// Decode an inner class's metadata in `outer`'s type-parameter scope, so a member that
+    /// addresses an outer parameter by id resolves it as kotlinc's reader does.
+    pub fn within_outer(&self, outer: &ClassInfo) -> Result<ClassInfo, ReadError> {
+        let Some(raw) = self.inner_metadata.as_deref() else {
+            return Ok(self.clone());
+        };
+        let meta = crate::jvm::metadata::decode_metadata_within(
+            raw,
+            &self.this_class(),
+            &self.methods,
+            &outer.meta.type_parameter_scope,
+        )
+        .map_err(ReadError::BadKotlinMetadata)?;
+        Ok(ClassInfo {
+            meta,
+            inner_metadata: None,
+            ..self.clone()
+        })
+    }
+
+    /// This class with no metadata left to decode within an outer class.
+    pub fn without_inner_metadata(self) -> ClassInfo {
+        ClassInfo {
+            inner_metadata: None,
+            ..self
         }
     }
 
@@ -884,15 +925,16 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
     // (for an annotation class) its `@Retention` policy.
     let attrs = read_class_attrs(&mut r, &cp);
 
-    let meta = crate::jvm::metadata::decode_metadata(
-        &attrs.d1.unwrap_or_default(),
-        &attrs.d2.unwrap_or_default(),
-        attrs.k,
-        &this_class,
-        attrs.pn.as_deref(),
-        &methods,
-    )
-    .map_err(ReadError::BadKotlinMetadata)?;
+    let raw_metadata = crate::jvm::metadata::RawMetadata {
+        d1: attrs.d1.unwrap_or_default(),
+        d2: attrs.d2.unwrap_or_default(),
+        k: attrs.k,
+        package_name: attrs.pn,
+    };
+    let meta =
+        crate::jvm::metadata::decode_metadata_within(&raw_metadata, &this_class, &methods, &[])
+            .map_err(ReadError::BadKotlinMetadata)?;
+    let inner_metadata = meta.is_inner.then(|| std::sync::Arc::new(raw_metadata));
     Ok(ClassInfo {
         major,
         access,
@@ -909,6 +951,7 @@ pub fn parse_class(bytes: &[u8]) -> Result<ClassInfo, ReadError> {
         java_targets: attrs.java_targets,
         inner_classes: attrs.inner_classes,
         annotation_element_defaults,
+        inner_metadata,
     })
 }
 
@@ -1016,9 +1059,14 @@ fn read_class_attrs(r: &mut Reader, cp: &[C]) -> ClassAttrs {
                 if is_retention && ename == "value" {
                     let Ok(tag) = attr.u1() else { break };
                     if tag == b'e' {
-                        let _ = attr.u2(); // enum type descriptor index
+                        // Only a `java.lang.annotation.RetentionPolicy` constant is a policy.
+                        let owner = attr.u2().map(utf8);
                         if let Ok(ci) = attr.u2() {
-                            out.retention = Some(utf8(ci).to_string());
+                            if owner.is_ok_and(|owner| {
+                                owner == "Ljava/lang/annotation/RetentionPolicy;"
+                            }) {
+                                out.retention = Some(utf8(ci).to_string());
+                            }
                         }
                     } else {
                         // Unexpected shape — stop parsing this class's attributes rather than desync.
@@ -1061,7 +1109,12 @@ fn read_class_attrs(r: &mut Reader, cp: &[C]) -> ClassAttrs {
                 if (is_kotlin_target && ename == "allowedTargets")
                     || (is_java_target && ename == "value")
                 {
-                    match read_element_value(&mut attr, cp, ElementValueExtract::EnumConstants) {
+                    let entries = ElementValueExtract::EnumConstants(if is_kotlin_target {
+                        "Lkotlin/annotation/AnnotationTarget;"
+                    } else {
+                        "Ljava/lang/annotation/ElementType;"
+                    });
+                    match read_element_value(&mut attr, cp, entries) {
                         Ok(Some(constants)) if is_kotlin_target => out.kotlin_targets = constants,
                         Ok(Some(constants)) => out.java_targets = constants,
                         Ok(None) => {}
@@ -1264,9 +1317,10 @@ enum ElementValueExtract {
     Skip,
     /// String elements (`s`) — `@Metadata`'s `d1`/`d2`.
     Strings,
-    /// Enum-constant elements (`e`) — an annotation's `@Target` entries, of which only the CONSTANT
-    /// name is kept (the enum type is implied by the element).
-    EnumConstants,
+    /// Enum-constant elements (`e`) of exactly the enum whose type descriptor is given — an
+    /// annotation's `@Target` entries (`AnnotationTarget` for Kotlin, `ElementType` for Java). Only
+    /// the constant name of a matching element is kept; an element of another enum is no entry.
+    EnumConstants(&'static str),
 }
 
 /// Skip an element_value, extracting an array's elements when `extract` asks for their shape.
@@ -1325,7 +1379,7 @@ fn read_element_value_body(
                 }
                 // An enum element is `e` + type descriptor + constant name, two indices where a
                 // string element has one — reading it as a string array would desync the walk.
-                ElementValueExtract::EnumConstants => {
+                ElementValueExtract::EnumConstants(descriptor) => {
                     let mut result = Vec::with_capacity(n);
                     for _ in 0..n {
                         let t = r.u1()? as char;
@@ -1333,9 +1387,11 @@ fn read_element_value_body(
                             read_element_value_body(r, cp, t, ElementValueExtract::Skip)?;
                             continue;
                         }
-                        r.u2()?; // enum type descriptor
+                        let owner = r.u2()?;
                         let constant = r.u2()?;
-                        result.push(utf8(constant));
+                        if utf8(owner) == descriptor {
+                            result.push(utf8(constant));
+                        }
                     }
                     return Ok(Some(result));
                 }

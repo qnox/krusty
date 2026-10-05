@@ -16,6 +16,10 @@ pub(crate) struct SplicedSuspension {
     /// resolves to the `$completion` parameter while discovering and to the machine's own
     /// continuation local while emitting.
     pub call: ExprId,
+    /// The value class whose box a resumption of this call delivers, with the carrier the call
+    /// returns where it does not suspend. The resumed path unboxes it, so both paths join holding
+    /// the carrier.
+    pub resumed_box: Option<(crate::types::TypeName, crate::types::Ty)>,
 }
 
 /// A suspension point of a function whose machine kotlinc's transformer builds from its bytecode.
@@ -62,8 +66,6 @@ pub(crate) struct SuspendLambdaCapture {
     pub field: u32,
     /// The captured value's type.
     pub ty: crate::types::Ty,
-    /// Whether the constructor names it `$receiver` rather than like its field.
-    pub receiver: bool,
 }
 
 /// A suspend lambda realized as a class of its own (kotlinc's `SuspendLambdaLowering`), which the
@@ -76,6 +78,8 @@ pub(crate) struct SuspendLambdaClass {
     pub function_type: crate::types::Ty,
     /// The captured values, in constructor order.
     pub captures: Vec<SuspendLambdaCapture>,
+    /// What each parameter of the class's constructor, `create` and typed `invoke` is.
+    pub member_parameters: super::SuspendLambdaParameters,
     /// The lambda's own parameters (its receiver first), in order: each one's type, and the field
     /// it is kept in when the body reads it.
     pub parameters: Vec<(crate::types::Ty, Option<u32>)>,
@@ -85,6 +89,8 @@ pub(crate) struct SuspendLambdaClass {
     /// The declarations of the type parameters the lambda's function type names, directly or
     /// through their bounds, which its metadata records.
     pub type_parameters: Vec<crate::ir::IrTypeParameter>,
+    /// The source form, read before the implementation becomes `invokeSuspend` and drops its origin.
+    pub form: crate::ir::IrLambdaForm,
 }
 
 /// The suspend functions whose machine is built during emission, with their suspensions: those
