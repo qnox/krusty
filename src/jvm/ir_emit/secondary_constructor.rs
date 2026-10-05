@@ -5,7 +5,7 @@ use super::{
     constructor_default_masks, instance_field_jvm_name, jvm_tys, load, method_descriptor,
     slot_words, type_descriptor, ClassWriter, CodeBuilder, EmitEnv, Emitter,
 };
-use crate::ir::{IrClass, IrConstructorTarget, IrFile, IrSecondaryCtor};
+use crate::ir::{IrClass, IrConstructorTarget, IrCtorParameterProvenance, IrFile, IrSecondaryCtor};
 use crate::jvm::method_parameters::OwnerConstructorPrefix;
 use crate::jvm::private_static_access::StaticOwner;
 use crate::types::Ty;
@@ -288,6 +288,14 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                 for &(parameter, field) in &c.pre_super_param_fields {
                     if parameter >= sc.prefix_params.len() as u32 {
                         continue;
+                    }
+                    // An inner class's enclosing-instance store carries the constructor's own line;
+                    // a local class's captured values are stored without one.
+                    let encloses = c.ctor_args.get(parameter as usize).is_some_and(|argument| {
+                        argument.provenance == IrCtorParameterProvenance::EnclosingInstance
+                    });
+                    if encloses && !generated && sc.lines.decl_line != 0 {
+                        sctor.mark_line(sc.lines.decl_line);
                     }
                     let parameter = parameter as usize + owner_prefix_tys.len();
                     let ty = sc_param_tys[parameter];

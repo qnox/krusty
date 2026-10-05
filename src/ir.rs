@@ -47,9 +47,7 @@ mod fields;
 mod function_scope;
 mod inline_copies;
 mod suspension_points;
-pub use suspension_points::{
-    IrIntrinsicSuspensionKind, IrIntrinsicSuspensionPoint, IrValueClassSuspendResult,
-};
+pub use suspension_points::{IrIntrinsicSuspensionPoint, IrValueClassSuspendResult};
 mod intrinsic;
 mod jvm_static_realization;
 mod lambda_classes;
@@ -101,7 +99,7 @@ pub use constructors::{
     IrCapturedReceiver, IrConstructorCapture, IrCtorParameterProvenance,
     IrJvmValueClassSecondaryCtor,
 };
-pub use constructors::{IrConstructorAccess, IrConstructorTarget};
+pub use constructors::{IrConstructorAccess, IrConstructorTarget, IrCustomSerializerConstruction};
 pub use constructors::{IrSecondaryCtor, IrSecondaryCtorLines};
 pub use expression_provenance::{EnumValueOfDeclaration, IrShortCircuitKind};
 pub use field_flags::IrfFlags;
@@ -1636,6 +1634,10 @@ pub struct IrFile {
     /// Common resolution records the path distinction before flattening the complete hierarchy;
     /// target emitters consume it without reopening a classifier provider.
     pub superclass_interfaces: std::collections::HashMap<TypeName, Vec<TypeName>>,
+    /// The frontend-selected custom serializer construction of each source classifier whose
+    /// `@Serializable(with = …)` names a serializer class, keyed by that classifier.
+    pub custom_serializer_constructions:
+        std::collections::HashMap<TypeName, IrCustomSerializerConstruction>,
     /// Exact semantic property-override edges copied from stable FIR. A target backend may erase
     /// these types and materialize representation bridges, but it must not search declarations.
     pub property_overrides: std::collections::HashMap<TypeName, Vec<IrPropertyOverride>>,
@@ -2117,6 +2119,10 @@ pub struct IrFile {
     /// The static `constructor-impl` realizing each value-class constructor, with that constructor's
     /// ordinal (`0` is the primary). Its `$default` stub takes kotlinc's `DefaultConstructorMarker`.
     pub(crate) jvm_value_class_constructor_impls: std::collections::HashMap<u32, u32>,
+    /// The Kotlin-level signature of each value-class method the JVM pass creates or moves onto the
+    /// carrier before its main erasure (`constructor-impl`, the synthesized and user-written
+    /// `equals`/`hashCode`/`toString` statics, computed accessors), recorded while still semantic.
+    pub(crate) jvm_value_class_member_signatures: std::collections::HashMap<u32, IrGenericSig>,
     /// Generated JVM methods kotlinc writes without nullability annotations. The JVM value-class
     /// pass records exact function identities; common lowering does not interpret this set.
     pub(crate) jvm_nullability_unannotated_methods: std::collections::HashSet<u32>,
@@ -2336,6 +2342,10 @@ pub struct IrFile {
     /// native scalar (the unsigned integers) is recorded like any other; its representation is the
     /// backend's question.
     external_value_classes: std::collections::HashMap<TypeName, Ty>,
+    /// The declarations of [`Self::external_value_classes`] as their providers published them: the
+    /// underlying type over the declaration's own type parameters.
+    external_value_class_declarations:
+        std::collections::HashMap<TypeName, crate::types::DeclaredValueClass>,
     /// Expression identity → `(declared value-class name, erased underlying type)` for a construction
     /// rewritten in place by the JVM value-class pass. This records semantic origin rather than the
     /// generated helper's spelling: a source `new` remains distinguishable from an unrelated static call
@@ -2514,6 +2524,20 @@ pub struct IrTypeParameter {
     /// Kotlin declaration capability retained for targets that materialize runtime type operations.
     /// The JVM consumes it when choosing its reified-operation marker representation.
     pub reified: bool,
+}
+
+impl IrTypeParameter {
+    /// A use of this parameter as a type.
+    pub(crate) fn ty(&self) -> Ty {
+        Ty::ty_param(&self.semantic_name, self.upper_bound())
+    }
+
+    /// The representative upper bound: the first declared bound, else `Any?`.
+    pub(crate) fn upper_bound(&self) -> Ty {
+        self.bounds
+            .first()
+            .map_or(Ty::nullable(Ty::obj("kotlin/Any")), |(bound, _)| *bound)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2712,6 +2736,21 @@ impl IrFile {
         self.class_signatures.get(&internal)
     }
 
+    /// `class` applied to its own type parameters (`C<T>`): the type of its `this`.
+    pub(crate) fn class_type(&self, class: &IrClass) -> Ty {
+        let arguments: Vec<Ty> = self
+            .class_signature_name(class.fq_name)
+            .map(|signature| {
+                signature
+                    .type_params
+                    .iter()
+                    .map(IrTypeParameter::ty)
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ty::obj_args_name(class.fq_name, &arguments)
+    }
+
     pub fn insert_field_signatures(&mut self, internal: &str, sigs: Vec<(String, String)>) {
         self.field_signatures
             .insert(crate::types::type_name(internal), sigs);
@@ -2823,6 +2862,7 @@ mod debug_lines;
 mod debug_locals;
 mod generated_members;
 pub(crate) use data_class_members::IrDataClassMemberRole;
+pub(crate) use debug_lines::UnitBodyExit;
 pub use debug_locals::{IrCatchBinding, IrLambdaForm, IrLambdaOrigin};
 pub(crate) use debug_locals::{IrDebugLocalProvenance, IrInlineLocalRole};
 pub use generated_members::{

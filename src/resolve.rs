@@ -126,6 +126,7 @@ mod local_method_dependencies;
 mod loop_flow;
 mod member_extension_selection;
 mod member_overload_clash;
+mod named_class_constructors;
 mod operator_calls;
 use operator_calls::{range_operator, ResolvedInRangeComparison};
 mod overload_diagnostics;
@@ -240,6 +241,7 @@ use loop_flow::collect_all_reassigned;
 pub(crate) use member_extension_selection::{
     MemberExtensionFunctionSelection, MemberExtensionSelection,
 };
+pub(crate) use named_class_constructors::publish_named_class_constructors;
 pub(crate) use override_plans::publish_override_plans;
 use postponed_constraints::PostponedCallConstraints;
 use postponed_diagnostics::PostponedDiagnostics;
@@ -13401,6 +13403,17 @@ fn instantiate_member_extension_with(
         generic.map_or(function.signature.ret, |signature| signature.ret),
         &bindings,
     );
+    // Ordinary extension and member calls publish these solutions on the call. A member
+    // extension publishes them too, so an inlined `typeOf<T>()` receives the call-site argument.
+    let type_arguments = generic
+        .map(|signature| {
+            signature
+                .formals
+                .iter()
+                .map(|formal| solved_member_extension_type_argument(&bindings, formal))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     Some(InstantiatedMemberExtension {
         extension_receiver: apply_inference_bindings(declared_receiver, &bindings),
         logical_params,
@@ -13411,7 +13424,20 @@ fn instantiate_member_extension_with(
         physical_vararg_index: full_call_sig.vararg_index,
         score,
         argument_parameters,
+        type_arguments,
     })
+}
+
+/// A formal's call-site solution, or `None` when it is still the formal itself.
+fn solved_member_extension_type_argument(
+    bindings: &crate::symbol_resolver::GSigBinds,
+    formal: &str,
+) -> Option<Ty> {
+    let solution = bindings.get(formal).copied()?;
+    (solution != Ty::Error
+        && !solution.mentions_pending()
+        && !matches!(solution.non_null(), Ty::TyParam(identity, _) if identity == formal))
+    .then_some(solution)
 }
 
 impl<'a> Checker<'a> {
@@ -13661,6 +13687,12 @@ impl<'a> Checker<'a> {
                     .is_some_and(|shape| shape.is_interface());
                 let dispatch_receiver =
                     self.implicit_receiver_selection(candidate.dispatch_receiver);
+                if !candidate.type_arguments.is_empty()
+                    && candidate.type_arguments.iter().all(Option::is_some)
+                {
+                    self.resolved_call_type_args
+                        .insert(call, candidate.type_arguments.clone());
+                }
                 self.resolved_calls.insert(
                     call,
                     candidate.resolved_call(dispatch_receiver, extension_receiver, interface),
@@ -19308,7 +19340,7 @@ impl<'a> Checker<'a> {
                 // Resolve that shape once: both contextual argument typing and the selected `invoke`
                 // operation must consume the same semantic value.
                 let explicit_invoke_ty = (name == CALLABLE_INVOKE_OPERATOR)
-                    .then(|| self.expression_function_type(scope, receiver, rt))
+                    .then(|| self.invoke_function_view(scope, receiver, rt))
                     .flatten();
                 let receiver_function_argument_params = explicit_invoke_ty
                     .and_then(|ty| match ty {
@@ -26673,7 +26705,7 @@ val result = object { fun value(): String = captured }
             companion_object: None,
             qualified_name: None,
             value_underlying: None,
-            value_underlying_property: None,
+            value_declaration: None,
             alias_target,
             type_parameters: crate::types::TypeParameters::default(),
             own_type_parameter_count: 0,
@@ -29526,7 +29558,7 @@ fun box(): String {
                     companion_object: None,
                     qualified_name: None,
                     value_underlying: None,
-                    value_underlying_property: None,
+                    value_declaration: None,
                     alias_target: None,
                     own_type_parameter_count: type_parameters.type_params.len(),
                     type_parameters,
@@ -29687,7 +29719,7 @@ fun box(): String {
                     companion_object: None,
                     qualified_name: None,
                     value_underlying: None,
-                    value_underlying_property: None,
+                    value_declaration: None,
                     alias_target: None,
                     type_parameters: crate::types::TypeParameters::default(),
                     own_type_parameter_count: 0,
@@ -36182,6 +36214,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         implicit_receiver_selections: HashMap::new(),
         implicit_receiver_identities: HashMap::new(),
         read_flow_roots: HashMap::new(),
+        read_callable_reference_types: HashMap::new(),
         anonymous_super_read_provenance: HashMap::new(),
         stable_property_reads: std::collections::HashSet::new(),
         implicit_receiver_identity_uses: receiver_uses::ReceiverUses::default(),
@@ -38386,6 +38419,8 @@ pub(crate) struct MemberExtensionFunctionCandidate {
     overridden_results: Box<[Ty]>,
     owner: TypeName,
     physical_name: String,
+    /// Solved method type arguments in formal order. `None` is an unsolved formal.
+    type_arguments: Vec<Option<Ty>>,
 }
 
 #[derive(Clone)]
@@ -38412,6 +38447,9 @@ struct InstantiatedMemberExtension {
     physical_vararg_index: Option<usize>,
     score: (usize, std::cmp::Reverse<usize>, bool),
     argument_parameters: Vec<(usize, usize)>,
+    /// Solved method type arguments in formal order. Published on the call when every formal
+    /// has one, matching an ordinary extension call.
+    type_arguments: Vec<Option<Ty>>,
 }
 
 struct MemberExtensionCall<'a> {
@@ -38883,6 +38921,8 @@ struct Checker<'a> {
     implicit_receiver_identities: HashMap<ExprId, (usize, usize)>,
     /// The flow root each checked lexical-value or `this` read resolved to.
     read_flow_roots: HashMap<ExprId, scope::PathRoot>,
+    /// The exact function shape of a callable reference a checked name read is bound to.
+    read_callable_reference_types: HashMap<ExprId, Ty>,
     /// Exact selected value/receiver identity for a bare read that an anonymous object's constructor
     /// may keep. This is recorded when the scope tower binds the expression; capture publication
     /// consumes the decision without rescanning a later scope or comparing source spellings.
@@ -61796,12 +61836,17 @@ impl<'a> Checker<'a> {
                 branch_types.push((c.body, ht));
                 // In VALUE position, REFERENCE branches use the same full join as other conditional
                 // expressions: `try { x } catch { null }` is `T?`, and different reference classes
-                // join to `Any`. Restricting this to reference-like branches is intentional. An
-                // integer constant is adapted to a sibling primitive after this loop. A non-constant
+                // join to `Any`. Two primitive branches deliberately do not take it: an integer
+                // constant is adapted to a sibling primitive after this loop, and a non-constant
                 // primitive disagreement (`Int` versus `Long`) keeps `try_branch_join`.
                 let reference_like =
                     |ty: Ty| ty.is_reference() || matches!(ty, Ty::Nothing | Ty::Error);
-                result = if wanted.value_required && reference_like(result) && reference_like(ht) {
+                // A primitive beside a REAL reference joins the same way: `try { s.length } catch
+                // (e: Exception) { null }` is `Int?`, as `if (c) s.length else null` is.
+                let joins = (reference_like(result) && reference_like(ht))
+                    || result.is_reference()
+                    || ht.is_reference();
+                result = if wanted.value_required && joins {
                     // Join against the EXPECTATION, exactly as `if`/`when` do: a `try` in value
                     // position is a conditional expression like any other. A blind join of two
                     // generic branches invents an out-projection (`R<out Any>`) that no INVARIANT
@@ -63415,6 +63460,11 @@ impl<'a> Checker<'a> {
                     }
                 }
                 crate::trace_compiler!("resolve", "name read {n} origin={:?}", l.origin);
+                if let Some(function) = l.callable_reference_type {
+                    // A value bound to a callable reference keeps the reference's exact function
+                    // shape beside its nominal reflection type; invoking the read consumes it.
+                    self.read_callable_reference_types.insert(e, function);
+                }
                 if let ReceiverFnValueOrigin::ClassStorage(field)
                 | ReceiverFnValueOrigin::EnumEntryPropertyStorage { field, .. } = l.origin
                 {

@@ -1933,8 +1933,13 @@ impl JvmLibraries {
                     }
                 }
             } else if let Some((_, _, declared)) = &metadata_class_signature {
+                // A function-type supertype (`KProperty0<V> : () -> V`) is an edge to the function
+                // classifier it instantiates, which declares the inherited `invoke`.
                 for supertype in declared {
-                    if let Some(name) = supertype.obj_internal() {
+                    if let Some(name) =
+                        crate::libraries::function_classifiers::supertype_classifier(*supertype)
+                            .obj_internal()
+                    {
                         supertypes.push_name(name);
                     }
                 }
@@ -2309,14 +2314,20 @@ impl JvmLibraries {
             let supertype_templates = supertypes
                 .iter_ids()
                 .map(|semantic| {
-                    if let Some(template) = declared_supertype_templates.iter().find(|template| {
-                        template.obj_internal().is_some_and(|declared| {
-                            declared == semantic
-                                || super::jvm_class_map::type_names_map_to_same_jvm_internal(
-                                    declared, semantic,
-                                )
+                    if let Some(template) = declared_supertype_templates
+                        .iter()
+                        .map(|template| {
+                            crate::libraries::function_classifiers::supertype_classifier(*template)
                         })
-                    }) {
+                        .find(|template| {
+                            template.obj_internal().is_some_and(|declared| {
+                                declared == semantic
+                                    || super::jvm_class_map::type_names_map_to_same_jvm_internal(
+                                        declared, semantic,
+                                    )
+                            })
+                        })
+                    {
                         return Ty::obj_args_name(semantic, template.type_args());
                     }
                     if super::jvm_class_map::type_names_map_to_same_jvm_internal(
@@ -2478,7 +2489,7 @@ impl JvmLibraries {
                 companion_object,
                 qualified_name: ci.meta.class_qualified_name.as_deref().map(Box::from),
                 value_underlying,
-                value_underlying_property: value_class.and_then(|declaration| declaration.property),
+                value_declaration: value_class.and_then(|declaration| declaration.declaration),
                 alias_target: None,
                 own_type_parameter_count: type_params.len(),
                 type_parameters: crate::types::TypeParameters::new(

@@ -104,9 +104,152 @@ impl CodegenMarker {
     }
 }
 
+/// One side of an `InlineMarker.beforeInlineCall`/`afterInlineCall` bracket.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum InlineCallBracket {
+    Open,
+    Close,
+}
+
+impl InlineCallBracket {
+    /// The bracket side a decoded instruction is, if it is one.
+    pub(crate) fn of_insn(insn: &crate::jvm::inline::Insn) -> Option<InlineCallBracket> {
+        let crate::jvm::inline::Insn::Plain { op, operands } = insn else {
+            return None;
+        };
+        if *op != CODEGEN_MARKER_OP {
+            return None;
+        }
+        match CodegenMarker::from_operand(*operands.first()?)? {
+            CodegenMarker::BeforeInlineCall => Some(InlineCallBracket::Open),
+            CodegenMarker::AfterInlineCall => Some(InlineCallBracket::Close),
+            CodegenMarker::Mark => None,
+        }
+    }
+}
+
+/// A closing `afterInlineCall` with no `beforeInlineCall` opening it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct UnpairedInlineCallMarker;
+
+/// The `beforeInlineCall`/`afterInlineCall` brackets of a body, followed as kotlinc's FixStack
+/// (`FixStackAnalyzer`) rewrites them when the class is written: the opening marker saves the
+/// operand stack into locals and clears it, the closing one reloads the saved values under the
+/// bracketed code's result. Every analysis that reads a body still carrying the markers (the frame
+/// computation, the coroutine machine's frame typing, the method-node stack shapes) follows them
+/// through this one model, so the states they compute are those of the rewritten body, which is
+/// what the class file carries.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct InlineCallBrackets {
+    /// By instruction: which side of a bracket it is.
+    sides: Vec<Option<InlineCallBracket>>,
+    /// By closing instruction: the opening one, by nesting (`FixStackContext`).
+    opening: Vec<Option<usize>>,
+}
+
+impl InlineCallBrackets {
+    /// Pair the brackets of a body given each instruction's side.
+    pub(crate) fn pair(
+        sides: impl IntoIterator<Item = Option<InlineCallBracket>>,
+    ) -> InlineCallBrackets {
+        let sides: Vec<_> = sides.into_iter().collect();
+        let mut opening = vec![None; sides.len()];
+        let mut open = Vec::new();
+        for (index, side) in sides.iter().enumerate() {
+            match side {
+                Some(InlineCallBracket::Open) => open.push(index),
+                Some(InlineCallBracket::Close) => opening[index] = open.pop(),
+                None => {}
+            }
+        }
+        InlineCallBrackets { sides, opening }
+    }
+
+    /// The brackets of a decoded body.
+    pub(crate) fn of_insns(insns: &[crate::jvm::inline::Insn]) -> InlineCallBrackets {
+        InlineCallBrackets::pair(insns.iter().map(InlineCallBracket::of_insn))
+    }
+
+    /// Follow the instruction at `index` on `stack`, the stack it left (a marker itself is
+    /// stack-neutral). An opening marker clears the stack and returns what it saved; a closing one
+    /// puts `before_opening(opening)` — the stack before its opening marker — back under the
+    /// bracketed code's result. Anything else leaves the stack alone.
+    pub(crate) fn follow<T>(
+        &self,
+        index: usize,
+        stack: &mut Vec<T>,
+        before_opening: impl FnOnce(usize) -> Option<Vec<T>>,
+    ) -> Result<Option<Vec<T>>, UnpairedInlineCallMarker> {
+        match self.sides.get(index).copied().flatten() {
+            None => Ok(None),
+            Some(InlineCallBracket::Open) => Ok(Some(std::mem::take(stack))),
+            Some(InlineCallBracket::Close) => {
+                let under = self.opening[index]
+                    .and_then(before_opening)
+                    .ok_or(UnpairedInlineCallMarker)?;
+                // The bracketed code's result, normally one value or none; a body that left more
+                // is FixStack's to reject, so its values are kept.
+                let inner = std::mem::replace(stack, under);
+                stack.extend(inner);
+                Ok(None)
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::instruction_len;
+    use super::{InlineCallBracket, InlineCallBrackets, UnpairedInlineCallMarker};
+
+    #[test]
+    fn a_bracket_saves_the_stack_and_puts_it_back_under_the_result() {
+        use InlineCallBracket::{Close, Open};
+        // 0: push ; 1: open ; 2: push ; 3: open ; 4: push ; 5: close ; 6: close ; 7: close
+        let brackets = InlineCallBrackets::pair([
+            None,
+            Some(Open),
+            None,
+            Some(Open),
+            None,
+            Some(Close),
+            Some(Close),
+            Some(Close),
+        ]);
+        let before = [
+            vec![],
+            vec!["dest"],
+            vec![],
+            vec!["inner"],
+            vec![],
+            vec!["x"],
+            vec!["inner", "x"],
+        ];
+        let mut stack = vec!["dest"];
+        assert_eq!(brackets.follow(0, &mut stack, |_| None), Ok(None));
+        assert_eq!(
+            brackets.follow(1, &mut stack, |_| None),
+            Ok(Some(vec!["dest"]))
+        );
+        assert!(stack.is_empty());
+        let mut inner = vec!["x"];
+        // The inner closing marker reloads what its own opening saved.
+        assert_eq!(
+            brackets.follow(5, &mut inner, |opening| Some(before[opening].clone())),
+            Ok(None)
+        );
+        assert_eq!(inner, ["inner", "x"]);
+        let mut result = vec!["r"];
+        assert_eq!(
+            brackets.follow(6, &mut result, |opening| Some(before[opening].clone())),
+            Ok(None)
+        );
+        assert_eq!(result, ["dest", "r"]);
+        assert_eq!(
+            brackets.follow(7, &mut result, |opening| Some(before[opening].clone())),
+            Err(UnpairedInlineCallMarker)
+        );
+    }
 
     #[test]
     fn instruction_lengths_cover_switches_wide_forms_and_malformed_operands() {

@@ -268,7 +268,13 @@ impl<'a> StreamedModuleSymbols<'a> {
             .filter(|supertype| matches!(supertype.non_null(), Ty::Fun(_)))
             .collect();
         projected.callable_signature = projected.callable_signatures.first().copied();
-        projected.supertype_templates = supertype_templates;
+        // Beside its callable shape, a function supertype is an edge to the function classifier it
+        // instantiates (`suspend () -> R` extends `SuspendFunction0<R>`), whose `invoke` an
+        // override implements.
+        projected.supertype_templates = supertype_templates
+            .into_iter()
+            .map(crate::libraries::function_classifiers::supertype_classifier)
+            .collect();
         projected.supertypes = projected
             .supertype_templates
             .iter()
@@ -302,8 +308,17 @@ impl<'a> StreamedModuleSymbols<'a> {
                             .index
                             .signature(declaration)
                             .map(|signature| signature.result.get());
-                        projected.value_underlying_property =
-                            self.index.declaration_name(declaration).map(str::to_owned);
+                        projected.value_declaration = projected
+                            .value_underlying
+                            .zip(self.index.declaration_name(declaration))
+                            .zip(self.index.own_type_parameter_types(owner))
+                            .map(|((underlying, property), type_parameters)| {
+                                crate::types::DeclaredValueClass {
+                                    property: property.into(),
+                                    underlying,
+                                    type_parameters,
+                                }
+                            });
                     }
                     let Some((name, value)) = self
                         .index

@@ -471,7 +471,12 @@ pub(super) fn build_class_metadata_with_facts(
                         .map(|(_, field)| field)
                         .or(delegate)
                         .filter(|field| property.ty != field.ty || names_local(field.ty))
-                        .map(|field| desc(field.ty)),
+                        .map(|field| desc(field.ty))
+                        .or_else(|| {
+                            static_fields::hoisted_static_for(ir, c, property_index)
+                                .filter(|storage| storage.erased_declared_ty.is_some())
+                                .map(|storage| desc(storage.ty))
+                        }),
                     // The PHYSICAL field name when the JVM realization mangles it — an instance
                     // property beside a same-named hoisted companion static (`result` → `result$1`).
                     field_name: backing
@@ -1255,6 +1260,8 @@ pub(super) fn build_class_metadata_with_facts(
         Vec::new()
     };
     let nested_refs: Vec<&str> = nested_names.iter().map(String::as_str).collect();
+    let enclosing_type_parameters =
+        super::super::local_classifiers::enclosing_type_parameters(ir, c);
     let class_type_parameters = ir
         .class_signature(&c.fq_name())
         .map(|signature| signature.type_params.as_slice())
@@ -1344,7 +1351,10 @@ pub(super) fn build_class_metadata_with_facts(
             supertype_spellings: &supertype_spellings,
             type_params: &c.type_params,
             type_param_bounds: class_type_parameters,
-            captured_type_params: super::super::local_classifiers::captured_type_parameters(c),
+            captured_type_params: super::super::local_classifiers::captured_type_parameters(
+                c,
+                &enclosing_type_parameters,
+            ),
             ctor_param_tparams: &ctor_param_tparams,
             ctor_param_annotations: &named_ctor_param_annotations,
             flags: class_metadata_flags(ir, c),
