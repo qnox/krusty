@@ -7492,6 +7492,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `resolve::integer_constants::tests::division_by_zero_adapts_to_long_without_a_folded_value`,
   `tests/integer_literal_branch_join_e2e.rs::division_by_zero_int_constant_throws_after_adapting_to_long`,
   `tests/classpath_jdk_static_e2e.rs::non_literal_int_does_not_match_long_parameter`.
+- **An elvis over a safe call keeps its own null check.** fir2ir builds `a?.f() ?: b` as an elvis
+  `when` over a temporary holding the safe call's (nullable) value, so kotlinc emits the safe call's
+  `ifnull` to the shared null path and then the elvis's own `dup; ifnonnull`, whatever `f()`'s
+  declared type. Only the bytecode null-check analysis (`RedundantNullCheckMethodTransformer`)
+  removes the elvis's check, where it proves the value non-null (a `new`, a string constant).
+  Common lowering therefore never fuses the two guards on the selector's type. Test:
+  `tests/elvis_over_safe_call_e2e.rs`.
+
 - **An integer-constant branch takes a sibling primitive.** An `if`, `when`, elvis, or `try` with no
   expected type still adapts an integer-constant branch to the non-null primitive of the other
   branches when every such constant fits: `if (flag) current() - start else 0` is `Long`,
@@ -12006,6 +12014,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **Multi-line `catch` parameter.** `catch (\n e: Exception\n)` now parses — the parser skips newlines
   around the catch parameter exactly as an ordinary parameter list allows (`multiline_catch_e2e`).
 
+- **Multi-line loop condition.** A newline inside the parentheses of an `if`, `while` or
+  `do … while` condition is insignificant, so `while (\n    true\n)` and `} while (\n    c\n)`
+  parse; the three share one parenthesized-condition parser. The emitted loop is the one-line loop's
+  code with the condition's own line, as kotlinc emits it. Test:
+  `paren_condition_newline_e2e::loop_conditions_on_fresh_lines_are_byte_identical_to_kotlinc`.
+
 - **Exhaustive `when` over a CLASSPATH `sealed` class with no `else`.** A `when (d) { is D.A -> …; is
   D.B -> … }` over a classpath `sealed` `D` is exhaustive (hence an EXPRESSION) when every direct
   subtype is covered — the same rule as a same-module sealed subject, but the subtype set now comes from
@@ -12366,6 +12380,56 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   so a jump the constant folder removes shares their output line instead of remaining as its own
   `nop`. Tests: `tests/comparison_jump_line_e2e.rs`, `tests/constant_conditions_e2e.rs`.
 
+- **A local extension function's receiver is named after its lifted name.** kotlinc names an
+  extension receiver's local `$this$<name>` from the function's IR name when it writes the method;
+  `LocalDeclarationsLowering` has already renamed a local function to its lifted name, and the `$`
+  in it is escaped like any debug local: `fun String.wrap()` inside `top` has the receiver
+  `$this$top_u24wrap`, inside a member `member` `$this$member_u24twice`. A lambda's receiver keeps
+  its own `$this$<label>` spelling. Test: `tests/local_extension_receiver_name_e2e.rs`.
+
+- **A `$default` constructor's header precedes its body's constants.** ASM's `visitMethod` interns
+  a method's name and descriptor when the method begins, so the synthetic
+  `<init>(…, int, DefaultConstructorMarker)` descriptor is interned before the `Methodref` of the
+  constructor its body delegates to, for a primary and a secondary constructor alike. Test:
+  `tests/default_constructor_header_pool_e2e.rs`.
+
+- **An explicit primitive `equals` calls `Object.equals`.** A builtin scalar's declared
+  `equals(Any?)` (`Int`, `Short`, `Char`, `Boolean`, `Double`, …) is the `PrimitiveEquals`
+  intrinsic. kotlinc's `ExplicitEquals` boxes both operands and calls
+  `java/lang/Object.equals(Ljava/lang/Object;)Z`, so the JVM realizes it as that virtual call rather
+  than the wrapper's own `equals`. A class receiver keeps ordinary dispatch on its own class. Test:
+  `tests/primitive_explicit_equals_e2e.rs`.
+
+- **An explicit primitive `compareTo` calls kotlinc's `CompareTo` owner.** The int category
+  (`Int`, `Char`, `Short`, `Byte`) and `Long` call `kotlin/jvm/internal/Intrinsics.compare`,
+  `Boolean` calls `java/lang/Boolean.compare(ZZ)`, and `Float`/`Double` their wrappers' `compare`.
+  The checked comparison operand of `Boolean.compareTo(Boolean)` is `Boolean` (a `Char` pair still
+  compares as `Int`). Only a numeric operand's relational form folds into a direct comparison; a
+  `Boolean` `<` stays `Boolean.compare` tested against zero, as kotlinc's comparison intrinsics
+  cover only numbers. Test: `tests/primitive_compare_to_owner_e2e.rs`.
+
+- **A null-cast message spells the root package `<root>`.** kotlinc's `TypeOperatorLowering`
+  writes `null cannot be cast to non-null type ${type.render()}`, and the IR renderer writes a
+  declaration's package with `FqName.toString()`, which is `<root>` for the root package. So every
+  root-package classifier in the target, its type arguments, and the owner of a type parameter
+  (`T of <root>.FileKt.generic`, `T of <root>.Holder`) carry the `<root>.` prefix, exactly as the
+  inliner's reified cast already did. The native runtime message keeps its unprefixed spelling.
+  Tests: `tests/root_package_cast_message_e2e.rs`, `tests/unboxing_coercion_e2e.rs`.
+
+- **An exhaustive `when`'s implicit `else` throws on the `when`'s line.** fir2ir adds
+  `else -> throw NoWhenBranchMatchedException()` to an exhaustive `when` without an `else`, at the
+  `when`'s own offsets, and kotlinc's `visitThrow` marks that line on the `new`. The JVM writes the
+  same throw for such a `when` and marks the `when`'s source line before it, so the exception's
+  frame does not stay on the last branch's line. Test: `tests/when_no_branch_matched_line_e2e.rs`.
+
+- **A subject `when`'s type-test and range conditions read the subject at their own line.**
+  fir2ir builds every condition's read of `tmp_subject` at that condition's offsets, so each
+  `is T` / `in r` condition reads the subject afresh with the condition's source line rather than
+  sharing one read. When the subject's temporary survives (it is read more than once), the line
+  sits on that load; when the bytecode temporaries pass folds a once-read temporary into its
+  initializer's load, the line moves to the next instruction, the `instanceof`, as in kotlinc's
+  output. Test: `tests/when_type_condition_line_e2e.rs`.
+
 - **A source Boolean constant in a condition marks its line on a `nop`** (kotlinc's `visitConst`,
   which marks the line and emits a `nop` for every Boolean constant because the constant need not
   be materialized). A constant condition is decided statically and emits no test of its own, so
@@ -12436,6 +12500,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   singleton with `StringBuilder.append(Object)`. Such a part stays off the `invokedynamic` concat,
   whose argument descriptor cannot be `V`. Test:
   `tests/unit_value_e2e.rs::unit_expression_in_a_string_template_appends_the_singleton`.
+
+- **A concatenation appends a `toString()` operand's receiver** (kotlinc's
+  `FlattenStringConcatenationLowering.isToStringCall`). An argument-free virtual call that plays
+  the `Any.toString` role is dropped from a string concatenation and its receiver is appended at
+  its own type (`append(Object)` for a class, `append(String)` for a `String`); a receiver that is
+  itself a concatenation contributes its parts. The role is the frontend's: a dependency call keeps
+  the role its provider published, and a current-module function inherits the role of the nearest
+  declaration it overrides (`InheritedCallableStatus.semantic_role`), so an override, an inherited
+  override and a data class's generated `toString` all qualify. A `super.toString()` keeps its
+  call. On the JVM this runs after value-class lowering, as kotlinc's does, so a value class's
+  `toString()` (by then a static `toString-impl` call) keeps its call. Tests:
+  `tests/string_concat_to_string_operand_e2e.rs`,
+  `fir_lower::tests::checked_hierarchy`.
 
 - **Equality with an enum operand compares references** (kotlinc's `Equals`, which takes
   `referenceEquals` when `a.isEnumValue || b.isEnumValue`). `==`/`!=` where either operand's type
@@ -12530,6 +12607,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   replaces the reference with the carrier itself, typed as its class, exactly as a class-strategy
   lambda's carrier is, instead of casting it to its function type. Test:
   `tests/reference_carrier_cast_e2e.rs`.
+
+- **An enum's property fields and getters carry their generic `Signature`.** kotlinc gives an
+  enum constructor property's field the same field `Signature` an ordinary class's has
+  (`Lkotlin/jvm/functions/Function1<Ljava/lang/Integer;Ljava/lang/Integer;>;`), and interns each
+  getter's `Signature` at its method visit, right after the getter's descriptor and before its
+  nullability annotation. The constructor's own `Signature` is written over its source parameters
+  only. Test: `tests/enum_constructor_signature_e2e.rs`.
 
 - **A primary constructor's `super(…)` delegation carries its operands' lines and returns to the
   declaration's start.** fir2ir builds a primary constructor's delegating call at the class

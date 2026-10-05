@@ -62,6 +62,18 @@ pub(super) fn emit_ctor_default_stub_with_prefix(
     } = stub;
     debug_assert!(logical_prefix_count <= physical_prefix.len());
     let n = real_params.len();
+    let marker = Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker");
+    let physical_params = physical_prefix
+        .iter()
+        .chain(real_params)
+        .copied()
+        .collect::<Vec<_>>();
+    let mut stub_params = physical_params.clone();
+    stub_params.extend(std::iter::repeat_n(Ty::Int, default_mask_count(n)));
+    stub_params.push(marker);
+    let desc = method_descriptor(&stub_params, Ty::Unit);
+    // ASM's `visitMethod` interns the stub's name and descriptor before its body's constants.
+    cw.reserve_method_pool("<init>", &desc, None, &[]);
     // The FILE facade, not the class. A default initializer is ordinary file-level code that happens
     // to run inside the constructor; same-file top-level calls still belong to the facade.
     let mut e = Emitter::new(
@@ -75,7 +87,6 @@ pub(super) fn emit_ctor_default_stub_with_prefix(
         defaults.iter().flatten().copied(),
     );
     e.this_uninitialized = true;
-    let marker = Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker");
     // `this` at slot 0 = value-index 0; real params at value-index 1..=n.
     let receiver = e.frame.enter(FrameKey::Receiver, Ty::obj(owner));
     e.slots.insert(0, (receiver, Ty::obj(owner)));
