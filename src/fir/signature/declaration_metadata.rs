@@ -3,6 +3,16 @@
 use super::*;
 
 impl ResolvedModuleIndex {
+    /// Every published type alias's expansion spelling, for the one stable-metadata step that
+    /// seals its type-use annotations (see [`crate::spelling::TypeUseAnnotation`]).
+    pub(crate) fn type_alias_spellings_mut(
+        &mut self,
+    ) -> impl Iterator<Item = &mut crate::spelling::Spelled> + '_ {
+        self.type_aliases
+            .values_mut()
+            .map(|header| &mut header.expansion_spelling)
+    }
+
     pub fn declaration_annotations(&self, declaration: DeclarationId) -> &[TypeName] {
         self.declaration_annotations
             .get(&declaration)

@@ -28,6 +28,10 @@ pub(crate) enum SourceFragmentMode {
     /// applications are checked. Their argument expressions are retained explicitly; neighboring
     /// declarations and class bodies have already been released.
     ClassifierAnnotations,
+    /// Stable type-use annotation publication: only the type-use annotation applications of the
+    /// selected declarations are checked, each in its owning declaration's scope. Their argument
+    /// expressions are retained explicitly; every other expression has already been released.
+    TypeUseAnnotations,
 }
 
 impl SourceFragmentMode {
@@ -48,6 +52,16 @@ impl SourceFragmentMode {
     pub(crate) fn is_classifier_annotations(self) -> bool {
         matches!(self, Self::ClassifierAnnotations)
     }
+
+    pub(crate) fn is_type_use_annotations(self) -> bool {
+        matches!(self, Self::TypeUseAnnotations)
+    }
+
+    /// A Pass-1 metadata-publication fragment: it folds annotation applications whose classifier
+    /// Pass 1 already bound, and checks nothing else of the file.
+    pub(crate) fn publishes_annotation_metadata(self) -> bool {
+        matches!(self, Self::ClassifierAnnotations | Self::TypeUseAnnotations)
+    }
 }
 
 #[cfg(test)]
@@ -61,6 +75,7 @@ mod tests {
         assert!(SourceFragmentMode::InlinePreparation.may_observe_released_annotation_syntax());
         assert!(SourceFragmentMode::SignatureDefaults.may_observe_released_annotation_syntax());
         assert!(!SourceFragmentMode::ClassifierAnnotations.may_observe_released_annotation_syntax());
+        assert!(!SourceFragmentMode::TypeUseAnnotations.may_observe_released_annotation_syntax());
     }
 
     /// Only Pass-1 default checking carries the signature-defaults restrictions; inline preparation

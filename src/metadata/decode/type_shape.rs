@@ -11,14 +11,26 @@ pub(crate) struct TypeAnnotation {
     arguments: Vec<AnnotationArgument>,
 }
 
-struct AnnotationArgument {
-    name_id: Option<u64>,
-    value: AnnotationValue,
+/// One `Annotation.Argument`: its name's string id and its value.
+pub(crate) struct AnnotationArgument {
+    pub(crate) name_id: Option<u64>,
+    pub(crate) value: AnnotationArgumentValue,
 }
 
-enum AnnotationValue {
-    Int(i64),
-    Other,
+/// One `Annotation.Argument.Value`, every id still unresolved. `kind` is the wire enum
+/// (`BYTE 0 … ARRAY 12`); an absent kind is the protobuf default, `BYTE`.
+pub(crate) struct AnnotationArgumentValue {
+    pub(crate) kind: u64,
+    pub(crate) integer: Option<i64>,
+    pub(crate) float: Option<f32>,
+    pub(crate) double: Option<f64>,
+    pub(crate) string_id: Option<u64>,
+    pub(crate) class_id: Option<u64>,
+    pub(crate) enum_value_id: Option<u64>,
+    pub(crate) annotation: Option<Box<TypeAnnotation>>,
+    pub(crate) elements: Vec<AnnotationArgumentValue>,
+    pub(crate) array_dimensions: u64,
+    pub(crate) flags: u64,
 }
 
 impl TypeAnnotation {
@@ -26,12 +38,16 @@ impl TypeAnnotation {
         self.class_id
     }
 
+    pub(crate) fn arguments(&self) -> &[AnnotationArgument] {
+        &self.arguments
+    }
+
     pub(crate) fn int_arguments(&self) -> impl Iterator<Item = (u64, i64)> + '_ {
         self.arguments.iter().filter_map(|argument| {
-            let AnnotationValue::Int(value) = argument.value else {
+            if argument.value.kind != 3 {
                 return None;
-            };
-            Some((argument.name_id?, value))
+            }
+            Some((argument.name_id?, argument.value.integer?))
         })
     }
 }
@@ -174,41 +190,72 @@ fn parse_type_annotation(body: &[u8]) -> Option<TypeAnnotation> {
 fn parse_annotation_argument(body: &[u8]) -> Option<AnnotationArgument> {
     let mut protobuf = Pb::new(body);
     let mut name_id = None;
-    let mut value = AnnotationValue::Other;
+    let mut value = None;
     while !protobuf.at_end() {
         let tag = protobuf.varint()?;
         match (tag >> 3, tag & 7) {
             (1, 0) => name_id = protobuf.varint(),
             (2, 2) => {
                 let length = protobuf.varint()? as usize;
-                value = parse_annotation_value(protobuf.bytes(length)?)?;
+                value = Some(parse_annotation_value(protobuf.bytes(length)?)?);
             }
             (_, wire) => protobuf.skip(wire)?,
         }
     }
-    Some(AnnotationArgument { name_id, value })
+    Some(AnnotationArgument {
+        name_id,
+        value: value?,
+    })
 }
 
-fn parse_annotation_value(body: &[u8]) -> Option<AnnotationValue> {
+fn parse_annotation_value(body: &[u8]) -> Option<AnnotationArgumentValue> {
     let mut protobuf = Pb::new(body);
-    let mut kind = None;
-    let mut integer = None;
+    let mut value = AnnotationArgumentValue {
+        kind: 0,
+        integer: None,
+        float: None,
+        double: None,
+        string_id: None,
+        class_id: None,
+        enum_value_id: None,
+        annotation: None,
+        elements: Vec::new(),
+        array_dimensions: 0,
+        flags: 0,
+    };
     while !protobuf.at_end() {
         let tag = protobuf.varint()?;
         match (tag >> 3, tag & 7) {
-            (1, 0) => kind = protobuf.varint(),
-            (2, 0) => integer = protobuf.varint(),
+            (1, 0) => value.kind = protobuf.varint()?,
+            // Integer payloads use protobuf zigzag encoding.
+            (2, 0) => value.integer = Some(unzigzag_i64(protobuf.varint()?)),
+            (3, 5) => {
+                let bytes = protobuf.bytes(4)?.try_into().ok()?;
+                value.float = Some(f32::from_le_bytes(bytes));
+            }
+            (4, 1) => {
+                let bytes = protobuf.bytes(8)?.try_into().ok()?;
+                value.double = Some(f64::from_le_bytes(bytes));
+            }
+            (5, 0) => value.string_id = Some(protobuf.varint()?),
+            (6, 0) => value.class_id = Some(protobuf.varint()?),
+            (7, 0) => value.enum_value_id = Some(protobuf.varint()?),
+            (8, 2) => {
+                let length = protobuf.varint()? as usize;
+                value.annotation = Some(Box::new(parse_type_annotation(protobuf.bytes(length)?)?));
+            }
+            (9, 2) => {
+                let length = protobuf.varint()? as usize;
+                value
+                    .elements
+                    .push(parse_annotation_value(protobuf.bytes(length)?)?);
+            }
+            (10, 0) => value.flags = protobuf.varint()?,
+            (11, 0) => value.array_dimensions = protobuf.varint()?,
             (_, wire) => protobuf.skip(wire)?,
         }
     }
-    // Annotation.Argument.Value.Type.INT = 3. Integer payloads use protobuf zigzag encoding.
-    Some(if kind == Some(3) {
-        integer
-            .map(|value| AnnotationValue::Int(unzigzag_i64(value)))
-            .unwrap_or(AnnotationValue::Other)
-    } else {
-        AnnotationValue::Other
-    })
+    Some(value)
 }
 
 fn unzigzag_i64(value: u64) -> i64 {

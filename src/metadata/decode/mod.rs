@@ -17,6 +17,7 @@ pub(crate) use parameter_shape::{
     ParsedValueParam, ParsedVariance,
 };
 pub(crate) use type_shape::{
-    parse_type_node, ParsedProjection, ParsedTypeArgument, ParsedTypeNode,
+    parse_type_node, AnnotationArgumentValue, ParsedProjection, ParsedTypeArgument, ParsedTypeNode,
+    TypeAnnotation,
 };
 pub(crate) use wire::{packed_varints, Pb};

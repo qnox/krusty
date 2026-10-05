@@ -8397,6 +8397,34 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   class` records the declared one. Tests:
   `tests/class_annotation_attributes_e2e.rs::a_legacy_inline_class_carries_jvm_inline_after_its_declared_annotations`.
 
+- **A type-use annotation is recorded on its type occurrence in `@Metadata`.** kotlinc writes every
+  annotation applied to a declared type occurrence whose retention is not `SOURCE` as
+  `Type.annotation` (extension field 100) on that occurrence's `Type`, at any depth and in source
+  order: `fun f(x: @Mark Item)`, `Holder<@Mark Item>`, `@Mark Item?`, `@Mark (Item) -> Unit`,
+  a supertype `class D : @Mark Base()`, and the box corpus's `checkExactType(value: @Exact T)`.
+  Retention alone decides: `@UnsafeVariance` (declared `SOURCE`) is not recorded, while
+  `@JvmSuppressWildcards` and `@kotlin.internal.Exact` are. The annotation's descriptor is interned
+  in `d2`, before the occurrence's abbreviation even though `abbreviated_type` is written first.
+  The identity is the one Pass 1 bound to the annotation reference; the record travels on the
+  declared type's spelling (`Spelled::annotations`) like an alias abbreviation. An application's
+  arguments are recorded with it: scalars and constant expressions (`@Bin(LIMIT)`, `@Bin(-1)`),
+  enum entries, class literals, arrays, nested annotations, and an omitted vararg's `[]`. They are
+  written in SOURCE order (`@Moded(kind = …, mode = …)` lists `kind` first) at every nesting depth,
+  unlike the class-file attribute, which kotlinc writes in declaration order. A boolean's
+  `int_value` is a zigzag `sint64` like every integral kind (`true` is 2). The arguments are
+  constant expressions folded by the checker in the scope of the innermost enclosing top-level or
+  class declaration, once signatures and constants are final; a mistyped one is reported once,
+  as kotlinc reports it. `@NoInfer` is no longer special-cased:
+  it is one more recorded type-use annotation. A `typealias` right-hand side is a declared
+  occurrence too: `typealias Marked = @Kept Item` records `@Kept` on the alias's `underlying_type`
+  and `expanded_type`, and `typealias Tagged = @Kept Cargo` records it on the alias reference, its
+  abbreviation, and the expansion alike. A USE of the alias inherits the right-hand side's
+  annotations on its expanded type, ahead of the use's own (`x: @Mark Marked` expands to
+  `@Kept @Mark Item`), while the use's abbreviation records only what the use wrote. An alias
+  read from a dependency's metadata behaves the same: its expanded type's annotations, arguments
+  included, are what a use inherits.
+  Tests: `tests/type_use_annotation_metadata_e2e.rs`.
+
 - **A qualified `typealias` spelling denotes its TARGET, not the alias.** `app.Cargo` and `Cargo`
   name the same declaration and must resolve identically. A dotted spelling reaches name resolution
   intact — the parse seam expands only what it can match — and qualified resolution answers it with

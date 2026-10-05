@@ -356,9 +356,10 @@ fn annotation_value_pb(st: &mut StringTable<'_>, value: &crate::ir::AnnoValue) -
                 out.field_varint(1, 6);
                 out.field_fixed64(4, value.to_bits());
             }
+            // `int_value` is a `sint64` for every integral kind, a boolean included.
             IrConst::Boolean(value) => {
                 out.field_varint(1, 7);
-                out.field_varint(2, u64::from(*value));
+                out.field_varint(2, zigzag_i64(i64::from(*value)));
             }
             IrConst::String(value) => {
                 out.field_varint(1, 8);
@@ -551,14 +552,7 @@ fn function_pb(
         } else {
             (*pty, f.spellings.param(i).clone())
         };
-        let mut ty = type_pb_declared(st, declared_ty, &declared_spelling, &tps);
-        if f.no_infer_params.get(i).copied().unwrap_or(false) {
-            let annotation = crate::metadata::type_encoder::encode_annotation(
-                st,
-                crate::types::type_name("kotlin/internal/NoInfer"),
-            );
-            ty.field_message(100, &annotation);
-        }
+        let ty = type_pb_declared(st, declared_ty, &declared_spelling, &tps);
         vp.field_message(3, &ty); // ValueParameter.type = 3
                                   // A `vararg` parameter records its ELEMENT type as `vararg_element_type` (field 4) —
                                   // kotlinc's declared type stays the array.

@@ -1691,7 +1691,7 @@ pub struct ResolvedAppliedClassifier {
 /// One source type-alias declaration after Pass-1 name/type resolution. The alias is declaration
 /// metadata rather than executable syntax: its expansion is pending-free, and its spelling sidecar
 /// exists only so a backend can serialize Kotlin's abbreviated type faithfully.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ResolvedTypeAliasHeader {
     pub declaration: DeclarationId,
     pub identity: TypeName,
