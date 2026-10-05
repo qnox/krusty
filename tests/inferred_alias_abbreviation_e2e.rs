@@ -65,7 +65,9 @@ fn a_join_keeps_the_abbreviation_only_of_an_equal_first_branch() {
 const DEPENDENCY: &str = "package dep\n\
     \n\
     class Payload\n\
-    typealias Cargo = Payload\n";
+    class Crate<T>(val content: T)\n\
+    typealias Cargo = Payload\n\
+    typealias Boxed<T> = Crate<T>\n";
 
 fn assert_identical_over_dependency(stem: &str, src: &str, class_internal: &str) {
     let result = common::metadata_diff_against_kotlinc_lib(
@@ -87,6 +89,40 @@ fn an_imported_alias_constructor_keeps_the_alias() {
         \n\
         val stored = Cargo()\n";
     assert_identical_over_dependency("ImportedAlias", src, "app/ImportedAliasKt");
+}
+
+/// A package-qualified constructor call binds the alias declaration itself, so qualification keeps
+/// the alias; a generic alias keeps its explicit argument the same way.
+#[test]
+fn a_package_qualified_alias_constructor_keeps_the_alias() {
+    let src = "package app\n\
+        \n\
+        val stored = dep.Cargo()\n\
+        val boxed = dep.Boxed<dep.Payload>(dep.Payload())\n";
+    assert_identical_over_dependency("QualifiedAlias", src, "app/QualifiedAliasKt");
+}
+
+/// A nearer classifier root named like the package commits the path to that classifier: the
+/// nested class it reaches names no alias.
+#[test]
+fn a_classifier_root_shadowing_the_alias_package_names_no_alias() {
+    let src = "package app\n\
+        \n\
+        object dep { class Cargo }\n\
+        val stored = dep.Cargo()\n";
+    assert_identical_over_dependency("ClassifierRoot", src, "app/ClassifierRootKt");
+}
+
+/// A nearer value root named like the package commits the path to that value: the call is its
+/// member, not the alias constructor.
+#[test]
+fn a_value_root_shadowing_the_alias_package_names_no_alias() {
+    let src = "package app\n\
+        \n\
+        class Maker { fun Cargo() = 1 }\n\
+        val dep = Maker()\n\
+        val stored = dep.Cargo()\n";
+    assert_identical_over_dependency("ValueRoot", src, "app/ValueRootKt");
 }
 
 /// A nearer nested classifier owns the spelling: its constructor's result names no alias even
