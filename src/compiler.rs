@@ -3,6 +3,7 @@
 mod backend_handoff;
 mod declaration_metadata;
 mod diagnostic_recovery;
+mod local_visibility;
 mod metadata_handoff;
 #[cfg(test)]
 mod streaming_tests;
@@ -562,7 +563,6 @@ fn check_body_group(
     {
         return None;
     }
-    let discovered_local_classifiers = !info.checked_local_class_declarations.is_empty();
     if let Err(declarations) = crate::resolve::publish_checked_local_signatures_in_pass_two_root(
         active_file,
         active,
@@ -581,7 +581,14 @@ fn check_body_group(
         );
         return None;
     }
-    if !discovered_local_classifiers {
+    // Most local classifiers retain public/default visibility, so their first checked body is
+    // already final. Repeat the body check only when publishing an override plan actually made a
+    // modifier-less member non-public; that later access check must consume the corrected header.
+    // Re-entering every body that merely contains a local classifier makes already-published local
+    // inheritance edges look like a second declaration and produces spurious `overrides nothing`.
+    let inherited_local_visibility =
+        local_visibility::group_published_non_public_member(active_file, active, &info, index);
+    if !inherited_local_visibility {
         return Some(info);
     }
 

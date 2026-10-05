@@ -7,6 +7,9 @@
 use std::collections::{HashMap, HashSet};
 
 mod inherited_status;
+mod published_recheck;
+
+pub(super) use published_recheck::published_function_override_matches;
 
 use super::SymbolTable;
 use crate::fir::{
