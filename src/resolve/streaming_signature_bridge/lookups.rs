@@ -1133,6 +1133,7 @@ impl ProductionSignatureSemantics<'_> {
             &receivers,
             super::super::MemberExtensionProbes {
                 explicit_context_arguments,
+                deferred_type_variables: &[],
                 select_context_arguments: &|parameters| {
                     super::super::context_argument_types(&[dispatch_receiver], parameters, &oracle)
                         .map(|types| {

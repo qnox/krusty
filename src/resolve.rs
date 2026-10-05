@@ -12920,23 +12920,24 @@ fn contextual_call_shape_with(
 
 /// Constrain one declared member-extension slot by its call-site evidence. The slot is unified both
 /// as declared and as already applied, so a formal reached only through another formal's solution
-/// (`P` bound to `List<Q>`) still learns from the argument. Only the callee's own method formals
-/// are solved here: a type variable that merely appears in an applied slot belongs to an enclosing
-/// declaration or to a postponed call (`E` of `produce { onSend.call("") }`), and the argument
-/// check reports the constraint to that owner instead of fixing it inside this candidate.
+/// (`P` bound to `List<Q>`) still learns from the argument. An active postponed call owns its own
+/// variables (`E` of `produce { onSend.call("") }`), so this nested candidate leaves those entries
+/// untouched and lets the argument check report the constraint to that owning frame. Every other
+/// solution remains candidate-local inference, including a delegate factory's formals and a stable
+/// enclosing declaration's type parameters.
 fn unify_member_extension_slot(
     declared: Ty,
     actual: Ty,
-    method_formals: &[(usize, &String)],
+    deferred_type_variables: &[String],
     bindings: &mut crate::symbol_resolver::GSigBinds,
 ) {
     let mut inferred = bindings.clone();
     let applied = apply_inference_bindings(declared, &inferred);
     crate::symbol_resolver::unify_ty(applied, actual, &mut inferred);
     crate::symbol_resolver::unify_ty(declared, actual, &mut inferred);
-    for (_, formal) in method_formals {
-        if let Some(solution) = inferred.get(*formal) {
-            bindings.insert((*formal).clone(), *solution);
+    for (formal, solution) in inferred {
+        if !deferred_type_variables.contains(&formal) {
+            bindings.insert(formal, solution);
         }
     }
 }
@@ -12959,6 +12960,9 @@ fn apply_inference_bindings(mut ty: Ty, bindings: &crate::symbol_resolver::GSigB
 #[derive(Clone, Copy)]
 pub(crate) struct MemberExtensionProbes<'p> {
     explicit_context_arguments: bool,
+    /// Variables owned by an active postponed-call frame. A nested candidate may expose them in an
+    /// applied parameter but must not consume their constraints before the owning frame sees them.
+    deferred_type_variables: &'p [String],
     select_context_arguments: &'p ContextArgumentSelector<'p>,
     is_spread_arg: &'p dyn Fn(usize) -> bool,
     unit_coerced_lambda: &'p dyn Fn(usize, Ty, Ty) -> Option<Ty>,
@@ -12980,6 +12984,7 @@ fn instantiate_member_extension_with(
 ) -> Option<InstantiatedMemberExtension> {
     let MemberExtensionProbes {
         explicit_context_arguments,
+        deferred_type_variables,
         select_context_arguments,
         is_spread_arg,
         unit_coerced_lambda,
@@ -13046,7 +13051,7 @@ fn instantiate_member_extension_with(
     for (parameter, actual) in context_actual_types.iter().enumerate() {
         let Some(actual) = actual else { continue };
         let declared = declared_params[parameter];
-        unify_member_extension_slot(declared, *actual, &method_type_params, &mut bindings);
+        unify_member_extension_slot(declared, *actual, deferred_type_variables, &mut bindings);
     }
     // Use the common index mapper over the SOURCE-VISIBLE shape. Implicit context parameters are
     // absent; explicitly named ones are present at the end and map back through
@@ -13085,12 +13090,17 @@ fn instantiate_member_extension_with(
         } else {
             *actual
         };
-        unify_member_extension_slot(declared, actual, &method_type_params, &mut bindings);
+        unify_member_extension_slot(declared, actual, deferred_type_variables, &mut bindings);
     }
     if let Some(expected) = result_constraint.expected() {
         let declared_ret = generic.map_or(function.signature.ret, |signature| signature.ret);
         let declared_ret = result_constraint.declaration_result(declared_ret);
-        unify_member_extension_slot(declared_ret, expected, &method_type_params, &mut bindings);
+        unify_member_extension_slot(
+            declared_ret,
+            expected,
+            deferred_type_variables,
+            &mut bindings,
+        );
     }
     for (index, parameter) in method_type_params {
         let fallback = generic
@@ -71638,9 +71648,11 @@ impl<'a> Checker<'a> {
         result_constraint: CallResultConstraint,
     ) -> Option<InstantiatedMemberExtension> {
         let args = call.args;
+        let deferred_type_variables = self.active_postponed_type_variables(scope);
         instantiate_member_extension_with(
             MemberExtensionProbes {
                 explicit_context_arguments: self.file.explicit_context_arguments,
+                deferred_type_variables: &deferred_type_variables,
                 select_context_arguments: &|parameters| {
                     self.select_context_arguments_with_types(scope, parameters)
                 },
@@ -71682,12 +71694,14 @@ impl<'a> Checker<'a> {
         let receivers =
             member_extension_selection::ordinary_dispatch_first(scope, receivers.to_vec());
         let args = call.args;
+        let deferred_type_variables = self.active_postponed_type_variables(scope);
         member_extension_function_with(
             &self.fed_source(),
             self,
             &receivers,
             MemberExtensionProbes {
                 explicit_context_arguments: self.file.explicit_context_arguments,
+                deferred_type_variables: &deferred_type_variables,
                 select_context_arguments: &|parameters| {
                     self.select_context_arguments_with_types(scope, parameters)
                 },
