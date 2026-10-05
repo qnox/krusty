@@ -2009,43 +2009,12 @@ impl FirBody {
         self.debug_name.as_deref()
     }
 
-    pub fn set_lifting_site(&mut self, site: FirLiftingSite) {
-        assert!(
-            self.lifting_site.replace(site).is_none(),
-            "a FIR body has one lifting site"
-        );
-    }
-
-    pub fn lifting_site(&self) -> Option<&FirLiftingSite> {
-        self.lifting_site.as_ref()
-    }
-
-    pub fn add_bodiless_lifting_site(&mut self, site: FirLiftingSite) {
-        self.bodiless_lifting_sites.push(site);
-    }
-
     pub(crate) fn add_local_delegate_plan(&mut self, plan: FirLocalDelegatePlan) {
         self.local_delegate_plans.push(plan);
     }
 
     pub(crate) fn local_delegate_plans(&self) -> &[FirLocalDelegatePlan] {
         &self.local_delegate_plans
-    }
-
-    /// Every lifting site this body and the callables nested in it declare, its own included.
-    pub fn collect_lifting_sites<'a>(&'a self, out: &mut Vec<&'a FirLiftingSite>) {
-        out.extend(self.lifting_site.iter());
-        out.extend(self.bodiless_lifting_sites.iter());
-        for statement in &self.statements {
-            if let FirStatementKind::LocalFunction { body, .. } = &statement.kind {
-                body.collect_lifting_sites(out);
-            }
-        }
-        for expression in &self.expressions {
-            if let FirExprKind::Lambda { body, .. } = &expression.kind {
-                body.collect_lifting_sites(out);
-            }
-        }
     }
 
     pub fn mark_source_lambda(&mut self, lambda: FirSourceLambda) {
