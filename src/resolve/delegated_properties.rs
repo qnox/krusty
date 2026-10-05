@@ -1442,31 +1442,35 @@ impl Checker<'_> {
                     &self.fed_source(),
                     self,
                     &receivers,
-                    self.file.explicit_context_arguments,
-                    &|parameters| self.select_context_arguments_with_types(scope, parameters),
-                    &|_| false,
-                    &|_, _, _| None,
-                    &|params, call_sig, slots| {
-                        let mapped = call_argument_parameter_indices(
-                            slots.args.len(),
-                            params.len(),
-                            slots.arg_names,
-                            slots.trailing_lambda,
-                            call_sig,
-                        )?;
-                        let mut score = 0;
-                        for (source, parameter) in mapped.into_iter().enumerate() {
-                            let expected = *params.get(parameter)?;
-                            let actual = *args.get(source)?;
-                            if !call_sig.parameter_admits(parameter, expected, actual) {
-                                return None;
+                    MemberExtensionProbes {
+                        explicit_context_arguments: self.file.explicit_context_arguments,
+                        select_context_arguments: &|parameters| {
+                            self.select_context_arguments_with_types(scope, parameters)
+                        },
+                        is_spread_arg: &|_| false,
+                        unit_coerced_lambda: &|_, _, _| None,
+                        score_candidate: &|params, call_sig, slots| {
+                            let mapped = call_argument_parameter_indices(
+                                slots.args.len(),
+                                params.len(),
+                                slots.arg_names,
+                                slots.trailing_lambda,
+                                call_sig,
+                            )?;
+                            let mut score = 0;
+                            for (source, parameter) in mapped.into_iter().enumerate() {
+                                let expected = *params.get(parameter)?;
+                                let actual = *args.get(source)?;
+                                if !call_sig.parameter_admits(parameter, expected, actual) {
+                                    return None;
+                                }
+                                score += self.member_argument_score(expected, actual)?;
                             }
-                            score += self.member_argument_score(expected, actual)?;
-                        }
-                        Some(CallCandidateScore {
-                            rank: (score, std::cmp::Reverse(0), !call_sig.vararg),
-                            sam_signatures: vec![None; slots.args.len()],
-                        })
+                            Some(CallCandidateScore {
+                                rank: (score, std::cmp::Reverse(0), !call_sig.vararg),
+                                sam_signatures: vec![None; slots.args.len()],
+                            })
+                        },
                     },
                     MemberExtensionFunctionCall {
                         extension_receiver: delegate_ty,
