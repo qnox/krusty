@@ -340,6 +340,7 @@ fn validate_expr(expression: &IrExpr) -> Result<(), UndeterminedIrType> {
         | IrExpr::GetValue(_)
         | IrExpr::ForwardedSuperArgument { .. }
         | IrExpr::SetValue { .. }
+        | IrExpr::SetFrameResult { .. }
         | IrExpr::Return(_)
         | IrExpr::Block { .. }
         | IrExpr::When { .. }
