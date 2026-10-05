@@ -505,30 +505,20 @@ fn realize_adapter_reference(
         },
         _ => unreachable!("empty and non-empty capture shapes are exhaustive"),
     };
-    let carrier = install_carrier(ir, expression, carrier, reference.function_type);
+    let carrier = install_carrier(ir, expression, carrier);
     if let Some(parameters) = declared_parameters {
         ir.construction_declared_params.insert(carrier, parameters);
     }
     Ok(())
 }
 
-/// Replace the reference expression with its carrier, cast to the reference's function type.
-/// kotlinc's `FunctionReferenceLowering` hands the carrier to its use site through that implicit
-/// cast, which the JVM writes as a `checkcast` to the `FunctionN` interface.
-/// Replace `expression` with `carrier` cast to its function type; the carrier's new id.
-fn install_carrier(
-    ir: &mut IrFile,
-    expression: usize,
-    carrier: IrExpr,
-    function_type: Ty,
-) -> ExprId {
-    let carrier = ir.add_expr(carrier);
-    ir.exprs[expression] = IrExpr::TypeOp {
-        op: crate::ir::IrTypeOp::Cast,
-        arg: carrier,
-        type_operand: function_type.non_null(),
-    };
-    carrier
+/// Replace the reference expression with its carrier. kotlinc's `FunctionReferenceLowering` hands
+/// the carrier to its use site through an implicit cast, which the JVM backend materializes only
+/// at the consumer: a `checkcast` to the consumer's own type (`Function1` for a function-typed
+/// parameter, `KFunction` for a reference-typed local), and none for `Object`.
+fn install_carrier(ir: &mut IrFile, expression: usize, carrier: IrExpr) -> ExprId {
+    ir.exprs[expression] = carrier;
+    ExprId::try_from(expression).expect("an expression id fits its index")
 }
 
 /// `parameters` of `function`, with each shared mutable capture realized as its JVM holder.

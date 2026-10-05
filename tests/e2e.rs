@@ -1797,6 +1797,8 @@ mod redundant_checkcasts_before_aastore_e2e;
 mod redundant_null_check_e2e;
 #[path = "redundant_null_jumps_e2e.rs"]
 mod redundant_null_jumps_e2e;
+#[path = "reference_consumer_casts_e2e.rs"]
+mod reference_consumer_casts_e2e;
 #[path = "renamed_builtin_bridge_owner_e2e.rs"]
 mod renamed_builtin_bridge_owner_e2e;
 #[path = "source_when_nop_e2e.rs"]

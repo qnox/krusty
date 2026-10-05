@@ -559,6 +559,17 @@ impl<'a> JvmSignatureFormatter<'a> {
                     self.ty_at(&element, wildcards.for_argument(variance))?
                 ))
             }
+            // `KFunctionN` and `KSuspendFunctionN` are realized as `kotlin.reflect.KFunction<out R>`,
+            // whose one argument is the reference's result: kotlinc writes only the last argument.
+            Ty::Obj(owner, arguments)
+                if crate::jvm::function_classifiers::is_reflective_function_classifier(owner) =>
+            {
+                let result = arguments.last().copied()?;
+                self.ty_at(
+                    &Ty::obj_args(crate::types::KFUNCTION_INTERNAL, &[result]),
+                    wildcards,
+                )
+            }
             Ty::Obj(owner, arguments) if self.is_written_raw(owner, arguments)? => Some(format!(
                 "L{};",
                 crate::jvm::names::classfile_internal_name_of(owner)
