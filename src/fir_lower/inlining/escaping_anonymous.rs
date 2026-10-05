@@ -60,7 +60,7 @@ pub(super) fn specialize(
         )?;
     }
     for root in &roots {
-        ir.remap_reachable_classifier_identities(&renames, [*root], &mut detached_impls);
+        remap_reachable_implementations(ir, &renames, *root, &mut detached_impls, &expansion);
     }
     Ok(())
 }
@@ -115,9 +115,41 @@ fn retarget(
             *name = specialized;
         }
     }
-    ir.remap_reachable_classifier_identities(renames, [root], detached_impls);
+    remap_reachable_implementations(ir, renames, root, detached_impls, expansion);
     note_caller_property_uses(ir, root);
     Ok(())
+}
+
+/// A shared lambda implementation detached for this anonymous-class copy is a call-site
+/// specialization too. Recording that ownership keeps a suspend or class-materialized lambda on
+/// the backend's specialized naming path instead of publishing a second source class identity.
+fn remap_reachable_implementations(
+    ir: &mut crate::ir::IrFile,
+    renames: &HashMap<TypeName, TypeName>,
+    root: ExprId,
+    detached_impls: &mut HashSet<FunId>,
+    expansion: &Expansion<'_>,
+) {
+    for detached in ir.remap_reachable_classifier_identities(renames, [root], detached_impls) {
+        ir.specialized_functions.insert(
+            detached.target,
+            crate::ir::IrSpecializedFunction {
+                source: detached.source,
+                caller_declaration: expansion.site.caller_declaration,
+                caller: expansion.site.caller,
+                caller_is_default: expansion.site.caller_is_default,
+                caller_source_name: expansion.site.caller_source_name.to_string(),
+                inline_callee: expansion.site.inline_callee,
+                inline_callee_source_name: expansion.site.inline_callee_source_name.to_string(),
+                parent: detached.parent,
+            },
+        );
+        if detached.parent.is_none() {
+            ir.specialized_expansion_order
+                .entry(detached.target)
+                .or_insert(detached.order);
+        }
+    }
 }
 
 fn note_caller_property_uses(ir: &mut crate::ir::IrFile, root: ExprId) {

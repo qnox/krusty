@@ -4,6 +4,16 @@ use std::collections::{HashMap, HashSet};
 
 use crate::types::{Ty, TypeName};
 
+/// A lambda implementation split from a shared source implementation while remapping one
+/// reachable inline expansion. The lowering that owns that expansion attaches its call-site
+/// specialization record before a backend assigns any class identity.
+pub(crate) struct DetachedLambdaImplementation {
+    pub(crate) source: FunId,
+    pub(crate) target: FunId,
+    pub(crate) parent: Option<FunId>,
+    pub(crate) order: ExprId,
+}
+
 use super::{
     Callee, ClassId, EnclosingDeclaration, ExprId, FunId, IrCallableReferenceTarget,
     IrCheckedArgument, IrCheckedOperation, IrExpr,
@@ -1411,9 +1421,9 @@ impl super::IrFile {
         names: &HashMap<TypeName, TypeName>,
         roots: impl IntoIterator<Item = ExprId>,
         detached_impls: &mut HashSet<FunId>,
-    ) {
+    ) -> Vec<DetachedLambdaImplementation> {
         if names.is_empty() {
-            return;
+            return Vec::new();
         }
         let class_ids = self
             .classes
@@ -1446,6 +1456,7 @@ impl super::IrFile {
         let mut seen = HashSet::new();
         let mut pending = closure.iter().copied().collect::<Vec<_>>();
         let mut local_clones = HashMap::new();
+        let mut new_detached = Vec::new();
         while let Some(expression) = pending.pop() {
             if !seen.insert(expression) {
                 continue;
@@ -1461,9 +1472,23 @@ impl super::IrFile {
                 ) {
                     existing
                 } else {
+                    let source = impl_fn;
+                    let parent = self
+                        .callable_reference_enclosures
+                        .get(&expression)
+                        .and_then(|enclosure| match enclosure {
+                            super::IrEnclosure::Lambda(owner) => local_clones.get(owner).copied(),
+                            _ => None,
+                        });
                     let cloned = detach_lambda_impl(self, impl_fn);
                     local_clones.insert(impl_fn, cloned);
                     detached_impls.insert(cloned);
+                    new_detached.push(DetachedLambdaImplementation {
+                        source,
+                        target: cloned,
+                        parent,
+                        order: expression,
+                    });
                     cloned
                 };
                 if let IrExpr::Lambda { impl_fn: slot, .. } = &mut self.exprs[expression as usize] {
@@ -1528,6 +1553,7 @@ impl super::IrFile {
         for expression_id in seen {
             remap_expression_facts(self, expression_id, names);
         }
+        new_detached
     }
 }
 
@@ -1877,8 +1903,8 @@ fn physical_name(
 mod tests {
     use super::*;
     use crate::ir::{
-        IrCallableReference, IrConst, IrDeclarationArgumentBoundary, IrModuleMemberAccess,
-        IrProgressionSource, IrRuntimeFunction, IrSamMethod, IrSamTarget,
+        IrCallableReference, IrConst, IrDeclarationArgumentBoundary, IrFunction,
+        IrModuleMemberAccess, IrProgressionSource, IrRuntimeFunction, IrSamMethod, IrSamTarget,
         IrValueClassTypeOperation, IrValueClassTypeRole,
     };
 
@@ -2065,5 +2091,48 @@ mod tests {
         assert!(ir.classifier_roles.contains_key(&target));
         assert_eq!(ir.companion_clinit_bodies[&target], expression);
         assert_eq!(ir.class_static_local_functions[&0], target);
+    }
+
+    #[test]
+    fn reachable_remap_reports_a_lambda_implementation_detached_from_another_site() {
+        let source = crate::types::type_name("sample/Source");
+        let target = crate::types::type_name("sample/Target");
+        let names = HashMap::from([(source, target)]);
+        let mut ir = super::super::IrFile::default();
+        let body = ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+        let implementation = ir.add_fun(IrFunction {
+            name: "invoke".to_string(),
+            params: Vec::new(),
+            ret: Ty::Int,
+            body: Some(body),
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: Vec::new(),
+        });
+        let lambda = |impl_fn| IrExpr::Lambda {
+            impl_fn,
+            arity: 0,
+            captures: Vec::new(),
+            sam: None,
+            inline_body: None,
+        };
+        let reachable = ir.add_expr(lambda(implementation));
+        let other = ir.add_expr(lambda(implementation));
+
+        let detached =
+            ir.remap_reachable_classifier_identities(&names, [reachable], &mut HashSet::new());
+
+        assert_eq!(detached.len(), 1);
+        assert_eq!(detached[0].source, implementation);
+        assert_eq!(detached[0].parent, None);
+        assert_eq!(detached[0].order, reachable);
+        assert!(matches!(
+            ir.expr(reachable),
+            IrExpr::Lambda { impl_fn, .. } if *impl_fn == detached[0].target
+        ));
+        assert!(matches!(
+            ir.expr(other),
+            IrExpr::Lambda { impl_fn, .. } if *impl_fn == implementation
+        ));
     }
 }

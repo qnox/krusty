@@ -340,9 +340,10 @@ pub(super) fn realize(
         {
             continue;
         }
-        let class_name = ((runtime_reified || inline_anonymous || delegate_source.is_some())
-            && ir.specialized_functions.contains_key(&fid))
-        .then(|| specialized_reified_placeholder(facade, fid));
+        let class_name = ir
+            .specialized_functions
+            .contains_key(&fid)
+            .then(|| specialized_reified_placeholder(facade, fid));
         if let Some(source) = delegate_source {
             let sites = delegate_sites(ir, fid, class_name)?;
             if sites.is_empty() {
