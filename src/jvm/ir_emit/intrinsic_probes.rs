@@ -6,7 +6,7 @@
 //! probeCoroutineSuspended; L:`, written at the call's own line.
 
 use super::{load, Emitter};
-use crate::ir::{ExprId, IrIntrinsicSuspensionKind};
+use crate::ir::ExprId;
 use crate::jvm::classfile::CodeBuilder;
 use crate::types::Ty;
 
@@ -15,14 +15,9 @@ const CONTINUATION: &str = "kotlin/coroutines/Continuation";
 impl Emitter<'_> {
     /// Follow `point`, when it is an unintercepted intrinsic suspension point, with its probe.
     pub(super) fn probe_intrinsic_suspension(&mut self, point: ExprId, code: &mut CodeBuilder) {
-        let Some(IrIntrinsicSuspensionKind::Unintercepted) = self
-            .ir
-            .intrinsic_suspension_points
-            .get(&point)
-            .map(|point| point.kind)
-        else {
+        if !self.ir.is_unintercepted_suspension(point) {
             return;
-        };
+        }
         // A block the transformer takes probes the fake continuation it was given.
         let declared = match self.is_transformed_block(point) {
             true => None,
@@ -89,9 +84,7 @@ impl Emitter<'_> {
 
 #[cfg(test)]
 mod tests {
-    use crate::ir::{
-        IrConst, IrExpr, IrFile, IrFunction, IrIntrinsicSuspensionKind, IrIntrinsicSuspensionPoint,
-    };
+    use crate::ir::{IrConst, IrExpr, IrFile, IrFunction, IrIntrinsicSuspensionPoint};
     use crate::jvm::ir_emit::invariant_tests::emit_for_test_with_probe_continuations;
     use crate::jvm::ir_emit::EmitRun;
     use crate::types::Ty;
@@ -104,7 +97,6 @@ mod tests {
             point,
             IrIntrinsicSuspensionPoint {
                 result: Ty::nullable(Ty::obj("kotlin/Any")),
-                kind: IrIntrinsicSuspensionKind::Unintercepted,
             },
         );
         ir.add_fun(IrFunction {

@@ -400,7 +400,9 @@ impl BodyFirChecker<'_> {
                     depth: source.depth,
                     path: Box::new([]),
                     ty,
-                    receiver: FirCapturedReceiver::Enclosing,
+                    receiver: FirCapturedReceiver::Enclosing {
+                        classifier: classifier.classifier,
+                    },
                 });
             let value = self.body.add_expr(FirExpr {
                 origin,

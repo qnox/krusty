@@ -1,13 +1,13 @@
 //! The boxed result kotlinc gives a scalar result over a reference-returning overridden slot.
 //!
-//! kotlinc's JVM signature mapper boxes a function's primitive result when any declaration it
+//! kotlinc's JVM signature mapper boxes a function's scalar result when any declaration it
 //! overrides returns something else (`forceBoxedReturnTypeOnOverride`): `override fun next(): Int`
 //! of `Iterator<T>.next(): T` is `next()Ljava/lang/Integer;`, and so is `invoke` of a
 //! `() -> Int` object. The override's own JVM result is the wrapper, so its body boxes once, a call
 //! through the class unboxes, and the bridge to the erased declaration returns the box as it is.
 //!
-//! The Kotlin declaration still returns the primitive, and common IR keeps saying so: its function
-//! result, its returns and its calls are untouched, and it classifies no type as primitive. The
+//! The Kotlin declaration still returns the semantic scalar type, and common IR keeps saying so:
+//! its function result, its returns and its calls are untouched. The
 //! question is one of JVM representation alone ([`scalar_over_reference`]): does the override's
 //! result map to an unboxed scalar where an overridden slot maps to a reference? This pass answers
 //! it from the exact override edges and records the choice in [`OverrideResults`], keyed by
@@ -23,18 +23,18 @@ use crate::jvm::backend::SkipReason;
 use crate::jvm::physical_type::ir_ty_to_jvm;
 use crate::types::{Ty, TypeName};
 
-/// The functions of this file whose JVM result is the wrapper of their primitive Kotlin result.
+/// The functions of this file whose scalar result is carried in its wrapper class on the JVM.
 #[derive(Default)]
 pub(crate) struct OverrideResults {
     boxed: HashSet<FunId>,
     /// Value-class member calls the value-class pass realized as a static call of a boxed
-    /// member's `-impl`, with the primitive Kotlin result each reads out of the wrapper.
+    /// member's `-impl`, with the scalar result each reads out of the wrapper.
     static_member_calls: HashMap<ExprId, Ty>,
-    /// The properties of this file whose getter result is the wrapper of their primitive type,
+    /// The properties of this file whose getter result is the wrapper of their scalar JVM type,
     /// by checked identity and by their place among the owning class's properties.
     boxed_properties: HashSet<PropertyId>,
     boxed_members: HashSet<(TypeName, u32)>,
-    /// Realized `super` calls of a boxed getter, with the primitive type each reads out of it.
+    /// Realized `super` calls of a boxed getter, with the scalar type each reads out of it.
     super_getter_calls: HashMap<ExprId, Ty>,
 }
 
@@ -71,8 +71,8 @@ pub(crate) fn boxes_sam_result(target: &crate::ir::IrSamTarget) -> bool {
     sam_results_boxed_over(target).next().is_some()
 }
 
-/// The primitive Kotlin result of the selected dependency member when its exact class-file slot is
-/// that primitive's wrapper. The identity is already frozen at the frontend/backend boundary; a
+/// The semantic scalar result of the selected dependency member when its exact class-file slot is
+/// that scalar's wrapper. The identity is already frozen at the frontend/backend boundary; a
 /// missing fact is an invalid backend input, never a reason to guess from the semantic type.
 pub(crate) fn external_boxed_result(
     callables: &crate::backend::CheckedBackendCallables,
@@ -89,7 +89,7 @@ pub(crate) fn external_boxed_result(
 }
 
 impl OverrideResults {
-    /// Whether `function`'s JVM result is the wrapper of its primitive one.
+    /// Whether `function`'s JVM result is the wrapper of its scalar one.
     pub(crate) fn boxes(&self, function: FunId) -> bool {
         self.boxed.contains(&function)
     }
@@ -106,13 +106,13 @@ impl OverrideResults {
     }
 
     /// Whether the getter of the `index`th property of `owner`, a class of this file, returns the
-    /// wrapper of the property's primitive type.
+    /// wrapper of the property's scalar type.
     pub(crate) fn boxes_member_property(&self, owner: TypeName, index: u32) -> bool {
         self.boxed_members.contains(&(owner, index))
     }
 
-    /// The primitive type of the current-module property `property`, in this file or another, when
-    /// its getter returns that primitive's wrapper.
+    /// The scalar type of the current-module property `property`, in this file or another, when
+    /// its getter returns that scalar's wrapper.
     pub(crate) fn boxed_property_result(&self, ir: &IrFile, property: PropertyId) -> Option<Ty> {
         if self.boxed_properties.contains(&property) {
             return ir
@@ -135,13 +135,13 @@ impl OverrideResults {
     }
 
     /// Record that the value-class pass realized `call` as a static call of the `-impl` of a member
-    /// whose JVM result is the wrapper of the primitive `result`.
+    /// whose JVM result is the wrapper of the scalar `result`.
     pub(crate) fn record_static_member_call(&mut self, call: ExprId, result: Ty) {
         self.static_member_calls.insert(call, result);
     }
 
-    /// The primitive Kotlin result of the current-module declaration `callable`, in this file or
-    /// another, when its JVM result is that primitive's wrapper.
+    /// The scalar Kotlin result of the current-module declaration `callable`, in this file or
+    /// another, when its JVM result is that scalar's wrapper.
     pub(crate) fn boxed_callable_result(&self, ir: &IrFile, callable: CallableId) -> Option<Ty> {
         match ir.checked_callable_functions.get(&callable) {
             Some(&function) => self
@@ -160,7 +160,7 @@ impl OverrideResults {
         }
     }
 
-    /// The primitive Kotlin result of the call `expression`, when its callee returns the wrapper in
+    /// The scalar Kotlin result of the call `expression`, when its callee returns the wrapper in
     /// its place: a member call through the class, a `super` call, a member call of a declaration
     /// in another file, or the static member a value-class call was realized as.
     pub(crate) fn boxed_call_result(&self, ir: &IrFile, expression: ExprId) -> Option<Ty> {
@@ -237,7 +237,7 @@ pub(super) fn realizes_overrides(ir: &IrFile, class: usize) -> bool {
 
 /// Choose the wrapper as the JVM result of every override whose scalar result stands over a
 /// reference-returning overridden slot. Common IR is read, never changed.
-pub(super) fn box_primitive_override_results(
+pub(super) fn box_scalar_override_results(
     ir: &IrFile,
     callables: &crate::backend::CheckedBackendCallables,
     property_realizations: &crate::jvm::property_realizations::PropertyRealizations,
@@ -269,17 +269,28 @@ pub(super) fn box_primitive_override_results(
                 }
                 _ => false,
             };
+            // A big-arity function type is realized as `FunctionN`, whose single `invoke` takes
+            // the arguments packed in an array: kotlinc's vararg-bridge lowering detaches the
+            // override from the arity-specific `invoke`, so its scalar result keeps its unboxed
+            // JVM carrier and only the packed bridge returns the box.
+            let packed_function_invoke =
+                crate::libraries::function_classifiers::classifier(edge.overridden_owner)
+                    .is_some_and(|function| {
+                        !function.is_reflective()
+                            && crate::jvm::names::uses_function_n(function.arity())
+                    });
             let result = ir.functions[function as usize].ret;
             if edge.implementation_owner == owner
                 && ir.classes[class].methods.contains(&function)
                 && scalar_result(result)
                 && !ir.suspend_funs.contains(&function)
+                && !packed_function_invoke
                 && (scalar_over_reference(result, edge.declared_result) || dependency_boxed_result)
             {
                 results.boxed.insert(function);
             }
         }
-        box_primitive_property_overrides(ir, callables, owner, &mut results)?;
+        box_scalar_property_overrides(ir, callables, owner, &mut results)?;
     }
     for (call, property) in property_realizations.super_getters() {
         if let Some(result) = results.boxed_property_result(ir, property) {
@@ -289,10 +300,10 @@ pub(super) fn box_primitive_override_results(
     Ok(results)
 }
 
-/// The property analogue: a primitive property of `owner` overriding one whose type is not a
-/// primitive, or a dependency getter already returning the wrapper, returns the wrapper from its
+/// The property analogue: a scalar property of `owner` overriding one whose JVM representation is
+/// a reference, or a dependency getter already returning the wrapper, returns the wrapper from its
 /// getter, its source-written getter or the delegation forwarder standing for it included.
-fn box_primitive_property_overrides(
+fn box_scalar_property_overrides(
     ir: &IrFile,
     callables: &crate::backend::CheckedBackendCallables,
     owner: TypeName,
@@ -339,7 +350,7 @@ fn box_primitive_property_overrides(
     Ok(())
 }
 
-/// Whether `property`, when a dependency's, has a getter returning the wrapper of its primitive
+/// Whether `property`, when a dependency's, has a getter returning the wrapper of its scalar
 /// `declared` type (see [`external_boxed_result`]).
 pub(crate) fn external_boxed_getter(
     callables: &crate::backend::CheckedBackendCallables,

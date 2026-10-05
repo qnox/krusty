@@ -49,11 +49,16 @@ impl Emitter<'_> {
     /// Write continuation read `e` as kotlinc's fake continuation, when it is one: the transformer
     /// replaces it with the machine's continuation. `false`, having written nothing, otherwise.
     pub(super) fn emit_fake_continuation(&mut self, e: ExprId, code: &mut CodeBuilder) -> bool {
-        if !self.transformed_suspensions.fake_continuations.contains(&e) {
+        if !self.is_fake_continuation(e) {
             return false;
         }
         self.load_fake_continuation(code);
         true
+    }
+
+    /// Whether `e` reads kotlinc's fake continuation rather than the function's own.
+    pub(super) fn is_fake_continuation(&self, e: ExprId) -> bool {
+        self.transformed_suspensions.fake_continuations.contains(&e)
     }
 
     /// kotlinc's fake continuation, cast to the interface the block's parameter and the probe take.

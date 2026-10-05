@@ -251,10 +251,6 @@ pub enum FirIntrinsic {
     SuspendCoroutineUninterceptedOrReturn {
         callee: Box<str>,
     },
-    /// The selected safe coroutine primitive. This is distinct from the unintercepted primitive:
-    /// target realization must invoke the block with a one-shot safe, intercepted continuation and
-    /// use that continuation's completed value or suspension sentinel as the call result.
-    SuspendCoroutine,
     UnsignedToString {
         source: ResolvedTy,
     },
