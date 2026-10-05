@@ -182,9 +182,6 @@ fn run_backend_passes_after_plugins(
     let module_readable_value_classes = classifiers.module().metadata_readable_value_classes();
     // Plugins produce backend-neutral checked IR. Realize any semantic super dispatch they add at
     // the same JVM boundary as source super calls, never in the plugin itself or the emitter.
-    // Every body of the file is lowered, so each lifting sequence is whole: name its callables
-    // before any pass renders a debug name from them.
-    crate::jvm::lifted_names::number(ir, &facts.local_delegate_access);
     crate::jvm::module_calls::realize_super_calls(ir, callables)
         .map_err(|_| SkipReason::SuperCalls)?;
     crate::jvm::annotation_constructions::lower_annotation_constructions(ir, facade);
@@ -229,7 +226,7 @@ fn run_backend_passes_after_plugins(
         return Err(SkipReason::ValueClasses);
     }
     facts.override_results =
-        crate::jvm::override_results::box_primitive_override_results(ir, callables)?;
+        crate::jvm::override_results::box_scalar_override_results(ir, callables)?;
     crate::jvm::bridges::derive_bridges(
         ir,
         classpath,
@@ -257,7 +254,18 @@ fn run_backend_passes_after_plugins(
     ) {
         return Err(SkipReason::ValueClasses);
     }
+    // Companion fields move before value-class erasure. A private property reference was realized
+    // against the companion instance accessor; point it at the outer class's `access$…$cp` now
+    // that the field's physical type is known.
+    crate::jvm::property_references::retarget_hoisted_companion_references(
+        ir,
+        &mut facts.property_reference_realizations,
+    );
     crate::jvm::parameter_assertions::finalize_after_value_class_lowering(ir);
+    // Every body of the file is lowered, so each lifting sequence is whole, and the value-class
+    // pass has named the functions kotlinc names their lifted callables after: name those callables
+    // before any pass renders a debug name from them.
+    crate::jvm::lifted_names::number(ir, &facts.local_delegate_access);
     // Generic erasure and value-class projection have now fixed every declaration parameter's JVM
     // carrier. Consume and retarget the exact call-owned adapters before default/suspend/inline
     // transforms clone or wrap those calls; the provenance is a one-shot representation contract.
@@ -1260,11 +1268,9 @@ pub fn facade_package_metadata_from_ir(
                 params: declaration.params.clone(),
                 ret: declaration.ret,
                 decl_order: declaration.source_order as usize,
-                annotations: ir
-                    .function_annotations
-                    .get(&declaration.function)
-                    .map(|annotations| annotations.applications().cloned().collect())
-                    .unwrap_or_default(),
+                annotations: crate::metadata::MetadataAnnotations::of_optional(
+                    ir.function_annotations.get(&declaration.function),
+                ),
                 receiver: declaration.receiver,
                 param_modifiers: super::metadata_flags::declared_value_parameters(
                     ir,
@@ -1306,7 +1312,7 @@ pub fn facade_package_metadata_from_ir(
                 spellings: declaration.spellings.clone(),
                 param_annotations: param_annotations
                     .iter()
-                    .map(|annotations| annotations.applications().cloned().collect())
+                    .map(crate::metadata::MetadataAnnotations::of)
                     .collect(),
                 no_infer_params,
             }
@@ -1353,15 +1359,19 @@ pub fn facade_package_metadata_from_ir(
                 .map(|parameter| crate::jvm::names::type_descriptor(*parameter))
                 .collect::<String>();
             let ty_descriptor = crate::jvm::names::type_descriptor(declaration.ty);
+            // A value class is stored as its carrier. The getter kotlinc records, and the field
+            // descriptor a reader cannot derive from `S`, both name that carrier.
+            let value_descriptor =
+                erased_value_class_descriptor(ir, declaration).unwrap_or(ty_descriptor);
             let getter = has_getter.then(|| {
                 (
                     crate::jvm::names::property_getter_name(&declaration.name),
-                    format!("({descriptor_parameters}){ty_descriptor}"),
+                    format!("({descriptor_parameters}){value_descriptor}"),
                 )
             });
             let setter = has_setter.then(|| {
                 let mut parameters = descriptor_parameters;
-                parameters.push_str(&ty_descriptor);
+                parameters.push_str(&value_descriptor);
                 (
                     crate::jvm::names::property_setter_name(&declaration.name),
                     format!("({parameters})V"),
@@ -1411,6 +1421,7 @@ pub fn facade_package_metadata_from_ir(
                 setter_visibility: declaration.setter_visibility,
                 companion,
                 delegate_field: delegate_field(ir, declaration),
+                field_desc: erased_value_class_descriptor(ir, declaration),
             }
         })
         .collect::<Vec<_>>();
@@ -1448,6 +1459,23 @@ pub fn facade_package_metadata_from_ir(
 
 /// The physical name and descriptor of the static field holding a delegated package property's
 /// delegate.
+/// The carrier descriptor of a package property whose storage was erased from a value class.
+fn erased_value_class_descriptor(
+    ir: &crate::ir::IrFile,
+    declaration: &crate::ir::IrPackageProperty,
+) -> Option<String> {
+    let crate::ir::IrLocalPropertyLayout::TopLevelStorage { storage, .. } =
+        ir.local_property_layouts.get(&declaration.property)?
+    else {
+        return None;
+    };
+    let field = ir.statics.get(*storage as usize)?;
+    field
+        .erased_declared_ty
+        .is_some()
+        .then(|| crate::jvm::names::type_descriptor(field.ty))
+}
+
 fn delegate_field(
     ir: &crate::ir::IrFile,
     declaration: &crate::ir::IrPackageProperty,

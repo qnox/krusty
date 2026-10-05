@@ -848,7 +848,7 @@ fn rewrite_anonymous_super_forward(
                 type_operand,
             }))
         }
-        IrExpr::NotNullAssert { operand, message } => {
+        IrExpr::NotNullAssert { operand, check } => {
             let operand = rewrite_anonymous_super_forward(
                 ir,
                 operand,
@@ -856,7 +856,7 @@ fn rewrite_anonymous_super_forward(
                 parameter,
                 declaration,
             )?;
-            Ok(ir.add_expr(IrExpr::NotNullAssert { operand, message }))
+            Ok(ir.add_expr(IrExpr::NotNullAssert { operand, check }))
         }
         IrExpr::ForwardedSuperArgument { .. } => Ok(forward(ir)),
         _ => Err(FirFileLoweringFailure::MissingCallable(declaration)),
@@ -974,7 +974,7 @@ pub(super) fn finalize_constructor_field_indices(
 /// Recover the constant value of a checked constructor default after its explicit FIR conversions
 /// have been lowered. This does not evaluate source syntax: only a constant and the already-selected
 /// representation coercions around it are admissible.
-fn checked_default_constant(
+pub(super) fn checked_default_constant(
     ir: &IrFile,
     expression: u32,
     target: crate::types::Ty,

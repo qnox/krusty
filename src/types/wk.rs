@@ -22,13 +22,23 @@ names! {
     kotlin_reflect_package => "kotlin/reflect",
     kotlin_ranges_package => "kotlin/ranges",
     kotlin_internal_package => "kotlin/internal",
+    kotlin_collections_package => "kotlin/collections",
+    kotlin_text_package => "kotlin/text",
+    kotlin_sequences_package => "kotlin/sequences",
     intrinsic_const_evaluation => "kotlin/internal/IntrinsicConstEvaluation",
     platform_dependent => "kotlin/internal/PlatformDependent",
     published_api => "kotlin/PublishedApi",
     continuation => "kotlin/coroutines/Continuation",
+    function_root => "kotlin/Function",
     any => "kotlin/Any",
+    kclass => "kotlin/reflect/KClass",
+    comparable => "kotlin/Comparable",
     array => "kotlin/Array",
     string => "kotlin/String",
+    char_sequence => "kotlin/CharSequence",
+    iterable => "kotlin/collections/Iterable",
+    sequence => "kotlin/sequences/Sequence",
+    indexed_value => "kotlin/collections/IndexedValue",
     unit => "kotlin/Unit",
     ubyte => "kotlin/UByte",
     ushort => "kotlin/UShort",
@@ -169,3 +179,21 @@ pub fn progression_builder(package: TypeName, name: &str) -> Option<ProgressionB
 /// element a stepped progression reaches (`getProgressionLastElementByReturnType`). Its overloads
 /// come from the provider's declarations.
 pub const PROGRESSION_LAST_ELEMENT: &str = "getProgressionLastElement";
+
+/// The `withIndex()` extension of `kotlin.collections`, `kotlin.text` and `kotlin.sequences` that
+/// kotlinc's `ForLoopsLowering` (`WithIndexHandler`) iterates through instead of calling, when a
+/// `for` loop destructures the `IndexedValue` it yields.
+pub const WITH_INDEX: &str = "withIndex";
+
+/// The `IndexedValue` property holding an element's index: the first component.
+pub const INDEXED_VALUE_INDEX: &str = "index";
+
+/// The `IndexedValue` property holding the element itself: the second component.
+pub const INDEXED_VALUE_VALUE: &str = "value";
+
+/// The `kotlin.CharSequence` property kotlinc's `CharSequenceIterationHandler` bounds an indexed
+/// loop over a `CharSequence` with.
+pub const CHAR_SEQUENCE_LENGTH: &str = "length";
+
+/// The indexed-access operator convention (`OperatorNameConventions.GET`).
+pub const INDEXED_GET: &str = "get";

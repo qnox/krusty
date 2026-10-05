@@ -132,3 +132,83 @@ fn concrete_java_collection_keeps_its_kotlin_interface_faces() {
         classifier.supertypes
     );
 }
+
+#[test]
+fn comparable_compare_to_publishes_its_semantic_role() {
+    let (Some(stdlib), Some(jdk)) = (
+        crate::toolchain::stdlib_jar(),
+        crate::toolchain::jdk_modules(),
+    ) else {
+        return;
+    };
+    let libraries = initialized_libraries(std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
+        vec![stdlib, jdk],
+    )));
+    let selected = crate::symbol_resolver::members_in_hierarchy(
+        &libraries,
+        Ty::obj_name(crate::types::wk::comparable()),
+        "compareTo",
+    );
+    let overloads = match selected {
+        crate::libraries::Callables::Functions(functions)
+        | crate::libraries::Callables::Both { functions, .. } => functions.overloads,
+        crate::libraries::Callables::None | crate::libraries::Callables::Properties(_) => {
+            Vec::new()
+        }
+    };
+    assert_eq!(overloads.len(), 1);
+    assert_eq!(
+        overloads[0].callable.semantic_role,
+        Some(crate::types::SemanticCallRole::KotlinComparableCompareTo)
+    );
+}
+
+#[test]
+fn reflection_declarations_publish_their_semantic_roles() {
+    let Some(stdlib) = crate::toolchain::stdlib_jar() else {
+        return;
+    };
+    let libraries = initialized_libraries(std::rc::Rc::new(crate::jvm::classpath::Classpath::new(
+        vec![stdlib],
+    )));
+
+    let callable_declarations =
+        libraries.declared_callables_for(Ty::obj("kotlin/reflect/KCallable"), "name", &[], &[]);
+    let callable = callable_declarations
+        .properties()
+        .first()
+        .expect("KCallable.name");
+    assert_eq!(
+        callable.getter.semantic_role,
+        Some(crate::types::SemanticCallRole::KotlinCallableReferenceName)
+    );
+
+    let property = crate::symbol_resolver::members_in_hierarchy(
+        &libraries,
+        Ty::obj_args("kotlin/reflect/KProperty1", &[Ty::String, Ty::Int]),
+        "get",
+    );
+    let get = property.functions().first().expect("KProperty1.get(T)");
+    assert_eq!(
+        get.callable.semantic_role,
+        Some(crate::types::SemanticCallRole::KotlinPropertyReferenceGet(
+            1
+        ))
+    );
+
+    let mutable = crate::symbol_resolver::members_in_hierarchy(
+        &libraries,
+        Ty::obj_args("kotlin/reflect/KMutableProperty1", &[Ty::String, Ty::Int]),
+        "set",
+    );
+    let set = mutable
+        .functions()
+        .first()
+        .expect("KMutableProperty1.set(T, V)");
+    assert_eq!(
+        set.callable.semantic_role,
+        Some(crate::types::SemanticCallRole::KotlinPropertyReferenceSet(
+            1
+        ))
+    );
+}

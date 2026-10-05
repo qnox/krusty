@@ -89,20 +89,27 @@ impl PropertyReferenceTarget {
             .unwrap_or_else(|| {
                 crate::jvm::jvm_class_map::to_jvm_internal(&semantic_call_owner).to_string()
             });
-        let reflection_facade = property.ext_facade_or_facade(facade);
+        let physical_facade = property.ext_facade_or_facade(facade);
+        // A private member accessor bridge is static only as an invocation detail. Reporting its
+        // owner as a facade would set CallableReference's top-level flag and make the mutable view
+        // of the property unequal to an immutable reference to the same declaration.
+        let reflection_facade = (realization.accessor_role
+            != crate::jvm::property_references::PropertyAccessorRole::AccessBridge)
+            .then(|| physical_facade.clone())
+            .flatten();
         let getter_facade = realization
             .getter_bridge_owner
             .map(TypeName::render)
-            .or_else(|| reflection_facade.clone());
+            .or_else(|| physical_facade.clone());
         let setter_facade = realization
             .setter_bridge_owner
             .map(TypeName::render)
-            .or_else(|| reflection_facade.clone());
+            .or(physical_facade);
         let getter_descriptor = property_getter_descriptor(property, getter_facade.is_some());
         let (getter_params, getter_ret) = parse_physical_method_desc(&getter_descriptor)
             .expect("validated property getter descriptor");
         let signature = realization
-            .protected_reflection_getter
+            .reflection_getter
             .as_ref()
             .map(|(name, descriptor)| format!("{name}{descriptor}"))
             .unwrap_or_else(|| format!("{}{getter_descriptor}", property.getter_name));
@@ -232,18 +239,26 @@ impl PropertyCallTarget<'_> {
             code.checkcast(class);
             code.arraylength();
         } else if let Some(facade) = self.facade {
-            adapt_property_reference_value(
-                cw,
-                code,
-                self.unboxed_receiver_value_class,
-                self.params[0],
-            );
-            let method = cw.methodref(facade, self.name, self.descriptor);
-            code.invokestatic(
-                method,
-                slot_words(ir_ty_to_jvm(&self.params[0])) as i32,
-                slot_words(ret) as i32,
-            );
+            // `access$getX$cp()` takes no receiver. The bound reference still captured the
+            // companion instance for reflection; the read itself does not use it.
+            if self.params.is_empty() {
+                code.pop();
+                let method = cw.methodref(facade, self.name, self.descriptor);
+                code.invokestatic(method, 0, slot_words(ret) as i32);
+            } else {
+                adapt_property_reference_value(
+                    cw,
+                    code,
+                    self.unboxed_receiver_value_class,
+                    self.params[0],
+                );
+                let method = cw.methodref(facade, self.name, self.descriptor);
+                code.invokestatic(
+                    method,
+                    slot_words(ir_ty_to_jvm(&self.params[0])) as i32,
+                    slot_words(ret) as i32,
+                );
+            }
         } else if let Some(value_class) = self.unboxed_receiver_value_class {
             // A MEMBER of a value class: its accessor is realized as a static method over the
             // carrier on the value class itself, so the receiver is unboxed and the call is static.
@@ -286,14 +301,22 @@ impl PropertyCallTarget<'_> {
             return;
         }
         if let Some(facade) = self.facade {
-            adapt_property_reference_value(
-                cw,
-                code,
-                self.unboxed_receiver_value_class,
-                self.params[0],
-            );
-            code.aload(value_local);
-            self.emit_property_value(cw, code, self.params[1]);
+            // A hoisted companion bridge is static and takes only the value. The bound
+            // reference still captured the companion instance; the write does not pass it.
+            if self.params.len() == 1 {
+                code.pop();
+                code.aload(value_local);
+                self.emit_property_value(cw, code, self.params[0]);
+            } else {
+                adapt_property_reference_value(
+                    cw,
+                    code,
+                    self.unboxed_receiver_value_class,
+                    self.params[0],
+                );
+                code.aload(value_local);
+                self.emit_property_value(cw, code, self.params[1]);
+            }
             let arg_words = self
                 .params
                 .iter()

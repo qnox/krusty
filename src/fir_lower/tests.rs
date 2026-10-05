@@ -169,6 +169,7 @@ fn literal_until_loop_stays_checked_until_backend_realization() {
                 unsigned_compare: None,
                 body,
                 label,
+                with_index: None,
             }) => Some((
                 *variable,
                 variable_name.as_deref(),
@@ -1761,23 +1762,57 @@ fn interface_property_accessors_share_source_order_with_functions() {
 }
 
 #[test]
-fn consuming_lowering_retains_constructor_initialized_storage_read_by_custom_getter() {
-    let platform: Box<dyn crate::libraries::SemanticPlatform> = Box::new(
-        crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
-            crate::jvm::classpath::Classpath::new(crate::toolchain::classpath_jars_for(
-                "// WITH_STDLIB",
-            )),
-        ))
-        .expect("JVM provider initialization"),
+fn abstract_member_properties_publish_their_exact_accessor_functions() {
+    let ir = lower_single_source(
+        "interface AbstractProperties {\n\
+             val answer: Int\n\
+             var tail: String\n\
+         }\n",
+        "AbstractPropertyAccessors",
     );
-    let ir = lower_single_source_with_platform(
+    let class = ir
+        .classes
+        .iter()
+        .find(|class| class.fq_name_matches("AbstractProperties"))
+        .expect("checked interface class");
+    let answer = class
+        .properties
+        .iter()
+        .find(|property| property.name == "answer")
+        .expect("answer property");
+    let tail = class
+        .properties
+        .iter()
+        .find(|property| property.name == "tail")
+        .expect("tail property");
+
+    let answer_getter = answer.getter.expect("abstract val getter identity");
+    let tail_getter = tail.getter.expect("abstract var getter identity");
+    let tail_setter = tail.setter.expect("abstract var setter identity");
+    assert!(answer.setter.is_none());
+    assert_eq!(
+        class
+            .methods
+            .iter()
+            .copied()
+            .filter(|function| [answer_getter, tail_getter, tail_setter].contains(function))
+            .collect::<Vec<_>>(),
+        [answer_getter, tail_getter, tail_setter]
+    );
+    for function in [answer_getter, tail_getter, tail_setter] {
+        assert!(ir.functions[function as usize].body.is_none());
+    }
+}
+
+#[test]
+fn consuming_lowering_retains_constructor_initialized_storage_read_by_custom_getter() {
+    let ir = lower_single_source_with_jvm_stdlib(
         "class A {\n\
              val value: String\n\
                  get() = field + \"K\"\n\
              constructor(initial: String) { value = initial }\n\
          }\n",
         "ConstructorInitializedCustomGetter",
-        platform,
     );
 
     let class = ir
@@ -1900,22 +1935,13 @@ fn consuming_lowering_preserves_class_literal_without_checked_placeholder() {
 
 #[test]
 fn same_file_inline_call_specializes_reified_types_fixed_by_callable_argument() {
-    let platform: Box<dyn crate::libraries::SemanticPlatform> = Box::new(
-        crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
-            crate::jvm::classpath::Classpath::new(crate::toolchain::classpath_jars_for(
-                "// WITH_STDLIB",
-            )),
-        ))
-        .expect("JVM provider initialization"),
-    );
-    let ir = lower_single_source_with_platform(
+    let ir = lower_single_source_with_jvm_stdlib(
         "fun <T, R> generic(value: T): R = value as R\n\
          inline fun <reified T, reified R> inspect(\n\
              value: T, result: R, operation: (T) -> R\n\
          ) { T::class; R::class }\n\
          fun use() { inspect(\"value\", 1, ::generic) }\n",
         "ReifiedCallableArgument",
-        platform,
     );
 
     let classifiers = ir
@@ -1935,20 +1961,11 @@ fn same_file_inline_call_specializes_reified_types_fixed_by_callable_argument() 
 
 #[test]
 fn same_file_inline_call_specializes_reified_type_inside_nested_inline_lambda() {
-    let platform: Box<dyn crate::libraries::SemanticPlatform> = Box::new(
-        crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
-            crate::jvm::classpath::Classpath::new(crate::toolchain::classpath_jars_for(
-                "// WITH_STDLIB",
-            )),
-        ))
-        .expect("JVM provider initialization"),
-    );
-    let ir = lower_single_source_with_platform(
+    let ir = lower_single_source_with_jvm_stdlib(
         "inline fun <reified T> countOfType(values: List<Any>): Int =\n\
              values.count { it is T }\n\
          fun use(values: List<Any>): Int = countOfType<String>(values)\n",
         "NestedReifiedLambda",
-        platform,
     );
 
     assert!(ir.exprs.iter().any(|expression| matches!(
@@ -1963,20 +1980,11 @@ fn same_file_inline_call_specializes_reified_type_inside_nested_inline_lambda() 
 
 #[test]
 fn same_file_inline_call_specializes_sized_array_allocation_type() {
-    let platform: Box<dyn crate::libraries::SemanticPlatform> = Box::new(
-        crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
-            crate::jvm::classpath::Classpath::new(crate::toolchain::classpath_jars_for(
-                "// WITH_STDLIB",
-            )),
-        ))
-        .expect("JVM provider initialization"),
-    );
-    let ir = lower_single_source_with_platform(
+    let ir = lower_single_source_with_jvm_stdlib(
         "inline fun <reified T> pair(first: T, second: T): Array<T> =\n\
              Array<T>(2) { if (it == 0) first else second }\n\
          fun use(): Array<String> = pair<String>(\"p\", \"q\")\n",
         "ReifiedSizedArray",
-        platform,
     );
 
     let body = ir
@@ -3195,6 +3203,20 @@ fn unsigned_range_containment_stays_semantic_until_backend_realization() {
 
 pub(super) fn lower_single_source(source: &str, stem: &str) -> IrFile {
     lower_single_source_with_platform(source, stem, Box::new(crate::libraries::EmptySymbolSource))
+}
+
+pub(crate) fn lower_single_source_with_jvm_stdlib(source: &str, stem: &str) -> IrFile {
+    let mut classpath = crate::toolchain::classpath_jars_for("// WITH_STDLIB");
+    if let Some(jdk) = crate::toolchain::jdk_modules() {
+        classpath.push(jdk);
+    }
+    let platform: Box<dyn crate::libraries::SemanticPlatform> = Box::new(
+        crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+            crate::jvm::classpath::Classpath::new(classpath),
+        ))
+        .expect("JVM provider initialization"),
+    );
+    lower_single_source_with_platform(source, stem, platform)
 }
 
 pub(crate) fn lower_single_source_with_platform(

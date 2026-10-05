@@ -1,9 +1,14 @@
 //! Type model: Kotlin scalar, object, array, function, nullable, platform-flexible, and type-parameter
 //! shapes. Backend-specific names and descriptors are kept out of this module.
 
+mod classifier_declarations;
 mod intersection;
 pub(crate) use intersection::declaration_approximation;
 mod semantic_call_role;
+pub use classifier_declarations::{
+    ClassifierDeclarationFacts, ClassifierDeclarationKind, DeclaredValueClass,
+    GeneratedClassifierFact, GeneratedClassifierKind, GeneratedClassifierPurpose,
+};
 pub use semantic_call_role::SemanticCallRole;
 mod interning;
 mod spelling;
@@ -2109,7 +2114,10 @@ pub enum AnnotationValue {
     Char(u16),
     String(crate::kt_string::KtString),
     Enum(TypeName, String),
-    Class(TypeName),
+    /// The exact semantic type represented by a class literal. Arrays retain every dimension and
+    /// their component type; collapsing `Array<String>::class` to the `kotlin/Array` classifier
+    /// loses the class-file descriptor before lowering can encode it.
+    Class(Ty),
     Annotation {
         internal: TypeName,
         values: Vec<(String, AnnotationValue)>,
@@ -2126,7 +2134,7 @@ impl AnnotationValue {
 
 /// One resolved annotation application published as part of a classifier record. This is the
 /// provider-neutral semantic payload consumers may inspect: the annotation and every class-valued
-/// argument are stable identities, never descriptors or source spellings.
+/// argument are stable semantic types, never descriptors or source spellings.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResolvedAnnotation {
     pub annotation: TypeName,
@@ -2145,68 +2153,8 @@ impl ResolvedAnnotation {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct AnnotationSemanticFacts {
     pub deprecated_hidden: bool,
-}
-
-/// A plugin-generated classifier published with the source header that owns it. The common
-/// frontend records semantic declaration facts; a representation backend maps them to its own
-/// class flags without recognizing generated JVM spellings.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct GeneratedClassifierFact {
-    pub classifier: TypeName,
-    pub lexical_owner: TypeName,
-    pub purpose: GeneratedClassifierPurpose,
-    pub source_name: Box<str>,
-    pub visibility: Visibility,
-    pub kind: GeneratedClassifierKind,
-    pub is_abstract: bool,
-    pub is_final: bool,
-    pub captures_outer: bool,
-    pub compiler_generated: bool,
-}
-
-/// Semantic reason a frontend plugin contributed a classifier. Consumers select this contract,
-/// never a generated source/JVM spelling.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum GeneratedClassifierPurpose {
-    SerializationSerializer,
-    SerializationCompanion,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum GeneratedClassifierKind {
-    Class,
-    Interface,
-    Annotation,
-    Enum,
-}
-
-/// Declaration facts of a classifier, as its declaring compilation fixed them.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ClassifierDeclarationFacts {
-    pub kind: ClassifierDeclarationKind,
-    /// `abstract` or `sealed`: no instance has exactly this class. An interface is always abstract.
-    pub is_abstract: bool,
-    /// Type parameters the classifier declares itself, not the ones it captures lexically.
-    pub own_type_parameter_count: usize,
-    /// The companion object: the name of the static field holding it and its classifier. A source
-    /// classifier of this module reports only a DECLARED companion; one a compiler plugin adds is
-    /// that plugin's to name.
-    pub companion: Option<(Box<str>, TypeName)>,
-    /// The Kotlin qualified name with every boundary dotted (`lib.Outer.Nested`), as metadata and
-    /// source declare it. It is not derivable from the internal name, where `$` is also a legal
-    /// identifier character.
-    pub qualified_name: Option<Box<str>>,
-    /// Declared in a source file of this module rather than read from a dependency.
-    pub source: bool,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ClassifierDeclarationKind {
-    Class,
-    Interface,
-    Annotation,
-    Enum,
-    Object,
+    /// An `@OptionalExpectation` without an actual here (see `ir::DeclarationAnnotations`).
+    pub optional_expectation: bool,
 }
 
 /// Provider-neutral checked facts for a classifier. Consumers receive stable identities and typed
@@ -2257,6 +2205,12 @@ pub trait ClassifierFactSource {
     /// A plugin sees only the file it runs on, so a value class declared in a SIBLING file of the
     /// module, or on the classpath, is visible to it only through this answer.
     fn classifier_value_underlying(&self, _classifier: TypeName) -> Option<Ty> {
+        None
+    }
+
+    /// The value class's declared underlying type over its own type parameters. A provider that
+    /// answers [`Self::classifier_value_underlying`] for a declaration answers this for it too.
+    fn classifier_value_declaration(&self, _classifier: TypeName) -> Option<DeclaredValueClass> {
         None
     }
 

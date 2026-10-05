@@ -92,6 +92,8 @@ impl FunctionInfo {
         callable.owner_is_interface = member.is_interface();
         callable.visibility = member.visibility;
         callable.member_realization = member.realization;
+        callable.compiler_intrinsic = member.realization.compiler_intrinsic();
+        callable.semantic_role = member.semantic_role;
         callable.default_realization = member.default_realization.clone();
         callable.external_default_provider = member.external_default_provider;
         callable.nonvirtual_realization = member.nonvirtual_realization.clone();
@@ -160,6 +162,7 @@ impl FunctionInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::libraries::{CompilerIntrinsic, MemberRealization};
 
     #[test]
     fn classifier_member_round_trip_keeps_source_and_physical_names_separate() {
@@ -189,6 +192,28 @@ mod tests {
     }
 
     #[test]
+    fn classifier_member_round_trip_keeps_the_exact_compiler_intrinsic() {
+        let owner = crate::types::type_name("fixture/Owner");
+        let mut declaration = LibraryMember::new(
+            "read".to_string(),
+            vec![Ty::Int],
+            Ty::Char,
+            "(I)C".to_string(),
+        );
+        declaration.realization = MemberRealization::Intrinsic(CompilerIntrinsic::StringGet);
+
+        let candidate = FunctionInfo::classifier_member(FnKind::Member, owner, declaration);
+        assert_eq!(
+            candidate.callable.compiler_intrinsic,
+            Some(CompilerIntrinsic::StringGet)
+        );
+        assert_eq!(
+            candidate.member_with_return(Ty::Char).realization,
+            MemberRealization::Intrinsic(CompilerIntrinsic::StringGet)
+        );
+    }
+
+    #[test]
     fn classifier_conversion_preserves_exact_reified_formals_on_both_candidate_handles() {
         let owner = crate::types::type_name("sample/Owner");
         let mut member =
@@ -199,6 +224,25 @@ mod tests {
         assert_eq!(
             candidate.callable.reified_type_parameter_ordinals.as_ref(),
             [1]
+        );
+    }
+
+    #[test]
+    fn classifier_conversion_preserves_the_provider_semantic_role() {
+        let owner = crate::types::type_name("fixture/Callable");
+        let mut member = LibraryMember::new(
+            "perform".to_string(),
+            Vec::new(),
+            Ty::Unit,
+            "()V".to_string(),
+        );
+        member.semantic_role = Some(crate::types::SemanticCallRole::KotlinFunctionInvoke);
+
+        let candidate = FunctionInfo::classifier_member(FnKind::Member, owner, member);
+
+        assert_eq!(
+            candidate.callable.semantic_role,
+            Some(crate::types::SemanticCallRole::KotlinFunctionInvoke)
         );
     }
 }

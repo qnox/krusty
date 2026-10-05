@@ -11,8 +11,8 @@ use super::*;
 
 /// A lambda realized as a class implementing its function type. `invoke` is the lambda's own
 /// function, now an instance method of the class over the lambda's parameters. The class's fields
-/// are the captured values, in capture order; `receiver_captures` names those whose source role
-/// makes kotlinc use its receiver-parameter convention.
+/// are the captured values, in capture order; `captures` keeps what each one was in source, and a
+/// target spells the field and constructor parameter from it.
 #[derive(Clone, Debug)]
 pub struct IrLambdaClass {
     /// A checked public inline declaration exposes this closure to callers in other packages.
@@ -20,9 +20,26 @@ pub struct IrLambdaClass {
     pub invoke: FunId,
     /// The lambda's function type: the class's `FunctionN` and its generic supertype.
     pub function_type: Ty,
-    pub receiver_captures: Vec<u32>,
+    /// What each field captures, in field order.
+    pub captures: Vec<IrLambdaCapture>,
+    /// The origins of the implicit receivers the lambda captured, which
+    /// [`IrLambdaCapture::Receiver`] indexes; the lambda's own record, which `invoke` no longer has.
+    pub captured_receivers: Vec<IrCapturedReceiver>,
+    /// Where the lambda was lifted from, which `invoke` no longer records: a target that realizes
+    /// that declaration differently (a value-class member as a static) names a captured receiver
+    /// after that realization.
+    pub(crate) lifting_root: Option<IrLiftingRoot>,
     /// What the erased `FunctionN.invoke` bridge adapts, once `invoke` has its physical signature.
     pub bridge: IrInvokeBridge,
+}
+
+/// One captured value a lambda class stores in a field.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum IrLambdaCapture {
+    /// A captured local value, by its source name.
+    Value(Box<str>),
+    /// A captured implicit receiver, by its position among [`IrLambdaClass::captured_receivers`].
+    Receiver(u32),
 }
 
 /// How an erased `FunctionN.invoke(Object…)Object` reaches a class's own specialized `invoke`.

@@ -4,8 +4,9 @@
 //! visibility. This JVM boundary supplies descriptors and protobuf flag encoding without inferring
 //! publication from a synthetic access flag, parameter spelling, or physical constructor shape.
 
-use crate::ir::{AppliedAnnotation, IrClass, IrFile, IrSecondaryCtor};
+use crate::ir::{IrClass, IrFile, IrSecondaryCtor};
 use crate::jvm::{ir_emit::jvm_tys, names::type_descriptor};
+use crate::metadata::MetadataAnnotations;
 use crate::types::{Ty, Visibility};
 
 pub(super) struct SecondaryConstructorMetadataShape {
@@ -15,7 +16,7 @@ pub(super) struct SecondaryConstructorMetadataShape {
     pub(super) signature_name: Option<&'static str>,
     pub(super) vararg_index: Option<usize>,
     pub(super) flags: u64,
-    pub(super) annotations: Vec<AppliedAnnotation>,
+    pub(super) annotations: MetadataAnnotations,
 }
 
 pub(super) fn secondary_constructor_shapes(
@@ -42,7 +43,7 @@ pub(super) fn secondary_constructor_shapes(
                 signature_name: Some("constructor-impl"),
                 vararg_index: constructor.vararg_index,
                 flags: secondary_constructor_flags(constructor.metadata_visibility),
-                annotations: constructor.annotations.applications().cloned().collect(),
+                annotations: MetadataAnnotations::of(&constructor.annotations),
             }),
     );
     shapes
@@ -98,7 +99,7 @@ fn secondary_constructor_shape(
         signature_name: None,
         vararg_index: constructor.vararg_index,
         flags: secondary_constructor_flags(visibility),
-        annotations: constructor.annotations.applications().cloned().collect(),
+        annotations: MetadataAnnotations::of(&constructor.annotations),
     })
 }
 
@@ -184,7 +185,7 @@ mod tests {
         assert_eq!(published.signature_name, None);
         assert_eq!(published.vararg_index, Some(1));
         assert_eq!(published.flags, 16);
-        assert!(published.annotations.is_empty());
+        assert!(!published.annotations.declares_annotations());
     }
 
     #[test]

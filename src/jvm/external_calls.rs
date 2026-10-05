@@ -834,7 +834,6 @@ pub(super) fn realize(
                 | crate::libraries::CompilerIntrinsic::StartCoroutine
                 | crate::libraries::CompilerIntrinsic::CoroutineContext
                 | crate::libraries::CompilerIntrinsic::CoroutineSuspended
-                | crate::libraries::CompilerIntrinsic::SuspendCoroutine
                 | crate::libraries::CompilerIntrinsic::SuspendCoroutineUninterceptedOrReturn
                 | crate::libraries::CompilerIntrinsic::EnumValues
                 | crate::libraries::CompilerIntrinsic::EnumName
@@ -848,6 +847,7 @@ pub(super) fn realize(
                 | crate::libraries::CompilerIntrinsic::RangeUntil
                 | crate::libraries::CompilerIntrinsic::ProgressionStep
                 | crate::libraries::CompilerIntrinsic::ProgressionReversed
+                | crate::libraries::CompilerIntrinsic::WithIndex
                 | crate::libraries::CompilerIntrinsic::UnsignedCompare { .. }
                 | crate::libraries::CompilerIntrinsic::PrimitiveIteratorNext
                 | crate::libraries::CompilerIntrinsic::NumericConversion

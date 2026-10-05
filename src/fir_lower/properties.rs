@@ -1210,7 +1210,7 @@ fn materialize_member_property(
         None
     };
 
-    let getter = property.getter.map(|body| {
+    let mut getter = property.getter.map(|body| {
         let function = add_accessor_function(
             ir,
             crate::names::property_getter_name(&property.name),
@@ -1227,22 +1227,21 @@ fn materialize_member_property(
     // An abstract property has no FIR body and no backing field, but its accessor declarations are
     // still part of the class ABI. Publish those methods explicitly in common IR so every backend
     // sees the same checked declaration shape; a backend must not infer them from a property name.
+    let mut abstract_setter = None;
     if backing_field.is_none()
         && property.getter.is_none()
         && (class_flags.has(DeclarationFlags::INTERFACE)
             || property.flags.has(DeclarationFlags::ABSTRACT))
     {
-        let getter = add_abstract_accessor_function(
+        let abstract_getter = add_abstract_accessor_function(
             ir,
             crate::names::property_getter_name(&property.name),
             context_parameters.clone(),
             property.ty,
             owner,
         );
-        ir.fn_source_order.insert(getter, source_order);
-        ir.open_methods.insert(getter);
-        ir.classes[class_id as usize].methods.push(getter);
-        set_accessor_parameter_identities(index, property.declaration, false, getter, ir)?;
+        ir.open_methods.insert(abstract_getter);
+        ir.classes[class_id as usize].methods.push(abstract_getter);
         // The accessor of a property typed by an enclosing-class type parameter signs `()TT;`, the
         // same as a member function returning `T`. A declared function gets this from
         // `attach_callable_generic_facts`, which runs over CALLABLES; an accessor is synthesized
@@ -1250,11 +1249,10 @@ fn materialize_member_property(
         // mentions no type parameter formats to the descriptor and the attribute is dropped
         // downstream, so this does not need to decide genericity itself.
         ir.member_semantic_sigs
-            .insert(getter, (context_parameters.clone(), property.ty));
-        let type_params = declaration_type_parameters(index, property.declaration);
-        attach_accessor_type_parameters(ir, getter, &type_params);
+            .insert(abstract_getter, (context_parameters.clone(), property.ty));
+        getter = Some(abstract_getter);
         if property.flags.has(DeclarationFlags::MUTABLE) {
-            let setter = add_abstract_accessor_function(
+            let abstract_setter_function = add_abstract_accessor_function(
                 ir,
                 crate::names::property_setter_name(&property.name),
                 context_parameters
@@ -1265,12 +1263,12 @@ fn materialize_member_property(
                 Ty::Unit,
                 owner,
             );
-            ir.fn_source_order.insert(setter, source_order);
-            ir.open_methods.insert(setter);
-            ir.classes[class_id as usize].methods.push(setter);
-            set_accessor_parameter_identities(index, property.declaration, true, setter, ir)?;
+            ir.open_methods.insert(abstract_setter_function);
+            ir.classes[class_id as usize]
+                .methods
+                .push(abstract_setter_function);
             ir.member_semantic_sigs.insert(
-                setter,
+                abstract_setter_function,
                 (
                     context_parameters
                         .iter()
@@ -1280,27 +1278,30 @@ fn materialize_member_property(
                     Ty::Unit,
                 ),
             );
-            attach_accessor_type_parameters(ir, setter, &type_params);
+            abstract_setter = Some(abstract_setter_function);
         }
     }
-    let setter = property.setter.map(|body| {
-        let function = add_accessor_function(
-            ir,
-            crate::names::property_setter_name(&property.name),
-            context_parameters
-                .iter()
-                .copied()
-                .chain(std::iter::once(property.ty))
-                .collect(),
-            Ty::Unit,
-            body,
-            AccessorResult::AsDeclared,
-            false,
-            Some(owner),
-        );
-        ir.classes[class_id as usize].methods.push(function);
-        function
-    });
+    let setter = property
+        .setter
+        .map(|body| {
+            let function = add_accessor_function(
+                ir,
+                crate::names::property_setter_name(&property.name),
+                context_parameters
+                    .iter()
+                    .copied()
+                    .chain(std::iter::once(property.ty))
+                    .collect(),
+                Ty::Unit,
+                body,
+                AccessorResult::AsDeclared,
+                false,
+                Some(owner),
+            );
+            ir.classes[class_id as usize].methods.push(function);
+            function
+        })
+        .or(abstract_setter);
     if let Some(getter) = getter {
         set_accessor_parameter_identities(index, property.declaration, false, getter, ir)?;
     }
@@ -1437,6 +1438,12 @@ pub(super) fn add_accessor_function(
     let returned = ir.add_expr(IrExpr::Return(returns_value.then_some(value)));
     if let Some(line) = line {
         ir.expr_source_lines.insert(returned, line);
+    }
+    if let Some(exit) = (!returns_value)
+        .then(|| ir.accessor_body_exit(value))
+        .flatten()
+    {
+        ir.mark_unit_body_exit(returned, exit);
     }
     let body = if returns_value {
         ir.add_expr(IrExpr::Block {
@@ -1972,6 +1979,8 @@ pub(super) fn accept_property_body(
         .first()
         .and_then(|root| body.statement(*root))
         .map(|statement| statement.origin);
+    let is_setter = anchor.kind == DeclarationKind::Accessor && anchor.sibling == 1;
+    let setter_exit = is_setter.then(|| setter_exit_line(&body)).flatten();
     let lowered = lower_body_with_context(body, index, ir, local_callables)
         .map_err(FirFileLoweringFailure::Body)?;
     if !lowered.defaults.is_empty() {
@@ -1980,6 +1989,17 @@ pub(super) fn accept_property_body(
         ));
     }
     let value = body_value(lowered.roots.into_vec(), origin, ir)?;
+    let setter_exit = setter_exit.and_then(|exit| match exit {
+        super::UnitReturnLine::ClosingBrace(line) => {
+            Some(crate::ir::UnitBodyExit::ClosingBrace(line))
+        }
+        super::UnitReturnLine::ExpressionEnd => {
+            super::unit_expression_end(ir, value).map(crate::ir::UnitBodyExit::ExpressionEnd)
+        }
+    });
+    if let Some(exit) = setter_exit {
+        ir.record_accessor_body_exit(value, exit);
+    }
     let has_constant_initializer = anchor.kind == DeclarationKind::Property
         && anchor.owner.is_none()
         && index
@@ -2045,6 +2065,15 @@ pub(super) fn accept_property_body(
     Ok(())
 }
 
+/// Where a setter body's appended `return` takes its line: the end of an expression body, or the
+/// closing `}` a block body falls off.
+fn setter_exit_line(body: &FirBody) -> Option<super::UnitReturnLine> {
+    if body.has_implicit_return() {
+        return Some(super::UnitReturnLine::ExpressionEnd);
+    }
+    (body.close_line() != 0).then(|| super::UnitReturnLine::ClosingBrace(body.close_line()))
+}
+
 /// Attach a retained accessor body to the inline-only function predeclared in a caller's file.
 /// The foreign property itself is not imported into that file: it is only the lexical owner of
 /// this checked template, while the selected accessor identity is the splice boundary.
@@ -2097,6 +2126,12 @@ pub(super) fn accept_inline_accessor_template(
     let returned = ir.add_expr(IrExpr::Return(returns_value.then_some(value)));
     if let Some(line) = line {
         ir.expr_source_lines.insert(returned, line);
+    }
+    if let Some(exit) = (!returns_value)
+        .then(|| ir.accessor_body_exit(value))
+        .flatten()
+    {
+        ir.mark_unit_body_exit(returned, exit);
     }
     let body = if returns_value {
         ir.add_expr(IrExpr::Block {

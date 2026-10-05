@@ -99,15 +99,19 @@ fn hierarchy_names(source: &dyn SymbolSource, root: Ty) -> Option<Vec<String>> {
     Some(names)
 }
 
-fn interface_owners(source: &dyn SymbolSource, root: Ty) -> Option<HashSet<TypeName>> {
-    let mut owners = HashSet::new();
+fn interface_hierarchy(source: &dyn SymbolSource, root: Ty) -> Option<Vec<Ty>> {
+    let mut interfaces = Vec::new();
     let mut queue = VecDeque::from([root]);
+    let mut seen = HashSet::new();
     while let Some(current) = queue.pop_front() {
         let owner = current.kotlin_class_internal()?;
-        if !owners.insert(owner) {
+        if !seen.insert(owner) {
             continue;
         }
-        source.classifier(owner)?;
+        let declaration = source.classifier(owner)?;
+        if declaration.is_interface() {
+            interfaces.push(current);
+        }
         queue.extend(
             crate::symbol_resolver::direct_supertypes(source, current)
                 .into_iter()
@@ -119,7 +123,14 @@ fn interface_owners(source: &dyn SymbolSource, root: Ty) -> Option<HashSet<TypeN
                 }),
         );
     }
-    Some(owners)
+    Some(interfaces)
+}
+
+fn interface_owners(source: &dyn SymbolSource, root: Ty) -> Option<HashSet<TypeName>> {
+    interface_hierarchy(source, root)?
+        .into_iter()
+        .map(|interface| interface.kotlin_class_internal())
+        .collect()
 }
 
 fn is_delegated_function(function: &FunctionInfo, interface_owners: &HashSet<TypeName>) -> bool {
@@ -397,9 +408,10 @@ fn function_call(
 fn delegated_function_declaration(
     source: &dyn SymbolSource,
     index: &ResolvedModuleIndex,
+    root: Ty,
     function: &FunctionInfo,
 ) -> Option<ResolvedDelegatedFunctionDeclaration> {
-    let (target, parameters, result, parameter_identities) =
+    let (target, parameters, result, applied_parameters, applied_result, parameter_identities) =
         if let Some(declaration) = function.stable_declaration {
             let callable = index.callable_for_declaration(declaration)?;
             let signature = index.signature(declaration)?;
@@ -421,10 +433,32 @@ fn delegated_function_declaration(
             // value, never an ordinary parameter a provider's call shape spells by its name.
             let parameter_identities =
                 index.callable_parameter_identities(callable.id, parameters.len())?;
+            let (mut applied_parameters, applied_result) =
+                stable_member_signature(source, index, root, function.callable.owner, declaration)?;
+            if let Some(receiver) = callable.shape.extension_receiver {
+                let applied_owner = applied_owner_type(source, root, function.callable.owner)?;
+                let classifier = source.classifier(function.callable.owner)?;
+                let bindings =
+                    crate::symbol_resolver::classifier_bindings(&classifier, applied_owner);
+                let receiver = crate::symbol_resolver::specialize_signature_receiver_type(
+                    source,
+                    receiver.get(),
+                    &bindings,
+                );
+                applied_parameters.insert(
+                    callable
+                        .shape
+                        .context_parameter_count
+                        .min(applied_parameters.len() as u32) as usize,
+                    receiver,
+                );
+            }
             (
                 ResolvedFunctionOverrideTarget::Module(callable.id),
                 parameters.into_boxed_slice(),
                 signature.result.get(),
+                applied_parameters,
+                applied_result,
                 parameter_identities,
             )
         } else {
@@ -445,16 +479,21 @@ fn delegated_function_declaration(
                 ResolvedFunctionOverrideTarget::External(identity),
                 parameters,
                 result,
+                applied_function_parameters(function),
+                function.ret.apply(function.callable.ret),
                 parameter_identities,
             )
         };
     Some(ResolvedDelegatedFunctionDeclaration {
         target,
         owner: function.callable.owner,
+        semantic_role: function.callable.semantic_role,
         collection_barrier: function.callable.collection_barrier,
         parameter_identities,
         parameters: resolved_types(parameters.iter().copied())?,
         result: ResolvedTy::new(result).ok()?,
+        applied_parameters: resolved_types(applied_parameters)?,
+        applied_result: ResolvedTy::new(applied_result).ok()?,
         interface: function.callable.owner_is_interface,
     })
 }
@@ -584,9 +623,11 @@ fn property_slot(property: &PropertyInfo) -> Option<PropertySlot> {
 fn delegated_property(
     source: &dyn SymbolSource,
     index: &ResolvedModuleIndex,
+    delegating_classifier: Ty,
     interface: Ty,
     slot: PropertySlot,
     candidates: Vec<&PropertyInfo>,
+    inherited_class_candidates: Vec<&PropertyInfo>,
 ) -> Option<ResolvedDelegatedProperty> {
     let (getter, setter) = effective_property(source, index, interface, candidates)?;
     let (context_parameters, property_type) =
@@ -602,16 +643,50 @@ fn delegated_property(
     };
     let declaration = setter.unwrap_or(getter);
     let declared = super::override_plans::property_declaration(index, declaration)?;
-    let overridden = Box::new(ResolvedDelegatedPropertyDeclaration {
+    let mut overridden = vec![ResolvedDelegatedPropertyDeclaration {
         target: declared.target,
         owner: declaration.owner,
         ty: ResolvedTy::new(declared.ty).ok()?,
+        applied_ty: ResolvedTy::new(property_type).ok()?,
         receiver: match declared.receiver {
             Some(receiver) => Some(ResolvedTy::new(receiver).ok()?),
             None => None,
         },
+        mutable: setter.is_some(),
         interface: declaration.getter.owner_is_interface,
-    });
+        depth: 0,
+    }];
+    let inherited_class = inherited_class_candidates
+        .into_iter()
+        .filter_map(|candidate| {
+            let (_, applied_ty) =
+                applied_property_signature(source, index, delegating_classifier, candidate)?;
+            let compatible = if candidate.setter.is_some() {
+                applied_ty.canonical_semantic() == property_type.canonical_semantic()
+            } else {
+                crate::symbol_resolver::resolution_subtype(source, property_type, applied_ty)
+            };
+            compatible.then_some((candidate, applied_ty))
+        })
+        .min_by_key(|(candidate, _)| candidate.receiver_rank);
+    if let Some((inherited, applied_ty)) = inherited_class {
+        let declared = super::override_plans::property_declaration(index, inherited)?;
+        if !overridden
+            .iter()
+            .any(|known| known.target == declared.target)
+        {
+            overridden.push(ResolvedDelegatedPropertyDeclaration {
+                target: declared.target,
+                owner: inherited.owner,
+                ty: ResolvedTy::new(declared.ty).ok()?,
+                applied_ty: ResolvedTy::new(applied_ty).ok()?,
+                receiver: declared.receiver.map(ResolvedTy::new).transpose().ok()?,
+                mutable: inherited.setter.is_some(),
+                interface: false,
+                depth: inherited.receiver_rank,
+            });
+        }
+    }
     let accessor_call = |property: &PropertyInfo, setter: bool| {
         property_call(
             index,
@@ -626,7 +701,7 @@ fn delegated_property(
         )
     };
     Some(ResolvedDelegatedProperty {
-        overridden,
+        overridden: overridden.into_boxed_slice(),
         name: getter.name.clone().into_boxed_str(),
         type_parameters: match declared.target {
             crate::fir::ResolvedPropertyOverrideTarget::Module(_) => {
@@ -771,18 +846,53 @@ fn delegation_members(
             if function.flags.inherited_by_delegation {
                 continue;
             }
-            let call = function_call(source, index, interface, function);
-            let overridden = delegated_function_declaration(source, index, function)?;
+            let call = function_call(source, index, interface, function)?;
+            let primary = delegated_function_declaration(source, index, interface, function)?;
             let parameter_identities =
-                delegated_forwarder_parameter_identities(&overridden.parameter_identities);
+                delegated_forwarder_parameter_identities(&primary.parameter_identities);
             let type_parameters = delegated_type_parameters(function.generic_sig.as_ref())?;
+            let mut overridden = vec![primary];
+            // `members_in_hierarchy(own, name)` is an override view and deliberately coalesces
+            // identical slots. A generated forwarder still implements every exact interface
+            // declaration in that slot, so enumerate direct declarations from each applied
+            // interface occurrence and retain their stable identities independently.
+            for interface in interface_hierarchy(source, own)? {
+                let owner = interface.kotlin_class_internal()?;
+                let declarations =
+                    crate::symbol_resolver::members_in_hierarchy(source, interface, &name);
+                for obligation in declarations.functions().iter().filter(|obligation| {
+                    obligation.callable.owner == owner
+                        && obligation.receiver_rank == 0
+                        && obligation.visibility != crate::libraries::Visibility::Private
+                        && function_slot(obligation) == slot
+                        && applied_function_result(source, index, own, obligation).is_some_and(
+                            |result| {
+                                crate::symbol_resolver::resolution_subtype(
+                                    source,
+                                    call.result.get(),
+                                    result,
+                                )
+                            },
+                        )
+                }) {
+                    let obligation =
+                        delegated_function_declaration(source, index, own, obligation)?;
+                    if overridden
+                        .iter()
+                        .any(|known| known.target == obligation.target)
+                    {
+                        continue;
+                    }
+                    overridden.push(obligation);
+                }
+            }
             members.push(ResolvedDelegatedMember::Function(
                 ResolvedDelegatedFunction {
                     name: function.callable.name.clone().into_boxed_str(),
                     parameter_identities,
                     type_parameters,
-                    overridden,
-                    call: call?,
+                    overridden: overridden.into_boxed_slice(),
+                    call,
                 },
             ));
         }
@@ -813,12 +923,25 @@ fn delegation_members(
             if own_property_slots.contains(&slot) {
                 continue;
             }
+            let inherited_class_candidates = own_callables
+                .properties()
+                .iter()
+                .filter(|property| property.receiver_rank != 0)
+                .filter(|property| property_slot(property) == Some(slot))
+                .filter(|property| {
+                    source
+                        .classifier(property.owner)
+                        .is_some_and(|classifier| !classifier.is_interface())
+                })
+                .collect();
             members.push(ResolvedDelegatedMember::Property(delegated_property(
                 source,
                 index,
+                own,
                 interface,
                 slot,
                 property_candidates,
+                inherited_class_candidates,
             )?));
         }
     }

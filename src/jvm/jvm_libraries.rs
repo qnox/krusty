@@ -11,6 +11,7 @@ mod dependency_registration;
 mod generic_signatures;
 mod inline_body_plan;
 mod inline_capability;
+mod java_nullability;
 mod mapped_builtin_member_status;
 mod parameter_plans;
 #[cfg(test)]
@@ -32,6 +33,9 @@ use generic_signatures::{
     suspend_return_from_gsig,
 };
 use inline_capability::{metadata_inline, property_accessor_inline};
+use java_nullability::{
+    java_result_enhancement, java_type_argument_nullability, java_type_nullability,
+};
 use mapped_builtin_member_status::{mapped_builtin_member_status, MappedBuiltinMemberStatus};
 
 use super::classpath::{
@@ -42,6 +46,7 @@ use super::jvm_class_map::{erased_top_member_owner, to_kotlin_internal};
 use super::metadata;
 use crate::jvm::names::same_mapped_virtual_name_of;
 use crate::jvm::names::{property_getter_name, type_descriptor};
+use crate::libraries::builtin_top_level_realization::attach_function_realization;
 use crate::libraries::{
     AnnotationParameterPolicy, AnnotationPositionalPolicy, CallSig, EmptySymbolSource, FnFlags,
     FnKind, FunctionInfo, FunctionSet, GenericReturnPolicy, GenericSig, InlineKind, LibConst,
@@ -103,6 +108,7 @@ pub struct JvmLibraries {
     /// normalized class headers and restores any outer request overlay when this provider drops.
     source_headers: std::cell::RefCell<Option<super::classpath::StubOverlayGuard>>,
     common_expectations: std::sync::Arc<super::common_metadata::CommonExpectationIndex>,
+    optional_annotations: super::optional_annotations::OptionalAnnotationIndex,
     builtins_customizer: JvmBuiltInsCustomizer,
     /// `-api-version` for this compilation. Classpath caches stay shared; availability is decided
     /// here, per provider, when a `@SinceKotlin` callable is offered as a candidate.
@@ -128,54 +134,6 @@ pub(crate) fn inherited_by_delegation(
 ) -> bool {
     !is_abstract
         && (!has_kotlin_metadata || annotations.contains(&crate::types::wk::platform_dependent()))
-}
-
-fn java_type_nullability(ty: Ty, nullability: Option<JavaNullability>) -> Ty {
-    if !ty.is_reference() {
-        return ty;
-    }
-    // With no type-use qualifier, Java's flexibility applies recursively: `String[]` exposes
-    // `Array<String!>!`, and `List<String>` exposes `List<String!>!`. Qualifying only the outer
-    // classifier incorrectly rejects `null` as an expanded Java `String...` element.
-    let ty = match ty.non_null() {
-        Ty::Obj(name, arguments) if !arguments.is_empty() => {
-            let arguments = arguments
-                .iter()
-                .map(|argument| java_type_argument_nullability(*argument))
-                .collect::<Vec<_>>();
-            // Retain the invariant lower bound of Java's flexible array projection. Common type
-            // semantics derives `Array<out T>` as the upper bound of the surrounding platform type.
-            Ty::obj_args_name(name, &arguments)
-        }
-        _ => ty,
-    };
-    // Java wrapper classes are Kotlin primitive types with Java's flexible/nullability qualifier.
-    // Keep the physical wrapper in the JVM descriptor; the semantic signature must be `Int!`, not
-    // `java.lang.Integer!`, so core type checking needs no representation-specific compatibility rule.
-    let ty = ty
-        .non_null()
-        .obj_internal()
-        .and_then(super::jvm_class_map::wrapper_to_kotlin_prim_name)
-        .map(super::classpath::kotlin_name_to_ty)
-        .unwrap_or(ty);
-    match nullability {
-        Some(JavaNullability::NotNull) => ty.non_null(),
-        Some(JavaNullability::Nullable) => Ty::nullable(ty),
-        None => Ty::platform_nullable(ty),
-    }
-}
-
-/// Apply Java's unqualified flexibility inside a generic argument without discarding its semantic
-/// wrapper. A declaration variable stays a variable whose bound is flexible; use-site variance stays
-/// a projection whose interior is flexible.
-fn java_type_argument_nullability(ty: Ty) -> Ty {
-    match ty {
-        Ty::TyParam(name, bound) => Ty::ty_param(name, java_type_nullability(*bound, None)),
-        Ty::InProjection(inner) => Ty::in_projection(java_type_argument_nullability(*inner)),
-        Ty::OutProjection(inner) => Ty::out_projection(java_type_argument_nullability(*inner)),
-        Ty::StarProjection(inner) => Ty::star_projection(java_type_argument_nullability(*inner)),
-        _ => java_type_nullability(ty, None),
-    }
 }
 
 /// JVM-only description of a classfile field used to realize an already-normalized Kotlin
@@ -668,10 +626,7 @@ impl JvmLibraries {
                 return_value_status: None,
             };
             function.annotations = builtin.annotations;
-            function.callable.compiler_intrinsic =
-                crate::libraries::builtin_top_level_realization::normalized_function_realization(
-                    pkg, name, &function,
-                );
+            attach_function_realization(pkg, name, &mut function);
             overloads.push(function);
         }
         overloads
@@ -996,10 +951,12 @@ impl JvmLibraries {
                 .map_err(|error| crate::libraries::PlatformInitializationError {
                     message: format!("cannot load Kotlin common-expectation dependency: {error}"),
                 })?;
+        let optional_annotations = super::optional_annotations::OptionalAnnotationIndex::load(&cp)?;
         Ok(JvmLibraries {
             cp,
             source_headers: Default::default(),
             common_expectations,
+            optional_annotations,
             builtins_customizer: JvmBuiltInsCustomizer,
             api_version: LanguageVersion::default(),
             api_withheld: Default::default(),
@@ -1673,6 +1630,19 @@ impl JvmLibraries {
                 }
                 parameter_plans::member(&mut member, dispatch_parameter, continuation_parameter);
                 if let Some(declaration) = declaration {
+                    member.semantic_role =
+                        crate::libraries::builtin_declaration::semantic_call_role(
+                            crate::libraries::builtin_declaration::BuiltinMemberDeclaration {
+                                owner: internal_name,
+                                name: &member.name,
+                                params: &member.params,
+                                ret: member.ret,
+                                is_property: false,
+                                is_operator: declaration.is_operator(),
+                                is_infix: declaration.is_infix(),
+                                annotations: &member.annotations,
+                            },
+                        );
                     let facts = crate::libraries::builtin_declaration::BuiltinMemberDeclaration {
                         owner: internal_name,
                         name: &member.name,
@@ -1782,6 +1752,8 @@ impl JvmLibraries {
                 }
                 if let Some(java_nullable) = platform_nullable_params {
                     member.call_sig.platform_nullable_params = java_nullable;
+                    member.call_sig.result_enhancement =
+                        java_result_enhancement(internal_name, m.return_nullability);
                 }
                 if constructor_declaration.is_some() || (!has_kotlin_metadata && m.name == "<init>")
                 {
@@ -1961,8 +1933,13 @@ impl JvmLibraries {
                     }
                 }
             } else if let Some((_, _, declared)) = &metadata_class_signature {
+                // A function-type supertype (`KProperty0<V> : () -> V`) is an edge to the function
+                // classifier it instantiates, which declares the inherited `invoke`.
                 for supertype in declared {
-                    if let Some(name) = supertype.obj_internal() {
+                    if let Some(name) =
+                        crate::libraries::function_classifiers::supertype_classifier(*supertype)
+                            .obj_internal()
+                    {
                         supertypes.push_name(name);
                     }
                 }
@@ -2337,14 +2314,20 @@ impl JvmLibraries {
             let supertype_templates = supertypes
                 .iter_ids()
                 .map(|semantic| {
-                    if let Some(template) = declared_supertype_templates.iter().find(|template| {
-                        template.obj_internal().is_some_and(|declared| {
-                            declared == semantic
-                                || super::jvm_class_map::type_names_map_to_same_jvm_internal(
-                                    declared, semantic,
-                                )
+                    if let Some(template) = declared_supertype_templates
+                        .iter()
+                        .map(|template| {
+                            crate::libraries::function_classifiers::supertype_classifier(*template)
                         })
-                    }) {
+                        .find(|template| {
+                            template.obj_internal().is_some_and(|declared| {
+                                declared == semantic
+                                    || super::jvm_class_map::type_names_map_to_same_jvm_internal(
+                                        declared, semantic,
+                                    )
+                            })
+                        })
+                    {
                         return Ty::obj_args_name(semantic, template.type_args());
                     }
                     if super::jvm_class_map::type_names_map_to_same_jvm_internal(
@@ -2494,22 +2477,19 @@ impl JvmLibraries {
                 members,
                 companion,
                 constants: self.constants_for_class(internal_name, &ci),
-                sam_eligible: if is_mapped_builtin {
-                    // A Kotlin `actual typealias` to a Java SAM preserves constructor syntax. This
-                    // is distinct from Kotlin's mapped builtins (`List` -> `java.util.List`): those
-                    // have no alias declaration and must not become SAMs merely because their JVM
-                    // realization happens to be an interface. Both facts come from provider metadata.
-                    self.cp.type_alias_target_name(internal_name).is_some()
-                        && Self::sam_eligible_for_class(&ci)
-                } else {
-                    Self::sam_eligible_for_class(&ci)
-                },
+                // A Kotlin `actual typealias` to a Java SAM preserves constructor syntax. This is
+                // distinct from Kotlin's mapped builtins (`List` -> `java.util.List`): those have no
+                // alias declaration and must not become SAMs merely because their JVM realization
+                // happens to be an interface. Both facts come from provider metadata.
+                sam_eligible: (!is_mapped_builtin
+                    || self.cp.type_alias_target_name(internal_name).is_some())
+                    && Self::sam_eligible_for_class(&ci),
                 callable_signature,
                 callable_signatures,
                 companion_object,
                 qualified_name: ci.meta.class_qualified_name.as_deref().map(Box::from),
                 value_underlying,
-                value_underlying_property: value_class.and_then(|declaration| declaration.property),
+                value_declaration: value_class.and_then(|declaration| declaration.declaration),
                 alias_target: None,
                 own_type_parameter_count: type_params.len(),
                 type_parameters: crate::types::TypeParameters::new(
@@ -2536,6 +2516,7 @@ impl JvmLibraries {
                 annotation_targets: (kind == crate::libraries::TypeKind::Annotation)
                     .then(|| classpath_annotation_targets(&ci)),
                 mapped_collection: None,
+                annotation_element_defaults: ci.annotation_element_defaults.clone(),
             })
         }
     }
@@ -3210,11 +3191,12 @@ fn class_implements_name(cp: &Classpath, internal: TypeName, target: TypeName) -
 }
 
 impl JvmLibraries {
-    /// Federate the classpath package catalog with the core declaration source. `symbols()` already
-    /// combines those sources; package-prefix resolution must expose the same namespace or an explicit
-    /// import can be rejected before its core symbol is queried.
+    /// The packages `symbols()` combines (classpath, optional annotations, core declarations), or
+    /// an explicit import can be rejected before its symbol is queried.
     fn package_exists(&self, parent: TypeName, name: &str) -> bool {
-        self.cp.has_package(parent, name) || EmptySymbolSource.package_exists(parent, name)
+        self.cp.has_package(parent, name)
+            || self.optional_annotations.has_package(parent, name)
+            || EmptySymbolSource.package_exists(parent, name)
     }
 
     fn register_external_classifier(
@@ -3266,9 +3248,9 @@ impl JvmLibraries {
             callable.inline_body_plan = self.inline_body_plan(&callable).map(Box::new);
             // A member extension is an extension for source applicability, but its physical method
             // still dispatches on the declaring class/object instance. Keep those independent facts:
-            // the `FunctionInfo` above carries the semantic kind; the external identity carries the
-            // instance-member realization consumed after checked FIR has supplied both receivers.
-            self.register_external_callable(&mut callable, FnKind::Member);
+            // `FunctionInfo` carries semantic kind; the external identity carries the instance-member
+            // realization consumed after checked FIR has supplied both receivers.
+            self.register_external_callable(&mut callable, FnKind::Member, None);
             member.external_identity = callable.external_identity;
             member.inline_body_plan = callable.inline_body_plan;
         }
@@ -3289,12 +3271,12 @@ impl JvmLibraries {
                 member.default_realization = callable.default_realization.clone();
             }
             callable.inline_body_plan = self.inline_body_plan(&callable).map(Box::new);
-            self.register_external_callable(&mut callable, FnKind::TopLevel);
+            self.register_external_callable(&mut callable, FnKind::TopLevel, None);
             member.external_identity = callable.external_identity;
             member.inline_body_plan = callable.inline_body_plan;
         }
         for declarations in classifier.declared_callables.values_mut() {
-            *declarations = self.register_external_callables(declarations.clone());
+            *declarations = self.register_external_callables(declarations.clone(), None);
         }
     }
 
@@ -3307,6 +3289,7 @@ impl JvmLibraries {
             self.cp.intern_external_callable(
                 &callable,
                 super::classpath::ExternalCallableKind::Constructor,
+                None,
             )
         };
         member.external_identity = Some(identity);
@@ -3418,6 +3401,19 @@ impl JvmLibraries {
                     getter.owner_is_interface = ci.is_interface();
                     getter.is_abstract = mp.is_abstract;
                     getter.inline = property_accessor_inline(getter_public);
+                    getter.semantic_role =
+                        crate::libraries::builtin_declaration::semantic_call_role(
+                            crate::libraries::builtin_declaration::BuiltinMemberDeclaration {
+                                owner: cn,
+                                name: &mp.name,
+                                params: &semantic_context,
+                                ret: ty,
+                                is_property: true,
+                                is_operator: false,
+                                is_infix: false,
+                                annotations: &[],
+                            },
+                        );
                     if value_dispatch {
                         getter.member_realization = crate::libraries::MemberRealization::Direct {
                             pass_receiver: true,
@@ -3564,6 +3560,18 @@ impl JvmLibraries {
                     .or_else(|| getter_signature.as_ref().map(|signature| signature.ret))
                     .unwrap_or(ty);
                 getter.ret = ty;
+                getter.semantic_role = crate::libraries::builtin_declaration::semantic_call_role(
+                    crate::libraries::builtin_declaration::BuiltinMemberDeclaration {
+                        owner: cn,
+                        name: &mp.name,
+                        params: &semantic_context,
+                        ret: ty,
+                        is_property: true,
+                        is_operator: false,
+                        is_infix: false,
+                        annotations: &[],
+                    },
+                );
                 let setter = mp.setter.clone().and_then(|s| {
                     let (mut physical_params, physical_ret) = parse_method_desc(&s.desc)?;
                     if carrier_receiver {
@@ -3702,6 +3710,7 @@ impl JvmLibraries {
                 getter.external_identity = Some(self.cp.intern_external_callable(
                     &getter,
                     super::classpath::ExternalCallableKind::InstanceFieldRead,
+                    None,
                 ));
                 let setter = (field.access & 0x0010 == 0).then(|| {
                     let setter_source_name = name.to_string();
@@ -3720,6 +3729,7 @@ impl JvmLibraries {
                     setter.external_identity = Some(self.cp.intern_external_callable(
                         &setter,
                         super::classpath::ExternalCallableKind::InstanceFieldWrite,
+                        None,
                     ));
                     setter
                 });
@@ -3911,10 +3921,10 @@ impl JvmLibraries {
                     || function.callable.descriptor != mapping.descriptor
             });
         }
-        self.register_external_callables(crate::libraries::Callables::from_parts(
-            functions,
-            PropertySet { overloads },
-        ))
+        self.register_external_callables(
+            crate::libraries::Callables::from_parts(functions, PropertySet { overloads }),
+            None,
+        )
     }
 
     /// Build the classifier half of the provider's unified symbol record.
@@ -4012,9 +4022,7 @@ impl JvmLibraries {
                     std::sync::Arc::new(classifier)
                 })
         }
-        .or_else(|| {
-            self.common_expectations.classifier(internal_name)
-        });
+        .or_else(|| self.optional_annotations.classifier(internal_name));
         self.cp
             .cache_library_type_name(internal_name, built.clone());
         built
@@ -4422,13 +4430,7 @@ impl JvmLibraries {
         }
         if let SymbolNamespace::Package(package) = namespace {
             for overload in &mut overloads {
-                if let Some(intrinsic) =
-                    crate::libraries::builtin_top_level_realization::normalized_function_realization(
-                        package, name, overload,
-                    )
-                {
-                    overload.callable.compiler_intrinsic = Some(intrinsic);
-                }
+                attach_function_realization(package, name, overload);
             }
             for property in &mut props {
                 if let Some(intrinsic) =
@@ -4495,7 +4497,7 @@ impl JvmLibraries {
         } else {
             platform_callables
         };
-        let callables = self.register_external_callables(callables);
+        let callables = self.register_external_callables(callables, package);
         let importable_declaration = core.importable_declaration || static_field.is_some();
         self.cp.memoize_symbols(
             namespace,
@@ -4912,31 +4914,18 @@ impl JvmLibraries {
                                 &m.name,
                                 params.len(),
                             );
-                        // Normalize the exact Kotlin `Any` declaration while its provider identity
-                        // and source member are still together. Later JVM passes consume this role
-                        // from the selected callable; they never rediscover it from call spelling.
-                        // A builtin scalar whose metadata declares no `hashCode` (`Int`) inherits
-                        // `Any`'s; the wrapper method found for it realizes that same declaration.
-                        let inherits_any_member = builtin_cn == crate::types::wk::any()
-                            || (m.realization == crate::libraries::MemberRealization::Dispatch
-                                && m.name == "hashCode"
-                                && super::jvm_class_map::wrapper_internal(Ty::obj_name(
-                                    builtin_cn,
-                                ))
-                                .is_some());
-                        let semantic_role = if inherits_any_member && params.is_empty() {
-                            match m.name.as_str() {
-                                "hashCode" => {
-                                    Some(crate::types::SemanticCallRole::KotlinAnyHashCode)
-                                }
-                                "toString" => {
-                                    Some(crate::types::SemanticCallRole::KotlinAnyToString)
-                                }
-                                _ => None,
-                            }
-                        } else {
-                            None
-                        };
+                        // Exact builtin declarations already carry their role from the shared
+                        // declaration normalizer. A builtin scalar whose metadata declares no
+                        // `hashCode` (`Int`) is the one additional JVM projection: its wrapper
+                        // method realizes the `Any` declaration that the scalar inherits.
+                        let inherited_wrapper_role = (m.realization
+                            == crate::libraries::MemberRealization::Dispatch
+                            && m.name == "hashCode"
+                            && params.is_empty()
+                            && super::jvm_class_map::wrapper_internal(Ty::obj_name(builtin_cn))
+                                .is_some())
+                        .then_some(crate::types::SemanticCallRole::KotlinAnyHashCode);
+                        let semantic_role = m.semantic_role.or(inherited_wrapper_role);
                         let physical_owner = erased_top_member_owner(cn, m.owner.as_ref().copied());
                         let collection_barrier =
                             collection_barrier_role(builtin_cn, scope_name, &params, ret);
@@ -4947,6 +4936,7 @@ impl JvmLibraries {
                             suspend,
                             context_count: m.context_count,
                             member_realization: m.realization,
+                            compiler_intrinsic: m.realization.compiler_intrinsic(),
                             semantic_role,
                             collection_barrier,
                             signature: m.signature.clone(),
@@ -5167,14 +5157,11 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
     }
 
     fn is_optional_expectation(&self, classifier: TypeName) -> bool {
-        if !self.common_expectations.contains(classifier) {
+        if !self.optional_annotations.contains(classifier) {
             return false;
         }
 
-        // Common metadata can contain both target-less optional expectations (for example
-        // `kotlin.js.JsStatic` on JVM) and expectations with a real JVM actual (for example
-        // `kotlin.jvm.JvmInline`). Only the former disappear from platform sources. Target
-        // declarations always shadow the common header.
+        // Ranked below class files (kotlinc): a target declaration shadows the optional header.
         !self.cp.class_exists_name(classifier)
             && self.cp.type_alias_target_name(classifier).is_none()
             && self.cp.builtin_classifier_name(classifier).is_none()

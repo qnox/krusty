@@ -74,9 +74,11 @@ impl ResolverInputs<'_> {
             .qualified_type_classifier_binding_in_scope(spelling)
             .0
         {
-            crate::symbol_resolver::CandidateSelection::Selected(classifier) => Some(classifier),
-            crate::symbol_resolver::CandidateSelection::None
-            | crate::symbol_resolver::CandidateSelection::Ambiguous => None,
+            crate::symbol_resolver::CandidateSelectionWithTies::Selected(classifier) => {
+                Some(classifier)
+            }
+            crate::symbol_resolver::CandidateSelectionWithTies::None
+            | crate::symbol_resolver::CandidateSelectionWithTies::Ambiguous(_) => None,
         }
     }
 }

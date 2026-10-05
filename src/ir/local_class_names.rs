@@ -40,6 +40,16 @@ fn name(name: &mut TypeName, names: &HashMap<TypeName, TypeName>) {
     }
 }
 
+/// A captured enclosing instance names its class by identity, which follows the class's rename.
+fn captured_receiver(
+    receiver: &mut super::IrCapturedReceiver,
+    names: &HashMap<TypeName, TypeName>,
+) {
+    if let super::IrCapturedReceiver::Enclosing { classifier } = receiver {
+        name(classifier, names);
+    }
+}
+
 fn ty(value: Ty, names: &HashMap<TypeName, TypeName>) -> Ty {
     match value {
         Ty::Obj(classifier, arguments) => Ty::obj_args_name(
@@ -387,9 +397,8 @@ fn expression(expression: &mut IrExpr, names: &HashMap<TypeName, TypeName>) {
 
 fn annotation_value(value: &mut super::AnnoValue, names: &HashMap<TypeName, TypeName>) {
     match value {
-        super::AnnoValue::Enum(classifier, _) | super::AnnoValue::Class(classifier) => {
-            name(classifier, names)
-        }
+        super::AnnoValue::Enum(classifier, _) => name(classifier, names),
+        super::AnnoValue::Class(classifier) => *classifier = ty(*classifier, names),
         super::AnnoValue::Annotation(annotation) => annotation_application(annotation, names),
         super::AnnoValue::Array(values) => values
             .iter_mut()
@@ -548,6 +557,9 @@ impl super::IrFile {
             }
             plan.reference.property_type = ty(plan.reference.property_type, names);
             for accessor in std::iter::once(&mut plan.getter).chain(plan.setter.iter_mut()) {
+                for receiver in &mut accessor.captured_receivers {
+                    captured_receiver(receiver, names);
+                }
                 tys(&mut accessor.parameters, names);
                 type_parameters(&mut accessor.type_parameters, names);
                 accessor.result = ty(accessor.result, names);
@@ -587,6 +599,18 @@ impl super::IrFile {
             for argument in &mut class.ctor_args {
                 argument.ty = ty(argument.ty, names);
                 argument.declared_ty = argument.declared_ty.map(|value| ty(value, names));
+                if let Some(receiver) = argument
+                    .capture
+                    .as_mut()
+                    .and_then(|capture| capture.receiver.as_mut())
+                {
+                    captured_receiver(receiver, names);
+                }
+            }
+            if let Some(lambda) = &mut class.lambda {
+                for receiver in &mut lambda.captured_receivers {
+                    captured_receiver(receiver, names);
+                }
             }
             class
                 .annotation_impl_of
@@ -691,6 +715,11 @@ impl super::IrFile {
                 }
             }
         }
+        for parameters in self.fn_params.values_mut() {
+            for receiver in &mut parameters.captured_receivers {
+                captured_receiver(receiver, names);
+            }
+        }
         for annotations_by_function in self.function_annotations.values_mut() {
             annotations(annotations_by_function, names);
         }
@@ -793,8 +822,9 @@ impl super::IrFile {
                 *member = ty(*member, names);
             }
             construction
-                .enclosing_class
+                .scopes
                 .iter_mut()
+                .flatten()
                 .for_each(|value| name(value, names));
         }
         for aliases in self.class_type_aliases.values_mut() {
@@ -845,6 +875,10 @@ impl super::IrFile {
         }
         for underlying in self.external_value_classes.values_mut() {
             *underlying = ty(*underlying, names);
+        }
+        for declaration in self.external_value_class_declarations.values_mut() {
+            declaration.underlying = ty(declaration.underlying, names);
+            tys(&mut declaration.type_parameters, names);
         }
         for substitutions in self.reified_call_subst.values_mut() {
             for (_, substitution) in substitutions {
@@ -985,6 +1019,7 @@ impl super::IrFile {
         remap_keyed(&mut self.class_signatures, names);
         remap_keyed(&mut self.field_signatures, names);
         remap_keyed(&mut self.external_value_classes, names);
+        remap_keyed(&mut self.external_value_class_declarations, names);
 
         remap_first_key(&mut self.synthesized_data_class_members, names);
         remap_first_key(&mut self.generated_secondary_constructors, names);
@@ -1018,4 +1053,80 @@ impl super::IrFile {
                 .map(|value| names.get(&value).copied().unwrap_or(value))
                 .collect();
     }
+}
+
+impl super::IrFile {
+    /// Rename every local classifier to the physical name a target gives it, from its provenance.
+    ///
+    /// A name is its lexical owner's physical name followed by its source segments and then its
+    /// ordinal, each a nested component. A classifier with no lexical owner starts from
+    /// `root(source, first)` instead, which names its FIRST component. That start is the only
+    /// thing targets disagree on: the JVM nests the whole path in the declaring file's facade
+    /// (`AKt$box$Local`), and a target without facade classes starts it in the package
+    /// (`box$Local`).
+    pub(crate) fn realize_local_class_names(
+        &mut self,
+        root: impl Fn(super::IrModuleSource, &str) -> TypeName,
+    ) {
+        let classes = self
+            .local_class_name_provenance
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
+        let mut physical = HashMap::new();
+        for class in classes {
+            physical_name(class, &root, self, &mut physical);
+        }
+        let identities = physical
+            .into_iter()
+            .map(|(class, physical)| (self.classes[class as usize].fq_name, physical))
+            .collect();
+        self.remap_classifier_identities(&identities);
+    }
+
+    /// [`Self::realize_local_class_names`] for a target without facade classes: a local
+    /// classifier that no classifier owns starts in its declaring source's package, so the one
+    /// local to a top-level `box` is `box$Local` and its first anonymous object `box$1`.
+    pub(crate) fn realize_local_class_names_in_packages(&mut self) {
+        self.realize_local_class_names(|source, first| {
+            crate::types::type_name_child(source.package, first)
+        });
+    }
+}
+
+fn physical_name(
+    class: ClassId,
+    root: &impl Fn(super::IrModuleSource, &str) -> TypeName,
+    ir: &super::IrFile,
+    cache: &mut HashMap<ClassId, TypeName>,
+) -> TypeName {
+    if let Some(name) = cache.get(&class) {
+        return *name;
+    }
+    // An owner declared outside executable code (a top-level or member classifier) already has its
+    // physical identity; only local and anonymous classifiers are named from provenance.
+    let Some(provenance) = ir.local_class_name_provenance.get(&class) else {
+        return ir.classes[class as usize].fq_name;
+    };
+    let ordinal = provenance.ordinal.map(|ordinal| ordinal.to_string());
+    let mut components = provenance
+        .segments
+        .iter()
+        .map(String::as_str)
+        .chain(ordinal.as_deref());
+    let mut name = match provenance.lexical_owner {
+        Some(IrLocalClassOwner::Class(owner)) => physical_name(owner, root, ir, cache),
+        Some(IrLocalClassOwner::External(owner)) => owner,
+        None => {
+            let first = components
+                .next()
+                .expect("a local classifier's provenance names at least one component");
+            root(provenance.source, first)
+        }
+    };
+    for component in components {
+        name = crate::types::type_name_nested_child(name, component);
+    }
+    cache.insert(class, name);
+    name
 }

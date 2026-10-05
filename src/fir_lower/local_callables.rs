@@ -1236,7 +1236,7 @@ impl BodyLowering<'_> {
                 result,
                 body.has_implicit_return(),
                 unit_as_value,
-                body.close_line(),
+                unit_return_line(body),
                 body_origin(body),
             )?
         };
@@ -1473,6 +1473,15 @@ fn local_function_debug_line(body: &FirBody) -> Option<u32> {
     (source_line != 0).then_some(source_line)
 }
 
+/// Where a local callable's implicit `Unit` return takes its line: a lambda's closing `}`, or the
+/// end of an expression-bodied local function's expression.
+fn unit_return_line(body: &FirBody) -> Option<super::UnitReturnLine> {
+    if body.source_lambda().is_none() {
+        return Some(super::UnitReturnLine::ExpressionEnd);
+    }
+    (body.close_line() != 0).then(|| super::UnitReturnLine::ClosingBrace(body.close_line()))
+}
+
 fn body_origin(body: &FirBody) -> crate::fir::OriginId {
     body.roots()
         .first()
@@ -1552,6 +1561,7 @@ pub(super) fn record_lifting_sites(
     let Some(source_order) = index.source_order(declaration) else {
         return;
     };
+    let container = super::root_enclosure(index, ir, declaration);
     let mut sites = Vec::new();
     body.collect_lifting_sites(&mut sites);
     for site in sites {
@@ -1579,6 +1589,7 @@ pub(super) fn record_lifting_sites(
                 name: step.name.clone(),
                 lifted: site.lifted,
                 scope,
+                container,
             },
         );
     }

@@ -179,8 +179,18 @@ fn remap_direct_children(expression: &mut IrExpr, mut map: impl FnMut(ExprId) ->
                 *start = map(*start);
                 *end = map(*end);
             }
-            IrCheckedOperation::RangeLoop { source, body, .. } => {
+            IrCheckedOperation::RangeLoop {
+                source,
+                body,
+                with_index,
+                ..
+            } => {
                 source.map_operands(&mut map);
+                if let Some(index) = with_index {
+                    index.declaration = map(index.declaration);
+                    index.bindings = map(index.bindings);
+                    index.element_copies = map(index.element_copies);
+                }
                 *body = map(*body);
             }
             IrCheckedOperation::PropertyReference {
@@ -394,6 +404,15 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     }
     if ir.null_guards.contains(&source) {
         ir.null_guards.insert(target);
+    }
+    if ir.plain_updates.contains(&source) {
+        ir.plain_updates.insert(target);
+    }
+    if ir.transparent_loop_bodies.contains(&source) {
+        ir.transparent_loop_bodies.insert(target);
+    }
+    if ir.for_loop_next_loops.contains(&source) {
+        ir.for_loop_next_loops.insert(target);
     }
     if ir.lateinit_initialization_probes.contains(&source) {
         ir.lateinit_initialization_probes.insert(target);

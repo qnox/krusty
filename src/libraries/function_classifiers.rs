@@ -114,18 +114,24 @@ pub(crate) fn supertype_classifier(supertype: Ty) -> Ty {
     let Ty::Fun(signature) = supertype else {
         return supertype;
     };
-    let classifier = FunctionClassifier {
-        kind: if signature.suspend {
+    let classifier = function_classifier_identity(signature.params.len(), signature.suspend);
+    let mut arguments = signature.params.clone();
+    arguments.push(signature.ret);
+    Ty::obj_args_name(classifier, &arguments)
+}
+
+/// The function classifier a function type of `arity` parameters (an extension receiver and context
+/// parameters included) is an instance of: `kotlin/FunctionN` or `kotlin/coroutines/SuspendFunctionN`.
+pub(crate) fn function_classifier_identity(arity: usize, suspend: bool) -> TypeName {
+    FunctionClassifier {
+        kind: if suspend {
             FunctionClassKind::SuspendFunction
         } else {
             FunctionClassKind::Function
         },
-        arity: signature.params.len(),
+        arity,
     }
-    .identity();
-    let mut arguments = signature.params.clone();
-    arguments.push(signature.ret);
-    Ty::obj_args_name(classifier, &arguments)
+    .identity()
 }
 
 pub(crate) fn is_reflective_function_classifier(internal: TypeName) -> bool {
@@ -211,6 +217,7 @@ fn ensure_invoke(
     result: Ty,
     suspend: bool,
 ) {
+    let role = Some(crate::types::SemanticCallRole::KotlinFunctionInvoke);
     let already_declared = shape
         .declared_callables
         .get("invoke")
@@ -232,17 +239,32 @@ fn ensure_invoke(
         );
         callable.owner_is_interface = true;
         callable.suspend = suspend;
+        callable.semantic_role = role;
         let mut declaration =
             FunctionInfo::plain(FnKind::Member, Some(Ty::obj_name(identity)), callable);
         declaration.call_sig = synthesized_invoke_call_sig(parameters.len());
         declaration.flags.operator = true;
         declaration.flags.is_abstract = true;
+        // The seed's own `invoke` has the physical shape (a suspend function's runtime interface
+        // takes the continuation as one more parameter); the classifier declares only this one.
+        shape.members.retain(|member| member.name != "invoke");
         shape.insert_declared_callables(
             "invoke".to_string(),
             Callables::Functions(FunctionSet {
                 overloads: vec![declaration],
             }),
         );
+    }
+    if let Some(callables) = shape.declared_callables.get_mut("invoke") {
+        let (mut functions, properties) = std::mem::take(callables).into_parts();
+        for candidate in &mut functions.overloads {
+            if candidate.semantic_params().as_ref() == parameters
+                && candidate.callable.ret.canonical_semantic() == result
+            {
+                candidate.callable.semantic_role = role;
+            }
+        }
+        *callables = Callables::from_parts(functions, properties);
     }
     if !shape.members.iter().any(|member| {
         member.name == "invoke" && member.params == parameters && member.ret == result
@@ -258,6 +280,7 @@ fn ensure_invoke(
         member.set_is_interface(true);
         member.set_is_operator(true);
         member.set_suspend(suspend);
+        member.semantic_role = role;
         // kotlinc synthesizes these classifiers inside the standard library's must-use scope, and
         // an override inherits the status of the declaration it overrides.
         member.return_value_status = Some(crate::types::ReturnValueStatus::MustUse);
@@ -270,6 +293,11 @@ fn ensure_invoke(
         }
         member.call_sig = synthesized_invoke_call_sig(parameters.len());
         shape.members.push(member);
+    }
+    for member in &mut shape.members {
+        if member.name == "invoke" && member.params == parameters && member.ret == result {
+            member.semantic_role = role;
+        }
     }
 }
 
@@ -374,6 +402,61 @@ mod tests {
         assert_eq!(signature.params.len(), 30);
         assert!(shape.represents_function_type());
         assert!(shape.declared_callables.contains_key("invoke"));
+        let (functions, _) = shape
+            .declared_callables
+            .get("invoke")
+            .expect("invoke declaration")
+            .clone()
+            .into_parts();
+        assert_eq!(functions.overloads.len(), 1);
+        assert_eq!(
+            functions.overloads[0].callable.semantic_role,
+            Some(crate::types::SemanticCallRole::KotlinFunctionInvoke)
+        );
+        assert_eq!(
+            shape
+                .members
+                .iter()
+                .find(|member| member.name == "invoke")
+                .expect("invoke member")
+                .semantic_role,
+            Some(crate::types::SemanticCallRole::KotlinFunctionInvoke)
+        );
+    }
+
+    #[test]
+    fn normalization_attaches_the_role_to_an_existing_invoke_declaration() {
+        let function = classifier(type_name("kotlin/Function1")).expect("Function1 identity");
+        let mut seed = (*synthetic(function)).clone();
+        let callables = seed
+            .declared_callables
+            .get_mut("invoke")
+            .expect("invoke declaration");
+        let (mut functions, properties) = std::mem::take(callables).into_parts();
+        functions.overloads[0].callable.semantic_role = None;
+        *callables = Callables::from_parts(functions, properties);
+        seed.members
+            .iter_mut()
+            .find(|member| member.name == "invoke")
+            .expect("invoke member")
+            .semantic_role = None;
+
+        let normalized = normalize(function, seed);
+        assert_eq!(
+            normalized.declared_callables["invoke"].functions()[0]
+                .callable
+                .semantic_role,
+            Some(crate::types::SemanticCallRole::KotlinFunctionInvoke)
+        );
+        assert_eq!(
+            normalized
+                .members
+                .iter()
+                .find(|member| member.name == "invoke")
+                .expect("invoke member")
+                .semantic_role,
+            Some(crate::types::SemanticCallRole::KotlinFunctionInvoke)
+        );
     }
 
     #[test]

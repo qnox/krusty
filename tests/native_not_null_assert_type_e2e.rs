@@ -31,3 +31,19 @@ fn a_not_null_assertion_yields_a_value_its_consumer_can_name() {
     expect_box_ok_with_stdlib(source, "NotNullAssertType");
     expect_native_box(source, "NotNullAssertType", "OK");
 }
+
+/// A `lateinit` read yields its operand the same way.
+#[test]
+fn a_lateinit_read_yields_a_value_its_consumer_can_name() {
+    let source = "class Held {\n\
+         \x20   lateinit var text: String\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   val held = Held()\n\
+         \x20   held.text = \"OK\"\n\
+         \x20   if (held.text.length != 2) return \"fail length\"\n\
+         \x20   return held.text\n\
+         }\n";
+    expect_box_ok_with_stdlib(source, "LateinitReadType");
+    expect_native_box(source, "LateinitReadType", "OK");
+}

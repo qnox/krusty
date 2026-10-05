@@ -13,6 +13,45 @@
 use super::common::expect_native_box;
 
 #[test]
+fn a_substituted_generic_bottom_value_runs_and_falls_through() {
+    // `materialize()` is inferred at `Nothing` because the lambda's result is coerced to `Unit`.
+    // Its body runs — the appended "K" is the proof — and `test` returns normally afterwards.
+    expect_native_box(
+        "var result = \"fail\"\n\
+         fun <K> materialize(): K {\n\
+         \x20   result += \"K\"\n\
+         \x20   return \"str\" as K\n\
+         }\n\
+         fun test(n: Number) {\n\
+         \x20   n.let {\n\
+         \x20       materialize()\n\
+         \x20   }\n\
+         }\n\
+         fun box(): String {\n\
+         \x20   result = \"O\"\n\
+         \x20   test(42)\n\
+         \x20   return result\n\
+         }\n",
+        "SubstitutedBottomFallsThrough",
+        "OK",
+    );
+}
+
+#[test]
+fn a_substituted_generic_bottom_value_hands_on_the_value_it_made() {
+    // The same shape read as a value rather than discarded: what reaches the caller is the erased
+    // result the body actually returned, which is the only value there is to hand on.
+    expect_native_box(
+        "fun <K> materialize(): K = \"OK\" as K\n\
+         fun <T> myRun(action: () -> T): T = action()\n\
+         fun produce(): Any = myRun { materialize() } ?: \"fail\"\n\
+         fun box(): String = produce().toString()\n",
+        "SubstitutedBottomHandsOnValue",
+        "OK",
+    );
+}
+
+#[test]
 fn a_genuinely_divergent_call_ends_its_path() {
     // `stop` never returns, so the statement after it is unreachable and the join that follows has
     // only the other branch to merge. A backend that let the path continue would need a value of
