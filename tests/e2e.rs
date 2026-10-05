@@ -2673,3 +2673,9 @@ mod discarded_inline_result_temporary_e2e;
 mod special_builtin_call_sites_e2e;
 #[path = "type_intrinsics_e2e.rs"]
 mod type_intrinsics_e2e;
+
+#[path = "value_class_receiver_inline_only_e2e.rs"]
+mod value_class_receiver_inline_only_e2e;
+
+#[path = "field_store_lines_e2e.rs"]
+mod field_store_lines_e2e;
