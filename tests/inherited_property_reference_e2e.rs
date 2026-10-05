@@ -13,49 +13,6 @@ fn reflect_jar() -> std::path::PathBuf {
 }
 
 #[test]
-fn common_ir_records_the_written_owner_of_each_inherited_property_reference() {
-    let source = r#"
-        interface H<T> {
-            val parent: T?
-        }
-
-        interface A : H<A>
-
-        fun references(a: A) {
-            val unbound = A::parent
-            val bound = a::parent
-            val declaring = H<A>::parent
-        }
-    "#;
-    let classpath = std::rc::Rc::new(krusty::jvm::classpath::Classpath::new(vec![
-        common::stdlib_jar(),
-        common::jdk_modules(),
-    ]));
-    let platform = Box::new(
-        krusty::jvm::jvm_libraries::JvmLibraries::new(classpath)
-            .expect("JVM provider initialization"),
-    );
-    let (files, diagnostics) =
-        common::capture_common_ir(source, "InheritedPropertyOwner", platform);
-    assert!(diagnostics.is_empty(), "frontend rejected: {diagnostics:?}");
-    let owners = files
-        .iter()
-        .flat_map(|file| &file.exprs)
-        .filter_map(|expression| match expression {
-            krusty::ir::IrExpr::Checked(krusty::ir::IrCheckedOperation::PropertyReference {
-                target:
-                    krusty::fir::FirPropertyReferenceTarget::SpecializedModule {
-                        reflection_owner, ..
-                    },
-                ..
-            }) => reflection_owner.as_ref().map(|owner| owner.render()),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(owners, ["A", "A", "H"]);
-}
-
-#[test]
 fn an_inherited_property_reference_substitutes_through_the_referenced_classifier() {
     let source = r#"
         interface H<T> {

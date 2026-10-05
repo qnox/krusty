@@ -823,6 +823,44 @@ fn specialized_generic_extension_property_reference_publishes_final_accessor_sha
 }
 
 #[test]
+fn checked_fir_records_the_written_owner_of_each_inherited_property_reference() {
+    let (body, _) = checked_function_body_with_platform(
+        "interface H<T> { val parent: T? }\n\
+         interface A : H<A>\n\
+         fun references(a: A) {\n\
+         \x20   val unbound = A::parent\n\
+         \x20   val bound = a::parent\n\
+         \x20   val declaring = H<A>::parent\n\
+         }\n",
+        "references",
+        jvm_semantics(),
+    );
+    let owners = (0..body.expression_count())
+        .filter_map(|raw| {
+            let FirExprKind::PropertyReference {
+                target:
+                    FirPropertyReferenceTarget::SpecializedModule {
+                        reflection_owner, ..
+                    },
+                ..
+            } = &body.expr(FirExprId::from_raw(raw as u32))?.kind
+            else {
+                return None;
+            };
+            *reflection_owner
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        owners,
+        [
+            crate::types::type_name("A"),
+            crate::types::type_name("A"),
+            crate::types::type_name("H"),
+        ]
+    );
+}
+
+#[test]
 fn inline_generic_property_reference_publishes_the_selected_getter_splice() {
     let (body, _) = checked_function_body_with_platform(
         "class Token\n\

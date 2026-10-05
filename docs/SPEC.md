@@ -3514,7 +3514,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   another file of the same module is published with its source kind; one normalized common-IR kind
   query covers either source location, and a missing published kind fails realization instead of
   falling back to the declaring owner. Tests:
-  `common_ir_records_the_written_owner_of_each_inherited_property_reference`,
+  `checked_fir_records_the_written_owner_of_each_inherited_property_reference`,
   `an_inherited_property_reference_substitutes_through_the_referenced_classifier` and
   `an_inherited_property_reference_in_another_file_uses_the_referenced_classifier` in
   `tests/inherited_property_reference_e2e.rs`. Corpus:
