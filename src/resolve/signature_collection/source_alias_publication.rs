@@ -70,15 +70,18 @@ pub(in crate::resolve) fn publish_source_alias(
         .insert(alias.identity, (spelling, formals, expansion));
 }
 
-/// Every type-use annotation application of one compact source, as Pass 1 bound it. Its
-/// arguments and its retention are the checker's to decide; see
-/// [`crate::spelling::TypeUseAnnotation`].
+/// Every type-use annotation application of one compact source, as Pass 1 bound it, and the name
+/// of each named function-type parameter. An application's arguments and its retention are the
+/// checker's to decide; see [`crate::spelling::TypeUseAnnotation`].
 pub(in crate::resolve) fn compact_source_type_annotations(
     table: &SymbolTable,
     headers: &crate::fir::StreamedHeaderModule,
     source: crate::fir::SourceFileId,
 ) -> crate::spelling::RecordedTypeAnnotations {
     let mut recorded = crate::spelling::RecordedTypeAnnotations::default();
+    for (occurrence, name) in headers.function_type_parameter_names(source) {
+        recorded.record_parameter_name(occurrence, name);
+    }
     for (occurrence, annotations) in headers.type_use_annotations(source) {
         let bound = annotations
             .iter()
