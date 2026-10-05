@@ -81,11 +81,17 @@ pub(super) fn emit_enum_entry_subclass(
     ctor.ret_void();
     ctor.ensure_locals(ctor_max);
     ctor.link();
-    cw.add_method(
+    let ctor_signature = super::constructor_signatures::enum_entry_constructor_signature(
+        &signature_formatter,
+        user_tys,
+        &user_jvm,
+    );
+    cw.add_method_sig(
         0x0000,
         "<init>",
         &method_descriptor(&ctor_params, Ty::Unit),
         &ctor,
+        ctor_signature.as_deref(),
     );
     if let Some(defaults) = ir
         .class_ctor_defaults(&superclass)

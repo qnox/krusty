@@ -3,8 +3,11 @@
 
 use super::*;
 
+mod constructor_positions;
 mod type_arguments;
 mod value_class_positions;
+
+pub(super) use constructor_positions::ConstructorParameter;
 
 /// Whether declaration-site variance becomes a JVM wildcard at the position being formatted.
 ///

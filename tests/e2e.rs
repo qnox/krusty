@@ -497,6 +497,8 @@ mod constructor_argument_specificity_e2e;
 mod constructor_continuation_e2e;
 #[path = "constructor_initialization_order_e2e.rs"]
 mod constructor_initialization_order_e2e;
+#[path = "constructor_signature_e2e.rs"]
+mod constructor_signature_e2e;
 #[path = "consumer_materialized_result_e2e.rs"]
 mod consumer_materialized_result_e2e;
 #[path = "context_and_loop_wording_e2e.rs"]
