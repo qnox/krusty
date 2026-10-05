@@ -15,6 +15,20 @@ pub(super) struct Entry {
     pub(super) components: Vec<(usize, u16)>,
     /// A `long` or `double`, which takes two indices.
     pub(super) wide: bool,
+    /// For a `CONSTANT_InvokeDynamic` or `CONSTANT_Dynamic`, its `BootstrapMethods` entry's
+    /// arguments then method handle: ASM's `addBootstrapMethod` interns them, in that order,
+    /// before the entry and its name and type.
+    pub(super) bootstrap: Vec<u16>,
+}
+
+impl Entry {
+    /// Every entry this one names, in the order ASM interns them before it.
+    pub(super) fn named(&self) -> impl Iterator<Item = u16> + '_ {
+        self.bootstrap
+            .iter()
+            .copied()
+            .chain(self.components.iter().map(|&(_, component)| component))
+    }
 }
 
 /// The part of a method's `Code` holding an index, in the order ASM interns them: the exception
@@ -121,6 +135,8 @@ struct Reader<'a> {
     fields: Range<usize>,
     method_starts: Vec<usize>,
     methods_end: usize,
+    /// Each `BootstrapMethods` entry: its method handle, then its arguments.
+    bootstrap_methods: Vec<Vec<u16>>,
 }
 
 pub(super) fn read(bytes: &[u8]) -> Result<ClassSlots, Unread> {
@@ -132,6 +148,7 @@ pub(super) fn read(bytes: &[u8]) -> Result<ClassSlots, Unread> {
         fields: 0..0,
         method_starts: Vec::new(),
         methods_end: 0,
+        bootstrap_methods: Vec::new(),
     };
     reader.pool()?;
     let pool_end = reader.at;
@@ -139,6 +156,7 @@ pub(super) fn read(bytes: &[u8]) -> Result<ClassSlots, Unread> {
     if reader.at != bytes.len() {
         return Err(Unread::Truncated);
     }
+    reader.link_bootstrap_methods()?;
     Ok(ClassSlots {
         entries: reader.entries,
         pool_end,
@@ -238,10 +256,31 @@ impl Reader<'_> {
                 range: start..self.at,
                 components,
                 wide,
+                bootstrap: Vec::new(),
             }));
             if wide {
                 self.entries.push(None);
             }
+        }
+        Ok(())
+    }
+
+    /// Give each dynamic entry the bootstrap method entry it names by attribute index.
+    fn link_bootstrap_methods(&mut self) -> Result<(), Unread> {
+        for entry in self.entries.iter_mut().flatten() {
+            let start = entry.range.start;
+            if !matches!(self.bytes[start], 17 | 18) {
+                continue;
+            }
+            let method = u16::from_be_bytes([self.bytes[start + 1], self.bytes[start + 2]]);
+            let Some((handle, arguments)) = self
+                .bootstrap_methods
+                .get(usize::from(method))
+                .and_then(|method| method.split_first())
+            else {
+                return Err(Unread::Truncated);
+            };
+            entry.bootstrap = arguments.iter().copied().chain([*handle]).collect();
         }
         Ok(())
     }
@@ -329,8 +368,11 @@ impl Reader<'_> {
             }
             ("BootstrapMethods", Scope::Class) => {
                 for _ in 0..self.u2()? {
-                    self.index(class)?;
-                    self.indices(class)?;
+                    let mut method = vec![self.index(class)?];
+                    for _ in 0..self.u2()? {
+                        method.push(self.index(class)?);
+                    }
+                    self.bootstrap_methods.push(method);
                 }
             }
             ("MethodParameters", Scope::Method(_)) => {

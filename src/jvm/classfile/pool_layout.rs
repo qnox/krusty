@@ -301,7 +301,7 @@ impl<'a> Layout<'a> {
         }
         placed[at] = true;
         if let Some(entry) = &self.read.entries[at] {
-            for &(_, component) in &entry.components {
+            for component in entry.named() {
                 self.place(component, placed, order);
             }
         }
@@ -397,7 +397,7 @@ fn reached_from(read: &ClassSlots, index: u16) -> Vec<usize> {
         }
         reached.push(at);
         if let Some(entry) = &read.entries[at] {
-            pending.extend(entry.components.iter().map(|&(_, component)| component));
+            pending.extend(entry.named());
         }
     }
     reached
@@ -422,7 +422,7 @@ fn reach(read: &ClassSlots, index: u16, reached: &mut [bool]) {
         }
         reached[at] = true;
         if let Some(entry) = &read.entries[at] {
-            pending.extend(entry.components.iter().map(|&(_, component)| component));
+            pending.extend(entry.named());
         }
     }
 }
