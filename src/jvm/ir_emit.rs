@@ -959,6 +959,7 @@ fn attach_synth_nullability(ir: &IrFile, c: &crate::ir::IrClass, cw: &mut ClassW
                 ir.is_jvm_companion_hoisted_static(*index as u32) && s.owner_matches(&c.fq_name())
             })
             .map(|(_, s)| s)
+            .filter(|s| !s.is_lateinit)
         {
             if let Some(a) = ann(&s.name, jvm_declared_ty(&s.ty)) {
                 cw.set_field_nullability(&s.name, a);
@@ -2495,7 +2496,7 @@ fn emit_scheduled_member(
         return;
     };
     let f = &ir.functions[fid as usize];
-    if let Some(defaults) = ir.param_defaults(fid) {
+    if let Some(defaults) = ir.declared_param_defaults(fid) {
         if f.is_static {
             let marker = static_default_stub_marker(ir, fid);
             emit_facade_default_stub(
@@ -3644,7 +3645,7 @@ fn emit_interface_class(
             .map(|(_, declaration)| *declaration)
             .unwrap_or(fid);
         if !deferred_suspend_declaration {
-            if let Some(defaults) = ir.param_defaults(default_fid) {
+            if let Some(defaults) = ir.declared_param_defaults(default_fid) {
                 // `disable` puts NOTHING executable on the interface, the `$default` stub included: call
                 // sites go to the holder's copy instead.
                 if bodies_on_interface {
@@ -3903,7 +3904,9 @@ fn emit_enum_class(
     // The property backing fields are visited after the methods: each name interns where the
     // constructor body first stores it, after that body's own constants.
     for (f, t) in c.fields.iter().zip(&field_tys) {
-        let nullability = nullability_annotation(field_nullability_kind(ir, &fq, &f.name, f.ty));
+        let nullability = (!f.is_lateinit())
+            .then(|| nullability_annotation(field_nullability_kind(ir, &fq, &f.name, f.ty)))
+            .flatten();
         let signature =
             property_jvm_signatures(&signature_formatter, &f.ty, f.type_param.as_deref()).field;
         cw.add_field_late_sig(
@@ -3929,7 +3932,7 @@ fn emit_enum_class(
         // `Lazy<KSerializer<Object>>`), and a reference-typed one carries kotlinc's nullability
         // annotation — the same treatment the class and facade field tables give their statics.
         let signatures = property_jvm_signatures(&signature_formatter, &s.ty, None);
-        let ann = (field_nullability_kind(ir, &fq, &s.name, s.ty) == 1)
+        let ann = (!s.is_lateinit && field_nullability_kind(ir, &fq, &s.name, s.ty) == 1)
             .then_some("Lorg/jetbrains/annotations/NotNull;");
         cw.add_field_late_sig(
             acc,
@@ -4200,7 +4203,7 @@ fn emit_enum_class(
                 // silently had no stub at all — a call omitting the argument had nothing to dispatch to.
                 // Same call as the class path, so the super-call guard rides along: an enum IS
                 // inheritable (an entry body subclasses it), which is why kotlinc guards the stub.
-                if let Some(defaults) = ir.param_defaults(fid) {
+                if let Some(defaults) = ir.declared_param_defaults(fid) {
                     emit_default_stub(
                         ir,
                         fid,

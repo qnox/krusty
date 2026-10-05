@@ -1289,8 +1289,12 @@ mod lambda_vs_block_fun_type_e2e;
 mod language_level_features_e2e;
 #[path = "lateinit_companion_read_e2e.rs"]
 mod lateinit_companion_read_e2e;
+#[path = "lateinit_field_nullability_e2e.rs"]
+mod lateinit_field_nullability_e2e;
 #[path = "lateinit_field_visibility_e2e.rs"]
 mod lateinit_field_visibility_e2e;
+#[path = "lateinit_getter_shape_e2e.rs"]
+mod lateinit_getter_shape_e2e;
 #[path = "lateinit_local_e2e.rs"]
 mod lateinit_local_e2e;
 #[path = "lateinit_operand_stack_e2e.rs"]
@@ -1489,6 +1493,8 @@ mod nullable_uint_property_e2e;
 mod open_end_range_membership_e2e;
 #[path = "optional_expectation_annotation_e2e.rs"]
 mod optional_expectation_annotation_e2e;
+#[path = "override_default_stub_e2e.rs"]
+mod override_default_stub_e2e;
 #[path = "primitive_explicit_equals_e2e.rs"]
 mod primitive_explicit_equals_e2e;
 #[path = "primitive_hash_code_e2e.rs"]
