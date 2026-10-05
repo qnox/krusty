@@ -19315,34 +19315,6 @@ impl<'a> Checker<'a> {
                 let explicit_invoke_ty = (name == CALLABLE_INVOKE_OPERATOR)
                     .then(|| self.expression_function_type(scope, receiver, rt))
                     .flatten();
-                let receiver_function_argument_params = explicit_invoke_ty
-                    .and_then(|ty| match ty {
-                        Ty::Fun(signature) if signature.params.len() == args.len() => {
-                            Some(signature.params.clone())
-                        }
-                        _ => None,
-                    })
-                    .or_else(|| {
-                        self.receiver_function_member_call_params(scope, rt, &name, args.len())
-                    })
-                    .or_else(|| {
-                        // A selected member/extension PROPERTY can itself be the function value
-                        // invoked by this syntax (`receiver.block(arg)`). Its function signature is
-                        // available before argument checking and therefore owns contextual lambda
-                        // typing just like a local function value does. Waiting until the later
-                        // property-read fallback first checks `{ this.member }` expectation-free and
-                        // leaks that provisional diagnostic even though the property's parameter is
-                        // a receiver function type.
-                        self.select_property_read(scope, rt, &name)
-                            .ok()
-                            .flatten()
-                            .and_then(|selection| match selection.ty().non_null() {
-                                Ty::Fun(signature) if signature.params.len() == args.len() => {
-                                    Some(signature.params.clone())
-                                }
-                                _ => None,
-                            })
-                    });
                 // For a class method with function-type parameters, type lambda arguments against the
                 // method's `lambda_param_types` (so `it` resolves), mirroring the free-function path.
                 // A MODULE (user-declared) class method only: a classpath receiver leaves this `None` so
@@ -19367,6 +19339,41 @@ impl<'a> Checker<'a> {
                         }
                     })
                     .collect::<Vec<_>>();
+                let receiver_function_argument_params = explicit_invoke_ty
+                    .and_then(|ty| match ty {
+                        Ty::Fun(signature) if signature.params.len() == args.len() => {
+                            Some(signature.params.clone())
+                        }
+                        _ => None,
+                    })
+                    .or_else(|| {
+                        self.receiver_function_member_call_params(
+                            scope,
+                            call,
+                            rt,
+                            &name,
+                            args,
+                            &generic_member_partial,
+                        )
+                    })
+                    .or_else(|| {
+                        // A selected member/extension PROPERTY can itself be the function value
+                        // invoked by this syntax (`receiver.block(arg)`). Its function signature is
+                        // available before argument checking and therefore owns contextual lambda
+                        // typing just like a local function value does. Waiting until the later
+                        // property-read fallback first checks `{ this.member }` expectation-free and
+                        // leaks that provisional diagnostic even though the property's parameter is
+                        // a receiver function type.
+                        self.select_property_read(scope, rt, &name)
+                            .ok()
+                            .flatten()
+                            .and_then(|selection| match selection.ty().non_null() {
+                                Ty::Fun(signature) if signature.params.len() == args.len() => {
+                                    Some(signature.params.clone())
+                                }
+                                _ => None,
+                            })
+                    });
                 // Selection and contextual lambda typing depend on the receiver's semantic members,
                 // not on whether lowering later obtains that receiver from an expression, an object
                 // singleton, or a companion field. Classifier receivers use this same planner above.

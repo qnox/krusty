@@ -121,18 +121,29 @@ impl Checker<'_> {
         receiver: Ty,
         name: &str,
     ) -> Option<Ty> {
-        let params =
-            self.receiver_function_member_call_params(scope, receiver, name, args.len())?;
-        let arg_tys = args
+        let partial = args
             .iter()
-            .zip(params)
-            .map(|(&argument, parameter)| match self.file.expr(argument) {
-                Expr::Lambda { .. } | Expr::CallableRef { .. } => {
-                    self.check_argument_expected(scope, argument, parameter, false, None)
-                }
-                _ => self.expr(scope, argument),
+            .map(|&argument| match self.file.expr(argument) {
+                Expr::Lambda { .. } | Expr::CallableRef { .. } => None,
+                _ => Some(self.expr(scope, argument)),
             })
             .collect::<Vec<_>>();
+        let params =
+            self.receiver_function_member_call_params(scope, call, receiver, name, args, &partial)?;
+        let arg_tys =
+            args.iter()
+                .zip(params)
+                .enumerate()
+                .map(
+                    |(source, (&argument, parameter))| match self.file.expr(argument) {
+                        Expr::Lambda { .. } | Expr::CallableRef { .. } => {
+                            self.check_argument_expected(scope, argument, parameter, false, None)
+                        }
+                        _ => partial[source]
+                            .expect("ordinary argument was checked during applicability"),
+                    },
+                )
+                .collect::<Vec<_>>();
         self.record_explicit_receiver_function_invoke(
             scope,
             CallArgs {

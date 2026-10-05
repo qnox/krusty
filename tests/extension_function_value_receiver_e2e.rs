@@ -142,3 +142,29 @@ fn local_and_receiver_function_values_outrank_outer_extensions_like_kotlinc() {
         "ext_fn_value_vs_outer_extensions",
     );
 }
+
+#[test]
+fn an_inapplicable_function_value_leaves_the_tower_to_an_applicable_callable() {
+    common::expect_box_same_as_kotlinc(
+        "interface Scope\n\
+         object O : Scope {\n\
+         \x20   fun f(x: String) = \"member:$x\"\n\
+         \x20   fun <T> h() = \"generic-member\"\n\
+         }\n\
+         fun Scope.g(x: String) = \"top:$x\"\n\
+         fun qualified(f: Scope.(Int) -> String) = O.f(\"x\")\n\
+         fun expression(s: Scope, g: Scope.(Int) -> String) = s.g(\"x\")\n\
+         fun safe(s: Scope?, g: Scope.(Int) -> String) = s?.g(\"x\")\n\
+         fun explicitTypeArguments(h: Scope.() -> String) = O.h<Int>()\n\
+         fun applicable(f: Scope.(String) -> String) = O.f(\"x\")\n\
+         fun box(): String {\n\
+         \x20   val wrong: Scope.(Int) -> String = { \"wrong:$it\" }\n\
+         \x20   val all = listOf(\n\
+         \x20       qualified(wrong), expression(O, wrong), safe(O, wrong),\n\
+         \x20       explicitTypeArguments { \"wrong\" }, applicable { \"value:$it\" },\n\
+         \x20   ).joinToString()\n\
+         \x20   return if (all == \"member:x, top:x, top:x, generic-member, value:x\") \"OK\" else all\n\
+         }\n",
+        "ext_fn_value_applicability",
+    );
+}
