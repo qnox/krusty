@@ -1422,7 +1422,8 @@ impl BodyLowering<'_> {
                     expression.ty.get().non_null(),
                     crate::types::Ty::Fun(signature) if signature.suspend
                 );
-                let lambda = self.checked_lambda(*callable, body, suspend)?;
+                let unit_method = self.unit_method_lambda.take() == Some(expression_id);
+                let lambda = self.checked_lambda(*callable, body, suspend, unit_method)?;
                 self.record_generated_class_provenance(expression_id, lambda as usize);
                 // Every lambda keeps its place in the naming walk, whether or not a target writes
                 // a class for it: a spliced lambda's inline-depth marker is spelled after it.
@@ -1593,6 +1594,18 @@ impl BodyLowering<'_> {
             .ty
             .get();
         let value = expression;
+        if let Some(FirConversionKind::Sam(sam)) = conversion.map(|conversion| conversion.kind) {
+            let unit_method = self.body.sam_conversion(sam).is_some_and(|conversion| {
+                !conversion.suspend && conversion.declared_result.get() == crate::types::Ty::Unit
+            });
+            let literal = self
+                .body
+                .expr(value)
+                .is_some_and(|operand| matches!(operand.kind, FirExprKind::Lambda { .. }));
+            if unit_method && literal {
+                self.unit_method_lambda = Some(value);
+            }
+        }
         let expression = self.expression(value)?;
         let converted = self.lowered_with_conversion(expression, source_type, conversion)?;
         if conversion.is_some_and(|conversion| {

@@ -81,6 +81,37 @@ pub(super) fn record_renamed_functions(
     );
 }
 
+/// Source functions that the frontend bound to Kotlin `Any` members, keyed by their exact common
+/// IR realization. A same-spelled function without that checked override edge is deliberately
+/// absent, regardless of its physical name or arity.
+fn custom_any_roles(ir: &IrFile, owner: TypeName) -> HashMap<u32, crate::types::SemanticCallRole> {
+    ir.function_overrides
+        .get(&owner)
+        .into_iter()
+        .flatten()
+        .filter_map(|edge| {
+            let role = edge.overridden_semantic_role?;
+            if !matches!(
+                role,
+                crate::types::SemanticCallRole::KotlinAnyEquals
+                    | crate::types::SemanticCallRole::KotlinAnyHashCode
+                    | crate::types::SemanticCallRole::KotlinAnyToString
+            ) {
+                return None;
+            }
+            let crate::fir::ResolvedFunctionOverrideTarget::Module(declaration) =
+                edge.implementation
+            else {
+                return None;
+            };
+            ir.checked_callable_functions
+                .get(&declaration)
+                .copied()
+                .map(|function| (function, role))
+        })
+        .collect()
+}
+
 /// Synthesize a value class's unboxed-support members directly in the IR (a JVM concern, so it lives in
 /// this pass, not common lowering): `unbox-impl`/`box-impl`/`constructor-impl`/`equals-impl0` plus structural
 /// `equals`/`hashCode`/`toString` (skipped where the user defined one). The plain single-field class
@@ -239,32 +270,7 @@ pub(super) fn synth_value_members(
     // the first static parameter slot, so the body itself needs no slot rewrite; value-class property
     // reads inside it are lowered to the carrier later in this pass. The ordinary instance override is
     // synthesized below as the ABI delegator back to this implementation.
-    let custom_any_roles = ir
-        .function_overrides
-        .get(&internal_name)
-        .into_iter()
-        .flatten()
-        .filter_map(|edge| {
-            let role = edge.overridden_semantic_role?;
-            if !matches!(
-                role,
-                crate::types::SemanticCallRole::KotlinAnyEquals
-                    | crate::types::SemanticCallRole::KotlinAnyHashCode
-                    | crate::types::SemanticCallRole::KotlinAnyToString
-            ) {
-                return None;
-            }
-            let crate::fir::ResolvedFunctionOverrideTarget::Module(declaration) =
-                edge.implementation
-            else {
-                return None;
-            };
-            ir.checked_callable_functions
-                .get(&declaration)
-                .copied()
-                .map(|function| (function, role))
-        })
-        .collect::<HashMap<_, _>>();
+    let custom_any_roles = custom_any_roles(ir, internal_name);
     let mut custom_equals = false;
     let mut custom_hash_code = false;
     let mut custom_to_string = false;
@@ -1097,5 +1103,61 @@ pub(super) fn shift_slots(ir: &mut IrFile, root: ExprId) {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn override_edge(
+        owner: TypeName,
+        implementation: crate::fir::CallableId,
+        role: Option<crate::types::SemanticCallRole>,
+    ) -> crate::ir::IrFunctionOverride {
+        crate::ir::IrFunctionOverride {
+            implementation: crate::fir::ResolvedFunctionOverrideTarget::Module(implementation),
+            implementation_function: None,
+            implementation_owner: owner,
+            overridden: crate::fir::ResolvedFunctionOverrideTarget::Module(
+                crate::fir::CallableId::from_raw(99),
+            ),
+            overridden_owner: crate::types::type_name("kotlin/Any"),
+            overridden_semantic_role: role,
+            collection_barrier: None,
+            overridden_is_interface: false,
+            name: "equals".to_string(),
+            declared_parameters: vec![Ty::obj("kotlin/Any")],
+            declared_result: Ty::Boolean,
+            applied_parameters: vec![Ty::obj("kotlin/Any")],
+            applied_result: Ty::Boolean,
+            implementation_parameters: vec![Ty::String],
+            implementation_parameter_identities: Vec::new(),
+            overridden_parameter_identities: Vec::new(),
+            implementation_result: Ty::Boolean,
+            suspend: false,
+            has_kotlin_superclass_override: false,
+            depth: 1,
+        }
+    }
+
+    #[test]
+    fn same_named_function_is_custom_any_only_with_the_checked_override_role() {
+        let mut ir = IrFile::default();
+        let owner = crate::types::type_name("app/Token");
+        let declaration = crate::fir::CallableId::from_raw(7);
+        let function = 3;
+        ir.checked_callable_functions.insert(declaration, function);
+        ir.function_overrides
+            .insert(owner, vec![override_edge(owner, declaration, None)]);
+
+        assert!(custom_any_roles(&ir, owner).is_empty());
+
+        ir.function_overrides.get_mut(&owner).unwrap()[0].overridden_semantic_role =
+            Some(crate::types::SemanticCallRole::KotlinAnyEquals);
+        assert_eq!(
+            custom_any_roles(&ir, owner),
+            HashMap::from([(function, crate::types::SemanticCallRole::KotlinAnyEquals)])
+        );
     }
 }

@@ -124,6 +124,7 @@ impl ReferencedDependencies {
             | IrExpr::SingletonValue { .. }
             | IrExpr::GetValue(_)
             | IrExpr::SetValue { .. }
+            | IrExpr::SetFrameResult { .. }
             | IrExpr::PluginPlaceholder { .. }
             | IrExpr::Return(_)
             | IrExpr::Block { .. }

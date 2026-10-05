@@ -451,14 +451,38 @@ impl<'a> FileLowering<'a> {
         Some((*internal, ctor_params.clone(), omitted))
     }
 
-    /// The physical ordinals a class's primary `super(…)` delegation omits, if any.
+    /// Which constructor of its superclass `class`'s `super(…)` delegation calls: `None` for the
+    /// primary, the secondary's index otherwise, as the checker recorded it. `Err` when the
+    /// recorded ordinal names no constructor this file declares for the superclass.
+    pub(super) fn super_constructor(&self, class: ClassId) -> Result<Option<usize>, Unsupported> {
+        let declaration = &self.ir.classes[class as usize];
+        let Some(secondary) = declaration.super_ctor.ordinal.checked_sub(1) else {
+            return Ok(None);
+        };
+        let parent = self
+            .ir
+            .class_id_by_name(declaration.superclass)
+            .map(|parent| &self.ir.classes[parent as usize]);
+        match parent.and_then(|parent| parent.secondary_ctors.get(secondary as usize)) {
+            Some(constructor) if constructor.prefix_params.is_empty() => {
+                Ok(Some(secondary as usize))
+            }
+            _ => Err(format!(
+                "a superclass call of `{}` to a constructor its superclass does not declare here",
+                declaration.fq_name()
+            )),
+        }
+    }
+
+    /// The physical ordinals a class's `super(…)` delegation omits, if any, with the superclass
+    /// constructor it calls.
     ///
     /// The IR records SEMANTIC ordinals — a backend's own prefix is not its to know — so they are
     /// shifted past the superclass's compiler-supplied leading parameters here.
     pub(super) fn omitted_super_arguments(
         &self,
         class: ClassId,
-    ) -> Option<(TypeName, Option<Vec<Ty>>, Vec<u32>)> {
+    ) -> Option<(TypeName, Option<usize>, Vec<u32>)> {
         let declaration = &self.ir.classes[class as usize];
         let omitted = self
             .ir
@@ -471,29 +495,30 @@ impl<'a> FileLowering<'a> {
         let prefix = self.ir.classes[parent as usize].constructor_prefix_count;
         let mut physical: Vec<u32> = omitted.iter().map(|ordinal| ordinal + prefix).collect();
         physical.sort_unstable();
-        // WHICH of the base's constructors the supertype call names, by the parameter list the
-        // class recorded for it. A base whose only constructor is a SECONDARY is reached this way
-        // — `class C : B()` where `B`'s one constructor defaults its argument — and reading the
-        // primary's frame for it would fill a frame that does not exist.
-        Some((
-            declaration.superclass,
-            Some(declaration.super_ctor_params.clone()),
-            physical,
-        ))
+        // A base whose only constructor is a SECONDARY is reached this way — `class C : B()`
+        // where `B`'s one constructor defaults its argument — and reading the primary's frame
+        // for it would fill a frame that does not exist.
+        let secondary = self.super_constructor(class).ok()?;
+        Some((declaration.superclass, secondary, physical))
     }
 
     /// Declare a wrapper for every omission shape the file's constructions use.
     pub(super) fn declare_default_constructors(&mut self) -> Result<(), Unsupported> {
         // A `class B : A()` whose base leaves arguments out needs the same wrapper a `A()` written
         // as an expression would, and the delegation is not an expression, so both are collected.
-        let shapes: Vec<(TypeName, Option<Vec<Ty>>, Vec<u32>)> = (0..self.ir.classes.len()
+        let shapes: Vec<(TypeName, Option<usize>, Vec<u32>)> = (0..self.ir.classes.len()
             as ClassId)
             .filter_map(|class| self.omitted_super_arguments(class))
             .chain(
                 self.ir
                     .exprs
                     .iter()
-                    .filter_map(Self::omitted_constructor_arguments),
+                    .filter_map(Self::omitted_constructor_arguments)
+                    .filter_map(|(internal, selected, omitted)| {
+                        let class = self.ir.class_id_by_name(internal)?;
+                        let secondary = self.selected_constructor(class, selected.as_deref())?;
+                        Some((internal, secondary, omitted))
+                    }),
             )
             // An enum CONSTANT leaving an argument out is the same omission written a third way:
             // `RED` where the enum's constructor declares `(val rgb: Int = 0)` is not an
@@ -512,15 +537,12 @@ impl<'a> FileLowering<'a> {
                 })
             }))
             .collect();
-        for (internal, selected, omitted) in shapes {
+        for (internal, secondary, omitted) in shapes {
             // A construction naming a class this file does not declare, or a constructor whose
             // parameter list names none of this class's, declares no wrapper; the call site then
             // finds none and declines there, rather than this phase failing the whole file for one
             // construction.
             let Some(class) = self.ir.class_id_by_name(internal) else {
-                continue;
-            };
-            let Some(secondary) = self.selected_constructor(class, selected.as_deref()) else {
                 continue;
             };
             let declared = match secondary {
