@@ -1816,18 +1816,10 @@ impl<'a> FileLowering<'a> {
         let parent = match layout.superclass {
             Some(parent) => {
                 let parent_declaration = &self.ir.classes[parent as usize];
-                // `class B : A(4)` names the constructor the checker selected, which may be a
+                // `class B : A(4)` calls the constructor the checker selected, which may be a
                 // SECONDARY one — `sealed class A() { constructor(i: Int) : this() }` is that
-                // shape. Reading the primary's parameter list for every base call made the arity
-                // disagree and declined the file. Kotlin admits no two constructors of one class
-                // with the same parameter list, so a secondary matching the selection is it.
-                let sibling = parent_declaration
-                    .secondary_ctors
-                    .iter()
-                    .position(|candidate| {
-                        candidate.prefix_params.is_empty()
-                            && candidate.params == declaration.super_ctor_params
-                    });
+                // shape — and an enum constant's subclass calls the one its constant selected.
+                let sibling = self.super_constructor(class)?;
                 let params: Vec<Ty> = match sibling {
                     Some(sibling) => parent_declaration.secondary_ctors[sibling].params.clone(),
                     None => constructor_parameters(self.ir, parent),
