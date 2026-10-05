@@ -411,18 +411,9 @@ impl Emitter<'_> {
     }
 
     /// A cast target as kotlinc's IR renderer spells it in
-    /// `null cannot be cast to non-null type …`.
+    /// `null cannot be cast to non-null type …`, where a class in the root package reads
+    /// `<root>.Token`.
     fn rendered_cast_target(&self, ty: Ty) -> String {
-        self.rendered_cast_type(ty, false)
-    }
-
-    /// A reified cast target as kotlinc's inliner spells it in the same message, where a class in
-    /// the root package reads `<root>.Token`.
-    pub(super) fn rendered_inlined_cast_target(&self, ty: Ty) -> String {
-        self.rendered_cast_type(ty, true)
-    }
-
-    fn rendered_cast_type(&self, ty: Ty, qualify_root_classifier: bool) -> String {
         self.ir.rendered_cast_target(
             ty,
             &|function| {
@@ -432,8 +423,13 @@ impl Emitter<'_> {
                         .unwrap_or_else(|| crate::types::type_name(&self.facade)),
                 )
             },
-            qualify_root_classifier,
+            true,
         )
+    }
+
+    /// A reified cast target the inliner substitutes renders through the same IR renderer.
+    pub(super) fn rendered_inlined_cast_target(&self, ty: Ty) -> String {
+        self.rendered_cast_target(ty)
     }
 
     fn emit_implicit_coercion(

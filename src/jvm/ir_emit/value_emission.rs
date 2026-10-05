@@ -28,6 +28,43 @@ impl super::Emitter<'_> {
         node: &IrExpr,
         code: &mut CodeBuilder,
     ) {
+        // A `Companion` field this class may not read is read through the accessor the plan
+        // placed for it.
+        if let (Some(context), Some(read)) = (
+            self.static_owner,
+            super::companion_field::companion_field_read(self.ir, self.classifiers, node),
+        ) {
+            match super::companion_field::companion_field_accessor(self.ir, context, &read) {
+                Err(error) => {
+                    *self.run.emit_error.borrow_mut() = Some(error);
+                    return;
+                }
+                Ok(Some((owner, accessor))) => {
+                    let planned = self.run.static_accessor_plan.borrow().declares(
+                        crate::jvm::private_static_access::StaticOwner::Class(owner),
+                        accessor,
+                    );
+                    if !planned {
+                        *self.run.emit_error.borrow_mut() = Some(format!(
+                            "{} declares no accessor for companion {}",
+                            owner.render(),
+                            read.companion.render()
+                        ));
+                        return;
+                    }
+                    let (name, descriptor) = super::companion_field::companion_instance_accessor(
+                        owner,
+                        read.holder,
+                        read.companion,
+                        &read.field,
+                    );
+                    let method = self.cw.methodref(&owner.render(), &name, &descriptor);
+                    code.invokestatic(method, 0, 1);
+                    return;
+                }
+                Ok(None) => {}
+            }
+        }
         match node {
             IrExpr::BottomValue { producer, .. } => {
                 let baseline = code.stack_height();
@@ -744,9 +781,13 @@ impl super::Emitter<'_> {
                         };
                         self.emit_value(receiver, code);
                         self.emit_value(*argument, code);
+                        // kotlinc's `CompareTo` intrinsic: the int category and `long` go through
+                        // `Intrinsics.compare`, `Boolean` and the floating types through their
+                        // wrappers.
                         let (owner, descriptor) = match *operand {
-                            Ty::Int => ("java/lang/Integer", "(II)I"),
-                            Ty::Long => ("java/lang/Long", "(JJ)I"),
+                            Ty::Boolean => ("java/lang/Boolean", "(ZZ)I"),
+                            Ty::Int => ("kotlin/jvm/internal/Intrinsics", "(II)I"),
+                            Ty::Long => ("kotlin/jvm/internal/Intrinsics", "(JJ)I"),
                             Ty::Float => ("java/lang/Float", "(FF)I"),
                             Ty::Double => ("java/lang/Double", "(DD)I"),
                             _ => unreachable!(
@@ -1365,11 +1406,10 @@ impl super::Emitter<'_> {
                 code.getstatic(f, 1);
             }
             IrExpr::SingletonValue { classifier } => {
-                let Some(published) = singleton_instance_load::published_singleton(
-                    self.ir,
-                    *classifier,
-                    self.bodies.singleton_storage(*classifier),
-                ) else {
+                let dependency = crate::jvm::singleton_storage::of(self.classifiers, *classifier);
+                let Some(published) =
+                    singleton_instance_load::published_singleton(self.ir, *classifier, dependency)
+                else {
                     *self.run.emit_error.borrow_mut() = Some(format!(
                         "missing JVM storage for singleton {}",
                         classifier.render()
@@ -1730,6 +1770,7 @@ impl super::Emitter<'_> {
                     indy,
                     cap_words,
                     captures,
+                    cap_tys,
                     sam.as_ref().is_some_and(|target| target.nullable),
                 );
             }
@@ -1879,7 +1920,7 @@ impl super::Emitter<'_> {
                     self.release_operand_spills(&temps);
                 } else {
                     self.emit_value(*holder, code);
-                    self.emit_value(*value, code);
+                    self.emit_element_value(*elem, *value, code);
                 }
                 let (cls, fdesc) = ref_class(elem);
                 let f = self.cw.fieldref(cls, "element", fdesc);

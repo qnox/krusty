@@ -2251,6 +2251,7 @@ mod tests {
             getter_jvm_name: None,
             setter_jvm_name: None,
             needs_access_bridge: false,
+            accessor_annotations: Default::default(),
         }];
         let property = crate::fir::PropertyId::from_raw(0);
         ir.local_property_layouts.insert(
