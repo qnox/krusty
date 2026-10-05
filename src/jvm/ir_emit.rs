@@ -1959,11 +1959,14 @@ fn build_lambda_class(plan: &LambdaClassPlan, opts: &EmitOptions) -> (String, Ve
         .unwrap_or(&[])
         .to_vec();
     // A Kotlin lambda's class declares kotlinc's typed `invoke` over the lambda's own parameters,
-    // which its metadata names; the erased `FunctionN.invoke` is a bridge to it.
+    // which its metadata names; the erased `FunctionN.invoke` is a bridge to it. A typed `invoke`
+    // that erases to the interface slot (`invoke(Object)Object` over an unbounded `T`) is that
+    // slot itself, with no bridge.
     let typed_invoke = plan
         .metadata
         .as_ref()
-        .and_then(|metadata| metadata.typed_invoke.as_deref());
+        .and_then(|metadata| metadata.typed_invoke.as_deref())
+        .filter(|typed| *typed != plan.sam_desc);
     if let Some(typed_desc) = typed_invoke {
         emit_typed_lambda_invoke(
             &mut cw,

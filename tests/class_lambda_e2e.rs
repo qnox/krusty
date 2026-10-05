@@ -383,7 +383,8 @@ fun box(): String {
 /// provided>` for an anonymous function), which a lambda's `toString()` renders through
 /// kotlin-reflect: `(kotlin.Int) -> kotlin.Int`. The record names the class's typed `invoke`
 /// (`invoke(ILToken;)Ljava/lang/Integer;`, or only its name for `invoke()V`, which a reader
-/// rebuilds). Each class's header must equal kotlinc's.
+/// rebuilds; an unbounded `T` erases the typed `invoke` to the interface slot itself). Each class's
+/// header must equal kotlinc's.
 const METADATA_SOURCE: &str = r#"
 class Token(val n: Int)
 fun plain(): Any = { x: Int, t: Token -> x + t.n }
@@ -392,15 +393,17 @@ fun <T : Comparable<T>> generic(): Any = { t: T -> t }
 fun capturing(base: Token): Any = { y: Int -> base.n + y }
 fun unitResult(): Any = { -> }
 fun nullable(): Any = { x: Int? -> x }
+fun <T> erased(): Any = { t: T -> t }
 "#;
 
-const METADATA_LAMBDA_CLASSES: [&str; 6] = [
+const METADATA_LAMBDA_CLASSES: [&str; 7] = [
     "MKt$plain$1",
     "MKt$extension$1",
     "MKt$generic$1",
     "MKt$capturing$1",
     "MKt$unitResult$1",
     "MKt$nullable$1",
+    "MKt$erased$1",
 ];
 
 fn class_mode_metadata(
