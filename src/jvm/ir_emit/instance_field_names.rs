@@ -32,7 +32,12 @@ pub(super) fn instance_field_jvm_name(ir: &IrFile, class: &IrClass, field: &IrFi
 
 fn physical_name(ir: &IrFile, class: &IrClass, index: usize, earlier: &[String]) -> String {
     if let Some(capture) = super::super::capture_names::field_capture(class, index) {
-        return super::super::capture_names::capture_name(capture);
+        return super::super::capture_names::class_capture(ir, class, capture).field;
+    }
+    if let Some(lambda) = &class.lambda {
+        return super::super::capture_names::lambda_class_capture(ir, lambda, index)
+            .expect("every field of a lambda class stores one of its captures")
+            .field;
     }
     let field = &class.fields[index];
     let owner = class.fq_name();

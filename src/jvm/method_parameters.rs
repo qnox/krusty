@@ -4,6 +4,7 @@ use crate::ir::{
     IrClass, IrFile, IrGeneratedParameterRole, IrParameterIdentity, IrParameterRole,
     IrSecondaryCtor,
 };
+use crate::jvm::suspend::cps::{SuspendLambdaMember, SuspendLambdaParameters};
 use crate::types::{Ty, TypeName};
 
 pub(super) type MethodParameter = (Option<String>, u16);
@@ -79,7 +80,8 @@ pub(super) fn record_function(
 
 /// Parameters of one emitted common-IR function. Presence of `FnParamInfo` is the explicit contract
 /// that the function has declaration/debug parameter identities; compiler-generated parameters are
-/// flagged from their recorded provenance. A holder receiver is a JVM-generated synthetic prefix.
+/// flagged from their recorded provenance. A holder receiver is a JVM-generated synthetic prefix, and
+/// kotlinc flags every value or receiver a lifted callable captures synthetic too.
 pub(super) fn function(
     ir: &IrFile,
     function: u32,
@@ -101,22 +103,28 @@ pub(super) fn function(
         physical_parameters.len(),
         "recorded function parameter identities must match the physical JVM parameters"
     );
-    let projected_names =
-        crate::jvm::parameter_names::function_method_parameters(ir, function, physical_parameters)
-            .expect("published MethodParameters identities have JVM projections");
+    let projected_names = crate::jvm::parameter_names::placed(
+        ir,
+        function,
+        holder_receiver,
+        crate::jvm::parameter_names::function_method_parameters(ir, function, physical_parameters),
+    )
+    .expect("published MethodParameters identities have JVM projections");
+    // A value-class member lowered to a static `-impl`, an interface member's body on its
+    // `DefaultImpls` holder and a `$suspendImpl` all take their receivers as ordinary parameters.
+    let moved_receivers = ir.jvm_value_class_receiver_impls.contains(&function)
+        || crate::jvm::parameter_names::takes_dispatch_receiver_first(
+            ir,
+            function,
+            holder_receiver,
+        );
     let mut parameters = identities
         .into_iter()
         .enumerate()
         .map(|(index, identity)| {
             (
                 projected_names[index].clone(),
-                u16::from(matches!(
-                    identity.role,
-                    IrParameterRole::Generated(
-                        IrGeneratedParameterRole::HolderReceiver
-                            | IrGeneratedParameterRole::ValueClassCarrier
-                    )
-                )) * SYNTHETIC,
+                function_parameter_flags(identity.role, moved_receivers),
             )
         })
         .collect::<Vec<_>>();
@@ -126,7 +134,67 @@ pub(super) fn function(
     parameters
 }
 
-fn constructor_prefix(class: &IrClass, count: usize) -> Vec<MethodParameter> {
+/// kotlinc flags a compiler-generated receiver or capture `SYNTHETIC`. A static that takes a
+/// member's receivers as parameters moves its dispatch receiver into a synthetic one (a value-class
+/// `-impl`'s carrier `arg0`, `DefaultImpls`' `$this`) and its extension receiver into an ordinary
+/// parameter, which it flags `MANDATED` (`$this$mext`, `$receiver`); an extension receiver that
+/// stays one, of an instance method or a top-level function, has no flag.
+fn function_parameter_flags(role: IrParameterRole, moved_receivers: bool) -> u16 {
+    match role {
+        IrParameterRole::Generated(
+            IrGeneratedParameterRole::HolderReceiver | IrGeneratedParameterRole::ValueClassCarrier,
+        )
+        | IrParameterRole::CapturedValue { .. }
+        | IrParameterRole::CapturedReceiver { .. } => SYNTHETIC,
+        IrParameterRole::ExtensionReceiver if moved_receivers => MANDATED,
+        _ => 0,
+    }
+}
+
+/// The interface entry a value class keeps on its box for a member lowered to a static `-impl`
+/// declares that member's parameters less the carrier, named as the member names them. Its
+/// extension receiver is the receiver of an instance method again, so it has no flag (`$this$abs`
+/// beside the static's mandated one). `member_parameters` are the static's physical parameters.
+pub(super) fn value_class_interface_entry(
+    ir: &IrFile,
+    member: u32,
+    member_parameters: &[Ty],
+    entry_parameters: usize,
+) -> Vec<MethodParameter> {
+    let identities = ir
+        .function_parameter_identities(member)
+        .expect("a value-class member lowered to a static records its parameter identities");
+    assert_eq!(
+        identities.len(),
+        member_parameters.len(),
+        "recorded function parameter identities must match the physical JVM parameters"
+    );
+    assert!(
+        matches!(
+            identities.first().map(|identity| identity.role),
+            Some(IrParameterRole::Generated(
+                IrGeneratedParameterRole::ValueClassCarrier
+            ))
+        ),
+        "an interface entry's static member leads with its carrier"
+    );
+    assert_eq!(
+        identities.len() - 1,
+        entry_parameters,
+        "an interface entry declares its static member's parameters less the carrier"
+    );
+    let names =
+        crate::jvm::parameter_names::function_method_parameters(ir, member, member_parameters)
+            .expect("published MethodParameters identities have JVM projections");
+    identities
+        .iter()
+        .zip(names)
+        .skip(1)
+        .map(|(identity, name)| (name, function_parameter_flags(identity.role, false)))
+        .collect()
+}
+
+fn constructor_prefix(ir: &IrFile, class: &IrClass, count: usize) -> Vec<MethodParameter> {
     assert!(
         count <= class.ctor_args.len(),
         "constructor prefix exceeds its arguments"
@@ -150,7 +218,7 @@ fn constructor_prefix(class: &IrClass, count: usize) -> Vec<MethodParameter> {
             let name = argument
                 .capture
                 .as_ref()
-                .map(crate::jvm::capture_names::capture_name)
+                .map(|capture| crate::jvm::capture_names::class_capture(ir, class, capture).field)
                 .or_else(|| {
                     let field = argument.field_index?;
                     Some(class.fields.get(field as usize)?.name.clone())
@@ -172,6 +240,7 @@ fn generated_constructor_flags(role: IrGeneratedParameterRole) -> u16 {
 }
 
 pub(super) fn primary_constructor(
+    ir: &IrFile,
     class: &IrClass,
     physical_parameters: &[Ty],
 ) -> Vec<MethodParameter> {
@@ -184,7 +253,7 @@ pub(super) fn primary_constructor(
         "primary constructor identities must match its physical JVM parameters"
     );
     let prefix = class.constructor_prefix_count as usize;
-    let mut parameters = constructor_prefix(class, prefix);
+    let mut parameters = constructor_prefix(ir, class, prefix);
     let projected = crate::jvm::parameter_names::constructor_method_parameters(&class.ctor_args);
     parameters.extend(projected[prefix..].iter().cloned().map(|name| (name, 0)));
     parameters
@@ -194,10 +263,11 @@ pub(super) fn primary_constructor(
 /// JVM `MethodParameters` attribute was requested. Synthetic marker accessors still need these for
 /// their `LocalVariableTable`; omitting that table must not be used as a substitute for identities.
 pub(super) fn primary_constructor_identities(
+    ir: &IrFile,
     class: &IrClass,
     physical_parameters: &[Ty],
 ) -> Vec<Option<String>> {
-    let identities = crate::jvm::parameter_names::constructor_local_variables(&class.ctor_args);
+    let identities = crate::jvm::parameter_names::constructor_local_variables(ir, class);
     assert_eq!(identities.len(), physical_parameters.len());
     identities
 }
@@ -239,6 +309,7 @@ impl OwnerConstructorPrefix {
 }
 
 pub(super) fn secondary_constructor(
+    ir: &IrFile,
     class: &IrClass,
     constructor: &IrSecondaryCtor,
     owner_prefix: &OwnerConstructorPrefix,
@@ -253,7 +324,11 @@ pub(super) fn secondary_constructor(
         "secondary constructor identities must match its physical JVM parameters"
     );
     let mut parameters = owner_prefix.parameters.clone();
-    parameters.extend(constructor_prefix(class, constructor.prefix_params.len()));
+    parameters.extend(constructor_prefix(
+        ir,
+        class,
+        constructor.prefix_params.len(),
+    ));
     parameters.extend(
         constructor
             .named_params
@@ -268,6 +343,7 @@ pub(super) fn secondary_constructor(
 /// `MethodParameters`, but an emitted marker accessor must still use the identities common IR
 /// recorded instead of inventing `pN` names or silently dropping its debug locals.
 pub(super) fn secondary_constructor_identities(
+    ir: &IrFile,
     class: &IrClass,
     constructor: &IrSecondaryCtor,
     owner_prefix: &OwnerConstructorPrefix,
@@ -279,7 +355,11 @@ pub(super) fn secondary_constructor_identities(
         "secondary constructor identities must match its physical JVM parameters"
     );
     let mut parameters = owner_prefix.parameters.clone();
-    parameters.extend(constructor_prefix(class, constructor.prefix_params.len()));
+    parameters.extend(constructor_prefix(
+        ir,
+        class,
+        constructor.prefix_params.len(),
+    ));
     parameters.extend(
         constructor
             .named_params
@@ -307,10 +387,13 @@ pub(super) fn enum_value_of() -> [MethodParameter; 1] {
     [parameter("value", 0)]
 }
 
-/// Compatibility-holder forwards prepend a JVM-generated receiver to the declaration's parameters.
-/// Metadata/provider boundaries must supply every source identity; inventing `pN` names would make
-/// reflection succeed with a semantically false parameter list.
-pub(super) fn holder_forward(
+/// A compatibility-holder forward republishing an inherited member prepends a JVM-generated
+/// receiver to the declaration's parameters, and takes an extension receiver as an ordinary,
+/// mandated parameter like every static that moves a member's receivers. Metadata/provider
+/// boundaries must supply every source identity; inventing `pN` names would make reflection
+/// succeed with a semantically false parameter list.
+pub(super) fn resolved_holder_forward(
+    identities: &[crate::fir::ResolvedParameterIdentity],
     names: &[Option<String>],
     physical_parameters: &[Ty],
 ) -> Vec<MethodParameter> {
@@ -319,8 +402,19 @@ pub(super) fn holder_forward(
         physical_parameters.len(),
         "compatibility-holder parameter identities must match its declaration"
     );
+    assert_eq!(
+        identities.len(),
+        names.len(),
+        "one spelling per compatibility-holder parameter identity"
+    );
     std::iter::once(parameter("$this", SYNTHETIC))
-        .chain(names.iter().cloned().map(|name| (name, 0)))
+        .chain(identities.iter().zip(names).map(|(identity, name)| {
+            let flags = match identity {
+                crate::fir::ResolvedParameterIdentity::ExtensionReceiver => MANDATED,
+                _ => 0,
+            };
+            (name.clone(), flags)
+        }))
         .collect()
 }
 
@@ -354,4 +448,38 @@ pub(super) fn continuation_constructor(class: &IrClass) -> Vec<MethodParameter> 
 
 pub(super) fn continuation_invoke_suspend() -> [MethodParameter; 1] {
     [parameter("$result", 0)]
+}
+
+/// `MethodParameters` of a suspend lambda class's generated `member`, formatted from the
+/// parameter identities its realization recorded and checked against `physical_parameters`: a
+/// captured value or receiver under the name of the field it initializes, synthetic; the
+/// completion, `create`'s value and the typed `invoke`'s `FunctionN` values as their roles spell
+/// them.
+pub(super) fn suspend_lambda_member(
+    ir: &IrFile,
+    parameters: &SuspendLambdaParameters,
+    member: SuspendLambdaMember,
+    physical_parameters: &[Ty],
+) -> Vec<MethodParameter> {
+    parameters
+        .physical(member, physical_parameters.len())
+        .iter()
+        .map(|identity| match identity.role {
+            IrParameterRole::CapturedValue { .. } | IrParameterRole::CapturedReceiver { .. } => {
+                let names =
+                    crate::jvm::capture_names::suspend_lambda_capture(ir, parameters, identity);
+                parameter(names.field, SYNTHETIC)
+            }
+            IrParameterRole::Generated(
+                IrGeneratedParameterRole::Continuation
+                | IrGeneratedParameterRole::SuspendLambdaCreateValue
+                | IrGeneratedParameterRole::FunctionInvokeValue { .. },
+            ) => parameter(
+                crate::jvm::parameter_names::method_parameter(identity, "")
+                    .expect("a suspend lambda's generated parameter role has a JVM name"),
+                0,
+            ),
+            role => panic!("a suspend lambda's {member:?} declares no {role:?} parameter"),
+        })
+        .collect()
 }

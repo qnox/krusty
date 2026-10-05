@@ -3,6 +3,7 @@
 //! rediscover alias-ness from the source spelling after selection.
 
 use super::*;
+use crate::symbol_resolver::{CandidateSelectionWithTies, ClassifierMiss};
 
 /// The typealias binding selected on the classifier tower together with its expanded classifier.
 /// A declared alias carries its qualified identity. `identity` is absent only for a statement-local
@@ -48,6 +49,43 @@ fn selected_alias_from_declaration(
     }
 }
 
+fn same_selected_alias(
+    left: Option<&SelectedTypeAlias>,
+    right: Option<&SelectedTypeAlias>,
+) -> bool {
+    match (left, right) {
+        (None, None) => true,
+        (Some(left), Some(right)) => {
+            left.identity == right.identity
+                && left.formals == right.formals
+                && left.expansion == right.expansion
+        }
+        (None, Some(_)) | (Some(_), None) => false,
+    }
+}
+
+/// How a qualified classifier spelling meets a scope-tower rung whose root lacks the written
+/// suffix. A qualifier in an expression commits to the first rung that binds its root; a type
+/// reference considers only complete paths, so `A.B` in a type reaches an imported `A` that has
+/// `B` past a nearer lexical `A` that does not (kotlinc 2.4.20).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum QualifiedRoot {
+    Committed,
+    CompletePath,
+}
+
+type ClassifierBinding = (
+    InheritedNestedClassifier,
+    Option<ClassifierMiss>,
+    Option<SelectedTypeAlias>,
+);
+
+enum CompleteImportedSelection {
+    None(Option<ClassifierBinding>),
+    Selected(ClassifierBinding),
+    Ambiguous(Vec<TypeName>),
+}
+
 impl Checker<'_> {
     /// Select the classifier root from the scope tower, then commit every remaining segment through
     /// the shared qualifier loop. The third result is the alias binding from the same winning root
@@ -56,11 +94,27 @@ impl Checker<'_> {
         &self,
         scope: &CheckerScope<'_>,
         name: &str,
-    ) -> (
-        InheritedNestedClassifier,
-        Option<String>,
-        Option<SelectedTypeAlias>,
-    ) {
+    ) -> ClassifierBinding {
+        self.select_classifier_binding_with(scope, name, QualifiedRoot::Committed)
+    }
+
+    /// Bind a type reference's classifier: each scope-tower rung offers its root, and a rung whose
+    /// root does not contain the written suffix yields to the next one, as kotlinc's type resolution
+    /// selects among complete paths only.
+    pub(super) fn select_type_classifier_binding(
+        &self,
+        scope: &CheckerScope<'_>,
+        name: &str,
+    ) -> ClassifierBinding {
+        self.select_classifier_binding_with(scope, name, QualifiedRoot::CompletePath)
+    }
+
+    fn select_classifier_binding_with(
+        &self,
+        scope: &CheckerScope<'_>,
+        name: &str,
+        mode: QualifiedRoot,
+    ) -> ClassifierBinding {
         let segments = name
             .split(['.', '/'])
             .filter(|segment| !segment.is_empty())
@@ -69,137 +123,196 @@ impl Checker<'_> {
         let Some((_, root_name)) = segments.first() else {
             return (
                 InheritedNestedClassifier::NotFound,
-                Some(name.to_string()),
+                Some(ClassifierMiss::Unresolved(name.to_string())),
                 None,
             );
         };
         let source = self.fed_source();
-        let mut selected_alias = None;
+        // The miss of the nearest rung that bound the root: a lower rung may still supply a
+        // complete path, but its own misses never replace this one.
+        let nearest_miss: std::cell::RefCell<Option<ClassifierBinding>> = Default::default();
+        let offer = |root: TypeName, alias: Option<SelectedTypeAlias>| {
+            let binding = self.commit_classifier_suffix(
+                &source,
+                ResolvedQualifier::Classifier(root),
+                root_name,
+                &segments,
+                alias,
+            );
+            if mode == QualifiedRoot::CompletePath
+                && binding.0 == InheritedNestedClassifier::NotFound
+            {
+                nearest_miss.borrow_mut().get_or_insert(binding);
+                None
+            } else {
+                Some(binding)
+            }
+        };
         let scoped = scope.symbols(root_name, &source);
-        let root = if let Some(internal) = scoped.classifier_name {
-            ResolvedQualifier::Classifier(internal)
-        } else if let Some(alias) = self.selected_lexical_type_alias(scope, root_name) {
+        if let Some(internal) = scoped.classifier_name {
+            if let Some(binding) = offer(internal, None) {
+                return binding;
+            }
+        }
+        if let Some(alias) = self.selected_lexical_type_alias(scope, root_name) {
             let Ok((internal, alias)) = alias else {
                 return Self::invalid_alias_selection(root_name);
             };
-            selected_alias = Some(alias);
-            ResolvedQualifier::Classifier(internal)
-        } else if let Some(internal) = self.classifier_header_lexical_type_name(root_name) {
-            ResolvedQualifier::Classifier(internal)
-        } else if let Some(internal) = self.enclosing_nested_type_name(root_name) {
-            ResolvedQualifier::Classifier(internal)
-        } else {
-            match self.inherited_nested_type_name(root_name) {
-                InheritedNestedClassifier::Found(internal) => {
-                    ResolvedQualifier::Classifier(internal)
+            if let Some(binding) = offer(internal, Some(alias)) {
+                return binding;
+            }
+        }
+        if let Some(internal) = self.classifier_header_lexical_type_name(root_name) {
+            if let Some(binding) = offer(internal, None) {
+                return binding;
+            }
+        }
+        if let Some(internal) = self.enclosing_nested_type_name(root_name) {
+            if let Some(binding) = offer(internal, None) {
+                return binding;
+            }
+        }
+        match self.inherited_nested_type_name(root_name) {
+            InheritedNestedClassifier::Found(internal) => {
+                if let Some(binding) = offer(internal, None) {
+                    return binding;
                 }
-                InheritedNestedClassifier::Ambiguous => {
+            }
+            InheritedNestedClassifier::Ambiguous => {
+                return nearest_miss.take().unwrap_or((
+                    InheritedNestedClassifier::Ambiguous,
+                    Some(ClassifierMiss::Unresolved(root_name.clone())),
+                    None,
+                ));
+            }
+            InheritedNestedClassifier::NotFound => {}
+        }
+        if let Some((classifier, declaration)) = self.explicit_import_classifier_binding(root_name)
+        {
+            let Ok(alias) = selected_alias_from_declaration(classifier, declaration.as_ref())
+            else {
+                return Self::invalid_alias_selection(root_name);
+            };
+            if let Some(binding) = offer(classifier, alias) {
+                return binding;
+            }
+        }
+        if let Some((classifier, alias)) = self.selected_same_package_classifier(root_name) {
+            let Ok(alias) = alias else {
+                return Self::invalid_alias_selection(root_name);
+            };
+            if let Some(binding) = offer(classifier, alias) {
+                return binding;
+            }
+        }
+        if let Some(classifier) = self.alias_ahead_of_imported_classifier(scope, root_name, &source)
+        {
+            let Ok(alias) = self.selected_scoped_type_alias(scope, root_name, classifier) else {
+                return Self::invalid_alias_selection(root_name);
+            };
+            if let Some(binding) = offer(classifier, Some(alias)) {
+                return binding;
+            }
+        }
+        if mode == QualifiedRoot::CompletePath {
+            match self.complete_imported_classifier_binding(root_name, &segments, &source) {
+                CompleteImportedSelection::Selected(binding) => return binding,
+                CompleteImportedSelection::Ambiguous(candidates) => {
                     return (
                         InheritedNestedClassifier::Ambiguous,
-                        Some(root_name.clone()),
+                        Some(ClassifierMiss::Ambiguous(candidates)),
                         None,
                     );
                 }
-                InheritedNestedClassifier::NotFound => {
-                    if let Some((classifier, declaration)) =
-                        self.explicit_import_classifier_binding(root_name)
-                    {
-                        let provenance =
-                            selected_alias_from_declaration(classifier, declaration.as_ref());
-                        let Ok(alias) = provenance else {
-                            return Self::invalid_alias_selection(root_name);
-                        };
-                        selected_alias = alias;
-                        ResolvedQualifier::Classifier(classifier)
-                    } else if let Some((classifier, alias)) =
-                        self.selected_same_package_classifier(root_name)
-                    {
-                        let Ok(alias) = alias else {
-                            return Self::invalid_alias_selection(root_name);
-                        };
-                        selected_alias = alias;
-                        ResolvedQualifier::Classifier(classifier)
-                    } else if let Some(classifier) =
-                        self.alias_ahead_of_imported_classifier(scope, root_name, &source)
-                    {
-                        let Ok(alias) =
-                            self.selected_scoped_type_alias(scope, root_name, classifier)
-                        else {
-                            return Self::invalid_alias_selection(root_name);
-                        };
-                        selected_alias = Some(alias);
-                        ResolvedQualifier::Classifier(classifier)
-                    } else {
-                        let imported = classifier_from_imports(
-                            root_name,
-                            &self.imports,
-                            &self.import_levels,
-                            &source,
-                        );
-                        crate::trace_compiler!(
-                            "resolve",
-                            "classifier root={root_name} imported={:?}",
-                            imported.found().map(TypeName::render)
-                        );
-                        match imported {
-                            InheritedNestedClassifier::Found(internal) => {
-                                let internal = self.libraries.canonical_source_type_name(internal);
-                                let Ok(alias) =
-                                    self.selected_imported_type_alias(root_name, internal)
-                                else {
-                                    return Self::invalid_alias_selection(root_name);
-                                };
-                                selected_alias = alias;
-                                ResolvedQualifier::Classifier(internal)
-                            }
-                            InheritedNestedClassifier::Ambiguous => {
-                                return (
-                                    InheritedNestedClassifier::Ambiguous,
-                                    Some(root_name.clone()),
-                                    None,
-                                );
-                            }
-                            InheritedNestedClassifier::NotFound => {
-                                match self
-                                    .classifier_header_owner
-                                    .map_or(InheritedNestedClassifier::NotFound, |owner| {
-                                        self.inherited_nested_type_for_owner(root_name, owner)
-                                    }) {
-                                    InheritedNestedClassifier::Found(internal) => {
-                                        ResolvedQualifier::Classifier(internal)
-                                    }
-                                    InheritedNestedClassifier::Ambiguous => {
-                                        return (
-                                            InheritedNestedClassifier::Ambiguous,
-                                            Some(root_name.clone()),
-                                            None,
-                                        );
-                                    }
-                                    InheritedNestedClassifier::NotFound
-                                        if segments.len() > 1
-                                            && source.package_exists(TypeName::ROOT, root_name) =>
-                                    {
-                                        ResolvedQualifier::Package(crate::types::type_name_child(
-                                            TypeName::ROOT,
-                                            root_name,
-                                        ))
-                                    }
-                                    InheritedNestedClassifier::NotFound => {
-                                        return (
-                                            InheritedNestedClassifier::NotFound,
-                                            Some(root_name.clone()),
-                                            None,
-                                        );
-                                    }
-                                }
-                            }
-                        }
+                CompleteImportedSelection::None(miss) => {
+                    if let Some(miss) = miss {
+                        nearest_miss.borrow_mut().get_or_insert(miss);
                     }
                 }
             }
-        };
+        } else {
+            match imported_classifier_selection(
+                root_name,
+                &self.imports,
+                &self.import_levels,
+                &source,
+            ) {
+                CandidateSelectionWithTies::Selected(internal) => {
+                    crate::trace_compiler!(
+                        "resolve",
+                        "classifier root={root_name} imported={}",
+                        internal.render()
+                    );
+                    let internal = self.libraries.canonical_source_type_name(internal);
+                    let Ok(alias) = self.selected_imported_type_alias(root_name, internal) else {
+                        return Self::invalid_alias_selection(root_name);
+                    };
+                    if let Some(binding) = offer(internal, alias) {
+                        return binding;
+                    }
+                }
+                CandidateSelectionWithTies::Ambiguous(candidates) => {
+                    return nearest_miss.take().unwrap_or((
+                        InheritedNestedClassifier::Ambiguous,
+                        Some(ClassifierMiss::Ambiguous(candidates)),
+                        None,
+                    ));
+                }
+                CandidateSelectionWithTies::None => {}
+            }
+        }
+        match self
+            .classifier_header_owner
+            .map_or(InheritedNestedClassifier::NotFound, |owner| {
+                self.inherited_nested_type_for_owner(root_name, owner)
+            }) {
+            InheritedNestedClassifier::Found(internal) => {
+                if let Some(binding) = offer(internal, None) {
+                    return binding;
+                }
+            }
+            InheritedNestedClassifier::Ambiguous => {
+                return nearest_miss.take().unwrap_or((
+                    InheritedNestedClassifier::Ambiguous,
+                    Some(ClassifierMiss::Unresolved(root_name.clone())),
+                    None,
+                ));
+            }
+            InheritedNestedClassifier::NotFound => {}
+        }
+        if let Some(miss) = nearest_miss.take() {
+            return miss;
+        }
+        if segments.len() > 1 && source.package_exists(TypeName::ROOT, root_name) {
+            return self.commit_classifier_suffix(
+                &source,
+                ResolvedQualifier::Package(crate::types::type_name_child(
+                    TypeName::ROOT,
+                    root_name,
+                )),
+                root_name,
+                &segments,
+                None,
+            );
+        }
+        (
+            InheritedNestedClassifier::NotFound,
+            Some(ClassifierMiss::Unresolved(root_name.clone())),
+            None,
+        )
+    }
+
+    /// Walk the written suffix from one selected root through the shared qualifier loop.
+    fn commit_classifier_suffix(
+        &self,
+        source: &CachedCompositeSource<'_>,
+        root: ResolvedQualifier,
+        root_name: &str,
+        segments: &[(Option<ExprId>, String)],
+        mut selected_alias: Option<SelectedTypeAlias>,
+    ) -> ClassifierBinding {
         match walk_qualifier_namespace_facets_with_declaration_identity(
-            &source,
+            source,
             root.classifier(),
             None,
             root_name,
@@ -212,7 +325,7 @@ impl Checker<'_> {
                     else {
                         let failed = segments
                             .last()
-                            .map_or(root_name.as_str(), |(_, segment)| segment);
+                            .map_or(root_name, |(_, segment)| segment.as_str());
                         return Self::invalid_alias_selection(failed);
                     };
                     selected_alias = alias;
@@ -225,31 +338,181 @@ impl Checker<'_> {
             }
             Ok((ResolvedQualifier::Value | ResolvedQualifier::Package(_), _)) => (
                 InheritedNestedClassifier::NotFound,
-                segments.last().map(|(_, segment)| segment.clone()),
+                segments
+                    .last()
+                    .map(|(_, segment)| ClassifierMiss::Unresolved(segment.clone())),
                 None,
             ),
             Err(QualifierError::UnresolvedSegment { name, .. })
-            | Err(QualifierError::AmbiguousRoot { name, .. }) => {
-                (InheritedNestedClassifier::NotFound, Some(name), None)
-            }
+            | Err(QualifierError::AmbiguousRoot { name, .. }) => (
+                InheritedNestedClassifier::NotFound,
+                Some(ClassifierMiss::Unresolved(name)),
+                None,
+            ),
             Err(QualifierError::NotANameChain { .. }) => (
                 InheritedNestedClassifier::NotFound,
-                Some(root_name.clone()),
+                Some(ClassifierMiss::Unresolved(root_name.to_string())),
                 None,
             ),
         }
+    }
+
+    /// Select star/default-imported type paths only after advancing every root through the written
+    /// suffix. Root ambiguity is not path ambiguity: `p.A` and `q.A` may share one import rung while
+    /// only one of them declares the requested `B` in `A.B`.
+    fn complete_imported_classifier_binding(
+        &self,
+        root_name: &str,
+        segments: &[(Option<ExprId>, String)],
+        source: &CachedCompositeSource<'_>,
+    ) -> CompleteImportedSelection {
+        let mut nearest_miss = None;
+        for level in &self.import_levels {
+            let candidates = crate::symbol_resolver::classifier_candidates_at_import_level(
+                source, root_name, level,
+            );
+            if candidates.is_empty() {
+                continue;
+            }
+            let roots = level
+                .packages
+                .iter()
+                .filter_map(|&owner| {
+                    let namespace = if source.classifier(owner).is_some() {
+                        crate::symbol_source::SymbolNamespace::Classifier(owner)
+                    } else {
+                        crate::symbol_source::SymbolNamespace::Package(owner)
+                    };
+                    let record = source.symbols(namespace, root_name);
+                    let root = record
+                        .classifier_name
+                        .filter(|root| candidates.contains(root))?;
+                    Some((
+                        self.libraries.canonical_source_type_name(root),
+                        record.classifier_declaration.clone(),
+                    ))
+                })
+                .collect::<Vec<_>>();
+            debug_assert!(!roots.is_empty());
+
+            let mut completed: Vec<(TypeName, Option<SelectedTypeAlias>)> = Vec::new();
+            for (root, declaration) in roots {
+                let alias = selected_alias_from_declaration(root, declaration.as_ref());
+                let binding = self.commit_classifier_suffix(
+                    source,
+                    ResolvedQualifier::Classifier(root),
+                    root_name,
+                    segments,
+                    alias.as_ref().ok().cloned().flatten(),
+                );
+                let InheritedNestedClassifier::Found(classifier) = binding.0 else {
+                    nearest_miss.get_or_insert(binding);
+                    continue;
+                };
+                let Ok(_) = alias else {
+                    return CompleteImportedSelection::Selected(Self::invalid_alias_selection(
+                        root_name,
+                    ));
+                };
+                let selected_alias = binding.2;
+                if let Some((_, previous_alias)) = completed
+                    .iter()
+                    .find(|(previous, _)| *previous == classifier)
+                {
+                    if !same_selected_alias(previous_alias.as_ref(), selected_alias.as_ref()) {
+                        return CompleteImportedSelection::Selected(Self::invalid_alias_selection(
+                            root_name,
+                        ));
+                    }
+                    continue;
+                }
+                completed.push((classifier, selected_alias));
+            }
+
+            match completed.len() {
+                0 => {}
+                1 => {
+                    let (classifier, alias) = completed.pop().expect("one completed type path");
+                    return CompleteImportedSelection::Selected((
+                        InheritedNestedClassifier::Found(classifier),
+                        None,
+                        alias,
+                    ));
+                }
+                _ => {
+                    return CompleteImportedSelection::Ambiguous(
+                        completed
+                            .into_iter()
+                            .map(|(classifier, _)| classifier)
+                            .collect(),
+                    );
+                }
+            }
+        }
+        CompleteImportedSelection::None(nearest_miss)
+    }
+
+    fn enclosing_nested_type_name(&self, name: &str) -> Option<TypeName> {
+        // Probe the current class and its structural lexical owners in nearest-first order. Each
+        // owner's companion object contributes its static classifier scope right after the owner.
+        let source = self.fed_source();
+        self.lexical_source_class_names()
+            .into_iter()
+            .find_map(|outer| self.static_rung_nested_type_name(&source, outer, name))
+    }
+
+    /// A nested classifier of one lexical class rung: the owner's own nested classifiers, then
+    /// those of its companion object (kotlinc's `staticScope`, then `companionStaticScope`).
+    fn static_rung_nested_type_name(
+        &self,
+        source: &CachedCompositeSource<'_>,
+        owner: TypeName,
+        name: &str,
+    ) -> Option<TypeName> {
+        let own = type_name_nested_child(owner, name);
+        if source.classifier(own).is_some() {
+            return Some(own);
+        }
+        let companion = source.classifier(owner)?.companion_object.as_ref()?.1;
+        let nested = type_name_nested_child(companion, name);
+        source.classifier(nested).is_some().then_some(nested)
+    }
+
+    /// Classifier declarations visible in a classifier header before package/import lookup. The
+    /// current classifier is recursively visible, as are its own nested declarations and siblings
+    /// owned by enclosing lexical classifiers. Supertype-list resolution does not install this
+    /// context; primary-constructor parameter declarations do.
+    fn classifier_header_lexical_type_name(&self, name: &str) -> Option<TypeName> {
+        let owner = self.classifier_header_owner?;
+        if owner.nested_segment_ref() == name {
+            return Some(owner);
+        }
+        let source = self.fed_source();
+        if let Some(nested) = self.static_rung_nested_type_name(&source, owner, name) {
+            return Some(nested);
+        }
+        let mut enclosing = owner.nested_owner();
+        while let Some(candidate_owner) = enclosing {
+            if let Some(candidate) =
+                self.static_rung_nested_type_name(&source, candidate_owner, name)
+            {
+                return Some(candidate);
+            }
+            enclosing = candidate_owner.nested_owner();
+        }
+        None
     }
 
     fn invalid_alias_selection(
         name: &str,
     ) -> (
         InheritedNestedClassifier,
-        Option<String>,
+        Option<ClassifierMiss>,
         Option<SelectedTypeAlias>,
     ) {
         (
             InheritedNestedClassifier::Ambiguous,
-            Some(name.to_string()),
+            Some(ClassifierMiss::Unresolved(name.to_string())),
             None,
         )
     }

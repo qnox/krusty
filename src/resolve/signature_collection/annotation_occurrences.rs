@@ -108,11 +108,62 @@ pub(in crate::resolve) fn resolve_declaration_type_parameter_annotations(
 /// Add direct nested classifiers from the supplied lexical owners. Owners carry lexical-precedence
 /// ranks (nearest is lowest); one arena scan therefore handles ordinary nested classes, inherited
 /// lexical owners, and enum-entry anonymous subclass scopes without origin-specific name probing.
+///
+/// Each owner's companion object contributes its own static classifier scope directly after the
+/// owner's (kotlinc's `companionStaticScope` tower element): `Edge` declared in `companion object`
+/// is visible unqualified in the containing class, and an owner's own `Edge` shadows it.
 pub(in crate::resolve) fn extend_lexical_nested_classifier_names(
     file: &File,
     lexical_owner_ranks: &HashMap<TypeName, usize>,
     class_names: &mut ClassNames,
 ) {
+    extend_static_rung_classifier_names(file, lexical_owner_ranks, None, class_names);
+}
+
+/// [`extend_lexical_nested_classifier_names`] for the header of `header_owner`, which contributes
+/// no rung even when it is the companion of an enclosing owner: `companion object : Base<Edge>() {
+/// class Edge }` does not see its own `Edge`.
+pub(in crate::resolve) fn extend_header_lexical_nested_classifier_names(
+    file: &File,
+    (lexical_owner_ranks, header_owner): (&HashMap<TypeName, usize>, TypeName),
+    class_names: &mut ClassNames,
+) {
+    extend_static_rung_classifier_names(file, lexical_owner_ranks, Some(header_owner), class_names);
+}
+
+fn extend_static_rung_classifier_names(
+    file: &File,
+    lexical_owner_ranks: &HashMap<TypeName, usize>,
+    header_owner: Option<TypeName>,
+    class_names: &mut ClassNames,
+) {
+    let declaration_internal = |class: &ClassDecl| {
+        class_names
+            .get(&class.name)
+            .unwrap_or_else(|| type_name(&class_internal(file, &class.name)))
+    };
+    let mut static_rungs = lexical_owner_ranks
+        .iter()
+        .map(|(&owner, &rank)| (owner, 2 * rank))
+        .collect::<HashMap<_, _>>();
+    for &declaration in &file.decls {
+        let Decl::Class(class) = file.decl(declaration) else {
+            continue;
+        };
+        let Some(&rank) = lexical_owner_ranks.get(&declaration_internal(class)) else {
+            continue;
+        };
+        let Some(Decl::Class(companion)) = class.companion.map(|companion| file.decl(companion))
+        else {
+            continue;
+        };
+        // A companion that is itself a lexical owner keeps its own (nearer) rank.
+        let companion = declaration_internal(companion);
+        if Some(companion) == header_owner || lexical_owner_ranks.contains_key(&companion) {
+            continue;
+        }
+        static_rungs.insert(companion, 2 * rank + 1);
+    }
     let mut lexical_nested = HashMap::<String, (usize, TypeName)>::new();
     for &declaration in &file.decls {
         let Decl::Class(nested) = file.decl(declaration) else {
@@ -122,7 +173,7 @@ pub(in crate::resolve) fn extend_lexical_nested_classifier_names(
             continue;
         };
         let owner = type_name(&class_internal(file, owner));
-        let Some(&rank) = lexical_owner_ranks.get(&owner) else {
+        let Some(&rank) = static_rungs.get(&owner) else {
             continue;
         };
         let internal = class_names

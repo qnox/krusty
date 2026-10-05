@@ -1,5 +1,6 @@
 //! Library metadata shared by symbol sources.
 
+mod annotation_application;
 mod array_factories;
 pub(crate) mod builtin_declaration;
 pub(crate) mod builtin_member_realization;
@@ -19,8 +20,14 @@ mod inline_body;
 pub(crate) mod physical_parameter_plan;
 mod platform_contract;
 mod property_producer;
+mod result_nullability;
+pub use annotation_application::{
+    AnnotationApplication, AnnotationElementDefault, AnnotationParameterPolicy,
+    AnnotationPositionalPolicy,
+};
 pub use call_realization::{
-    DefaultCallRealization, NonvirtualCallRealization, OverriddenCallKind,
+    DefaultCallRealization, ExternalCallableKind, ExternalCallableRealization,
+    ExternalPropertyRealization, NonvirtualCallRealization, OverriddenCallKind,
     OverriddenCallRealization,
 };
 pub(crate) use classifier_callables::constructor_generic_signature;
@@ -33,6 +40,7 @@ pub use platform_contract::{
     PlatformInitializationError, PlatformSourceHeaderInput, SourceHeaderError,
 };
 pub use property_producer::PropertyProducer;
+pub use result_nullability::{ResultEnhancement, ReturnInfo};
 
 use crate::types::InlineParameterModifier;
 pub use crate::types::Visibility;
@@ -436,51 +444,6 @@ pub(crate) fn type_alias_target_classifier(expansion: Ty) -> Option<TypeName> {
         Ty::Nothing => Some(crate::types::type_name("kotlin/Nothing")),
         expansion => function_classifiers::supertype_classifier(expansion).kotlin_class_internal(),
     }
-}
-
-/// How a provider realizes one already-selected dependency callable.
-///
-/// The identity a consumer holds is opaque and provider-assigned; this is what the provider hands
-/// back for it. Neither half names a target: [`LibraryCallable`] is the semantic declaration, and
-/// the kind says which shape the declaration takes — a top-level function, a member, or a property
-/// realized over storage rather than an accessor. A backend reads it; it does not reconstruct it.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum ExternalCallableKind {
-    TopLevel,
-    Extension,
-    Member,
-    Constructor,
-    /// A provider-normalized Kotlin property getter realized as a read of instance storage.
-    InstanceFieldRead,
-    /// A provider-normalized Kotlin property setter realized as a write of instance storage.
-    InstanceFieldWrite,
-    /// A selected dependency property whose realization is a static field read.
-    StaticFieldRead,
-    /// A selected dependency property whose realization is a static field write.
-    StaticFieldWrite,
-}
-
-#[derive(Clone, Debug)]
-pub struct ExternalCallableRealization {
-    pub callable: LibraryCallable,
-    pub kind: ExternalCallableKind,
-    /// Provider-published identities parallel to the callable's semantic source parameters. The
-    /// physical parameter plan joins them to ABI-only slots such as a suspend continuation.
-    /// A backend formats these for debug/metadata surfaces; it never reconstructs them from arity.
-    pub parameter_identities: Box<[crate::fir::ResolvedParameterIdentity]>,
-}
-
-/// A provider's realization of one normalized Kotlin property. FIR carries only its opaque
-/// identity; callers read the semantic name and the independently interned physical accessors here.
-#[derive(Clone, Debug)]
-pub struct ExternalPropertyRealization {
-    pub name: String,
-    pub getter: crate::fir::ExternalCallableId,
-    pub setter: Option<crate::fir::ExternalCallableId>,
-    /// The provider-normalized declaration is its value class's underlying storage property.
-    pub declares_value_class_storage: bool,
-    /// Provider-normalized payload of a compile-time constant property.
-    pub compile_time_constant: Option<LibraryConst>,
 }
 
 pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
@@ -1124,6 +1087,8 @@ pub struct CallSig {
     pub inline_modifiers: Vec<InlineParameterModifier>,
     /// Per logical Java parameter, whether nullable arguments are accepted.
     pub platform_nullable_params: Vec<bool>,
+    /// Java signature enhancement of the declared result's nullability.
+    pub result_enhancement: ResultEnhancement,
     /// Minimum arguments a caller must supply (params beyond this have defaults). 0 by default.
     pub required: usize,
     /// True if a logical param is `vararg` (callers pack values into its array).
@@ -1149,31 +1114,6 @@ pub struct ParamList {
     /// constructor parameter list. The checker consumes the policy without asking whether the
     /// declaration came from source, Kotlin metadata, or a Java classfile.
     pub annotation: Option<AnnotationParameterPolicy>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct AnnotationParameterPolicy {
-    /// Whether positional arguments use ordinary constructor order, are unavailable, or feed the
-    /// array-typed `value` element as individual values.
-    pub positional: AnnotationPositionalPolicy,
-    /// Kotlin declaration `vararg val` materializes an omitted empty array; a classfile annotation
-    /// element with a default must remain absent so its declaration default stands.
-    pub materialize_omitted_vararg: bool,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AnnotationPositionalPolicy {
-    Constructor,
-    NamedOnly,
-    /// The declaration's `value` parameter alone accepts one positional argument.
-    Value,
-    ValueVararg,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AnnotationApplication {
-    pub parameters: ParamList,
-    pub policy: AnnotationParameterPolicy,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1616,46 +1556,6 @@ fn vec_for_arity<T>(items: Vec<T>, param_count: usize) -> Vec<T> {
         items
     } else {
         Vec::new()
-    }
-}
-
-#[derive(Clone, Copy, Default)]
-pub struct ReturnInfo {
-    pub nullable: bool,
-    pub class: Option<Ty>,
-}
-
-impl ReturnInfo {
-    pub fn new(nullable: bool, class: Option<Ty>) -> Self {
-        ReturnInfo { nullable, class }
-    }
-
-    pub fn apply(self, fallback: Ty) -> Ty {
-        self.apply_with_class(self.class, fallback)
-    }
-
-    pub fn apply_with_class(self, class: Option<Ty>, fallback: Ty) -> Ty {
-        let ret = match class {
-            // Nullability wraps the declared generic result; it must not hide the already-solved
-            // type arguments. Otherwise a dependency `Box<T>?` specialized as `Box<Base>?` is
-            // collapsed back to raw `Box?` while the equivalent source declaration stays precise.
-            Some(meta) if !fallback.non_null().type_args().is_empty() => {
-                let specialized = Ty::obj_args(&meta.name(), fallback.non_null().type_args());
-                if matches!(meta, Ty::PlatformNullable(_)) {
-                    Ty::platform_nullable(specialized)
-                } else {
-                    specialized
-                }
-            }
-            Some(meta) => meta,
-            None => fallback,
-        };
-        if self.nullable && !ret.is_nullable() && (ret.boxed_ref().is_some() || ret.is_reference())
-        {
-            Ty::nullable(ret)
-        } else {
-            ret
-        }
     }
 }
 
@@ -2475,9 +2375,10 @@ pub struct LibraryType {
     /// (`UInt` → `Int`, `Result` → `Any`); `None` for an ordinary class. The JVM backend erases the value
     /// class to this everywhere (like a user value class), reproducing kotlinc's unboxed representation.
     pub value_underlying: Option<Ty>,
-    /// Source name of a value class's sole underlying property. Kept beside its underlying type because
-    /// together they are the complete semantic value-class shape used by the JVM representation pass.
-    pub value_underlying_property: Option<String>,
+    /// A value class's sole underlying property and its declared type over the class's own type
+    /// parameters. Kept beside its underlying type because together they are the complete semantic
+    /// value-class shape used by the JVM representation pass.
+    pub value_declaration: Option<crate::types::DeclaredValueClass>,
     /// When this name is a `typealias`, the target internal it expands to (`kotlin/collections/ArrayList`
     /// → `java/util/ArrayList`); `None` for a real type. Name resolution records the target, so an alias
     /// resolves to the underlying type with no separate alias query.
@@ -2526,6 +2427,10 @@ pub struct LibraryType {
     /// map pairs them. Published by the provider that owns that map; `None` for every other
     /// classifier.
     pub mapped_collection: Option<crate::types::MappedCollection>,
+    /// For an annotation classifier: each element that declares a default, as the provider's
+    /// declaration format records it. A module annotation publishes none; its defaults are
+    /// checked default expressions.
+    pub annotation_element_defaults: Vec<(Box<str>, AnnotationElementDefault)>,
 }
 
 impl std::ops::Deref for LibraryType {
@@ -2610,7 +2515,7 @@ impl LibraryType {
             companion_object: None,
             qualified_name: None,
             value_underlying: None,
-            value_underlying_property: None,
+            value_declaration: None,
             alias_target: None,
             type_parameters: crate::types::TypeParameters::default(),
             own_type_parameter_count: 0,
@@ -2622,6 +2527,7 @@ impl LibraryType {
             retention: None,
             annotation_targets: None,
             mapped_collection: None,
+            annotation_element_defaults: Vec::new(),
         }
     }
 
@@ -2723,38 +2629,6 @@ impl LibraryType {
                     && !params.names.iter().any(String::is_empty)
             })
             .cloned()
-    }
-}
-
-impl LibraryType {
-    /// Complete annotation application shape normalized at the declaration-provider boundary.
-    /// Kotlin annotation constructors already carry the ordinary positional/default/vararg facts;
-    /// providers for constructor-less declaration formats attach an explicit annotation policy.
-    pub fn annotation_application(&self) -> Option<AnnotationApplication> {
-        if !self.is_annotation() {
-            return None;
-        }
-        let parameters = if let Some(parameters) = self
-            .named_parameter_lists
-            .iter()
-            .find(|parameters| parameters.annotation.is_some())
-        {
-            if parameters.names.len() != parameters.defaults.len()
-                || parameters.names.len() != parameters.types.len()
-                || parameters.names.iter().any(String::is_empty)
-                || parameters.types.contains(&Ty::Error)
-            {
-                return None;
-            }
-            parameters.clone()
-        } else {
-            self.constructor_named_params(0)?
-        };
-        let policy = parameters.annotation.unwrap_or(AnnotationParameterPolicy {
-            positional: AnnotationPositionalPolicy::Constructor,
-            materialize_omitted_vararg: parameters.vararg.is_some(),
-        });
-        Some(AnnotationApplication { parameters, policy })
     }
 }
 
@@ -2932,7 +2806,7 @@ mod tests {
             companion_object: None,
             qualified_name: None,
             value_underlying: None,
-            value_underlying_property: None,
+            value_declaration: None,
             alias_target: None,
             type_parameters: crate::types::TypeParameters::default(),
             own_type_parameter_count: 0,
@@ -2944,6 +2818,7 @@ mod tests {
             retention: None,
             annotation_targets: None,
             mapped_collection: None,
+            annotation_element_defaults: Vec::new(),
         };
         f(&mut t);
         t

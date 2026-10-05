@@ -24,6 +24,10 @@ pub use ranges::{
     FirProgressionClass, FirProgressionSource, FirRangeComparisonProvenance, FirRangeCounterKind,
     FirRangeOperation, FirRuntimeFunction,
 };
+mod indexed_iteration;
+pub use indexed_iteration::{FirBuiltinIterableKind, FirCharSequenceIndexing};
+mod with_index;
+pub use with_index::{FirIndexedValueComponent, FirWithIndexLoop};
 mod property_access;
 pub use property_access::{
     FirClassifierProperty, FirInlineAccessorSplice, FirInlineTypeSubstitution, FirPropertyDispatch,
@@ -129,7 +133,8 @@ pub enum FirSamMethod {
 /// diagnoses that it cannot support Java platform values.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FirPlatformNarrowing {
-    pub message: Box<str>,
+    /// The checked producer's name; `None` for a value kotlinc cannot name, such as a block's.
+    pub message: Option<Box<str>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -248,10 +253,6 @@ pub enum FirIntrinsic {
     SuspendCoroutineUninterceptedOrReturn {
         callee: Box<str>,
     },
-    /// The selected safe coroutine primitive. This is distinct from the unintercepted primitive:
-    /// target realization must invoke the block with a one-shot safe, intercepted continuation and
-    /// use that continuation's completed value or suspension sentinel as the call result.
-    SuspendCoroutine,
     UnsignedToString {
         source: ResolvedTy,
     },
@@ -779,12 +780,6 @@ pub enum FirBinaryOperation {
     ShiftLeft,
     ShiftRight,
     UnsignedShiftRight,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum FirBuiltinIterableKind {
-    Array,
-    String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1621,6 +1616,7 @@ pub enum FirLoopHeader {
         has_next: Box<FirIteratorCall>,
         next: Box<FirIteratorCall>,
     },
+    WithIndex(Box<FirWithIndexLoop>),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1641,6 +1637,9 @@ pub struct FirIteratorCall {
     /// protocol call is not specialized per site, so a substituted receiver (`Int` for `T?`)
     /// crosses into the declared type here.
     pub receiver_conversion: Option<FirConversion>,
+    /// The not-null check of an enhanced Java result the loop stores (`ArrayList.iterator()`, and
+    /// the `next()` of the iterator it returns), named by the protocol call.
+    pub result_check: Option<FirPlatformNarrowingId>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2812,7 +2811,12 @@ impl FirBody {
             + self
                 .platform_narrowings
                 .iter()
-                .map(|narrowing| narrowing.message.len())
+                .map(|narrowing| {
+                    narrowing
+                        .message
+                        .as_ref()
+                        .map_or(0, |message| message.len())
+                })
                 .sum::<usize>()
             + self.control_targets.len() * std::mem::size_of::<FirControlTarget>()
             + self.expressions.len() * std::mem::size_of::<FirExpr>()

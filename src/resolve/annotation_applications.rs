@@ -68,9 +68,12 @@ impl Checker<'_> {
             && self.is_optional_expectation_classifier(internal)
             && !self.suppresses_diagnostic("OPTIONAL_DECLARATION_USAGE_IN_NON_COMMON_SOURCE")
         {
+            // kotlinc's OPTIONAL_DECLARATION_USAGE_IN_NON_COMMON_SOURCE, on the type reference.
             self.diags.error(
                 annotation.span,
-                format!("unresolved reference '{}'.", annotation.name),
+                "declaration annotated with '@OptionalExpectation' can only be used in common \
+                 module sources."
+                    .to_string(),
             );
             return;
         }
@@ -93,5 +96,32 @@ impl Checker<'_> {
         };
         self.applied_annotations
             .insert((annotation.span.lo, annotation.span.hi), applied);
+    }
+
+    /// A classifier's own annotations are resolved where the classifier is declared: a nested
+    /// classifier's annotations see the static rungs of the classifier that contains it (`@Dsl
+    /// class Inner` naming a sibling `annotation class Dsl`), never its own nested declarations.
+    pub(super) fn check_classifier_own_annotations(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        class: &ClassDecl,
+        owner: Option<TypeName>,
+    ) {
+        let container = owner
+            .and_then(|owner| owner.nested_owner())
+            .filter(|container| {
+                self.fed_source().classifier(*container).is_some()
+                    && !self.lexical_source_class_names().contains(container)
+            });
+        if let Some(container) = container {
+            self.lexical_class_context.insert(0, container);
+        }
+        for (annotation, arguments) in class.annotations.iter().zip(&class.annotation_args) {
+            self.check_annotation_application(scope, annotation, arguments);
+        }
+        if let Some(container) = container {
+            let removed = self.lexical_class_context.remove(0);
+            debug_assert_eq!(removed, container);
+        }
     }
 }

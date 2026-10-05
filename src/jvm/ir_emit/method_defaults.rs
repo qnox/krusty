@@ -305,7 +305,7 @@ fn emit_adapted_unbox(
 /// A static `$default` stub's trailing marker is constructor-specific only for a value-class
 /// `constructor-impl`; every function stub uses plain `Object`.
 pub(super) fn static_default_stub_marker(ir: &IrFile, fid: u32) -> Ty {
-    if ir.jvm_value_class_constructor_impls.contains(&fid) {
+    if ir.jvm_value_class_constructor_impls.contains_key(&fid) {
         Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker")
     } else {
         Ty::obj("java/lang/Object")

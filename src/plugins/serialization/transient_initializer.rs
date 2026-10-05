@@ -49,7 +49,7 @@ pub(super) fn missing_initializers<'a>(
         })
         .map(|property| FrontendPluginDiagnostic {
             span: property.declaration_span,
-            message,
+            message: message.to_string(),
         })
 }
 
@@ -105,7 +105,7 @@ mod tests {
             reported(TypeKind::Class, &[], &properties),
             vec![FrontendPluginDiagnostic {
                 span: Span::new(10, 20),
-                message: transient_missing_initializer(None),
+                message: transient_missing_initializer(None).to_string(),
             }]
         );
     }

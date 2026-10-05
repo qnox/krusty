@@ -145,6 +145,7 @@ pub(super) fn generated_serializer_annotations() -> DeclarationAnnotations {
         },
         facts: crate::types::AnnotationSemanticFacts {
             deprecated_hidden: true,
+            optional_expectation: false,
         },
     }])
 }

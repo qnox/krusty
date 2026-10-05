@@ -15,6 +15,18 @@ impl BodyLowering<'_, '_, '_> {
         args: &[u32],
     ) -> Result<Option<Value>, Unsupported> {
         match callee {
+            Callee::LocalWithDefaults { function, defaults }
+            | Callee::ClassStaticWithDefaults {
+                function, defaults, ..
+            } => self.defaulted_call(*function, defaults, dispatch_receiver, args),
+            Callee::ModuleWithDefaults { defaults, .. } => {
+                match self.file.inherited_default_provider(callee) {
+                    Some(provider) => {
+                        self.defaulted_call(provider, defaults, dispatch_receiver, args)
+                    }
+                    None => Err(format!("a {} call", callee_kind(callee))),
+                }
+            }
             // A static method owned by a class is, to this generator, a function with a symbol —
             // the owner is a JVM placement fact, and there is no flat facade here for it to be
             // placed differently from. A local function declared inside a member is the shape that
@@ -111,7 +123,7 @@ impl BodyLowering<'_, '_, '_> {
                 }
                 let owner = super::super::super::intrinsics::DeclarationOwner::callable(
                     realization.physical_owner,
-                    realization.is_top_level(),
+                    realization.declaration_package,
                 );
                 // The Kotlin name the declaration PUBLISHES, not the spelling it is realized under.
                 // A physical name is an emit handle: a JVM realization may RENAME a member, and
@@ -123,6 +135,17 @@ impl BodyLowering<'_, '_, '_> {
                     .reflection_name
                     .clone()
                     .unwrap_or_else(|| realization.name.clone());
+                let semantic_role = self
+                    .file
+                    .ir
+                    .semantic_call_roles
+                    .get(&site)
+                    .copied()
+                    .or(realization.semantic_role);
+                let runtime_member_role = compiler_intrinsics::runtime_member_role(
+                    realization.compiler_intrinsic,
+                    semantic_role,
+                );
                 match dispatch_receiver {
                     // A member: the receiver is the runtime function's first argument, and
                     // everything crosses as a reference.
@@ -137,12 +160,19 @@ impl BodyLowering<'_, '_, '_> {
                             .map(Ty::non_null)
                             .and_then(|ty| ty.obj_internal())
                         {
-                            if self.file.implements_dependency(internal) {
+                            if self.file.implements_dependency(internal)
+                                && runtime_member_role.is_none()
+                            {
                                 return Err(format!(
                                     "the member `{}.{name}` of a type this file implements itself",
                                     internal.render().replace('/', ".")
                                 ));
                             }
+                        }
+                        if let Some(realized) =
+                            self.scope_function(owner, &name, receiver, args, *ret)
+                        {
+                            return realized;
                         }
                         // `x.isNaN()` and its two siblings are one comparison each. Realizing them
                         // here rather than in the runtime keeps the operand unboxed — the member
@@ -162,6 +192,16 @@ impl BodyLowering<'_, '_, '_> {
                             {
                                 return realized;
                             }
+                        }
+                        if let Some(realized) =
+                            self.reference_member(realization.semantic_role, receiver, args, *ret)
+                        {
+                            return realized;
+                        }
+                        if let Some(realized) =
+                            self.reference_delegate(realization.semantic_role, receiver, args, *ret)
+                        {
+                            return realized;
                         }
                         // `x++` where `x` is an `Int?`: the member is the primitive's, and so is
                         // the value, whatever it arrived carried as.
@@ -424,15 +464,7 @@ impl BodyLowering<'_, '_, '_> {
                             owner,
                             &name,
                             params,
-                            compiler_intrinsics::runtime_member_role(
-                                realization.compiler_intrinsic,
-                                self.file
-                                    .ir
-                                    .semantic_call_roles
-                                    .get(&site)
-                                    .copied()
-                                    .or(realization.semantic_role),
-                            ),
+                            runtime_member_role,
                         ) else {
                             return Err(format!(
                                 "the member `{}.{name}`",
@@ -472,6 +504,21 @@ impl BodyLowering<'_, '_, '_> {
                             super::super::super::intrinsics::assertion_call(owner, &name, params)
                         {
                             return self.assertion(symbol, compared, args);
+                        }
+                        if super::super::super::intrinsics::is_assert_fails_with(
+                            owner, &name, params,
+                        ) {
+                            return self.assert_fails_with(args, params, *ret);
+                        }
+                        if let Some(realized) =
+                            self.top_level_scope_function(owner, &name, args, params, *ret)
+                        {
+                            return realized;
+                        }
+                        if let Some(builder) =
+                            super::super::super::intrinsics::builder_scope(owner, &name, params)
+                        {
+                            return self.builder_scope_function(builder, args);
                         }
                         // `require`, `check`, `requireNotNull`, `checkNotNull`, `error`. Not a
                         // runtime call: the message block runs only when the check fails, so the

@@ -318,12 +318,12 @@ fn guarded_positions_match_the_reference_compiler() {
     );
 }
 
-/// kotlinc's OTHER form: where the narrowed value has no name to report — a source-block branch, a
-/// `try` value, the merged value of a conditional in ARGUMENT position — it emits the message-less
-/// `Intrinsics.checkNotNull(Object)V` instead. krusty does not implement that form; this pins the gap
-/// so it is visible (and this assertion fails) the day it is closed.
+/// kotlinc's OTHER form: where the narrowed value has no name to report (a source-block branch,
+/// the merged value of a conditional in ARGUMENT position) it emits the message-less
+/// `Intrinsics.checkNotNull(Object)V`. krusty emits it for a block branch; the argument-position
+/// conditional is still unguarded, and this pins that gap so the assertion fails the day it closes.
 #[test]
-fn the_message_less_form_is_not_implemented() {
+fn message_less_guards_match_the_reference_compiler_except_argument_conditionals() {
     let nameless = |classes: &[(String, Vec<u8>)], tag| {
         let work = common::scratch_dir().expect("allocate javap fixture");
         let mut arguments = vec!["-p".to_string(), "-c".to_string()];
@@ -338,18 +338,32 @@ fn the_message_less_form_is_not_implemented() {
         let borrowed: Vec<&str> = arguments.iter().map(String::as_str).collect();
         let text = common::javap(&borrowed).unwrap_or_else(|| panic!("javap failed for {tag}"));
         let _ = std::fs::remove_dir_all(work);
-        text.lines()
-            .filter(|line| line.contains("Intrinsics.checkNotNull:(Ljava/lang/Object;)V"))
-            .count()
+        let mut method = String::new();
+        let mut sites = Vec::new();
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if !line.starts_with("    ") && trimmed.ends_with(';') && trimmed.contains('(') {
+                method = trimmed.to_string();
+            } else if trimmed.contains("Intrinsics.checkNotNull:(Ljava/lang/Object;)V") {
+                sites.push(method.clone());
+            }
+        }
+        sites
     };
-    assert!(
-        nameless(&positions().reference, "kotlinc") >= 2,
-        "the fixture must exercise kotlinc's message-less form"
+    let reference = nameless(&positions().reference, "kotlinc");
+    let argument = "public static final int conditionalArgument(boolean);";
+    assert_eq!(
+        reference,
+        [
+            "public static final int blockBranch(boolean);".to_string(),
+            argument.to_string(),
+        ],
+        "the fixture must exercise kotlinc's message-less form in both positions"
     );
     assert_eq!(
         nameless(&positions().krusty, "krusty"),
-        0,
-        "krusty emits no message-less guard; `x!!` uses the same intrinsic but is absent here"
+        ["public static final int blockBranch(boolean);".to_string()],
+        "krusty guards the block branch like kotlinc and does not yet guard `{argument}`"
     );
 }
 

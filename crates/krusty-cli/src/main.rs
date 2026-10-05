@@ -250,21 +250,27 @@ pub fn compile(opts: &cli::Options) -> Result<usize, String> {
     let outputs =
         krusty::compiler::emit_analyzed(analysis, &stems, &backend, &opts.module_name, &mut diags);
 
+    // Render each diagnostic against ITS OWN source file (by `Diagnostic::file`), once — not the
+    // whole list against every file, which mis-attributed multi-file errors to the wrong source.
+    let rendered: Vec<(&str, &str)> = opts
+        .sources
+        .iter()
+        .zip(&sources)
+        .map(|(p, s)| (p.as_str(), s.as_str()))
+        .collect();
     if diags.has_errors() {
-        // Render each diagnostic against ITS OWN source file (by `Diagnostic::file`), once — not the
-        // whole list against every file, which mis-attributed multi-file errors to the wrong source.
-        let rendered: Vec<(&str, &str)> = opts
-            .sources
-            .iter()
-            .zip(&sources)
-            .map(|(p, s)| (p.as_str(), s.as_str()))
-            .collect();
         return Err(format!(
             "{}krusty: {} error(s)\n",
             diags.render_all(&rendered),
-            diags.diags.len()
+            diags
+                .diags
+                .iter()
+                .filter(|diagnostic| diagnostic.severity == krusty::diag::Severity::Error)
+                .count()
         ));
     }
+    // Warnings alone do not fail the compilation, but they are still reported.
+    eprint!("{}", diags.render_all(&rendered));
 
     let emitted = outputs
         .iter()

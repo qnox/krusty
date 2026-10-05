@@ -140,7 +140,7 @@ mod tests {
             companion_object: None,
             qualified_name: None,
             value_underlying: None,
-            value_underlying_property: None,
+            value_declaration: None,
             alias_target: None,
             type_parameters: Default::default(),
             own_type_parameter_count: 0,
@@ -152,6 +152,7 @@ mod tests {
             retention: None,
             annotation_targets: None,
             mapped_collection: None,
+            annotation_element_defaults: Vec::new(),
         })
     }
 

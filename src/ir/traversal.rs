@@ -98,8 +98,18 @@ pub fn for_each_child(exprs: &[IrExpr], e: ExprId, f: &mut impl FnMut(ExprId)) {
                 f(*start);
                 f(*end);
             }
-            IrCheckedOperation::RangeLoop { source, body, .. } => {
+            IrCheckedOperation::RangeLoop {
+                source,
+                body,
+                with_index,
+                ..
+            } => {
                 source.operands().into_iter().for_each(&mut *f);
+                if let Some(index) = with_index {
+                    f(index.declaration);
+                    f(index.bindings);
+                    f(index.element_copies);
+                }
                 f(*body);
             }
             IrCheckedOperation::PropertyReference {

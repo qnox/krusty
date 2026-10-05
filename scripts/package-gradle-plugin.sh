@@ -68,9 +68,12 @@ plugins {
 }
 \`\`\`
 
-Plugin order is part of the supported boundary: apply Kotlin/JVM first, then krusty. Any supplemental
-Kotlin compiler plugin must be applied after krusty and is rejected because krusty cannot preserve
-its compiler semantics.
+Plugin order is part of the supported boundary: apply Kotlin/JVM first, then krusty. The
+kotlinx.serialization plugin (\`kotlin("plugin.serialization")\`) is supported in any order; krusty
+receives the Kotlin Gradle plugin's compiler-plugin classpath and options as kotlinc would. Any other
+Kotlin compiler plugin is rejected, wherever it is applied, because krusty cannot preserve its
+compiler semantics. Projects applying Gradle's \`kotlin-dsl\` (such as \`buildSrc\`) and Kotlin
+compile tasks outside any source set stay with kotlinc; the plugin logs each task it leaves.
 
 Compile with \`./gradlew -Pkrusty.binary=/path/to/krusty krustyCompile\`.
 The Kotlin/JVM plugin is an explicit consumer dependency and is not bundled here. This local-repo

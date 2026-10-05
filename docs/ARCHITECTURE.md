@@ -82,6 +82,17 @@ are not started. The replacement wiring runs at the end of project configuration
 registering a task from inside a task configuration callback. The plugin does not invoke krusty-build, inspect task implementation classes, or
 mutate private action lists. `.kts` files are not compilation inputs.
 
+Two kinds of `KotlinJvmCompile` stay with kotlinc, and the plugin logs each one at configuration
+(`krusty: task '…' is left to kotlinc: …`). A task with no `sourceSetName` belongs to no source-set
+compilation: from Gradle 8, `kotlin-dsl` registers `compilePluginsBlocks` as one; it compiles the `plugins {}`
+blocks extracted from precompiled script plugins as scripts, with no Java sibling or classes output.
+Every compile of a project applying `kotlin-dsl` (`org.gradle.kotlin.kotlin-dsl.base`, so `buildSrc`
+and convention-plugin builds) also stays: its precompiled script plugins are `.gradle.kts` scripts,
+its SAM-with-receiver and assignment compiler plugins change call resolution, and its compiler
+settings add arguments the adapter does not model. Replacing such a task would drop the scripts or
+reject the build, so neither is replaced and neither joins `krustyCompile`.
+(`kotlin_dsl_build_src_compiles_through_krusty` in `crates/krusty-build/src/gradle.rs`.)
+
 The adapter derives Kotlin semantics from `KotlinBasePlugin.pluginVersion`. It reads the experimental
 Build Tools API `compilerVersion` property behind the two exact KGP/BTA opt-ins only to reject an
 override which would make those semantics diverge; it does not use the experimental compiler path.
@@ -91,10 +102,16 @@ krusty. Once any source, classpath, friend path, plugin, compiler option, or com
 the task cleans its Kotlin output directory and recompiles the complete source set. That deliberately
 coarse boundary keeps source additions and removals, multifile facades, generated classes, and
 `.kotlin_module` metadata correct without reconstructing Kotlin's dependency graph from class files.
-Compiler plugins are outside this adapter boundary: applied public
-`KotlinCompilerPluginSupportPlugin` implementations and plugin CLI switches are rejected. KGP's raw
-`pluginClasspath` and `pluginOptions` collections are not treated as activation signals because a
-plain Kotlin/JVM compilation can populate them with implementation plumbing.
+Compiler plugins pass through the adapter as kotlinc receives them: each compile task's KGP
+`pluginClasspath` becomes `-Xplugin=<jars>` and its `pluginOptions` become
+`-P plugin:<id>:<key>=<value>`, and the compiler resolves each jar by the registrar it declares.
+Plugin CLI free arguments stay rejected in favour of that structured input. The applied public
+`KotlinCompilerPluginSupportPlugin` implementations, collected whether they were applied before or
+after krusty, gate the task before krusty runs: `org.jetbrains.kotlinx.serialization` runs as
+krusty's native pass, and `kotlin.scripting` — kotlinc's default scripting plugin, which KGP applies
+to every project and puts on every plugin classpath — acts only on script sources, which the adapter
+never passes. Any other applied support plugin fails the task, and a plugin jar added to the plugin
+classpath without one is refused by the compiler.
 
 Build correctness rests on these contracts:
 
