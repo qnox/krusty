@@ -2,6 +2,8 @@
 
 use std::collections::HashMap;
 
+use crate::fir::CapturedCallableOwner;
+
 use super::*;
 
 #[derive(Clone, Debug)]
@@ -70,9 +72,9 @@ impl BodyFirChecker<'_> {
             };
         }
         let dispatch_owner = self.current_storage_owner();
-        let dispatch_depth = dispatch_owner.map(|_| {
+        let dispatch_depth = dispatch_owner.map(|owner| {
             capture_depths.insert(semantic_depth, runtime_depth);
-            capture_receivers.insert(semantic_depth, FirCapturedReceiver::Enclosing);
+            capture_receivers.insert(semantic_depth, self.enclosing_instance(owner));
             runtime_depth
         });
         let owner = DeclarationId::from_raw(self.body.owner().raw());
@@ -106,7 +108,7 @@ impl BodyFirChecker<'_> {
                 .expect("too many implicit receivers");
             structural_paths.insert(depth, path.clone().into_boxed_slice());
             capture_depths.insert(depth, depth);
-            capture_receivers.insert(depth, FirCapturedReceiver::Enclosing);
+            capture_receivers.insert(depth, self.enclosing_instance(outer));
             classifier = Some(outer);
         }
         ReceiverFrame {
@@ -130,7 +132,14 @@ impl BodyFirChecker<'_> {
             return FirCapturedReceiver::Lambda(lambda.label().map(Box::<str>::from));
         }
         if let Some(name) = self.body.debug_name() {
-            return FirCapturedReceiver::Callable(name.into());
+            let owner = match self.body.local_callable() {
+                Some(_) => CapturedCallableOwner::LocalFunction,
+                None => CapturedCallableOwner::Declaration,
+            };
+            return FirCapturedReceiver::Callable {
+                label: name.into(),
+                owner,
+            };
         }
         let declaration = DeclarationId::from_raw(self.body.owner().raw());
         let property = self
@@ -143,7 +152,10 @@ impl BodyFirChecker<'_> {
             .index
             .declaration_name(property)
             .expect("an extension property has a source name");
-        FirCapturedReceiver::Callable(name.into())
+        FirCapturedReceiver::Callable {
+            label: name.into(),
+            owner: CapturedCallableOwner::Declaration,
+        }
     }
 
     fn context_receiver_capture(&self, ordinal: usize) -> FirCapturedReceiver {
@@ -195,6 +207,17 @@ impl BodyFirChecker<'_> {
     /// The nearest stable declaration that owns instance storage for this body. This is a checked
     /// ownership edge, not a classifier/name search: entry-body members point directly at their
     /// stable enum-entry declaration, while ordinary members point at a classifier declaration.
+    /// The captured instance of the classifier or enum entry `owner`, by the classifier's identity.
+    /// An enum entry's instance is typed as its enum class.
+    pub(super) fn enclosing_instance(&self, owner: DeclarationId) -> FirCapturedReceiver {
+        let classifier = self
+            .index
+            .enclosing_classifier(owner)
+            .expect("an instance owner is a classifier or an enum entry of one")
+            .classifier;
+        FirCapturedReceiver::Enclosing { classifier }
+    }
+
     pub(super) fn current_storage_owner(&self) -> Option<DeclarationId> {
         let mut declaration = DeclarationId::from_raw(self.body.owner().raw());
         loop {

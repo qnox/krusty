@@ -508,7 +508,7 @@ impl BodyFirChecker<'_> {
                 depth: source.depth,
                 path: capture_path.clone(),
                 ty: receiver_ty,
-                receiver: FirCapturedReceiver::Enclosing,
+                receiver: self.enclosing_instance(receiver_owner),
             });
         let receiver = self.body.add_expr(FirExpr {
             origin,

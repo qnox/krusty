@@ -290,17 +290,34 @@ pub struct ClassSets {
 
 /// Complete output inventory from both compilers for one checked multi-file module.
 pub fn classes_against_kotlinc_module(sources: &[(&str, &str)]) -> ClassSets {
+    classes_against_kotlinc_source_set(sources, 0)
+}
+
+/// [`classes_against_kotlinc_module`] for a multiplatform JVM module whose first `common` sources
+/// are common sources: kotlinc gets `-Xmulti-platform -Xcommon-sources=…`, krusty marks the same
+/// sources common.
+pub fn classes_against_kotlinc_source_set(sources: &[(&str, &str)], common: usize) -> ClassSets {
     let common_root = super::common_core::scratch_dir().expect("allocate module class inventory");
     let output = common_root.join("reference");
     let mut arguments = vec!["-d".to_owned(), output.to_string_lossy().into_owned()];
-    for (name, source) in sources {
+    let mut common_paths = Vec::new();
+    let mut paths = Vec::new();
+    for (index, (name, source)) in sources.iter().enumerate() {
         let path = common_root.join(name);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).expect("create module source directory");
         }
         std::fs::write(&path, source).expect("write module fixture source");
-        arguments.push(path.to_string_lossy().into_owned());
+        if index < common {
+            common_paths.push(path.to_string_lossy().into_owned());
+        }
+        paths.push(path.to_string_lossy().into_owned());
     }
+    if common > 0 {
+        arguments.push("-Xmulti-platform".to_owned());
+        arguments.push(format!("-Xcommon-sources={}", common_paths.join(",")));
+    }
+    arguments.extend(paths);
     let (code, diagnostics) = super::common_core::byte_dump::with_recorded_diagnostics(|| {
         super::common_core::kotlinc_compile(&arguments).expect("reference compiler is provisioned")
     });
@@ -313,14 +330,18 @@ pub fn classes_against_kotlinc_module(sources: &[(&str, &str)]) -> ClassSets {
     let _ = std::fs::remove_dir_all(common_root);
     let stdlib = super::common_core::stdlib_jar();
     let jdk = super::common_core::jdk_modules();
-    let krusty =
-        super::common_core::compile_in_process_files(sources, &[stdlib], Some(jdk.as_path()))
-            .expect("krusty accepted module inventory fixture")
-            .into_iter()
-            // The in-process emitter also returns `META-INF/<module>.kotlin_module`. The reference
-            // side is class files only, so the inventory comparison is class identity.
-            .filter(|(_, bytes)| bytes.starts_with(&[0xCA, 0xFE, 0xBA, 0xBE]))
-            .collect();
+    let krusty = super::e2e_support::compile_in_process_files_common(
+        sources,
+        common,
+        &[stdlib],
+        Some(jdk.as_path()),
+    )
+    .expect("krusty accepted module inventory fixture")
+    .into_iter()
+    // The in-process emitter also returns `META-INF/<module>.kotlin_module`. The reference
+    // side is class files only, so the inventory comparison is class identity.
+    .filter(|(_, bytes)| bytes.starts_with(&[0xCA, 0xFE, 0xBA, 0xBE]))
+    .collect();
     ClassSets { reference, krusty }
 }
 

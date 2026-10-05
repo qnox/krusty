@@ -281,7 +281,10 @@ fn an_inner_class_reads_a_superclass_capture_from_the_enclosing_instance() {
         matches!(
             capture,
             Some(krusty::ir::IrConstructorCapture {
-                receiver: Some(krusty::ir::IrCapturedReceiver::Callable(label)),
+                receiver: Some(krusty::ir::IrCapturedReceiver::Callable {
+                    label,
+                    owner: krusty::fir::CapturedCallableOwner::Declaration,
+                }),
                 ..
             }) if label.as_ref() == "bar"
         ),

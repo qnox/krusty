@@ -810,6 +810,29 @@ impl<'a> CommonIrBodySink<'a> {
                     .is_none(),
                 "a source classifier may publish function override edges once"
             );
+            if let Some((constructor, operands)) =
+                index.serialization_custom_serializer_constructor(declaration)
+            {
+                let construction = crate::ir::IrCustomSerializerConstruction {
+                    serializer: index
+                        .enclosing_classifier(constructor)
+                        .ok_or(FirFileLoweringFailure::MissingCallable(constructor))?
+                        .classifier,
+                    parameters: index
+                        .signature(constructor)
+                        .ok_or(FirFileLoweringFailure::MissingCallable(constructor))?
+                        .parameters
+                        .iter()
+                        .map(|parameter| parameter.get())
+                        .collect(),
+                    operands: operands.into(),
+                    target: super::constructors::module_constructor_target(index, constructor)
+                        .ok_or(FirFileLoweringFailure::MissingCallable(constructor))?,
+                };
+                self.ir
+                    .custom_serializer_constructions
+                    .insert(classifier_identity, construction);
+            }
             // Serialization/metadata external names use Kotlin's declaration spelling, where both
             // package and lexical-class boundaries are dots. Capture it while the stable owner/name
             // graph is available; common IR must not reconstruct those boundaries from a JVM `$`.
@@ -1594,7 +1617,7 @@ impl<'a> CommonIrBodySink<'a> {
                 result,
                 lowered.implicit_return,
                 false,
-                0,
+                Some(super::UnitReturnLine::ExpressionEnd),
                 origin,
             )
             .map_err(FirFileLoweringFailure::Body)?

@@ -803,6 +803,12 @@ impl Emitter<'_> {
             } else {
                 Supply::Stored
             };
+            // kotlinc never stores an inline suspend callee's continuation: the body reads the
+            // caller's own continuation local, as every suspension point in the caller does.
+            if self.reads_continuation_local(argument) {
+                supplies.push(Supply::CallerLocal);
+                continue;
+            }
             let local = matches!(self.ir.expr(argument), IrExpr::GetValue(v)
                 if self.slots.contains_key(v))
                 && self.local_needs_no_boxing(argument, physical[index]);
@@ -863,9 +869,27 @@ impl Emitter<'_> {
         local.scalar_value_repr().is_none() && parameter.scalar_value_repr().is_none()
     }
 
+    /// Whether `argument` is the continuation this emission reads from its own local, rather than
+    /// a fake continuation or one the CPS pass bound to a value.
+    fn reads_continuation_local(&self, argument: u32) -> bool {
+        matches!(self.ir.expr(argument), IrExpr::CurrentContinuation)
+            && self.continuation_slot.is_some()
+            && !self.is_fake_continuation(argument)
+    }
+
     /// The caller local an argument is read from, coerced to the parameter's class as kotlinc's
     /// `StackValue.coerce` does between two reference types.
     fn caller_local_binding(&self, argument: u32, parameter: Ty) -> Binding {
+        if self.reads_continuation_local(argument) {
+            let slot = self
+                .continuation_slot
+                .expect("a continuation read binds the continuation slot");
+            return Binding::CallerLocal {
+                slot,
+                category: Category::Reference,
+                checkcast: None,
+            };
+        }
         let IrExpr::GetValue(value) = self.ir.expr(argument) else {
             unreachable!("a caller-local argument is a local read");
         };

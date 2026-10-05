@@ -1563,6 +1563,11 @@ pub struct ResolvedModuleIndex {
     /// classifier. The callable was selected while the generated symbol table was authoritative;
     /// later consumers receive its owner and arity without recognizing a generated spelling.
     serialization_companion_accessors: HashMap<DeclarationId, (Box<str>, TypeName, usize)>,
+    /// Primary constructor of the custom serializer CLASS a source classifier's
+    /// `@Serializable(with = …)` names, selected and validated by the serialization frontend, with
+    /// the generated accessor's operand ordinal passed to each constructor parameter.
+    serialization_custom_serializer_constructors:
+        HashMap<DeclarationId, (DeclarationId, Box<[u32]>)>,
     /// Stable declarations whose resolved `@Suppress` policy permits otherwise-invisible source
     /// references while checking their bodies. Annotation occurrences remain Pass-1 syntax; only
     /// this declaration-owned semantic fact crosses into Pass 2.
@@ -2632,6 +2637,7 @@ impl ResolvedModuleIndex {
             && self.local_class_name_provenance.is_empty()
             && self.generated_classifiers.is_empty()
             && self.serialization_companion_accessors.is_empty()
+            && self.serialization_custom_serializer_constructors.is_empty()
             && self.classifiers.is_empty()
             && self.signatures.is_empty()
             && self.callables.is_empty()
@@ -3116,6 +3122,14 @@ impl ResolvedModuleIndex {
                 .serialization_companion_accessors
                 .values()
                 .map(|(field, _, _)| field.len())
+                .sum::<usize>()
+            + self.serialization_custom_serializer_constructors.len()
+                * (std::mem::size_of::<DeclarationId>()
+                    + std::mem::size_of::<(DeclarationId, Box<[u32]>)>())
+            + self
+                .serialization_custom_serializer_constructors
+                .values()
+                .map(|(_, operands)| std::mem::size_of_val(operands.as_ref()))
                 .sum::<usize>()
             + (self.invisible_reference_suppressions.len()
                 + self.invisible_member_suppressions.len()

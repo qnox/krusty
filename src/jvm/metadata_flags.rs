@@ -53,11 +53,9 @@ pub(super) fn class_metadata_flags(ir: &IrFile, c: &crate::ir::IrClass) -> u64 {
     } else {
         0
     };
-    // Only DECLARED annotations set `hasAnnotations`: the `@JvmInline` the class file implies for a
-    // legacy `inline class` is not one (kotlinc: `inline class W(val x: Int)` flags 134).
-    let has_annotations = u64::from(!c.applied_annotations.is_empty());
-    has_annotations
-        | (visibility << 1)
+    // `hasAnnotations` (bit 0) is the metadata writer's, from the class's DECLARED annotations: the
+    // `@JvmInline` the class file implies for a legacy `inline class` is not one (kotlinc: 134).
+    (visibility << 1)
         | (modality << 4)
         | (kind << 6)
         // `IS_INNER` (bit 9): an `inner class` — the record is how a consumer knows construction

@@ -1261,11 +1261,9 @@ pub fn facade_package_metadata_from_ir(
                 params: declaration.params.clone(),
                 ret: declaration.ret,
                 decl_order: declaration.source_order as usize,
-                annotations: ir
-                    .function_annotations
-                    .get(&declaration.function)
-                    .map(|annotations| annotations.applications().cloned().collect())
-                    .unwrap_or_default(),
+                annotations: crate::metadata::MetadataAnnotations::of_optional(
+                    ir.function_annotations.get(&declaration.function),
+                ),
                 receiver: declaration.receiver,
                 param_modifiers: super::metadata_flags::declared_value_parameters(
                     ir,
@@ -1307,7 +1305,7 @@ pub fn facade_package_metadata_from_ir(
                 spellings: declaration.spellings.clone(),
                 param_annotations: param_annotations
                     .iter()
-                    .map(|annotations| annotations.applications().cloned().collect())
+                    .map(crate::metadata::MetadataAnnotations::of)
                     .collect(),
                 no_infer_params,
             }

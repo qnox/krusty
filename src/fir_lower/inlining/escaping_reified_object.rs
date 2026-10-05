@@ -277,6 +277,123 @@ fn a_reified_anonymous_object_copies_its_property_accessors() {
     );
 }
 
+const TYPE_OF_PROPERTY: &str = "\
+import kotlin.reflect.typeOf\n\
+class Token\n\
+inline fun <reified T> foo(): Any = object { val x = typeOf<T>() }.x\n\
+fun box(): Any = foo<Token>()\n";
+
+const NESTED_TYPE_OF_PROPERTY: &str = "\
+import kotlin.reflect.typeOf\n\
+class Token\n\
+inline fun <reified T> foo(): Any = object { val x = typeOf<T>() }.x\n\
+inline fun <reified T> bar(): Any = foo<List<T>>()\n\
+fun box(): Any = bar<Token>()\n";
+
+fn reified_substitution_values(ir: &crate::ir::IrFile, class: u32) -> Vec<Ty> {
+    let mut roots = ir.classes[class as usize]
+        .methods
+        .iter()
+        .filter_map(|method| ir.functions[*method as usize].body)
+        .collect::<Vec<_>>();
+    roots.extend(ir.classes[class as usize].init_body);
+    roots.extend(
+        ir.classes[class as usize]
+            .properties
+            .iter()
+            .filter_map(|property| property.initializer),
+    );
+    let mut pending = roots;
+    let mut seen = std::collections::HashSet::new();
+    let mut values = Vec::new();
+    while let Some(expression) = pending.pop() {
+        if !seen.insert(expression) {
+            continue;
+        }
+        if let IrExpr::Call {
+            callee: crate::ir::Callee::External { substitutions, .. },
+            ..
+        } = ir.expr(expression)
+        {
+            values.extend(
+                substitutions
+                    .iter()
+                    .filter(|substitution| substitution.reified)
+                    .map(|substitution| substitution.value),
+            );
+        }
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+    }
+    values
+}
+
+fn mentions_type_parameter(ty: Ty) -> bool {
+    match ty.non_null() {
+        Ty::TyParam(..) => true,
+        other => other
+            .type_args()
+            .iter()
+            .copied()
+            .any(mentions_type_parameter),
+    }
+}
+
+#[test]
+fn an_inlined_reified_anonymous_object_specializes_type_of_in_a_property() {
+    let ir = lower(TYPE_OF_PROPERTY, "ReifiedAnonymousTypeOf");
+    let declaration = ir
+        .classes
+        .iter()
+        .enumerate()
+        .find_map(|(index, class)| {
+            let index = u32::try_from(index).expect("class index");
+            (class.is_anonymous_object
+                && reified_substitution_values(&ir, index)
+                    .iter()
+                    .copied()
+                    .any(mentions_type_parameter))
+            .then_some(index)
+        })
+        .expect("the declaration class keeps typeOf<T>()");
+    let call = constructed_class(&ir, function_named(&ir, "box"));
+    assert_ne!(declaration, call);
+    let call_values = reified_substitution_values(&ir, call);
+    assert!(
+        call_values
+            .iter()
+            .any(|ty| ty.non_null() == Ty::obj("Token")),
+        "the call-site typeOf argument is Token, got {call_values:?}"
+    );
+    assert!(
+        call_values
+            .iter()
+            .copied()
+            .all(|ty| !mentions_type_parameter(ty)),
+        "the call-site typeOf argument is not left as a type parameter, got {call_values:?}"
+    );
+    assert!(ir.reified_anonymous_declarations.contains(&declaration));
+    assert!(!ir.reified_anonymous_declarations.contains(&call));
+}
+
+#[test]
+fn a_nested_inline_specializes_type_of_inside_the_anonymous_object() {
+    let ir = lower(NESTED_TYPE_OF_PROPERTY, "NestedReifiedAnonymousTypeOf");
+    let call = constructed_class(&ir, function_named(&ir, "box"));
+    let call_values = reified_substitution_values(&ir, call);
+    let list_of_token = Ty::obj_args("kotlin/collections/List", &[Ty::obj("Token")]);
+    assert!(
+        call_values.iter().any(|ty| ty.non_null() == list_of_token),
+        "the outer call specializes typeOf to List<Token>, got {call_values:?}"
+    );
+    assert!(
+        call_values
+            .iter()
+            .copied()
+            .all(|ty| !mentions_type_parameter(ty)),
+        "the outer call does not leave a type parameter in typeOf, got {call_values:?}"
+    );
+}
+
 fn method_calls(ir: &crate::ir::IrFile, function: u32) -> Vec<u32> {
     let Some(body) = ir.functions[function as usize].body else {
         return Vec::new();

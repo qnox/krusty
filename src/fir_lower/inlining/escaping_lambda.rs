@@ -498,8 +498,11 @@ fn substitutions_use_binding(
 
 /// Runtime call facts that carry a reified type argument. Static result/signature/storage facts are
 /// deliberately excluded: specializing those types may be necessary once a copy exists, but they
-/// do not cause a closure implementation to execute a reified operation.
-fn expression_facts_use_binding(
+/// do not cause a closure or anonymous-object implementation to execute a reified operation.
+///
+/// Anonymous objects share this predicate. `typeOf<T>()` stays an external call until the JVM
+/// realizes it, and only the reified substitution says the call is a runtime type operation.
+pub(super) fn expression_facts_use_binding(
     ir: &crate::ir::IrFile,
     expression: ExprId,
     bindings: &HashMap<String, Ty>,
