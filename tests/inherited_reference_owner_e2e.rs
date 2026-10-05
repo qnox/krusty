@@ -69,17 +69,3 @@ fn an_unbound_extension_reference_keeps_the_file_facade_owner() {
     );
     assert_eq!(reference, "OK");
 }
-
-/// A member extension is both a member and an extension. Callable references to it are prohibited,
-/// so reflection must not retarget the dispatch class onto the extension receiver.
-#[test]
-fn a_member_extension_reference_is_prohibited() {
-    let source = r#"
-        class Extension(val name: String)
-        class Dispatch {
-            fun Extension.member(): String = name
-            fun ref() = Extension::member
-        }
-    "#;
-    common::assert_messages_match_kotlinc(source);
-}

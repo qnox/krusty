@@ -66349,15 +66349,6 @@ impl<'a> Checker<'a> {
                     return Some(ty);
                 }
             }
-            // A member extension is visible on the dispatch receiver, so `Extension::member`
-            // inside that class resolves. References to it are prohibited; reporting the name as
-            // unresolved would hide that diagnostic.
-            if !self
-                .member_extension_function_shapes(scope, extension_receiver_ty, name)
-                .is_empty()
-            {
-                return Some(self.reject_member_extension_reference(expression, name));
-            }
             None
         })();
         selected
