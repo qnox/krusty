@@ -766,6 +766,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   block do not decline the transformer: the block is one point at its own line. Suspend lambdas
   that read their continuation still take the IR machine (`jvm/suspend/bytecode_machine.rs`,
   `jvm/ir_emit/transformed_suspensions.rs`). Tests: `tests/intrinsic_suspension_probes_e2e.rs`.
+- **A suspend function's result is annotated `@Nullable`.** Its CPS `Object` result is either
+  the value or `COROUTINE_SUSPENDED`, so kotlinc annotates it `@Nullable` whatever the declared
+  result: a non-null value class, a bare type parameter (otherwise unannotated), or an abstract
+  declaration's (`jvm/ir_emit/declared_nullability.rs`, `jvm/abstract_method_nullability.rs`).
+  Tests: `tests/suspend_result_nullability_e2e.rs`.
 - **`suspendCoroutine` is an ordinary inline suspend call.** The stdlib declares it a public
   `@InlineOnly` suspend function whose compiled body already holds kotlinc's suspension markers
   and `SafeContinuation` protocol, and kotlinc inlines that body like any other: no declaration
