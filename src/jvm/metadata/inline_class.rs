@@ -12,6 +12,9 @@ pub struct InlineClass {
     pub underlying_nullable: Option<bool>,
     /// The sole property's name (`data` for `UInt`/`Result`).
     pub property_name: Option<String>,
+    /// The sole property and its declared type over the class's own type parameters. `None` when
+    /// metadata omitted either.
+    pub declaration: Option<crate::types::DeclaredValueClass>,
 }
 
 /// If `ctx` is a Kotlin `@JvmInline value class`, its decoded [`InlineClass`] (presence of the
@@ -74,6 +77,10 @@ pub(super) fn inline_class(ctx: &MetaCtx) -> Option<InlineClass> {
             .as_deref()
             .and_then(|name| property_return_type(ctx, name, type_table));
     }
+    let declaration = property_name
+        .as_deref()
+        .zip(underlying)
+        .and_then(|(property, resolved)| declared_value_class(ctx, type_table, property, resolved));
     let (underlying_class, underlying_nullable) = match underlying {
         Some((body, table_nullable)) => {
             let (class, nullable) = parse_type_class_and_nullable(body);
@@ -98,6 +105,49 @@ pub(super) fn inline_class(ctx: &MetaCtx) -> Option<InlineClass> {
         underlying_class,
         underlying_nullable,
         property_name,
+        declaration,
+    })
+}
+
+/// The underlying type `resolved` decoded over the class's own type parameters, which a value
+/// class (never inner) declares all of itself.
+fn declared_value_class(
+    ctx: &MetaCtx,
+    type_table: Option<&[u8]>,
+    property: &str,
+    resolved: (&[u8], bool),
+) -> Option<crate::types::DeclaredValueClass> {
+    let parameters = type_param_bodies(ctx.msg, CLASS_TYPE_PARAMETER_FIELD)
+        .into_iter()
+        .map(parse_type_param)
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    let context = type_parameter_context(&[], &[], &parameters, ctx.records, ctx.d2, type_table)?;
+    let underlying = decode_metadata_type_ref(
+        Some(resolved),
+        type_table,
+        ctx.records,
+        ctx.d2,
+        Some(&context),
+    )?;
+    let type_parameters = context
+        .formals
+        .iter()
+        .map(|name| {
+            Ty::ty_param(
+                name,
+                context
+                    .erasure_bounds
+                    .get(name)
+                    .copied()
+                    .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any"))),
+            )
+        })
+        .collect();
+    Some(crate::types::DeclaredValueClass {
+        property: property.into(),
+        underlying,
+        type_parameters,
     })
 }
 

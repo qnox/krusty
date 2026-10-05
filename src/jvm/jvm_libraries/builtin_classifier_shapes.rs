@@ -41,7 +41,7 @@ pub(super) fn mapped_builtin_signature(internal: TypeName) -> Option<LibraryType
         companion_object: None,
         qualified_name: None,
         value_underlying: None,
-        value_underlying_property: None,
+        value_declaration: None,
         alias_target: None,
         type_parameters: crate::types::TypeParameters::default(),
         own_type_parameter_count: 0,
@@ -110,7 +110,7 @@ pub(super) fn builtin_library_type(
         companion_object: None,
         qualified_name: None,
         value_underlying: None,
-        value_underlying_property: None,
+        value_declaration: None,
         alias_target: None,
         own_type_parameter_count: generic.type_params.len(),
         type_parameters: crate::types::TypeParameters::new(

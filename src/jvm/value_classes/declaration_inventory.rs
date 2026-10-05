@@ -49,6 +49,9 @@ pub(super) fn merge_referenced(
             underlying_properties.insert(classifier, property);
         }
 
+        if let Some(declaration) = classifiers.classifier_value_declaration(classifier) {
+            ir.insert_external_value_class_declaration(classifier, declaration);
+        }
         let candidates = [
             ir.external_value_class_name(classifier).copied(),
             classifiers.classifier_value_underlying(classifier),

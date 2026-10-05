@@ -577,6 +577,7 @@ fn become_invoke_suspend(ir: &mut IrFile, fid: u32, class: TypeName) {
     ir.synthetic_methods.remove(&fid);
     ir.class_static_local_functions.remove(&fid);
     ir.lambda_own_params_from.remove(&fid);
+    ir.vc_declared_sigs.remove(&fid);
     ir.lambda_origins.remove(&fid);
     ir.lifted_functions.remove(&fid);
     ir.lifted_names.remove(&fid);

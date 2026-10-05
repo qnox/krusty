@@ -187,9 +187,16 @@ impl crate::types::ClassifierFactSource for JvmLibraries {
         SymbolSource::classifier(self, classifier).and_then(|shape| shape.value_underlying)
     }
 
+    fn classifier_value_declaration(
+        &self,
+        classifier: TypeName,
+    ) -> Option<crate::types::DeclaredValueClass> {
+        SymbolSource::classifier(self, classifier).and_then(|shape| shape.value_declaration.clone())
+    }
+
     fn classifier_value_property(&self, classifier: TypeName) -> Option<String> {
         SymbolSource::classifier(self, classifier)
-            .and_then(|shape| shape.value_underlying_property.clone())
+            .and_then(|shape| Some(shape.value_declaration.as_ref()?.property.to_string()))
     }
 
     fn classifier_role(&self, classifier: TypeName) -> Option<crate::types::ClassifierRole> {

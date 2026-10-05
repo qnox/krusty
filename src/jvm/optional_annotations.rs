@@ -205,7 +205,7 @@ fn annotation_type(declaration: &semantic::KotlinClass) -> LibraryType {
         companion_object: None,
         qualified_name: None,
         value_underlying: None,
-        value_underlying_property: None,
+        value_declaration: None,
         alias_target: None,
         own_type_parameter_count: type_parameters.type_params.len(),
         type_parameters,
