@@ -71,6 +71,17 @@ impl ResolvedModuleIndex {
             .map(|(field, companion, arity)| (field.as_ref(), *companion, *arity))
     }
 
+    /// The custom serializer class's primary constructor selected for `declaration`'s
+    /// `@Serializable(with = …)`, with the accessor operand ordinal for each of its parameters.
+    pub fn serialization_custom_serializer_constructor(
+        &self,
+        declaration: DeclarationId,
+    ) -> Option<(DeclarationId, &[u32])> {
+        self.serialization_custom_serializer_constructors
+            .get(&declaration)
+            .map(|(constructor, operands)| (*constructor, operands.as_ref()))
+    }
+
     pub fn publish_declaration_annotations(
         &mut self,
         declaration: DeclarationId,
@@ -179,6 +190,20 @@ impl ResolvedModuleIndex {
                 .insert(declaration, (field, companion, type_parameters))
                 .is_none(),
             "a source classifier may publish only one serialization companion accessor"
+        );
+    }
+
+    pub fn publish_serialization_custom_serializer_constructor(
+        &mut self,
+        declaration: DeclarationId,
+        constructor: DeclarationId,
+        operands: Box<[u32]>,
+    ) {
+        assert!(
+            self.serialization_custom_serializer_constructors
+                .insert(declaration, (constructor, operands))
+                .is_none(),
+            "a source classifier may publish only one custom serializer constructor"
         );
     }
 }

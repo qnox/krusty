@@ -185,7 +185,7 @@ impl SpillLayout {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{IrIntrinsicSuspensionKind, IrIntrinsicSuspensionPoint};
+    use crate::ir::IrIntrinsicSuspensionPoint;
 
     #[test]
     fn suspension_points_follow_the_final_body_order() {
@@ -193,13 +193,8 @@ mod tests {
         let first = ir.add_expr(IrExpr::UnitInstance);
         let second = ir.add_expr(IrExpr::UnitInstance);
         for point in [first, second] {
-            ir.intrinsic_suspension_points.insert(
-                point,
-                IrIntrinsicSuspensionPoint {
-                    result: Ty::Unit,
-                    kind: IrIntrinsicSuspensionKind::Safe,
-                },
-            );
+            ir.intrinsic_suspension_points
+                .insert(point, IrIntrinsicSuspensionPoint { result: Ty::Unit });
         }
         let body = ir.add_expr(IrExpr::Block {
             stmts: vec![first, second],

@@ -22,10 +22,9 @@ pub struct FnMeta {
     pub ret: Ty,
     /// Position of the declaration in the FILE (see [`PropMeta::decl_order`]).
     pub decl_order: usize,
-    /// BINARY/RUNTIME-retained annotations applied to the function, including their frontend-checked
-    /// element values. These become `Function.annotation` (field 12) records; SOURCE annotations never
-    /// enter this list.
-    pub annotations: Vec<crate::ir::AppliedAnnotation>,
+    /// The function's annotations: the `HAS_ANNOTATIONS` flag and the BINARY/RUNTIME-retained
+    /// `Function.annotation` (field 12) records with their frontend-checked element values.
+    pub annotations: crate::metadata::MetadataAnnotations,
     /// Extension-receiver type (`Function.receiver_type` = 5), `Some` for an extension function. Recorded
     /// SEPARATELY from `params` (the LOGICAL value params, receiver excluded), so a reader recovers the
     /// extension's true source arity — `fun T.f(a)` is one value param, not two. `None` for a plain fn.
@@ -97,7 +96,7 @@ pub struct FnMeta {
     pub spellings: crate::spelling::DeclaredSpellings,
     /// User annotations on each value parameter (`fun f(@Mark a: Int)`), parallel to `params`. A short
     /// or empty vec leaves the remaining parameters unannotated.
-    pub param_annotations: Vec<Vec<crate::ir::AppliedAnnotation>>,
+    pub param_annotations: Vec<crate::metadata::MetadataAnnotations>,
     /// Kotlin type-use inference policy, parallel to `params`.
     pub no_infer_params: Vec<bool>,
 }
@@ -114,7 +113,7 @@ impl FnMeta {
             params,
             ret,
             decl_order: 0,
-            annotations: Vec::new(),
+            annotations: Default::default(),
             receiver: None,
             param_modifiers: Vec::new(),
             suspend: false,
@@ -444,7 +443,7 @@ fn function_pb(
             )
         }
     };
-    let flags = u64::from(!f.annotations.is_empty())
+    let flags = u64::from(f.annotations.declares_annotations())
         | (vis << 1)
         | (u64::from(f.suspend) << 13)
         | (u64::from(f.tailrec) << 11)
@@ -518,7 +517,7 @@ fn function_pb(
             continue;
         }
         let mut vp = Pb::new();
-        let annotations = f.param_annotations.get(i).map(Vec::as_slice).unwrap_or(&[]);
+        let annotations = f.param_annotations.get(i);
         // ValueParameter.flags = 1 (before name, matching kotlinc's field order): what the
         // parameter declared, plus bit 0 = HAS_ANNOTATIONS when it carries annotations — the bit
         // stays set when the source feature is disabled; the `annotation` records are gated
@@ -529,11 +528,7 @@ fn function_pb(
             .copied()
             .unwrap_or_default()
             .flags()
-            | if crate::metadata::class_builder::records_annotations(annotations) {
-                crate::metadata::class_builder::HAS_ANNOTATIONS
-            } else {
-                0
-            };
+            | crate::metadata::class_builder::param_annotation_flags(annotations);
         if flags != 0 {
             vp.field_varint(1, flags);
         }
@@ -594,7 +589,7 @@ fn function_pb(
     // though it SERIALIZES after them — kotlinc's serializer writes the extension first, so an
     // ANNOTATED suspend function's CPS descriptor precedes `Lp/Mark;` in d2. Interning it early only
     // when annotations exist leaves every unannotated function's string table exactly where it was.
-    let mut signature = (!f.annotations.is_empty())
+    let mut signature = (!f.annotations.records().is_empty())
         .then(|| method_signature_pb(st, f))
         .flatten();
     // Applied annotations (Function.annotation = 12): `Annotation.id` (field 1) referencing the class
@@ -603,7 +598,7 @@ fn function_pb(
     // language level 2.4) gates the records, not the flags: an older source-language configuration
     // keeps the `HAS_ANNOTATIONS` bit above and writes nothing here.
     if annotations_in_metadata {
-        for annotation in &f.annotations {
+        for annotation in f.annotations.records() {
             p.repeated_message(12, &annotation_pb(st, annotation));
         }
     }
@@ -695,6 +690,9 @@ pub struct PropMeta {
     /// A delegated property's `(name, descriptor)` of the static field holding its delegate, which
     /// kotlinc records explicitly after the accessors' signatures.
     pub delegate_field: Option<(String, String)>,
+    /// JVM field descriptor when storage is not what a reader derives from the Kotlin type. A
+    /// value class's field is its carrier (`S` stored as `Ljava/lang/String;`).
+    pub field_desc: Option<String>,
 }
 
 /// A source typealias declaration in package or classifier metadata.
@@ -971,7 +969,11 @@ fn property_pb(st: &mut StringTable<'_>, m: &PropMeta) -> Pb {
         field.field_varint(2, st.local(descriptor) as u64); // JvmFieldSignature.desc = 2
         jvm.field_message(1, &field);
     } else if m.has_backing_field {
-        jvm.field_message(1, &Pb::new());
+        let mut field = Pb::new();
+        if let Some(descriptor) = &m.field_desc {
+            field.field_varint(2, st.local(descriptor) as u64); // JvmFieldSignature.desc = 2
+        }
+        jvm.field_message(1, &field);
     }
     if let Some(getter) = &getter {
         jvm.field_message(3, getter);
@@ -1185,6 +1187,7 @@ mod tests {
                 setter_visibility: crate::types::Visibility::Public,
                 companion: false,
                 delegate_field: None,
+                field_desc: None,
                 decl_order: 0,
             }
         }
@@ -1240,6 +1243,7 @@ mod tests {
                 setter_visibility: crate::types::Visibility::Public,
                 companion: false,
                 delegate_field: None,
+                field_desc: None,
                 has_constant: false,
                 decl_order: 0,
             }],
@@ -1298,6 +1302,7 @@ mod tests {
                 setter_visibility: crate::types::Visibility::Public,
                 companion: false,
                 delegate_field: None,
+                field_desc: None,
                 has_constant: false,
                 decl_order: 0,
             }],
@@ -1355,6 +1360,7 @@ mod tests {
                 setter_visibility: crate::types::Visibility::Public,
                 companion: false,
                 delegate_field: None,
+                field_desc: None,
                 has_constant: false,
                 decl_order: 0,
             }],
@@ -1405,6 +1411,7 @@ mod tests {
                 setter_visibility: crate::types::Visibility::Public,
                 companion: false,
                 delegate_field: None,
+                field_desc: None,
                 decl_order: 0,
             }],
             &[],

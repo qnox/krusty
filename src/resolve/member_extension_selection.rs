@@ -224,6 +224,7 @@ pub(super) fn candidate(
         overridden_results: shape.function.overridden_results.clone(),
         owner: shape.owner,
         physical_name: shape.function.physical_name.clone(),
+        type_arguments: instantiated.type_arguments,
     }
 }
 

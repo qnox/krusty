@@ -69,11 +69,9 @@ pub(super) fn functions(ir: &IrFile, publication: &IrGeneratedMemberPublication)
             if function.name != metadata.source_name {
                 result.jvm_sig_name = Some(function.name.clone());
             }
-            result.annotations = ir
-                .function_annotations
-                .get(&member.function)
-                .map(|annotations| annotations.applications().cloned().collect())
-                .unwrap_or_default();
+            result.annotations = crate::metadata::MetadataAnnotations::of_optional(
+                ir.function_annotations.get(&member.function),
+            );
             Some(result)
         })
         .collect()
@@ -204,7 +202,7 @@ mod tests {
             metadata[0].jvm_sig.as_deref(),
             Some("(JLjava/lang/String;Lkotlin/Unit;)V")
         );
-        assert!(metadata[0].annotations.is_empty());
+        assert!(!metadata[0].annotations.declares_annotations());
     }
 
     #[test]
