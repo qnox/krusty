@@ -34,7 +34,7 @@ impl Checker<'_> {
             );
             return;
         }
-        let internal = if self.fragment.is_classifier_annotations() {
+        let internal = if self.fragment.publishes_annotation_metadata() {
             // Pass 1 already bound this exact occurrence. Metadata publication consumes that
             // identity directly: resolving its spelling again after actualization could resurrect
             // a target-excluded optional-expect annotation or select a different scope rung.

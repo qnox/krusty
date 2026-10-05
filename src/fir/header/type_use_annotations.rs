@@ -1,22 +1,15 @@
 //! Type-use annotation occurrences retained by the header inventory for `@Metadata`.
 //!
 //! The parser files a type's annotations under the type's start offset. Pass 1 binds each
-//! annotation reference to its classifier by span; this arena keeps the span and whether the
-//! application had arguments, so the declared-type spellings can be built after the source AST is
-//! released.
+//! annotation reference to its classifier by span; this arena keeps those spans, so the
+//! declared-type spellings can be built after the source AST is released.
 
 use super::SourceFileId;
 use crate::ast::File;
 use crate::diag::Span;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct HeaderTypeUseAnnotation {
-    pub annotation: Span,
-    pub has_arguments: bool,
-}
-
 /// One annotated type occurrence: its start offset and its annotations in source order.
-type AnnotatedOccurrence = (u32, Box<[HeaderTypeUseAnnotation]>);
+type AnnotatedOccurrence = (u32, Box<[Span]>);
 
 #[derive(Default)]
 pub(super) struct HeaderTypeUseAnnotationArena {
@@ -31,12 +24,7 @@ impl HeaderTypeUseAnnotationArena {
             .map(|(&occurrence, annotations)| {
                 let annotations = annotations
                     .iter()
-                    .map(|annotation| HeaderTypeUseAnnotation {
-                        annotation: annotation.span,
-                        has_arguments: file
-                            .type_annotation_arguments
-                            .contains_key(&(annotation.span.lo, annotation.span.hi)),
-                    })
+                    .map(|annotation| annotation.span)
                     .collect();
                 (occurrence, annotations)
             })
@@ -51,7 +39,7 @@ impl HeaderTypeUseAnnotationArena {
     pub(super) fn occurrences(
         &self,
         source: SourceFileId,
-    ) -> impl Iterator<Item = (u32, &[HeaderTypeUseAnnotation])> + '_ {
+    ) -> impl Iterator<Item = (u32, &[Span])> + '_ {
         self.occurrences
             .get(&source)
             .into_iter()
@@ -65,7 +53,7 @@ impl HeaderTypeUseAnnotationArena {
             .flatten()
             .map(|(_, annotations)| {
                 std::mem::size_of::<AnnotatedOccurrence>()
-                    + annotations.len() * std::mem::size_of::<HeaderTypeUseAnnotation>()
+                    + annotations.len() * std::mem::size_of::<Span>()
             })
             .sum()
     }

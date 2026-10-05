@@ -125,3 +125,135 @@ fn a_use_of_an_annotated_typealias_inherits_its_annotations() {
     );
     assert_identical("AliasPassUse", &src, "app/AliasPassUseKt");
 }
+
+const ARGUMENT_PRELUDE: &str = "package app\n\
+    \n\
+    import kotlin.reflect.KClass\n\
+    \n\
+    @Target(AnnotationTarget.TYPE) annotation class Bin(val size: Int)\n\
+    @Target(AnnotationTarget.TYPE) annotation class Named(val label: String, val wide: Boolean = false)\n\
+    @Target(AnnotationTarget.TYPE) annotation class Moded(val mode: Mode, val kind: KClass<*>)\n\
+    @Target(AnnotationTarget.TYPE) annotation class Listed(val sizes: IntArray, val names: Array<String>, val inner: Bin)\n\
+    @Target(AnnotationTarget.TYPE) annotation class Many(vararg val tags: String)\n\
+    @Target(AnnotationTarget.TYPE) annotation class Paired(val first: Int, val second: Int)\n\
+    @Target(AnnotationTarget.TYPE) annotation class Wrapping(val inner: Paired, val all: Array<Paired>)\n\
+    enum class Mode { On, Off }\n\
+    class Item\n\
+    class Holder<T>\n\
+    const val LIMIT = 4\n";
+
+/// An annotation application's arguments are recorded with it, in kotlinc's argument order.
+#[test]
+fn a_type_annotation_with_scalar_arguments_is_recorded() {
+    let src = format!(
+        "{ARGUMENT_PRELUDE}\n\
+         fun take(item: @Bin(3) Item, other: @Bin(LIMIT) Item): @Named(\"x\") Item = item\n\
+         fun swap(holder: Holder<@Named(wide = true, label = \"y\") Item>): Holder<@Bin(-1) Item> = Holder()\n"
+    );
+    assert_identical("ScalarUse", &src, "app/ScalarUseKt");
+}
+
+#[test]
+fn a_type_annotation_with_enum_and_class_arguments_is_recorded() {
+    let src = format!(
+        "{ARGUMENT_PRELUDE}\n\
+         fun mode(item: @Moded(Mode.On, Item::class) Item): @Moded(kind = Holder::class, mode = Mode.Off) Item = item\n"
+    );
+    assert_identical("ModedUse", &src, "app/ModedUseKt");
+}
+
+#[test]
+fn a_type_annotation_with_array_and_nested_arguments_is_recorded() {
+    let src = format!(
+        "{ARGUMENT_PRELUDE}\n\
+         fun list(item: @Listed([1, 2], [\"a\"], Bin(5)) Item): @Many(\"p\", \"q\") Item = item\n\
+         fun none(item: @Many Item): @Listed(intArrayOf(), arrayOf(), Bin(0)) Item = item\n"
+    );
+    assert_identical("ListedUse", &src, "app/ListedUseKt");
+}
+
+/// A nested annotation's named arguments are recorded as written, too.
+#[test]
+fn a_nested_type_annotation_argument_keeps_its_written_order() {
+    let src = format!(
+        "{ARGUMENT_PRELUDE}\n\
+         fun wrap(item: @Wrapping(Paired(second = 2, first = 1), [Paired(second = 4, first = 3)]) Item): Item = item\n"
+    );
+    assert_identical("WrapUse", &src, "app/WrapUseKt");
+}
+
+/// A member's application folds in its classifier's scope, where a companion constant is visible.
+#[test]
+fn a_member_type_annotation_folds_in_its_classifier_scope() {
+    let src = format!(
+        "{ARGUMENT_PRELUDE}\n\
+         open class Base\n\
+         class Crate : @Bin(LIMIT) Base() {{\n\
+             companion object {{ const val SIZE = 8 }}\n\
+             val held: @Named(\"held\") Item = Item()\n\
+             fun put(item: @Bin(SIZE) Item): Holder<@Bin(SIZE + 1) Item> = Holder()\n\
+         }}\n"
+    );
+    assert_identical("CrateUse", &src, "app/Crate");
+}
+
+/// A typealias's right-hand side with argument-bearing annotations, and its use.
+#[test]
+fn an_annotated_typealias_with_arguments_is_recorded() {
+    let src = format!(
+        "{ARGUMENT_PRELUDE}\n\
+         typealias Sized = @Bin(7) Item\n\
+         typealias Labeled = Holder<@Named(\"z\") Item>\n\
+         fun pass(sized: Sized, labeled: Labeled): @Named(\"w\") Sized = sized\n"
+    );
+    assert_identical("SizedUse", &src, "app/SizedUseKt");
+}
+
+const ANNOTATED_DEPENDENCY: &str = "package dep\n\
+    \n\
+    @Target(AnnotationTarget.TYPE) annotation class Kept\n\
+    @Target(AnnotationTarget.TYPE) annotation class Bin(val size: Int)\n\
+    class Item\n\
+    class Holder<T>\n\
+    typealias Marked = @Kept Item\n\
+    typealias Sized = @Bin(2) Item\n\
+    typealias Nested = Holder<@Bin(3) Item>\n\
+    typealias Tagged = @Bin(9) Marked\n";
+
+/// A use of an annotated typealias read from a compiled dependency's metadata inherits its
+/// right-hand side's annotations exactly as a source alias's use does.
+#[test]
+fn a_use_of_an_annotated_dependency_typealias_inherits_its_annotations() {
+    let src = "package app\n\
+        \n\
+        import dep.*\n\
+        \n\
+        fun pass(marked: Marked, sized: Sized, nested: Nested, tagged: Tagged): @Bin(1) Marked = marked\n";
+    let result = common::metadata_diff_against_kotlinc_lib(
+        "DepAliasUse",
+        &[("Dep.kt", ANNOTATED_DEPENDENCY)],
+        src,
+        "app/DepAliasUseKt",
+    )
+    .expect("reference kotlinc is provisioned");
+    result.unwrap_or_else(|diff| panic!("{diff}"));
+}
+
+/// A mistyped type-use annotation argument is reported once, exactly as kotlinc reports it.
+#[test]
+fn a_mistyped_type_annotation_argument_is_reported_like_kotlinc() {
+    let source = "package app\n\
+        \n\
+        @Target(AnnotationTarget.TYPE) annotation class Bin(val size: Int)\n\
+        class Item\n\
+        \n\
+        fun take(item: @Bin(\"s\") Item): Item = item\n";
+    let result = common::compiler_diagnostics(&[("Mistyped.kt", source)], &[]);
+    assert_ne!(result.reference_code, 0, "kotlinc accepted the fixture");
+    assert_ne!(result.krusty_code, 0, "krusty accepted the fixture");
+    let mut krusty = common::compiler_errors(&result.krusty_stdout);
+    krusty.extend(common::compiler_errors(&result.krusty_stderr));
+    let reference = common::compiler_errors(&result.reference_stderr);
+    assert_eq!(krusty, reference);
+    assert_eq!(reference.len(), 1, "{}", result.reference_stderr);
+}

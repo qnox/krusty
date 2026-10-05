@@ -96,6 +96,55 @@ impl DeclarationAnnotations {
     }
 }
 
+/// A frontend-checked annotation argument, as the constant the backends encode.
+impl From<&crate::types::AnnotationValue> for AnnoValue {
+    fn from(value: &crate::types::AnnotationValue) -> Self {
+        use crate::types::AnnotationValue;
+        match value {
+            AnnotationValue::Int(value) => AnnoValue::Const(IrConst::Int(*value)),
+            AnnotationValue::Byte(value) => AnnoValue::Const(IrConst::Byte(*value)),
+            AnnotationValue::Short(value) => AnnoValue::Const(IrConst::Short(*value)),
+            AnnotationValue::Long(value) => AnnoValue::Const(IrConst::Long(*value)),
+            AnnotationValue::Float(value) => AnnoValue::Const(IrConst::Float(*value)),
+            AnnotationValue::Double(value) => AnnoValue::Const(IrConst::Double(*value)),
+            AnnotationValue::Boolean(value) => AnnoValue::Const(IrConst::Boolean(*value)),
+            AnnotationValue::Char(value) => AnnoValue::Const(IrConst::Char(*value)),
+            AnnotationValue::String(value) => AnnoValue::Const(IrConst::String(value.clone())),
+            AnnotationValue::Enum(internal, constant) => {
+                AnnoValue::Enum(*internal, constant.clone())
+            }
+            AnnotationValue::Class(ty) => AnnoValue::Class(*ty),
+            AnnotationValue::Annotation { internal, values } => {
+                AnnoValue::Annotation(AppliedAnnotation {
+                    internal: *internal,
+                    values: values
+                        .iter()
+                        .map(|(name, value)| (name.clone(), AnnoValue::from(value)))
+                        .collect(),
+                })
+            }
+            AnnotationValue::Array(values) => {
+                AnnoValue::Array(values.iter().map(AnnoValue::from).collect())
+            }
+        }
+    }
+}
+
+/// A provider-normalized annotation application (a checked source one, or one decoded from a
+/// dependency), as the applied annotation the backends encode.
+impl From<&crate::types::ResolvedAnnotation> for AppliedAnnotation {
+    fn from(annotation: &crate::types::ResolvedAnnotation) -> Self {
+        Self {
+            internal: annotation.annotation,
+            values: annotation
+                .arguments
+                .iter()
+                .map(|(name, value)| (name.clone(), AnnoValue::from(value)))
+                .collect(),
+        }
+    }
+}
+
 /// An applied annotation (`@Anno(...)`) to encode into a `RuntimeVisibleAnnotations` attribute.
 #[derive(Clone, Debug)]
 pub struct AppliedAnnotation {

@@ -6,53 +6,6 @@
 use crate::ast;
 use crate::resolve::TypeInfo;
 
-fn annotation_value(value: &crate::types::AnnotationValue) -> crate::ir::AnnoValue {
-    use crate::types::AnnotationValue;
-    match value {
-        AnnotationValue::Int(value) => crate::ir::AnnoValue::Const(crate::ir::IrConst::Int(*value)),
-        AnnotationValue::Byte(value) => {
-            crate::ir::AnnoValue::Const(crate::ir::IrConst::Byte(*value))
-        }
-        AnnotationValue::Short(value) => {
-            crate::ir::AnnoValue::Const(crate::ir::IrConst::Short(*value))
-        }
-        AnnotationValue::Long(value) => {
-            crate::ir::AnnoValue::Const(crate::ir::IrConst::Long(*value))
-        }
-        AnnotationValue::Float(value) => {
-            crate::ir::AnnoValue::Const(crate::ir::IrConst::Float(*value))
-        }
-        AnnotationValue::Double(value) => {
-            crate::ir::AnnoValue::Const(crate::ir::IrConst::Double(*value))
-        }
-        AnnotationValue::Boolean(value) => {
-            crate::ir::AnnoValue::Const(crate::ir::IrConst::Boolean(*value))
-        }
-        AnnotationValue::Char(value) => {
-            crate::ir::AnnoValue::Const(crate::ir::IrConst::Char(*value))
-        }
-        AnnotationValue::String(value) => {
-            crate::ir::AnnoValue::Const(crate::ir::IrConst::String(value.clone()))
-        }
-        AnnotationValue::Enum(internal, constant) => {
-            crate::ir::AnnoValue::Enum(*internal, constant.clone())
-        }
-        AnnotationValue::Class(ty) => crate::ir::AnnoValue::Class(*ty),
-        AnnotationValue::Annotation { internal, values } => {
-            crate::ir::AnnoValue::Annotation(crate::ir::AppliedAnnotation {
-                internal: *internal,
-                values: values
-                    .iter()
-                    .map(|(name, value)| (name.clone(), annotation_value(value)))
-                    .collect(),
-            })
-        }
-        AnnotationValue::Array(values) => {
-            crate::ir::AnnoValue::Array(values.iter().map(annotation_value).collect())
-        }
-    }
-}
-
 fn applied_annotation(
     annotation: &crate::types::AppliedAnnotation,
 ) -> crate::ir::AppliedAnnotation {
@@ -61,7 +14,7 @@ fn applied_annotation(
         values: annotation
             .values
             .iter()
-            .map(|(name, value)| (name.clone(), annotation_value(value)))
+            .map(|(name, value)| (name.clone(), crate::ir::AnnoValue::from(value)))
             .collect(),
     }
 }

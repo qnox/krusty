@@ -170,7 +170,7 @@ pub(crate) fn spelling_of_ref_with(
     let expansion_annotations = template
         .map(|(rhs, _, _)| {
             let inherited = rhs.expansion_annotations.iter();
-            inherited.chain(&rhs.annotations).copied().collect()
+            inherited.chain(&rhs.annotations).cloned().collect()
         })
         .unwrap_or_default();
     let expansion_args = expansion_arg_spellings(template, &alias_args);

@@ -1,5 +1,7 @@
 //! Kotlin metadata typealias declarations and their source-level spelling templates.
 
+mod type_annotations;
+
 use super::string_table::{resolve_class_name, resolve_string, Rec};
 use super::{
     decode_metadata_type, flags_visibility, parse_type_class_name, type_param_bodies, MetaCtx,
@@ -8,6 +10,7 @@ use super::{
 use crate::metadata::decode::{parse_type_node, parse_type_param, ParsedTypeParam, Pb};
 use crate::types::{type_name, Ty, TypeName};
 use std::collections::HashMap;
+use type_annotations::bind_type_annotations;
 
 /// One public `typealias` from a file facade's `Package` metadata.
 #[derive(Clone, Debug)]
@@ -191,16 +194,23 @@ fn parse_type_alias_decoded(
     })?;
     // How the right-hand side SPELLED its arguments, so a use site in another module inherits the
     // abbreviation (`typealias CargoBox = PBox<Cargo, Cargo>` abbreviates both expanded arguments).
-    let expansion_spelling = expanded_body
-        .map(|type_body| crate::spelling::Spelled {
-            definitely_non_null: parse_type_node(type_body)
-                .is_some_and(|node| node.definitely_non_null),
-            alias: None,
-            alias_args: Vec::new(),
-            args: parse_type_argument_spellings(type_body, records, d2),
-            ..crate::spelling::Spelled::default()
-        })
-        .unwrap_or_default();
+    // The expanded root's annotations are everything a use inherits: kotlinc already placed the
+    // right-hand side's own and the ones IT inherited from an alias it names there, in order.
+    let expansion_spelling = match expanded_body {
+        Some(type_body) => {
+            let node = parse_type_node(type_body)?;
+            crate::spelling::Spelled {
+                definitely_non_null: node.definitely_non_null,
+                args: parse_type_argument_spellings(type_body, records, d2)?,
+                annotations: bind_type_annotations(&node.annotations, records, d2)?
+                    .into_iter()
+                    .map(crate::spelling::TypeUseAnnotation::Checked)
+                    .collect(),
+                ..crate::spelling::Spelled::default()
+            }
+        }
+        None => crate::spelling::Spelled::default(),
+    };
     Some(MetaTypeAlias {
         name,
         target: internal,
@@ -210,70 +220,63 @@ fn parse_type_alias_decoded(
     })
 }
 
-/// The `typealias` spellings recorded on a `Type`'s arguments as `Type.abbreviated_type`.
+/// The `typealias` spellings and annotations recorded on a `Type`'s arguments. `None` when an
+/// argument's annotation cannot be bound.
 fn parse_type_argument_spellings(
     body: &[u8],
     records: &[Rec],
     d2: &[String],
-) -> Vec<crate::spelling::Spelled> {
+) -> Option<Vec<crate::spelling::Spelled>> {
     let mut arguments = Vec::new();
     let mut pb = Pb::new(body);
     while !pb.at_end() {
-        let Some(tag) = pb.varint() else { break };
+        let tag = pb.varint()?;
         match (tag >> 3, tag & 7) {
             // Type.argument = 2, each an `Argument { projection = 1, type = 2 }`.
             (2, 2) => {
-                let Some(len) = pb.varint() else { break };
-                let Some(argument) = pb.bytes(len as usize) else {
-                    break;
-                };
-                arguments.push(parse_argument_spelling(argument, records, d2));
+                let len = pb.varint()?;
+                let argument = pb.bytes(len as usize)?;
+                arguments.push(parse_argument_spelling(argument, records, d2)?);
             }
-            (_, wire) => {
-                if pb.skip(wire).is_none() {
-                    break;
-                }
-            }
+            (_, wire) => pb.skip(wire)?,
         }
     }
     if arguments.iter().all(crate::spelling::Spelled::is_none) {
-        return Vec::new();
+        return Some(Vec::new());
     }
-    arguments
+    Some(arguments)
 }
 
-/// One `Argument`'s spelling: its inner `Type`'s own abbreviation plus, recursively, its arguments'.
+/// One `Argument`'s spelling: its inner `Type`'s own abbreviation and annotations plus,
+/// recursively, its arguments'.
 fn parse_argument_spelling(
     body: &[u8],
     records: &[Rec],
     d2: &[String],
-) -> crate::spelling::Spelled {
+) -> Option<crate::spelling::Spelled> {
     let mut pb = Pb::new(body);
     while !pb.at_end() {
-        let Some(tag) = pb.varint() else { break };
+        let tag = pb.varint()?;
         match (tag >> 3, tag & 7) {
             (2, 2) => {
-                let Some(len) = pb.varint() else { break };
-                let Some(inner) = pb.bytes(len as usize) else {
-                    break;
-                };
-                return crate::spelling::Spelled {
-                    definitely_non_null: parse_type_node(inner)
-                        .is_some_and(|node| node.definitely_non_null),
+                let len = pb.varint()?;
+                let inner = pb.bytes(len as usize)?;
+                let node = parse_type_node(inner)?;
+                return Some(crate::spelling::Spelled {
+                    definitely_non_null: node.definitely_non_null,
                     alias: parse_type_alias_name(inner, records, d2),
-                    alias_args: Vec::new(),
-                    args: parse_type_argument_spellings(inner, records, d2),
+                    args: parse_type_argument_spellings(inner, records, d2)?,
+                    annotations: bind_type_annotations(&node.annotations, records, d2)?
+                        .into_iter()
+                        .map(crate::spelling::TypeUseAnnotation::Checked)
+                        .collect(),
                     ..crate::spelling::Spelled::default()
-                };
+                });
             }
-            (_, wire) => {
-                if pb.skip(wire).is_none() {
-                    break;
-                }
-            }
+            (_, wire) => pb.skip(wire)?,
         }
     }
-    crate::spelling::Spelled::default()
+    Some(crate::spelling::Spelled::default())
 }
 
 /// The alias a `Type` was spelled as: its `abbreviated_type` (f13) and that message's

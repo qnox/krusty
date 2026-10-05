@@ -56,6 +56,7 @@ pub(crate) use actualization_names::actualization_type_bindings;
 pub(crate) use actualization_names::resolve_actualization_classifier_for_test;
 pub(crate) use checked_annotation_publication::publish_checked_classifier_annotations;
 pub(crate) use checked_constant_publication::publish_checked_compile_time_constants;
+pub(crate) use type_use_annotation_publication::publish_checked_type_use_annotations;
 mod call_constraints;
 mod call_diagnostics;
 mod call_result_constraint;
@@ -152,6 +153,7 @@ mod safe_index;
 mod sam_constructors;
 mod sam_conversion_recording;
 mod source_fragment;
+mod type_use_annotation_publication;
 use source_fragment::SourceFragmentMode;
 mod scope;
 mod selected_argument_commitment;
@@ -37007,7 +37009,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
     // discarded; neither may become a second owner of the application.
     if !capture_discovery
         && !fragment.is_signature_defaults()
-        && !fragment.is_classifier_annotations()
+        && !fragment.publishes_annotation_metadata()
     {
         let applications = file.file_annotations.clone();
         for (annotation, arguments) in applications {
@@ -37019,7 +37021,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
     // declaration facts. Only the legacy whole-file checker decodes them here; reparsing one Pass-2
     // body must neither rediscover a caller-visible signature fact nor patch the module table.
     if !fragment.is_signature_defaults()
-        && !fragment.is_classifier_annotations()
+        && !fragment.publishes_annotation_metadata()
         && resolved_index.is_none()
     {
         c.collect_source_contracts(scope, selected_body_declarations);
@@ -37028,12 +37030,15 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
     // Typealiases have no `Decl` node, so their declaration type-parameter annotations enter the
     // same checker path explicitly at file scope. Capture discovery is a scratch expression pass;
     // the authoritative check below owns annotation validation and folded values.
-    if !capture_discovery && !fragment.is_classifier_annotations() {
+    if !capture_discovery && !fragment.publishes_annotation_metadata() {
         for &declaration_start in &file.type_alias_declaration_starts {
             c.check_declaration_type_parameter_annotations(scope, declaration_start);
         }
     }
 
+    if fragment.is_type_use_annotations() {
+        c.check_owned_type_use_annotations(scope, None);
+    }
     // Each top-level declaration is checked in its OWN scope, so a prior declaration's bindings
     // cannot leak into the next one.
     c.anonymous_lexical_scope = anonymous_lexical_scope;
@@ -37100,6 +37105,10 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
             continue;
         }
         c.set_anonymous_lexical_class_context(d);
+        if fragment.is_type_use_annotations() && !matches!(file.decl(d), Decl::Class(_)) {
+            c.check_owned_type_use_annotations(scope, Some(d));
+            continue;
+        }
         match file.decl(d) {
             Decl::Fun(f) => c.check_top_level_fun(scope, f, d),
             Decl::Class(cl) => {
@@ -37110,7 +37119,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
             }
         }
     }
-    if !capture_discovery && !fragment.is_classifier_annotations() {
+    if !capture_discovery && !fragment.publishes_annotation_metadata() {
         if let (Some(index), Some(selected_bodies)) = (resolved_index, selected_stable_bodies) {
             let direct_classes = selected_inline_owned_anonymous_classes(
                 file,
@@ -37197,7 +37206,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         }
     }
     if let Some(body) = file.script_body.filter(|_| {
-        !fragment.is_classifier_annotations()
+        !fragment.publishes_annotation_metadata()
             && !c.signature_defaults_only
             && (!capture_discovery
                 || c.capture_scope
@@ -37211,7 +37220,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         });
         c.in_script_body = false;
     }
-    if !capture_discovery && !fragment.is_classifier_annotations() {
+    if !capture_discovery && !fragment.publishes_annotation_metadata() {
         c.check_import_paths();
         for reference in &file.detached_type_refs {
             if c.resolved_type_tys
@@ -37330,7 +37339,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         source_contracts,
         ..
     } = c;
-    if !capture_discovery && !fragment.is_classifier_annotations() {
+    if !capture_discovery && !fragment.publishes_annotation_metadata() {
         if let Some(syms) = syms.pass_one_symbols_mut() {
             publish_checked_primary_constructor_types(
                 file,
@@ -37672,7 +37681,7 @@ fn check_file_at_impl_mode_with_index<S: CheckerSymbolEnvironment>(
         delegate_property_reference_type,
         context_args,
     };
-    if !capture_discovery && !fragment.is_classifier_annotations() {
+    if !capture_discovery && !fragment.publishes_annotation_metadata() {
         plugin_expression_planning::plan_plugin_expressions(
             file,
             &mut info,
@@ -51198,21 +51207,25 @@ impl<'a> Checker<'a> {
     /// resolver's `LibraryConst` payloads, so nested-class and dependency constants participate
     /// without reopening a source spelling or classifier lookup.
     fn fold_annotation_string(&self, expression: ExprId) -> Option<crate::kt_string::KtString> {
-        let constant = checked_constant_expression(
-            CheckedConstantExpression {
-                file: self.file,
-                expression_types: &self.expr_types,
-                resolved_constants: &self.resolved_constants,
-                resolved_calls: &self.resolved_calls,
-                resolved_operator_calls: &self.resolved_operator_calls,
-            },
-            expression,
-            Ty::String,
-        )?;
-        match constant.value {
+        match self.checked_constant(expression, Ty::String)?.value {
             crate::libraries::LibConst::Str(value) => Some(value),
             _ => None,
         }
+    }
+
+    fn checked_constant(
+        &self,
+        expression: ExprId,
+        declared: Ty,
+    ) -> Option<crate::libraries::LibraryConst> {
+        let context = CheckedConstantExpression {
+            file: self.file,
+            expression_types: &self.expr_types,
+            resolved_constants: &self.resolved_constants,
+            resolved_calls: &self.resolved_calls,
+            resolved_operator_calls: &self.resolved_operator_calls,
+        };
+        checked_constant_expression(context, expression, declared)
     }
 
     /// A resolved compile-time constant read (`const val`), whatever expression shape reached it.
@@ -51231,8 +51244,13 @@ impl<'a> Checker<'a> {
         use crate::libraries::LibConst;
         use crate::types::AnnotationValue;
 
-        let constant = self.resolved_constants.get(&e)?;
         let declared = expected.map(Ty::non_null);
+        // A constant reference was resolved by checking; any other constant expression (`-1`,
+        // `LIMIT * 2`) folds through the same checked constant language as a `const val`.
+        let constant = match self.resolved_constants.get(&e) {
+            Some(constant) => constant.clone(),
+            None => self.checked_constant(e, declared?)?,
+        };
         Some(match &constant.value {
             LibConst::Int(value) => match declared {
                 Some(Ty::Boolean) => AnnotationValue::Boolean(*value != 0),
@@ -53503,6 +53521,15 @@ impl<'a> Checker<'a> {
                 }
             }
             self.check_declaration_type_parameter_annotations(scope, cl.span.lo);
+            if self.fragment.is_type_use_annotations() {
+                self.check_owned_type_use_annotations(scope, Some(d));
+                if current_owner.is_some() {
+                    self.lexical_class_context.remove(0);
+                }
+                self.active_statement_suppressions
+                    .truncate(class_suppression_depth);
+                return;
+            }
             // A local class's lexical captures are concrete fields, not unresolved outer locals once
             // its body is entered. Shadow the enclosing binding with the exact generated storage slot;
             // the checker then records that slot on every read and lowering never searches fields.
@@ -71251,7 +71278,7 @@ impl<'a> Checker<'a> {
         scope: &CheckerScope<'_>,
         annotation: &AnnotationRef,
     ) -> Option<TypeName> {
-        if self.fragment.is_classifier_annotations() {
+        if self.fragment.publishes_annotation_metadata() {
             return self
                 .module
                 .legacy_symbols()?

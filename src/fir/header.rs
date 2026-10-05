@@ -27,7 +27,6 @@ pub use flags::{HeaderParameterFlags, HeaderTypeFlags, HeaderTypeParameterFlags}
 use nested_classifiers::{
     bind_parser_identity, classifier_identity, companion_declarations, nested_classifier_owners,
 };
-pub(crate) use type_use_annotations::HeaderTypeUseAnnotation;
 use type_use_annotations::HeaderTypeUseAnnotationArena;
 pub(crate) use visibility_suppressions::HeaderVisibilitySuppressionApplication;
 use visibility_suppressions::HeaderVisibilitySuppressionArena;
@@ -2967,11 +2966,12 @@ impl StreamedHeaderModule {
             .collect()
     }
 
-    /// Annotated type occurrences of `source`, by start offset; see [`HeaderTypeUseAnnotation`].
+    /// Annotated type occurrences of `source`, by start offset, each with its annotation spans in
+    /// source order.
     pub(crate) fn type_use_annotations(
         &self,
         source: SourceFileId,
-    ) -> impl Iterator<Item = (u32, &[HeaderTypeUseAnnotation])> + '_ {
+    ) -> impl Iterator<Item = (u32, &[crate::diag::Span])> + '_ {
         self.type_use_annotations.occurrences(source)
     }
 

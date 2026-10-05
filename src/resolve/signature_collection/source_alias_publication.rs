@@ -70,9 +70,9 @@ pub(in crate::resolve) fn publish_source_alias(
         .insert(alias.identity, (spelling, formals, expansion));
 }
 
-/// The annotations `@Metadata` records on each annotated type occurrence of one compact source:
-/// of the annotations written on the occurrence, in source order, those Pass 1 bound to a
-/// classifier whose retention is not `SOURCE`. See [`crate::spelling::Spelled::annotations`].
+/// Every type-use annotation application of one compact source, as Pass 1 bound it. Its
+/// arguments and its retention are the checker's to decide; see
+/// [`crate::spelling::TypeUseAnnotation`].
 pub(in crate::resolve) fn compact_source_type_annotations(
     table: &SymbolTable,
     headers: &crate::fir::StreamedHeaderModule,
@@ -80,26 +80,25 @@ pub(in crate::resolve) fn compact_source_type_annotations(
 ) -> crate::spelling::RecordedTypeAnnotations {
     let mut recorded = crate::spelling::RecordedTypeAnnotations::default();
     for (occurrence, annotations) in headers.type_use_annotations(source) {
-        let identities = annotations
+        let bound = annotations
             .iter()
-            .filter(|annotation| !annotation.has_arguments)
-            .filter_map(|annotation| {
+            .filter(|&&span| {
                 let reference = AnnotationRef {
                     name: String::new(),
-                    span: annotation.annotation,
+                    span,
                 };
-                table.resolved_annotation(source.raw(), &reference)
+                table
+                    .resolved_annotation(source.raw(), &reference)
+                    .is_some()
             })
-            .filter(|&identity| {
-                let retention = table.annotation_retention(identity).or_else(|| {
-                    let classifier = table.libraries.classifier(identity)?;
-                    crate::resolve::annotation_applications::annotation_retention(None, &classifier)
-                });
-                retention
-                    .is_some_and(|retention| retention != crate::types::AnnotationRetention::Source)
+            .map(|&span| {
+                crate::spelling::TypeUseAnnotation::Bound(crate::spelling::AnnotationOccurrence {
+                    source: source.raw(),
+                    span,
+                })
             })
             .collect();
-        recorded.record(occurrence, identities);
+        recorded.record(occurrence, bound);
     }
     recorded
 }

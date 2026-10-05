@@ -602,7 +602,8 @@ fn encode_type_with_parameter(
                     message.field_varint(9, strings.local(source_name) as u64);
                 }
             }
-            add_type_annotations(&mut message, strings, spelled);
+            let annotations = type_annotations(strings, spelled);
+            add_type_annotations(&mut message, annotations);
         }
         Ty::Obj(classifier, arguments) => {
             // kotlinc interns the enclosing classifier before recursively interning its arguments,
@@ -620,20 +621,23 @@ fn encode_type_with_parameter(
                 message.field_varint(3, 1);
             }
             message.field_varint(6, classifier as u64);
+            let annotations = type_annotations(strings, spelled);
             if expansion == Expansion::Expanded {
                 encode_abbreviation(&mut message, strings, spelled, nullable, type_parameters)?;
             }
-            add_type_annotations(&mut message, strings, spelled);
+            add_type_annotations(&mut message, annotations);
         }
         Ty::Unit => {
             encode_classifier(&mut message, strings, "kotlin/Unit", nullable);
+            let annotations = type_annotations(strings, spelled);
             encode_abbreviation(&mut message, strings, spelled, nullable, type_parameters)?;
-            add_type_annotations(&mut message, strings, spelled);
+            add_type_annotations(&mut message, annotations);
         }
         Ty::Nothing => {
             encode_classifier(&mut message, strings, "kotlin/Nothing", nullable);
+            let annotations = type_annotations(strings, spelled);
             encode_abbreviation(&mut message, strings, spelled, nullable, type_parameters)?;
-            add_type_annotations(&mut message, strings, spelled);
+            add_type_annotations(&mut message, annotations);
         }
         Ty::Fun(signature) => {
             let arity = signature.params.len() + usize::from(signature.suspend);
@@ -669,6 +673,7 @@ fn encode_type_with_parameter(
                 message.field_varint(3, 1);
             }
             message.field_varint(6, classifier as u64);
+            let annotations = type_annotations(strings, spelled);
             if expansion == Expansion::Expanded {
                 encode_abbreviation(&mut message, strings, spelled, nullable, type_parameters)?;
             }
@@ -678,7 +683,7 @@ fn encode_type_with_parameter(
             if signature.context_count > 0 {
                 add_context_function_annotation(&mut message, strings, signature.context_count);
             }
-            add_type_annotations(&mut message, strings, spelled);
+            add_type_annotations(&mut message, annotations);
             if signature.suspend {
                 message.field_varint(1, 1); // Type.flags: SUSPEND_TYPE
             }
@@ -828,8 +833,8 @@ pub(crate) fn encode_alias_reference(
     message.field_varint(12, alias_id as u64); // Type.type_alias_name = 12
                                                // The reference records only what this occurrence wrote, never what the alias's own right-hand
                                                // side applies to its expansion.
-    for &annotation in &spelled.annotations {
-        message.field_message(100, &encode_annotation(strings, annotation));
+    for annotation in &spelled.annotations {
+        message.field_message(100, &encode_type_annotation(strings, annotation.checked()));
     }
     Ok(Some(message))
 }
@@ -877,11 +882,33 @@ pub(crate) fn encode_annotation(strings: &mut StringTable<'_>, classifier: TypeN
 /// Append the source annotations `@Metadata` records on this (expanded) type occurrence as
 /// `Type.annotation` (extension field 100): those an alias named here applies to its expansion,
 /// then the occurrence's own, each in source order. See [`Spelled::expansion_annotations`].
-fn add_type_annotations(message: &mut Pb, strings: &mut StringTable<'_>, spelled: &Spelled) {
-    let inherited = spelled.expansion_annotations.iter();
-    for &annotation in inherited.chain(&spelled.annotations) {
-        message.field_message(100, &encode_annotation(strings, annotation));
+///
+/// kotlinc interns these annotations BEFORE the node's abbreviation even though `abbreviated_type`
+/// (f13) is written ahead of them, so callers build the messages first with [`type_annotations`].
+fn add_type_annotations(message: &mut Pb, annotations: Vec<Pb>) {
+    for annotation in &annotations {
+        message.field_message(100, annotation);
     }
+}
+
+/// The `Type.annotation` messages of one occurrence, interning their strings now.
+fn type_annotations(strings: &mut StringTable<'_>, spelled: &Spelled) -> Vec<Pb> {
+    let inherited = spelled.expansion_annotations.iter();
+    inherited
+        .chain(&spelled.annotations)
+        .map(|annotation| encode_type_annotation(strings, annotation.checked()))
+        .collect()
+}
+
+/// A type-use annotation application as a metadata `Annotation` message, with its argument values.
+fn encode_type_annotation(
+    strings: &mut StringTable<'_>,
+    annotation: &crate::types::ResolvedAnnotation,
+) -> Pb {
+    crate::metadata::builder::annotation_pb(
+        strings,
+        &crate::ir::AppliedAnnotation::from(annotation),
+    )
 }
 
 pub(crate) fn add_extension_function_annotation(message: &mut Pb, strings: &mut StringTable<'_>) {
