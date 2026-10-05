@@ -74,6 +74,10 @@ impl Emitter<'_> {
                     }
                 }
             }
+            IrTypeOp::InstanceOf | IrTypeOp::NotInstanceOf => {
+                let arg = self.instance_check_operand(arg);
+                self.emit_type_op_operand(arg, code)
+            }
             _ => self.emit_type_op_operand(arg, code),
         };
         match op {
@@ -532,6 +536,29 @@ impl Emitter<'_> {
     /// Emit a type-operation operand and return its physical stack type plus semantic scalar
     /// identity. Value and branch forms of `is`/`!is` share this boundary so unsigned/value-class
     /// boxing cannot drift between the ordinary and fused emitters.
+    /// The value an `instanceof` tests. A compiler-inserted reference narrowing of the operand (a
+    /// smart cast) is kotlinc's implicit cast, which only a consumer needing the narrowed type
+    /// materializes; `instanceof` accepts any reference, so kotlinc tests the value unnarrowed. A
+    /// written `as` keeps its `checkcast`.
+    pub(super) fn instance_check_operand(&self, mut operand: ExprId) -> ExprId {
+        while let IrExpr::TypeOp {
+            op: IrTypeOp::Cast,
+            arg,
+            type_operand,
+        } = *self.ir.expr(operand)
+        {
+            let reference_target = !ir_ty_to_jvm(&stored_value_ty(type_operand)).is_jvm_scalar();
+            if !reference_target
+                || self.ir.written_casts.contains(&operand)
+                || self.value_ty(arg).is_jvm_scalar()
+            {
+                break;
+            }
+            operand = arg;
+        }
+        operand
+    }
+
     pub(super) fn emit_type_op_operand(
         &mut self,
         operand: ExprId,

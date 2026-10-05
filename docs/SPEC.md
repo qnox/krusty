@@ -10981,6 +10981,27 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   provide equally is `overload resolution ambiguity between candidates:`, followed by each
   candidate's header (`class Item : Any`), at the reference. Verified against kotlinc 2.4.20.
   (`tests/nested_type_parameter_bound_e2e.rs`.)
+- **A runtime type test must be fully checkable (FIR `isCastErased`).** `x is C<A>` and
+  `x !is C<A>` are accepted only when the operand's static type proves everything but `C`'s
+  classifier; otherwise the target is `cannot check for instance of erased type 'C<A>'.` at the
+  type. The rule is kotlinc's: a non-reified type-parameter target is erased unless the test is an
+  upcast or only checks a `T?` operand for null (`x is T` with `x: T?`, `T : Any`); nullability is
+  stripped from both sides; an upcast is never erased; otherwise `C`'s own type parameters are
+  unified through `C`'s supertypes with the operand's arguments (`findStaticallyKnownSubtype`,
+  each part of an intersection operand contributing; an unreached parameter stays itself and a
+  star stays a star) and the result must be a subtype of the target. Function types take part as
+  their `FunctionN`/`SuspendFunctionN` classifiers, so `suspend (Int) -> Int` is not proved to be a
+  `Function2<Int, Continuation<Int>, Any?>`. The operand's type is FIR's: the declared type of a
+  path that is not smart cast, otherwise the intersection of the declared type with every smart-cast
+  fact still in force (a nested `is` adds to an outer `as`), so after `f as Function2<…>` testing
+  `f is SuspendFunction1<Int, Any?>` is an upcast. The error renders function classifiers as
+  function types (`'suspend (Int) -> Any?'`) and a type parameter with its owner (`'T (of fun <T>
+  h)'`). `as` casts report only kotlinc's UNCHECKED_CAST warning, which krusty does not emit. Not
+  ported: FIR's rule that a local class whose type parameters come from an enclosing declaration is
+  always erased. On the JVM a smart-cast operand of `instanceof` is tested unnarrowed (kotlinc's
+  implicit cast writes no `checkcast` there), and `KFunctionN`/`KSuspendFunctionN` is written in a
+  generic `Signature` as its carrier `KFunction<R>`. Verified against kotlinc 2.4.20.
+  (`tests/erased_type_check_e2e.rs`.)
 
 ## 8. Success criteria for the PoC
 
