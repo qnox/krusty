@@ -8293,9 +8293,8 @@ mod invariant_tests {
 
     // A `GetValue` of a value slot that was never allocated is malformed IR. Letting emission
     // silently skip it would preserve a second, fail-soft path around the authoritative final-body
-    // analysis; the backend must reject the broken phase contract at the method boundary.
+    // analysis; the backend rejects the broken contract with an emission error at the method.
     #[test]
-    #[should_panic(expected = "cannot compute JVM frames for box()V: Unsteppable(0)")]
     fn getvalue_of_unallocated_slot_is_an_explicit_backend_invariant_violation() {
         let mut ir = IrFile::default();
         let body = ir.add_expr(IrExpr::GetValue(99));
@@ -8308,7 +8307,12 @@ mod invariant_tests {
             dispatch_receiver: None,
             param_checks: vec![],
         });
-        let _ = emit_for_test(&ir, "TestKt", &EmitRun::default());
+        let run = EmitRun::default();
+        assert!(emit_for_test(&ir, "TestKt", &run).is_none());
+        assert_eq!(
+            run.emit_error().as_deref(),
+            Some("value read references a slot that was never declared")
+        );
     }
 
     // A `Unit` declaration owns a `kotlin/Unit` reference slot, so reading it pushes one operand. A
