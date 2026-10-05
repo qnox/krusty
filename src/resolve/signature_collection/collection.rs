@@ -881,30 +881,6 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                         .map_or(c.is_value && c.value_modifier_span.is_none(), |flags| {
                             flags.has(crate::fir::DeclarationFlags::VALUE)
                         });
-                    // `@JvmInline` is a resolved annotation identity. A `value` keyword without it
-                    // is a boxed class under `FullValueClasses` and an error otherwise. A legacy
-                    // `inline class` is unboxed without the annotation.
-                    let has_jvm_inline = c.annotations.iter().any(|annotation| {
-                        table
-                            .resolved_annotation(i as u32, annotation)
-                            .is_some_and(|name| name == type_name("kotlin/jvm/JvmInline"))
-                    });
-                    let wrote_value_keyword = c.value_modifier_span.is_some();
-                    let full_value =
-                        wrote_value_keyword && !has_jvm_inline && file.full_value_classes;
-                    let unboxed_value_class = if wrote_value_keyword {
-                        has_jvm_inline
-                    } else {
-                        classifier_is_value
-                    };
-                    if wrote_value_keyword && !has_jvm_inline && !file.full_value_classes {
-                        if let Some(span) = c.value_modifier_span {
-                            diags.error(
-                                span,
-                                "value classes without '@JvmInline' annotation are not yet supported.",
-                            );
-                        }
-                    }
                     let classifier_is_annotation = classifier_declaration_flags.map_or_else(
                         || c.is_annotation(),
                         |flags| flags.has(crate::fir::DeclarationFlags::ANNOTATION_CLASS),
@@ -1250,6 +1226,31 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                         i as u32,
                         &mut table.resolved_annotations,
                     );
+                    // Decide representation only after this declaration's annotations have been
+                    // bound in its lexical classifier scope. Reading the occurrence table before
+                    // this point misclassifies every `@JvmInline value class` as an unannotated
+                    // full-value declaration.
+                    let has_jvm_inline = c.annotations.iter().any(|annotation| {
+                        table
+                            .resolved_annotation(i as u32, annotation)
+                            .is_some_and(|name| name == type_name("kotlin/jvm/JvmInline"))
+                    });
+                    let wrote_value_keyword = c.value_modifier_span.is_some();
+                    let full_value =
+                        wrote_value_keyword && !has_jvm_inline && file.full_value_classes;
+                    let unboxed_value_class = if wrote_value_keyword {
+                        has_jvm_inline
+                    } else {
+                        classifier_is_value
+                    };
+                    if wrote_value_keyword && !has_jvm_inline && !file.full_value_classes {
+                        if let Some(span) = c.value_modifier_span {
+                            diags.error(
+                                span,
+                                "value classes without '@JvmInline' annotation are not yet supported.",
+                            );
+                        }
+                    }
                     // JVM erasure of every type parameter in scope: the enclosing declarations'
                     // (outer/local) first, then this class's own. A declared reference bound erases to
                     // the bound (`<T : Cargo>` → `Lapp/Cargo;`) — the class counterpart of what the
