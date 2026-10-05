@@ -323,34 +323,40 @@ pub(super) fn build_class_metadata_with_facts(
                 .backing_field
                 .and_then(|index| c.fields.get(index as usize).map(|field| (index, field)));
             let (default_getter, default_setter) = accessor_jvm_names(c, &property.name);
+            // A getter's descriptor is its physical one: a scalar getter result over a reference-returning overridden
+            // property returns the wrapper (see `jvm::override_results`).
+            let physical_getter = |fid: u32| {
+                let function = &ir.functions[fid as usize];
+                (
+                    function.name.clone(),
+                    ir_method_desc(&function.params, &override_results.physical_result(ir, fid)),
+                )
+            };
             let ordinary_getter = property
                 .getter
-                .and_then(|fid| ir.functions.get(fid as usize))
-                .map(|function| {
-                    (
-                        function.name.clone(),
-                        ir_method_desc(&function.params, &function.ret),
-                    )
-                })
+                .filter(|&fid| (fid as usize) < ir.functions.len())
+                .map(physical_getter)
                 .or_else(|| {
                     c.methods
                         .iter()
-                        .map(|fid| &ir.functions[*fid as usize])
-                        .find(|function| function.name == default_getter)
-                        .map(|function| {
-                            (
-                                function.name.clone(),
-                                ir_method_desc(&function.params, &function.ret),
-                            )
-                        })
+                        .copied()
+                        .find(|&fid| ir.functions[fid as usize].name == default_getter)
+                        .map(physical_getter)
                 })
                 .or_else(|| {
                     backing.and_then(|(_, field)| {
                         // `@JvmField` suppresses the accessor pair entirely, so there is no
                         // synthesized getter to derive from the backing field — kotlinc records the
                         // field alone.
+                        let boxed = override_results
+                            .boxes_member_property(c.fq_name, property_index as u32);
+                        let result = if boxed {
+                            Ty::nullable(property.ty)
+                        } else {
+                            field.ty
+                        };
                         (!visibility.is_private() && !is_jvm_field(c, &property.name))
-                            .then(|| (default_getter, format!("(){}", desc(field.ty))))
+                            .then(|| (default_getter, format!("(){}", desc(result))))
                     })
                 });
             let getter = if c.is_annotation {
@@ -471,7 +477,12 @@ pub(super) fn build_class_metadata_with_facts(
                         .map(|(_, field)| field)
                         .or(delegate)
                         .filter(|field| property.ty != field.ty || names_local(field.ty))
-                        .map(|field| desc(field.ty)),
+                        .map(|field| desc(field.ty))
+                        .or_else(|| {
+                            static_fields::hoisted_static_for(ir, c, property_index)
+                                .filter(|storage| storage.erased_declared_ty.is_some())
+                                .map(|storage| desc(storage.ty))
+                        }),
                     // The PHYSICAL field name when the JVM realization mangles it — an instance
                     // property beside a same-named hoisted companion static (`result` → `result$1`).
                     field_name: backing
@@ -1250,6 +1261,8 @@ pub(super) fn build_class_metadata_with_facts(
         Vec::new()
     };
     let nested_refs: Vec<&str> = nested_names.iter().map(String::as_str).collect();
+    let enclosing_type_parameters =
+        super::super::local_classifiers::enclosing_type_parameters(ir, c);
     let class_type_parameters = ir
         .class_signature(&c.fq_name())
         .map(|signature| signature.type_params.as_slice())
@@ -1339,7 +1352,10 @@ pub(super) fn build_class_metadata_with_facts(
             supertype_spellings: &supertype_spellings,
             type_params: &c.type_params,
             type_param_bounds: class_type_parameters,
-            captured_type_params: super::super::local_classifiers::captured_type_parameters(c),
+            captured_type_params: super::super::local_classifiers::captured_type_parameters(
+                c,
+                &enclosing_type_parameters,
+            ),
             ctor_param_tparams: &ctor_param_tparams,
             ctor_param_annotations: &named_ctor_param_annotations,
             flags: class_metadata_flags(ir, c),

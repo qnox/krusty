@@ -167,6 +167,10 @@ mod type_operation_emission;
 mod value_emission;
 mod vararg;
 mod when;
+use declared_property_accessor::{
+    declared_property_accessor_jvm, emit_backing_field_read_adaptation,
+    emit_backing_field_write_adaptation,
+};
 use signature_formatter::{JvmSignatureFormatter, Wildcards};
 use singleton_instance::{add_singleton_instance_field, emit_singleton_instance_clinit};
 use synth_debug_tables::attach_synth_debug_tables;
@@ -520,11 +524,7 @@ pub struct LambdaModes {
     pub sam_conversions: LambdaMode,
 }
 
-/// Whether the JVM result of `target`'s method is the wrapper of its primitive Kotlin result, as
-/// it is for a primitive override of a non-primitive result (see `jvm::override_results`).
-fn boxes_sam_result(target: &crate::ir::IrSamTarget) -> bool {
-    target.overrides_non_primitive_result && !target.suspend
-}
+use crate::jvm::override_results::boxes_sam_result;
 
 impl LambdaModes {
     /// How the closure of a lambda (or a conversion to `sam`) of `arity` parameters is realized. A
@@ -2254,97 +2254,6 @@ fn checkcast_internal(ty: Ty) -> Option<String> {
     }
 }
 
-/// JVM type exposed by a synthesized property accessor. The value-class pass stamps the exact
-/// mangled getter only when this property's own type uses its erased field carrier. Consume that
-/// decision directly; emission must not repeat classifier/value-class lookup. An explicit backing
-/// field with a narrower type does not otherwise change the property's public descriptor.
-fn declared_property_accessor_jvm(
-    _ir: &IrFile,
-    property: &crate::ir::IrProperty,
-    field: &crate::ir::IrField,
-) -> Ty {
-    if property.getter_jvm_name.is_some() {
-        jvm_declared_ty(&field.ty)
-    } else {
-        jvm_declared_ty(&stored_value_ty(property.ty))
-    }
-}
-
-/// Adapt the physical backing-field value already on the stack to the property's declared return.
-/// Resolution has already chosen both types; this is only their JVM representation boundary.
-fn emit_backing_field_read_adaptation(
-    ir: &IrFile,
-    cw: &mut ClassWriter,
-    code: &mut CodeBuilder,
-    property: &crate::ir::IrProperty,
-    field_jvm: Ty,
-    accessor_jvm: Ty,
-) {
-    if field_jvm == accessor_jvm {
-        return;
-    }
-    if field_jvm.is_reference() && accessor_jvm.is_jvm_scalar() {
-        unbox_prim_from(cw, code, field_jvm, accessor_jvm);
-    } else if accessor_jvm.is_reference() {
-        if let Some(storage) = property
-            .storage_ty
-            .and_then(|ty| ty.non_null().obj_internal())
-        {
-            if crate::jvm::value_classes::is_boxed_value_class(ir, storage)
-                && field_jvm.is_jvm_scalar()
-            {
-                emit_box_impl(ir, cw, &Ty::obj_name(storage), code);
-                return;
-            }
-        }
-        if field_jvm.is_jvm_scalar() {
-            box_prim_free(cw, code, field_jvm);
-        } else {
-            let internal = crate::jvm::names::instanceof_internal_name(accessor_jvm);
-            if internal != "java/lang/Object" {
-                let class = cw.class_ref(&internal);
-                code.checkcast(class);
-            }
-        }
-    }
-}
-
-/// Adapt a synthesized setter's declared argument to the physical backing-field representation.
-fn emit_backing_field_write_adaptation(
-    ir: &IrFile,
-    cw: &mut ClassWriter,
-    code: &mut CodeBuilder,
-    property: &crate::ir::IrProperty,
-    accessor_jvm: Ty,
-    field_jvm: Ty,
-) {
-    if accessor_jvm == field_jvm {
-        return;
-    }
-    if accessor_jvm.is_reference() && field_jvm.is_jvm_scalar() {
-        if let Some(storage) = property
-            .storage_ty
-            .and_then(|ty| ty.non_null().obj_internal())
-        {
-            if crate::jvm::value_classes::is_boxed_value_class(ir, storage) {
-                let class = cw.class_ref(&storage.render());
-                code.checkcast(class);
-                emit_unbox_impl(ir, cw, &Ty::obj_name(storage), code);
-                return;
-            }
-        }
-        unbox_prim_from(cw, code, accessor_jvm, field_jvm);
-    } else if accessor_jvm.is_jvm_scalar() && field_jvm.is_reference() {
-        box_prim_free(cw, code, accessor_jvm);
-    } else if accessor_jvm.is_reference() && field_jvm.is_reference() {
-        let internal = crate::jvm::names::instanceof_internal_name(field_jvm);
-        if internal != "java/lang/Object" {
-            let class = cw.class_ref(&internal);
-            code.checkcast(class);
-        }
-    }
-}
-
 /// Synthesize the accessors for the properties a class DECLARES but whose accessor methods the IR does
 /// not carry — a plain backing-field property has no source-written accessor, so `getX()`/`setX(v)` are
 /// pure realization and belong here, not in the language-level lowering. A property that declares its own
@@ -2390,6 +2299,7 @@ fn emit_declared_property_accessors(
         fq_name,
         formatter,
         param_assertions,
+        override_results: env.override_results,
     };
     for property in &c.properties {
         declared_property_accessor::emit(
@@ -2462,6 +2372,7 @@ fn emit_scheduled_member(
                 fq_name,
                 formatter: signature_formatter,
                 param_assertions,
+                override_results: env.override_results,
             };
             declared_property_accessor::emit(
                 &accessor_owner,
@@ -3469,14 +3380,17 @@ fn emit_class(
     if computed.is_some() && !is_coroutine_state_machine(c) {
         attach_synth_debug_tables(
             ir,
+            env.override_results,
             c,
             &mut cw,
             opts.param_assertions,
-            primary_ctor_debug
-                .as_ref()
-                .map(|(descriptor, pc)| (descriptor.as_str(), *pc)),
-            &ctor_lines,
-            &init_locals,
+            synth_debug_tables::PrimaryConstructorDebug {
+                method: primary_ctor_debug
+                    .as_ref()
+                    .map(|(descriptor, pc)| (descriptor.as_str(), *pc)),
+                lines: &ctor_lines,
+                init_locals: &init_locals,
+            },
         );
         attach_declared_method_debug(ir, env.override_results, c, &mut cw);
         attach_synth_nullability(ir, c, &mut cw);
@@ -3737,13 +3651,7 @@ fn emit_interface_class(
             // only the holder's private static (measured on 2.4.20), and a private abstract method
             // is not even a legal class-file shape (ACC_PRIVATE|ACC_ABSTRACT fails to load).
             if !ir.method_visibility(fid).is_private() {
-                let desc =
-                    function_annotations::add_abstract(ir, &mut cw, fid, &signature_formatter, env);
-                // An abstract method still carries kotlinc's nullability annotations.
-                let (result, params) = super::abstract_method_nullability::annotations(ir, fid, f);
-                if result.is_some() || params.iter().any(Option::is_some) {
-                    cw.set_method_nullability(&f.name, &desc, result, &params);
-                }
+                function_annotations::add_abstract(ir, &mut cw, fid, &signature_formatter, env);
             }
         }
         // An interface method with default parameters gets a STATIC `<name>$default(iface, params…, mask,
@@ -3836,10 +3744,13 @@ fn emit_interface_class(
             &mut cw,
             c.fq_name,
             c.decl_line,
-            &f.name,
-            &physical_params,
-            &parameter_names,
-            jvm_declared_ty(&env.override_results.physical_result(ir, fid)),
+            JdAccessBridgeMember {
+                name: &f.name,
+                param_tys: &physical_params,
+                parameter_names: &parameter_names,
+                ret: jvm_declared_ty(&env.override_results.physical_result(ir, fid)),
+                varargs: method_access::varargs_access(ir, fid),
+            },
         );
     }
     if enable_compat {
@@ -3877,7 +3788,14 @@ fn emit_interface_class(
         .then(|| build_class_metadata(ir, c, opts, env))
         .flatten();
     if computed.is_some() {
-        attach_synth_debug_tables(ir, c, &mut cw, opts.param_assertions, None, &[], &[]);
+        attach_synth_debug_tables(
+            ir,
+            env.override_results,
+            c,
+            &mut cw,
+            opts.param_assertions,
+            synth_debug_tables::PrimaryConstructorDebug::default(),
+        );
         attach_declared_method_debug(ir, env.override_results, c, &mut cw);
         attach_synth_nullability(ir, c, &mut cw);
     }
@@ -4622,12 +4540,14 @@ fn emit_enum_class(
     if class_metadata.is_some() {
         attach_synth_debug_tables(
             ir,
+            env.override_results,
             c,
             &mut cw,
             opts.param_assertions,
-            emits_primary_ctor.then_some((ctor_desc.as_str(), 0)),
-            &[],
-            &[],
+            synth_debug_tables::PrimaryConstructorDebug {
+                method: emits_primary_ctor.then_some((ctor_desc.as_str(), 0)),
+                ..Default::default()
+            },
         );
         attach_declared_method_debug(ir, env.override_results, c, &mut cw);
         attach_synth_nullability(ir, c, &mut cw);
@@ -5107,6 +5027,16 @@ fn jd_declared_param_tys(ir: &IrFile, fid: u32) -> Vec<Ty> {
         .collect()
 }
 
+/// The member shape carried through an `access$<name>$jd` bridge. The vararg bit is a recorded
+/// declaration fact, not inferred from an array descriptor.
+pub(super) struct JdAccessBridgeMember<'a> {
+    pub(super) name: &'a str,
+    pub(super) param_tys: &'a [Ty],
+    pub(super) parameter_names: &'a [Option<String>],
+    pub(super) ret: Ty,
+    pub(super) varargs: u16,
+}
+
 /// The `access$<name>$jd` bridge kotlinc puts on an `enable`-mode interface for each of its
 /// non-private default methods: a `public static synthetic` whose body makes the NON-VIRTUAL call
 /// (`invokespecial` on the interface's own method) that the `$DefaultImpls` forward and legacy
@@ -5116,11 +5046,15 @@ fn emit_jd_access_bridge(
     cw: &mut ClassWriter,
     interface: crate::types::TypeName,
     decl_line: u32,
-    member_name: &str,
-    param_tys: &[Ty],
-    parameter_names: &[Option<String>],
-    ret: Ty,
+    member: JdAccessBridgeMember<'_>,
 ) {
+    let JdAccessBridgeMember {
+        name: member_name,
+        param_tys,
+        parameter_names,
+        ret,
+        varargs,
+    } = member;
     assert_eq!(
         parameter_names.len(),
         param_tys.len(),
@@ -5148,7 +5082,11 @@ fn emit_jd_access_bridge(
     let target = cw.interface_methodref(&fq, member_name, &member_desc);
     code.invokespecial(target, argument_words as i32, slot_words(ret) as i32);
     emit_return(ret, &mut code);
-    finish_code::<0x1009>(cw, &name, &bridge_desc, &mut code, argument_words); // PUBLIC | STATIC | SYNTHETIC
+    code.ensure_locals(argument_words);
+    code.link();
+    // PUBLIC | STATIC | SYNTHETIC, plus the selected member's own ACC_VARARGS when its last
+    // physical parameter is the declared vararg.
+    cw.add_method_sig(0x1009 | varargs, &name, &bridge_desc, &code, None);
     let mut locals = vec![("$this".to_string(), format!("L{fq};"), 0)];
     let mut slot = 1u16;
     for (index, parameter) in param_tys.iter().enumerate() {
@@ -5815,29 +5753,6 @@ fn property_jvm_signatures(
 /// `Signature` for a member whose SEMANTIC types mention enclosing-class type parameters: each
 /// position is a bare `T<name>;` reference or a plain non-generic descriptor. `None` when any
 /// position needs deeper generic formatting (those flow through the ordinary formatters).
-fn member_semantic_signature(params: &[Ty], ret: Ty) -> Option<String> {
-    fn part(t: Ty) -> Option<String> {
-        match t {
-            Ty::TyParam(name, _) => Some(format!(
-                "T{};",
-                crate::types::type_parameter_source_name(name)
-            )),
-            Ty::Nullable(inner) if matches!(*inner, Ty::TyParam(..)) => part(*inner),
-            t if !crate::types::ty_mentions_any_param(t) && t.type_args().is_empty() => {
-                Some(crate::jvm::names::type_descriptor(ir_ty_to_jvm(&t)))
-            }
-            _ => None,
-        }
-    }
-    let mut out = String::from("(");
-    for &p in params {
-        out.push_str(&part(p)?);
-    }
-    out.push(')');
-    out.push_str(&part(ret)?);
-    Some(out)
-}
-
 fn method_signature(
     formatter: &JvmSignatureFormatter<'_>,
     ir: &IrFile,
@@ -5869,8 +5784,11 @@ fn method_signature_shape(
         let ret = generic.ret.as_ref().unwrap_or(declared_ret);
         return suspend_generic_method_sig(formatter, generic, ret);
     }
+    if let Some(generic) = ir.jvm_value_class_member_signatures.get(&fid) {
+        return formatter.method_signature(generic, f, None);
+    }
     if let Some(generic) = ir.signatures.get(&fid) {
-        let generic = value_class_signatures::physical_generic_signature(ir, fid, f, generic);
+        let generic = value_class_signatures::physical_generic_signature(ir, fid, generic);
         let vararg_index = ir.fn_varargs.get(&fid).map(|vararg| vararg.index);
         return formatter.method_signature(&generic, f, vararg_index);
     }
@@ -5880,12 +5798,10 @@ fn method_signature_shape(
     ) {
         return suspend_method_sig(formatter, params, ret);
     }
-    if let Some((params, ret)) = value_class_signatures::physical_member_signature(ir, fid, f) {
-        // A member using ENCLOSING-CLASS type parameters signs with bare references (`(TT;)TT;`)
-        // and declares nothing — the parameters belong to the class header's own signature.
-        if let Some(sig) = member_semantic_signature(&params, ret) {
-            return Some(sig);
-        }
+    if let Some((params, ret)) = value_class_signatures::physical_member_signature(ir, fid) {
+        // A member using ENCLOSING-CLASS type parameters declares none: they belong to the class
+        // header's own signature (`(TT;)TT;`).
+        return formatter.method_positions(&params, &ret);
     }
     if let Some((params, declared_ret)) = ir.suspend_declared_sigs.get(&fid) {
         // A value-class RETURN survives in the continuation's type argument as the value class
@@ -5898,6 +5814,9 @@ fn method_signature_shape(
             .map(|(_, _, value_class_ret)| value_class_ret)
             .unwrap_or(declared_ret);
         return suspend_method_sig(formatter, params, ret);
+    }
+    if let Some((params, ret)) = value_class_signatures::declared_value_class_signature(ir, fid) {
+        return formatter.method_positions(&params, &ret);
     }
     method_parameterized_sig(formatter, &signature_function_params(ir, fid), &f.ret)
 }

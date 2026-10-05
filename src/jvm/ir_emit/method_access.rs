@@ -21,7 +21,7 @@ fn jvm_visibility(visibility: crate::types::Visibility) -> u16 {
 /// `calculateMethodFlags`: the member's own visibility and `ACC_ABSTRACT`, never `ACC_FINAL`.
 /// Interface members record `public`, so their flags are unchanged.
 pub(super) fn abstract_method_access(ir: &IrFile, fid: u32) -> u16 {
-    jvm_visibility(ir.method_visibility(fid)) | ACC_ABSTRACT
+    jvm_visibility(ir.method_visibility(fid)) | ACC_ABSTRACT | varargs_access(ir, fid)
 }
 
 /// The access word of the method emitted for `fid`. `holder_static` is an interface member's body
@@ -117,7 +117,7 @@ pub(super) fn is_reifiable(ir: &IrFile, fid: u32) -> bool {
 /// kotlinc sets `ACC_VARARGS` exactly when the method's LAST physical parameter is the declared
 /// `vararg`, so Java may call it in element form. Captured values and receivers lead the physical
 /// list and do not move it; a suspend function's trailing continuation does.
-fn varargs_access(ir: &IrFile, fid: u32) -> u16 {
+pub(super) fn varargs_access(ir: &IrFile, fid: u32) -> u16 {
     let trailing = ir.fn_varargs.get(&fid).is_some_and(|vararg| vararg.is_last);
     if trailing && !ir.suspend_funs.contains(&fid) {
         ACC_VARARGS

@@ -293,6 +293,73 @@ fn local_override_keeps_overridden_visibility_like_kotlinc() {
     );
 }
 
+/// `ACC_VARARGS` on every vararg member shape: a declared abstract member, an `abstract override`,
+/// the concrete override under it, an interface member, an `open` member with its override, and the
+/// jvm-default compatibility surface — a default member's `access$…$jd` bridge and `$DefaultImpls`
+/// forwarder, republished too on a sub-interface that inherits the default without redeclaring it.
+const ABSTRACT_VARARGS: &str = "abstract class Printer {\n\
+    abstract fun println(vararg objects: Any?): Printer\n\
+}\n\
+abstract class IndentingPrinter : Printer() {\n\
+    abstract override fun println(vararg objects: Any?): Printer\n\
+}\n\
+class ConsolePrinter : IndentingPrinter() {\n\
+    var lines: Int = 0\n\
+    override fun println(vararg objects: Any?): Printer {\n\
+        lines += objects.size\n\
+        return this\n\
+    }\n\
+}\n\
+interface Logger {\n\
+    fun log(vararg msgs: String): Int\n\
+}\n\
+interface Greeter {\n\
+    fun greet(vararg names: String): Int = names.size\n\
+}\n\
+interface FriendlyGreeter : Greeter\n\
+open class OpenBase {\n\
+    open fun write(vararg bytes: Int): Int = bytes.size\n\
+}\n\
+class OpenDerived : OpenBase() {\n\
+    override fun write(vararg bytes: Int): Int = bytes.size + 1\n\
+}\n\
+fun box(): String {\n\
+    val printer = ConsolePrinter()\n\
+    printer.println(\"a\", \"b\")\n\
+    val logger = object : Logger {\n\
+        override fun log(vararg msgs: String): Int = msgs.size\n\
+    }\n\
+    val greeter = object : Greeter {}\n\
+    val friendly = object : FriendlyGreeter {}\n\
+    val total = printer.lines + logger.log(\"x\", \"y\", \"z\") + greeter.greet(\"g\") + friendly.greet(\"h\") + OpenDerived().write(1, 2)\n\
+    return if (total == 10) \"OK\" else \"fail: \" + total\n\
+}\n";
+
+#[test]
+fn abstract_vararg_members_run() {
+    common::expect_box_ok_with_stdlib(ABSTRACT_VARARGS, "AbstractVarargs");
+}
+
+#[test]
+fn abstract_vararg_method_flags_match_kotlinc() {
+    assert_method_flags_match_kotlinc(
+        "AbstractVarargs",
+        ABSTRACT_VARARGS,
+        &[
+            "Printer",
+            "IndentingPrinter",
+            "ConsolePrinter",
+            "Logger",
+            "Greeter",
+            "Greeter$DefaultImpls",
+            "FriendlyGreeter",
+            "FriendlyGreeter$DefaultImpls",
+            "OpenBase",
+            "OpenDerived",
+        ],
+    );
+}
+
 /// An override of an `internal` member keeps `internal` and so stays JVM-public, as kotlinc's
 /// does. kotlinc mangles the member's JVM name (`f$main`) and records the mangled name in the
 /// `@Metadata` `jvm_signature` extension where krusty keeps the declared name — a pre-existing

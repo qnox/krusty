@@ -38,13 +38,9 @@ impl Checker<'_> {
         {
             return;
         }
-        if matches!(expected, Ty::PlatformNullable(_) | Ty::Error)
-            || expected.is_nullable()
-            || !(expected.is_reference() || expected.is_jvm_scalar())
-        {
-            return;
+        if expected_type_rejects_null(expected) {
+            self.platform_narrowings.insert(e, position);
         }
-        self.platform_narrowings.insert(e, position);
     }
 
     /// An enhanced Java result initializing a declaration whose type is inferred from it.
@@ -136,6 +132,33 @@ impl Checker<'_> {
                     })
             })
             .collect()
+    }
+}
+
+/// Whether a value committed to the declared `expected` type must not be `null`: the negation of
+/// kotlinc's `acceptsNullValues` in `Fir2IrImplicitCastInserter.insertSpecialCast`. A nullable or
+/// flexible type accepts `null`, and so does a type parameter whose upper bound does. A value
+/// coerced to `Unit` or committed to `Nothing`, a projection, and an erroneous or unsolved type
+/// commit the value to no type that could reject it.
+///
+/// Ordinary calls and generated delegation forwarders both decide their implicit not-null cast
+/// here, so the two cannot disagree on which declared types accept `null`.
+pub(super) fn expected_type_rejects_null(expected: Ty) -> bool {
+    let mut current = expected;
+    let mut seen = std::collections::HashSet::new();
+    loop {
+        match current {
+            Ty::Unit
+            | Ty::Nothing
+            | Ty::Error
+            | Ty::Pending
+            | Ty::InProjection(_)
+            | Ty::OutProjection(_)
+            | Ty::StarProjection(_) => return false,
+            Ty::TyParam(name, bound) if seen.insert(name) => current = *bound,
+            Ty::TyParam(..) => return false,
+            _ => return !current.admits_null(),
+        }
     }
 }
 
