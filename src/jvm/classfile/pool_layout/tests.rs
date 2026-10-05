@@ -327,8 +327,7 @@ fn a_rewritten_call_site_follows_its_bootstrap_arguments_and_method() {
         added: before_g + 1..after_g + 1,
         interned: after_g + 1..after_g + 1,
     }];
-    let laid_out = match relaid_class(&class, &relaid, Unnamed::Dropped).expect("the class reads")
-    {
+    let laid_out = match relaid_class(&class, &relaid, Unnamed::Dropped).expect("the class reads") {
         Some(laid_out) => laid_out,
         None => class,
     };
