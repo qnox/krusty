@@ -4278,6 +4278,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   forwards neither `log` nor `save`. Test:
   `tests/context_parameters_e2e.rs::context_interface_delegation_forwards_both_interfaces`.
 
+- **A delegation forwarder signs the member as its class sees it.** In a generic class delegating a
+  generic interface, the forwarder's generic `Signature` names the class's own type parameters in
+  the substituted positions, as kotlinc writes it: `class Pass<D>(b: Source<D>) : Source<D> by b`
+  forwards `take(TD;)TD;` over the descriptor `(Ljava/lang/Object;)Ljava/lang/Object;`, and a bound
+  `D : CharSequence` erases the descriptor to the bound while the `Signature` stays `(TD;)TD;`. The
+  forwarder records its semantic parameters and result like any member that uses its class's type
+  parameters; without that record the attribute was missing. Test:
+  `tests/delegation_forwarder_signature_e2e.rs`.
+
 - **Property with a backing field + custom accessor referencing `field`.** `val x = "O" get() = field
   + "K"` / `var v = 1 get() = field + 10 set(value) { field = value * 2 }` — a stored backing field
   AND a custom getter/setter (distinct from a computed property, which has no field, and a plain field,
