@@ -196,6 +196,7 @@ fn a_rewritten_method_s_entries_are_placed_in_asm_order() {
     let relaid = [RelaidMethod {
         index: 1,
         added: before_g + 1..after_g + 1,
+        leading: Vec::new(),
         interned: after_g + 1..after_g + 1,
     }];
     let laid_out = relaid_class(&class, &relaid, Unnamed::Dropped)

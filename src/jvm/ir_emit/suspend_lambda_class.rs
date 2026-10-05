@@ -258,8 +258,18 @@ pub(super) fn emit_suspend_lambda_class(
             cw.add_field_late(access, &field.name, &field.descriptor, None, None);
         }
     }
-    for Capture { field } in &shape.captures {
-        cw.add_field_late(0x1010, &field.name, &field.descriptor, None, None);
+    // A captured value's field carries its type's generic `Signature`, as a shared cell's
+    // `Ref$ObjectRef<T>` does.
+    for (Capture { field }, capture) in shape.captures.iter().zip(&lambda.captures) {
+        let signature = parameterized_sig(&formatter, &c.fields[capture.field as usize].ty);
+        cw.add_field_late_sig(
+            0x1010,
+            &field.name,
+            &field.descriptor,
+            signature.as_deref(),
+            None,
+            None,
+        );
     }
 
     emit_constructor(
