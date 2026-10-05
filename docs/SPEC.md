@@ -10003,7 +10003,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   jumps on its operand with the opposite sense. Common IR spells a negation as the same
   `operand == false` comparison, so lowering records it (`IrFile::add_negation`,
   `IrFile::negations`, copied with the expression), and the JVM condition emitter flips the jump
-  only for a recorded negation. Test: `tests/boolean_literal_equality_e2e.rs`.
+  only for a recorded negation. An explicit `b.not()` call is the same negation, and so is the
+  exact `Boolean.not` declaration a callable reference's adapter body keeps: the JVM target realizes
+  that declaration as a typed `BuiltinMemberOperation::Negation`, whose commit replaces the call node
+  and records it (`IrFile::replace_with_negation`) together, so no consumer reads a negation back
+  from the comparison's shape. Tests: `tests/boolean_literal_equality_e2e.rs`,
+  `tests/boolean_not_call_e2e.rs` (`if (b.not())` and `Boolean::not`).
 - **A discarded value whose pushers are all loads or constants is not pushed, as kotlinc's
   `PopBackwardPropagationTransformer` does, and dead code goes before the `goto` and `nop` steps.**
   The pass runs after StackPeephole (step `PopBackwardPropagation`,

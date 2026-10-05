@@ -108,6 +108,8 @@ mod bazel_cli_contract_e2e;
 mod block_slot_reuse_e2e;
 #[path = "boolean_literal_equality_e2e.rs"]
 mod boolean_literal_equality_e2e;
+#[path = "boolean_not_call_e2e.rs"]
+mod boolean_not_call_e2e;
 #[path = "bound_expr_ref_e2e.rs"]
 mod bound_expr_ref_e2e;
 #[path = "bound_library_ref_e2e.rs"]
