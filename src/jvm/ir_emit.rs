@@ -220,7 +220,7 @@ use secondary_constructor::SecondaryConstructorEmitter;
 /// the `INSTANCE` store, and `<init>` is a bare `super()` call. Companions hoist their fields to the
 /// OUTER class instead (not modeled yet), and local/anonymous objects keep instance fields.
 fn object_static_storage(c: &IrClass) -> bool {
-    c.is_object && !c.is_companion && !c.is_local_class && c.enum_entry_of.is_none()
+    c.is_object && !c.is_companion && !c.is_local_class && !c.is_enum_entry
 }
 
 /// Kotlin interfaces and annotation classes are both JVM interfaces. Common IR keeps their source
@@ -2609,8 +2609,8 @@ fn emit_class(
     if c.is_interface {
         return emit_interface_class(ir, c, facade, env, opts, class_meta, extra);
     }
-    if let Some(user_tys) = &c.enum_entry_of {
-        return enum_entry_subclass::emit_enum_entry_subclass(ir, c, facade, env, opts, user_tys);
+    if c.is_enum_entry {
+        return enum_entry_subclass::emit_enum_entry_subclass(ir, c, facade, env, opts);
     }
     if c.prop_ref.is_some() {
         return property_reference_class::emit_prop_ref_class(ir, c, facade, env, opts);
@@ -3152,26 +3152,28 @@ fn emit_class(
                 .expect("constructor default prefix exceeds its defaults");
             constructor_defaults::emit_ctor_default_stub_with_prefix(
                 ir,
-                &fq_name,
-                c.fq_name,
-                facade,
-                prefix_params,
-                prefix_count,
-                source_params,
-                source_defaults,
-                None,
-                value_param_ctor || c.is_sealed,
-                c.primary_ctor_annotations.deprecated(),
-                // A declared private primary's overload is package-private, the way kotlinc gives
-                // any private constructor's; a sealed class's is its public way in.
-                if ir.ctor_visibilities.get(&c.fq_name_id())
-                    == Some(&crate::types::Visibility::Private)
-                    && !c.is_sealed
-                    && !value_param_ctor
-                {
-                    0x1000
-                } else {
-                    0x1001
+                constructor_defaults::ConstructorDefaultStub {
+                    owner: &fq_name,
+                    owner_identity: c.fq_name,
+                    facade,
+                    physical_prefix: prefix_params,
+                    logical_prefix_count: prefix_count,
+                    real_params: source_params,
+                    defaults: source_defaults,
+                    secondary_lines: None,
+                    target_uses_marker_accessor: value_param_ctor || c.is_sealed,
+                    deprecated: c.primary_ctor_annotations.deprecated(),
+                    // A declared private primary's overload is package-private, the way kotlinc
+                    // gives any private constructor's; a sealed class's is its public way in.
+                    access: if ir.ctor_visibilities.get(&c.fq_name_id())
+                        == Some(&crate::types::Visibility::Private)
+                        && !c.is_sealed
+                        && !value_param_ctor
+                    {
+                        0x1000
+                    } else {
+                        0x1001
+                    },
                 },
                 &mut cw,
                 env,
@@ -4045,11 +4047,9 @@ fn emit_enum_class(
     ctor.ret_void();
     ctor.ensure_locals(max_locals);
     ctor.link();
-    // A plain enum's constructor is `private` (matching kotlinc — javap then hides the synthetic
-    // `(String,int)` params in its display). A subclassed enum's ctor must be reachable from its entry
-    // subclasses' `<init>` (an `invokespecial` from another class): kotlinc keeps it `private` and relies
-    // on nestmate access, which krusty doesn't emit, so it stays package-private + synthetic here.
-    let base_ctor_acc = if has_subclass { ACC_SYNTHETIC } else { 0x0002 };
+    // An enum's constructor is `private`. An entry subclass reaches it through the marker accessor
+    // emitted with the class's other accessors, or through the `$default` overload.
+    let base_ctor_acc = 0x0002;
     // kotlinc emits a generic `Signature` on the enum ctor listing only the USER params (the synthetic
     // leading `(String, int)` are excluded) — e.g. `()V` for a plain enum, `(I)V` for `E(val n: Int)`.
     // javap reads it to display `Color()` instead of `Color(String, int)`; without it the synthetic
@@ -4060,18 +4060,6 @@ fn emit_enum_class(
     // `ClassFormatError: Duplicate method name "<init>"`. Its bytes are still built above so the
     // constant pool interns in kotlinc's order.
     seed_enum_constructor_locals(ir, c, &self_desc, &mut cw);
-    // The constructor's LocalVariableTable strings follow its body, and the property accessors
-    // (`getTag`, its descriptor, its `@NotNull`) come next, each at its method visit.
-    for (f, t) in c.fields[..n_params].iter().zip(&user_tys) {
-        cw.reserve_method_name(&property_getter_name(&f.name));
-        cw.reserve_descriptor(&format!("(){}", type_descriptor(*t)));
-        // The nullability comes from the declared type; `t` is its erased JVM form.
-        match field_nullability_kind(ir, &fq, &f.name, f.ty) {
-            1 => cw.reserve_descriptor("Lorg/jetbrains/annotations/NotNull;"),
-            2 => cw.reserve_descriptor("Lorg/jetbrains/annotations/Nullable;"),
-            _ => {}
-        }
-    }
     let emits_primary_ctor = c.has_primary_ctor || c.secondary_ctors.is_empty();
     if emits_primary_ctor {
         cw.add_method_sig(
@@ -4109,20 +4097,35 @@ fn emit_enum_class(
     {
         constructor_defaults::emit_ctor_default_stub_with_prefix(
             ir,
-            &fq,
-            c.fq_name,
-            facade,
-            &[Ty::String, Ty::Int],
-            0,
-            &all_param_tys,
-            defaults,
-            None,
-            false,
-            false,
-            base_ctor_acc | ACC_SYNTHETIC,
+            constructor_defaults::ConstructorDefaultStub {
+                owner: &fq,
+                owner_identity: c.fq_name,
+                facade,
+                physical_prefix: &[Ty::String, Ty::Int],
+                logical_prefix_count: 0,
+                real_params: &all_param_tys,
+                defaults,
+                secondary_lines: None,
+                target_uses_marker_accessor: false,
+                deprecated: false,
+                access: ACC_SYNTHETIC,
+            },
             &mut cw,
             env,
         );
+    }
+
+    // The constructors' LocalVariableTable strings follow their bodies, and the property accessors
+    // (`getTag`, its descriptor, its `@NotNull`) come next, each at its method visit.
+    for (f, t) in c.fields[..n_params].iter().zip(&user_tys) {
+        cw.reserve_method_name(&property_getter_name(&f.name));
+        cw.reserve_descriptor(&format!("(){}", type_descriptor(*t)));
+        // The nullability comes from the declared type; `t` is its erased JVM form.
+        match field_nullability_kind(ir, &fq, &f.name, f.ty) {
+            1 => cw.reserve_descriptor("Lorg/jetbrains/annotations/NotNull;"),
+            2 => cw.reserve_descriptor("Lorg/jetbrains/annotations/Nullable;"),
+            _ => {}
+        }
     }
 
     emit_declared_property_accessors(
@@ -4333,6 +4336,7 @@ fn emit_enum_class(
     // before `<clinit>`, forwarders first.
     emit_default_impls_forwarders(ir, c, &mut cw, env);
     bridge_emission::emit_bridges(ir, c, &mut cw, env);
+    constructor_accessors::emit_accessors(ir, c, &fq, &mut cw);
     // `<clinit>` is RESERVED and BUILT here, after the plugin-generated members: kotlinc interns
     // their names, descriptors and body constants between the entry constants and `<clinit>`, so
     // building the initializer earlier claimed those pool slots first.

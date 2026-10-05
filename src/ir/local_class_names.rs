@@ -628,9 +628,6 @@ impl super::IrFile {
                     .iter_mut()
                     .for_each(|value| name(value, names));
             }
-            if let Some(parameters) = &mut class.enum_entry_of {
-                tys(parameters, names);
-            }
             if let Some(reference) = &mut class.prop_ref {
                 reference
                     .owner_internal

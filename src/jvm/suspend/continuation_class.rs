@@ -294,7 +294,7 @@ pub(super) fn build_continuation_class(
         super_ctor: crate::ir::IrConstructorTarget::UNRESTRICTED_PRIMARY,
         is_enum: false,
         enum_entries: vec![],
-        enum_entry_of: None,
+        is_enum_entry: false,
         prop_ref: None,
         func_ref: None,
         lambda: None,
