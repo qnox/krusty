@@ -117,11 +117,10 @@ impl Checker<'_> {
             return false;
         }
         // FIR cannot test a local classifier application whose target carries a type parameter
-        // owned outside that classifier's lexical class chain. A local class may capture a generic
-        // function's `T`, but its runtime class carries no testable `T`; an outer class's `T` is in
-        // the class chain and therefore is not rejected by this rule. Read both relations from the
-        // stable declaration index rather than inferring either one from a generated local name.
-        if self.local_classifier_has_external_type_parameter(subtype_class, arguments.as_ref()) {
+        // owned outside that local classifier. Its runtime classifier cannot test a type argument
+        // captured from either an enclosing function or an enclosing class. Read both declaration
+        // identities from the stable index rather than inferring ownership from a generated name.
+        if self.local_classifier_captures_type_parameter(subtype_class, arguments.as_ref()) {
             return true;
         }
         let source = self.fed_source();
@@ -142,7 +141,7 @@ impl Checker<'_> {
         is_subtype(&TyCtx::new(), self, candidate, target)
     }
 
-    fn local_classifier_has_external_type_parameter(
+    fn local_classifier_captures_type_parameter(
         &self,
         classifier: crate::types::TypeName,
         arguments: &[Ty],
@@ -159,7 +158,6 @@ impl Checker<'_> {
         {
             return false;
         }
-        let class_chain = index.classifier_and_outer_class_declarations(declaration);
         arguments.iter().copied().any(|argument| {
             let Some(parameter_name) = direct_type_parameter(argument) else {
                 return false;
@@ -169,7 +167,7 @@ impl Checker<'_> {
             };
             index
                 .type_parameter_owner(parameter)
-                .is_some_and(|owner| !class_chain.contains(&owner))
+                .is_some_and(|owner| owner != declaration)
         })
     }
 }

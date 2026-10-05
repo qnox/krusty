@@ -174,16 +174,16 @@ fn a_local_class_capturing_a_function_parameter_is_rejected_like_kotlinc() {
     common::assert_errors_match_kotlinc(&sources, &common::language_directives::kotlinc_args(SRC));
 }
 
-/// A type parameter owned by an actual outer class belongs to the local classifier's class chain;
-/// FIR's local-class rule must not reject it as though it came from an enclosing function.
+/// A local classifier cannot test a type argument captured from an enclosing class, just as it
+/// cannot test one captured from an enclosing function.
 #[test]
-fn a_local_class_using_an_outer_class_parameter_is_not_rejected_as_erased() {
+fn a_local_class_capturing_an_outer_class_parameter_is_rejected_like_kotlinc() {
     const SRC: &str = "class Outer<T>(private val value: T) {\n\
         \x20   fun check(x: Any): Boolean {\n\
         \x20       class Local(val nested: T)\n\
         \x20       return x is Local\n\
         \x20   }\n\
-        }\n\
-        fun box(): String = if (!Outer(1).check(\"not local\")) \"OK\" else \"FAIL\"\n";
-    common::expect_box_same_as_kotlinc(SRC, "LocalClassOuterTypeParameter");
+        }\n";
+    let sources = [("Main.kt", SRC)];
+    common::assert_errors_match_kotlinc(&sources, &common::language_directives::kotlinc_args(SRC));
 }
