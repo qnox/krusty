@@ -1,12 +1,13 @@
-//! The boxed result kotlinc gives a primitive override of a non-primitive declaration.
+//! The boxed JVM result carrier kotlinc gives an override with a scalar result, such as `Int`, of a
+//! declaration whose result is not that scalar.
 //!
-//! kotlinc's JVM signature mapper boxes a function's primitive result when any declaration it
-//! overrides returns something else (`forceBoxedReturnTypeOnOverride`): `override fun next(): Int`
+//! kotlinc's JVM signature mapper carries a function's scalar result in its wrapper class when any
+//! declaration it overrides returns something else (`forceBoxedReturnTypeOnOverride`): `override fun next(): Int`
 //! of `Iterator<T>.next(): T` is `next()Ljava/lang/Integer;`, and so is `invoke` of a
 //! `() -> Int` object. The override's own JVM result is the wrapper, so its body boxes once, a call
 //! through the class unboxes, and the bridge to the erased declaration returns the box as it is.
 //!
-//! The Kotlin declaration still returns the primitive, and common IR keeps saying so: its function
+//! The Kotlin declaration still returns the scalar, and common IR keeps saying so: its function
 //! result, its returns and its calls are untouched. Only the JVM carrier of the result changes, so
 //! this pass records the choice in [`OverrideResults`], keyed by function, and the descriptors and
 //! the emitter read it there. A declaration of another file takes the same choice from the fact its
@@ -19,17 +20,17 @@ use crate::ir::{is_kotlin_primitive, Callee, ExprId, FunId, IrExpr, IrFile};
 use crate::jvm::backend::SkipReason;
 use crate::types::Ty;
 
-/// The functions of this file whose JVM result is the wrapper of their primitive Kotlin result.
+/// The functions of this file whose scalar result is carried in its wrapper class on the JVM.
 #[derive(Default)]
 pub(crate) struct OverrideResults {
     boxed: HashSet<FunId>,
     /// Value-class member calls the value-class pass realized as a static call of a boxed
-    /// member's `-impl`, with the primitive Kotlin result each reads out of the wrapper.
+    /// member's `-impl`, with the scalar result each reads out of the wrapper.
     static_member_calls: HashMap<ExprId, Ty>,
 }
 
-/// The primitive Kotlin result of the selected dependency member when its exact class-file slot is
-/// that primitive's wrapper. The identity is already frozen at the frontend/backend boundary; a
+/// The scalar result of the selected dependency member when its exact class-file slot is that
+/// scalar's wrapper class. The identity is already frozen at the frontend/backend boundary; a
 /// missing fact is an invalid backend input, never a reason to guess from the semantic type.
 pub(crate) fn external_boxed_result(
     callables: &crate::backend::CheckedBackendCallables,
@@ -48,7 +49,7 @@ pub(crate) fn external_boxed_result(
 }
 
 impl OverrideResults {
-    /// Whether `function`'s JVM result is the wrapper of its primitive one.
+    /// Whether `function`'s scalar result is carried in its wrapper class.
     pub(crate) fn boxes(&self, function: FunId) -> bool {
         self.boxed.contains(&function)
     }
@@ -65,13 +66,13 @@ impl OverrideResults {
     }
 
     /// Record that the value-class pass realized `call` as a static call of the `-impl` of a member
-    /// whose JVM result is the wrapper of the primitive `result`.
+    /// whose JVM result is the wrapper class of the scalar `result`.
     pub(crate) fn record_static_member_call(&mut self, call: ExprId, result: Ty) {
         self.static_member_calls.insert(call, result);
     }
 
-    /// The primitive Kotlin result of the current-module declaration `callable`, in this file or
-    /// another, when its JVM result is that primitive's wrapper.
+    /// The scalar result of the current-module declaration `callable`, in this file or another,
+    /// when its JVM result is that scalar's wrapper class.
     pub(crate) fn boxed_callable_result(&self, ir: &IrFile, callable: CallableId) -> Option<Ty> {
         match ir.checked_callable_functions.get(&callable) {
             Some(&function) => self
@@ -89,8 +90,8 @@ impl OverrideResults {
         }
     }
 
-    /// The primitive Kotlin result of the call `expression`, when its callee returns the wrapper in
-    /// its place: a member call through the class, a `super` call, a member call of a declaration
+    /// The scalar result of the call `expression`, when its callee returns the wrapper class in its
+    /// place: a member call through the class, a `super` call, a member call of a declaration
     /// in another file, or the static member a value-class call was realized as.
     pub(crate) fn boxed_call_result(&self, ir: &IrFile, expression: ExprId) -> Option<Ty> {
         match ir.expr(expression) {
@@ -132,9 +133,9 @@ pub(super) fn realizes_overrides(ir: &IrFile, class: usize) -> bool {
             .contains_key(&u32::try_from(class).expect("class index"))
 }
 
-/// Choose the wrapper as the JVM result of every override whose primitive result replaces a
-/// non-primitive one. Common IR is read, never changed.
-pub(super) fn box_primitive_override_results(
+/// Choose the wrapper class as the JVM result carrier of every override whose scalar result
+/// replaces a result that is not that scalar. Common IR is read, never changed.
+pub(super) fn box_scalar_override_results(
     ir: &IrFile,
     callables: &crate::backend::CheckedBackendCallables,
 ) -> Result<OverrideResults, SkipReason> {
@@ -165,10 +166,21 @@ pub(super) fn box_primitive_override_results(
                 }
                 _ => false,
             };
+            // A big-arity function type is realized as `FunctionN`, whose single `invoke` takes
+            // the arguments packed in an array: kotlinc's vararg-bridge lowering detaches the
+            // override from the arity-specific `invoke`, so its scalar result keeps its unboxed
+            // JVM carrier and only the packed bridge returns the box.
+            let packed_function_invoke =
+                crate::libraries::function_classifiers::classifier(edge.overridden_owner)
+                    .is_some_and(|function| {
+                        !function.is_reflective()
+                            && crate::jvm::names::uses_function_n(function.arity())
+                    });
             if edge.implementation_owner == owner
                 && ir.classes[class].methods.contains(&function)
                 && is_kotlin_primitive(ir.functions[function as usize].ret)
                 && !ir.suspend_funs.contains(&function)
+                && !packed_function_invoke
                 && (edge.overrides_non_primitive_result() || dependency_boxed_result)
             {
                 results.boxed.insert(function);

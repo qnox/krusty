@@ -271,7 +271,13 @@ impl<'a> StreamedModuleSymbols<'a> {
             .filter(|supertype| matches!(supertype.non_null(), Ty::Fun(_)))
             .collect();
         projected.callable_signature = projected.callable_signatures.first().copied();
-        projected.supertype_templates = supertype_templates;
+        // Beside its callable shape, a function supertype is an edge to the function classifier it
+        // instantiates (`suspend () -> R` extends `SuspendFunction0<R>`), whose `invoke` an
+        // override implements.
+        projected.supertype_templates = supertype_templates
+            .into_iter()
+            .map(crate::libraries::function_classifiers::supertype_classifier)
+            .collect();
         projected.supertypes = projected
             .supertype_templates
             .iter()

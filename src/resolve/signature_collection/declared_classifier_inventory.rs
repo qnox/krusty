@@ -120,12 +120,14 @@ pub(in crate::resolve) fn declared_classifier_inventory(
                 .supertypes
                 .iter()
                 .filter_map(|supertype| {
-                    declared_supertype_name_from_source_name(
-                        &source_name,
-                        &supertype.name,
-                        &names,
-                        &lexical_classifiers,
-                    )
+                    function_supertype_classifier(supertype).or_else(|| {
+                        declared_supertype_name_from_source_name(
+                            &source_name,
+                            &supertype.name,
+                            &names,
+                            &lexical_classifiers,
+                        )
+                    })
                 })
                 .collect::<Vec<_>>();
             supertypes.extend(classifier_header.base.as_ref().and_then(|base| {
@@ -174,12 +176,14 @@ pub(in crate::resolve) fn declared_classifier_inventory(
                     .supertypes
                     .iter()
                     .filter_map(|supertype| {
-                        declared_supertype_name(
-                            class,
-                            &supertype.name,
-                            &names,
-                            &lexical_classifiers,
-                        )
+                        function_supertype_classifier(supertype).or_else(|| {
+                            declared_supertype_name(
+                                class,
+                                &supertype.name,
+                                &names,
+                                &lexical_classifiers,
+                            )
+                        })
                     })
                     .collect::<Vec<_>>();
                 supertypes.extend(classifier_header.base.as_ref().and_then(|base| {
@@ -197,4 +201,16 @@ pub(in crate::resolve) fn declared_classifier_inventory(
         source_classifier_visibility,
         source_direct_supertypes,
     }
+}
+
+/// The classifier a function-type supertype instantiates (`class C : suspend (Int) -> R` extends
+/// `kotlin/coroutines/SuspendFunction1`). Function-type syntax has no spelling to look up; its
+/// arity and kind name the classifier.
+fn function_supertype_classifier(supertype: &crate::ast::TypeRef) -> Option<TypeName> {
+    (supertype.name == "<fun>").then(|| {
+        crate::libraries::function_classifiers::function_classifier_identity(
+            supertype.fun_params.len(),
+            supertype.fun_suspend(),
+        )
+    })
 }

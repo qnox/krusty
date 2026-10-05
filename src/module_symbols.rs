@@ -321,6 +321,19 @@ impl<'a> ModuleSymbols<'a> {
                 )
             })
             .collect::<Vec<_>>();
+        // A function supertype the signature keeps as a callable shape (`suspend () -> R`,
+        // `(P1, ..., P23) -> R`) is still an edge to the function classifier it instantiates,
+        // which declares the `invoke` the class overrides.
+        for callable in &c.callable_signatures {
+            let classifier =
+                crate::libraries::function_classifiers::supertype_classifier(*callable);
+            if let Some(owner) = classifier.obj_internal() {
+                if !supertypes.contains(&owner) {
+                    supertypes.push(owner);
+                    supertype_templates.push(classifier);
+                }
+            }
+        }
         let enum_entries = self.syms.enum_entries_of(c.internal_name()).cloned();
         if enum_entries.is_some() {
             // An enum's implicit superclass is the applied Kotlin declaration `Enum<Self>`.
