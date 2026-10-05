@@ -197,7 +197,7 @@ fn attach_function_metadata(
     };
     let annotations =
         super::declaration_metadata::declaration_annotations(&function.annotations, info);
-    if !annotations.is_empty() {
+    if annotations.declares_annotations() {
         ir.function_annotations.insert(function_id, annotations);
     }
     let mut parameter_annotations = function
@@ -215,7 +215,7 @@ fn attach_function_metadata(
     }
     if parameter_annotations
         .iter()
-        .any(|annotations| !annotations.is_empty())
+        .any(crate::ir::DeclarationAnnotations::declares_annotations)
     {
         ir.fn_param_annotations
             .insert(function_id, parameter_annotations);

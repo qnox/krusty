@@ -2,6 +2,18 @@
 
 use crate::types::{Ty, TypeName};
 
+/// Stable declaration identity of the abstract method a SAM conversion implements.
+///
+/// FIR chooses the method; lowering translates that choice once into this IR boundary contract so
+/// a backend never imports the frontend SAM node or reselects the method from its spelling.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IrSamMethod {
+    Module(crate::fir::CallableId),
+    External(crate::fir::ExternalCallableId),
+    /// The `invoke` inherited from a function-type supertype.
+    FunctionTypeInvoke,
+}
+
 /// Checked functional-interface target attached to a lambda after SAM conversion.
 ///
 /// Both the call-site-specialized shape and the declaration shape are retained: the former types
@@ -14,7 +26,7 @@ pub struct IrSamTarget {
     pub method: String,
     /// The abstract method the conversion implements, as the checker selected it. A target that
     /// implements the interface by declaration identity reads this, never the name.
-    pub method_target: crate::fir::FirSamMethod,
+    pub method_target: IrSamMethod,
     pub parameters: Vec<Ty>,
     pub result: Ty,
     pub declared_parameters: Vec<Ty>,

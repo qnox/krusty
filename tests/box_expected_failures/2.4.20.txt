@@ -2,15 +2,12 @@
 # compiler/testData/codegen/box. Every outcome transition fails conformance. Regenerate
 # tests/box_expected_failures/2.4.20.txt with KRUSTY_BLESS_BOX_FAILURES=1 on a full local run.
 # The goal is to empty this list of expected failures.
-annotations/instances/AnnotationInstantiationWithArray.kt
-annotations/instances/multimoduleTypeParams.kt
 bridges/internalMethodOverrideInOtherModule.kt
 bridges/internalMethodOverrideMultipleInheritance.kt
 compileKotlinAgainstKotlin/inlineClasses/privateCompanionObjectValInDifferentModule.kt
 compileKotlinAgainstKotlin/inlineClasses/privateTopLevelValInDifferentModule.kt
 coroutines/functionReference_Function_SuspendFunction_casts.kt
 coroutines/tailCallOptimizations/crossinline.kt
-extensionFunctions/kt475.kt
 fullValueClasses/basicSyntax.kt
 fullValueClasses/construction.kt
 fullValueClasses/inapplicableTypes.kt
@@ -31,16 +28,11 @@ fullValueClasses/reservedNames.kt
 fullValueClasses/vararg.kt
 functions/functionNtoString.kt
 functions/functionNtoStringGeneric.kt
-innerNested/nestedInPackage.kt
 multiplatform/k2/defaultArguments/bothInExpectAndActual.kt
 multiplatform/k2/defaultArguments/bothInExpectAndActual2.kt
-multiplatform/k2/kt66970.kt
 reflection/functions/genericOverriddenFunction.kt
-reflection/functions/typeParameterInReturnType.kt
 reflection/typeOf/intersectionType.kt
 reflection/typeOf/localClass.kt
 reflection/typeOf/nonReifiedTypeParameters/recursiveBoundWithInline.kt
 reflection/typeOf/nonReifiedTypeParameters/recursiveBoundWithoutInline.kt
-reflection/typeOf/reifiedAsNestedArgument.kt
 reflection/typeOf/typeAliasedType.kt
-typeErasure/funWithReifiedTypeParameterContextParameterAndExtensionReceiverInsideClass.kt

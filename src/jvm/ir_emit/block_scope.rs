@@ -19,6 +19,12 @@ impl Emitter<'_> {
         value: Option<u32>,
         code: &mut CodeBuilder,
     ) {
+        // A `suspendCoroutineUninterceptedOrReturn` block statement is still a suspension point:
+        // its result is probed and discarded the way any suspension statement's is.
+        if self.is_transformed_block(block) {
+            self.emit_discarding(block, code);
+            return;
+        }
         self.link_safe_call_chain(block, code);
         let saved = self.open_slot_scope();
         let terminal_target = self.terminal_statement_target.take();
@@ -173,7 +179,10 @@ impl Emitter<'_> {
         while i < self.open_locals.len() {
             if self.open_locals[i].depth >= depth {
                 let local = self.open_locals.remove(i);
-                let length = end.saturating_sub(local.start);
+                let length = local
+                    .explicit_end
+                    .unwrap_or(end)
+                    .saturating_sub(local.start);
                 local.record(Some(length), code);
             } else {
                 i += 1;
@@ -239,6 +248,9 @@ pub(super) struct OpenLocal {
     /// Where in the table the entry goes when it must precede entries recorded after it opened,
     /// rather than follow them.
     pub(super) table_position: Option<usize>,
+    /// Where the range ends when that is before its block does: a `do…while` body's local that the
+    /// condition does not read ends where the condition starts.
+    pub(super) explicit_end: Option<u16>,
 }
 
 impl OpenLocal {

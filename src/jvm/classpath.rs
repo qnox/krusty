@@ -30,6 +30,7 @@ mod mapped_builtin_realizations;
 mod metadata_indexes;
 mod method_bodies;
 mod method_body_cache;
+mod module_optional_annotations;
 mod package_facades;
 mod property_access;
 mod property_identity;
@@ -4466,16 +4467,15 @@ struct JarPackages {
     facades: HashSet<NameId>,
     /// Whether the entire entry was catalogued successfully.
     complete: bool,
+    /// The optional annotation classes of the entry's `META-INF/*.kotlin_module` files.
+    optional_annotations: module_optional_annotations::EntryOptionalAnnotations,
 }
 
 impl JarPackages {
     fn with_names(names: std::sync::Arc<NameTree>) -> Self {
         Self {
             names,
-            packages: HashMap::new(),
-            classes: Vec::new(),
-            facades: HashSet::new(),
-            complete: false,
+            ..Self::default()
         }
     }
 
@@ -4660,22 +4660,6 @@ fn record_pkg_entry_name(name: &str, jp: &mut JarPackages) {
 }
 
 /// Merge a jar's `kotlin_module` bytes into its catalog: each package's facade internal names.
-fn record_kotlin_module(bytes: &[u8], jp: &mut JarPackages) {
-    for (pkg, facades) in super::metadata::read_kotlin_module(bytes) {
-        let pkg_id = jp.names.insert(&pkg);
-        let facades = facades
-            .iter()
-            .map(|facade| jp.names.insert(facade))
-            .collect::<Vec<_>>();
-        jp.facades.extend(facades.iter().copied());
-        jp.packages
-            .entry(pkg_id)
-            .or_default()
-            .facades
-            .extend(facades);
-    }
-}
-
 /// Build one entry's [`JarPackages`] — the only eager per-jar work: a central-directory name pass plus
 /// the shallow `kotlin_module` read(s). The JDK jimage contributes its package membership from the
 /// location table (names only — no class parse), so `find` can scope a JDK type to the jimage instead
@@ -4743,7 +4727,8 @@ fn build_jar_packages_jar(jar: &Path, jp: &mut JarPackages) -> bool {
         };
         let mut buf = Vec::new();
         if e.read_to_end(&mut buf).is_ok() {
-            record_kotlin_module(&buf, jp);
+            let name = e.name().to_string();
+            module_optional_annotations::record_kotlin_module(&name, &buf, jp);
         } else {
             complete = false;
         }
@@ -4793,7 +4778,7 @@ fn build_jar_packages_dir_visited(
         let rel = rel.to_string_lossy().replace('\\', "/");
         if rel.ends_with(".kotlin_module") {
             if let Ok(b) = std::fs::read(&p) {
-                record_kotlin_module(&b, jp);
+                module_optional_annotations::record_kotlin_module(&rel, &b, jp);
             } else {
                 complete = false;
             }
@@ -4942,10 +4927,10 @@ mod fq_tests {
             Ty::String,
             "(I)Ljava/lang/String;",
         );
-        let identity = cp.intern_external_callable(&partial, ExternalCallableKind::Member);
+        let identity = cp.intern_external_callable(&partial, ExternalCallableKind::Member, None);
 
         partial.visibility = crate::types::Visibility::Protected;
-        let reinterned = cp.intern_external_callable(&partial, ExternalCallableKind::Member);
+        let reinterned = cp.intern_external_callable(&partial, ExternalCallableKind::Member, None);
 
         assert_eq!(reinterned, identity);
         assert_eq!(
@@ -5022,7 +5007,11 @@ mod fq_tests {
             [2, 4, 0],
         );
         let mut packages = JarPackages::default();
-        record_kotlin_module(&module, &mut packages);
+        module_optional_annotations::record_kotlin_module(
+            "META-INF/main.kotlin_module",
+            &module,
+            &mut packages,
+        );
 
         assert!(packages.contains_facade("p/Utils"));
         assert!(packages.contains_facade("p/HelpersKt"));

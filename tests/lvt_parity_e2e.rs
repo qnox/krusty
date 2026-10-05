@@ -216,3 +216,36 @@ fn catch_parameter_is_recorded() {
     };
     assert_lvt_entry(&text, "failure", "Ljava/lang/Exception;");
 }
+
+fn assert_identical_with_stdlib(name: &str, src: &str) {
+    let class = format!("{name}Kt");
+    common::byte_diff_against_kotlinc_cp(name, src, &class, &[common::stdlib_jar()])
+        .expect("the reference kotlinc is provisioned")
+        .unwrap_or_else(|diff| panic!("{class} differs from kotlinc:\n{diff}"));
+}
+
+/// `endUnreferencedDoWhileLocals`: a local a written `do … while` body declares may be undeclared
+/// when `continue` reaches the condition, so unless the condition reads it its range ends where
+/// the condition starts. A local the condition reads stays live through it.
+#[test]
+fn a_do_while_body_local_the_condition_does_not_read_ends_at_the_condition() {
+    assert_identical_with_stdlib(
+        "LvtDoWhileLocals",
+        "fun sum(n: Int): Int { var s = 0; var k = 0; do { val w = k * 2; s += w; k++ } while (k < n); return s }\n\
+         fun read(n: Int): Int { var s = 0; do { val w = s + 1; s = w } while (w < n); return s }\n",
+    );
+}
+
+/// A counted loop that steps before its body keeps the `for` loop's origin, so kotlinc emits its
+/// loop variable ahead of the loop labels and every body local lives through the condition. The
+/// overflow-guarded shape is a counter `do … while` of its own and ends them early.
+#[test]
+fn a_counted_loop_keeps_its_variable_through_its_condition() {
+    assert_identical_with_stdlib(
+        "LvtCountedLoops",
+        "fun constant(): Int { var s = 0; for (i in 1..4) s += i; return s }\n\
+         fun stepped(): Int { var s = 0; for (i in 1..9 step 2) s += i; return s }\n\
+         fun reversed(): Int { var s = 0; for (i in (1..4).reversed()) s += i; return s }\n\
+         fun bounded(n: Int): Int { var s = 0; for (i in 1..n) s += i; return s }\n",
+    );
+}

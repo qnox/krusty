@@ -20,6 +20,7 @@ mod coroutine_transform;
 mod debug_metadata;
 mod descriptor_mentions;
 mod enclosing_method;
+mod inline_call_stacks;
 mod inner_classes;
 mod late_fields;
 mod line_numbers;
@@ -417,8 +418,8 @@ struct MethodInfo {
     /// pass owns and OVERWRITES) so the two can be attached in either order; `finish` concatenates
     /// them per parameter, user annotations first — kotlinc's order.
     user_invisible_param_anns: Vec<Vec<Vec<u8>>>,
-    /// Analysis-only Java header stubs preserve whether an annotation element may be omitted.
-    annotation_default: bool,
+    /// The default this annotation element declares.
+    annotation_default: Option<annotation_values::ElementDefault>,
     /// `MethodParameters` entries `(name_index, access_flags)`, one per parameter in descriptor order.
     /// Empty ⇒ no attribute. kotlinc writes this only under `-java-parameters`, and only for methods
     /// that HAVE a declaration: a `$default` bridge or a synthetic marker constructor gets none.
@@ -700,7 +701,7 @@ impl ClassWriter {
     }
 
     pub fn seed_class(&mut self, internal: &str) {
-        self.cp.class(internal);
+        self.class_ref(internal);
     }
 
     /// Intern a UTF-8 constant before natural first use.
@@ -752,7 +753,7 @@ impl ClassWriter {
 
     /// Add an implemented interface / extended interface by internal name.
     pub fn add_interface(&mut self, internal: &str) {
-        let c = self.cp.class(internal);
+        let c = self.class_ref(internal);
         self.interfaces.push(c);
     }
 
@@ -791,23 +792,9 @@ impl ClassWriter {
             param_anns: Vec::new(),
             visible_param_anns: Vec::new(),
             user_invisible_param_anns: Vec::new(),
-            annotation_default: false,
+            annotation_default: None,
             method_parameters: Vec::new(),
         });
-    }
-
-    pub(crate) fn mark_annotation_default(&mut self, name: &str, desc: &str) {
-        let (Some(name), Some(desc)) = (self.cp.lookup_utf8(name), self.cp.lookup_utf8(desc))
-        else {
-            return;
-        };
-        if let Some(method) = self
-            .methods
-            .iter_mut()
-            .find(|method| method.name == name && method.desc == desc)
-        {
-            method.annotation_default = true;
-        }
     }
 
     /// Declare a field (e.g. a backing field for a Kotlin property).
@@ -1305,7 +1292,7 @@ impl ClassWriter {
             param_anns: Vec::new(),
             visible_param_anns: Vec::new(),
             user_invisible_param_anns: Vec::new(),
-            annotation_default: false,
+            annotation_default: None,
             method_parameters: Vec::new(),
         });
         if let Some(computed) = &computed {
@@ -1433,23 +1420,40 @@ impl ClassWriter {
     }
 
     pub fn finish(self) -> Vec<u8> {
-        let (bytes, coroutines) = self.finish_with_coroutines();
+        let finished = self.finish_with_coroutines();
         assert!(
-            coroutines.is_empty(),
+            finished.coroutines.is_empty(),
             "a class with transformed coroutines is finished through `finish_with_coroutines`"
         );
-        bytes
+        assert!(
+            finished.failures.is_empty(),
+            "a class whose methods can fail to be written is finished through \
+             `finish_with_coroutines`: {:?}",
+            finished.failures
+        );
+        finished.bytes
     }
 
-    /// [`Self::finish`] for a class whose suspend functions the coroutine transformer rewrites:
-    /// the class, and what each transformation found, which its continuation class is built from.
-    pub(crate) fn finish_with_coroutines(
-        mut self,
-    ) -> (Vec<u8>, Vec<coroutine_transform::TransformedCoroutine>) {
+    /// [`Self::finish`] for a class whose suspend functions the coroutine transformer rewrites, or
+    /// whose inline calls saved the operand stack: the class, what each coroutine transformation
+    /// found (which its continuation class is built from), and each method that could not be
+    /// normalized. A class with such a failure is not written: its bytes are empty.
+    pub(crate) fn finish_with_coroutines(mut self) -> FinishedClass {
         // Every method's tables are final now: the coroutine transformer runs over the suspend
-        // functions it was asked for, then kotlinc's bytecode rewrites over the rest.
+        // functions it was asked for, the operand stack is saved around the other methods' inline
+        // calls, then kotlinc's bytecode rewrites run over the rest.
         let coroutines = self.transform_coroutines();
-        (self.write(), coroutines)
+        let failures = self.fix_inline_call_stacks();
+        let bytes = if failures.is_empty() {
+            self.write()
+        } else {
+            Vec::new()
+        };
+        FinishedClass {
+            bytes,
+            coroutines,
+            failures,
+        }
     }
 
     fn write(mut self) -> Vec<u8> {
@@ -1667,13 +1671,17 @@ impl ClassWriter {
             .iter()
             .any(|method| !method.method_parameters.is_empty())
             .then(|| self.cp.utf8("MethodParameters"));
-        // Source-header annotation stubs carry only the omission policy. The reader deliberately
-        // ignores the default payload, but the attribute body remains structurally valid.
-        let annotation_default_attr = self
+        let mut annotation_default_attrs = HashMap::new();
+        for default in self
             .methods
             .iter()
-            .any(|method| method.annotation_default)
-            .then(|| (self.cp.utf8("AnnotationDefault"), self.cp.utf8("")));
+            .filter_map(|m| m.annotation_default.as_ref())
+        {
+            let name = default.attribute_name();
+            if !annotation_default_attrs.contains_key(name) {
+                annotation_default_attrs.insert(name, self.cp.utf8(name));
+            }
+        }
         // Field annotation attribute names, interned only when a field actually carries them.
         let field_vis_ann_name = field_rva;
         // Field-level `RuntimeInvisibleAnnotations` reuses the name interned before `Code` (dedup).
@@ -1865,7 +1873,7 @@ impl ClassWriter {
             let ripa_attr: u16 = u16::from(!invisible_params.is_empty());
             let mp_attr: u16 = u16::from(!m.method_parameters.is_empty());
             let ann_attr = mrva_attr + mria_attr + rvpa_attr + ripa_attr + mp_attr;
-            let default_attr = u16::from(m.annotation_default);
+            let default_attr = u16::from(m.annotation_default.is_some());
             match &m.code {
                 None => u2(&mut out, sig_attr + dep_attr + ann_attr + default_attr), // abstract: optional Signature [+ Deprecated] [+ anns/default]
                 Some(code) => {
@@ -1959,13 +1967,10 @@ impl ClassWriter {
                 u2(&mut out, deprecated_attr_name.unwrap());
                 u4(&mut out, 0);
             }
-            if m.annotation_default {
-                let (name, empty_string) = annotation_default_attr
-                    .expect("annotation-default constants must be reserved before serialization");
-                u2(&mut out, name);
-                u4(&mut out, 3);
-                out.push(b's');
-                u2(&mut out, empty_string);
+            if let Some(default) = &m.annotation_default {
+                u2(&mut out, annotation_default_attrs[default.attribute_name()]);
+                u4(&mut out, default.bytes().len() as u32);
+                out.extend_from_slice(default.bytes());
             }
             // Method-level `RuntimeVisibleAnnotations` (declared user annotations), then
             // `RuntimeInvisibleAnnotations` (the annotated return + BINARY-retained user
@@ -2778,13 +2783,15 @@ impl CodeBuilder {
     }
 }
 
-/// Constant-pool index of a `Class` entry, exposed for `new`.
-impl ClassWriter {
-    pub fn class_ref(&mut self, internal: &str) -> u16 {
-        self.cp.class(internal)
-    }
+/// A class written by [`ClassWriter::finish_with_coroutines`].
+pub(crate) struct FinishedClass {
+    /// The class file, empty when a method failed to be normalized.
+    pub bytes: Vec<u8>,
+    /// What the coroutine transformation of each requested method found.
+    pub coroutines: Vec<coroutine_transform::TransformedCoroutine>,
+    /// Each method whose saved operand stack could not be normalized, with the reason.
+    pub failures: Vec<String>,
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;

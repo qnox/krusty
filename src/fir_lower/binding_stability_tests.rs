@@ -50,6 +50,7 @@ fn inline_rehome_moves_a_checked_range_loops_declared_value() {
         unsigned_compare: None,
         body,
         label: "loop".to_string(),
+        with_index: None,
     }));
 
     assert_eq!(

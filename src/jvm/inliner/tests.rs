@@ -1,6 +1,7 @@
 use super::anonymous_object::MalformedType;
 use super::class_roles::RegeneratedClass;
 use super::*;
+use crate::jvm::bytecode_passes::coroutines::markers::inline_call_marker;
 use crate::jvm::method_node::{Category, Constant, LabelId, LocalVariable, TryCatchBlock};
 
 const ACC_STATIC: u16 = 0x0008;
@@ -624,10 +625,11 @@ fn an_invoke_of_an_inline_lambda_becomes_the_lambdas_body() {
             ),
             // The argument, coerced back to the lambda's `Int` and stored above the body's
             // parameters (the lambda and its captured value), then the lambda's body reading it
-            // and the caller's `base`.
+            // and the caller's `base`, bracketed for FixStack.
             checkcast("java/lang/Number"),
             method(0xb6, "java/lang/Number", "intValue", "()I"),
             var(0x36, 5),
+            inline_call_marker(true),
             var(0x15, 5),
             var(0x15, 2),
             op(0x60),
@@ -638,6 +640,7 @@ fn an_invoke_of_an_inline_lambda_becomes_the_lambdas_body() {
                 "valueOf",
                 "(I)Ljava/lang/Integer;"
             ),
+            inline_call_marker(false),
             checkcast("java/lang/Number"),
             method(0xb6, "java/lang/Number", "intValue", "()I"),
             op(0x00),
@@ -659,6 +662,128 @@ fn an_invoke_of_an_inline_lambda_becomes_the_lambdas_body() {
         .collect();
     // The body's line, the lambda's, and the body's again after the lambda.
     assert_eq!(lines, vec![7, 2, 7]);
+}
+
+/// `inline fun f(block: (Int) -> Int): Int = 10 + block(1)`: the invoke finds `10` under it.
+fn ten_plus_apply_to_one() -> MethodNode {
+    let mut node = apply_to_one();
+    let first_load = node
+        .nodes
+        .iter()
+        .position(|node| matches!(node, Node::Insn(Insn::Var { op: 0x19, .. })))
+        .expect("the lambda is loaded");
+    node.nodes.insert(
+        first_load,
+        Node::Insn(Insn::Int {
+            op: 0x10,
+            operand: 10,
+        }),
+    );
+    let result = node
+        .nodes
+        .iter()
+        .position(|node| matches!(node, Node::Insn(Insn::Op(0xac))))
+        .expect("the result is returned");
+    node.nodes.insert(result, op(0x60));
+    node.max_stack = 3;
+    node
+}
+
+#[test]
+fn a_lambda_invoked_over_a_stacked_value_is_bracketed_for_fix_stack() {
+    let parameters = Parameters {
+        parameters: vec![Parameter {
+            category: Category::Reference,
+            binding: Binding::Lambda(0),
+        }],
+        captured: vec![Parameter {
+            category: Category::Int,
+            binding: Binding::CallerLocal {
+                slot: 2,
+                category: Category::Int,
+                checkcast: None,
+            },
+        }],
+    };
+    let inlined = inline(
+        &ten_plus_apply_to_one(),
+        &parameters,
+        &[plus_captured()],
+        false,
+        5,
+        &Default::default(),
+        InliningContext {
+            lines: &mut OwnLines,
+            classes: &NoClasses,
+            objects: &mut NoObjects,
+        },
+    )
+    .expect("inlines");
+    let instructions: Vec<Node> = inlined
+        .instructions()
+        .filter(|insn| !matches!(insn, Insn::Jump { .. }))
+        .cloned()
+        .map(Node::Insn)
+        .collect();
+    // `MethodInliner` brackets the lambda for the caller's FixStack, which saves the `10` the body
+    // left under the invoke; the stack is followed as FixStack will leave it: empty inside the
+    // bracket, the `10` back under the lambda's result after it.
+    assert_eq!(
+        instructions,
+        vec![
+            op(0x00),
+            Node::Insn(Insn::Int {
+                op: 0x10,
+                operand: 10
+            }),
+            op(0x04),
+            method(
+                0xb8,
+                "java/lang/Integer",
+                "valueOf",
+                "(I)Ljava/lang/Integer;"
+            ),
+            checkcast("java/lang/Number"),
+            method(0xb6, "java/lang/Number", "intValue", "()I"),
+            var(0x36, 5),
+            inline_call_marker(true),
+            var(0x15, 5),
+            var(0x15, 2),
+            op(0x60),
+            op(0x00),
+            method(
+                0xb8,
+                "java/lang/Integer",
+                "valueOf",
+                "(I)Ljava/lang/Integer;"
+            ),
+            inline_call_marker(false),
+            checkcast("java/lang/Number"),
+            method(0xb6, "java/lang/Number", "intValue", "()I"),
+            op(0x60),
+            op(0x00),
+        ]
+    );
+    let shapes = crate::jvm::method_node::stack_shapes(&inlined).expect("the stack is followed");
+    let around = |marker: &Node| {
+        let at = inlined
+            .nodes
+            .iter()
+            .position(|node| node == marker)
+            .expect("the marker is placed");
+        (shapes[at].clone(), shapes[at + 1].clone())
+    };
+    assert_eq!(
+        around(&inline_call_marker(true)),
+        (Some(vec![Category::Int]), Some(vec![]))
+    );
+    assert_eq!(
+        around(&inline_call_marker(false)),
+        (
+            Some(vec![Category::Reference]),
+            Some(vec![Category::Int, Category::Reference])
+        )
+    );
 }
 
 /// Regenerates the `n`th object as `Main$g$$inlined$f$n` with an `n`-`int` constructor, recording

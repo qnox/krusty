@@ -883,6 +883,10 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo
 - ✅ TDD: `tests/destructure_e2e.rs` (data-class destructuring with `_` skips, incl. inside a `for`
   loop, on the JVM; non-`componentN` type rejection). Full suite 178 green. `for ((a, b) in …)`
   destructuring loops (often over stdlib `withIndex()`/collections) remain a follow-up.
+- ✅ `for ((i, v) in x.withIndex())` iterates `x` itself as kotlinc's `WithIndexHandler` does
+  (arrays, `CharSequence`s, progressions, `Iterable`s and `Sequence`s); see SPEC §7 and
+  `tests/for_in_with_index_e2e.rs`. Unsigned arrays and counted receivers whose element entry is a
+  `var` or needs a conversion still iterate `IndexedValue`s.
 
 ## Phase 72 — Stdlib/built-in type resolution via the classpath (no hardcoded lists)  ✅
 - ✅ **Removed the hardcoded `builtin_exception` table.** Exception types now resolve from the
@@ -4115,9 +4119,11 @@ cases that call `typeOf`, 50 pass now; before this, one did. The semantics are i
 Remaining:
 - Six `typeErasure/*InsideClass` cases. A reified MEMBER inline function is called, not inlined, so it
   throws whatever its body does. That is not specific to `typeOf`.
-- Reified parameters in anonymous objects regenerated per call site (`reifiedAsNestedArgument`,
-  `localClass`). Same-module `object` members (`reified/capture.kt`, `reified/innerObject.kt`)
-  are copied at the inline call.
+- Reified `typeOf` in an anonymous object's property initializer is specialized at the inline
+  call, including when another inline function passes the outer reified parameter
+  (`reifiedAsNestedArgument`). `localClass` remains: two local objects compare equal.
+  Same-module `object` members (`reified/capture.kt`, `reified/innerObject.kt`) are copied at the
+  inline call.
 - Reified intersection-type arguments (`intersectionType`,
   `reifiedTypeArgumentWithIntersectionTypeAsTypeArgument`).
 - Typealias use-site projections (`typeAliasedType`).
@@ -4470,6 +4476,10 @@ each one lowering more and declining less:
   runtime-owned `Throwable`. A singleton, an enum's constants and the top-level properties are
   built lazily or before the entry, and each withdraws what it published when its initializer
   throws.
+- **Functions as values** (tier 3): lambdas and their captures (a captured `var` lives in a holder
+  object), function types with a fixed `invoke` slot, SAM conversions, callable references to
+  functions and properties including bound ones and dependency members, default arguments through
+  one wrapper per omission shape, local functions, and the stdlib scope functions.
 - Tests: `tests/native_codegen_e2e.rs` and the `tests/native_*_e2e.rs` files present at this tier;
   `tests/common::cross_check_backends` also runs every JVM box test natively, where a decline is a
   skip and a wrong answer a failure. Every architecture is linked on one host

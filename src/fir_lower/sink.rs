@@ -241,10 +241,12 @@ impl<'a> CommonIrBodySink<'a> {
         finalize_inherited_statuses(index, self.ir);
         finalize_constructors(index, self.ir)?;
         super::annotation_constructions::finalize_defaults(self.ir)?;
+        super::annotation_constructions::assign_evaluation_scopes(self.ir);
         super::constructors::finalize_local_superclass_captures(self.ir)?;
         finalize_enum_entries(self.ir)?;
         finalize_properties(index, self.ir)?;
         finalize_constructor_field_indices(index, self.ir)?;
+        super::annotation_constructions::publish_element_defaults(self.ir);
         finalize_interface_delegations(index, self.ir)?;
         finalize_data_classes(index, self.ir)?;
         super::module_declarations::publish_referenced(index, self.ir)?;
@@ -808,6 +810,29 @@ impl<'a> CommonIrBodySink<'a> {
                     .is_none(),
                 "a source classifier may publish function override edges once"
             );
+            if let Some((constructor, operands)) =
+                index.serialization_custom_serializer_constructor(declaration)
+            {
+                let construction = crate::ir::IrCustomSerializerConstruction {
+                    serializer: index
+                        .enclosing_classifier(constructor)
+                        .ok_or(FirFileLoweringFailure::MissingCallable(constructor))?
+                        .classifier,
+                    parameters: index
+                        .signature(constructor)
+                        .ok_or(FirFileLoweringFailure::MissingCallable(constructor))?
+                        .parameters
+                        .iter()
+                        .map(|parameter| parameter.get())
+                        .collect(),
+                    operands: operands.into(),
+                    target: super::constructors::module_constructor_target(index, constructor)
+                        .ok_or(FirFileLoweringFailure::MissingCallable(constructor))?,
+                };
+                self.ir
+                    .custom_serializer_constructions
+                    .insert(classifier_identity, construction);
+            }
             // Serialization/metadata external names use Kotlin's declaration spelling, where both
             // package and lexical-class boundaries are dots. Capture it while the stable owner/name
             // graph is available; common IR must not reconstruct those boundaries from a JVM `$`.
@@ -1592,7 +1617,7 @@ impl<'a> CommonIrBodySink<'a> {
                 result,
                 lowered.implicit_return,
                 false,
-                0,
+                Some(super::UnitReturnLine::ExpressionEnd),
                 origin,
             )
             .map_err(FirFileLoweringFailure::Body)?
