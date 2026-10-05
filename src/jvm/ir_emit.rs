@@ -3934,7 +3934,7 @@ fn emit_enum_class(
         // `Lazy<KSerializer<Object>>`), and a reference-typed one carries kotlinc's nullability
         // annotation — the same treatment the class and facade field tables give their statics.
         let signatures = property_jvm_signatures(&signature_formatter, &s.ty, None);
-        let ann = (field_nullability_kind(ir, &fq, &s.name, s.ty) == 1)
+        let ann = (!s.is_lateinit && field_nullability_kind(ir, &fq, &s.name, s.ty) == 1)
             .then_some("Lorg/jetbrains/annotations/NotNull;");
         cw.add_field_late_sig(
             acc,

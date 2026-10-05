@@ -423,14 +423,17 @@ pub(super) fn emit_class_static_fields(
         // Generated storage with no declaration of its own is ACC_SYNTHETIC and unannotated.
         let synthetic = ir.is_compiler_generated_static(static_index);
         let acc = if synthetic { acc | 0x1000 } else { acc };
-        // Reference-typed statics, including private hoisted fields, carry nullability annotations.
-        let ann = (!synthetic && (desc.starts_with('L') || desc.starts_with('['))).then(|| {
-            if s.ty.is_nullable() {
-                "Lorg/jetbrains/annotations/Nullable;"
-            } else {
-                "Lorg/jetbrains/annotations/NotNull;"
-            }
-        });
+        // Reference-typed statics, including private hoisted fields, carry nullability annotations,
+        // except a `lateinit` one, which holds null until assigned.
+        let ann =
+            (!synthetic && !s.is_lateinit && (desc.starts_with('L') || desc.starts_with('[')))
+                .then(|| {
+                    if s.ty.is_nullable() {
+                        "Lorg/jetbrains/annotations/Nullable;"
+                    } else {
+                        "Lorg/jetbrains/annotations/NotNull;"
+                    }
+                });
         let signature = property_jvm_signatures(signature_formatter, &s.ty, None).field;
         cw.add_field_late_sig(
             acc,
