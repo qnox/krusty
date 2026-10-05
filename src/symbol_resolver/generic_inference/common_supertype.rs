@@ -23,7 +23,7 @@ pub(super) fn common_super_types(source: &dyn SymbolSource, bounds: &[Ty]) -> Ty
         .iter()
         .map(|bound| bound.non_null())
         .collect::<Vec<_>>();
-    let result = common_at(source, &bounds);
+    let result = CommonSupertypeSolver::new(source).common(&bounds);
     if nullable {
         Ty::nullable(result.non_null())
     } else {
@@ -31,39 +31,97 @@ pub(super) fn common_super_types(source: &dyn SymbolSource, bounds: &[Ty]) -> Ty
     }
 }
 
-fn common_at(source: &dyn SymbolSource, bounds: &[Ty]) -> Ty {
-    let Some((&first, rest)) = bounds.split_first() else {
-        return Ty::obj_name(crate::types::wk::any());
-    };
-    if rest.iter().all(|bound| *bound == first) {
-        return first;
-    }
-    let oracle = SourceOracle(source);
-    let context = crate::assignable::TyCtx::new();
-    let closures = bounds
-        .iter()
-        .map(|bound| closure(source, *bound))
-        .collect::<Vec<_>>();
-    let mut classifiers = Vec::new();
-    for candidate in &closures[0] {
-        let Ty::Obj(classifier, arguments) = candidate else {
-            continue;
-        };
-        if !classifiers.contains(&(*classifier, arguments.len()))
-            && closures.iter().skip(1).all(|types| {
-                types.iter().any(|ty| {
-                    matches!(ty, Ty::Obj(name, args)
-                        if name == classifier && args.len() == arguments.len())
-                })
-            })
-        {
-            classifiers.push((*classifier, arguments.len()));
+struct CommonSupertypeSolver<'a> {
+    source: &'a dyn SymbolSource,
+    active: Vec<Vec<Ty>>,
+    completed: Vec<(Vec<Ty>, Ty)>,
+}
+
+impl<'a> CommonSupertypeSolver<'a> {
+    fn new(source: &'a dyn SymbolSource) -> Self {
+        Self {
+            source,
+            active: Vec::new(),
+            completed: Vec::new(),
         }
     }
 
-    let mut candidates = Vec::new();
-    for (classifier, arity) in classifiers {
-        let matching = closures
+    fn common(&mut self, bounds: &[Ty]) -> Ty {
+        self.common_at(bounds)
+            .unwrap_or_else(|| Ty::obj_name(crate::types::wk::any()))
+    }
+
+    /// Join one unordered constraint set. Returning `None` means this exact join is already active:
+    /// the classifier candidate that led back to it is recursive and must not participate in this
+    /// round. Other shared classifiers still compete, and `Any` remains the sound result when no
+    /// acyclic candidate exists.
+    fn common_at(&mut self, bounds: &[Ty]) -> Option<Ty> {
+        let mut key = Vec::with_capacity(bounds.len());
+        for bound in bounds.iter().copied().map(Ty::non_null) {
+            if !key.contains(&bound) {
+                key.push(bound);
+            }
+        }
+        let Some((&first, rest)) = key.split_first() else {
+            return Some(Ty::obj_name(crate::types::wk::any()));
+        };
+        if rest.iter().all(|bound| *bound == first) {
+            return Some(first);
+        }
+        if let Some((_, result)) = self
+            .completed
+            .iter()
+            .find(|(known, _)| same_bound_set(known, &key))
+        {
+            return Some(*result);
+        }
+        if self
+            .active
+            .iter()
+            .any(|active| same_bound_set(active, &key))
+        {
+            return None;
+        }
+        self.active.push(key.clone());
+        let result = self.common_active(&key);
+        self.active.pop();
+        self.completed.push((key, result));
+        Some(result)
+    }
+
+    fn common_active(&mut self, bounds: &[Ty]) -> Ty {
+        let Some((&first, rest)) = bounds.split_first() else {
+            return Ty::obj_name(crate::types::wk::any());
+        };
+        if rest.iter().all(|bound| *bound == first) {
+            return first;
+        }
+        let oracle = SourceOracle(self.source);
+        let context = crate::assignable::TyCtx::new();
+        let closures = bounds
+            .iter()
+            .map(|bound| closure(self.source, *bound))
+            .collect::<Vec<_>>();
+        let mut classifiers = Vec::new();
+        for candidate in &closures[0] {
+            let Ty::Obj(classifier, arguments) = candidate else {
+                continue;
+            };
+            if !classifiers.contains(&(*classifier, arguments.len()))
+                && closures.iter().skip(1).all(|types| {
+                    types.iter().any(|ty| {
+                        matches!(ty, Ty::Obj(name, args)
+                        if name == classifier && args.len() == arguments.len())
+                    })
+                })
+            {
+                classifiers.push((*classifier, arguments.len()));
+            }
+        }
+
+        let mut candidates = Vec::new();
+        for (classifier, arity) in classifiers {
+            let matching = closures
             .iter()
             .map(|types| {
                 types
@@ -73,102 +131,114 @@ fn common_at(source: &dyn SymbolSource, bounds: &[Ty]) -> Ty {
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
-        collect_classifier_combinations(
-            source,
-            classifier,
-            &matching,
-            0,
-            &mut Vec::new(),
-            &mut candidates,
-        );
-    }
-    let mut most_specific = Vec::new();
-    for index in 0..candidates.len() {
-        let candidate = candidates[index];
-        let dominated = candidates.iter().any(|other| {
-            other != &candidate
-                && crate::assignable::is_assignable(&context, &oracle, *other, candidate)
-                && !crate::assignable::is_assignable(&context, &oracle, candidate, *other)
-        });
-        if !dominated {
-            most_specific.push(candidate);
+            self.collect_classifier_combinations(
+                classifier,
+                &matching,
+                0,
+                &mut Vec::new(),
+                &mut candidates,
+            );
+        }
+        let mut most_specific = Vec::new();
+        for index in 0..candidates.len() {
+            let candidate = candidates[index];
+            let dominated = candidates.iter().any(|other| {
+                other != &candidate
+                    && crate::assignable::is_assignable(&context, &oracle, *other, candidate)
+                    && !crate::assignable::is_assignable(&context, &oracle, candidate, *other)
+            });
+            if !dominated {
+                most_specific.push(candidate);
+            }
+        }
+        match most_specific.as_slice() {
+            [] => Ty::obj("kotlin/Any"),
+            [one] => *one,
+            many => Ty::intersection(many),
         }
     }
-    match most_specific.as_slice() {
-        [] => Ty::obj("kotlin/Any"),
-        [one] => *one,
-        many => Ty::intersection(many),
+
+    fn collect_classifier_combinations(
+        &mut self,
+        classifier: TypeName,
+        matching: &[Vec<Ty>],
+        index: usize,
+        selected: &mut Vec<Ty>,
+        candidates: &mut Vec<Ty>,
+    ) {
+        if index == matching.len() {
+            if let Some(combined) = self.combine_classifier(classifier, selected) {
+                if !candidates.contains(&combined) {
+                    candidates.push(combined);
+                }
+            }
+            return;
+        }
+        for ty in &matching[index] {
+            selected.push(*ty);
+            self.collect_classifier_combinations(
+                classifier,
+                matching,
+                index + 1,
+                selected,
+                candidates,
+            );
+            selected.pop();
+        }
+    }
+
+    fn combine_classifier(&mut self, classifier: TypeName, types: &[Ty]) -> Option<Ty> {
+        let arguments = types
+            .iter()
+            .map(|ty| match ty {
+                Ty::Obj(_, arguments) => arguments.as_ref(),
+                _ => &[][..],
+            })
+            .collect::<Vec<_>>();
+        let arity = arguments.first().map_or(0, |arguments| arguments.len());
+        let variances = self
+            .source
+            .classifier(classifier)
+            .map(|shape| shape.type_param_variances().clone())
+            .unwrap_or_default();
+        let mut combined_arguments = Vec::with_capacity(arity);
+        for index in 0..arity {
+            let projected = arguments
+                .iter()
+                .map(|arguments| arguments[index])
+                .collect::<Vec<_>>();
+            if projected.iter().all(|argument| *argument == projected[0]) {
+                combined_arguments.push(projected[0]);
+                continue;
+            }
+            let variance = variances
+                .get(index)
+                .copied()
+                .unwrap_or(TypeVariance::Invariant);
+            if variance == TypeVariance::In {
+                // A contravariant argument contributes no readable lower bound. Computing its
+                // common supertype is both semantically unused and recursively re-enters F-bounded
+                // declarations such as Comparable<in T>.
+                combined_arguments.push(Ty::star_projection(Ty::nullable(Ty::obj("kotlin/Any"))));
+                continue;
+            }
+            let readable = projected
+                .iter()
+                .map(|argument| argument.projection_read_ty().non_null())
+                .collect::<Vec<_>>();
+            let joined = self.common_at(&readable)?;
+            combined_arguments.push(if variance == TypeVariance::Out {
+                joined
+            } else {
+                Ty::out_projection(joined)
+            });
+        }
+        Some(Ty::obj_args_name(classifier, &combined_arguments))
     }
 }
 
-fn collect_classifier_combinations(
-    source: &dyn SymbolSource,
-    classifier: TypeName,
-    matching: &[Vec<Ty>],
-    index: usize,
-    selected: &mut Vec<Ty>,
-    candidates: &mut Vec<Ty>,
-) {
-    if index == matching.len() {
-        let combined = combine_classifier(source, classifier, selected);
-        if !candidates.contains(&combined) {
-            candidates.push(combined);
-        }
-        return;
-    }
-    for ty in &matching[index] {
-        selected.push(*ty);
-        collect_classifier_combinations(
-            source,
-            classifier,
-            matching,
-            index + 1,
-            selected,
-            candidates,
-        );
-        selected.pop();
-    }
-}
-
-fn combine_classifier(source: &dyn SymbolSource, classifier: TypeName, types: &[Ty]) -> Ty {
-    let arguments = types
-        .iter()
-        .map(|ty| match ty {
-            Ty::Obj(_, arguments) => arguments.as_ref(),
-            _ => &[][..],
-        })
-        .collect::<Vec<_>>();
-    let arity = arguments.first().map_or(0, |arguments| arguments.len());
-    let variances = source
-        .classifier(classifier)
-        .map(|shape| shape.type_param_variances().clone())
-        .unwrap_or_default();
-    let mut combined_arguments = Vec::with_capacity(arity);
-    for index in 0..arity {
-        let projected = arguments
-            .iter()
-            .map(|arguments| arguments[index])
-            .collect::<Vec<_>>();
-        if projected.iter().all(|argument| *argument == projected[0]) {
-            combined_arguments.push(projected[0]);
-            continue;
-        }
-        let variance = variances
-            .get(index)
-            .copied()
-            .unwrap_or(TypeVariance::Invariant);
-        let readable = projected
-            .iter()
-            .map(|argument| argument.projection_read_ty().non_null())
-            .collect::<Vec<_>>();
-        let joined = common_at(source, &readable);
-        combined_arguments.push(match variance {
-            TypeVariance::Out => joined,
-            TypeVariance::Invariant => Ty::out_projection(joined),
-            TypeVariance::In => Ty::star_projection(Ty::nullable(Ty::obj("kotlin/Any"))),
-        });
-    }
-    Ty::obj_args_name(classifier, &combined_arguments)
+fn same_bound_set(left: &[Ty], right: &[Ty]) -> bool {
+    left.len() == right.len() && left.iter().all(|bound| right.contains(bound))
 }
 
 /// The classifier a reified operation records. An intersection is not a runtime class. When every
