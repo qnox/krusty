@@ -30,6 +30,7 @@ mod method_annotations;
 mod method_parameters;
 mod method_rewrite;
 mod pool_layout;
+mod pool_noting;
 mod stack_maps;
 mod utf8_pool;
 
@@ -132,6 +133,8 @@ struct ConstPool {
     /// once one is interned slots and entries no longer line up; its second slot holds
     /// [`Self::UNUSABLE_SLOT`], which names no entry.
     slot_entries: Vec<u32>,
+    /// See [`pool_noting`].
+    noted: Option<Vec<u16>>,
 }
 
 impl ConstPool {
@@ -145,10 +148,10 @@ impl ConstPool {
     fn intern(&mut self, c: Const) -> u16 {
         if let Const::Utf8(text) = &c {
             if let Some(index) = self.utf8_index.get(text) {
-                return index;
+                return self.noting(index);
             }
         } else if let Some(&index) = self.dedup.get(&c) {
-            return index;
+            return self.noting(index);
         }
         let idx = self.slot_count() + 1; // 1-based
         self.slot_entries.push(self.entries.len() as u32);
@@ -162,7 +165,7 @@ impl ConstPool {
                 self.dedup.insert(other, idx);
             }
         }
-        idx
+        self.noting(idx)
     }
 
     /// Intern the `CONSTANT_Utf8` for a Kotlin string VALUE, keeping its code units.
@@ -818,25 +821,6 @@ impl ClassWriter {
             visible_anns: Vec::new(),
             invisible_anns: Vec::new(),
         });
-    }
-
-    /// Declare a field ahead of every field declared so far (a suspend lambda's spill fields,
-    /// which the coroutine transformer adds after the class's own).
-    pub(super) fn add_leading_field(&mut self, access: u16, name: &str, desc: &str) {
-        let n = self.cp.utf8(name);
-        let d = self.cp.utf8(desc);
-        self.fields.insert(
-            0,
-            FieldInfo {
-                access,
-                name: n,
-                desc: d,
-                signature: None,
-                const_value: None,
-                visible_anns: Vec::new(),
-                invisible_anns: Vec::new(),
-            },
-        );
     }
 
     /// Add a field carrying a `ConstantValue` attribute (`const_idx` = a constant-pool index from
