@@ -338,3 +338,46 @@ fn a_copied_class_keeps_an_entry_nothing_names() {
     let padded = with_integers(&class, 2);
     assert_eq!(relayout(padded.clone(), &[], Unnamed::Kept), padded);
 }
+
+#[test]
+fn a_rewritten_call_site_follows_its_bootstrap_arguments_and_method() {
+    // ASM's `addBootstrapMethod` interns a call site's bootstrap arguments, then its bootstrap
+    // method handle, before the `InvokeDynamic` and its name and type. `BootstrapMethods` names
+    // them only by attribute index, yet a rewritten method's call site is still placed after them.
+    let mut writer = ClassWriter::new("T", "java/lang/Object");
+    let desc = "()Ljava/lang/Object;";
+    let before_g = writer.cp.slot_count();
+    add_static(&mut writer, "g", desc, |code, writer| {
+        let argument = writer.method_type("()V");
+        let bootstrap = writer.method_handle_static(
+            "B",
+            "bootstrap",
+            "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/CallSite;",
+        );
+        let entry = writer.add_bootstrap(bootstrap, vec![argument]);
+        let site = writer.invoke_dynamic(entry, "run", "()Ljava/lang/Runnable;");
+        code.invokedynamic(site, 0, 1);
+        code.areturn();
+    });
+    let after_g = writer.cp.slot_count();
+    let class = writer.finish();
+    let relaid = [RelaidMethod {
+        index: 0,
+        added: before_g + 1..after_g + 1,
+        leading: Vec::new(),
+        interned: after_g + 1..after_g + 1,
+    }];
+    let laid_out = match relaid_class(&class, &relaid, Unnamed::Dropped).expect("the class reads") {
+        Some(laid_out) => laid_out,
+        None => class,
+    };
+    let entries = pool(&laid_out);
+    let position = |tag: &str| {
+        entries
+            .iter()
+            .position(|entry| entry == tag)
+            .unwrap_or_else(|| panic!("{tag} in {entries:?}"))
+    };
+    let (argument, handle, site) = (position("tag 16"), position("tag 15"), position("tag 18"));
+    assert!(argument < handle && handle < site, "{entries:?}");
+}
