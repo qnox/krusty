@@ -3,6 +3,7 @@
 
 mod accessor_names;
 mod aggregate_boundaries;
+mod boxed_generic_overrides;
 mod bridge_names;
 mod bridge_parameters;
 mod bridge_realization;
@@ -653,96 +654,18 @@ pub(crate) fn lower_value_classes(
         })
         .collect();
 
-    // A member method OVERRIDING a generic supertype method receives its VALUE-CLASS param BOXED: the
-    // supertype's erased signature passes `Object`, so the incoming arg is a boxed `X`, not the underlying.
-    // The IR's bridge record carries the evidence — a concrete VC param (`Result`) whose supertype-erased
-    // counterpart is a generic reference (`Any`), with NO mangled target unboxing it (a degenerate
-    // `target_name = None` bridge; a mangled `foo-<hash>` target would unbox in the bridge instead). Mark
-    // such a param slot as the BOXED value class so the body unboxes it at each value-class member call —
-    // matching kotlinc, which unboxes the incoming box before use. (Only the repr analysis sees this; the
-    // emitted method signature is unchanged.)
-    // A GENERIC value class (`IC<T>`, its field typed by a type parameter) is left unmarked: its box
-    // and unbox differ from a concrete-underlying one's, which krusty can't mark without a conflict.
-    let generic_vcs: std::collections::HashSet<TypeName> = ir
-        .classes
-        .iter()
-        .filter(|c| c.is_value && !c.type_params.is_empty())
-        .map(|c| c.fq_name)
-        .collect();
     let inline_own_parameters = inline_body_slots::own_parameters(ir);
     let mut slot_types = slot_types;
-    let mut boxed_generic_overrides = HashSet::new();
-    for c in &ir.classes {
-        for b in &c.bridges {
-            // A VALUE-CLASS-returning override is MANGLED with fully UNBOXED params — kotlinc keeps it
-            // unboxed. Only a NON-value-class-returning override keeps the erased supertype name and receives
-            // its value-class param BOXED. So skip a value-class return (and a mangled-target bridge).
-            if b.target_name.is_some()
-                || b.concrete_ret
-                    .non_null()
-                    .obj_internal()
-                    .is_some_and(|fq| under.contains_key(&fq))
-            {
-                continue;
-            }
-            // The bridge's exact target. A bridge to an implementation this class does not declare
-            // (an inherited or external one) has no body here whose slots receive the box.
-            let Some(fid) = b.target_function.filter(|fid| c.methods.contains(fid)) else {
-                continue;
-            };
-            let f = &ir.functions[fid as usize];
-            // A method MANGLED by a value-class PARAMETER (not only a value-class return) is likewise
-            // unboxed in its bridge — `call(Result, IC)` mangles to `call-<hash>` because of the user value
-            // class `IC` (kotlinc EXEMPTS a `kotlin.Result` param from mangling), and its bridge unboxes
-            // BOTH params. The `target_name`/return checks above miss this shape (non-value-class return,
-            // `target_name = None`), so its params would be wrongly marked boxed and double-unboxed at use.
-            // Skip when the method is mangled — same predicate the mangle pass below applies.
-            let is_file_class = f.dispatch_receiver.is_none();
-            if vc_mangle(
-                &f.name,
-                &orig_params[fid as usize],
-                &orig_rets[fid as usize],
-                &under,
-                is_file_class,
-                suspend_fids.contains(&fid),
-            ) != f.name
-            {
-                continue;
-            }
-            let base = u32::from(f.dispatch_receiver.is_some() && !f.is_static);
-            for (i, (cp, ep)) in b
-                .concrete_params
-                .iter()
-                .zip(b.erased_params.iter())
-                .enumerate()
-            {
-                if let Some(x) = cp.non_null().obj_internal() {
-                    // The supertype must pass a GENERIC `Any`/`Object` at this position — i.e. the param was a
-                    // type PARAMETER there (`I<Result>.foo(T)`), so the arg is boxed. A value class that is
-                    // CONCRETE in the supertype (`Core.getFor(id: Aid)`) erases to its OWN underlying
-                    // (`String`), the method is mangled, and its param arrives UNBOXED — do NOT mark it.
-                    let supertype_generic = ep
-                        .non_null()
-                        .obj_internal()
-                        .is_some_and(super::jvm_class_map::is_jvm_erased_top);
-                    if under.contains_key(&x) && supertype_generic && !generic_vcs.contains(&x) {
-                        // Mark BOXED in the body's slot repr AND the call-boundary target, so a
-                        // CALLER boxes into this generic slot and the BODY unboxes it.
-                        let boxed = Ty::nullable(Ty::obj_name(x));
-                        slot_types[fid as usize].insert(base + i as u32, boxed);
-                        boxed_generic_overrides.insert(fid);
-                        if let Some(p) =
-                            orig_params.get_mut(fid as usize).and_then(|v| v.get_mut(i))
-                        {
-                            *p = boxed;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    call_arguments::record_method_parameters(ir, &boxed_generic_overrides, &orig_params);
+    // The source parameters, before an override of a generic member takes some of them boxed.
+    let declared_params = orig_params.clone();
+    boxed_generic_overrides::mark(
+        ir,
+        &under,
+        &mut orig_params,
+        &orig_rets,
+        &mut slot_types,
+        &suspend_fids,
+    );
     // 1. Erase signatures + drop null-checks on params that erased to a non-reference. `box-impl`
     //    returns the boxed `X` (the one position not erased).
     let is_vc_ty = |t: &Ty| {
@@ -842,7 +765,7 @@ pub(crate) fn lower_value_classes(
                 declared_sigs.push((
                     fid as u32,
                     source_name.clone(),
-                    orig_params[fid].clone(),
+                    declared_params[fid].clone(),
                     orig_rets[fid],
                 ));
             }
@@ -1057,9 +980,8 @@ pub(crate) fn lower_value_classes(
     for (call, classifier) in boxed_calls {
         ir.physical_types.insert(call, Ty::obj_name(classifier));
     }
-    // An intrinsic point's value comes through a generic slot: `suspendCoroutine<T>` reads
-    // `SafeContinuation.getOrThrow(): Object`, and `suspendCoroutineUninterceptedOrReturn<T>`'s block
-    // returns `Any?`. A value-class `T` therefore crosses as its box (or null for `T?`), never as the
+    // An intrinsic point's value comes through a generic slot: a
+    // `suspendCoroutineUninterceptedOrReturn<T>` block returns `Any?`. A value-class `T` therefore crosses as its box (or null for `T?`), never as the
     // carrier, on either path. Preserve that physical fact on the exact FIR-selected intrinsic point
     // so a value-class suspend-function tail does not descend into the inlined user block and attempt
     // to box that block's own result.
@@ -4655,7 +4577,7 @@ fn restore_boxed_suspension_tails(ir: &mut IrFile, id: ExprId, unboxes: &HashSet
 fn box_ref_tail(ir: &mut IrFile, id: ExprId, x: TypeName, inputs: ReprInputs<'_>) {
     let under = inputs.under;
     // A structural intrinsic point may contain an inlined user block whose own tail has a different
-    // type (`suspendCoroutine<T> { ... }` contains a `Unit` block). Its exact physical result belongs
+    // type (`suspendCoroutineUninterceptedOrReturn<T> { ... }` may end in a `Unit` block). Its exact physical result belongs
     // to the point as a whole; never recurse through that semantic boundary and reinterpret the block
     // tail as the enclosing function's value-class result.
     if ir.physical_types.get(&id).is_some_and(|ty| {

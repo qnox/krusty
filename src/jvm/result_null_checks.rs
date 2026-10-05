@@ -34,7 +34,7 @@ pub(super) fn check_before_result_coercion(ir: &mut IrFile) {
         })
         .collect::<Vec<_>>();
     for (assertion, coercion) in placements {
-        let IrExpr::NotNullAssert { message, .. } = ir.exprs[assertion as usize].clone() else {
+        let IrExpr::NotNullAssert { check, .. } = ir.exprs[assertion as usize].clone() else {
             unreachable!("a collected placement is a null assertion");
         };
         let IrExpr::TypeOp {
@@ -47,7 +47,7 @@ pub(super) fn check_before_result_coercion(ir: &mut IrFile) {
         // former coercion node becomes the assertion over the call's own slot.
         ir.exprs[coercion as usize] = IrExpr::NotNullAssert {
             operand: arg,
-            message,
+            check,
         };
         ir.exprs[assertion as usize] = IrExpr::TypeOp {
             op: IrTypeOp::ImplicitCoercion,

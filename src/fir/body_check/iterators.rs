@@ -65,30 +65,61 @@ impl BodyFirChecker<'_> {
                 )
             })?
             .ty;
+        let iterator_enhanced = has_enhanced_result(&protocol.iterator);
+        let mut iterator =
+            self.iterator_protocol_call(span, origin, &protocol.iterator, iterable_ty)?;
+        let has_next =
+            self.iterator_protocol_call(span, origin, &protocol.has_next, iterator_ty)?;
+        let mut next = self.iterator_protocol_call(span, origin, &protocol.next, iterator_ty)?;
+        if iterator_enhanced {
+            iterator.result_check = self.protocol_result_check(&protocol.iterator);
+        }
+        // The element a stored iterator yields keeps the enhancement of that iterator's type
+        // argument: a Java `Iterator<E>` result enhanced from `MutableIterator<E>` carries a not-null
+        // `E`, which `next()`, declared to return the iterator's type parameter, hands back.
+        let element_enhanced = has_enhanced_result(&protocol.next)
+            || iterator_enhanced
+                && matches!(
+                    &next.target,
+                    FirCallTarget::External {
+                        declared_result: Some(declared),
+                        ..
+                    } if matches!(declared.get(), crate::types::Ty::TyParam(..))
+                );
+        // kotlinc's `acceptsNullValues`: a type parameter whose bound admits `null` accepts it.
+        let element = variable_ty.get();
+        let element_rejects_null = !element.admits_null()
+            && !element.upper_bound_admits_null()
+            && (element.is_reference() || element.is_jvm_scalar());
+        if element_enhanced && element_rejects_null {
+            next.result_check = self.protocol_result_check(&protocol.next);
+        }
         Ok(FirLoopHeader::Iterator {
             variable,
             variable_ty,
             iterable,
             iterator_ty,
-            iterator: Box::new(self.iterator_protocol_call(
-                self.file.stmt_spans.get(statement.0 as usize).copied(),
-                origin,
-                &protocol.iterator,
-                iterable_ty,
-            )?),
-            has_next: Box::new(self.iterator_protocol_call(
-                self.file.stmt_spans.get(statement.0 as usize).copied(),
-                origin,
-                &protocol.has_next,
-                iterator_ty,
-            )?),
-            next: Box::new(self.iterator_protocol_call(
-                self.file.stmt_spans.get(statement.0 as usize).copied(),
-                origin,
-                &protocol.next,
-                iterator_ty,
-            )?),
+            iterator: Box::new(iterator),
+            has_next: Box::new(has_next),
+            next: Box::new(next),
         })
+    }
+
+    /// The not-null check a stored protocol result gets, named like any checked call result.
+    fn protocol_result_check(
+        &mut self,
+        selected: &ResolvedCall,
+    ) -> Option<crate::fir::FirPlatformNarrowingId> {
+        let ResolvedCall::Member(member) = selected else {
+            return None;
+        };
+        let message = format!("{}(...)", member.member.name).into_boxed_str();
+        Some(
+            self.body
+                .add_platform_narrowing(crate::fir::FirPlatformNarrowing {
+                    message: Some(message),
+                }),
+        )
     }
 
     pub(super) fn iterator_protocol_call(
@@ -179,6 +210,17 @@ impl BodyFirChecker<'_> {
             receiver,
             context_arguments,
             receiver_conversion,
+            result_check: None,
         })
     }
+}
+
+/// Whether a selected protocol call's declaration result is enhanced to not-null.
+fn has_enhanced_result(selected: &ResolvedCall) -> bool {
+    matches!(
+        selected,
+        ResolvedCall::Member(member)
+            if member.member.call_sig.result_enhancement
+                == crate::libraries::ResultEnhancement::NotNull
+    )
 }

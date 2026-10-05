@@ -220,14 +220,62 @@ pub(super) fn root_container_at(ir: &IrFile, root: &IrLiftingRoot) -> Option<cra
 
 /// The function whose body a class declared in `enclosure` is written in, through every enclosing
 /// lambda and local function, as the target realized it: the [`root_container`] of a local
-/// function or suspend lambda, else the function or accessor itself. `None` for an enclosure that
-/// is no function body.
+/// function or suspend lambda, else the function or accessor itself. A suspend lambda realized as
+/// a class of its own encloses what it declares in its `invokeSuspend`, but that class is no
+/// source declaration, so nothing in it captures its instance: the root is the one the lambda's
+/// class is written in. `None` for an enclosure that is no function body.
 pub(super) fn enclosure_root(ir: &IrFile, enclosure: IrEnclosure) -> Option<crate::ir::FunId> {
     match enclosure {
-        IrEnclosure::Function(function) => Some(root_container(ir, function).unwrap_or(function)),
+        IrEnclosure::Function(function) => match root_container(ir, function) {
+            Some(root) => Some(root),
+            None => match generated_class_enclosure(ir, function) {
+                Some(outer) => enclosure_root(ir, outer),
+                None => Some(function),
+            },
+        },
         IrEnclosure::Lambda(lambda) => root_container(ir, lambda)
             .or_else(|| enclosure_root(ir, *ir.lambda_enclosures.get(&lambda)?)),
         _ => container_function(ir, enclosure),
+    }
+}
+
+/// The function among `container` and the members of the local or anonymous classes it is written
+/// in, outward, that is a member of `classifier`: where an instance of `classifier` captured in
+/// `container` comes from. `None` when no class in that chain is `classifier`.
+pub(super) fn classifier_member(
+    ir: &IrFile,
+    container: crate::ir::FunId,
+    classifier: crate::types::TypeName,
+) -> Option<crate::ir::FunId> {
+    let mut function = container;
+    loop {
+        let owner = member_owner(ir, function)?;
+        if owner.fq_name == classifier {
+            return Some(function);
+        }
+        function = enclosure_root(ir, owner.enclosure?)?;
+    }
+}
+
+/// The class `function` is a member of, a static realization of a member included.
+fn member_owner(ir: &IrFile, function: crate::ir::FunId) -> Option<&crate::ir::IrClass> {
+    match ir.functions[function as usize].dispatch_receiver {
+        Some(owner) => Some(&ir.classes[ir.class_id_by_name(owner)? as usize]),
+        None => ir
+            .classes
+            .iter()
+            .find(|class| class.methods.contains(&function)),
+    }
+}
+
+/// Where the compiler-generated class whose method `function` is, such as a suspend lambda's class
+/// owning its `invokeSuspend`, is declared; `None` for a method of a source class.
+fn generated_class_enclosure(ir: &IrFile, function: crate::ir::FunId) -> Option<IrEnclosure> {
+    let owner = ir.functions[function as usize].dispatch_receiver?;
+    let class = &ir.classes[ir.class_id_by_name(owner)? as usize];
+    match class.is_source_declared {
+        true => None,
+        false => class.enclosure,
     }
 }
 

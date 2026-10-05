@@ -17,6 +17,9 @@ use super::*;
 mod lambda_node;
 mod lambda_route;
 mod regenerated_objects;
+use crate::jvm::bytecode_passes::coroutines::markers::{
+    is_after_inline_marker, is_before_inline_marker,
+};
 use crate::jvm::inliner::{self, Binding, InlineError, Parameter, Parameters};
 use crate::jvm::method_node::{
     encode_instruction, is_terminal, stack_shapes, word_delta, Category, Insn, MethodNode, Node,
@@ -800,6 +803,12 @@ impl Emitter<'_> {
             } else {
                 Supply::Stored
             };
+            // kotlinc never stores an inline suspend callee's continuation: the body reads the
+            // caller's own continuation local, as every suspension point in the caller does.
+            if self.reads_continuation_local(argument) {
+                supplies.push(Supply::CallerLocal);
+                continue;
+            }
             let local = matches!(self.ir.expr(argument), IrExpr::GetValue(v)
                 if self.slots.contains_key(v))
                 && self.local_needs_no_boxing(argument, physical[index]);
@@ -860,9 +869,27 @@ impl Emitter<'_> {
         local.scalar_value_repr().is_none() && parameter.scalar_value_repr().is_none()
     }
 
+    /// Whether `argument` is the continuation this emission reads from its own local, rather than
+    /// a fake continuation or one the CPS pass bound to a value.
+    fn reads_continuation_local(&self, argument: u32) -> bool {
+        matches!(self.ir.expr(argument), IrExpr::CurrentContinuation)
+            && self.continuation_slot.is_some()
+            && !self.is_fake_continuation(argument)
+    }
+
     /// The caller local an argument is read from, coerced to the parameter's class as kotlinc's
     /// `StackValue.coerce` does between two reference types.
     fn caller_local_binding(&self, argument: u32, parameter: Ty) -> Binding {
+        if self.reads_continuation_local(argument) {
+            let slot = self
+                .continuation_slot
+                .expect("a continuation read binds the continuation slot");
+            return Binding::CallerLocal {
+                slot,
+                category: Category::Reference,
+                checkcast: None,
+            };
+        }
         let IrExpr::GetValue(value) = self.ir.expr(argument) else {
             unreachable!("a caller-local argument is a local read");
         };
@@ -936,6 +963,18 @@ impl Emitter<'_> {
         }
         let mut top_local = 0u16;
         let mut duplicating: Option<(u8, u16)> = None;
+        // The expanded lambdas' `beforeInlineCall`/`afterInlineCall` brackets that are written:
+        // those with operands to save, the caller's or the body's own. FixStack stores them into
+        // locals when the class is written, so inside a written bracket the stack holds only what
+        // the lambda pushes, as `stack_shapes` follows it.
+        let mut brackets: Vec<bool> = Vec::new();
+        let under = |brackets: &[bool]| {
+            if brackets.contains(&true) {
+                0
+            } else {
+                baseline
+            }
+        };
         for (at, node) in inlined.nodes.iter().enumerate() {
             match node {
                 Node::Label(label) => {
@@ -943,17 +982,35 @@ impl Emitter<'_> {
                     match &shapes[at] {
                         Some(stack) if code.is_dead() => {
                             code.bind_external_target(caller);
-                            code.set_stack_height(baseline + words(stack));
+                            code.set_stack_height(under(&brackets) + words(stack));
                         }
                         Some(stack) => {
                             code.bind(caller);
-                            code.set_stack_height(baseline + words(stack));
+                            code.set_stack_height(under(&brackets) + words(stack));
                         }
                         None => code.bind(caller),
                     }
                     bound_at[label.index()] = Some(code.bytes.len());
                 }
                 Node::Line { line, .. } => code.inlined_line(*line),
+                Node::Insn(_) if is_before_inline_marker(node) => {
+                    let saves = shapes[at]
+                        .as_ref()
+                        .is_some_and(|stack| under(&brackets) + words(stack) > 0);
+                    if saves {
+                        code.inline_call_marker(true);
+                        code.set_stack_height(0);
+                    }
+                    brackets.push(saves);
+                }
+                Node::Insn(_) if is_after_inline_marker(node) => {
+                    if brackets.pop().unwrap_or(false) {
+                        code.inline_call_marker(false);
+                        if let Some(stack) = shapes.get(at + 1).cloned().flatten() {
+                            code.set_stack_height(under(&brackets) + words(&stack));
+                        }
+                    }
+                }
                 Node::Insn(insn) => {
                     if let Insn::Var { op, slot } = insn {
                         top_local = top_local.max(slot + var_words(*op));
