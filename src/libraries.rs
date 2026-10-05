@@ -577,6 +577,23 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
         false
     }
 
+    /// The Kotlin package that declares library top-level callable `callable`, whose `owner` may
+    /// be the platform container realizing it rather than the package itself.
+    fn top_level_callable_package(&self, callable: &LibraryCallable) -> TypeName {
+        callable.owner
+    }
+
+    /// The contract-DSL member `name` of classifier `owner` is, when `owner` declares it: a
+    /// description's call means an effect only when it selected one of these declarations.
+    fn contract_dsl_member(
+        &self,
+        _owner: TypeName,
+        _name: &str,
+        _value_parameters: usize,
+    ) -> Option<crate::contracts::DslMember> {
+        None
+    }
+
     /// Primitive represented by a platform wrapper type.
     fn boxed_primitive(&self, _ty: Ty) -> Option<Ty> {
         None

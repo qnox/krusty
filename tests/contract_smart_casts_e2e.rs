@@ -82,3 +82,36 @@ fn a_member_contract_narrows_and_is_recorded_in_class_metadata() {
         byte_identical("Member", MEMBER, class);
     }
 }
+
+/// The contract call and its invocation kinds are bound by the declarations they select, so a
+/// package-qualified `contract`, an import-aliased `InvocationKind`, a fully qualified entry, and
+/// an explicitly imported entry all declare the same contract as the plain spelling.
+const QUALIFIED_SPELLINGS: &str = r#"
+@file:OptIn(kotlin.contracts.ExperimentalContracts::class)
+import kotlin.contracts.*
+import kotlin.contracts.InvocationKind.EXACTLY_ONCE
+import kotlin.contracts.InvocationKind as Kind
+
+fun qualified(x: Any?): Boolean {
+    kotlin.contracts.contract { returns(true) implies (x is String) }
+    return x is String
+}
+fun importedEntry(block: () -> Unit) {
+    contract { callsInPlace(block, EXACTLY_ONCE) }
+    block()
+}
+fun aliasedKind(block: () -> Unit) {
+    contract { callsInPlace(block, Kind.AT_MOST_ONCE) }
+    block()
+}
+fun fullyQualified(block: () -> Unit) {
+    contract { callsInPlace(block, kotlin.contracts.InvocationKind.AT_LEAST_ONCE) }
+    block()
+}
+fun use(a: Any?): Int = if (qualified(a)) a.length else 0
+"#;
+
+#[test]
+fn qualified_and_aliased_spellings_declare_the_same_contract() {
+    byte_identical("qualified_spellings", QUALIFIED_SPELLINGS, "MainKt");
+}

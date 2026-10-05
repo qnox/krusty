@@ -5187,11 +5187,51 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
         // callable and never embeds or reports the runtime facade class name. Requiring both the
         // source name and declaring package prevents an unrelated library callable from acquiring
         // intrinsic behavior merely because one component happens to match.
+        // The full signature is `contract(builder: ContractBuilder.() -> Unit)`, whose builder is a
+        // classifier of the same package.
+        let builder = match callable.params.as_slice() {
+            [Ty::Fun(builder)] if builder.has_receiver && builder.ret == Ty::Unit => {
+                builder.params.first().copied()
+            }
+            _ => None,
+        };
         callable.name == "contract"
-            && callable
-                .owner
-                .parent()
-                .is_some_and(|package| package.matches("kotlin/contracts"))
+            && callable.ret == Ty::Unit
+            && callable.owner.parent().is_some_and(is_contracts_package)
+            && builder
+                .and_then(Ty::kotlin_class_internal)
+                .and_then(TypeName::parent)
+                .is_some_and(is_contracts_package)
+    }
+
+    fn top_level_callable_package(&self, callable: &crate::libraries::LibraryCallable) -> TypeName {
+        // A classpath callable's owner is its file facade class; a compiler-declared one names
+        // its package directly.
+        if self.cp.find_name(callable.owner).is_some() {
+            callable.owner.namespace()
+        } else {
+            callable.owner
+        }
+    }
+
+    fn contract_dsl_member(
+        &self,
+        owner: TypeName,
+        name: &str,
+        value_parameters: usize,
+    ) -> Option<crate::contracts::DslMember> {
+        use crate::contracts::DslMember;
+        if !owner.parent().is_some_and(is_contracts_package) {
+            return None;
+        }
+        match (owner.segment_ref(), name, value_parameters) {
+            ("ContractBuilder", "returns", 0) => Some(DslMember::Returns),
+            ("ContractBuilder", "returns", 1) => Some(DslMember::ReturnsValue),
+            ("ContractBuilder", "returnsNotNull", 0) => Some(DslMember::ReturnsNotNull),
+            ("ContractBuilder", "callsInPlace", 2) => Some(DslMember::CallsInPlace),
+            ("SimpleEffect", "implies", 1) => Some(DslMember::Implies),
+            _ => None,
+        }
     }
 
     fn implicit_common_supertypes(&self, types: &[Ty]) -> Vec<crate::libraries::SemanticSupertype> {
@@ -7200,4 +7240,9 @@ mod tests {
             None
         );
     }
+}
+
+/// `kotlin.contracts`, the package that declares the contract DSL.
+fn is_contracts_package(package: TypeName) -> bool {
+    package.matches("kotlin/contracts")
 }

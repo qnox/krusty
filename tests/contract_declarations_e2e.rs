@@ -6,6 +6,11 @@
 //! the owner's value parameters and extension receiver, and describes each parameter with at most
 //! one `callsInPlace`. Property accessors and secondary constructors may declare one.
 //!
+//! A description call is an effect only when it selects a `ContractBuilder` or `SimpleEffect`
+//! member, and an invocation kind only when it selects an entry of `InvocationKind`; a same-named
+//! extension or a foreign `EXACTLY_ONCE` is reported, never read by its spelling. The contract call
+//! itself declares a contract only when it is spelled `contract` and selects the intrinsic.
+//!
 //! DIFFERENTIAL: krusty's errors are compared with kotlinc's, complete and in order.
 
 use super::common;
@@ -101,5 +106,97 @@ fun inPlaceTwice(block: () -> Unit) {
     block()
 }
 ",
+    );
+}
+
+#[test]
+fn a_description_call_is_an_effect_only_when_it_selects_the_dsl() {
+    assert_matches_kotlinc(
+        "fun ContractBuilder.callsInPlace(block: () -> Unit, times: Int): CallsInPlace =
+    callsInPlace(block)
+fun ContractBuilder.returnsNotNull(flag: Boolean): ReturnsNotNull = returnsNotNull()
+infix fun Returns.implies(flag: String): ConditionalEffect = implies(true)
+
+fun sameNamedEffect(block: () -> Unit) {
+    contract { callsInPlace(block, 2) }
+    block()
+}
+fun sameNamedSimpleEffect(x: Any?): Any? {
+    contract { returnsNotNull(true) implies (x != null) }
+    return x
+}
+fun sameNamedImplies(x: Any?): Boolean {
+    contract { returns(true) implies \"s\" }
+    return true
+}
+fun notDsl(x: Any?): Boolean {
+    contract { x.toString() }
+    return x is String
+}
+fun use(a: Any?): Int = if (sameNamedImplies(a)) a.length else 0
+",
+    );
+}
+
+#[test]
+fn an_invocation_kind_is_an_entry_of_invocation_kind() {
+    assert_matches_kotlinc(
+        "val EXACTLY_ONCE: InvocationKind = InvocationKind.AT_MOST_ONCE
+object Foreign {
+    val EXACTLY_ONCE: InvocationKind = InvocationKind.AT_MOST_ONCE
+}
+fun topLevel(block: () -> Unit) {
+    contract { callsInPlace(block, EXACTLY_ONCE) }
+    block()
+}
+fun objectMember(block: () -> Unit) {
+    contract { callsInPlace(block, Foreign.EXACTLY_ONCE) }
+    block()
+}
+fun parameter(block: () -> Unit, kind: InvocationKind) {
+    contract { callsInPlace(block, kind) }
+    block()
+}
+",
+    );
+}
+
+/// A same-package `contract` that accepts the builder lambda outranks the star-imported intrinsic,
+/// so it declares no contract; an import alias of the intrinsic is not spelled `contract` and is a
+/// misplaced contract.
+#[test]
+fn the_contract_call_is_identified_by_the_declaration_it_selects() {
+    common::assert_errors_match_kotlinc(
+        &[
+            (
+                "alias.kt",
+                "@file:OptIn(kotlin.contracts.ExperimentalContracts::class)
+package alias
+import kotlin.contracts.contract as declare
+
+fun aliased(x: Any?): Boolean {
+    declare { returns(true) implies (x is String) }
+    return x is String
+}
+fun use(a: Any?): Int = if (aliased(a)) a.length else 0
+",
+            ),
+            (
+                "shadow.kt",
+                "@file:OptIn(kotlin.contracts.ExperimentalContracts::class)
+package shadow
+import kotlin.contracts.*
+
+fun contract(block: ContractBuilder.() -> Unit) {}
+
+fun shadowed(x: Any?): Boolean {
+    contract { returns(true) implies (x is String) }
+    return x is String
+}
+fun use(a: Any?): Int = if (shadowed(a)) a.length else 0
+",
+            ),
+        ],
+        &[],
     );
 }

@@ -1,12 +1,21 @@
 //! Pass-1 source-contract extraction and semantic publication.
 //!
 //! A source contract affects callers, so it is declaration data rather than an ordinary body. The
-//! active parser unit is decoded immediately into a compact temporary payload. The signature
-//! environment then binds its callee and condition types by stable declaration identity before the
-//! payload enters `ResolvedModuleIndex`; no parser id, source range, or unresolved `TypeRef` crosses
-//! into Pass 2.
+//! active parser unit reads the first statement's call and its description into a compact
+//! temporary payload. The signature environment then selects that call, every description call,
+//! and every invocation kind through ordinary overload and scope resolution, and decodes the
+//! contract from the declarations they selected before it enters `ResolvedModuleIndex`. Spelling
+//! is only lookup input; no parser id, source range, or unresolved `TypeRef` crosses into Pass 2.
 
-use crate::ast::{Decl, Expr, File, FunBody, Stmt};
+use std::collections::HashMap;
+
+use crate::ast::{Decl, Expr, File, FunBody, Stmt, TypeRef};
+use crate::contracts::{
+    CallBinding, Description, DescriptionBinder, DescriptionOwner, InvocationKind, KindBinding,
+    TermId, TermKind,
+};
+use crate::symbol_resolver::{CallArgKind, CandidateSelection};
+use crate::types::{Ty, TypeName};
 
 use super::ProductionSignatureSemantics;
 
@@ -14,14 +23,18 @@ use super::ProductionSignatureSemantics;
 pub(crate) struct SourceContractCandidate {
     declaration: crate::fir::DeclarationId,
     source: crate::fir::SourceFileId,
-    callee: Box<str>,
-    shadowed_by_parameter: bool,
-    contract: crate::contracts::Contract,
+    /// The first statement's callee: `contract` or a package-qualified `kotlin.contracts.contract`.
+    callee: Vec<String>,
+    name: String,
+    params: Vec<String>,
+    param_types: Vec<TypeRef>,
+    receiver: Option<TypeRef>,
+    description: Description,
 }
 
-/// Decode contract-shaped first statements while the bounded Pass-1 parser unit is active.
-/// Semantic classification is deliberately deferred: aliases, imports, module shadowing, and
-/// provider identity belong to the normal signature resolver below, not to syntax recognition.
+/// Read the first statement of each function while the bounded Pass-1 parser unit is active.
+/// Whether that statement declares a contract is deliberately deferred: aliases, imports, module
+/// shadowing, and provider identity belong to the signature resolver below, not to syntax.
 pub(crate) fn extract_source_contract_candidates(
     file: &File,
     source: crate::fir::SourceFileId,
@@ -55,20 +68,13 @@ pub(crate) fn extract_source_contract_candidates(
             let Expr::Call { callee, .. } = file.expr(expression) else {
                 return None;
             };
-            let Expr::Name(callee) = file.expr(*callee) else {
+            let callee = callee_path(file, *callee)?;
+            // kotlinc's raw FIR only offers a first statement spelled `contract` for binding; an
+            // import alias of the intrinsic is an ordinary call and a misplaced contract.
+            if callee.last().map(String::as_str) != Some("contract") {
                 return None;
-            };
-            let contract = crate::contracts::decode_source(
-                file,
-                expression,
-                &function
-                    .params
-                    .iter()
-                    .map(|parameter| parameter.name.clone())
-                    .collect::<Vec<_>>(),
-                &function.name,
-                function.receiver.is_some(),
-            )?;
+            }
+            let description = Description::read(file, expression)?;
             let declaration = stubs
                 .iter()
                 .find(|stub| {
@@ -80,15 +86,35 @@ pub(crate) fn extract_source_contract_candidates(
             Some(SourceContractCandidate {
                 declaration,
                 source,
-                callee: callee.clone().into_boxed_str(),
-                shadowed_by_parameter: function
+                callee,
+                name: function.name.clone(),
+                params: function
                     .params
                     .iter()
-                    .any(|parameter| parameter.name == *callee),
-                contract,
+                    .map(|parameter| parameter.name.clone())
+                    .collect(),
+                param_types: function
+                    .params
+                    .iter()
+                    .map(|parameter| parameter.ty.clone())
+                    .collect(),
+                receiver: function.receiver.clone(),
+                description,
             })
         })
         .collect()
+}
+
+fn callee_path(file: &File, callee: crate::ast::ExprId) -> Option<Vec<String>> {
+    match file.expr(callee) {
+        Expr::Name(name) => Some(vec![name.clone()]),
+        Expr::Member { receiver, name } => {
+            let mut path = callee_path(file, *receiver)?;
+            path.push(name.clone());
+            Some(path)
+        }
+        _ => None,
+    }
 }
 
 impl ProductionSignatureSemantics<'_> {
@@ -105,42 +131,47 @@ impl ProductionSignatureSemantics<'_> {
         let mut resolved = Vec::new();
         let mut failed = Vec::new();
         for candidate in candidates {
-            if candidate.shadowed_by_parameter {
-                continue;
-            }
             let scope = crate::fir::SignatureScope {
                 owner: candidate.declaration,
                 source: candidate.source,
             };
-            let intrinsic = self
-                .with_resolver(scope, |resolver| {
-                    let overloads = resolver.accessible_top_level_candidates(&candidate.callee);
-                    let mut functions =
-                        crate::libraries::FunctionSet { overloads }.into_top_level();
-                    let first = functions.next()?;
-                    (self
-                        .table
-                        .libraries
-                        .is_erased_contract_callable(&first.callable)
-                        && functions.all(|function| {
-                            self.table
-                                .libraries
-                                .is_erased_contract_callable(&function.callable)
-                        }))
-                    .then_some(())
-                })
-                .is_ok();
-            if !intrinsic {
+            let Some(builder) = self.selected_contract_builder(scope, candidate) else {
                 continue;
-            }
-            let contract = candidate.contract.with_resolved_types(&mut |reference| {
+            };
+            let resolve_type = |reference: &TypeRef| {
                 self.with_signature_type_scope(scope, |lexical| {
                     self.signature_type_ref(scope, lexical, reference)
                 })
                 .ok()
                 .flatten()
                 .filter(|ty| !ty.mentions_pending() && !ty.mentions_error())
-            });
+            };
+            let mut binder = SignatureDescriptionBinder {
+                semantics: self,
+                scope,
+                builder,
+                params: &candidate.params,
+                param_types: candidate.param_types.iter().map(resolve_type).collect(),
+                receiver: candidate.receiver.as_ref().and_then(resolve_type),
+                selections: HashMap::new(),
+            };
+            // A description kotlinc rejects declares no contract; Pass 2 reports its findings
+            // from the checked body.
+            let Some(contract) = candidate
+                .description
+                .decode(
+                    &DescriptionOwner {
+                        params: &candidate.params,
+                        name: &candidate.name,
+                        has_receiver: candidate.receiver.is_some(),
+                    },
+                    &mut binder,
+                )
+                .contract
+            else {
+                continue;
+            };
+            let contract = contract.with_resolved_types(&mut |reference| resolve_type(reference));
             match crate::contracts::ResolvedContract::new(contract) {
                 Ok(contract) => resolved.push((candidate.declaration, contract)),
                 Err(error) => {
@@ -159,6 +190,230 @@ impl ProductionSignatureSemantics<'_> {
             failed.sort_by_key(|declaration| declaration.raw());
             failed.dedup();
             Err(failed)
+        }
+    }
+
+    /// The `ContractBuilder` receiver of the contract intrinsic the candidate's first statement
+    /// selects, or `None` when ordinary resolution selects anything else. The call's only argument
+    /// is a lambda. A parameter or an implicit receiver's member outranks every top-level function;
+    /// among those, overload selection picks one declaration, identified by its full signature.
+    fn selected_contract_builder(
+        &self,
+        scope: crate::fir::SignatureScope,
+        candidate: &SourceContractCandidate,
+    ) -> Option<Ty> {
+        let arguments = [CallArgKind::LambdaLiteral(Ty::Error)];
+        let (name, qualifier) = candidate.callee.split_last()?;
+        let selected = if qualifier.is_empty() {
+            if candidate.params.contains(name) {
+                return None;
+            }
+            for receiver in self.implicit_receivers(scope) {
+                let member = self.with_resolver(scope, |resolver| {
+                    let callables = resolver.receiver_callables(receiver, name);
+                    resolver.select_receiver_function_with_params(
+                        receiver, name, &arguments, &[], &callables,
+                    )
+                });
+                if member.is_ok() {
+                    return None;
+                }
+            }
+            self.with_resolver(scope, |resolver| {
+                resolver.select_top_level_function_candidates(
+                    name,
+                    resolver.accessible_top_level_candidates(name),
+                    &arguments,
+                    &[],
+                )
+            })
+        } else {
+            self.with_qualified_package_resolver(scope, &qualifier.join("."), |_, resolver| {
+                resolver
+                    .select_top_level_function_candidates(
+                        name,
+                        resolver.accessible_top_level_candidates(name),
+                        &arguments,
+                        &[],
+                    )
+                    .ok_or_else(Self::failure)
+            })
+        };
+        let (_, callable) = selected.ok()?;
+        if !self.table.libraries.is_erased_contract_callable(&callable) {
+            return None;
+        }
+        match callable.params.first() {
+            Some(Ty::Fun(builder)) => builder.params.first().copied(),
+            _ => None,
+        }
+    }
+}
+
+/// One selected description call: the declaration's owner, kind, and specialized shape.
+#[derive(Clone)]
+struct SelectedDslCall {
+    owner: TypeName,
+    kind: crate::libraries::FnKind,
+    params: Vec<Ty>,
+    ret: Ty,
+}
+
+/// Binds a description in the declaring function's signature scope, where the lambda's implicit
+/// receiver is the selected contract's builder.
+struct SignatureDescriptionBinder<'s, 'a> {
+    semantics: &'s ProductionSignatureSemantics<'a>,
+    scope: crate::fir::SignatureScope,
+    builder: Ty,
+    params: &'s [String],
+    param_types: Vec<Option<Ty>>,
+    receiver: Option<Ty>,
+    selections: HashMap<TermId, Option<SelectedDslCall>>,
+}
+
+impl SignatureDescriptionBinder<'_, '_> {
+    fn select(&mut self, description: &Description, call: TermId) -> Option<SelectedDslCall> {
+        if let Some(selected) = self.selections.get(&call) {
+            return selected.clone();
+        }
+        let selected = self.select_uncached(description, call);
+        self.selections.insert(call, selected.clone());
+        selected
+    }
+
+    fn select_uncached(&mut self, description: &Description, call: TermId) -> Option<SelectedDslCall> {
+        let TermKind::Call {
+            receiver,
+            name,
+            args,
+            ..
+        } = &description.term(call).kind
+        else {
+            return None;
+        };
+        let receiver = match receiver {
+            None => self.builder,
+            Some(receiver) => self.select(description, *receiver)?.ret,
+        };
+        let arguments = args
+            .iter()
+            .map(|argument| CallArgKind::Typed(self.argument_type(description, *argument)))
+            .collect::<Vec<_>>();
+        self.semantics
+            .with_resolver(self.scope, |resolver| {
+                let callables = resolver.receiver_callables(receiver, name);
+                match resolver.select_receiver_function_with_params_tracking(
+                    receiver, name, &arguments, &[], &callables, None,
+                ) {
+                    CandidateSelection::Selected((function, params, ret)) => {
+                        Some(SelectedDslCall {
+                            owner: function.callable.owner,
+                            kind: function.kind,
+                            params,
+                            ret,
+                        })
+                    }
+                    CandidateSelection::None | CandidateSelection::Ambiguous => None,
+                }
+            })
+            .ok()
+    }
+
+    /// The type an argument of a description call has in the declaring function's scope.
+    fn argument_type(&mut self, description: &Description, argument: TermId) -> Ty {
+        match &description.term(argument).kind {
+            TermKind::Bool(_)
+            | TermKind::Is { .. }
+            | TermKind::Equality { .. }
+            | TermKind::And(..)
+            | TermKind::Or(..) => Ty::Boolean,
+            TermKind::Null => Ty::Null,
+            TermKind::Call { .. } => self
+                .select(description, argument)
+                .map_or(Ty::Error, |selected| selected.ret),
+            TermKind::Name(segments) => match segments.as_slice() {
+                [name] if name == "this" || name.starts_with("this@") => {
+                    self.receiver.unwrap_or(Ty::Error)
+                }
+                [name] if self.params.contains(name) => self
+                    .params
+                    .iter()
+                    .position(|param| param == name)
+                    .and_then(|index| self.param_types[index])
+                    .unwrap_or(Ty::Error),
+                _ => self
+                    .enum_entry(segments)
+                    .map_or(Ty::Error, |(owner, _)| Ty::obj_name(owner)),
+            },
+            TermKind::Other => Ty::Error,
+        }
+    }
+
+    /// The enum entry a name denotes in the declaring function's scope, as (enum, entry): an
+    /// explicitly imported entry, or a qualified one whose qualifier names the enum. A parameter
+    /// root is a value, never a qualifier.
+    fn enum_entry(&self, segments: &[String]) -> Option<(TypeName, String)> {
+        let semantics = self.semantics;
+        let (owner, entry) = match segments {
+            [] => return None,
+            [name] => semantics.explicit_imported_classifier_callable(self.scope.source, name)?,
+            [root, .., entry] => {
+                if self.params.contains(root) {
+                    return None;
+                }
+                let qualifier = segments[..segments.len() - 1].join(".");
+                let owner = semantics.qualified_classifier_or_source_alias(self.scope, &qualifier)?;
+                (owner, entry.clone())
+            }
+        };
+        let module =
+            crate::module_symbols::ModuleSymbols::for_file(semantics.table, self.scope.source.raw());
+        let source = crate::symbol_source::CompositeSource::new(vec![
+            &module as &dyn crate::symbol_source::SymbolSource,
+            &*semantics.table.libraries as &dyn crate::symbol_source::SymbolSource,
+        ]);
+        crate::symbol_source::SymbolSource::classifier(&source, owner)
+            .is_some_and(|classifier| classifier.enum_entries.contains(&entry))
+            .then_some((owner, entry))
+    }
+}
+
+impl DescriptionBinder for SignatureDescriptionBinder<'_, '_> {
+    fn bind_call(&mut self, description: &Description, call: TermId) -> CallBinding {
+        let Some(selected) = self.select(description, call) else {
+            return CallBinding::Unresolved;
+        };
+        let TermKind::Call { name, .. } = &description.term(call).kind else {
+            return CallBinding::Unresolved;
+        };
+        let member = (selected.kind == crate::libraries::FnKind::Member)
+            .then(|| {
+                self.semantics.table.libraries.contract_dsl_member(
+                    selected.owner,
+                    name,
+                    selected.params.len(),
+                )
+            })
+            .flatten();
+        // Pass 1 only decides whether a contract exists; Pass 2 names a foreign declaration.
+        member.map_or(CallBinding::Foreign(String::new()), CallBinding::Dsl)
+    }
+
+    fn bind_kind(&mut self, description: &Description, call: TermId, kind: TermId) -> KindBinding {
+        let Some(expected) = self
+            .select(description, call)
+            .and_then(|selected| selected.params.get(1).copied())
+            .and_then(Ty::kotlin_class_internal)
+        else {
+            return KindBinding::Unresolved;
+        };
+        let TermKind::Name(segments) = &description.term(kind).kind else {
+            return KindBinding::Foreign(String::new());
+        };
+        match self.enum_entry(segments) {
+            Some((owner, entry)) if owner == expected => InvocationKind::of_entry(&entry)
+                .map_or(KindBinding::Foreign(String::new()), KindBinding::Entry),
+            _ => KindBinding::Foreign(String::new()),
         }
     }
 }

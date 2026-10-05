@@ -1,109 +1,22 @@
-//! Contract effects at call sites: which calls declare a contract, decoding a source declaration's
-//! `contract { … }` block, and the smart casts a `returns(…) implies …` effect proves.
+//! Contract effects at call sites: which call declares a contract, and the smart casts a
+//! `returns(…) implies …` effect proves.
 
 use super::*;
 
 impl Checker<'_> {
-    /// True when `e` resolves to the platform's erased contract-declaration intrinsic. This is the
-    /// same import-scoped, module-federated identity query used by inline-facade eligibility, so an
-    /// alias, source shadow, or unrelated same-named declaration cannot make checking and emission
-    /// disagree about whether the DSL lambda exists at runtime.
-    pub(super) fn is_contract_call(&self, scope: &CheckerScope<'_>, e: ExprId) -> bool {
-        let Expr::Call { callee, .. } = self.file.expr(e) else {
-            return false;
-        };
-        let Expr::Name(name) = self.file.expr(*callee) else {
-            return false;
-        };
-        // Lexical values/local functions outrank every top-level import. They are intentionally kept
-        // outside SymbolResolver's package federation, so close that final precedence rung here
-        // before asking the shared top-level identity classifier.
-        if self.lexical_value_declares(scope, name) {
-            return false;
-        }
-        resolved_call_is_erased_contract(self.file, e, &self.resolver(), self.libraries)
-    }
-
-    /// Decode every top-level function's `contract { … }` block up front (see the call site in
-    /// `check_file_at_impl_mode`).
-    pub(super) fn collect_source_contracts(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        selected_body_declarations: Option<&std::collections::HashSet<Span>>,
-    ) {
-        let file = self.file;
-        for &d in &file.decls {
-            let Decl::Fun(f) = file.decl(d) else { continue };
-            // An enclosing top-level declaration can be active solely to recreate the lexical
-            // scope of a nested inline body. Its ordinary body was deliberately removed from the
-            // compact Pass-1 syntax and does not own work in this check.
-            if selected_body_declarations.is_some_and(|selected| !selected.contains(&f.span)) {
-                continue;
-            }
-            if let Some(contract) = self.decode_fun_contract(scope, f) {
-                // Contract type conditions belong to the CALLEE declaration. Resolve them while
-                // that declaration's type parameters and imports are still in scope, then keep the
-                // resulting stable semantic identities on the signature/metadata handoff. Deferring
-                // a source spelling such as `R` until a call site incorrectly asks the caller's
-                // lexical scope to resolve the callee's formal.
-                let declaration_scope = scope.child(ScopeKind::Function { receiver: None });
-                let type_parameters = TParams::symbolic_from_decl_with(
-                    &f.type_params,
-                    &f.type_param_bounds,
-                    &|name| self.select_classifier(scope, name).found(),
-                )
-                .alpha_renamed_declaration(
-                    &f.type_params,
-                    self.compilation_id,
-                    self.file_index,
-                    f.signature_span.lo,
-                );
-                declaration_scope.declare_tparams(&f.type_params, &type_parameters, |name| {
-                    f.reified_type_params.contains(name)
-                });
-                let contract = contract.with_resolved_types(&mut |reference| {
-                    let ty = self.type_ref_ty_silent(&declaration_scope, reference);
-                    (ty != Ty::Error).then_some(ty)
-                });
-                self.source_contracts
-                    .insert(d, std::sync::Arc::new(contract));
-            }
-        }
-    }
-
-    /// The decoded contract of a source function, or `None` when its body has no (confirmed)
-    /// `kotlin.contracts.contract { … }` statement.
-    pub(super) fn decode_fun_contract(
-        &self,
-        scope: &CheckerScope<'_>,
-        f: &FunDecl,
-    ) -> Option<crate::contracts::Contract> {
-        let crate::ast::FunBody::Block(block) = f.body else {
-            return None;
-        };
-        let Expr::Block { stmts, trailing } = self.file.expr(block) else {
-            return None;
-        };
-        let expression = stmts
-            .iter()
-            .filter_map(|statement| match self.file.stmt(*statement) {
-                Stmt::Expr(expression) => Some(*expression),
-                _ => None,
-            })
-            .chain(trailing.iter().copied())
-            .find(|expression| self.is_contract_call(scope, *expression))?;
-        let params: Vec<String> = f.params.iter().map(|p| p.name.clone()).collect();
-        crate::contracts::decode_source(
-            self.file,
-            expression,
-            &params,
-            &f.name,
-            f.receiver.is_some(),
+    /// Whether checked call `e` selected the platform's erased contract-declaration intrinsic. The
+    /// call is checked like any other first; this reads the declaration overload selection
+    /// recorded for it, identified by its full signature.
+    pub(super) fn selects_contract_intrinsic(&self, e: ExprId) -> bool {
+        matches!(
+            self.resolved_calls.get(&e),
+            Some(ResolvedCall::TopLevel(call))
+                if self.libraries.is_erased_contract_callable(&call.callable)
         )
     }
 
-    /// The contract of the function a call resolved to — decoded from same-file source through the
-    /// selected declaration identity, or read from metadata attached to the selected callable.
+    /// The contract of the function a call resolved to: the Pass-1 contract or the metadata contract
+    /// attached to the selected callable.
     pub(super) fn contract_for_call(
         &self,
         call: ExprId,
@@ -111,20 +24,8 @@ impl Checker<'_> {
         match self.resolved_calls.get(&call) {
             Some(ResolvedCall::Member(c)) => c.member.contract.clone(),
             Some(ResolvedCall::Companion(member)) => member.contract.clone(),
-            Some(ResolvedCall::TopLevel(c)) => c.callable.contract.clone().or_else(|| {
-                c.source_decl
-                    .and_then(|d| self.source_contracts.get(&d).cloned())
-            }),
-            Some(ResolvedCall::Extension(c)) => c.callable.contract.clone().or_else(|| {
-                c.source
-                    .filter(|(file, _)| *file == self.file_index)
-                    .and_then(|(_, decl)| self.source_contracts.get(&DeclId(decl)).cloned())
-            }),
-            // Key by the selected declaration, NOT by name: `source_contracts` is a HashMap, so a
-            // name scan could bind a same-named sibling overload's contract (nondeterministically)
-            // to this call. `source` is (file, decl); only same-file decls are decoded here —
-            // cross-file extension contracts arrive already patched onto the signature (see the
-            // `source_contracts` drain in `check_file_at_impl_mode`).
+            Some(ResolvedCall::TopLevel(c)) => c.callable.contract.clone(),
+            Some(ResolvedCall::Extension(c)) => c.callable.contract.clone(),
             _ => None,
         }
     }

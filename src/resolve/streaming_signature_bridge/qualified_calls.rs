@@ -24,19 +24,17 @@ impl ProductionSignatureSemantics<'_> {
         Ok(package)
     }
 
-    pub(super) fn select_qualified_package_call(
+    /// Run `select` with a resolver whose top-level scope is the package `qualifier` names, as
+    /// seen from `scope`'s file.
+    pub(super) fn with_qualified_package_resolver<T>(
         &self,
         scope: crate::fir::SignatureScope,
-        spelling: &str,
-        arguments: &[crate::fir::ResolvedSigCallArgument<'_>],
-        type_arguments: &[crate::fir::ResolvedTy],
-        trailing_lambda: bool,
-        demand: &mut dyn FnMut(
-            crate::fir::DeclarationId,
-        )
-            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
-    ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
-        let (qualifier, name) = spelling.rsplit_once('.').ok_or_else(Self::failure)?;
+        qualifier: &str,
+        select: impl FnOnce(
+            crate::types::TypeName,
+            &crate::symbol_resolver::SymbolResolver<'_>,
+        ) -> Result<T, crate::fir::DiagnosticId>,
+    ) -> Result<T, crate::fir::DiagnosticId> {
         let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
         let package = self.qualified_package(qualifier, &module)?;
         let packages = [package];
@@ -52,6 +50,23 @@ impl ProductionSignatureSemantics<'_> {
             &packages,
         )
         .with_access_context(access_package, scope.source.raw(), Vec::new());
+        select(package, &resolver)
+    }
+
+    pub(super) fn select_qualified_package_call(
+        &self,
+        scope: crate::fir::SignatureScope,
+        spelling: &str,
+        arguments: &[crate::fir::ResolvedSigCallArgument<'_>],
+        type_arguments: &[crate::fir::ResolvedTy],
+        trailing_lambda: bool,
+        demand: &mut dyn FnMut(
+            crate::fir::DeclarationId,
+        )
+            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+    ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
+        let (qualifier, name) = spelling.rsplit_once('.').ok_or_else(Self::failure)?;
+        self.with_qualified_package_resolver(scope, qualifier, |package, resolver| {
         let candidates = self.implicit_context_candidates(
             scope,
             resolver.accessible_top_level_candidates(name).into_iter(),
@@ -106,6 +121,7 @@ impl ProductionSignatureSemantics<'_> {
             callable.ret,
         );
         crate::fir::ResolvedTy::new(callable.ret).map_err(|_| Self::failure())
+        })
     }
 
     pub(super) fn qualified_package_call_argument_expectations(
@@ -117,21 +133,7 @@ impl ProductionSignatureSemantics<'_> {
         trailing_lambda: bool,
     ) -> Result<Box<[Option<crate::fir::ResolvedTy>]>, crate::fir::DiagnosticId> {
         let (qualifier, name) = spelling.rsplit_once('.').ok_or_else(Self::failure)?;
-        let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
-        let package = self.qualified_package(qualifier, &module)?;
-        let packages = [package];
-        let access_package = self
-            .headers
-            .sources
-            .get(scope.source)
-            .ok_or_else(Self::failure)?
-            .package;
-        let resolver = crate::symbol_resolver::SymbolResolver::new_scoped_with_module(
-            self.table.libraries.as_ref(),
-            &module,
-            &packages,
-        )
-        .with_access_context(access_package, scope.source.raw(), Vec::new());
+        self.with_qualified_package_resolver(scope, qualifier, |_, resolver| {
         let candidates = self.implicit_context_candidates(
             scope,
             resolver.accessible_top_level_candidates(name).into_iter(),
@@ -151,7 +153,7 @@ impl ProductionSignatureSemantics<'_> {
             })
             .ok_or_else(Self::failure)?;
         let parameters = Self::functional_parameter_shapes(
-            &resolver,
+            resolver,
             &selected,
             crate::symbol_resolver::specialized_function_params(&selected, &kinds, &type_arguments),
         );
@@ -162,5 +164,6 @@ impl ProductionSignatureSemantics<'_> {
             trailing_lambda,
         )
         .ok_or_else(Self::failure)
+        })
     }
 }

@@ -11069,7 +11069,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `init` block or a nested block, and not an expression body); local, open, abstract, overriding
   and non-private interface functions cannot declare one; property accessors and secondary
   constructors may. Its description may refer only to the owner's value parameters and extension
-  receiver, and describes each parameter with at most one `callsInPlace`. Verified against kotlinc
+  receiver, and describes each parameter with at most one `callsInPlace`. Recognition follows the
+  declarations a call selects, never its spelling past raw FIR: a first statement spelled
+  `contract` (simple or package-qualified) declares a contract only when ordinary overload
+  selection picks the `kotlin.contracts.contract` intrinsic, so an applicable same-package
+  `contract` shadows it silently and an import alias of the intrinsic is a misplaced contract
+  ("contract should be the first statement."). Each description call is an effect only when it
+  selects a `ContractBuilder` or `SimpleEffect` member; any other selection is reported at its
+  statement as "'pkg/name' is not part of the contracts DSL.". An invocation kind must select an
+  `InvocationKind` entry (imported, aliased or fully qualified alike); a same-named top-level
+  property, object member or parameter is "'R|pkg/NAME|' is not a valid invocation kind." (object
+  members as `Q|Owner|.R|/Owner.NAME|`, parameters as `R|<local>/name|`). Verified against kotlinc
   2.4.20. (`tests/contract_smart_casts_e2e.rs`, `tests/contract_declarations_e2e.rs`.)
 - **The receiver of a compound member assignment.** `receiver.x op= value` evaluates `receiver`
   once. A read of a `val`, a parameter, or a value a lambda or local function lifted to a method
