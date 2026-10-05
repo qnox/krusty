@@ -914,6 +914,10 @@ fn extract_file_stub_inventory(
                 .with(DeclarationFlags::OPERATOR, function.is_operator())
                 .with(DeclarationFlags::INFIX, function.is_infix())
                 .with(
+                    DeclarationFlags::HAS_VISIBILITY_MODIFIER,
+                    function.has_visibility_modifier(),
+                )
+                .with(
                     DeclarationFlags::COMPANION,
                     function.is_companion_extension(),
                 )
@@ -1039,6 +1043,10 @@ fn extract_file_stub_inventory(
                 .with(DeclarationFlags::OVERRIDE, property.is_override)
                 .with(DeclarationFlags::ABSTRACT, property.is_abstract)
                 .with(DeclarationFlags::MUTABLE, property.is_var)
+                .with(
+                    DeclarationFlags::HAS_VISIBILITY_MODIFIER,
+                    property.has_visibility_modifier,
+                )
                 .with(DeclarationFlags::LATEINIT, property.is_lateinit)
                 .with(DeclarationFlags::DELEGATED, property.delegate.is_some())
                 .with(
@@ -1237,7 +1245,11 @@ fn extract_file_stub_inventory(
                     .with(DeclarationFlags::PROPERTY_PARAMETER, true)
                     .with(DeclarationFlags::MUTABLE, property.is_var)
                     .with(DeclarationFlags::OPEN, property.is_open)
-                    .with(DeclarationFlags::OVERRIDE, property.is_override),
+                    .with(DeclarationFlags::OVERRIDE, property.is_override)
+                    .with(
+                        DeclarationFlags::HAS_VISIBILITY_MODIFIER,
+                        property.has_visibility_modifier,
+                    ),
             });
         }
         // Data-class component/copy callables participate in ordinary overload selection during

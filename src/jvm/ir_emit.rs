@@ -3637,8 +3637,12 @@ fn emit_interface_class(
                 });
                 emit_holder_method(ir, fid, c.fq_name, &fq_name, facade, di, env);
             }
-            function_annotations::add_abstract(ir, &mut cw, fid, &signature_formatter, env);
-            // PUBLIC | ABSTRACT
+            // A private member has NO interface-side declaration under `disable`: kotlinc writes
+            // only the holder's private static (measured on 2.4.20), and a private abstract method
+            // is not even a legal class-file shape (ACC_PRIVATE|ACC_ABSTRACT fails to load).
+            if !ir.method_visibility(fid).is_private() {
+                function_annotations::add_abstract(ir, &mut cw, fid, &signature_formatter, env);
+            }
         }
         // An interface method with default parameters gets a STATIC `<name>$default(iface, params…, mask,
         // marker)` (the JVM realization of interface default args) — it applies the defaults then dispatches

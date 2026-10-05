@@ -31,7 +31,7 @@ mod nesting;
 mod properties;
 mod return_labels;
 mod value_parameters;
-use declaration_modifiers::{function_flags, visibility_of};
+use declaration_modifiers::{function_flags, has_visibility_modifier, visibility_of};
 pub(crate) use declaration_stream::visit_declaration_units_with_features;
 use file_features::apply_file_features;
 use lexical_type_parameters::LexicalTypeParameters;
@@ -1484,6 +1484,7 @@ impl<'a> Parser<'a> {
                     );
                     Self::mark_inline_accessors(&mut d, &mods);
                     d.visibility = visibility_of(&mods);
+                    d.has_visibility_modifier = has_visibility_modifier(&mods);
                     d.is_override = mods.iter().any(|m| m == "override");
                     d.is_external |= mods.iter().any(|m| m == "external");
                     d.is_expect = is_expect;
@@ -2435,6 +2436,7 @@ impl<'a> Parser<'a> {
                             .iter()
                             .any(|modifier| modifier == "open" || modifier == "override"),
                     visibility: visibility_of(&epmods),
+                    has_visibility_modifier: has_visibility_modifier(&epmods),
                     default,
                     annotations: Vec::new(),
                     annotation_args: Vec::new(),
@@ -3358,6 +3360,7 @@ impl<'a> Parser<'a> {
                             .iter()
                             .any(|modifier| modifier == "open" || modifier == "override"),
                     visibility: visibility_of(&cpmods),
+                    has_visibility_modifier: has_visibility_modifier(&cpmods),
                     default,
                     annotations: pannos,
                     annotation_args: pannos_args,
@@ -3783,6 +3786,7 @@ impl<'a> Parser<'a> {
                             p.is_abstract = true;
                         }
                         p.visibility = visibility_of(&imods);
+                        p.has_visibility_modifier = has_visibility_modifier(&imods);
                         p.is_open =
                             !imods.iter().any(|m| m == "final") && !p.visibility.is_private();
                         p.is_override = imods.iter().any(|m| m == "override");
