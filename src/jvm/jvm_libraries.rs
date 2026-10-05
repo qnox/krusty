@@ -7,6 +7,8 @@ mod builtin_classifier_shapes;
 mod builtins_customizer;
 mod catalog_presence;
 mod classifier_facts;
+#[cfg(test)]
+mod contract_dsl_tests;
 mod dependency_registration;
 mod generic_signatures;
 mod inline_body_plan;
@@ -16,8 +18,6 @@ mod mapped_builtin_member_status;
 mod parameter_plans;
 #[cfg(test)]
 mod provider_normalization_tests;
-#[cfg(test)]
-mod contract_dsl_tests;
 mod return_types;
 use return_types::{java_collection_return_lower_bound, metadata_declared_nonnull_return};
 mod static_properties;

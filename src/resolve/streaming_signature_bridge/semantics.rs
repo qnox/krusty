@@ -124,7 +124,7 @@ impl ProductionSignatureSemantics<'_> {
     /// has already selected the lexical value and its semantic type; evaluating the dependency
     /// must consume that fact directly instead of pretending the generated field is a Kotlin
     /// property and reopening member lookup.
-    fn enclosing_capture_type(
+    pub(super) fn enclosing_capture_type(
         &self,
         scope: crate::fir::SignatureScope,
         spelling: &str,
@@ -154,7 +154,7 @@ impl ProductionSignatureSemantics<'_> {
     /// interpreted as a package or classifier namespace. Compact signature evaluation must keep
     /// that ordering too; trying `Provider.create` as a classifier call first is observably wrong
     /// when an enclosing class declares a property named `Provider`.
-    fn qualified_value_receiver(
+    pub(super) fn qualified_value_receiver(
         &self,
         scope: crate::fir::SignatureScope,
         qualifier: &str,

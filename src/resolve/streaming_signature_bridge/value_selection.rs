@@ -105,6 +105,11 @@ impl ProductionSignatureSemantics<'_> {
                     {
                         return Ok(selected);
                     }
+                    // An enum entry is a value of its enum's static scope, named through the
+                    // classifier qualifier once the root is known not to be a value.
+                    if self.classifier_has_enum_entry(classifier, name) {
+                        return Self::enum_entry_value(classifier, name);
+                    }
                 }
             }
             if let Ok(value) = self.qualified_receiver_ty(scope, spelling, origin, demand) {
@@ -493,7 +498,9 @@ impl ProductionSignatureSemantics<'_> {
                 if let Some(parameter) =
                     self.demanded_enclosing_constructor_parameter(scope, spelling, demand)?
                 {
-                    return crate::fir::ResolvedTy::new(parameter).map_err(|_| Self::failure());
+                    return crate::fir::ResolvedTy::new(parameter)
+                        .map(SelectedValue::plain)
+                        .map_err(|_| Self::failure());
                 }
                 // The authoritative classifier operation owns lexical declaration, inherited,
                 // and file/import scope priority, including enum-entry-owned nested declarations.
@@ -507,7 +514,9 @@ impl ProductionSignatureSemantics<'_> {
                     );
                     return Err(Self::failure());
                 };
-                return crate::fir::ResolvedTy::new(value).map_err(|_| Self::failure());
+                return crate::fir::ResolvedTy::new(value)
+                    .map(SelectedValue::plain)
+                    .map_err(|_| Self::failure());
             }
         };
         if let Some(signature) = self.demanded_source_signature_at(
@@ -516,7 +525,7 @@ impl ProductionSignatureSemantics<'_> {
             Some(origin),
             demand,
         )? {
-            return Ok(signature.result);
+            return Ok(SelectedValue::plain(signature.result));
         }
         crate::fir::ResolvedTy::new(property.ty)
             .map(SelectedValue::plain)

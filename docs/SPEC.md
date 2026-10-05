@@ -11056,7 +11056,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   accessor the plan placed for it. A dependency superclass's companion is also an implicit
   receiver while Pass 1 infers a declaration's type, as a source one is. Verified against kotlinc
   2.4.20. (`tests/companion_private_members_e2e.rs`.)
- - **Contracts.** A `returns(…) implies` conclusion narrows the caller's arguments like the
+- **Contracts.** A `returns(…) implies` conclusion narrows the caller's arguments like the
   matching `is` or null test, a primitive type included; a Boolean call in a condition applies
   `returns(true)`/`returns(false)`, and a call compared with `null` applies `returnsNotNull()`
   (`!= null`) or `returns(null)` (`== null`). A final member function's contract narrows at its

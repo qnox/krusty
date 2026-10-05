@@ -448,14 +448,11 @@ impl ProductionSignatureSemantics<'_> {
                 classifier: property.owner,
                 name: property.name.clone(),
             });
-        let result = match self.demanded_source_signature(
-            None,
-            property.stable_declaration,
-            demand,
-        )? {
-            Some(signature) => signature.result,
-            None => crate::fir::ResolvedTy::new(property.ty).map_err(|_| Self::failure())?,
-        };
+        let result =
+            match self.demanded_source_signature(None, property.stable_declaration, demand)? {
+                Some(signature) => signature.result,
+                None => crate::fir::ResolvedTy::new(property.ty).map_err(|_| Self::failure())?,
+            };
         Ok(Some(SelectedValue { result, enum_entry }))
     }
 }

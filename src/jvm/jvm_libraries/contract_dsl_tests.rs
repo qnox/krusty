@@ -69,13 +69,13 @@ fn a_same_owner_same_name_same_arity_member_of_another_signature_is_not_the_dsl(
     let builder = "kotlin/contracts/ContractBuilder";
     let [_, returns_value] = members(&libraries, builder, "returns")
         .try_into()
-        .expect("ContractBuilder declares returns() and returns(value)");
+        .unwrap_or_else(|_| panic!("ContractBuilder declares returns() and returns(value)"));
     let [calls_in_place] = members(&libraries, builder, "callsInPlace")
         .try_into()
-        .expect("ContractBuilder declares one callsInPlace");
+        .unwrap_or_else(|_| panic!("ContractBuilder declares one callsInPlace"));
     let [implies] = members(&libraries, "kotlin/contracts/SimpleEffect", "implies")
         .try_into()
-        .expect("SimpleEffect declares one implies");
+        .unwrap_or_else(|_| panic!("SimpleEffect declares one implies"));
     let foreign_kind = Ty::obj("p/InvocationKind");
     let variants = [
         // `returns(value: Int)`, and `returns(value: Any?)` returning another type.
