@@ -756,6 +756,13 @@ fn add_forwarder(
         value: None,
     });
     let parameter_count = params.len();
+    // A forwarder in a generic class signs the member as that class sees it: `class Impl<D>(b:
+    // Base<D>) : Base<D> by b` forwards `foo(TD;)TD;`, not its erasure.
+    let semantic = params
+        .iter()
+        .chain(std::iter::once(&ret))
+        .any(|ty| crate::types::ty_mentions_any_param(*ty))
+        .then(|| (params.clone(), ret));
     let function = ir.add_fun(IrFunction {
         name,
         params,
@@ -771,6 +778,9 @@ fn add_forwarder(
     // kotlinc's forwarder has no source line, yet it names its receiver and parameters.
     ir.fn_debug_locals.insert(function);
     ir.interface_delegation_forwarders.insert(function);
+    if let Some(semantic) = semantic {
+        ir.member_semantic_sigs.insert(function, semantic);
+    }
     function
 }
 
