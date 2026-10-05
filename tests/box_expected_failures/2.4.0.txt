@@ -4,8 +4,6 @@
 # The goal is to empty this list of expected failures.
 bridges/internalMethodOverrideInOtherModule.kt
 bridges/internalMethodOverrideMultipleInheritance.kt
-compileKotlinAgainstKotlin/inlineClasses/privateCompanionObjectValInDifferentModule.kt
-compileKotlinAgainstKotlin/inlineClasses/privateTopLevelValInDifferentModule.kt
 coroutines/tailCallOptimizations/crossinline.kt
 functions/functionNtoString.kt
 functions/functionNtoStringGeneric.kt

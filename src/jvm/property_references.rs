@@ -16,8 +16,8 @@ use crate::fir::{
     FirCallableReferenceBinding, FirPropertyReferenceTarget, FirPropertyTarget, PropertyId,
 };
 use crate::ir::{
-    FunId, IrCheckedOperation, IrClass, IrClassifierKind, IrExpr, IrFile, IrLocalPropertyLayout,
-    IrModuleProperty, PropRef,
+    FunId, IrCheckedOperation, IrClass, IrExpr, IrFile, IrLocalPropertyLayout, IrModuleProperty,
+    PropRef,
 };
 use crate::types::{type_name, Ty, TypeName};
 
@@ -181,17 +181,13 @@ pub(super) fn realize(
                     mutable,
                     declared_accessors(ir, target),
                     (&getter, setter.as_deref()),
-                    ModulePropertySite {
-                        caller: reference_owner,
-                        dispatch: None,
-                    },
+                    reference_owner,
                 )?
             }
             FirPropertyReferenceTarget::SpecializedModule {
                 property,
                 getter_name,
                 setter_name,
-                reflection_owner,
                 ..
             } => module_property(
                 ir.referenced_module_properties
@@ -202,11 +198,7 @@ pub(super) fn realize(
                 mutable,
                 declared_accessors(ir, property),
                 (getter_name.as_ref(), setter_name.as_deref()),
-                ModulePropertySite {
-                    caller: reference_owner,
-                    dispatch: referenced_member_dispatch(ir, *reflection_owner)
-                        .map_err(|()| PropertyReferenceRealizationTarget::Module(property))?,
-                },
+                reference_owner,
             )?,
             FirPropertyReferenceTarget::Classifier {
                 owner,
@@ -720,39 +712,6 @@ fn callable_descriptor(callable: &crate::backend::BackendCallableFact) -> String
     }
 }
 
-/// Where a source property reference sits, beyond the declaration it selected.
-struct ModulePropertySite {
-    /// Lexical class containing the reference. A protected member uses it as the bridge owner.
-    caller: Option<TypeName>,
-    /// Instance member written on a classifier (`A::parent` while `parent` is declared on a
-    /// supertype). `None` for a delegated metadata reference, which names the declaration.
-    dispatch: Option<ReferencedMemberDispatch>,
-}
-
-/// The classifier an instance property reference was written on, and whether calls through it
-/// are interface calls.
-struct ReferencedMemberDispatch {
-    class: TypeName,
-    is_interface: bool,
-}
-
-fn referenced_member_dispatch(
-    ir: &IrFile,
-    reflection_owner: Option<TypeName>,
-) -> Result<Option<ReferencedMemberDispatch>, ()> {
-    let Some(class) = reflection_owner else {
-        return Ok(None);
-    };
-    let is_interface = matches!(
-        ir.source_classifier_kind(class).ok_or(())?,
-        IrClassifierKind::Interface | IrClassifierKind::Annotation
-    );
-    Ok(Some(ReferencedMemberDispatch {
-        class,
-        is_interface,
-    }))
-}
-
 fn module_property(
     property: &IrModuleProperty,
     stems: &[String],
@@ -760,7 +719,7 @@ fn module_property(
     reference_mutable: bool,
     declared: DeclaredAccessors,
     selected_accessor_names: (&str, Option<&str>),
-    site: ModulePropertySite,
+    reference_owner: Option<TypeName>,
 ) -> Result<(PropRef, PropertyReferenceRealization), PropertyReferenceRealizationTarget> {
     let failure = PropertyReferenceRealizationTarget::Module(target);
     if !property.context_parameters.is_empty() || reference_mutable && !property.mutable {
@@ -791,7 +750,7 @@ fn module_property(
         .is_none()
         .then_some(enclosing)
         .flatten()
-        .zip(site.caller)
+        .zip(reference_owner)
         .filter(|(declaring, caller)| declaring.namespace() != caller.namespace())
         .filter(|_| property.extension_receiver.is_none() && !companion_associated)
         .and_then(|(target_owner, bridge_owner)| {
@@ -826,34 +785,11 @@ fn module_property(
             declared.to_owned()
         }
     };
-    let instance_member =
-        property.extension_receiver.is_none() && !companion_associated && enclosing.is_some();
-    // `A::parent` and `a::parent` name A, even when the declaration is a supertype member.
-    // kotlin-reflect substitutes the property type from that owner, and the getter is A's too.
-    let referenced = instance_member.then_some(site.dispatch).flatten();
-    let owner = referenced
-        .as_ref()
-        .map(|dispatch| dispatch.class)
-        .or_else(|| {
-            property
-                .extension_receiver
-                .and_then(Ty::kotlin_class_internal)
-        })
+    let owner = property
+        .extension_receiver
+        .and_then(Ty::kotlin_class_internal)
         .or(enclosing)
         .unwrap_or(static_owner);
-    // A protected bridge targets the declaration owner and is later rewritten to the bridge
-    // owner. Keep that physical identity separate from the classifier used for reflection.
-    let call_dispatch = protected_bridge
-        .is_none()
-        .then_some(referenced.as_ref())
-        .flatten();
-    let call_owner = call_dispatch
-        .map(|dispatch| dispatch.class)
-        .or(enclosing)
-        .unwrap_or(static_owner);
-    let owner_is_interface = call_dispatch
-        .map(|dispatch| dispatch.is_interface)
-        .unwrap_or_else(|| super::module_calls::owner_is_jvm_interface(property));
     // A companion-block receiver names the reflected classifier but is not passed to the accessor.
     // Keep the semantic owner (`C`) separate from the physical static call owner.
     let static_dispatch =
@@ -912,7 +848,7 @@ fn module_property(
     Ok((
         PropRef {
             owner_internal: Some(owner),
-            call_owner_internal: Some(call_owner),
+            call_owner_internal: Some(enclosing.unwrap_or(static_owner)),
             prop_name: name.to_string(),
             getter_name: bridged_name(
                 &declared_getter_name,
@@ -924,7 +860,7 @@ fn module_property(
                 bridged_name(name, bridged_setter.is_some(), declared.setter.is_some())
             }),
             setter_descriptor,
-            owner_is_interface,
+            owner_is_interface: super::module_calls::owner_is_jvm_interface(property),
             prop_ty: property.ty,
             bound: false,
             static_dispatch,
@@ -1035,6 +971,134 @@ fn synthesize(
             ty: class,
             field: "INSTANCE",
         },
+    }
+}
+
+/// A private companion property is realized before its field moves to the outer class. Once that
+/// hoist (and any value-class carrier erasure) has happened, the reference calls
+/// `access$get<X>$cp` there, and a `var` calls `access$set<X>$cp` with the same physical value.
+/// Reflection still reports `get<X>` of that field type, including a nullable primitive carrier
+/// that stayed boxed.
+pub(crate) fn retarget_hoisted_companion_references(
+    ir: &mut IrFile,
+    realizations: &mut PropertyReferenceRealizations,
+) {
+    struct Retarget {
+        class_index: usize,
+        outer: TypeName,
+        getter_call: String,
+        getter_descriptor: String,
+        declared_getter: String,
+        setter_call: Option<String>,
+        physical: Ty,
+        value_class: Option<TypeName>,
+    }
+
+    let mut pending = Vec::new();
+    for (class_index, class) in ir.classes.iter().enumerate() {
+        if class.prop_ref.is_none() {
+            continue;
+        }
+        let Some(realization) = realizations.get(class.fq_name) else {
+            continue;
+        };
+        let Some(property) = realization.member_access_bridge else {
+            continue;
+        };
+        if ir
+            .checked_properties
+            .get(&property)
+            .is_some_and(|checked| checked.delegate.is_some())
+        {
+            continue;
+        }
+        let Some(IrLocalPropertyLayout::Member {
+            class: companion,
+            property: property_index,
+            ..
+        }) = ir.local_property_layouts.get(&property)
+        else {
+            continue;
+        };
+        let Some(companion_class) = ir.classes.get(*companion as usize) else {
+            continue;
+        };
+        if !companion_class.is_companion {
+            continue;
+        }
+        let Some(static_index) =
+            ir.jvm_companion_property_static(companion_class.fq_name, *property_index)
+        else {
+            continue;
+        };
+        if !ir.is_jvm_companion_hoisted_static(static_index) || ir.is_jvm_field_static(static_index)
+        {
+            continue;
+        }
+        let storage = &ir.statics[static_index as usize];
+        let Some(outer) = storage.owner else {
+            continue;
+        };
+        let physical = storage.ty;
+        let declared_getter = realization.declared_getter_name.clone();
+        let getter_descriptor = format!("(){}", crate::jvm::names::type_descriptor(physical));
+        let setter_call = realization
+            .declared_setter_name
+            .clone()
+            .map(|name| format!("access${name}$cp"));
+        pending.push(Retarget {
+            class_index,
+            outer,
+            getter_call: format!("access${declared_getter}$cp"),
+            getter_descriptor,
+            declared_getter,
+            setter_call,
+            physical,
+            // A field that is already the value class is the boxed nullable carrier (`I?`).
+            // Recording it as a carrier would unbox the bridge argument to the underlying primitive.
+            value_class: storage
+                .erased_declared_ty
+                .and_then(|original| original.non_null().obj_internal())
+                .filter(|value_class| physical.non_null().obj_internal() != Some(*value_class)),
+        });
+    }
+
+    for update in pending {
+        let reference_name = ir.classes[update.class_index].fq_name;
+        let Some(realization) = realizations.get_mut(reference_name) else {
+            continue;
+        };
+        let setter_descriptor = update
+            .setter_call
+            .as_ref()
+            .map(|_| format!("({})V", crate::jvm::names::type_descriptor(update.physical)));
+        realization.physical_getter_ret = Some(update.physical);
+        realization.getter_bridge_owner = Some(update.outer);
+        realization.reflection_getter =
+            Some((update.declared_getter, update.getter_descriptor.clone()));
+        realization.getter_field = None;
+        realization.setter_field = None;
+        realization.member_access_bridge = None;
+        realization.accessor_names_are_physical = true;
+        if update.setter_call.is_some() {
+            realization.physical_setter_value = Some(update.physical);
+            realization.setter_bridge_owner = Some(update.outer);
+        }
+        // The value-class pass may already have marked this reference for unboxing. A nullable
+        // primitive carrier is stored as the box, so that mark has to be cleared with the retarget.
+        realization.boxed_value_class = update.value_class;
+        let reference = ir.classes[update.class_index]
+            .prop_ref
+            .as_mut()
+            .expect("the scan only queued classes that have a property reference");
+        reference.call_owner_internal = Some(update.outer);
+        reference.getter_name = update.getter_call;
+        reference.getter_descriptor = Some(update.getter_descriptor);
+        reference.ext_facade = None;
+        if let Some(setter_call) = update.setter_call {
+            reference.setter_name = Some(setter_call);
+            reference.setter_descriptor = setter_descriptor;
+        }
     }
 }
 
