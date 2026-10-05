@@ -15,6 +15,7 @@ use crate::types::Ty;
 
 mod callable_body_returns;
 mod catch_clauses;
+mod checked_hierarchy;
 mod checked_substitutions;
 mod integral_constants;
 mod local_classifier_provenance;
@@ -239,40 +240,30 @@ fn range_loop_records_an_exact_type_stable_bound_read() {
     assert_eq!(ir.logical_types.get(&end), Some(&Ty::Int));
 }
 
+/// fir2ir holds an elvis's left side in a temporary of its own (nullable) type even over a safe
+/// call with a non-null selector; the JVM's bytecode passes, not common lowering, decide whether
+/// the boxed value and its null check survive.
 #[test]
-fn nonnull_safe_call_selector_flows_directly_into_elvis_result() {
+fn an_elvis_over_a_safe_call_holds_the_nullable_value_in_its_own_temporary() {
     let ir = lower_single_source(
         "fun length(value: String?): Int = value?.length ?: -1\n",
         "SafeCallElvis",
     );
-    assert!(ir.exprs.iter().any(|expression| {
-        matches!(
-            expression,
-            IrExpr::Call {
-                callee: Callee::Intrinsic {
-                    operation: IrIntrinsic::StringLength,
+    let temporaries = ir
+        .exprs
+        .iter()
+        .filter(|expression| {
+            matches!(
+                expression,
+                IrExpr::Variable {
+                    ty,
+                    named: false,
                     ..
-                },
-                ..
-            }
-        )
-    }));
-    assert!(!ir.exprs.iter().any(|expression| {
-        matches!(
-            expression,
-            IrExpr::Variable {
-                ty,
-                named: false,
-                ..
-            } if *ty == Ty::nullable(Ty::Int)
-        ) || matches!(
-            expression,
-            IrExpr::TypeOp {
-                type_operand,
-                ..
-            } if *type_operand == Ty::nullable(Ty::Int)
-        )
-    }));
+                } if *ty == Ty::nullable(Ty::Int)
+            )
+        })
+        .count();
+    assert_eq!(temporaries, 1);
 }
 
 #[test]
@@ -440,39 +431,6 @@ fn disabled_assertion_drops_its_unlowered_operand_graph() {
             args,
         } if args.is_empty()
     ));
-}
-
-#[test]
-fn common_ir_receives_the_complete_applied_classifier_hierarchy() {
-    let ir = lower_single_source(
-        "interface Root<T>\n\
-         interface Middle<U> : Root<U>\n\
-         class Leaf : Middle<String>\n",
-        "Hierarchy",
-    );
-    let leaf = crate::types::type_name("Leaf");
-    let middle = crate::types::type_name("Middle");
-    let root = crate::types::type_name("Root");
-    let hierarchy = ir
-        .classifier_hierarchies
-        .get(&leaf)
-        .expect("source class hierarchy must cross the FIR/common-IR boundary");
-
-    assert_eq!(
-        hierarchy
-            .iter()
-            .map(|entry| (entry.classifier, entry.applied, entry.depth))
-            .collect::<Vec<_>>(),
-        vec![
-            (leaf, Ty::obj("Leaf"), 0),
-            (middle, Ty::obj_args("Middle", &[Ty::String]), 1),
-            (root, Ty::obj_args("Root", &[Ty::String]), 2),
-            // A classifier that declares no supertype still has Kotlin's implicit root.
-            (crate::types::wk::any(), Ty::obj("kotlin/Any"), 3),
-        ]
-    );
-    ir.validate_determined_types()
-        .expect("applied hierarchy types must be pending-free");
 }
 
 #[test]

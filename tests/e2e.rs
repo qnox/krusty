@@ -591,6 +591,8 @@ mod deep_nested_type_e2e;
 mod default_args_member_e2e;
 #[path = "default_args_synthetic_e2e.rs"]
 mod default_args_synthetic_e2e;
+#[path = "default_constructor_header_pool_e2e.rs"]
+mod default_constructor_header_pool_e2e;
 #[path = "default_import_resolution_e2e.rs"]
 mod default_import_resolution_e2e;
 #[path = "default_stub_super_guard_e2e.rs"]
@@ -699,6 +701,8 @@ mod editor_failed_signature_recovery_e2e;
 mod elvis_newline_continuation_e2e;
 #[path = "elvis_nullability_join_e2e.rs"]
 mod elvis_nullability_join_e2e;
+#[path = "elvis_over_safe_call_e2e.rs"]
+mod elvis_over_safe_call_e2e;
 #[path = "elvis_return_smartcast_e2e.rs"]
 mod elvis_return_smartcast_e2e;
 #[path = "elvis_signature_inference_e2e.rs"]
@@ -725,6 +729,8 @@ mod enum_companion_field_order_e2e;
 mod enum_constant_annotation_e2e;
 #[path = "enum_constant_annotation_emit_e2e.rs"]
 mod enum_constant_annotation_emit_e2e;
+#[path = "enum_constructor_signature_e2e.rs"]
+mod enum_constructor_signature_e2e;
 #[path = "enum_ctor_default_arg_e2e.rs"]
 mod enum_ctor_default_arg_e2e;
 #[path = "enum_entries_e2e.rs"]
@@ -1311,6 +1317,8 @@ mod local_class_scoping_e2e;
 mod local_delegated_accessors_e2e;
 #[path = "local_delegated_property_references_e2e.rs"]
 mod local_delegated_property_references_e2e;
+#[path = "local_extension_receiver_name_e2e.rs"]
+mod local_extension_receiver_name_e2e;
 #[path = "local_fun_default_args_e2e.rs"]
 mod local_fun_default_args_e2e;
 #[path = "local_fun_overload_e2e.rs"]
@@ -1467,6 +1475,8 @@ mod nullable_uint_property_e2e;
 mod open_end_range_membership_e2e;
 #[path = "optional_expectation_annotation_e2e.rs"]
 mod optional_expectation_annotation_e2e;
+#[path = "primitive_explicit_equals_e2e.rs"]
+mod primitive_explicit_equals_e2e;
 #[path = "primitive_hash_code_e2e.rs"]
 mod primitive_hash_code_e2e;
 #[path = "reference_carrier_cast_e2e.rs"]
@@ -1984,6 +1994,8 @@ mod primitive_bound_generic_e2e;
 mod primitive_box_cast_e2e;
 #[path = "primitive_compare_branch_e2e.rs"]
 mod primitive_compare_branch_e2e;
+#[path = "primitive_compare_to_owner_e2e.rs"]
+mod primitive_compare_to_owner_e2e;
 #[path = "primitive_iterator_next_e2e.rs"]
 mod primitive_iterator_next_e2e;
 #[path = "primitive_operator_extension_e2e.rs"]
@@ -2103,6 +2115,8 @@ mod result_companion_targs_e2e;
 mod result_e2e;
 #[path = "result_property_carrier_e2e.rs"]
 mod result_property_carrier_e2e;
+#[path = "root_package_cast_message_e2e.rs"]
+mod root_package_cast_message_e2e;
 #[path = "run_catching_inline_e2e.rs"]
 mod run_catching_inline_e2e;
 #[path = "run_noreceiver_e2e.rs"]
@@ -2269,6 +2283,8 @@ mod stdlib_ifblank_null_e2e;
 mod string_concat_append_overload_e2e;
 #[path = "string_concat_pool_order_e2e.rs"]
 mod string_concat_pool_order_e2e;
+#[path = "string_concat_to_string_operand_e2e.rs"]
+mod string_concat_to_string_operand_e2e;
 #[path = "string_concatenation_e2e.rs"]
 mod string_concatenation_e2e;
 #[path = "string_plus_indy_e2e.rs"]
@@ -2633,6 +2649,8 @@ mod when_classpath_java_enum_e2e;
 mod when_lambda_branch_e2e;
 #[path = "when_multiple_else_check_e2e.rs"]
 mod when_multiple_else_check_e2e;
+#[path = "when_no_branch_matched_line_e2e.rs"]
+mod when_no_branch_matched_line_e2e;
 #[path = "when_nothing_arm_e2e.rs"]
 mod when_nothing_arm_e2e;
 #[path = "when_null_guard_smartcast_e2e.rs"]
@@ -2643,6 +2661,8 @@ mod when_statement_value_arm_e2e;
 mod when_subject_ieee754_e2e;
 #[path = "when_throwing_branch_e2e.rs"]
 mod when_throwing_branch_e2e;
+#[path = "when_type_condition_line_e2e.rs"]
+mod when_type_condition_line_e2e;
 #[path = "wildcard_branch_join_e2e.rs"]
 mod wildcard_branch_join_e2e;
 #[path = "wrapped_param_type_e2e.rs"]

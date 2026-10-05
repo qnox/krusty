@@ -1,6 +1,6 @@
 //! Realization of stable same-file callable identities as ordinary common-IR calls.
 
-mod argument_boundaries;
+pub(super) mod argument_boundaries;
 mod reordered_operands;
 
 use crate::fir::{

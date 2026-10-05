@@ -21,6 +21,7 @@ mod collection_barriers;
 mod common_metadata;
 pub mod companion;
 pub mod compilation_inputs;
+mod concatenated_to_string;
 mod constructor_debug;
 mod constructor_metadata;
 mod debug_local_names;
