@@ -562,6 +562,7 @@ fn check_body_group(
     {
         return None;
     }
+    let discovered_local_classifiers = !info.checked_local_class_declarations.is_empty();
     if let Err(declarations) = crate::resolve::publish_checked_local_signatures_in_pass_two_root(
         active_file,
         active,
@@ -578,6 +579,37 @@ fn check_body_group(
                 "internal error: checked local signatures were not publishable: {declarations:?}"
             ),
         );
+        return None;
+    }
+    if !discovered_local_classifiers {
+        return Some(info);
+    }
+
+    // A body-local classifier does not have a stable checked signature until the first traversal
+    // has entered its lexical statement and the bridge above has published that signature. The
+    // inherited override plan is part of that signature: member access later in the same enclosing
+    // body must therefore be checked against the published plan, not the provisional parser
+    // declaration. Repeat the ordinary checker after publication instead of duplicating access or
+    // override semantics at this orchestration boundary. The first traversal is discovery-only for
+    // this group, so replace its diagnostics with the authoritative traversal's exact sequence.
+    diags.diags.truncate(diagnostics_start);
+    let info = crate::resolve::check_selected_declarations_in_pass_two(
+        active_file,
+        raw_source as u32,
+        &selected_roots,
+        &selected_bodies,
+        active,
+        &group.bodies,
+        symbols,
+        index,
+        streamed_cache,
+        diags,
+    );
+    diags.collapse_duplicates_from(diagnostics_start);
+    if diags.diags[diagnostics_start..]
+        .iter()
+        .any(|diagnostic| diagnostic.severity == crate::diag::Severity::Error)
+    {
         return None;
     }
     Some(info)

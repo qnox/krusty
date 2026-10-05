@@ -24,9 +24,7 @@ fn shared_diagnostic_wording_matches_kotlinc() {
     );
     let mut krusty_errors = errors(&result.krusty_stderr);
     krusty_errors.extend(errors(&result.krusty_stdout));
-    let mut kotlinc_errors = errors(&result.reference_stderr);
-    krusty_errors.sort_by_key(|error| (error.line, error.column));
-    kotlinc_errors.sort_by_key(|error| (error.line, error.column));
+    let kotlinc_errors = errors(&result.reference_stderr);
     assert_eq!(krusty_errors, kotlinc_errors);
     assert_eq!(
         krusty_errors
@@ -104,9 +102,7 @@ fn inherited_override_visibility_access_matches_kotlinc() {
     );
     let mut krusty_errors = errors(&result.krusty_stderr);
     krusty_errors.extend(errors(&result.krusty_stdout));
-    let mut kotlinc_errors = errors(&result.reference_stderr);
-    krusty_errors.sort_by_key(|error| (error.line, error.column));
-    kotlinc_errors.sort_by_key(|error| (error.line, error.column));
+    let kotlinc_errors = errors(&result.reference_stderr);
     assert_eq!(krusty_errors, kotlinc_errors);
     assert_eq!(
         krusty_errors
@@ -121,9 +117,7 @@ fn inherited_override_visibility_access_matches_kotlinc() {
 fn internal_override_visibility_access_matches_kotlinc_across_modules() {
     // An override written without a visibility modifier keeps the overridden member's `internal`,
     // so a dependent module cannot call it. Both compilers reject at the callee with the same
-    // position; krusty's message renders the callee name only where kotlinc renders the full
-    // signature — a pre-existing wording gap of the internal member-access diagnostic (the
-    // protected path renders the full form), pinned here so a wording fix flips one assertion.
+    // complete diagnostic.
     let lib = "open class Base {\n\
                \x20   internal open fun f(): Int = 1\n\
                }\n\
@@ -146,16 +140,7 @@ fn internal_override_visibility_access_matches_kotlinc_across_modules() {
     let mut krusty_errors = errors(&result.krusty_stderr);
     krusty_errors.extend(errors(&result.krusty_stdout));
     let kotlinc_errors = errors(&result.reference_stderr);
-    assert_eq!(
-        krusty_errors
-            .iter()
-            .map(|error| (error.line, error.column))
-            .collect::<Vec<_>>(),
-        kotlinc_errors
-            .iter()
-            .map(|error| (error.line, error.column))
-            .collect::<Vec<_>>(),
-    );
+    assert_eq!(krusty_errors, kotlinc_errors);
     assert_eq!(
         kotlinc_errors
             .iter()
@@ -163,19 +148,9 @@ fn internal_override_visibility_access_matches_kotlinc_across_modules() {
             .collect::<Vec<_>>(),
         ["cannot access 'fun f(): Int': it is internal in 'Derived'."],
     );
-    assert_eq!(
-        krusty_errors
-            .iter()
-            .map(|error| error.message.as_str())
-            .collect::<Vec<_>>(),
-        ["cannot access 'f': it is internal in 'Derived'"],
-    );
 }
 
 #[test]
-#[ignore = "a local classifier's override plan is published when its declaring body finishes \
-            checking, so the enclosing body's own access checks precede the inherited-visibility \
-            correction; krusty still accepts the call"]
 fn local_override_visibility_access_matches_kotlinc() {
     // kotlinc rejects the enclosing function's read of the local class's inherited-`protected`
     // override; the emitted class itself already carries the inherited visibility (see

@@ -68175,12 +68175,13 @@ impl<'a> Checker<'a> {
         {
             if matches!(
                 selected.member.visibility,
-                Visibility::PackagePrivate | Visibility::Protected
+                Visibility::Internal | Visibility::PackagePrivate | Visibility::Protected
             ) {
-                let visibility = if selected.member.visibility == Visibility::Protected {
-                    "protected"
-                } else {
-                    "package-private"
+                let visibility = match selected.member.visibility {
+                    Visibility::Internal => "internal",
+                    Visibility::PackagePrivate => "package-private",
+                    Visibility::Protected => "protected",
+                    Visibility::Private | Visibility::Public => unreachable!(),
                 };
                 self.diags.error(
                     self.call_callee_name_span(call),
@@ -68197,7 +68198,7 @@ impl<'a> Checker<'a> {
             } else {
                 let visibility = match selected.member.visibility {
                     Visibility::Private => "private",
-                    Visibility::Internal => "internal",
+                    Visibility::Internal => unreachable!(),
                     Visibility::Public => "public",
                     Visibility::Protected | Visibility::PackagePrivate => unreachable!(),
                 };
