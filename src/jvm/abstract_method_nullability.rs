@@ -1,7 +1,8 @@
 //! kotlinc's nullability annotations on an abstract (bodiless) method.
 //!
 //! Having no body is why an abstract method gets no debug tables; it still carries `@NotNull` /
-//! `@Nullable` on each reference parameter and on a reference return.
+//! `@Nullable` on each reference parameter and on a reference return, a suspend one's always
+//! `@Nullable`.
 
 use crate::ir::{IrFile, IrFunction};
 use crate::types::Ty;
@@ -35,9 +36,15 @@ pub(super) fn annotations(
             }
         })
         .collect();
-    let result = (!declares_nullable_bounded_type_parameter(ir, fid, None))
-        .then(|| annotation(function.ret))
-        .flatten();
+    // A suspend function's result is its CPS `Object`: the value or `COROUTINE_SUSPENDED`, which
+    // kotlinc annotates `@Nullable` whatever the declared result.
+    let result = if ir.suspend_funs.contains(&fid) {
+        annotation(Ty::nullable(function.ret))
+    } else {
+        (!declares_nullable_bounded_type_parameter(ir, fid, None))
+            .then(|| annotation(function.ret))
+            .flatten()
+    };
     (result, parameters)
 }
 

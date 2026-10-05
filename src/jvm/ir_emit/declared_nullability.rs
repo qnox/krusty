@@ -3,7 +3,8 @@
 //! A reference result or parameter is annotated with its declared nullability. A value-class
 //! member's static replacement leaves its carrier unannotated, and so does every position whose type
 //! is a bare type parameter with a nullable bound. The value-class interface entry, which stands in
-//! for that member on the box, carries the same annotations less the carrier.
+//! for that member on the box, carries the same annotations less the carrier. A suspend
+//! function's result is its CPS `Object`, always `@Nullable`.
 
 use super::body_has_reified_markers;
 use crate::ir::IrFile;
@@ -41,11 +42,18 @@ pub(super) fn declared_nullability(ir: &IrFile, fid: u32) -> DeclaredNullability
     let reified_body = f
         .body
         .is_some_and(|body| body_has_reified_markers(ir, body));
+    // A suspend function returns its result or `COROUTINE_SUSPENDED` through the CPS `Object`,
+    // which kotlinc annotates `@Nullable` whatever the declared result.
+    let suspend = ir.suspend_funs.contains(&fid);
     let ret_ann = (!lambda_impl
         && !reified_body
-        && gsig.is_none_or(|g| !g.ret.is_some_and(unannotated_type_parameter))
-        && member_sem.is_none_or(|(_, r)| !unannotated_type_parameter(*r)))
+        && (suspend
+            || (gsig.is_none_or(|g| !g.ret.is_some_and(unannotated_type_parameter))
+                && member_sem.is_none_or(|(_, r)| !unannotated_type_parameter(*r)))))
     .then(|| {
+        if suspend {
+            return ann_of(f.ret, Ty::nullable(f.ret));
+        }
         let semantic = value_class_declaration
             .map(|(_, _, result)| *result)
             .unwrap_or(f.ret);
