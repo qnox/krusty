@@ -4518,7 +4518,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`select_source_constructor`). Separately, the JVM `<init>()` convenience overload of an
   all-defaults primary is emitted only when the class declares no constructor without value
   parameters (kotlinc's `JvmDefaultConstructorLowering`); a declared `constructor()` owns that
-  descriptor. Tests: `tests/constructor_argument_specificity_e2e.rs`.
+  descriptor. A `this(...)`/`super(...)` delegation holds its supplied arguments in temporaries
+  only when they are written out of parameter order, as a call does; an omitted default is filled
+  by the callee and orders nothing, so `this(y = 7)` passes `7` directly. A constructor's synthetic
+  default-argument overload interns its descriptor before its body, as kotlinc visits a method's
+  signature first. The classes are byte-identical to kotlinc 2.4.20's. Tests:
+  `tests/constructor_argument_specificity_e2e.rs`.
 
 - **Method type parameter that shadows its class's (`class Box<T> { fun <T> m(x: T): T }`).** The
   classpath member-return substitution (`JvmLibraries::member_return`) binds a generic class's formal

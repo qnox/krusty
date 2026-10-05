@@ -9,9 +9,16 @@
 //! applicable constructors such as `(x: Int = 1, y: Int = 2)` and `(x: Long = 4L, y: Long = 5L)`
 //! were reported as "none of the following candidates is applicable" for `C(x = 100)`, and as an
 //! ambiguous `this(...)` delegation, although kotlinc 2.4.20 selects the `Int` constructor. Every
-//! fixture below runs under both compilers and must agree.
+//! fixture below runs under both compilers, must agree, and must emit kotlinc's class files byte for
+//! byte.
 
 use super::common;
+
+/// Run `source` under both compilers, then require each of `classes` to be kotlinc's exact bytes.
+fn same_as_kotlinc(source: &str, stem: &str, classes: &[&str]) {
+    common::expect_box_same_as_kotlinc(source, stem);
+    common::assert_classes_identical_to_kotlinc(stem, source, classes);
+}
 
 const NUMERIC_PAIR: &str = "class C(val x: Int = 1, val y: Int = 2) {\n\
     var via = \"primary\"\n\
@@ -29,7 +36,11 @@ fun box(): String {{\n\
     return if (r == expected) \"OK\" else r.toString()\n\
 }}\n"
     );
-    common::expect_box_same_as_kotlinc(&source, "CtorOmittedDefaultSpecificity");
+    same_as_kotlinc(
+        &source,
+        "CtorOmittedDefaultSpecificity",
+        &["C", "CtorOmittedDefaultSpecificityKt"],
+    );
 }
 
 #[test]
@@ -46,7 +57,11 @@ fun box(): String {\n\
     val expected = listOf(\"empty:primary(8,2)\", \"named:primary(1,7)\")\n\
     return if (r == expected) \"OK\" else r.toString()\n\
 }\n";
-    common::expect_box_same_as_kotlinc(source, "CtorDelegationOmittedDefault");
+    same_as_kotlinc(
+        source,
+        "CtorDelegationOmittedDefault",
+        &["C", "CtorDelegationOmittedDefaultKt"],
+    );
 }
 
 #[test]
@@ -62,7 +77,11 @@ fun box(): String {\n\
     val r = \"${c.via}(${c.x},${c.y})\"\n\
     return if (r == \"primary(100,2)\") \"OK\" else r\n\
 }\n";
-    common::expect_box_same_as_kotlinc(source, "QualifiedCtorOmittedDefault");
+    same_as_kotlinc(
+        source,
+        "QualifiedCtorOmittedDefault",
+        &["Outer", "Outer$C", "QualifiedCtorOmittedDefaultKt"],
+    );
 }
 
 /// Each vararg element maps to the vararg parameter's element type, so a call with several elements
@@ -77,7 +96,11 @@ fun box(): String {\n\
     val r = listOf(V(1, 2).via, V(1L, 2L).via, V(*intArrayOf(3)).via)\n\
     return if (r == listOf(\"int\", \"long\", \"int\")) \"OK\" else r.toString()\n\
 }\n";
-    common::expect_box_same_as_kotlinc(source, "VarargCtorSpecificity");
+    same_as_kotlinc(
+        source,
+        "VarargCtorSpecificity",
+        &["V", "VarargCtorSpecificityKt"],
+    );
 }
 
 /// A primary constructor whose every parameter has a default gets a JVM `<init>()` convenience
@@ -93,6 +116,13 @@ fun box(): String {\n\
     return if (C().x == 5 && c.x == 5) \"OK\" else \"${C().x} ${c.x}\"\n\
 }\n";
     common::expect_box_same_as_kotlinc(source, "DeclaredNoArgumentConstructor");
+    // The byte comparison compiles against the Kotlin standard library alone, without the JDK the
+    // `box` reflection needs, so it compares the class declaration on its own.
+    common::assert_classes_identical_to_kotlinc(
+        "DeclaredNoArgumentConstructorClass",
+        "class C(val x: Int = 1) {\n    constructor() : this(5)\n}\n",
+        &["C"],
+    );
 }
 
 /// A kotlinc-compiled dependency's constructors enter the same selection: its `@Metadata` supplies
@@ -113,5 +143,12 @@ fun box(): String {\n\
     assert_eq!(
         common::expect_box_run_against_kotlinc(LIB, main).as_deref(),
         Some("OK")
+    );
+    let library = common::kotlinc_library(LIB).expect("reference kotlinc is provisioned");
+    common::assert_classes_identical_to_kotlinc_against(
+        "DependencyCtorOmittedDefault",
+        main,
+        &["DependencyCtorOmittedDefaultKt"],
+        &[library],
     );
 }
