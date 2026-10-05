@@ -795,6 +795,7 @@ fn specialized_generic_extension_property_reference_publishes_final_accessor_sha
     };
     let FirPropertyReferenceTarget::SpecializedModule {
         property,
+        reflection_owner,
         receiver,
         extension_receiver,
         property_type,
@@ -809,6 +810,7 @@ fn specialized_generic_extension_property_reference_publishes_final_accessor_sha
     };
     let int = ResolvedTy::new(Ty::Int).expect("Int is a publishable FIR type");
     assert!(index.property_declaration(*property).is_some());
+    assert_eq!(*reflection_owner, None);
     assert_eq!(*receiver, Some(int));
     assert!(*extension_receiver);
     assert_eq!(*property_type, int);

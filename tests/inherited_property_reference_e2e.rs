@@ -48,9 +48,7 @@ fn common_ir_records_the_written_owner_of_each_inherited_property_reference() {
                         reflection_owner, ..
                     },
                 ..
-            }) => reflection_owner
-                .as_ref()
-                .map(krusty::types::TypeName::render),
+            }) => reflection_owner.as_ref().map(|owner| owner.render()),
             _ => None,
         })
         .collect::<Vec<_>>();
