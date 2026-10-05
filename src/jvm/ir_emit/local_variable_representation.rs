@@ -48,6 +48,7 @@ impl Emitter<'_> {
         index: u32,
         semantic_ty: Ty,
         initializer: Option<ExprId>,
+        named: bool,
         code: &mut CodeBuilder,
     ) {
         // A mutable captured local is represented explicitly by a `RefNew` initializer. Its source
@@ -93,7 +94,17 @@ impl Emitter<'_> {
                 if emit_deferred_zero(self.ir, declaration, initializer, slot_ty, code, self.cw) {
                     slot_ty
                 } else {
-                    self.emit_consumed_operand(initializer, code)
+                    // Only a source declaration runs kotlinc's `visitVariable` line restoration.
+                    // Call-operand holders and backend suspension temps are unnamed even when a
+                    // later migration changes which lowering pass creates them.
+                    if named {
+                        let previous = self.enter_declared_initializer(initializer);
+                        let source = self.emit_consumed_operand(initializer, code);
+                        self.leave_declared_initializer(previous);
+                        source
+                    } else {
+                        self.emit_consumed_operand(initializer, code)
+                    }
                 };
             let semantic = self
                 .ir
