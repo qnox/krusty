@@ -107,6 +107,7 @@ impl Parser<'_> {
         let mut getter_span: Option<Span> = None;
         let mut getter_inline = false;
         let mut getter_ty: Option<TypeRef> = None;
+        let mut getter_annotations = Vec::new();
         let mut setter: Option<PropAccessor> = None;
         let mut explicit_backing_field = None;
         let mut accessor_external = false;
@@ -196,12 +197,18 @@ impl Parser<'_> {
                 self.i = save; // not an accessor — restore (incl. any consumed newlines/modifier)
                 break;
             }
+            // The prefix was only skipped while it could still belong to the next declaration. It
+            // is the accessor's own now: parse its annotations once, in place.
+            let keyword_index = self.i;
+            self.i = save;
+            let annotations = self.parse_accessor_prefix_annotations(keyword_index);
             let is_get = self.keyword_text("get");
             let accessor_keyword = self.tok().span;
             self.bump(); // 'get' / 'set'
             accessor_external |= is_external;
             if is_get {
                 getter_declared = true;
+                getter_annotations = annotations;
                 getter_inline = is_inline;
                 // A custom getter is `get() = expr` / `get() { … }`. A bare `get` or a `get()` with
                 // no body is the (redundant) explicit DEFAULT getter — consume its optional `()` and
@@ -228,7 +235,7 @@ impl Parser<'_> {
                 let _ = visibility; // getter visibility not modeled (rare); ignored
             } else {
                 // setter: optional `(param)` then optional body; `private set` has neither.
-                let param = self.parse_setter_param();
+                let (param, param_annotations) = self.parse_setter_param();
                 let accessor_span = Span::new(
                     accessor_keyword.lo,
                     self.t[self.i.saturating_sub(1)].span.hi,
@@ -247,6 +254,8 @@ impl Parser<'_> {
                     body,
                     visibility,
                     is_inline,
+                    annotations,
+                    param_annotations,
                 });
             }
         }
@@ -290,6 +299,7 @@ impl Parser<'_> {
             getter_span,
             getter_inline,
             getter_ty,
+            getter_annotations,
             getter_reads_field,
             setter,
             is_const,
@@ -302,6 +312,35 @@ impl Parser<'_> {
             declaration_span: Span::new(declaration_start, end.hi),
             name_span,
         }
+    }
+
+    /// Parse the annotations of an accessor's modifier prefix, which runs up to the `get`/`set`
+    /// keyword at `keyword_index`. Modifiers were already read by the lookahead.
+    fn parse_accessor_prefix_annotations(
+        &mut self,
+        keyword_index: usize,
+    ) -> Vec<crate::ast::AccessorAnnotation> {
+        let mut annotations = Vec::new();
+        while self.i < keyword_index {
+            if self.at(TokenKind::At) {
+                annotations.extend(self.parse_accessor_annotation());
+            } else {
+                self.bump();
+            }
+        }
+        annotations
+    }
+
+    /// One annotation on an accessor or a setter parameter. A use-site-targeted one (`@get:A`)
+    /// does not apply to this declaration.
+    pub(super) fn parse_accessor_annotation(&mut self) -> Option<crate::ast::AccessorAnnotation> {
+        let at = self.tok().span.lo;
+        let (annotation, arguments) = self.parse_annotation();
+        Some(crate::ast::AccessorAnnotation {
+            at,
+            annotation: annotation?,
+            arguments,
+        })
     }
 
     /// `inline val`/`inline var` marks every accessor inline, the same as writing `inline` on each

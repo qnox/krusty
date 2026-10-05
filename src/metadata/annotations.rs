@@ -57,3 +57,24 @@ impl MetadataAnnotations {
         &self.records
     }
 }
+
+/// What `@Metadata` records about a property's accessors' own annotations: the getter's and the
+/// setter's `HAS_ANNOTATIONS` bits and records (`Property.getter_annotation` f15,
+/// `setter_annotation` f16), and the setter value parameter's.
+#[derive(Clone, Debug, Default)]
+pub struct AccessorMetadataAnnotations {
+    pub getter: MetadataAnnotations,
+    pub setter: MetadataAnnotations,
+    pub setter_parameter: MetadataAnnotations,
+}
+
+impl AccessorMetadataAnnotations {
+    /// A property's checked accessor annotations, recorded in declaration order.
+    pub fn of(annotations: &crate::ir::AccessorAnnotations) -> Self {
+        Self {
+            getter: MetadataAnnotations::of(&annotations.getter),
+            setter: MetadataAnnotations::of(&annotations.setter),
+            setter_parameter: MetadataAnnotations::of(&annotations.setter_parameter),
+        }
+    }
+}

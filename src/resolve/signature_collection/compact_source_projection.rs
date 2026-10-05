@@ -320,9 +320,9 @@ pub(in crate::resolve) fn compact_source_imports(
         .collect()
 }
 
-/// Publish an annotation classifier's source-declared retention/target policy from compact
-/// headers. The annotation argument arena stores only resolved-policy enum spellings and owns no
-/// ordinary expression or parser identity.
+/// Register each source annotation classifier from compact headers with the default retention.
+/// Its declared `@Retention` and `@Target` are published once the classifier-annotation pass has
+/// checked those applications.
 pub(in crate::resolve) fn collect_compact_annotation_policies(
     headers: &crate::fir::StreamedHeaderModule,
     table: &mut SymbolTable,
@@ -333,60 +333,11 @@ pub(in crate::resolve) fn collect_compact_annotation_policies(
                 .flags
                 .has(crate::fir::DeclarationFlags::ANNOTATION_CLASS)
     }) {
-        let source = stub.source.raw();
-        let retention = headers
-            .annotation_policy_applications(stub.id)
-            .iter()
-            .find_map(|application| {
-                table
-                    .resolved_annotations
-                    .get(&(source, application.annotation.lo, application.annotation.hi))
-                    .filter(|name| name.matches("kotlin/annotation/Retention"))?;
-                let argument = *headers
-                    .annotation_policy_arguments(application.arguments)
-                    .first()?;
-                match headers.lookup_names.get(argument)? {
-                    "RUNTIME" => Some(crate::types::AnnotationRetention::Runtime),
-                    "BINARY" => Some(crate::types::AnnotationRetention::Binary),
-                    "SOURCE" => Some(crate::types::AnnotationRetention::Source),
-                    _ => None,
-                }
-            })
-            .unwrap_or(crate::types::AnnotationRetention::Default);
         let (_, annotation) = compact_classifier_identity(headers, stub)
             .expect("a compact annotation classifier must retain its stable identity");
-        table.annotation_retentions.insert(annotation, retention);
-
-        let declared_targets = headers
-            .annotation_policy_applications(stub.id)
-            .iter()
-            .find_map(|application| {
-                table
-                    .resolved_annotations
-                    .get(&(source, application.annotation.lo, application.annotation.hi))
-                    .filter(|name| name.matches("kotlin/annotation/Target"))?;
-                let mut targets = crate::types::AnnotationTargets {
-                    value_parameter: false,
-                    property: false,
-                    field: false,
-                };
-                for argument in headers
-                    .annotation_policy_arguments(application.arguments)
-                    .iter()
-                    .filter_map(|argument| headers.lookup_names.get(*argument))
-                {
-                    match argument {
-                        "VALUE_PARAMETER" => targets.value_parameter = true,
-                        "PROPERTY" => targets.property = true,
-                        "FIELD" => targets.field = true,
-                        _ => {}
-                    }
-                }
-                Some(targets)
-            });
-        if let Some(targets) = declared_targets {
-            table.annotation_targets.insert(annotation, targets);
-        }
+        table
+            .annotation_retentions
+            .insert(annotation, crate::types::AnnotationRetention::Default);
     }
 }
 
@@ -410,10 +361,8 @@ pub(in crate::resolve) fn normalize_referenced_library_annotations(
             continue;
         }
         if let Some(targets) = library.annotation_targets {
-            table
-                .annotation_targets
-                .entry(annotation)
-                .or_insert(targets);
+            // A policy published earlier for the identity stays.
+            table.annotation_targets.publish_valid(annotation, targets);
         }
         let retention = match library.retention.as_deref() {
             Some("RUNTIME") => crate::types::AnnotationRetention::Runtime,

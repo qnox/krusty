@@ -222,7 +222,8 @@ fn annotation_type(declaration: &semantic::KotlinClass) -> LibraryType {
 }
 
 /// The class's `@kotlin.annotation.Retention`, as a classpath retention name. Kotlin's default is
-/// `RUNTIME`; `BINARY` is the class-file `CLASS` policy.
+/// `RUNTIME`; `BINARY` is the class-file `CLASS` policy. Only an entry of
+/// `kotlin.annotation.AnnotationRetention` itself is a retention.
 fn declared_retention(declaration: &semantic::KotlinClass) -> &'static str {
     let retention = type_name("kotlin/annotation/Retention");
     let entry = declaration
@@ -230,9 +231,15 @@ fn declared_retention(declaration: &semantic::KotlinClass) -> &'static str {
         .iter()
         .find(|annotation| annotation.identity == retention)
         .and_then(|annotation| annotation.argument("value"));
-    match entry {
-        Some(semantic::AnnotationArgument::Enum { entry, .. }) if entry == "SOURCE" => "SOURCE",
-        Some(semantic::AnnotationArgument::Enum { entry, .. }) if entry == "BINARY" => "CLASS",
+    let declared = match entry {
+        Some(semantic::AnnotationArgument::Enum { class, entry }) => {
+            crate::types::AnnotationRetention::of_entry(*class, entry)
+        }
+        _ => None,
+    };
+    match declared {
+        Some(crate::types::AnnotationRetention::Source) => "SOURCE",
+        Some(crate::types::AnnotationRetention::Binary) => "CLASS",
         _ => "RUNTIME",
     }
 }
@@ -253,16 +260,12 @@ fn declared_targets(declaration: &semantic::KotlinClass) -> crate::types::Annota
         semantic::AnnotationArgument::Array(elements) => elements.as_slice(),
         single => std::slice::from_ref(single),
     };
-    let allows = |name: &str| {
-        entries.iter().any(|element| {
-            matches!(element, semantic::AnnotationArgument::Enum { entry, .. } if entry == name)
-        })
-    };
-    crate::types::AnnotationTargets {
-        value_parameter: allows("VALUE_PARAMETER"),
-        property: allows("PROPERTY"),
-        field: allows("FIELD"),
-    }
+    crate::types::AnnotationTargets::kotlin(entries.iter().filter_map(|element| match element {
+        semantic::AnnotationArgument::Enum { class, entry } => {
+            crate::types::KotlinTarget::of_entry(*class, entry)
+        }
+        _ => None,
+    }))
 }
 
 #[cfg(test)]
@@ -270,7 +273,7 @@ mod tests {
     use std::collections::HashSet;
 
     use crate::jvm::classpath::Classpath;
-    use crate::types::{type_name, AnnotationTargets};
+    use crate::types::{type_name, AnnotationTargets, KotlinTarget};
 
     /// The stdlib publishes its JS- and Native-only optional annotations through
     /// `META-INF/kotlin-stdlib.kotlin_module`, with their declared retention and targets.
@@ -319,11 +322,12 @@ mod tests {
             (js_static.retention.as_deref(), js_static.annotation_targets),
             (
                 Some("CLASS"),
-                Some(AnnotationTargets {
-                    value_parameter: false,
-                    property: true,
-                    field: false,
-                })
+                Some(AnnotationTargets::kotlin([
+                    KotlinTarget::Function,
+                    KotlinTarget::Property,
+                    KotlinTarget::PropertyGetter,
+                    KotlinTarget::PropertySetter,
+                ]))
             )
         );
     }

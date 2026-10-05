@@ -109,6 +109,7 @@ pub(super) fn push_property_metadata(
                 field_name: None,
                 annotations: Default::default(),
                 field_annotations: Default::default(),
+                accessor_annotations: Default::default(),
                 synthetic_method: None,
                 moved_from_interface_companion: false,
                 companion: true,

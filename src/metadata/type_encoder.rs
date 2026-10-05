@@ -886,14 +886,6 @@ fn encode_abbreviation(
     Ok(())
 }
 
-/// A metadata `Annotation` message — `id` (f1), the annotation class's string-table entry. Used for
-/// `ValueParameter.annotation` (f7), which records a parameter's `@Anno` uses.
-pub(crate) fn encode_annotation(strings: &mut StringTable<'_>, classifier: TypeName) -> Pb {
-    let mut annotation = Pb::new();
-    annotation.field_varint(1, strings.class_id(classifier) as u64);
-    annotation
-}
-
 /// Append the source annotations `@Metadata` records on this (expanded) type occurrence as
 /// `Type.annotation` (extension field 100): those an alias named here applies to its expansion,
 /// then the occurrence's own, each in source order, then the `@ParameterName` of a named

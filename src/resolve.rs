@@ -33,6 +33,7 @@ use scope::{ContextReceiver, ContextReceiverKind, ContextValue, FlowExclusion, N
 
 mod abstract_obligations;
 mod access_control;
+mod accessor_annotations;
 mod actualization_names;
 mod alias_constructor_application;
 mod annotation_applications;
@@ -3317,10 +3318,10 @@ pub struct SymbolTable {
     /// Retention normalized at the declaration/provider boundary by resolved annotation identity.
     /// Lowering and backends consume this fact without reopening a source declaration or classpath.
     annotation_retentions: HashMap<TypeName, crate::types::AnnotationRetention>,
-    /// Declared `@Target` set per annotation identity, normalized at the same declaration/provider
-    /// boundary as the retention. An identity absent from this map declares no `@Target` and is
-    /// therefore applicable everywhere ([`crate::types::AnnotationTargets::DEFAULT`]).
-    annotation_targets: HashMap<TypeName, crate::types::AnnotationTargets>,
+    /// Declared `@Target` policy per annotation identity: a library's from its provider, a source
+    /// class's from its checked `@Target` application. An identity with no valid policy is
+    /// applicable everywhere ([`crate::types::AnnotationTargets::DEFAULT`]).
+    annotation_targets: crate::types::DeclaredTargetPolicies,
     /// Top-level function name → the facade class it lives on (`helper` → `pkg/AKt`), for the WHOLE
     /// multi-file compilation. Populated only by the multi-file driver (which knows each file's
     /// stem/facade); empty for single-file/in-process callers. Lets `lower_file` emit a call to a
@@ -3428,7 +3429,7 @@ impl Default for SymbolTable {
             resolved_annotations: HashMap::new(),
             declaration_visibility_suppressions: HashMap::new(),
             annotation_retentions: HashMap::new(),
-            annotation_targets: HashMap::new(),
+            annotation_targets: crate::types::DeclaredTargetPolicies::default(),
             fn_facades: HashMap::new(),
             fn_facades_by_decl: HashMap::new(),
             unemitted_fn_facades_by_decl: std::collections::HashSet::new(),
@@ -3649,13 +3650,10 @@ impl SymbolTable {
         self.annotation_retentions.get(&annotation).copied()
     }
 
-    /// The annotation's declared `@Target` set; an annotation that declares none is applicable
-    /// everywhere, which is what Kotlin's use-site defaulting assumes.
-    pub fn annotation_targets(&self, annotation: TypeName) -> crate::types::AnnotationTargets {
-        self.annotation_targets
-            .get(&annotation)
-            .copied()
-            .unwrap_or(crate::types::AnnotationTargets::DEFAULT)
+    /// The published `@Target` policies; an annotation with no valid one is applicable everywhere,
+    /// which is what Kotlin's use-site defaulting assumes.
+    pub fn annotation_targets(&self) -> &crate::types::DeclaredTargetPolicies {
+        &self.annotation_targets
     }
 
     /// Insert under the class's own internal name (the map's key scheme).
@@ -38363,10 +38361,10 @@ impl<'a> CheckerModuleSymbols<'a> {
         }
     }
 
-    fn annotation_targets(&self, classifier: TypeName) -> crate::types::AnnotationTargets {
+    fn annotation_targets(&self) -> &'a crate::types::DeclaredTargetPolicies {
         match self {
-            Self::Legacy(source) => source.annotation_targets(classifier),
-            Self::Streamed(source) => source.annotation_targets(classifier),
+            Self::Legacy(source) => source.annotation_targets(),
+            Self::Streamed(source) => source.annotation_targets(),
         }
     }
 
@@ -52126,6 +52124,7 @@ impl<'a> Checker<'a> {
             .selected_body_declarations
             .as_ref()
             .is_none_or(|selected| selected.contains(&p.span));
+        self.check_accessor_annotations(scope, p);
         let suppression_depth =
             self.push_declaration_policies(scope, &p.annotations, &p.annotation_args);
         // An extension property's own generic type parameters (`val <T> Array<T>.length: Int`)
@@ -53036,6 +53035,7 @@ impl<'a> Checker<'a> {
                     &property.annotations,
                     &property.annotation_args,
                 );
+                self.check_accessor_annotations(scope, property);
             }
             for parameter in &cl.props {
                 self.check_annotation_applications_in_declaration_scope(

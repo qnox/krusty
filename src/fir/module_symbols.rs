@@ -195,11 +195,8 @@ impl<'a> StreamedModuleSymbols<'a> {
         self.index.annotation_retention(classifier)
     }
 
-    pub(crate) fn annotation_targets(
-        &self,
-        classifier: TypeName,
-    ) -> crate::types::AnnotationTargets {
-        self.index.annotation_targets(classifier)
+    pub(crate) fn annotation_targets(&self) -> &'a crate::types::DeclaredTargetPolicies {
+        self.index.annotation_targets()
     }
 
     /// Project one current-module classifier from finalized declaration headers.

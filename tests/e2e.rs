@@ -66,6 +66,8 @@ mod annotation_instantiation_e2e;
 mod annotation_kclass_member_e2e;
 #[path = "annotation_nested_const_template_e2e.rs"]
 mod annotation_nested_const_template_e2e;
+#[path = "annotation_retention_identity_e2e.rs"]
+mod annotation_retention_identity_e2e;
 #[path = "annotation_target_emission_e2e.rs"]
 mod annotation_target_emission_e2e;
 #[path = "anon_fun_statement_e2e.rs"]
@@ -1481,6 +1483,8 @@ mod optional_expectation_annotation_e2e;
 mod primitive_explicit_equals_e2e;
 #[path = "primitive_hash_code_e2e.rs"]
 mod primitive_hash_code_e2e;
+#[path = "property_accessor_annotation_e2e.rs"]
+mod property_accessor_annotation_e2e;
 #[path = "reference_carrier_cast_e2e.rs"]
 mod reference_carrier_cast_e2e;
 #[path = "result_generic_override_argument_e2e.rs"]
