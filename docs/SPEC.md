@@ -11049,10 +11049,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   initializer) calls `access$getCompanion$p$s<hash>()` on the class that grants the access, where
   `<hash>` is the Java `String.hashCode` of the holder's simple name. kotlinc's `accessorParent`
   picks that class: the innermost enclosing class that subclasses the holder, else the innermost
-  enclosing class's companion that does. The holder and companion come from the recorded companion
-  edge, and each read calls the accessor the plan placed for it. A protected companion of a
-  library class is not yet reachable this way. Verified against kotlinc 2.4.20.
-  (`tests/companion_private_members_e2e.rs`.)
+  enclosing class's companion that does. The holder, its companion field and the companion's
+  visibility come from the holder's classifier record, which a source declaration and a
+  dependency's Kotlin metadata publish alike, so the accessor is the same whether the holder is
+  compiled with the reader, by kotlinc beforehand or by krusty beforehand. Each read calls the
+  accessor the plan placed for it. A dependency superclass's companion is also an implicit
+  receiver while Pass 1 infers a declaration's type, as a source one is. Verified against kotlinc
+  2.4.20. (`tests/companion_private_members_e2e.rs`.)
 - **The receiver of a compound member assignment.** `receiver.x op= value` evaluates `receiver`
   once. A read of a `val`, a parameter, or a value a lambda or local function lifted to a method
   receives as a parameter is read again for the setter, and so is every `this` receiver, including

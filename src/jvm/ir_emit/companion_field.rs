@@ -21,60 +21,52 @@ pub(super) fn companion_field_access(ir: &IrFile, class: &IrClass, companion: Ty
 }
 
 /// A read of the `Companion` field through which `holder` publishes companion `companion`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct CompanionFieldRead {
     pub(super) holder: TypeName,
     pub(super) companion: TypeName,
+    pub(super) field: Box<str>,
     visibility: crate::types::Visibility,
 }
 
-/// The `Companion` field `expression` reads, taken from the recorded companion edge: a checked
-/// singleton value names its classifier and a lowered read names the holder and the companion. A
-/// holder this file declares names the companion as its `companion_class`; any other holder is the
-/// companion owner of the module record.
-pub(super) fn companion_field_read(ir: &IrFile, expression: &IrExpr) -> Option<CompanionFieldRead> {
+/// The `Companion` field `expression` reads. A checked singleton value names its classifier and a
+/// lowered read names the holder too; either way the holder's classifier record must declare that
+/// companion, and the record is the same for a class of this file, of another file of this module,
+/// and of a dependency. The field's access is the companion's declared visibility, except that an
+/// interface publishes its companion through a public field.
+pub(super) fn companion_field_read(
+    ir: &IrFile,
+    classifiers: &dyn crate::backend::BackendClassifierSource,
+    expression: &IrExpr,
+) -> Option<CompanionFieldRead> {
     let (holder, companion) = match expression {
-        IrExpr::SingletonValue { classifier } => (None, *classifier),
+        IrExpr::SingletonValue { classifier } => (classifier.nested_owner()?, *classifier),
         IrExpr::StaticInstance { owner, ty, .. } if owner != ty => (
-            Some(ir.classes.get(*owner as usize)?.fq_name),
+            ir.classes.get(*owner as usize)?.fq_name,
             ir.classes.get(*ty as usize)?.fq_name,
         ),
-        IrExpr::ExternalStaticInstance { owner, ty, .. } if owner != ty => (Some(*owner), *ty),
+        IrExpr::ExternalStaticInstance { owner, ty, .. } if owner != ty => (*owner, *ty),
         _ => return None,
     };
-    if let Some(declared) = ir
-        .classes
-        .iter()
-        .find(|class| class.companion_class == Some(companion))
-    {
-        if holder.is_some_and(|holder| holder != declared.fq_name) {
-            return None;
-        }
-        // An interface publishes its companion through a public field whatever the companion's
-        // own visibility.
-        let visibility = if declared.is_interface {
-            crate::types::Visibility::Public
-        } else {
-            ir.class_visibilities
-                .get(&companion)
-                .copied()
-                .unwrap_or(crate::types::Visibility::Public)
-        };
-        return Some(CompanionFieldRead {
-            holder: declared.fq_name,
-            companion,
-            visibility,
-        });
-    }
-    let module = ir.referenced_module_classifiers.get(&companion)?;
-    let recorded = module.companion_owner?;
-    if holder.is_some_and(|holder| holder != recorded) {
+    let declared = classifiers.classifier(holder)?;
+    let (field, published) = declared.companion.as_ref()?;
+    if *published != companion {
         return None;
     }
+    let visibility = if declared.is_interface() {
+        crate::types::Visibility::Public
+    } else {
+        match classifiers.classifier(companion)?.access {
+            crate::libraries::ClassifierAccess::Private => crate::types::Visibility::Private,
+            crate::libraries::ClassifierAccess::Protected => crate::types::Visibility::Protected,
+            _ => crate::types::Visibility::Public,
+        }
+    };
     Some(CompanionFieldRead {
-        holder: recorded,
+        holder,
         companion,
-        visibility: module.visibility,
+        field: field.clone(),
+        visibility,
     })
 }
 
@@ -90,7 +82,7 @@ pub(super) fn companion_field_read(ir: &IrFile, expression: &IrExpr) -> Option<C
 pub(super) fn companion_field_accessor(
     ir: &IrFile,
     context: StaticOwner,
-    read: CompanionFieldRead,
+    read: &CompanionFieldRead,
 ) -> Result<Option<(TypeName, StaticAccessor)>, String> {
     let accessor = |owner: TypeName| {
         Ok(Some((
@@ -182,13 +174,14 @@ fn protected_access_grantor(ir: &IrFile, context: TypeName, holder: TypeName) ->
         })
 }
 
-/// The name and descriptor of `owner`'s accessor of `holder`'s field holding `companion`. An
-/// accessor declared by another class than the holder names the holder by kotlinc's
-/// `$s<hash>` suffix: the Java `String.hashCode` of its simple name.
+/// The name and descriptor of `owner`'s accessor of the `field` of `holder` that holds
+/// `companion`. An accessor declared by another class than the holder names the holder by
+/// kotlinc's `$s<hash>` suffix: the Java `String.hashCode` of its simple name.
 pub(super) fn companion_instance_accessor(
     owner: TypeName,
     holder: TypeName,
     companion: TypeName,
+    field: &str,
 ) -> (String, String) {
     let suffix = if owner == holder {
         String::new()
@@ -196,10 +189,7 @@ pub(super) fn companion_instance_accessor(
         format!("$s{}", java_string_hash(holder.nested_segment_ref()))
     };
     (
-        format!(
-            "access${}$p{suffix}",
-            property_getter_name(companion.nested_segment_ref())
-        ),
+        format!("access${}$p{suffix}", property_getter_name(field)),
         format!("()L{};", companion.render()),
     )
 }

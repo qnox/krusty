@@ -31,9 +31,9 @@ impl super::Emitter<'_> {
         // placed for it.
         if let (Some(context), Some(read)) = (
             self.static_owner,
-            super::companion_field::companion_field_read(self.ir, node),
+            super::companion_field::companion_field_read(self.ir, self.classifiers, node),
         ) {
-            match super::companion_field::companion_field_accessor(self.ir, context, read) {
+            match super::companion_field::companion_field_accessor(self.ir, context, &read) {
                 Err(error) => {
                     *self.run.emit_error.borrow_mut() = Some(error);
                     return;
@@ -55,6 +55,7 @@ impl super::Emitter<'_> {
                         owner,
                         read.holder,
                         read.companion,
+                        &read.field,
                     );
                     let method = self.cw.methodref(&owner.render(), &name, &descriptor);
                     code.invokestatic(method, 0, 1);
@@ -1405,11 +1406,15 @@ impl super::Emitter<'_> {
                 code.getstatic(f, 1);
             }
             IrExpr::SingletonValue { classifier } => {
-                let Some(published) = singleton_instance_load::published_singleton(
-                    self.ir,
-                    *classifier,
-                    self.bodies.singleton_storage(*classifier),
-                ) else {
+                // A dependency's non-public companion field has no public classfile storage to
+                // find; the holder's classifier record names it.
+                let dependency = self.bodies.singleton_storage(*classifier).or_else(|| {
+                    super::companion_field::companion_field_read(self.ir, self.classifiers, node)
+                        .map(|read| (read.holder, read.field.into_string()))
+                });
+                let Some(published) =
+                    singleton_instance_load::published_singleton(self.ir, *classifier, dependency)
+                else {
                     *self.run.emit_error.borrow_mut() = Some(format!(
                         "missing JVM storage for singleton {}",
                         classifier.render()

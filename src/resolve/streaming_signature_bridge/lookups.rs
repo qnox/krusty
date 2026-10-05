@@ -1271,11 +1271,19 @@ impl ProductionSignatureSemantics<'_> {
                     .into_iter()
                     .map(|(inherited, _, _)| inherited),
             ) {
-                if let Some(companion) = self
-                    .table
-                    .class_by_type_name(candidate)
-                    .and_then(|signature| signature.companion_internal)
-                {
+                // A dependency superclass publishes its companion through its classifier record,
+                // exactly as a source one does through its signature.
+                let companion = match self.table.class_by_type_name(candidate) {
+                    Some(signature) => signature.companion_internal,
+                    None => self
+                        .table
+                        .libraries
+                        .classifier(candidate)
+                        .and_then(|declaration| {
+                            declaration.companion_object.as_ref().map(|(_, c)| *c)
+                        }),
+                };
+                if let Some(companion) = companion {
                     let ty = Ty::obj_name(companion);
                     if !receivers.contains(&ty) {
                         receivers.push(ty);

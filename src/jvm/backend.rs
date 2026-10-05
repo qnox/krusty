@@ -1132,6 +1132,7 @@ impl Backend for JvmBackend {
         if let Err(target) = crate::jvm::module_calls::realize(
             &mut file.ir,
             file.stems,
+            &file.classifiers,
             &self.cp,
             &file.callables,
             &mut property_realizations,

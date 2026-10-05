@@ -154,3 +154,39 @@ fn other_classes_read_an_inherited_protected_companion_through_the_granting_clas
         );
     }
 }
+
+const PROTECTED_USE_CLASSES: &[&str] = &[
+    "b/Outer",
+    "b/Outer$Companion",
+    "b/Outer$Nested",
+    "b/Outer$Nested$foo$1",
+    "b/Unrelated",
+    "b/Unrelated$Companion",
+];
+
+/// The same reads against a holder compiled beforehand by kotlinc: its classifier record, read from
+/// Kotlin metadata, publishes the same companion edge and visibility a source holder does.
+#[test]
+fn a_protected_companion_of_a_kotlinc_built_dependency_is_read_like_a_source_one() {
+    let library = common::kotlinc_lib_out(&[("A.kt", PROTECTED_BASE)])
+        .expect("reference kotlinc is provisioned");
+    common::assert_classes_identical_to_kotlinc_against(
+        "Uses",
+        PROTECTED_USES,
+        PROTECTED_USE_CLASSES,
+        &[library],
+    );
+}
+
+/// The same reads against a holder krusty compiled beforehand.
+#[test]
+fn a_protected_companion_of_a_krusty_built_dependency_is_read_like_a_source_one() {
+    let library = common::compile_lib("protected_companion_base", PROTECTED_BASE)
+        .expect("krusty compiles the holder");
+    common::assert_classes_identical_to_kotlinc_against(
+        "Uses",
+        PROTECTED_USES,
+        PROTECTED_USE_CLASSES,
+        &[library],
+    );
+}

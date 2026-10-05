@@ -312,7 +312,6 @@ fn publish_classifier(
         IrModuleClassifier {
             singleton: header.flags.has(DeclarationFlags::SINGLETON),
             companion_owner,
-            visibility: header.visibility,
         },
     );
     Ok(())

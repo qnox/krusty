@@ -68,6 +68,9 @@ pub(super) enum StaticAccessor {
 pub(super) struct StaticAccessorPlan {
     by_owner: HashMap<StaticOwner, Vec<StaticAccessor>>,
     protected: Vec<ProtectedMemberAccessBridge>,
+    /// The field each planned companion accessor reads, by (holder, companion), as the holder's
+    /// classifier record declares it.
+    companion_fields: HashMap<(TypeName, TypeName), Box<str>>,
 }
 
 impl StaticAccessorPlan {
@@ -234,6 +237,8 @@ pub(super) fn plan(
     let private_member_bridges = env.run.private_member_access_bridges.borrow();
     let walk = Walk {
         ir,
+        classifiers: env.signature_symbols,
+        companion_fields: RefCell::default(),
         class_member_fids,
         property_realizations: env.property_realizations,
         protected_calls: &protected_calls,
@@ -313,6 +318,7 @@ pub(super) fn plan(
     uses.sort_by_key(|found| found.line);
     let mut plan = StaticAccessorPlan {
         protected: walk.protected.into_inner(),
+        companion_fields: walk.companion_fields.into_inner(),
         ..StaticAccessorPlan::default()
     };
     let mut seen = HashSet::new();
@@ -492,6 +498,9 @@ fn synthesized_carrier_uses(walk: &Walk, env: &EmitEnv, class: &IrClass) -> Vec<
 
 struct Walk<'a> {
     ir: &'a IrFile,
+    classifiers: &'a dyn crate::backend::BackendClassifierSource,
+    /// The field of each companion read routed through an accessor.
+    companion_fields: RefCell<HashMap<(TypeName, TypeName), Box<str>>>,
     class_member_fids: &'a HashSet<u32>,
     property_realizations: &'a crate::jvm::property_realizations::PropertyRealizations,
     /// The protected member calls emitted outside the class that may make them, by call.
@@ -570,13 +579,18 @@ impl Walk<'_> {
                 uses.push(self.protected_use(line, bridge.clone()));
                 continue;
             }
-            if let Some(read) =
-                super::companion_field::companion_field_read(ir, ir.expr(expression))
-            {
+            if let Some(read) = super::companion_field::companion_field_read(
+                ir,
+                self.classifiers,
+                ir.expr(expression),
+            ) {
                 // A read with no access path is reported where the emitter meets it.
                 if let Ok(Some((owner, accessor))) =
-                    super::companion_field::companion_field_accessor(ir, context, read)
+                    super::companion_field::companion_field_accessor(ir, context, &read)
                 {
+                    self.companion_fields
+                        .borrow_mut()
+                        .insert((read.holder, read.companion), read.field);
                     uses.push(Use {
                         line,
                         owner: StaticOwner::Class(owner),
@@ -753,9 +767,12 @@ pub(super) fn emit(
             StaticAccessor::FieldSetter { class, property } => {
                 accessor.field_setter(class, property, cw)
             }
-            StaticAccessor::CompanionInstance { companion, holder } => {
-                accessor.companion_instance(companion, holder, cw)
-            }
+            StaticAccessor::CompanionInstance { companion, holder } => accessor.companion_instance(
+                companion,
+                holder,
+                &plan.companion_fields[&(holder, companion)],
+                cw,
+            ),
             StaticAccessor::Protected(index) => {
                 let bridge = &plan.protected[index as usize];
                 let owner = bridge.owner.render();
@@ -1139,18 +1156,24 @@ impl Accessor<'_> {
     }
 
     /// `access$get<Companion>$p`: read `holder`'s `Companion` field.
-    fn companion_instance(&self, companion: TypeName, holder: TypeName, cw: &mut ClassWriter) {
+    fn companion_instance(
+        &self,
+        companion: TypeName,
+        holder: TypeName,
+        field: &str,
+        cw: &mut ClassWriter,
+    ) {
         let StaticOwner::Class(owner) = self.owner else {
             unreachable!("a companion field accessor is declared by a class");
         };
         let (name, descriptor) =
-            super::companion_field::companion_instance_accessor(owner, holder, companion);
+            super::companion_field::companion_instance_accessor(owner, holder, companion, field);
         reserve_signature(cw, &name, &descriptor);
         let mut code = CodeBuilder::new(0);
         code.mark_line(self.declaration_line);
         let field = cw.fieldref(
             &holder.render(),
-            companion.nested_segment_ref(),
+            field,
             &format!("L{};", companion.render()),
         );
         code.getstatic(field, 1);

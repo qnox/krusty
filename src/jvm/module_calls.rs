@@ -682,6 +682,7 @@ pub(super) fn realize_super_calls(
 pub(super) fn realize(
     ir: &mut IrFile,
     stems: &[String],
+    classifiers: &dyn crate::backend::BackendClassifierSource,
     classpath: &crate::jvm::classpath::Classpath,
     callables: &crate::backend::CheckedBackendCallables,
     property_realizations: &mut PropertyRealizations,
@@ -842,7 +843,16 @@ pub(super) fn realize(
             }
             IrExpr::SingletonValue { classifier } => {
                 let failure = ModuleRealizationTarget::Classifier(classifier);
-                let (owner, field) = if let Some(declaration) =
+                // A companion is stored in the field its holder's classifier record declares,
+                // whichever compilation declared the holder and whatever the field's access.
+                let companion_field = classifier.nested_owner().and_then(|holder| {
+                    let declared = classifiers.classifier(holder)?;
+                    let (field, companion) = declared.companion.as_ref()?;
+                    (*companion == classifier).then(|| (holder, field.to_string()))
+                });
+                let (owner, field) = if let Some(stored) = companion_field {
+                    stored
+                } else if let Some(declaration) =
                     ir.referenced_module_classifiers.get(&classifier).copied()
                 {
                     if !declaration.singleton {
