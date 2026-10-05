@@ -1084,9 +1084,9 @@ pub(crate) fn retarget_hoisted_companion_references(
             realization.physical_setter_value = Some(update.physical);
             realization.setter_bridge_owner = Some(update.outer);
         }
-        if let Some(value_class) = update.value_class {
-            realization.boxed_value_class = Some(value_class);
-        }
+        // The value-class pass may already have marked this reference for unboxing. A nullable
+        // primitive carrier is stored as the box, so that mark has to be cleared with the retarget.
+        realization.boxed_value_class = update.value_class;
         let reference = ir.classes[update.class_index]
             .prop_ref
             .as_mut()
