@@ -381,8 +381,14 @@ fn specialized_class(
         .collect::<Vec<_>>();
     copy_override_edges(ir, source_name, placeholder, &methods)?;
     remap_owned_class(ir, &owned, source, class_id, internal, placeholder);
-    let omitted_capture_fields =
-        consume_capture_free_lambdas(ir, class_id, order, &lambdas, class_name)?;
+    let omitted_capture_fields = consume_trivially_spliceable_lambdas(
+        ir,
+        class_id,
+        order,
+        &property_copies,
+        &lambdas,
+        class_name,
+    )?;
     renames.insert(internal, placeholder);
     ir.specialized_anonymous_classes.insert(
         class_id,
@@ -1182,22 +1188,43 @@ fn inline_lambda(ir: &crate::ir::IrFile, expression: ExprId) -> Option<(u32, Exp
     }
 }
 
-/// Inline each capture-free lambda into the copy and drop it from the constructor. A lambda that
-/// captures values stays a constructor argument: the copy is still a distinct class, and its
-/// methods keep calling the stored function.
-fn consume_capture_free_lambdas(
+/// Inline a lambda into the copy only when its body needs no operand binding or value rehoming.
+///
+/// Capture freedom alone is not enough: an extension/value parameter still has to be bound, a
+/// suspend lambda carries continuation semantics, and a body-local value has to be moved out of the
+/// lambda's independent value domain. Those shapes keep the lambda as an initialized constructor
+/// capture until the ordinary inline-body splicer can realize them. The narrow shape consumed here
+/// is a parameter-free, non-suspend body with no value slots, used exclusively by zero-argument
+/// invocations of its capture field.
+fn consume_trivially_spliceable_lambdas(
     ir: &mut crate::ir::IrFile,
     class: ClassId,
     construction: ExprId,
+    pending_property_roots: &[ExprId],
     lambdas: &[InlineLambdaArgument],
     class_name: TypeName,
 ) -> Result<u32, super::super::FirLoweringFailure> {
     let mut removals = Vec::new();
     for lambda in lambdas {
-        if lambda.capture_count != 0 {
+        let Some(function) = ir.functions.get(lambda.impl_fn as usize) else {
+            return Err(malformed(class_name));
+        };
+        if lambda.capture_count != 0
+            || !function.params.is_empty()
+            || ir.suspend_funs.contains(&lambda.impl_fn)
+            || body_uses_values(ir, lambda.inline_body)
+        {
             continue;
         }
-        inline_lambda_into_field_invokes(ir, class, lambda.field, lambda.inline_body, class_name)?;
+        if !inline_lambda_into_field_invokes(
+            ir,
+            class,
+            pending_property_roots,
+            lambda.field,
+            lambda.inline_body,
+        ) {
+            continue;
+        }
         ir.inline_only_fns.insert(lambda.impl_fn);
         ir.functions
             .get_mut(lambda.impl_fn as usize)
@@ -1209,27 +1236,57 @@ fn consume_capture_free_lambdas(
     removals.dedup();
     let omitted = u32::try_from(removals.len()).map_err(|_| malformed(class_name))?;
     for (parameter, field) in removals.into_iter().rev() {
-        remove_capture(ir, class, construction, parameter, field, class_name)?;
+        remove_capture(
+            ir,
+            class,
+            construction,
+            pending_property_roots,
+            parameter,
+            field,
+            class_name,
+        )?;
     }
     Ok(omitted)
+}
+
+fn body_uses_values(ir: &crate::ir::IrFile, root: ExprId) -> bool {
+    let mut pending = vec![root];
+    let mut seen = HashSet::new();
+    while let Some(expression) = pending.pop() {
+        if !seen.insert(expression) {
+            continue;
+        }
+        if !super::value_indices(ir.expr(expression)).is_empty() {
+            return true;
+        }
+        if let IrExpr::Lambda { captures, .. } = ir.expr(expression) {
+            pending.extend(captures.iter().copied());
+            continue;
+        }
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+    }
+    false
 }
 
 fn inline_lambda_into_field_invokes(
     ir: &mut crate::ir::IrFile,
     class: ClassId,
+    pending_property_roots: &[ExprId],
     field: u32,
     inline_body: ExprId,
-    class_name: TypeName,
-) -> Result<(), super::super::FirLoweringFailure> {
+) -> bool {
     let mut roots = ir.classes[class as usize]
         .methods
         .iter()
         .filter_map(|method| ir.functions.get(*method as usize)?.body)
         .collect::<Vec<_>>();
     roots.extend(ir.classes[class as usize].init_body);
+    roots.extend(pending_property_roots.iter().copied());
     let mut pending = roots;
     let mut seen = HashSet::new();
     let mut invocations = Vec::new();
+    let mut field_reads = HashSet::new();
+    let mut invoked_reads = HashSet::new();
     while let Some(expression) = pending.pop() {
         if !seen.insert(expression) {
             continue;
@@ -1238,11 +1295,28 @@ fn inline_lambda_into_field_invokes(
             continue;
         }
         crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
-        if let IrExpr::InvokeFunction { func, .. } = ir.expr(expression) {
-            if reads_capture_field(ir, *func, class, field) {
+        if let IrExpr::GetField {
+            class: owner,
+            index,
+            ..
+        } = ir.expr(expression)
+        {
+            if *owner == class && *index == field {
+                field_reads.insert(expression);
+            }
+        }
+        if let IrExpr::InvokeFunction { func, args, .. } = ir.expr(expression) {
+            if let Some(read) = capture_field_read(ir, *func, class, field) {
+                if !args.is_empty() {
+                    return false;
+                }
+                invoked_reads.insert(read);
                 invocations.push(expression);
             }
         }
+    }
+    if invocations.is_empty() || field_reads != invoked_reads {
+        return false;
     }
     for invocation in invocations {
         let (body, _) = crate::ir::clone_expression_dag(ir, inline_body);
@@ -1250,37 +1324,42 @@ fn inline_lambda_into_field_invokes(
             stmts: Vec::new(),
             value: Some(body),
         };
+        ir.suspend_calls.remove(&invocation);
+        ir.suspend_call_overridden_results.remove(&invocation);
     }
-    if capture_field_remains(ir, class, field) {
-        return Err(malformed(class_name));
-    }
-    Ok(())
+    !capture_field_remains(ir, class, pending_property_roots, field)
 }
 
-fn reads_capture_field(
+fn capture_field_read(
     ir: &crate::ir::IrFile,
     expression: ExprId,
     class: ClassId,
     field: u32,
-) -> bool {
+) -> Option<ExprId> {
     match ir.expr(expression) {
         IrExpr::GetField {
             class: owner,
             index,
             ..
-        } => *owner == class && *index == field,
-        IrExpr::NotNullAssert { operand, .. } => reads_capture_field(ir, *operand, class, field),
-        _ => false,
+        } if *owner == class && *index == field => Some(expression),
+        IrExpr::NotNullAssert { operand, .. } => capture_field_read(ir, *operand, class, field),
+        _ => None,
     }
 }
 
-fn capture_field_remains(ir: &crate::ir::IrFile, class: ClassId, field: u32) -> bool {
+fn capture_field_remains(
+    ir: &crate::ir::IrFile,
+    class: ClassId,
+    pending_property_roots: &[ExprId],
+    field: u32,
+) -> bool {
     let mut roots = ir.classes[class as usize]
         .methods
         .iter()
         .filter_map(|method| ir.functions.get(*method as usize)?.body)
         .collect::<Vec<_>>();
     roots.extend(ir.classes[class as usize].init_body);
+    roots.extend(pending_property_roots.iter().copied());
     let mut pending = roots;
     let mut seen = HashSet::new();
     while let Some(expression) = pending.pop() {
@@ -1309,11 +1388,12 @@ fn remove_capture(
     ir: &mut crate::ir::IrFile,
     class: ClassId,
     construction: ExprId,
+    pending_property_roots: &[ExprId],
     parameter: usize,
     field: u32,
     class_name: TypeName,
 ) -> Result<(), super::super::FirLoweringFailure> {
-    shift_capture_reads(ir, class, field);
+    shift_capture_reads(ir, class, pending_property_roots, field);
     let declaration = &mut ir.classes[class as usize];
     if field as usize >= declaration.fields.len()
         || parameter >= declaration.ctor_args.len()
@@ -1378,13 +1458,19 @@ fn remove_capture(
     Ok(())
 }
 
-fn shift_capture_reads(ir: &mut crate::ir::IrFile, class: ClassId, removed: u32) {
+fn shift_capture_reads(
+    ir: &mut crate::ir::IrFile,
+    class: ClassId,
+    pending_property_roots: &[ExprId],
+    removed: u32,
+) {
     let mut roots = ir.classes[class as usize]
         .methods
         .iter()
         .filter_map(|method| ir.functions.get(*method as usize)?.body)
         .collect::<Vec<_>>();
     roots.extend(ir.classes[class as usize].init_body);
+    roots.extend(pending_property_roots.iter().copied());
     let mut pending = roots;
     let mut seen = HashSet::new();
     while let Some(expression) = pending.pop() {
