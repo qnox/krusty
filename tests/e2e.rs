@@ -2,6 +2,8 @@
 //! crate, so product e2e modules live behind one target to keep link time and target size bounded.
 //! External corpus/reference-toolchain suites live in `conformance.rs`.
 
+#[path = "bridge_result_cast_e2e.rs"]
+mod bridge_result_cast_e2e;
 #[path = "common/bytecode_comparison.rs"]
 mod bytecode_comparison_support;
 #[path = "captured_field_storage_e2e.rs"]

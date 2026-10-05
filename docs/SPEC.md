@@ -12172,6 +12172,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   resulting exit on the setter body (`IrFile::record_accessor_body_exit`), and the accessor that
   appends the `return` marks it (`UnitBodyExit`). Test: `tests/setter_return_line_e2e.rs`.
 
+- **A bridge casts its delegated result to any different reference return type but `Object` or an
+  array.** kotlinc's bridge materializes the result of the call it delegates to at the bridge's own
+  return type, and `StackValue.coerce` writes a `checkcast` between two different reference types
+  without consulting the class hierarchy, unless the target is `Object` or an array. A `String`
+  override bridged to `CharSequence foo()` therefore returns through `checkcast CharSequence` (the
+  narrowing of an erased generic `Object` and of `Nothing?`'s `Void` are the same rule), while
+  the `Object foo()` bridge and an `Array<String>` result bridged to `Array<out Any>` return it as
+  it is. Test: `tests/bridge_result_cast_e2e.rs`.
+
 - **A function reference's carrier reaches its use site uncast.** kotlinc's
   `FunctionReferenceLowering` replaces a reference with its carrier (a `FunctionReferenceImpl`
   subclass instance or its `INSTANCE`) behind an implicit cast, which the JVM codegen writes as no
