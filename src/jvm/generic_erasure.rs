@@ -8,6 +8,7 @@
 //! reconstruct an owner from a JVM name. Keeping the conversion here prevents common lowering from
 //! committing a backend representation.
 
+use super::default_parameter_representation::primitive_bounded_type_parameter;
 use crate::ir::{IrFile, IrTypeParameter};
 use crate::types::{wk, Ty};
 use std::collections::{HashMap, HashSet};
@@ -64,10 +65,13 @@ fn resolve_primary_bound(
 /// A type-parameter occurrence erases to its primary bound. kotlinc's type mapper keeps the
 /// occurrence's nullability on that bound (`T : Int?` maps as `Int?`, so `Integer`, not `int`; and
 /// `T : IC?` maps as the nullable value class), and a bare `T` is nullable when a bound along its
-/// chain is. A reference bound erases to the same class either way.
+/// chain is. A reference bound erases to the same class either way. A non-null occurrence bounded
+/// by a JVM primitive stays the type parameter: its descriptor is already the primitive, and its
+/// `$default` stub takes the JDK wrapper instead.
 fn physical_type(ty: Ty, erasures: &HashMap<String, Ty>) -> Ty {
     match ty {
         Ty::TyParam(name, _) => match erasures.get(name).copied() {
+            Some(_) if primitive_bounded_type_parameter(ty).is_some() => ty,
             Some(erasure) if ty.upper_bound_admits_null() => Ty::nullable(erasure),
             Some(erasure) => erasure,
             None => ty,
