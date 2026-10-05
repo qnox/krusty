@@ -20,6 +20,9 @@ pub(super) struct SynthesizedValueMembers {
     /// [`crate::ir::IrConstructorTarget::ordinal`], so a construction reaches the exact overload
     /// its checked selection named.
     pub(super) constructor_impls: HashMap<(TypeName, u32), u32>,
+    /// Exact synthesized expressions that have already rendered a nested value-class carrier to a
+    /// String while retaining the nested class as their logical concat-boundary type.
+    pub(super) rendered_value_class_text: HashSet<ExprId>,
 }
 
 impl SynthesizedValueMembers {
@@ -102,7 +105,6 @@ pub(super) fn synth_value_members(
     has_init: bool,
     constructor_default: Option<ExprId>,
     realized: &mut SynthesizedValueMembers,
-    rendered_value_class_text: &mut HashSet<ExprId>,
 ) -> bool {
     let internal_name = ir.classes[class_id as usize].fq_name;
     let fname = ir.classes[class_id as usize].fields[0].name.clone();
@@ -443,7 +445,13 @@ pub(super) fn synth_value_members(
             let carrier = ir.add_expr(IrExpr::GetValue(0));
             // A non-null nested value class is this slot's carrier. Name it through its own
             // `toString-impl` (`Outer(i=Inner(x=20))`); the concat then appends that String.
-            let rendered = nested_value_text(ir, u_ir, under, carrier, rendered_value_class_text);
+            let rendered = nested_value_text(
+                ir,
+                u_ir,
+                under,
+                carrier,
+                &mut realized.rendered_value_class_text,
+            );
             // ONE `StringConcat` (not nested `+`): kotlinc builds a single `StringBuilder` and appends the
             // 1-char closing paren via `append(C)` — a nested concat would emit a second builder.
             let prefix = str_const(ir, format!("{simple}({fname}="));

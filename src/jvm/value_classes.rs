@@ -313,9 +313,6 @@ pub(crate) fn lower_value_classes(
 
     // Exact identities of members whose JVM realization synthesis already finalized.
     let mut realized_members = synth_members::SynthesizedValueMembers::default();
-    // Exact synthesized expressions that have already rendered a nested value-class carrier to a
-    // String while retaining the nested class as their logical concat-boundary type.
-    let mut rendered_value_class_text = HashSet::new();
     // Synthesize each value class's `-impl`/`equals`/`hashCode`/`toString` members up front (a JVM
     // concern — common lowering only emits the plain single-field class). Done before the analysis below so
     // they participate in `vc_methods`/erasure like any other method.
@@ -362,7 +359,6 @@ pub(crate) fn lower_value_classes(
             ir.classes[cid as usize].init_body.is_some(),
             constructor_default,
             &mut realized_members,
-            &mut rendered_value_class_text,
         ) {
             crate::trace_compiler!(
                 "value_classes",
@@ -3112,7 +3108,7 @@ pub(crate) fn lower_value_classes(
                 &ir.exprs,
                 id,
                 &repr_ctx,
-                &rendered_value_class_text,
+                &realized_members.rendered_value_class_text,
                 &mut ops,
             );
             if let IrExpr::Call { callee, args, .. } = &ir.exprs[id as usize] {

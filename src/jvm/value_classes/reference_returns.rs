@@ -39,7 +39,7 @@ pub(super) fn value_class_reference_supertypes(
     let mut pending = value_classes
         .keys()
         .filter_map(|classifier| classifiers.classifier(*classifier))
-        .flat_map(|facts| facts.supertypes.iter().copied().collect::<Vec<_>>())
+        .flat_map(|facts| facts.supertypes.to_vec())
         .collect::<Vec<_>>();
     let mut supertypes = HashSet::new();
     while let Some(classifier) = pending.pop() {
