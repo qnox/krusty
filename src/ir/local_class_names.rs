@@ -1012,6 +1012,7 @@ impl super::IrFile {
         remap_keyed(&mut self.super_constructor_default_arguments, names);
         remap_keyed(&mut self.external_super_constructors, names);
         remap_keyed(&mut self.class_declared_spellings, names);
+        remap_keyed(&mut self.class_superclass_positions, names);
         remap_keyed(&mut self.class_ctor_defaults, names);
         remap_keyed(&mut self.class_signatures, names);
         remap_keyed(&mut self.field_signatures, names);

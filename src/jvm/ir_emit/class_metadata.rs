@@ -1275,7 +1275,6 @@ pub(super) fn build_class_metadata_with_facts(
             (!property.visibility.is_public_api()).then_some(property.ty),
         )
     });
-    // Metadata lists the declared superclass before interfaces.
     let superclass = c.superclass;
     let any = crate::types::wk::any();
     let mut supertypes = ir
@@ -1309,7 +1308,18 @@ pub(super) fn build_class_metadata_with_facts(
         .get(&c.fq_name_id())
         .cloned()
         .unwrap_or_default();
-    let supertype_spellings = class_spellings.supertype_spellings(has_declared_superclass);
+    let mut supertype_spellings = class_spellings.supertype_spellings(has_declared_superclass);
+    // Both lists lead with the superclass; `@Metadata` lists it where the source wrote it.
+    let superclass_position = ir.class_superclass_positions.get(&c.fq_name_id());
+    if let Some(position) = superclass_position.filter(|_| has_declared_superclass) {
+        let position = *position as usize;
+        // An interface without a spelling has no entry yet; it must not shift the superclass's.
+        if supertype_spellings.len() <= position {
+            supertype_spellings.resize(position + 1, crate::spelling::Spelled::default());
+        }
+        supertypes[..=position].rotate_left(1);
+        supertype_spellings[..=position].rotate_left(1);
+    }
     let secondary_ctor_shapes =
         super::super::constructor_metadata::secondary_constructor_shapes(ir, c);
     let secondary_ctor_metas: Vec<crate::metadata::class_builder::CtorMeta> = secondary_ctor_shapes
