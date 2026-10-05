@@ -531,10 +531,14 @@ mod contextual_lambda_expected_return_e2e;
 mod continuation_spill_order_e2e;
 #[path = "contract_calls_in_place_e2e.rs"]
 mod contract_calls_in_place_e2e;
+#[path = "contract_declarations_e2e.rs"]
+mod contract_declarations_e2e;
 #[path = "contract_erasure_e2e.rs"]
 mod contract_erasure_e2e;
 #[path = "contract_metadata_roundtrip_e2e.rs"]
 mod contract_metadata_roundtrip_e2e;
+#[path = "contract_smart_casts_e2e.rs"]
+mod contract_smart_casts_e2e;
 #[path = "contract_smartcast_e2e.rs"]
 mod contract_smartcast_e2e;
 #[path = "contract_user_e2e.rs"]

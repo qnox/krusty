@@ -980,6 +980,7 @@ pub(super) fn build_class_metadata_with_facts(
                                 .unwrap_or(false)
                         })
                         .collect(),
+                    contract: ir.fn_contracts.get(&fid).map(|contract| contract.to_arc()),
                 })
             })
             .collect::<Vec<_>>()
@@ -1020,6 +1021,7 @@ pub(super) fn build_class_metadata_with_facts(
                 annotations: Default::default(),
                 param_annotations: Vec::new(),
                 no_infer_params: Vec::new(),
+                contract: None,
             });
         }
         if synthesizes_copy {
@@ -1059,6 +1061,7 @@ pub(super) fn build_class_metadata_with_facts(
                 annotations: Default::default(),
                 param_annotations: Vec::new(),
                 no_infer_params: Vec::new(),
+                contract: None,
             });
         }
         if ir
@@ -1086,6 +1089,7 @@ pub(super) fn build_class_metadata_with_facts(
                 annotations: Default::default(),
                 param_annotations: Vec::new(),
                 no_infer_params: Vec::new(),
+                contract: None,
             });
         }
         if ir
@@ -1113,6 +1117,7 @@ pub(super) fn build_class_metadata_with_facts(
                 annotations: Default::default(),
                 param_annotations: Vec::new(),
                 no_infer_params: Vec::new(),
+                contract: None,
             });
         }
         if ir
@@ -1140,6 +1145,7 @@ pub(super) fn build_class_metadata_with_facts(
                 annotations: Default::default(),
                 param_annotations: Vec::new(),
                 no_infer_params: Vec::new(),
+                contract: None,
             });
         }
         // kotlinc visits the source declarations first, then the members the compiler generates.

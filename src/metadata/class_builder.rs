@@ -11,6 +11,7 @@
 //! String table: a class id uses operation `DESC_TO_CLASS_ID` (Record.f3=2) over `Lpkg/Name;`;
 //! builtin types use `predefined_index` (Record.f2); everything else is a verbatim d2 entry.
 
+use crate::metadata::builder::ContractTypeTable;
 use crate::metadata::local_properties::{
     local_property_pb, LocalPropertyMeta, LOCAL_VARIABLE_FIELD,
 };
@@ -158,6 +159,8 @@ pub struct FnMeta {
     pub param_annotations: Vec<crate::metadata::MetadataAnnotations>,
     /// Kotlin type-use inference policy, parallel to `params`.
     pub no_infer_params: Vec<bool>,
+    /// The member's declared `contract { … }` (`Function.contract` = 32).
+    pub contract: Option<std::sync::Arc<crate::contracts::Contract>>,
 }
 
 impl FnMeta {
@@ -185,6 +188,7 @@ impl FnMeta {
             annotations: Default::default(),
             param_annotations: Vec::new(),
             no_infer_params: Vec::new(),
+            contract: None,
         }
     }
 }
@@ -1194,6 +1198,7 @@ pub fn build_class(
     // Member functions (name f2, return_type f3, value_parameter f6, flags f9; JVM sig derivable).
     let build_func = |st: &mut StringTable<'_>,
                       requirements: &mut VersionRequirementTable,
+                      contract_types: &mut ContractTypeTable,
                       m: &FnMeta| {
         let mut func = Pb::new();
         func.field_varint(2, st.local(&m.name) as u64);
@@ -1364,6 +1369,24 @@ pub fn build_class(
         // proto types alone don't pin the JVM descriptor (erasure, boxed nullable primitive). A
         // mangled member with a derivable descriptor (`f(): V?` — nullable value classes box) is
         // name-only; a renamed-and-erased one carries both.
+        // The declared contract (Function.contract = 32) interns where a package function's does:
+        // before the signature, or after the annotations of an annotated member.
+        let mut contract = |st: &mut StringTable<'_>| {
+            m.contract.as_deref().map(|contract| {
+                crate::metadata::builder::contract_pb(
+                    st,
+                    contract_types,
+                    contract,
+                    &function_type_parameters,
+                )
+            })
+        };
+        let early_contract = m
+            .annotations
+            .records()
+            .is_empty()
+            .then(|| contract(st))
+            .flatten();
         let sig = (m.jvm_sig.is_some() || m.jvm_sig_name.is_some()).then(|| {
             let mut p = Pb::new();
             if let Some(n) = m.jvm_sig_name.as_deref() {
@@ -1389,6 +1412,7 @@ pub fn build_class(
         for annotation in &annotations {
             func.repeated_message(12, annotation);
         }
+        let contract = early_contract.or_else(|| contract(st));
         // Function.version_requirement = 31: an index into this class's requirement table.
         if needs_inline_parameter_null_check(
             flags,
@@ -1397,6 +1421,9 @@ pub fn build_class(
         ) {
             func.field_varint(31, requirements.index(INLINE_PARAMETER_NULL_CHECK));
         }
+        if let Some(contract) = &contract {
+            func.field_message(32, contract); // Function.contract = 32
+        }
         if let Some(sig) = &sig {
             func.field_message(100, sig);
         }
@@ -1404,6 +1431,7 @@ pub fn build_class(
     };
     // Members add their requirements in serialization order; the class's own follow them.
     let mut requirements = VersionRequirementTable::default();
+    let mut contract_types = ContractTypeTable::default();
 
     let mut prop_msgs: Vec<Option<Pb>> = (0..props.len()).map(|_| None).collect();
     let mut func_msgs: Vec<Option<Pb>> = (0..methods.len()).map(|_| None).collect();
@@ -1419,7 +1447,12 @@ pub fn build_class(
             ClassMemberOrder::Function(index)
                 if index < methods.len() && func_msgs[index].is_none() =>
             {
-                func_msgs[index] = Some(build_func(&mut st, &mut requirements, &methods[index]));
+                func_msgs[index] = Some(build_func(
+                    &mut st,
+                    &mut requirements,
+                    &mut contract_types,
+                    &methods[index],
+                ));
             }
             ClassMemberOrder::TypeAlias(index)
                 if index < tail.type_aliases.len() && alias_msgs[index].is_none() =>
@@ -1450,7 +1483,12 @@ pub fn build_class(
     }
     for (index, function) in methods.iter().enumerate() {
         if func_msgs[index].is_none() {
-            func_msgs[index] = Some(build_func(&mut st, &mut requirements, function));
+            func_msgs[index] = Some(build_func(
+                &mut st,
+                &mut requirements,
+                &mut contract_types,
+                function,
+            ));
         }
     }
     for (index, alias) in tail.type_aliases.iter().enumerate() {
@@ -1583,6 +1621,9 @@ pub fn build_class(
     if let Some(requirement) = tail.compiler_version_requirement {
         // Class.versionRequirement (f31) indexes Class.versionRequirementTable (f32).
         class.field_varint(31, requirements.index(requirement));
+    }
+    if let Some(table) = contract_types.encode() {
+        class.field_message(30, &table); // Class.type_table = 30
     }
     if let Some(table) = requirements.encode() {
         class.field_message(32, &table); // Class.versionRequirementTable = 32
@@ -1814,6 +1855,7 @@ mod tests {
         let any_q = Ty::nullable(Ty::obj("kotlin/Any"));
         let methods = vec![
             FnMeta {
+                contract: None,
                 context_count: 0,
                 context_parameter_kinds: Vec::new(),
                 spellings: crate::spelling::DeclaredSpellings::default(),
@@ -1836,6 +1878,7 @@ mod tests {
                 no_infer_params: Vec::new(),
             },
             FnMeta {
+                contract: None,
                 context_count: 0,
                 context_parameter_kinds: Vec::new(),
                 spellings: crate::spelling::DeclaredSpellings::default(),
@@ -1858,6 +1901,7 @@ mod tests {
                 no_infer_params: Vec::new(),
             },
             FnMeta {
+                contract: None,
                 context_count: 0,
                 context_parameter_kinds: Vec::new(),
                 spellings: crate::spelling::DeclaredSpellings::default(),
@@ -1880,6 +1924,7 @@ mod tests {
                 no_infer_params: Vec::new(),
             },
             FnMeta {
+                contract: None,
                 context_count: 0,
                 context_parameter_kinds: Vec::new(),
                 spellings: crate::spelling::DeclaredSpellings::default(),
@@ -1902,6 +1947,7 @@ mod tests {
                 no_infer_params: Vec::new(),
             },
             FnMeta {
+                contract: None,
                 context_count: 0,
                 context_parameter_kinds: Vec::new(),
                 spellings: crate::spelling::DeclaredSpellings::default(),
@@ -1924,6 +1970,7 @@ mod tests {
                 no_infer_params: Vec::new(),
             },
             FnMeta {
+                contract: None,
                 context_count: 0,
                 context_parameter_kinds: Vec::new(),
                 spellings: crate::spelling::DeclaredSpellings::default(),

@@ -8,6 +8,8 @@ mod builtin_property_realization;
 mod builtins_customizer;
 mod catalog_presence;
 mod classifier_facts;
+#[cfg(test)]
+mod contract_dsl_tests;
 mod dependency_registration;
 mod generic_signatures;
 mod inline_body_plan;
@@ -5131,14 +5133,73 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
     fn is_erased_contract_callable(&self, callable: &crate::libraries::LibraryCallable) -> bool {
         // Contract erasure is a source-language decision, but the physical declaration owner is a
         // JVM-library fact. Keep that fact here: target-neutral resolve code sees only the selected
-        // callable and never embeds or reports the runtime facade class name. Requiring both the
-        // source name and declaring package prevents an unrelated library callable from acquiring
-        // intrinsic behavior merely because one component happens to match.
+        // callable and never embeds or reports the runtime facade class name. The selected
+        // declaration must be the intrinsic itself, `kotlin.contracts.contract(builder:
+        // ContractBuilder.() -> Unit): Unit`, by its declaring package, name, and complete
+        // signature; an unrelated library callable never acquires intrinsic behavior because one
+        // component happens to match.
+        let builder = Ty::obj("kotlin/contracts/ContractBuilder");
+        let takes_builder = match callable.params.as_slice() {
+            [Ty::Fun(function)] => {
+                function.has_receiver
+                    && function.context_count == 0
+                    && !function.suspend
+                    && function.params == [builder]
+                    && function.ret == Ty::Unit
+            }
+            _ => false,
+        };
         callable.name == "contract"
-            && callable
-                .owner
-                .parent()
-                .is_some_and(|package| package.matches("kotlin/contracts"))
+            && callable.ret == Ty::Unit
+            && callable.owner.parent().is_some_and(is_contracts_package)
+            && takes_builder
+    }
+
+    fn top_level_callable_package(&self, callable: &crate::libraries::LibraryCallable) -> TypeName {
+        // A classpath callable's owner is its file facade class; a compiler-declared one names
+        // its package directly.
+        if self.cp.find_name(callable.owner).is_some() {
+            callable.owner.namespace()
+        } else {
+            callable.owner
+        }
+    }
+
+    fn contract_dsl_member(
+        &self,
+        callable: &crate::contracts::SelectedDslCallable<'_>,
+    ) -> Option<crate::contracts::DslMember> {
+        use crate::contracts::DslMember;
+        if !callable.dispatch_member || callable.context_parameters != 0 {
+            return None;
+        }
+        let contracts = |name: &str| Ty::obj(&format!("kotlin/contracts/{name}"));
+        let member = if callable.owner.matches("kotlin/contracts/ContractBuilder") {
+            match (callable.name, callable.params) {
+                ("returns", []) => (DslMember::Returns, contracts("Returns")),
+                ("returns", [value]) if *value == Ty::nullable(Ty::obj("kotlin/Any")) => {
+                    (DslMember::ReturnsValue, contracts("Returns"))
+                }
+                ("returnsNotNull", []) => (DslMember::ReturnsNotNull, contracts("ReturnsNotNull")),
+                // `fun <R> callsInPlace(lambda: Function<R>, kind: InvocationKind)`: the lambda's
+                // `R` is the member's own type parameter, which selection may have specialized.
+                ("callsInPlace", [Ty::Obj(lambda, [_]), kind])
+                    if lambda.matches("kotlin/Function")
+                        && *kind == contracts("InvocationKind") =>
+                {
+                    (DslMember::CallsInPlace, contracts("CallsInPlace"))
+                }
+                _ => return None,
+            }
+        } else if callable.owner.matches("kotlin/contracts/SimpleEffect") {
+            match (callable.name, callable.params) {
+                ("implies", [Ty::Boolean]) => (DslMember::Implies, contracts("ConditionalEffect")),
+                _ => return None,
+            }
+        } else {
+            return None;
+        };
+        (callable.ret == member.1).then_some(member.0)
     }
 
     fn implicit_common_supertypes(&self, types: &[Ty]) -> Vec<crate::libraries::SemanticSupertype> {
@@ -7147,4 +7208,9 @@ mod tests {
             None
         );
     }
+}
+
+/// `kotlin.contracts`, the package that declares the contract DSL.
+fn is_contracts_package(package: TypeName) -> bool {
+    package.matches("kotlin/contracts")
 }
