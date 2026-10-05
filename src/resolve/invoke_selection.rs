@@ -161,11 +161,8 @@ impl Checker<'_> {
             return self
                 .callable_reference_types
                 .get(&receiver)
-                .copied()
-                .or_else(|| match self.file.expr(receiver) {
-                    Expr::Name(name) => self.lookup(scope, name)?.callable_reference_type,
-                    _ => None,
-                });
+                .or_else(|| self.read_callable_reference_types.get(&receiver))
+                .copied();
         }
         self.expression_function_type(scope, receiver, receiver_ty)
     }

@@ -8,7 +8,10 @@
 //!
 //! The member is reached through the function classifier the supertype instantiates, for a suspend
 //! or big-arity function type as well (`SuspendFunction1`, `Function23`), and for a function-type
-//! supertype in a dependency's metadata: a property reference value calls `KProperty0.invoke`.
+//! supertype in a dependency's metadata: a property reference value calls `KProperty0.invoke`. A
+//! suspend subclass is invoked, implicitly or as `f.invoke(t)`, through its own CPS
+//! `invoke(Token, Continuation)`; a big-arity one keeps its scalar `Int` result on its typed
+//! `invoke`, and only the packed `FunctionN` bridge returns the box.
 
 use super::common;
 
@@ -43,6 +46,7 @@ fn a_function_subclass_value_runs_its_own_invoke() {
 const SHAPES_SRC: &str = "class Token(val n: Int)\n\
 class Later : suspend (Token) -> Token { override suspend fun invoke(t: Token): Token = Token(t.n + 1) }\n\
 suspend fun later(f: Later, t: Token): Token = f(t)\n\
+suspend fun laterExplicit(f: Later, t: Token): Token = f.invoke(t)\n\
 class Wide : (Token, Token, Token, Token, Token, Token, Token, Token, Token, Token, Token, Token, Token, Token, Token, Token, Token, Token, Token, Token, Token, Token, Token) -> Int {\n\
     override fun invoke(a: Token, b: Token, c: Token, d: Token, e: Token, f: Token, g: Token, h: Token, i: Token, j: Token, k: Token, l: Token, m: Token, n: Token, o: Token, p: Token, q: Token, r: Token, s: Token, t: Token, u: Token, v: Token, w: Token): Int = a.n + w.n\n\
 }\n\
@@ -55,7 +59,7 @@ fun <T, R> pass(value: T, f: (T) -> R): R = f(value)\n";
 #[test]
 fn suspend_big_arity_and_reference_values_call_invoke_like_kotlinc() {
     let stdlib = [common::stdlib_jar()];
-    for class in ["FunctionShapeInvokeKt", "Wide", "Holder"] {
+    for class in ["FunctionShapeInvokeKt", "Later", "Wide", "Holder"] {
         common::byte_diff_against_kotlinc_cp("FunctionShapeInvoke", SHAPES_SRC, class, &stdlib)
             .expect("reference kotlinc is provisioned")
             .unwrap_or_else(|diff| panic!("{class}: {diff}"));
@@ -63,12 +67,26 @@ fn suspend_big_arity_and_reference_values_call_invoke_like_kotlinc() {
 }
 
 #[test]
-fn big_arity_and_reference_values_run_their_invoke() {
+fn suspend_big_arity_and_reference_values_run_their_invoke() {
     let source = format!(
-        "{SHAPES_SRC}fun box(): String {{\n\
+        "import kotlin.coroutines.*\n\
+{SHAPES_SRC}var resumed: Any? = null\n\
+class Sink : Continuation<Unit> {{\n\
+    override val context: CoroutineContext get() = EmptyCoroutineContext\n\
+    override fun resumeWith(result: Result<Unit>) {{ resumed = result.getOrNull() }}\n\
+}}\n\
+fun box(): String {{\n\
+    var implicit = 0\n\
+    var explicit = 0\n\
+    val body: suspend () -> Unit = {{\n\
+        implicit = later(Later(), Token(1)).n\n\
+        explicit = laterExplicit(Later(), Token(5)).n\n\
+    }}\n\
+    body.startCoroutine(Sink())\n\
+    if (resumed !== Unit) return \"not completed: $resumed\"\n\
     val holder = Holder(3)\n\
     val sum = wide(Wide(), Token(1)) + holder.viaProperty()\n\
-    return if (sum == 5) \"OK\" else \"fail $sum\"\n\
+    return if (implicit == 2 && explicit == 6 && sum == 5) \"OK\" else \"fail $implicit $explicit $sum\"\n\
 }}\n"
     );
     common::expect_box_ok_with_stdlib(&source, "FunctionShapeInvokeRun");

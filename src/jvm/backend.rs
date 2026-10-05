@@ -226,7 +226,7 @@ fn run_backend_passes_after_plugins(
         return Err(SkipReason::ValueClasses);
     }
     facts.override_results =
-        crate::jvm::override_results::box_primitive_override_results(ir, callables)?;
+        crate::jvm::override_results::box_scalar_override_results(ir, callables)?;
     crate::jvm::bridges::derive_bridges(
         ir,
         classpath,

@@ -7754,8 +7754,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   function classifier (`KFunction0`), keeps its exact function shape and calls `Function0.invoke`.
   The member is reached through the function classifier a function supertype instantiates, also
   for a suspend or big-arity one (`SuspendFunction1`, `Function23`) and for one in a dependency's
-  metadata: a `KProperty0` value calls `KProperty0.invoke`. A big-arity `invoke` override keeps its
-  primitive result, since kotlinc's vararg bridge detaches it from the arity-specific `invoke`.
+  metadata: a `KProperty0` value calls `KProperty0.invoke`. A big-arity `invoke` override with a
+  scalar result keeps its unboxed JVM carrier (`invoke(…)I`), since kotlinc's vararg bridge detaches
+  it from the arity-specific `invoke`; only the packed `FunctionN` bridge returns the box.
   Tests: `tests/function_subclass_invoke_e2e.rs`.
 - **A lambda argument to the invoke operator is CONTEXTUAL.** `b { it + 1 }` on a
   `class Box { operator fun invoke(f: (Int) -> Int) }` types `it` from the operator's parameter. The
