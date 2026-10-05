@@ -565,6 +565,8 @@ fn jvm_method_sig(st: &mut StringTable<'_>, name: Option<&str>, desc: &str) -> P
 /// A secondary constructor for class metadata (`Class.constructor` = f8, repeated after the primary).
 pub struct CtorMeta<'a> {
     pub params: &'a [(String, Ty)],
+    /// Source spellings parallel to `params`; metadata records aliases from this declaration fact.
+    pub param_spellings: &'a [crate::spelling::Spelled],
     /// Per-parameter `DECLARES_DEFAULT_VALUE` flags in the same source order as `params`.
     pub param_defaults: &'a [bool],
     pub desc: &'a str,
@@ -958,7 +960,7 @@ pub fn build_class(
             &mut st,
             CtorShape {
                 params: sc.params,
-                param_spellings: &[],
+                param_spellings: sc.param_spellings,
                 desc: sc.desc,
                 flags: sc.flags,
                 param_defaults: sc.param_defaults,
@@ -2325,6 +2327,7 @@ mod tests {
             &ClassTail {
                 secondary_ctors: &[CtorMeta {
                     params: &[],
+                    param_spellings: &[],
                     param_defaults: &[],
                     desc: "()V",
                     sig_name: None,

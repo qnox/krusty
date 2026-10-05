@@ -1011,6 +1011,7 @@ mod tests {
             lines: crate::ir::IrSecondaryCtorLines::default(),
             prefix_params: Vec::new(),
             params: vec![Ty::Int],
+            declared_spellings: crate::spelling::DeclaredSpellings::default(),
             named_params: Vec::new(),
             metadata_visibility: None,
             generated_debug: crate::ir::IrGeneratedDeclarationDebug::None,

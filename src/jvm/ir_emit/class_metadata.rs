@@ -813,8 +813,9 @@ pub(super) fn build_class_metadata_with_facts(
                     override_results.physical_result(ir, fid),
                 );
                 let vararg_index = ir.fn_varargs.get(&fid).map(|vararg| vararg.index);
-                let jvm_sig =
-                    super::super::metadata_method_signatures::requires_function_signature(
+                let jvm_sig_name = (name != f.name).then(|| f.name.clone());
+                let jvm_sig = (jvm_sig_name.is_some()
+                    || super::super::metadata_method_signatures::requires_function_signature(
                         receiver,
                         logical_params
                             .iter()
@@ -827,8 +828,8 @@ pub(super) fn build_class_metadata_with_facts(
                         metadata_ret,
                         &physical,
                         &local_classifiers,
-                    )
-                    .then_some(physical);
+                    ))
+                .then_some(physical);
                 Some(FnMeta {
                     // How SOURCE spelled this member's declared types — carried on the IR because
                     // class metadata is built without the AST (see `IrFile::fn_declared_spellings`).
@@ -852,7 +853,7 @@ pub(super) fn build_class_metadata_with_facts(
                     context_count: member_context_count,
                     context_parameter_kinds,
                     jvm_sig,
-                    jvm_sig_name: (name != f.name).then(|| f.name.clone()),
+                    jvm_sig_name,
                     // The declaration's own annotations, mirrored into `@Metadata`. Retention split
                     // the two class-file attributes apart (`RuntimeVisible`/`RuntimeInvisible`); the
                     // metadata record keeps ONE list, so they are rejoined here — SOURCE-retained
@@ -1246,6 +1247,7 @@ pub(super) fn build_class_metadata_with_facts(
         .iter()
         .map(|shape| crate::metadata::class_builder::CtorMeta {
             params: &shape.params,
+            param_spellings: &shape.param_spellings,
             param_defaults: &shape.param_defaults,
             desc: &shape.descriptor,
             sig_name: shape.signature_name,
