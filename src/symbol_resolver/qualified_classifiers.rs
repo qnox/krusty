@@ -35,8 +35,8 @@ impl SymbolResolver<'_> {
         &self,
         mut prefix: ClassifierPathPrefix,
         segments: &[&str],
+        mut alias: Option<crate::libraries::AliasExpansion>,
     ) -> Result<CompletedClassifierPath, (usize, String)> {
-        let mut alias = None;
         for (index, segment) in segments.iter().enumerate() {
             let (classifier, declaration) = match prefix {
                 ClassifierPathPrefix::Package(package) => {
@@ -118,6 +118,7 @@ impl SymbolResolver<'_> {
                 match self.advance_classifier_path(
                     ClassifierPathPrefix::Classifier(classifier),
                     &segments[1..],
+                    None,
                 ) {
                     Ok(path) => return (CandidateSelection::Selected(path.classifier), None),
                     Err((_, segment)) => return (CandidateSelection::None, Some(segment)),
@@ -132,6 +133,7 @@ impl SymbolResolver<'_> {
             match self.advance_classifier_path(
                 ClassifierPathPrefix::Package(crate::types::type_name_child(TypeName::ROOT, first)),
                 &segments[1..],
+                None,
             ) {
                 Ok(path) => return (CandidateSelection::Selected(path.classifier), None),
                 Err((_, segment)) => {
@@ -191,27 +193,29 @@ impl SymbolResolver<'_> {
             return (CandidateSelection::None, Some(spelling.to_string()));
         };
         let mut failure = None;
-        let mut consider = |candidates: &[TypeName]| {
-            let mut completed: Vec<CompletedClassifierPath> = Vec::new();
-            for &candidate in candidates {
-                match self.advance_classifier_path(
-                    ClassifierPathPrefix::Classifier(candidate),
-                    &segments[1..],
-                ) {
-                    Ok(path) => record_completed_path(&mut completed, path),
-                    Err(miss) => {
-                        if failure.as_ref().is_none_or(|(depth, _)| miss.0 > *depth) {
-                            failure = Some(miss);
+        let mut consider =
+            |candidates: Vec<(TypeName, Option<crate::libraries::AliasExpansion>)>| {
+                let mut completed: Vec<CompletedClassifierPath> = Vec::new();
+                for (candidate, alias) in candidates {
+                    match self.advance_classifier_path(
+                        ClassifierPathPrefix::Classifier(candidate),
+                        &segments[1..],
+                        alias,
+                    ) {
+                        Ok(path) => record_completed_path(&mut completed, path),
+                        Err(miss) => {
+                            if failure.as_ref().is_none_or(|(depth, _)| miss.0 > *depth) {
+                                failure = Some(miss);
+                            }
                         }
                     }
                 }
-            }
-            match completed.len() {
-                0 => None,
-                1 => completed.pop().map(CandidateSelection::Selected),
-                _ => Some(CandidateSelection::Ambiguous),
-            }
-        };
+                match completed.len() {
+                    0 => None,
+                    1 => completed.pop().map(CandidateSelection::Selected),
+                    _ => Some(CandidateSelection::Ambiguous),
+                }
+            };
         let selected = |selection: CandidateSelection<CompletedClassifierPath>| match selection {
             CandidateSelection::Selected(_) => (selection, None),
             CandidateSelection::Ambiguous => {
@@ -225,26 +229,53 @@ impl SymbolResolver<'_> {
                     return (CandidateSelection::Ambiguous, Some(first.to_string()));
                 }
                 if let Some((owner, declared_name)) = imports.explicit_target(first) {
-                    if let Some(candidate) = self.src.symbols(owner, &declared_name).classifier_name
-                    {
-                        if let Some(selection) = consider(&[candidate]) {
+                    let record = self.src.symbols(owner, &declared_name);
+                    if let Some(candidate) = record.classifier_name {
+                        let alias = alias_on_selected_classifier(
+                            candidate,
+                            record.classifier_declaration.as_ref(),
+                        );
+                        if let Some(selection) = consider(vec![(candidate, alias)]) {
                             return selected(selection);
                         }
                     }
                 }
                 for level in imports.classifier_levels() {
-                    let candidates = super::classifier_scope::classifier_candidates_at_import_level(
-                        &self.src, first, level,
-                    );
-                    if let Some(selection) = consider(&candidates) {
+                    let candidates = level
+                        .packages
+                        .iter()
+                        .filter_map(|&package| {
+                            let record = self.src.symbols(SymbolNamespace::Package(package), first);
+                            let classifier = record.classifier_name?;
+                            if level.builtins_only && !record.builtin_classifier {
+                                return None;
+                            }
+                            let alias = alias_on_selected_classifier(
+                                classifier,
+                                record.classifier_declaration.as_ref(),
+                            );
+                            Some((classifier, alias))
+                        })
+                        .collect();
+                    if let Some(selection) = consider(candidates) {
                         return selected(selection);
                     }
                 }
             }
             Some(FunctionScopeRef::Flat(packages)) => {
-                let candidates =
-                    super::classifier_candidates_at_scope_level(&self.src, first, packages);
-                if let Some(selection) = consider(&candidates) {
+                let candidates = packages
+                    .iter()
+                    .filter_map(|&package| {
+                        let record = self.src.symbols(SymbolNamespace::Package(package), first);
+                        let classifier = record.classifier_name?;
+                        let alias = alias_on_selected_classifier(
+                            classifier,
+                            record.classifier_declaration.as_ref(),
+                        );
+                        Some((classifier, alias))
+                    })
+                    .collect();
+                if let Some(selection) = consider(candidates) {
                     return selected(selection);
                 }
             }
@@ -254,6 +285,7 @@ impl SymbolResolver<'_> {
             match self.advance_classifier_path(
                 ClassifierPathPrefix::Package(crate::types::type_name_child(TypeName::ROOT, first)),
                 &segments[1..],
+                None,
             ) {
                 Ok(path) => return (CandidateSelection::Selected(path), None),
                 Err(mut package_failure) => {

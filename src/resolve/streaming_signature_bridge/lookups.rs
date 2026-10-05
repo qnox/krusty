@@ -425,32 +425,8 @@ impl ProductionSignatureSemantics<'_> {
         reference: &TypeRef,
         include_scope_owner_body: bool,
     ) -> Option<Ty> {
-        let (identity, formals, expansion) =
+        let (_, formals, expansion) =
             self.signature_source_alias_expansion(scope, &reference.name)?;
-        let selected_classifier = self.qualified_type_classifier(scope, &reference.name);
-        // Compare with the declaration-owned alias target, not with the storage variant of its
-        // expansion. A structural function expansion is `Ty::Fun`, while dependency metadata
-        // correctly records its classifier target; deriving the head from `Ty::Obj` would reject
-        // that legitimate alias and deriving it from backend representation would leak platform
-        // policy into signature resolution.
-        let expansion_head = self
-            .table
-            .source_alias_fqns
-            .get(&identity)
-            .copied()
-            .or_else(|| {
-                self.table
-                    .libraries
-                    .type_alias_expansion(identity)
-                    .map(|alias| alias.target)
-            })
-            .or_else(|| expansion.non_null().obj_internal());
-        if selected_classifier.is_some() && selected_classifier != expansion_head {
-            // A nearer class declaration owns this spelling. The imported alias is not a fallback
-            // template for that unrelated class, including when the alias expands to a function
-            // type and therefore has no classifier head at all.
-            return None;
-        }
         crate::trace_compiler!(
             "signature",
             "compact typealias use spelling={} formals={formals:?} template={expansion:?}",
@@ -505,69 +481,16 @@ impl ProductionSignatureSemantics<'_> {
         scope: crate::fir::SignatureScope,
         spelling: &str,
     ) -> Option<(crate::types::TypeName, Vec<String>, Ty)> {
-        // A dotted spelling is one qualified path. The winning provider record carries the alias
-        // template; the classifier facet alone is only the target (`Function1` for
-        // `(Int) -> String`) and would drop the expansion's arguments.
-        if spelling.contains('.') || spelling.contains('/') {
-            return self
-                .with_resolver(scope, |resolver| {
-                    resolver
-                        .qualified_type_alias_expansion(spelling)
-                        .map(|alias| (alias.identity, alias.formals, alias.expansion))
-                })
-                .ok();
-        }
-        let imports = self.function_import_scope(scope.source).ok()?;
-        let expansion = |identity: crate::types::TypeName| {
-            self.table
-                .source_alias_expansions
-                .get(&identity)
-                .cloned()
-                .or_else(|| {
-                    self.table
-                        .libraries
-                        .type_alias_expansion(identity)
-                        .map(|alias| (alias.formals, alias.expansion))
-                })
-        };
-        let identity = if let Some((owner, declared_name)) = imports.explicit_target(spelling) {
-            owner
-                .existing_classifier(&declared_name)
-                .filter(|&id| expansion(id).is_some())?
-        } else {
-            let mut found = None;
-            for level in imports.classifier_levels() {
-                for &package in &level.packages {
-                    let Some(candidate) = crate::types::existing_type_name_child(package, spelling)
-                        .filter(|&id| expansion(id).is_some())
-                        .filter(|_| {
-                            !level.builtins_only
-                                || self
-                                    .table
-                                    .libraries
-                                    .symbols(
-                                        crate::symbol_source::SymbolNamespace::Package(package),
-                                        spelling,
-                                    )
-                                    .builtin_classifier
-                        })
-                    else {
-                        continue;
-                    };
-                    match found {
-                        None => found = Some(candidate),
-                        // Two distinct alias declarations in one level: ambiguous, kotlinc rejects.
-                        Some(previous) if previous == candidate => {}
-                        Some(_) => return None,
-                    }
-                }
-                if found.is_some() {
-                    break;
-                }
-            }
-            found?
-        };
-        expansion(identity).map(|(formals, expansion)| (identity, formals, expansion))
+        // The classifier and optional alias come from one scope-tower operation. Looking up alias
+        // declarations separately would let a lower star-imported alias attach itself to a winning
+        // same-package class whenever both normalize to the same target classifier.
+        self.with_resolver(scope, |resolver| {
+            resolver
+                .qualified_type_alias_expansion(spelling)
+                .map(|alias| (alias.identity, alias.formals, alias.expansion))
+        })
+        .ok()
+        .flatten()
     }
 
     pub(super) fn qualified_classifier(

@@ -76,6 +76,28 @@ fn a_nearer_classifier_shadows_a_typealias() {
 }
 
 #[test]
+fn a_same_package_classifier_does_not_inherit_a_same_target_star_alias() {
+    const LIBRARY: &[(&str, &str)] = &[
+        ("Pick.kt", "package app\nclass Pick<T>\n"),
+        (
+            "Alias.kt",
+            "package imported\ntypealias Pick<T> = app.Pick<out T>\n",
+        ),
+    ];
+    const SOURCE: &str = "package app\n\
+        import imported.*\n\
+        val value: Pick<String>? = null\n";
+    let result = common::metadata_diff_against_kotlinc_lib(
+        "SameTargetShadow",
+        LIBRARY,
+        SOURCE,
+        "app/SameTargetShadowKt",
+    )
+    .expect("reference kotlinc is provisioned");
+    result.unwrap_or_else(|diff| panic!("{diff}"));
+}
+
+#[test]
 fn a_same_direction_typealias_projection_is_kept() {
     let source = r#"
         class Box<T>
