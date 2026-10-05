@@ -6,7 +6,8 @@
 //! marked Java value nothing checked, and `insertSpecialCast` guards it where its expected type
 //! rejects `null`. A local inferred from a marked value keeps its argument marks but not its head;
 //! a type variable fixed from several values is marked only where all of them are. A value passed
-//! to a parameter whose unsubstituted type is a nullable-bounded type parameter is not guarded.
+//! to a parameter whose unsubstituted type is a nullable-bounded type parameter is not guarded. A
+//! JDK member of a mapped builtin classifier is the builtin's declaration and carries no mark.
 
 use super::common;
 
@@ -105,6 +106,9 @@ fun treeValue(map: TreeMap<String, String>): String = map.entries.firstOf().valu
 fun nestedElement(map: HashMap<String, Iterable<String>>): String =
     map.values.firstOf().firstOf()
 
+fun text(error: IllegalStateException, first: Boolean): String =
+    if (first) error.toString() else ""
+
 fun box(): String {
     val map = HashMap<String, String>()
     map.put("O", "K")
@@ -125,7 +129,7 @@ fun box(): String {
         declaredEntries(map) + loopKey(map) + loopValue(map) + pickedMixed(map, set) +
         pickedMarked(map) + (boxed(values) as Box<*>).get() + paired(map) +
         boxedValue(values) + branchKey(map, true) + whenKey(map, true) + variableKey(map) +
-        treeValue(tree) + nestedElement(nested)
+        treeValue(tree) + nestedElement(nested) + text(IllegalStateException(), false)
     return if (result == "OK2OOO1OOOK11KKOKOOOKO") "OK" else result
 }
 "#;
@@ -156,6 +160,7 @@ fn values_derived_from_enhanced_java_results_are_checked_like_kotlinc() {
         "variableKey",
         "treeValue",
         "nestedElement",
+        "text",
     ] {
         let (kotlinc, krusty) = pair.method_code(class, method);
         assert_eq!(krusty, kotlinc, "{class}.{method}");

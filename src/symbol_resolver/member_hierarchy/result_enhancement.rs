@@ -124,9 +124,13 @@ pub(super) fn enhance_overriding_flexible_results(
         else {
             continue;
         };
-        // The marks follow the declared results' shapes, so read both before any substitution.
-        let (_, marks) =
-            enhance_from_overridden(declared_result(implementation), declared_result(fixing));
+        // The marks follow the declared results' shapes, so read both before any substitution. A
+        // mapped builtin's declaration takes the builtin's rigid result without the attribute.
+        let marks = if enhancement == ResultEnhancement::NotNull {
+            enhance_from_overridden(declared_result(implementation), declared_result(fixing)).1
+        } else {
+            crate::libraries::TypeEnhancement::NONE
+        };
         crate::trace_compiler!(
             "resolve",
             "enhanced overriding result owner={:?} name={} result={enhanced:?}",

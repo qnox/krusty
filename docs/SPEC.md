@@ -2386,7 +2386,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   variable fixed from several constraints is marked only where all of them are (`pick(map.keys, set)` is
   not; `pick(map.keys, map.keys)` is). A local or function whose type is inferred keeps the marks of its
   type ARGUMENTS but not its head (`val entries = map.entries; entries.firstOf()` checks `firstOf(...)`);
-  a declared type has no marks. The guard reads the UNSUBSTITUTED expected type, so a marked value passed
+  a declared type has no marks. A JDK member of a mapped builtin classifier is the builtin's
+  declaration and carries no mark (`charSequence.toString()`, `error.toString()`). The guard reads the UNSUBSTITUTED expected type, so a marked value passed
   to a parameter of type `T` (a generic constructor's `Box(value: T)`, an extension's `other: B`) is not
   guarded. krusty carries the marks beside the semantic type as a `TypeEnhancement` layout
   (`src/libraries/enhanced_nullability.rs`) recorded on the selected declaration, and derives a value's
