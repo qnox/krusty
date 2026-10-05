@@ -52,6 +52,8 @@ mod annotation_class_element_e2e;
 mod annotation_cross_file_defaults_e2e;
 #[path = "annotation_emission_e2e.rs"]
 mod annotation_emission_e2e;
+#[path = "annotation_hash_result_e2e.rs"]
+mod annotation_hash_result_e2e;
 #[path = "annotation_impl_class_e2e.rs"]
 mod annotation_impl_class_e2e;
 #[path = "annotation_instance_class_rows_e2e.rs"]
