@@ -1446,12 +1446,16 @@ impl BodyLowering<'_> {
                     if let Some(origin) = self.ir.lambda_origins.get_mut(&impl_fn) {
                         origin.class_provenance = provenance;
                     }
-                    // Class-strategy `toString()` reads these from the lambda class's metadata,
+                    // The checker published the declarations. Lowering does not look them up by name.
+                    // Class-strategy `toString()` reads them from the lambda class's metadata,
                     // including a non-suspend lambda. A suspend lambda's class reads the same record.
-                    let type_parameters =
-                        super::generics::resolved_type_parameters(self.index, type_parameters);
-                    self.ir
-                        .record_lambda_type_parameters(impl_fn, type_parameters);
+                    let recorded =
+                        super::generics::type_parameters_by_identity(self.index, type_parameters);
+                    self.ir.record_lambda_type_parameters(impl_fn, recorded);
+                    self.ir.record_lambda_class_provenance(
+                        impl_fn,
+                        crate::ir::type_reflection::LambdaClassProvenance::SourceFunction,
+                    );
                 }
                 lambda
             }

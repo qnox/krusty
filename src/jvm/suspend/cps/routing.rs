@@ -85,6 +85,8 @@ pub(crate) struct SuspendLambdaClass {
     /// The declarations of the type parameters the lambda's function type names, directly or
     /// through their bounds, which its metadata records.
     pub type_parameters: Vec<crate::ir::IrTypeParameter>,
+    /// The source form, read before the implementation becomes `invokeSuspend` and drops its origin.
+    pub form: crate::ir::IrLambdaForm,
 }
 
 /// The suspend functions whose machine is built during emission, with their suspensions: those

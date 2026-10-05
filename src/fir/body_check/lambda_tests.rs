@@ -56,6 +56,7 @@ fn capture_free_lambda_owns_a_body_local_callable_and_checked_body() {
         callable,
         type_parameters,
         body: lambda_body,
+        ..
     } = &body.expr(root_expression(&body)).expect("lambda").kind
     else {
         panic!("lambda must become a body-local checked callable")
@@ -1446,4 +1447,89 @@ fn a_function_value_passed_to_a_fun_interface_still_converts() {
         )
     };
     assert_eq!(conversion.classifier, crate::types::type_name("Foo"));
+}
+
+#[test]
+fn a_source_lambda_publishes_type_parameters_in_first_use_order() {
+    let (body, index) = checked_function_body("fun <T, U : T> id(u: U): () -> U = { u }\n", "id");
+    let FirExprKind::Lambda {
+        type_parameters, ..
+    } = &body.expr(root_expression(&body)).expect("lambda").kind
+    else {
+        panic!("the function body must be a checked lambda")
+    };
+    let owner = crate::fir::DeclarationId::from_raw(body.owner().raw());
+    assert_eq!(
+        type_parameters.as_ref(),
+        [
+            index
+                .type_parameter(owner, 1)
+                .expect("U is the second declared parameter"),
+            index
+                .type_parameter(owner, 0)
+                .expect("T is named by U's bound"),
+        ]
+    );
+}
+
+#[test]
+fn a_member_lambda_publishes_the_class_parameter_and_its_own() {
+    let (body, index) = checked_function_body(
+        "class Holder<T> {\n\
+             fun <V : T> pick(v: V): (T) -> V = { t: T -> v }\n\
+         }\n",
+        "pick",
+    );
+    let FirExprKind::Lambda {
+        type_parameters, ..
+    } = &body.expr(root_expression(&body)).expect("lambda").kind
+    else {
+        panic!("the member body must be a checked lambda")
+    };
+    let function = crate::fir::DeclarationId::from_raw(body.owner().raw());
+    let class_parameter = index
+        .declaration_anchor(function)
+        .and_then(|anchor| anchor.owner)
+        .and_then(|class| index.type_parameter(class, 0))
+        .expect("Holder declares T");
+    let own = index.type_parameter(function, 0).expect("pick declares V");
+    assert_eq!(type_parameters.as_ref(), [class_parameter, own]);
+    assert_ne!(class_parameter, own);
+}
+
+#[test]
+fn a_nested_type_parameter_shadows_the_class_parameter() {
+    let (body, index) = checked_function_body(
+        "class Box<T> {\n\
+             fun <T> inner(): (T) -> T = { t: T -> t }\n\
+         }\n",
+        "inner",
+    );
+    let FirExprKind::Lambda {
+        type_parameters, ..
+    } = &body.expr(root_expression(&body)).expect("lambda").kind
+    else {
+        panic!("the member body must be a checked lambda")
+    };
+    let function = crate::fir::DeclarationId::from_raw(body.owner().raw());
+    let own = index.type_parameter(function, 0).expect("inner declares T");
+    let class_parameter = index
+        .declaration_anchor(function)
+        .and_then(|anchor| anchor.owner)
+        .and_then(|class| index.type_parameter(class, 0))
+        .expect("Box declares T");
+    assert_eq!(type_parameters.as_ref(), [own]);
+    assert_ne!(own, class_parameter);
+}
+
+#[test]
+fn a_non_generic_lambda_publishes_no_type_parameters() {
+    let (body, _) = checked_function_body("fun make(): () -> Int = { 42 }\n", "make");
+    let FirExprKind::Lambda {
+        type_parameters, ..
+    } = &body.expr(root_expression(&body)).expect("lambda").kind
+    else {
+        panic!("the function body must be a checked lambda")
+    };
+    assert!(type_parameters.is_empty());
 }

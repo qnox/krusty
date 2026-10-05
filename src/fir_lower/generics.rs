@@ -104,6 +104,17 @@ pub(super) fn named_type_parameters(
     parameters
 }
 
+pub(super) fn type_parameters_by_identity(
+    index: &ResolvedModuleIndex,
+    parameters: &[TypeParameterId],
+) -> Vec<IrTypeParameter> {
+    parameters
+        .iter()
+        .copied()
+        .map(|parameter| type_parameter(index, parameter))
+        .collect()
+}
+
 fn type_parameter(index: &ResolvedModuleIndex, parameter: TypeParameterId) -> IrTypeParameter {
     let header = index
         .type_parameter_header(parameter)
@@ -125,17 +136,6 @@ fn type_parameter(index: &ResolvedModuleIndex, parameter: TypeParameterId) -> Ir
         variance: header.flags.variance(),
         reified: header.flags.is_reified(),
     }
-}
-
-pub(super) fn resolved_type_parameters(
-    index: &ResolvedModuleIndex,
-    parameters: &[TypeParameterId],
-) -> Vec<IrTypeParameter> {
-    parameters
-        .iter()
-        .copied()
-        .map(|parameter| type_parameter(index, parameter))
-        .collect()
 }
 
 /// A classifier's own type parameters, without the ones it captures from an outer declaration.

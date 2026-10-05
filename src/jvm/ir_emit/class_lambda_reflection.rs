@@ -3,8 +3,8 @@
 //! `Lambda.toString()` asks kotlin-reflect to read that record and render the function type.
 //! Without it, reflection falls back to the raw `FunctionN` interface.
 
-use crate::ir::type_reflection::type_parameters_named_by;
-use crate::ir::{IrFile, IrParameterRole, IrTypeParameter};
+use crate::ir::type_reflection::LambdaClassProvenance;
+use crate::ir::{IrFile, IrParameterRole};
 use crate::types::Ty;
 
 use super::signature_formatter::{JvmSignatureFormatter, Wildcards};
@@ -18,24 +18,29 @@ pub(super) struct ClassLambdaReflection {
     pub(super) d2: Vec<String>,
 }
 
-/// The reflection record for the lambda expression `expr`. A source lambda is identified by its
-/// recorded origin and must carry every checked fact needed by metadata. A synthesized adapter
-/// without source provenance may omit the record and keep the class it already had.
+/// The reflection record for a source lambda class. A synthesized adapter omits it. Any other
+/// lambda, and a source lambda missing its function type or parameter identities, is an error:
+/// those gaps are not proof that the class is an adapter.
 pub(super) fn reflect(
     ir: &IrFile,
     expr: u32,
     impl_fn: u32,
     formatter: &JvmSignatureFormatter<'_>,
 ) -> Result<Option<ClassLambdaReflection>, String> {
-    let source = ir.lambda_origins.contains_key(&impl_fn);
-    let Some(function_type) = ir.logical_types.get(&expr).copied() else {
-        return missing_source_fact(source, "a source class lambda has no recorded logical type");
-    };
+    match ir.lambda_class_provenance(impl_fn) {
+        Some(LambdaClassProvenance::SynthesizedAdapter) => return Ok(None),
+        Some(LambdaClassProvenance::SourceFunction) => {}
+        None => {
+            return Err("a class-strategy lambda has no source-or-adapter provenance".to_string());
+        }
+    }
+    let function_type = ir
+        .logical_types
+        .get(&expr)
+        .copied()
+        .ok_or("a source class lambda has no function type")?;
     let Ty::Fun(signature) = function_type.non_null() else {
-        return missing_source_fact(
-            source,
-            "a source class lambda's logical type is not a function type",
-        );
+        return Err("a source class lambda's type is not a function type".to_string());
     };
     let own = signature
         .params
@@ -49,24 +54,11 @@ pub(super) fn reflect(
     } else {
         (None, own)
     };
-    let Some(names) = value_parameter_names(ir, impl_fn, values.len())? else {
-        return missing_source_fact(
-            source,
-            "a source class lambda has no recorded parameter identities",
-        );
-    };
-    let Some(recorded) = ir.recorded_lambda_type_parameters(impl_fn) else {
-        return missing_source_fact(
-            source,
-            "a source class lambda has no recorded type-parameter identities",
-        );
-    };
-    if !type_parameters_available(signature.ret, receiver, values, recorded) {
-        return missing_source_fact(
-            source,
-            "a source class lambda's function type names an unrecorded type parameter",
-        );
-    }
+    let names = value_parameter_names(ir, impl_fn, values.len())?
+        .ok_or("a source class lambda has no parameter identities")?;
+    let recorded = ir
+        .recorded_lambda_type_parameters(impl_fn)
+        .ok_or("a source class lambda does not publish its type parameters")?;
     let rendered = formatter
         .ty_at(&function_type.non_null(), Wildcards::Suppressed)
         .ok_or("a class lambda's function type has no JVM signature")?;
@@ -75,11 +67,32 @@ pub(super) fn reflect(
         .copied()
         .zip(values.iter().copied())
         .collect::<Vec<_>>();
+    let origin = ir
+        .lambda_origins
+        .get(&impl_fn)
+        .ok_or("a source class lambda has no source form")?;
     let local_classifiers = crate::jvm::local_classifiers::names(ir);
     let enum_entry_bodies = crate::jvm::local_classifiers::enum_entry_bodies(ir);
+    let physical = super::super::metadata_method_signatures::lambda_invoke_descriptor(
+        receiver,
+        values,
+        signature.ret,
+    );
+    let record_descriptor = super::super::metadata_method_signatures::requires_function_signature(
+        receiver,
+        values.iter().copied(),
+        signature.ret,
+        &physical,
+        &local_classifiers,
+    );
     let approximate_intersection = |ty| formatter.declaration_approximation(ty);
     let (bytes, strings) = crate::metadata::lambda_function::build(
         &crate::metadata::lambda_function::LambdaFunction {
+            function_name: crate::metadata::lambda_function::function_name(origin.form),
+            jvm_method: Some(crate::metadata::lambda_function::JvmMethod {
+                name: "invoke",
+                descriptor: record_descriptor.then_some(physical.as_str()),
+            }),
             receiver,
             parameters: &parameters,
             result: signature.ret,
@@ -88,7 +101,7 @@ pub(super) fn reflect(
             enum_entry_bodies: &enum_entry_bodies,
             intersection_approximation: &approximate_intersection,
         },
-    );
+    )?;
     Ok(Some(ClassLambdaReflection {
         signature: format!("Lkotlin/jvm/internal/Lambda;{rendered}"),
         d1: crate::metadata::encoding::bytes_to_strings(&bytes),
@@ -96,19 +109,8 @@ pub(super) fn reflect(
     }))
 }
 
-fn missing_source_fact(
-    source: bool,
-    message: &'static str,
-) -> Result<Option<ClassLambdaReflection>, String> {
-    if source {
-        Err(message.to_string())
-    } else {
-        Ok(None)
-    }
-}
-
 /// Metadata names of the lambda's value parameters, in order. `None` when the implementation has
-/// no parameter identities at all (a synthesized adapter, not a source lambda).
+/// no parameter identities at all.
 fn value_parameter_names<'a>(
     ir: &'a IrFile,
     impl_fn: u32,
@@ -145,45 +147,8 @@ fn value_parameter_names<'a>(
 }
 
 fn is_value_parameter(role: IrParameterRole) -> bool {
-    !matches!(
+    matches!(
         role,
-        IrParameterRole::ExtensionReceiver
-            | IrParameterRole::ContextValue
-            | IrParameterRole::AnonymousContextParameter { .. }
-            | IrParameterRole::ContextReceiver { .. }
+        IrParameterRole::Value | IrParameterRole::UnusedValue | IrParameterRole::DestructuredValue
     )
-}
-
-/// Whether every type parameter the function type names, directly or through a bound, was
-/// recorded for this lambda. A synthesized function that names an enclosing parameter without
-/// that record is not a source lambda's metadata.
-fn type_parameters_available(
-    result: Ty,
-    receiver: Option<Ty>,
-    values: &[Ty],
-    recorded: &[IrTypeParameter],
-) -> bool {
-    let mut names = Vec::new();
-    type_parameters_named_by(result, &mut names);
-    if let Some(receiver) = receiver {
-        type_parameters_named_by(receiver, &mut names);
-    }
-    for &value in values {
-        type_parameters_named_by(value, &mut names);
-    }
-    let mut index = 0;
-    while index < names.len() {
-        let name = names[index];
-        let Some(parameter) = recorded
-            .iter()
-            .find(|parameter| parameter.semantic_name == name)
-        else {
-            return false;
-        };
-        for &(bound, _) in &parameter.bounds {
-            type_parameters_named_by(bound, &mut names);
-        }
-        index += 1;
-    }
-    true
 }

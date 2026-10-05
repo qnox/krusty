@@ -1848,11 +1848,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Kotlin function lambda's class implements `FunctionN` with that function type's generic
   signature, and its `@Metadata` is the synthetic-class record (`k=3`, local visibility) of one
   function: the lambda's receiver, value parameters, and result, plus the type parameters that
-  signature names. kotlin-reflect reads the record from `Lambda.toString()`, so the class strategy
+  signature names. The checker publishes those as the resolved declarations visible from the
+  lambda's owner, in first-use order, including a parameter named only by a bound. An inference
+  variable is not a declaration and is not published. Lowering copies that identity list and does
+  not look a declaration up by name. A lambda literal is named `<anonymous>` and an anonymous
+  function `<no name provided>`. The record's `JvmMethodSignature` names that class's `invoke`,
+  and includes the descriptor when `ClassMapperLite` cannot rebuild it from the Kotlin signature;
+  a suspend lambda class omits the extension. A synthesized adapter — a callable reference, a
+  property reference, a serializer supplier — is marked as an adapter and omits the record. A
+  source lambda whose function type, parameter identities, source form, or a named declaration is
+  missing is an emission error. kotlin-reflect reads the record from `Lambda.toString()`, so the class strategy
   prints `() -> kotlin.Unit`, `(kotlin.String) -> kotlin.Long`, `kotlin.Int.() -> kotlin.Unit`,
   and a generic `(T) -> T`. The box harness selects the strategy from `// LAMBDAS:` (`CLASS` or
   `INDY`); an absent directive is `indy`, matching kotlinc's default. Tests:
-  `tests/class_lambda_e2e.rs` (`class_lambda_to_string_matches_kotlinc`), corpus
+  `tests/class_lambda_e2e.rs` (`class_lambda_to_string_matches_kotlinc`,
+  `class_lambda_metadata_matches_kotlinc`), corpus
   `functions/functionNtoString.kt` and `functions/functionNtoStringGeneric.kt`. The
   two flags are independent; each selects only its own closure kind. Under
   `-Xsam-conversions=class`, an existing function value converted to a Java interface is the

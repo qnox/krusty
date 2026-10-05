@@ -64,7 +64,7 @@ impl BodyFirChecker<'_> {
             .file
             .expr_span(expression)
             .ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingSourceSpan))?;
-        let type_parameters = lambda_type_parameters(
+        let type_parameters = source_lambda_type_parameters(
             self.index,
             DeclarationId::from_raw(self.body.owner().raw()),
             self.info.semantic_ty(expression),
@@ -323,66 +323,34 @@ impl BodyFirChecker<'_> {
     }
 }
 
-/// Resolve the declaration-owned variables in a lambda's checked function type while its lexical
-/// declaration scope is still available. FIR lowering must consume these identities directly; a
-/// global semantic-name search can bind an unrelated declaration and cannot represent an
-/// inference-only variable at all.
-fn lambda_type_parameters(
+/// The declarations `function_type` names, then those their bounds name, in first-use order.
+///
+/// A name that is not a type parameter of this declaration or one of its owners is an inference
+/// variable. It is not published. Lowering consumes these identities and does not recover them
+/// by scanning type text.
+fn source_lambda_type_parameters(
     index: &ResolvedModuleIndex,
-    declaration: DeclarationId,
+    owner: DeclarationId,
     function_type: Ty,
 ) -> Box<[crate::fir::TypeParameterId]> {
-    fn named_by(ty: Ty, names: &mut Vec<&'static str>) {
-        match ty {
-            Ty::TyParam(name, _) => {
-                if !names.contains(&name) {
-                    names.push(name);
-                }
-            }
-            Ty::Obj(_, arguments) => {
-                for &argument in arguments {
-                    named_by(argument, names);
-                }
-            }
-            Ty::Fun(signature) => {
-                for &parameter in &signature.params {
-                    named_by(parameter, names);
-                }
-                named_by(signature.ret, names);
-            }
-            Ty::DefinitelyNotNull(inner)
-            | Ty::Nullable(inner)
-            | Ty::PlatformNullable(inner)
-            | Ty::InProjection(inner)
-            | Ty::OutProjection(inner) => named_by(*inner, names),
-            Ty::Intersection(parts) => {
-                for &part in parts {
-                    named_by(part, names);
-                }
-            }
-            Ty::StarProjection(_) => {}
-            Ty::Unit | Ty::Null | Ty::Nothing | Ty::Error | Ty::Pending => {}
-        }
-    }
-
     let mut names = Vec::new();
-    named_by(function_type, &mut names);
+    crate::ir::type_reflection::type_parameters_named_by(function_type, &mut names);
     let mut parameters = Vec::new();
     let mut cursor = 0;
     while let Some(&name) = names.get(cursor) {
         cursor += 1;
-        let Some(parameter) = index.type_parameter_in_declaration_scope(declaration, name) else {
+        let Some(identity) = index.type_parameter_in_declaration_scope(owner, name) else {
             continue;
         };
-        if parameters.contains(&parameter) {
+        if parameters.contains(&identity) {
             continue;
         }
-        parameters.push(parameter);
+        parameters.push(identity);
         let header = index
-            .type_parameter_header(parameter)
-            .expect("a resolved lambda type parameter must retain its stable header");
+            .type_parameter_header(identity)
+            .expect("a resolved type parameter retains its header");
         for bound in &header.bounds {
-            named_by(bound.ty.get(), &mut names);
+            crate::ir::type_reflection::type_parameters_named_by(bound.ty.get(), &mut names);
         }
     }
     parameters.into_boxed_slice()

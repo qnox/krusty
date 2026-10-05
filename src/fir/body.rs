@@ -1344,9 +1344,8 @@ pub enum FirExprKind {
     },
     Lambda {
         callable: LocalCallableId,
-        /// Exact declaration-owned type parameters named by this lambda's checked function type,
-        /// closed over their bounds in first-use order. Inference-only variables have no stable
-        /// declaration identity and are deliberately absent.
+        /// Declaration-owned type parameters the checked function type names, closed over their
+        /// bounds in first-use order. An inference variable has no stable declaration and is absent.
         type_parameters: Box<[TypeParameterId]>,
         body: Box<FirBody>,
     },
