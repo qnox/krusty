@@ -2175,7 +2175,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   checking whether a lambda captures a `var` from an outer local scope; the JVM realization currently
   uses a `kotlin/jvm/internal/Ref$XxxRef` holder. An inlined scope function (`let`/`also`/`run`/`apply`)
   needs no shared cell because its body is inlined, and a closure that writes a *field* (capturing
-  `this`) is still skipped.
+  `this`) is still skipped. **Holder default-value elision** (kotlinc
+  `JvmSharedVariablesManager.defineSharedValue`): a declaration whose initializer is a constant equal
+  to the element type's default creates the holder and sets no `element`, since the new holder
+  already holds it (`var r = 0` → `new Ref$IntRef; dup; invokespecial; astore`). The comparison is
+  Kotlin's boxed equality, so `-0.0`/`-0f` are stored; a nullable element's default is `null`, so
+  `var r: Int? = 0` stores; an unsigned element is a value class with no constant default, so `0u`
+  stores. A later assignment `r = 0` is an ordinary store. Tests:
+  `tests/shared_cell_default_initializer_e2e.rs`.
 - Classes with **no primary constructor** (`class A { constructor(…) { … } }`): every constructor is a
   secondary `<init>`. A constructor delegating to `super(…)` (or implicitly, to a no-arg base/`Object`)
   runs the field initializers + `init {}` blocks (source order) before its own body; one delegating to a

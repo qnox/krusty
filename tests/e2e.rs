@@ -1441,6 +1441,8 @@ mod result_generic_override_argument_e2e;
 mod same_module_inline_frame_markers_e2e;
 #[path = "setter_return_line_e2e.rs"]
 mod setter_return_line_e2e;
+#[path = "shared_cell_default_initializer_e2e.rs"]
+mod shared_cell_default_initializer_e2e;
 #[path = "splice_nullable_value_class_lambda_e2e.rs"]
 mod splice_nullable_value_class_lambda_e2e;
 #[path = "super_delegation_line_e2e.rs"]

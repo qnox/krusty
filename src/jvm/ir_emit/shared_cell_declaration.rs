@@ -1,6 +1,7 @@
 //! A captured mutable local's `Ref$XxxRef` holder. A declaration takes kotlinc's
 //! `SharedVariablesLowering` shape: the local stores a fresh holder, and a separate statement then
-//! sets its `element` to the initial value, which a declaration without an initializer omits. The
+//! sets its `element` to the initial value, which a declaration without an initializer, or with
+//! the element type's default constant, omits. The
 //! holder's debug range opens at its store, before the element is set.
 //!
 //! kotlinc boxes only a local that a closure it does not inline captures; a lambda it inlines
@@ -76,7 +77,7 @@ impl Emitter<'_> {
         store(holder, slot, code);
         self.mark_suspend_lambda_parameter_read(declaration, code);
         self.open_declared_local(declaration, slot, holder, code);
-        if let Some(value) = value {
+        if let Some(value) = value.filter(|&value| !self.is_default_element(elem, value)) {
             // The element store is the declaration's statement: its value marks its own line,
             // and the `putfield` returns to the declaration's.
             load(holder, slot, code);
@@ -115,6 +116,34 @@ impl Emitter<'_> {
             self.emit_value(init, code);
         }
         self.put_element(&elem, code);
+    }
+
+    /// kotlinc's `JvmSharedVariablesManager.defineSharedValue`: an initializer that is a constant
+    /// equal to the element type's default value is not stored, since a new holder's `element`
+    /// already holds it. The comparison is Kotlin's boxed equality, so `-0.0` is not the default
+    /// `0.0`, a nullable element's default is `null`, and an unsigned element has none.
+    fn is_default_element(&self, elem: Ty, value: ExprId) -> bool {
+        let IrExpr::Const(constant) = self.ir.expr(value) else {
+            return false;
+        };
+        match (constant, crate::ir::IrConst::zero_for_value_type(elem)) {
+            (crate::ir::IrConst::Double(value), crate::ir::IrConst::Double(_)) => {
+                value.to_bits() == 0
+            }
+            (crate::ir::IrConst::Float(value), crate::ir::IrConst::Float(_)) => {
+                value.to_bits() == 0
+            }
+            // An unsigned type is a value class, whose default kotlinc does not take as a
+            // constant, so `0u` is stored like any other value.
+            (
+                crate::ir::IrConst::UByte(_)
+                | crate::ir::IrConst::UShort(_)
+                | crate::ir::IrConst::UInt(_)
+                | crate::ir::IrConst::ULong(_),
+                _,
+            ) => false,
+            (constant, default) => *constant == default,
+        }
     }
 
     fn emit_new_holder(&mut self, class: &str, code: &mut CodeBuilder) {
