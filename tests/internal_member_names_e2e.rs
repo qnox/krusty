@@ -68,6 +68,28 @@ value class V(val raw: Int) {
     internal fun m(): Int = raw
     internal val p: Int get() = raw
 }
+
+open class Over {
+    internal fun f(x: Int): Int = x
+    fun f(x: String): Int = x.length
+    internal open fun g(x: Int): Int = x
+    open fun g(x: String): Int = x.length
+}
+
+class OverChild : Over() {
+    public override fun g(x: Int): Int = x + 1
+    public override fun g(x: String): Int = x.length + 1
+}
+
+fun box(): String {
+    val base = Over()
+    val child = OverChild()
+    val direct = base.f(1) + base.f(\"ab\") + base.g(2) + base.g(\"cd\")
+    val onChild = child.f(1) + child.f(\"xy\") + child.g(3) + child.g(\"z\")
+    val asBase: Over = child
+    val through = asBase.f(4) + asBase.f(\"abcd\") + asBase.g(5) + asBase.g(\"abcde\")
+    return if (direct == 7 && onChild == 9 && through == 20) \"OK\" else \"direct=$direct child=$onChild through=$through\"
+}
 ";
 
 /// Methods that are not the member-name contract: `Any`, constructors, and the value-class
@@ -216,11 +238,28 @@ fn internal_instance_members_match_kotlinc_under_an_explicit_module() {
             "demo/O",
             "demo/A$Companion",
             "demo/V",
+            "demo/Over",
+            "demo/OverChild",
         ],
     );
 }
 
 #[test]
+fn internal_and_public_overloads_keep_distinct_jvm_names() {
+    let result = common::compile_and_run_with_stdlib(SOURCE, "Members");
+    assert_eq!(result.as_deref(), Some("OK"));
+}
+
+#[test]
 fn the_default_module_suffix_is_main() {
-    assert_matches("main", &["demo/Base", "demo/Child", "demo/MembersKt"]);
+    assert_matches(
+        "main",
+        &[
+            "demo/Base",
+            "demo/Child",
+            "demo/MembersKt",
+            "demo/Over",
+            "demo/OverChild",
+        ],
+    );
 }

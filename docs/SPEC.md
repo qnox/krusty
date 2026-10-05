@@ -2036,6 +2036,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   gain a second method. A public override keeps the Kotlin name and also emits
   `ACC_PUBLIC|ACC_BRIDGE|ACC_SYNTHETIC` under the mangled name; that bridge `invokevirtual`s the
   public method, so a call through the internal declaration reaches the override. A public
+  overload of the same Kotlin name is a different method: the call and any bridge select the
+  internal signature by its declaration and JVM descriptor, and the public overload keeps its
+  name. A public JVM name that happens to end in `$` is not an internal slot. A public
   override of an internal `var` emits that bridge for both accessors (`getV$<module>` and
   `setV$<module>`), including when the accessors are still spelled with the Kotlin name because
   the overridden declaration is in another file of the same module. A call

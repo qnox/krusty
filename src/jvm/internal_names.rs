@@ -222,6 +222,12 @@ fn apply_synthesized_accessors(ir: &mut IrFile, accessors: &[SynthesizedAccessor
     }
 }
 
+struct PendingBridge {
+    class: usize,
+    name: String,
+    descriptor: String,
+}
+
 fn suffix_override_bridges(
     ir: &mut IrFile,
     old_names: &HashMap<FunId, String>,
@@ -234,7 +240,7 @@ fn suffix_override_bridges(
         .enumerate()
         .map(|(index, class)| (class.fq_name, index))
         .collect::<HashMap<_, _>>();
-    let mut pending = Vec::<(usize, String)>::new();
+    let mut pending = Vec::<PendingBridge>::new();
     for (owner, edges) in &ir.function_overrides {
         let Some(&class) = class_index.get(owner) else {
             continue;
@@ -245,19 +251,26 @@ fn suffix_override_bridges(
             };
             if let Some(function) = ir.checked_callable_functions.get(&callable).copied() {
                 if let Some(old) = old_names.get(&function) {
-                    pending.push((class, old.clone()));
+                    pending.push(PendingBridge {
+                        class,
+                        name: old.clone(),
+                        descriptor: function_descriptor(ir, function),
+                    });
                 }
                 continue;
             }
             // The overridden member lives in another file of this module, so this file never
             // renamed it. The bridge was recorded under the Kotlin name and still needs `$<module>`.
-            if let Some(name) = ir
+            if let Some(callable) = ir
                 .referenced_module_callables
                 .get(&callable)
                 .filter(|callable| module_callable_is_mangled(callable))
-                .map(|callable| callable.name.to_string())
             {
-                pending.push((class, name));
+                pending.push(PendingBridge {
+                    class,
+                    name: callable.name.to_string(),
+                    descriptor: jvm_signature(&callable.parameters, &callable.result),
+                });
             }
         }
     }
@@ -274,14 +287,33 @@ fn suffix_override_bridges(
                 let Some(old) = old_names.get(&function) else {
                     continue;
                 };
-                pending.push((class, old.clone()));
+                pending.push(PendingBridge {
+                    class,
+                    name: old.clone(),
+                    descriptor: function_descriptor(ir, function),
+                });
             }
             if let Some(accessor) = synthesized
                 .iter()
                 .find(|accessor| accessor.property == property)
             {
-                pending.extend(accessor.getter.iter().map(|name| (class, name.clone())));
-                pending.extend(accessor.setter.iter().map(|name| (class, name.clone())));
+                let Some(ty) = property_type(ir, accessor) else {
+                    continue;
+                };
+                if let Some(name) = &accessor.getter {
+                    pending.push(PendingBridge {
+                        class,
+                        name: name.clone(),
+                        descriptor: jvm_signature(&[], &ty),
+                    });
+                }
+                if let Some(name) = &accessor.setter {
+                    pending.push(PendingBridge {
+                        class,
+                        name: name.clone(),
+                        descriptor: jvm_signature(&[ty], &crate::types::Ty::Unit),
+                    });
+                }
             }
             if ir.local_property_layouts.contains_key(&property) {
                 continue;
@@ -290,20 +322,50 @@ fn suffix_override_bridges(
                 continue;
             };
             if module_getter_is_mangled(record) {
-                pending.push((class, crate::names::property_getter_name(&record.name)));
+                pending.push(PendingBridge {
+                    class,
+                    name: crate::names::property_getter_name(&record.name),
+                    descriptor: jvm_signature(&[], &record.ty),
+                });
             }
             if module_setter_is_mangled(record) {
-                pending.push((class, crate::names::property_setter_name(&record.name)));
+                pending.push(PendingBridge {
+                    class,
+                    name: crate::names::property_setter_name(&record.name),
+                    descriptor: jvm_signature(&[record.ty], &crate::types::Ty::Unit),
+                });
             }
         }
     }
-    for (class, old) in pending {
-        for bridge in &mut ir.classes[class].bridges {
-            if bridge.name == old {
-                bridge.name = format!("{old}{suffix}");
+    for bridge_rename in pending {
+        for bridge in &mut ir.classes[bridge_rename.class].bridges {
+            if bridge.name == bridge_rename.name
+                && jvm_signature(&bridge.erased_params, &bridge.erased_ret)
+                    == bridge_rename.descriptor
+            {
+                bridge.name = format!("{}{suffix}", bridge.name);
             }
         }
     }
+}
+
+fn function_descriptor(ir: &IrFile, function: FunId) -> String {
+    let function = &ir.functions[function as usize];
+    jvm_signature(&function.params, &function.ret)
+}
+
+fn jvm_signature(params: &[crate::types::Ty], ret: &crate::types::Ty) -> String {
+    crate::jvm::method_descriptors::ir_method_desc(params, ret)
+}
+
+fn property_type(ir: &IrFile, accessor: &SynthesizedAccessor) -> Option<crate::types::Ty> {
+    ir.classes
+        .iter()
+        .find(|class| class.fq_name == accessor.owner)?
+        .properties
+        .iter()
+        .find(|property| property.name == accessor.property_name)
+        .map(|property| property.ty)
 }
 
 fn property_accessors(ir: &IrFile, property: crate::fir::PropertyId) -> Vec<FunId> {
@@ -352,30 +414,41 @@ fn rewrite_call_names(
             setter_names.insert(property, ir.functions[function as usize].name.clone());
         }
     }
-    let mut by_owner = HashMap::<(TypeName, String), String>::new();
+    let mut by_signature = HashMap::<(TypeName, String, String), String>::new();
     for class in &ir.classes {
         for &function in &class.methods {
             let Some(old) = old_names.get(&function) else {
                 continue;
             };
-            by_owner.insert(
-                (class.fq_name, old.clone()),
+            by_signature.insert(
+                (
+                    class.fq_name,
+                    old.clone(),
+                    function_descriptor(ir, function),
+                ),
                 ir.functions[function as usize].name.clone(),
             );
         }
     }
     for accessor in synthesized {
+        let Some(ty) = property_type(ir, accessor) else {
+            continue;
+        };
         if let Some(getter) = &accessor.getter {
             getter_names.insert(accessor.property, format!("{getter}{suffix}"));
-            by_owner.insert(
-                (accessor.owner, getter.clone()),
+            by_signature.insert(
+                (accessor.owner, getter.clone(), jvm_signature(&[], &ty)),
                 format!("{getter}{suffix}"),
             );
         }
         if let Some(setter) = &accessor.setter {
             setter_names.insert(accessor.property, format!("{setter}{suffix}"));
-            by_owner.insert(
-                (accessor.owner, setter.clone()),
+            by_signature.insert(
+                (
+                    accessor.owner,
+                    setter.clone(),
+                    jvm_signature(&[ty], &crate::types::Ty::Unit),
+                ),
                 format!("{setter}{suffix}"),
             );
         }
@@ -405,7 +478,7 @@ fn rewrite_call_names(
         by_callable: &by_callable,
         getter_names: &getter_names,
         setter_names: &setter_names,
-        by_owner: &by_owner,
+        by_signature: &by_signature,
         module_functions: &module_functions,
         module_getters: &module_getters,
         module_setters: &module_setters,
@@ -462,20 +535,30 @@ fn append_module_suffix(name: &str, suffix: &str) -> String {
     format!("{name}{suffix}")
 }
 
-/// A value-class default call is already a static `name$default`. The member rename is `name`,
-/// so the stub keeps the suffix (`m-impl$default` → `m-impl$lib1$default`).
-fn owner_renamed(
-    by_owner: &HashMap<(TypeName, String), String>,
+/// A value-class default call is already a static `name$default`. The member rename is keyed by
+/// owner, pre-suffix name, and descriptor (`m-impl$default` → `m-impl$lib1$default`). A `$default`
+/// stub's descriptor is not the member's, so it follows the member only when that pre-suffix name
+/// has one signature. Two overloads share the name and must not both move.
+fn signature_renamed(
+    by_signature: &HashMap<(TypeName, String, String), String>,
     owner: TypeName,
     name: &str,
+    descriptor: &str,
 ) -> Option<String> {
-    if let Some(renamed) = by_owner.get(&(owner, name.to_string())) {
+    if let Some(renamed) = by_signature.get(&(owner, name.to_string(), descriptor.to_string())) {
         return Some(renamed.clone());
     }
     let base = name.strip_suffix("$default")?;
-    by_owner
-        .get(&(owner, base.to_string()))
-        .map(|renamed| format!("{renamed}$default"))
+    let mut matches = by_signature
+        .iter()
+        .filter(|((candidate_owner, candidate_name, _), _)| {
+            *candidate_owner == owner && candidate_name == base
+        });
+    let (_, renamed) = matches.next()?;
+    if matches.next().is_some() {
+        return None;
+    }
+    Some(format!("{renamed}$default"))
 }
 
 fn keep_default_stub(current: &str, renamed: String) -> String {
@@ -490,7 +573,7 @@ struct CallRename<'a> {
     by_callable: &'a HashMap<crate::fir::CallableId, String>,
     getter_names: &'a HashMap<crate::fir::PropertyId, String>,
     setter_names: &'a HashMap<crate::fir::PropertyId, String>,
-    by_owner: &'a HashMap<(TypeName, String), String>,
+    by_signature: &'a HashMap<(TypeName, String, String), String>,
     module_functions: &'a HashSet<crate::fir::CallableId>,
     module_getters: &'a HashSet<crate::fir::PropertyId>,
     module_setters: &'a HashSet<crate::fir::PropertyId>,
@@ -502,63 +585,97 @@ fn rewrite_callee(callee: &mut Callee, rename: &CallRename<'_>) {
         Callee::Virtual {
             owner,
             name,
+            descriptor,
             module_target,
             target,
             ..
         } => {
-            let renamed = match target {
-                Some(IrVirtualTarget::Function(ResolvedFunctionOverrideTarget::Module(
-                    callable,
-                ))) => rename.by_callable.get(callable).cloned(),
-                Some(IrVirtualTarget::PropertyGetter(
-                    crate::fir::ResolvedPropertyOverrideTarget::Module(property),
-                )) => rename.getter_names.get(property).cloned(),
-                Some(IrVirtualTarget::PropertySetter(
-                    crate::fir::ResolvedPropertyOverrideTarget::Module(property),
-                )) => rename.setter_names.get(property).cloned(),
-                _ => module_target.and_then(|callable| rename.by_callable.get(&callable).cloned()),
-            }
-            .or_else(|| owner_renamed(rename.by_owner, *owner, name));
-            if let Some(renamed) = renamed {
+            // A selected declaration is renamed only from that identity. Falling through to the
+            // owner and the Kotlin name would move every overload once one of them is internal.
+            if target.is_some() || module_target.is_some() {
+                let renamed = match target {
+                    Some(IrVirtualTarget::Function(ResolvedFunctionOverrideTarget::Module(
+                        callable,
+                    ))) => rename.by_callable.get(callable).cloned(),
+                    Some(IrVirtualTarget::PropertyGetter(
+                        crate::fir::ResolvedPropertyOverrideTarget::Module(property),
+                    )) => rename.getter_names.get(property).cloned(),
+                    Some(IrVirtualTarget::PropertySetter(
+                        crate::fir::ResolvedPropertyOverrideTarget::Module(property),
+                    )) => rename.setter_names.get(property).cloned(),
+                    Some(
+                        IrVirtualTarget::Function(ResolvedFunctionOverrideTarget::External(_))
+                        | IrVirtualTarget::PropertyGetter(
+                            crate::fir::ResolvedPropertyOverrideTarget::External(_),
+                        )
+                        | IrVirtualTarget::PropertySetter(
+                            crate::fir::ResolvedPropertyOverrideTarget::External(_),
+                        ),
+                    ) => None,
+                    _ => module_target
+                        .and_then(|callable| rename.by_callable.get(&callable).cloned()),
+                };
+                apply_identity_rename(name, renamed, rename, module_target, target);
+            } else if let Some(renamed) =
+                signature_renamed(rename.by_signature, *owner, name, descriptor)
+            {
                 *name = keep_default_stub(name, renamed);
-            } else if sibling_member_is_mangled(rename, module_target, target) {
-                *name = append_module_suffix(name, rename.suffix);
             }
         }
         Callee::Super {
             owner,
             name,
+            descriptor,
+            params,
+            ret,
             declaration,
             ..
         } => {
-            let renamed = match declaration {
-                Some(ResolvedFunctionOverrideTarget::Module(callable)) => {
-                    rename.by_callable.get(callable).cloned()
+            if let Some(declaration) = declaration.as_ref() {
+                let renamed = match declaration {
+                    ResolvedFunctionOverrideTarget::Module(callable) => {
+                        rename.by_callable.get(callable).cloned()
+                    }
+                    ResolvedFunctionOverrideTarget::External(_) => None,
+                };
+                if let Some(renamed) = renamed {
+                    *name = keep_default_stub(name, renamed);
+                } else if let ResolvedFunctionOverrideTarget::Module(callable) = declaration {
+                    if rename.module_functions.contains(callable) {
+                        *name = append_module_suffix(name, rename.suffix);
+                    }
                 }
-                _ => None,
-            }
-            .or_else(|| owner_renamed(rename.by_owner, *owner, name));
-            if let Some(renamed) = renamed {
-                *name = keep_default_stub(name, renamed);
-            } else if let Some(ResolvedFunctionOverrideTarget::Module(callable)) = declaration {
-                if rename.module_functions.contains(callable) {
-                    *name = append_module_suffix(name, rename.suffix);
+            } else {
+                let descriptor = if descriptor.is_empty() {
+                    jvm_signature(params, ret)
+                } else {
+                    descriptor.clone()
+                };
+                if let Some(renamed) =
+                    signature_renamed(rename.by_signature, *owner, name, &descriptor)
+                {
+                    *name = keep_default_stub(name, renamed);
                 }
             }
         }
         Callee::Special {
             owner,
             name,
+            descriptor,
             source,
             ..
         } => {
-            let renamed = source
-                .and_then(|callable| rename.by_callable.get(&callable).cloned())
-                .or_else(|| owner_renamed(rename.by_owner, *owner, name));
-            if let Some(renamed) = renamed {
+            if let Some(source) = source.as_ref() {
+                let renamed = rename.by_callable.get(source).cloned();
+                if let Some(renamed) = renamed {
+                    *name = keep_default_stub(name, renamed);
+                } else if rename.module_functions.contains(source) {
+                    *name = append_module_suffix(name, rename.suffix);
+                }
+            } else if let Some(renamed) =
+                signature_renamed(rename.by_signature, *owner, name, descriptor)
+            {
                 *name = keep_default_stub(name, renamed);
-            } else if source.is_some_and(|callable| rename.module_functions.contains(&callable)) {
-                *name = append_module_suffix(name, rename.suffix);
             }
         }
         Callee::Module { target, name, .. } | Callee::ModuleWithDefaults { target, name, .. } => {
@@ -568,12 +685,32 @@ fn rewrite_callee(callee: &mut Callee, rename: &CallRename<'_>) {
                 *name = append_module_suffix(name, rename.suffix);
             }
         }
-        Callee::Static { owner, name, .. } => {
-            if let Some(renamed) = owner_renamed(rename.by_owner, *owner, name) {
+        Callee::Static {
+            owner,
+            name,
+            descriptor,
+            ..
+        } => {
+            if let Some(renamed) = signature_renamed(rename.by_signature, *owner, name, descriptor)
+            {
                 *name = renamed;
             }
         }
         _ => {}
+    }
+}
+
+fn apply_identity_rename(
+    name: &mut String,
+    renamed: Option<String>,
+    rename: &CallRename<'_>,
+    module_target: &Option<crate::fir::CallableId>,
+    target: &Option<IrVirtualTarget>,
+) {
+    if let Some(renamed) = renamed {
+        *name = keep_default_stub(name, renamed);
+    } else if sibling_member_is_mangled(rename, module_target, target) {
+        *name = append_module_suffix(name, rename.suffix);
     }
 }
 
@@ -592,6 +729,15 @@ fn sibling_member_is_mangled(
         Some(IrVirtualTarget::PropertySetter(
             crate::fir::ResolvedPropertyOverrideTarget::Module(property),
         )) => rename.module_setters.contains(property),
+        Some(
+            IrVirtualTarget::Function(ResolvedFunctionOverrideTarget::External(_))
+            | IrVirtualTarget::PropertyGetter(crate::fir::ResolvedPropertyOverrideTarget::External(
+                _,
+            ))
+            | IrVirtualTarget::PropertySetter(crate::fir::ResolvedPropertyOverrideTarget::External(
+                _,
+            )),
+        ) => false,
         _ => module_target.is_some_and(|callable| rename.module_functions.contains(&callable)),
     }
 }
