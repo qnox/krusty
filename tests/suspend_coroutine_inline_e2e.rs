@@ -119,7 +119,10 @@ fn a_classpath_inline_suspend_result_is_narrowed_on_the_calls_line_like_kotlinc(
     common::assert_classes_identical_to_kotlinc_against(
         "SuspendInlineParked",
         PARKED_SOURCE,
-        &["SuspendInlineParkedKt", "SuspendInlineParkedKt$parkedResult$1"],
+        &[
+            "SuspendInlineParkedKt",
+            "SuspendInlineParkedKt$parkedResult$1",
+        ],
         &[library],
     );
 }

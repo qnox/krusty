@@ -7245,7 +7245,13 @@ impl<'a> Emitter<'a> {
             "inline target {owner}.{name}{descriptor} splice_descriptor={splice_desc} args={}",
             args.len()
         );
-        let Some(body) = self.bodies.body(owner, name, descriptor) else {
+        // kotlinc splices a suspend inline function's `name$$forInline` copy, which keeps the
+        // suspension markers its transformed `name` body has already lowered into a state machine.
+        let Some(body) = self
+            .bodies
+            .body(owner, &format!("{name}$$forInline"), descriptor)
+            .or_else(|| self.bodies.body(owner, name, descriptor))
+        else {
             crate::trace_compiler!("splice", "no body for {owner}.{name}{descriptor}");
             return false;
         };

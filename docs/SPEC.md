@@ -780,7 +780,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   on the call's line: the inlined body left the caller's line forgotten, and kotlinc's
   `visitVariable` marks the initializer before materializing its erased value, so the `checkcast`
   gets an entry of its own behind the transformer's resume entry on the same line, which keeps a
-  `nop` (`jvm/ir_emit/transformed_suspensions.rs`).
+  `nop` (`jvm/ir_emit/transformed_suspensions.rs`). A public suspend inline function from a
+  library is spliced from its private `name$$forInline` copy, which keeps the suspension markers;
+  its `name` body is already lowered to the callee's own state machine (or tail call), and
+  splicing it leaves the caller without one (`try_inline_static_as` in `jvm/ir_emit.rs`).
   Tests: `tests/suspend_coroutine_inline_e2e.rs`, the `coroutines/` box corpus through the kotlinc
   byte-diff harness, and
   `fir/body_check/call_tests.rs::suspend_coroutine_is_an_ordinary_inline_suspend_call`.
