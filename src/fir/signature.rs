@@ -1538,7 +1538,7 @@ pub struct ResolvedModuleIndex {
     /// Resolved source annotation policies keyed by classifier identity. These are declaration
     /// header facts; no annotation syntax or source coordinate survives finalization.
     annotation_retentions: HashMap<TypeName, crate::types::AnnotationRetention>,
-    annotation_targets: HashMap<TypeName, crate::types::AnnotationTargets>,
+    annotation_targets: crate::types::DeclaredTargetPolicies,
     /// Stable resolved identity of every source classifier. Identity belongs to the declaration
     /// inventory and may be known before an ordinary body-local classifier's lexical parent header
     /// is checked in Pass 2.
@@ -2025,7 +2025,6 @@ impl ResolvedModuleIndex {
         &mut self,
         classifier: TypeName,
         retention: crate::types::AnnotationRetention,
-        targets: Option<crate::types::AnnotationTargets>,
     ) {
         assert!(
             self.classifier_declarations.contains_key(&classifier),
@@ -2037,14 +2036,51 @@ impl ResolvedModuleIndex {
                 .is_none(),
             "an annotation classifier may publish one retention policy"
         );
-        if let Some(targets) = targets {
-            assert!(
-                self.annotation_targets
-                    .insert(classifier, targets)
-                    .is_none(),
-                "an annotation classifier may publish one target policy"
-            );
-        }
+    }
+
+    /// A source annotation class's declared `@Retention`, published once the classifier-annotation
+    /// pass has checked the application and found it selects a `kotlin.annotation.AnnotationRetention`
+    /// entry. It replaces the default the header registered the class with.
+    pub(crate) fn publish_annotation_retention(
+        &mut self,
+        classifier: TypeName,
+        retention: crate::types::AnnotationRetention,
+    ) {
+        let registered = self
+            .annotation_retentions
+            .get_mut(&classifier)
+            .expect("a declared retention requires the classifier's registered annotation policy");
+        assert!(
+            *registered == crate::types::AnnotationRetention::Default
+                && retention != crate::types::AnnotationRetention::Default,
+            "an annotation classifier may publish one declared retention"
+        );
+        *registered = retention;
+    }
+
+    /// A source annotation class's `@Target` policy, published once the classifier-annotation pass
+    /// has checked the application: `valid` decides applicability, an invalid application only
+    /// supplies kotlinc's recovery for diagnostics (see [`crate::types::DeclaredTargetPolicies`]).
+    pub(crate) fn publish_annotation_targets(
+        &mut self,
+        classifier: TypeName,
+        targets: crate::types::AnnotationTargets,
+        valid: bool,
+    ) {
+        assert!(
+            self.annotation_retentions.contains_key(&classifier),
+            "annotation targets require the classifier's published annotation policy"
+        );
+        let published = if valid {
+            self.annotation_targets.publish_valid(classifier, targets)
+        } else {
+            self.annotation_targets
+                .publish_invalid_recovery(classifier, targets)
+        };
+        assert!(
+            published,
+            "an annotation classifier may publish one target policy"
+        );
     }
 
     pub(crate) fn annotation_retention(
@@ -2054,14 +2090,8 @@ impl ResolvedModuleIndex {
         self.annotation_retentions.get(&classifier).copied()
     }
 
-    pub(crate) fn annotation_targets(
-        &self,
-        classifier: TypeName,
-    ) -> crate::types::AnnotationTargets {
-        self.annotation_targets
-            .get(&classifier)
-            .copied()
-            .unwrap_or(crate::types::AnnotationTargets::DEFAULT)
+    pub(crate) fn annotation_targets(&self) -> &crate::types::DeclaredTargetPolicies {
+        &self.annotation_targets
     }
 
     pub fn classifier_header(

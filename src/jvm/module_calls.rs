@@ -697,7 +697,7 @@ pub(super) fn realize_super_calls(
 pub(super) fn realize(
     ir: &mut IrFile,
     stems: &[String],
-    classpath: &crate::jvm::classpath::Classpath,
+    classifiers: &dyn crate::backend::BackendClassifierSource,
     callables: &crate::backend::CheckedBackendCallables,
     property_realizations: &mut PropertyRealizations,
     jvm_default: crate::jvm::ir_emit::JvmDefaultMode,
@@ -858,20 +858,8 @@ pub(super) fn realize(
             }
             IrExpr::SingletonValue { classifier } => {
                 let failure = ModuleRealizationTarget::Classifier(classifier);
-                let (owner, field) = if let Some(declaration) =
-                    ir.referenced_module_classifiers.get(&classifier).copied()
-                {
-                    if !declaration.singleton {
-                        return Err(failure);
-                    }
-                    if let Some(owner) = declaration.companion_owner {
-                        (owner, classifier.nested_segment_ref().to_owned())
-                    } else {
-                        (classifier, "INSTANCE".to_string())
-                    }
-                } else {
-                    classpath.singleton_storage(classifier).ok_or(failure)?
-                };
+                let (owner, field) =
+                    super::singleton_storage::of(classifiers, classifier).ok_or(failure)?;
                 Some(IrExpr::ExternalStaticInstance {
                     owner,
                     ty: classifier,

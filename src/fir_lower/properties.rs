@@ -414,6 +414,7 @@ pub(super) fn finalize_properties(
     realize_backing_field_operations(index, ir, &realizations)?;
     publish_foreign_accessor_layouts(index, ir, &mut realizations)?;
     ir.local_property_layouts.extend(realizations);
+    attach_declared_accessor_annotations(ir);
     // Accessor functions exist now, and checked reads still carry the call site's type arguments.
     // Splice `inline` accessors before a backend turns the read into a call and drops those
     // arguments: a reified `T::class` in the accessor is the call site's class.
@@ -970,6 +971,48 @@ struct MemberProperty {
     context_parameters: Vec<Ty>,
 }
 
+/// Hand the annotations on each declared accessor to that accessor function, and those on a
+/// declared setter's value parameter to its last parameter. A default accessor has no function
+/// here; a backend realizes it from [`IrFile::accessor_annotations`].
+fn attach_declared_accessor_annotations(ir: &mut IrFile) {
+    let declared = ir
+        .accessor_annotations
+        .iter()
+        .filter_map(|(property, annotations)| {
+            let (getter, setter) = match ir.local_property_layouts.get(property)? {
+                IrLocalPropertyLayout::TopLevelStorage { getter, setter, .. }
+                | IrLocalPropertyLayout::Member { getter, setter, .. } => (*getter, *setter),
+                IrLocalPropertyLayout::TopLevelAccessor { getter, setter, .. }
+                | IrLocalPropertyLayout::MemberExtension { getter, setter, .. } => {
+                    (Some(*getter), *setter)
+                }
+            };
+            Some((getter, setter, annotations.clone()))
+        })
+        .collect::<Vec<_>>();
+    for (getter, setter, annotations) in declared {
+        if let Some(getter) = getter.filter(|_| annotations.getter.declares_annotations()) {
+            ir.function_annotations.insert(getter, annotations.getter);
+        }
+        let Some(setter) = setter else {
+            continue;
+        };
+        if annotations.setter.declares_annotations() {
+            ir.function_annotations.insert(setter, annotations.setter);
+        }
+        if annotations.setter_parameter.declares_annotations() {
+            let mut parameters = vec![
+                crate::ir::DeclarationAnnotations::default();
+                ir.functions[setter as usize].params.len()
+            ];
+            if let Some(value) = parameters.last_mut() {
+                *value = annotations.setter_parameter;
+            }
+            ir.fn_param_annotations.insert(setter, parameters);
+        }
+    }
+}
+
 fn materialize_member_property(
     index: &ResolvedModuleIndex,
     member: MemberProperty,
@@ -1372,6 +1415,11 @@ fn materialize_member_property(
         getter_jvm_name: None,
         setter_jvm_name: None,
         needs_access_bridge: needs_property_reference_bridge,
+        accessor_annotations: ir
+            .accessor_annotations
+            .get(&property_id)
+            .cloned()
+            .unwrap_or_default(),
     });
     realizations.insert(
         property_id,

@@ -248,6 +248,7 @@ mod tests {
             value_underlying: None,
             value_declaration: None,
             role: None,
+            companion: None,
         })
     }
 
