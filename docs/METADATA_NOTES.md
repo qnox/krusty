@@ -487,8 +487,10 @@ wrote. A primitive specialized array has no type argument and is recorded unchan
 
 ## Class supertypes: only what source declared
 
-`Class.supertype` (f6) lists the DECLARED supertypes, superclass first. An undeclared `kotlin/Any`
-is never recorded — `class Holder<T>(val t: T) : Iface` writes one supertype record, not two.
+`Class.supertype` (f6) lists the DECLARED supertypes in source order, wherever the superclass is
+written: `class C : I, Base(), J` writes `I, Base, J`, and `d2` interns them in that order. Delegated
+interfaces, parenless superclasses, local classes and anonymous objects follow the same rule. An
+undeclared `kotlin/Any` is never recorded — `class Holder<T>(val t: T) : Iface` writes one supertype record, not two.
 
 This is a trap for a generic class: its supertype list comes from the recorded generic signature
 (`ir.class_signature(..).supers`), which ALWAYS materializes the superclass position because a JVM
@@ -500,3 +502,7 @@ non-generic shape with a superclass slot exactly when one was declared.
 that list. The flag cannot be inferred from the spellings themselves: a declared superclass that
 named no alias spells nothing, yet still occupies the slot, so only the emitter knows. Getting it
 wrong shifts every abbreviation onto the neighbouring supertype.
+
+Both lists lead with the superclass. The emitter then moves it to the slot that resolution recorded
+in `ResolvedClassifierHeader` and lowering published as `IrFile::class_superclass_positions`, so the
+spellings move with it. Tests: `tests/metadata_supertype_order_e2e.rs`.
