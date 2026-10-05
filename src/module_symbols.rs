@@ -465,7 +465,28 @@ impl<'a> ModuleSymbols<'a> {
             // does, so every downstream query (identity diagnostics included) can use the common
             // `SymbolSource::is_value_name` contract instead of branching on symbol provenance.
             value_underlying: c.value_field.as_ref().map(|(_, ty)| *ty),
-            value_underlying_property: c.value_field.as_ref().map(|(name, _)| name.clone()),
+            value_declaration: c.value_field.as_ref().map(|(property, underlying)| {
+                crate::types::DeclaredValueClass {
+                    property: property.as_str().into(),
+                    underlying: *underlying,
+                    // The class's own formals are already its declaration-scoped identities.
+                    type_parameters: c
+                        .type_params
+                        .iter()
+                        .enumerate()
+                        .map(|(index, name)| {
+                            Ty::ty_param(
+                                name,
+                                c.type_param_bounds
+                                    .get(index)
+                                    .copied()
+                                    .filter(|bound| *bound != Ty::Error)
+                                    .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any"))),
+                            )
+                        })
+                        .collect(),
+                }
+            }),
             alias_target: None,
             // Preserve the classifier's formals on the common type shape. Receiver-coupled queries can
             // then bind `Scope<String>` before selecting a member extension declared on `Scope<T>`, in

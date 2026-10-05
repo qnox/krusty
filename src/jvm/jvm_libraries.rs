@@ -2489,7 +2489,7 @@ impl JvmLibraries {
                 companion_object,
                 qualified_name: ci.meta.class_qualified_name.as_deref().map(Box::from),
                 value_underlying,
-                value_underlying_property: value_class.and_then(|declaration| declaration.property),
+                value_declaration: value_class.and_then(|declaration| declaration.declaration),
                 alias_target: None,
                 own_type_parameter_count: type_params.len(),
                 type_parameters: crate::types::TypeParameters::new(
