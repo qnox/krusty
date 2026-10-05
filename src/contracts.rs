@@ -9,7 +9,7 @@ mod description;
 
 pub use description::{
     CallBinding, Decoded, Description, DescriptionBinder, DescriptionOwner, DslMember, KindBinding,
-    Term, TermId, TermKind,
+    SelectedDslCallable, Term, TermId, TermKind,
 };
 
 /// A contract whose source type references have all been bound to publishable semantic types.

@@ -26,6 +26,23 @@ pub enum DslMember {
     Implies,
 }
 
+/// The declaration a description call selected, as the provider classifies a DSL member by it:
+/// its exact declaring classifier, name, receiver and context shape, and complete parameter and
+/// return types. A same-owner, same-name declaration of another signature is not the DSL.
+#[derive(Clone, Copy, Debug)]
+pub struct SelectedDslCallable<'a> {
+    /// The classifier declaring the selected member.
+    pub owner: crate::types::TypeName,
+    pub name: &'a str,
+    /// The call selected a member dispatched on its receiver, not an extension.
+    pub dispatch_member: bool,
+    /// The number of leading context parameters the declaration has.
+    pub context_parameters: usize,
+    /// The value parameter types, context parameters excluded.
+    pub params: &'a [crate::types::Ty],
+    pub ret: crate::types::Ty,
+}
+
 /// What one call of a description selected.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CallBinding {

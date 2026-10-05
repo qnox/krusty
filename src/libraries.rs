@@ -583,13 +583,11 @@ pub trait SemanticPlatform: crate::symbol_source::SymbolSource {
         callable.owner
     }
 
-    /// The contract-DSL member `name` of classifier `owner` is, when `owner` declares it: a
-    /// description's call means an effect only when it selected one of these declarations.
+    /// The contract-DSL member the selected declaration `callable` is, by its complete signature:
+    /// a description's call means an effect only when it selected one of these declarations.
     fn contract_dsl_member(
         &self,
-        _owner: TypeName,
-        _name: &str,
-        _value_parameters: usize,
+        _callable: &crate::contracts::SelectedDslCallable<'_>,
     ) -> Option<crate::contracts::DslMember> {
         None
     }

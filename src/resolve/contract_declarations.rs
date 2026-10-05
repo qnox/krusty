@@ -210,9 +210,9 @@ struct CheckedDescriptionBinder<'c, 'a> {
 
 impl DescriptionBinder for CheckedDescriptionBinder<'_, '_> {
     fn bind_call(&mut self, description: &Description, call: TermId) -> CallBinding {
-        let TermKind::Call { name, .. } = &description.term(call).kind else {
+        if !matches!(description.term(call).kind, TermKind::Call { .. }) {
             return CallBinding::Unresolved;
-        };
+        }
         match self
             .checker
             .resolved_calls
@@ -222,9 +222,21 @@ impl DescriptionBinder for CheckedDescriptionBinder<'_, '_> {
                 let Some(owner) = selected.member.owner else {
                     return CallBinding::Unresolved;
                 };
+                let contexts = selected.context_args.len();
+                let Some(params) = selected.member.params.get(contexts..) else {
+                    return CallBinding::Unresolved;
+                };
+                let callable = crate::contracts::SelectedDslCallable {
+                    owner,
+                    name: &selected.member.name,
+                    dispatch_member: true,
+                    context_parameters: contexts,
+                    params,
+                    ret: selected.ret,
+                };
                 self.checker
                     .libraries
-                    .contract_dsl_member(owner, name, selected.member.params.len())
+                    .contract_dsl_member(&callable)
                     .map_or_else(
                         || CallBinding::Foreign(member_callable_id(owner, &selected.member.name)),
                         CallBinding::Dsl,

@@ -385,7 +385,7 @@ impl ProductionSignatureSemantics<'_> {
         let reference = self
             .table
             .libraries
-            .property_reference_type(0, mutable, &[value.get()])
+            .property_reference_type(0, mutable, &[value.result.get()])
             .ok_or_else(Self::failure)?;
         crate::fir::ResolvedTy::new(reference)
             .map(Some)
@@ -399,7 +399,7 @@ impl ProductionSignatureSemantics<'_> {
         classifier: crate::types::TypeName,
         spelling: &str,
         demand: &mut Demand<'_>,
-    ) -> Result<Option<crate::fir::ResolvedTy>, crate::fir::DiagnosticId> {
+    ) -> Result<Option<SelectedValue>, crate::fir::DiagnosticId> {
         let properties = self
             .with_resolver(scope, |resolver| {
                 Some(resolver.classifier_associated_properties(classifier, spelling))
@@ -415,7 +415,7 @@ impl ProductionSignatureSemantics<'_> {
         classifier: crate::types::TypeName,
         spelling: &str,
         demand: &mut Demand<'_>,
-    ) -> Result<Option<crate::fir::ResolvedTy>, crate::fir::DiagnosticId> {
+    ) -> Result<Option<SelectedValue>, crate::fir::DiagnosticId> {
         let properties = self
             .with_resolver(scope, |resolver| {
                 Some(resolver.static_scope_associated_properties(classifier, spelling))
@@ -428,7 +428,7 @@ impl ProductionSignatureSemantics<'_> {
         &self,
         properties: Vec<crate::libraries::PropertyInfo>,
         demand: &mut Demand<'_>,
-    ) -> Result<Option<crate::fir::ResolvedTy>, crate::fir::DiagnosticId> {
+    ) -> Result<Option<SelectedValue>, crate::fir::DiagnosticId> {
         let Some(nearest) = properties
             .iter()
             .map(|property| property.receiver_rank)
@@ -442,14 +442,21 @@ impl ProductionSignatureSemantics<'_> {
         let (Some(property), None) = (nearest.next(), nearest.next()) else {
             return Err(Self::failure());
         };
-        if let Some(signature) =
-            self.demanded_source_signature(None, property.stable_declaration, demand)?
-        {
-            return Ok(Some(signature.result));
-        }
-        crate::fir::ResolvedTy::new(property.ty)
-            .map(Some)
-            .map_err(|_| Self::failure())
+        let enum_entry = self
+            .classifier_has_enum_entry(property.owner, &property.name)
+            .then(|| SelectedEnumEntry {
+                classifier: property.owner,
+                name: property.name.clone(),
+            });
+        let result = match self.demanded_source_signature(
+            None,
+            property.stable_declaration,
+            demand,
+        )? {
+            Some(signature) => signature.result,
+            None => crate::fir::ResolvedTy::new(property.ty).map_err(|_| Self::failure())?,
+        };
+        Ok(Some(SelectedValue { result, enum_entry }))
     }
 }
 

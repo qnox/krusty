@@ -115,3 +115,26 @@ fun use(a: Any?): Int = if (qualified(a)) a.length else 0
 fn qualified_and_aliased_spellings_declare_the_same_contract() {
     byte_identical("Qualified", QUALIFIED_SPELLINGS, "QualifiedKt");
 }
+
+/// An entry reached through a star import of `InvocationKind` and one imported under an alias are
+/// the same entries; the binding keeps the entry the ordinary value selection chose.
+const IMPORTED_KINDS: &str = r#"
+@file:OptIn(kotlin.contracts.ExperimentalContracts::class)
+import kotlin.contracts.*
+import kotlin.contracts.InvocationKind.*
+import kotlin.contracts.InvocationKind.AT_MOST_ONCE as Once
+
+fun starImported(block: () -> Unit) {
+    contract { callsInPlace(block, EXACTLY_ONCE) }
+    block()
+}
+fun aliasedEntry(block: () -> Unit) {
+    contract { callsInPlace(block, Once) }
+    block()
+}
+"#;
+
+#[test]
+fn star_imported_and_aliased_invocation_kinds_declare_their_entries() {
+    byte_identical("ImportedKinds", IMPORTED_KINDS, "ImportedKindsKt");
+}

@@ -32,11 +32,14 @@ mod postponed_calls;
 mod qualified_calls;
 mod receiver_member_level;
 mod semantics;
+mod value_selection;
 mod source_contracts;
 mod stable_function_index;
 mod type_parameter_publication;
 mod value_parameter_publication;
 mod vararg_constructor_property;
+
+use value_selection::{SelectedEnumEntry, SelectedValue};
 
 pub(super) use declaration_aliases::publish_compact_nested_aliases;
 pub(crate) use declaration_conflicts::finalize_streamed_top_level_conflicts;

@@ -254,13 +254,29 @@ impl ProductionSignatureSemantics<'_> {
     }
 }
 
-/// One selected description call: the declaration's owner, kind, and specialized shape.
+/// One selected description call: the declaration's owner, name, kind, and specialized shape.
 #[derive(Clone)]
 struct SelectedDslCall {
     owner: TypeName,
+    name: String,
     kind: crate::libraries::FnKind,
+    context_parameters: usize,
+    /// The value parameter types, context parameters excluded.
     params: Vec<Ty>,
     ret: Ty,
+}
+
+impl SelectedDslCall {
+    fn callable(&self) -> crate::contracts::SelectedDslCallable<'_> {
+        crate::contracts::SelectedDslCallable {
+            owner: self.owner,
+            name: &self.name,
+            dispatch_member: self.kind == crate::libraries::FnKind::Member,
+            context_parameters: self.context_parameters,
+            params: &self.params,
+            ret: self.ret,
+        }
+    }
 }
 
 /// Binds a description in the declaring function's signature scope, where the lambda's implicit
@@ -321,8 +337,10 @@ impl SignatureDescriptionBinder<'_, '_> {
                     CandidateSelection::Selected((function, params, ret)) => {
                         Some(SelectedDslCall {
                             owner: function.callable.owner,
+                            name: function.callable.name.clone(),
                             kind: function.kind,
-                            params,
+                            context_parameters: function.context_count,
+                            params: params.get(function.context_count..)?.to_vec(),
                             ret,
                         })
                     }
@@ -355,42 +373,40 @@ impl SignatureDescriptionBinder<'_, '_> {
                     .and_then(|index| self.param_types[index])
                     .unwrap_or(Ty::Error),
                 _ => self
-                    .enum_entry(segments)
-                    .map_or(Ty::Error, |(owner, _)| Ty::obj_name(owner)),
+                    .selected_value(segments)
+                    .map_or(Ty::Error, |selected| selected.result.get()),
             },
             TermKind::Other => Ty::Error,
         }
     }
 
-    /// The enum entry a name denotes in the declaring function's scope, as (enum, entry): an
-    /// explicitly imported entry, or a qualified one whose qualifier names the enum. A parameter
-    /// root is a value, never a qualifier.
-    fn enum_entry(&self, segments: &[String]) -> Option<(TypeName, String)> {
+    /// The value a description name selects in the declaring function's scope, through the
+    /// ordinary value tower: a parameter root is a value, so its path names no classifier member.
+    /// Contracts are bound before any inferred signature exists, so a value that would need one
+    /// is not selected; Pass 2 reports what the checked body finds, so this records nothing.
+    fn selected_value(&self, segments: &[String]) -> Option<super::SelectedValue> {
+        if segments
+            .first()
+            .is_none_or(|root| self.params.contains(root))
+        {
+            return None;
+        }
         let semantics = self.semantics;
-        let (owner, entry) = match segments {
-            [] => return None,
-            [name] => semantics.explicit_imported_classifier_callable(self.scope.source, name)?,
-            [root, .., entry] => {
-                if self.params.contains(root) {
-                    return None;
-                }
-                let qualifier = segments[..segments.len() - 1].join(".");
-                let owner =
-                    semantics.qualified_classifier_or_source_alias(self.scope, &qualifier)?;
-                (owner, entry.clone())
-            }
-        };
-        let module = crate::module_symbols::ModuleSymbols::for_file(
-            semantics.table,
-            self.scope.source.raw(),
+        let recorded = semantics.diagnostics.borrow().len();
+        let origin = semantics
+            .signature_origins
+            .get(&self.scope.owner)
+            .copied()
+            .unwrap_or(crate::fir::OriginId::from_raw(0));
+        let selected = semantics.select_value_candidate(
+            self.scope,
+            &segments.join("."),
+            origin,
+            None,
+            &mut |_| Err(ProductionSignatureSemantics::failure()),
         );
-        let source = crate::symbol_source::CompositeSource::new(vec![
-            &module as &dyn crate::symbol_source::SymbolSource,
-            &*semantics.table.libraries as &dyn crate::symbol_source::SymbolSource,
-        ]);
-        crate::symbol_source::SymbolSource::classifier(&source, owner)
-            .is_some_and(|classifier| classifier.enum_entries.contains(&entry))
-            .then_some((owner, entry))
+        semantics.diagnostics.borrow_mut().truncate(recorded);
+        selected.ok()
     }
 }
 
@@ -399,18 +415,11 @@ impl DescriptionBinder for SignatureDescriptionBinder<'_, '_> {
         let Some(selected) = self.select(description, call) else {
             return CallBinding::Unresolved;
         };
-        let TermKind::Call { name, .. } = &description.term(call).kind else {
-            return CallBinding::Unresolved;
-        };
-        let member = (selected.kind == crate::libraries::FnKind::Member)
-            .then(|| {
-                self.semantics.table.libraries.contract_dsl_member(
-                    selected.owner,
-                    name,
-                    selected.params.len(),
-                )
-            })
-            .flatten();
+        let member = self
+            .semantics
+            .table
+            .libraries
+            .contract_dsl_member(&selected.callable());
         // Pass 1 only decides whether a contract exists; Pass 2 names a foreign declaration.
         member.map_or(CallBinding::Foreign(String::new()), CallBinding::Dsl)
     }
@@ -426,8 +435,11 @@ impl DescriptionBinder for SignatureDescriptionBinder<'_, '_> {
         let TermKind::Name(segments) = &description.term(kind).kind else {
             return KindBinding::Foreign(String::new());
         };
-        match self.enum_entry(segments) {
-            Some((owner, entry)) if owner == expected => InvocationKind::of_entry(&entry)
+        match self
+            .selected_value(segments)
+            .and_then(|selected| selected.enum_entry)
+        {
+            Some(entry) if entry.classifier == expected => InvocationKind::of_entry(&entry.name)
                 .map_or(KindBinding::Foreign(String::new()), KindBinding::Entry),
             _ => KindBinding::Foreign(String::new()),
         }

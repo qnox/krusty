@@ -11072,12 +11072,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   receiver, and describes each parameter with at most one `callsInPlace`. Recognition follows the
   declarations a call selects, never its spelling past raw FIR: a first statement spelled
   `contract` (simple or package-qualified) declares a contract only when ordinary overload
-  selection picks the `kotlin.contracts.contract` intrinsic, so an applicable same-package
+  selection picks the `kotlin.contracts.contract` intrinsic, by its complete signature
+  `contract(builder: ContractBuilder.() -> Unit): Unit`, so an applicable same-package
   `contract` shadows it silently and an import alias of the intrinsic is a misplaced contract
   ("contract should be the first statement."). Each description call is an effect only when it
-  selects a `ContractBuilder` or `SimpleEffect` member; any other selection is reported at its
-  statement as "'pkg/name' is not part of the contracts DSL.". An invocation kind must select an
-  `InvocationKind` entry (imported, aliased or fully qualified alike); a same-named top-level
+  selects a `ContractBuilder` or `SimpleEffect` member by the member's complete signature (exact
+  declaring classifier, name, dispatch receiver with no context parameters, every parameter type
+  and the return type; `callsInPlace` takes `Function<R>` and exactly
+  `kotlin.contracts.InvocationKind`); any other selection is reported at its statement as
+  "'pkg/name' is not part of the contracts DSL.". An invocation kind is the enum entry ordinary
+  value selection chooses, with its enum and entry identity kept, and it must be an entry of the
+  enum the selected `callsInPlace` declares (imported, star-imported, aliased or fully qualified
+  alike); a same-named top-level
   property, object member or parameter is "'R|pkg/NAME|' is not a valid invocation kind." (object
   members as `Q|Owner|.R|/Owner.NAME|`, parameters as `R|<local>/name|`). Verified against kotlinc
   2.4.20. (`tests/contract_smart_casts_e2e.rs`, `tests/contract_declarations_e2e.rs`.)

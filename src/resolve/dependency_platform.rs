@@ -533,12 +533,9 @@ impl SemanticPlatform for DependencyPlatform {
 
     fn contract_dsl_member(
         &self,
-        owner: TypeName,
-        name: &str,
-        value_parameters: usize,
+        callable: &crate::contracts::SelectedDslCallable<'_>,
     ) -> Option<crate::contracts::DslMember> {
-        self.platform
-            .contract_dsl_member(owner, name, value_parameters)
+        self.platform.contract_dsl_member(callable)
     }
 
     fn boxed_primitive(&self, ty: Ty) -> Option<Ty> {
