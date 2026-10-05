@@ -443,7 +443,7 @@ impl BackendModuleFacts {
                         let mut parameters = signature
                             .parameters
                             .iter()
-                            .map(|parameter| erase_backend_parameter(parameter.get()))
+                            .map(|parameter| parameter.get())
                             .collect::<Vec<_>>();
                         if let Some(receiver) = callable.shape.extension_receiver {
                             parameters.insert(
@@ -452,6 +452,13 @@ impl BackendModuleFacts {
                                 receiver.get(),
                             );
                         }
+                        // The declared types stay semantic (a type parameter keeps its identity
+                        // for nullability); the physical list erases a type parameter to its bound.
+                        let physical_parameters = parameters
+                            .iter()
+                            .copied()
+                            .map(erase_backend_parameter)
+                            .collect::<Vec<_>>();
                         let parameter_identities = index
                             .callable_parameter_identities(callable.id, parameters.len())
                             .ok_or(BackendFactError::IncompleteClassifier(
@@ -470,7 +477,7 @@ impl BackendModuleFacts {
                                 ),
                                 physical_name: None,
                                 owner: Some(classifier.classifier),
-                                physical_params: parameters.clone().into_boxed_slice(),
+                                physical_params: physical_parameters.into_boxed_slice(),
                                 params: parameters.into_boxed_slice(),
                                 ret: signature.result.get(),
                                 physical_ret: signature.result.get(),

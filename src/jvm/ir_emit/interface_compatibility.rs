@@ -8,7 +8,9 @@ use super::*;
 /// JVM resolves to the inherited default) and a `B$DefaultImpls` holder forwarding to that bridge.
 /// A member inherited from a `disable`-compiled dependency has no default method to bridge to —
 /// its holder entry forwards straight to the dependency's own holder (behind a `checkcast`), with
-/// no `access$…$jd` bridge and no `@Deprecated`, exactly as measured on kotlinc 2.4.10.
+/// no `access$…$jd` bridge and no `@Deprecated`, exactly as measured on kotlinc 2.4.10. Under
+/// `disable` an interface republishes a member of this module's ancestor the same way, forwarding
+/// to the ancestor's holder (`Left$DefaultImpls.f` → `Base$DefaultImpls.f`, measured on 2.4.20).
 pub(super) fn emit_inherited_default_surface(
     ir: &IrFile,
     c: &crate::ir::IrClass,
@@ -49,28 +51,21 @@ pub(super) fn emit_inherited_default_surface(
         )
         .collect::<std::collections::HashSet<_>>();
     for (interface, shape) in closure {
-        let mut surface = |name: &str,
-                           param_tys: &[Ty],
-                           semantic_params: &[Ty],
-                           local_variable_names: &[Option<String>],
-                           reflected: &[crate::jvm::method_parameters::MethodParameter],
-                           assertion_names: &[Option<String>],
-                           physical_ret: Ty,
-                           semantic_ret: Ty,
-                           is_abstract: bool,
-                           visibility: crate::types::Visibility,
-                           realization: crate::libraries::MemberRealization,
-                           nonvirtual: Option<&crate::libraries::NonvirtualCallRealization>,
-                           cw: &mut ClassWriter,
-                           default_impls: &mut Option<ClassWriter>| {
-            let key = method_key(name, param_tys);
-            // The nearest declaration wins even when it is abstract.
-            if !selected.insert(key) {
-                return;
-            }
-            if is_abstract || visibility == crate::types::Visibility::Private {
-                return;
-            }
+        let surface = |name: &str,
+                       param_tys: &[Ty],
+                       semantic_params: &[Ty],
+                       local_variable_names: &[Option<String>],
+                       reflected: &[crate::jvm::method_parameters::MethodParameter],
+                       assertion_names: &[Option<String>],
+                       identities: &[crate::fir::ResolvedParameterIdentity],
+                       physical_ret: Ty,
+                       semantic_ret: Ty,
+                       realization: crate::libraries::MemberRealization,
+                       nonvirtual: Option<&crate::libraries::NonvirtualCallRealization>,
+                       cw: &mut ClassWriter,
+                       default_impls: &mut Option<ClassWriter>| {
+            let disable = opts.jvm_default == JvmDefaultMode::Disable;
+            let module_holder_descriptor;
             let target = match (nonvirtual, realization) {
                 // The dependency's `disable` realization: its holder static is the only body.
                 (Some(holder), _) => JdHolderTarget::DependencyHolder {
@@ -78,8 +73,23 @@ pub(super) fn emit_inherited_default_surface(
                     holder: holder.owner,
                     descriptor: &holder.descriptor,
                 },
+                // Under `disable` this module's ancestor keeps the body on its own holder.
+                (None, crate::libraries::MemberRealization::Dispatch)
+                    if disable && shape.source =>
+                {
+                    let mut with_receiver = vec![Ty::obj_name(interface)];
+                    with_receiver.extend_from_slice(param_tys);
+                    module_holder_descriptor = method_descriptor(&with_receiver, physical_ret);
+                    JdHolderTarget::DependencyHolder {
+                        declaring: interface,
+                        holder: crate::types::type_name_nested_child(interface, "DefaultImpls"),
+                        descriptor: &module_holder_descriptor,
+                    }
+                }
                 // A Kotlin default method somewhere above: bridge through this interface itself.
-                (None, crate::libraries::MemberRealization::Dispatch) if shape.is_kotlin => {
+                (None, crate::libraries::MemberRealization::Dispatch)
+                    if shape.is_kotlin && !disable =>
+                {
                     JdHolderTarget::AccessBridge
                 }
                 // A JAVA default method never joins the Kotlin compatibility surface.
@@ -116,14 +126,20 @@ pub(super) fn emit_inherited_default_surface(
                 });
             }
             // The guard set of an inherited member follows its semantic parameter nullability —
-            // the same selection its `@NotNull` parameter annotations use.
+            // the same selection its `@NotNull` parameter annotations use. The continuation is the
+            // compiler's own argument and is never checked.
             let guards: Vec<Option<String>> = if opts.param_assertions {
                 semantic_params
                     .iter()
+                    .zip(identities)
                     .enumerate()
-                    .map(|(index, parameter)| {
+                    .map(|(index, (parameter, identity))| {
                         (jd_nullability_annotation(parameter)
-                            == Some("Lorg/jetbrains/annotations/NotNull;"))
+                            == Some("Lorg/jetbrains/annotations/NotNull;")
+                            && !matches!(
+                                identity,
+                                crate::fir::ResolvedParameterIdentity::SuspendCompletion
+                            ))
                         .then(|| {
                             assertion_names[index]
                                 .clone()
@@ -206,6 +222,13 @@ pub(super) fn emit_inherited_default_surface(
                 semantic_ret = Ty::nullable(Ty::obj("java/lang/Object"));
                 identities.push(crate::fir::ResolvedParameterIdentity::SuspendCompletion);
             }
+            // The nearest declaration wins even when it is abstract.
+            if !selected.insert(method_key(&name, &param_tys)) {
+                continue;
+            }
+            if member.is_abstract() || member.visibility == crate::types::Visibility::Private {
+                continue;
+            }
             let reflected = if opts.java_parameters {
                 crate::jvm::method_parameters::resolved_holder_forward(
                     &identities,
@@ -222,10 +245,9 @@ pub(super) fn emit_inherited_default_surface(
                 &local_variable_names,
                 &reflected,
                 &assertion_names,
+                &identities,
                 physical_ret,
                 semantic_ret,
-                member.is_abstract(),
-                member.visibility,
                 member.realization,
                 member.nonvirtual.as_deref(),
                 cw,

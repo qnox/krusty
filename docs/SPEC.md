@@ -9601,10 +9601,34 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   republished forward of an inherited member does too. The JVM backend formats the entry from the
   static's recorded identities (an arity mismatch is an internal error), and the `$receiver`
   spelling from the extension-receiver role where the function is written on a holder or records a
-  holder receiver. Not yet matched: kotlinc lowers an interface default a value class inherits to
-  a `dflt-impl` static with an entry, where krusty writes a forward with no `MethodParameters`, and
-  orders an accessor's entry beside its static. Tests: `tests/java_parameters_attribute_e2e.rs`,
-  `tests/interface_default_method_e2e.rs`.
+  holder receiver. Not yet matched: kotlinc orders an overriding accessor's entry beside its
+  static. Tests: `tests/java_parameters_attribute_e2e.rs`, `tests/interface_default_method_e2e.rs`.
+- **An inherited interface default on a value class is a `-impl` static plus its forwarder.** A
+  class that inherits an interface default it does not override gets a compatibility forwarder
+  (`ACC_PUBLIC | ACC_BRIDGE`): under `enable` an `invokespecial` of the default through the first
+  direct superinterface it is inherited through; under `disable` an `invokestatic` of that same
+  superinterface's `$DefaultImpls` static, because every interface between the class and the
+  declaration republishes an inherited body on its own holder (`Left$DefaultImpls.f` checks its
+  parameters, `checkcast Base`, calls `Base$DefaultImpls.f`); `no-compatibility` writes none. The
+  forwarder's line is where the class declaration starts, annotations included, and under
+  `-java-parameters` it reflects the member's parameters unflagged (an extension receiver stays a
+  receiver; a suspend member ends with `$completion`). kotlinc's value-class lowering replaces each
+  such fake override of a value class with a static, exactly when it has a forwarder: `name-impl`,
+  or the forwarder's own name when value-class mangling renamed it (`tagged-P2Mlbr0`). It takes the
+  carrier `arg0` first, checks every `@NotNull` parameter but a continuation under its local name
+  (`$this$decorate` for an extension receiver), boxes the carrier and `invokevirtual`s the
+  forwarder; it maps no line, and reflects `arg0` synthetic and the extension receiver mandated.
+  The value class's forwarder `checkcast`s the box to the holder's interface under `disable`. Each
+  static precedes its forwarder, and the pairs follow the value class's own members and precede
+  its private constructor. A kotlinc consumer calls `Held.shared-impl`, so the static is the value
+  class's ABI. Reading or writing an inherited interface property through a value class boxes the
+  carrier for the interface accessor. A forwarder's parameter types are its declaration's: a
+  type parameter keeps its identity, so `<T> echo(t: T)` gets no `@NotNull` and no check. Not yet
+  matched: the generic `Signature` of every inherited-member forwarder and static (`<T> echo`,
+  `Continuation<? super Integer>`), and the specialized forwarder kotlinc writes for a member of a
+  substituted generic interface (`g(String)` plus an erased bridge over `G<String>`). Tests:
+  `tests/jvm_default_mode_e2e.rs` (`a_value_class_realizes_an_inherited_default_with_an_impl_static`
+  and its neighbours), `tests/java_parameters_attribute_e2e.rs`.
 - **A value-class default of a primary constructor is lowered like the constructor's other code.**
   `class Test(val x: S, val y: S = S("K"))` fills an omitted `y` in its synthetic
   `<init>(String, String, int, DefaultConstructorMarker)`. The default expression runs over the

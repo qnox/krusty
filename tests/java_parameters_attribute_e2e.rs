@@ -551,6 +551,35 @@ fn java_parameters_flags_a_default_impls_extension_receiver_mandated() {
     );
 }
 
+/// A class that inherits an interface default it does not override gets a forwarder: kotlinc
+/// reflects its parameters as the member names them, and its extension receiver `$this$decorate`
+/// is unflagged, since the forwarder is an instance method. A value class realizes each such forwarder with a static `<name>-impl` (or the
+/// forwarder's own mangled name) as well, whose carrier `arg0` is synthetic and whose extension
+/// receiver is mandated, like every value-class static. krusty wrote no `MethodParameters` on a
+/// forwarder and no static at all. (A generic or `suspend` member's rows match too, but the
+/// comparison keys a member by its generic `Signature`, a recorded gap of every forwarder.)
+#[test]
+fn java_parameters_names_an_inherited_default_forwarder_and_its_value_class_static() {
+    assert_parameter_parity(
+        "JavaParametersInheritedDefault",
+        "package demo\n\
+         @JvmInline value class Tag(val id: Int)\n\
+         interface Base {\n\
+         \x20 fun shared(x: Int, s: String): String = s + x\n\
+         \x20 var count: Int\n\
+         \x20\x20 get() = 7\n\
+         \x20\x20 set(value) {}\n\
+         \x20 fun String.decorate(times: Long): String = this + times\n\
+         \x20 fun tagged(tag: Tag): Int = tag.id\n\
+         }\n\
+         interface Left : Base { fun left(): String = \"left\" }\n\
+         interface Right : Base\n\
+         @JvmInline value class Held(val raw: Long) : Left, Right\n\
+         class Plain : Left, Right\n",
+        &["demo/Held", "demo/Plain"],
+    );
+}
+
 #[test]
 fn method_parameters_remain_opt_in() {
     let jdk = common::jdk_modules();

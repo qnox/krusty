@@ -23,6 +23,18 @@ pub(crate) fn module_member_jvm_name(
     vc_mangle(base, params, ret, ir, false, is_suspend)
 }
 
+/// The static a value class realizes an inherited member's box entry with, which kotlinc's
+/// value-class lowering names like any member's replacement: the entry's own name when value-class
+/// mangling already gave it a hash (`takes-LzhfEcQ`), otherwise `name-impl`. `declared` is the
+/// member's name before mangling and `entry` its JVM name on the box.
+pub(crate) fn inherited_member_impl_name(declared: &str, entry: &str) -> String {
+    if entry == declared {
+        format!("{declared}-impl")
+    } else {
+        entry.to_string()
+    }
+}
+
 /// The type a declared parameter or result occupies in the member's JVM descriptor: a value class
 /// is its carrier, as the declaring file's value-class pass lowers it; any other type is unchanged.
 fn module_member_carrier(ir: &IrFile, ty: Ty) -> Ty {
@@ -97,16 +109,17 @@ pub(crate) fn forwarded_member_types(
     declared_in_module: bool,
 ) -> ForwardedMemberTypes {
     if declared_in_module {
-        let params: Vec<Ty> = member
-            .params
-            .iter()
-            .map(|ty| module_member_carrier(ir, *ty))
-            .collect();
+        let carriers = |types: &[Ty]| -> Vec<Ty> {
+            types
+                .iter()
+                .map(|ty| module_member_carrier(ir, *ty))
+                .collect()
+        };
         let ret = module_member_carrier(ir, member.ret);
         return ForwardedMemberTypes {
-            physical_params: params.clone(),
+            physical_params: carriers(&member.physical_params),
             physical_ret: ret,
-            semantic_params: params,
+            semantic_params: carriers(&member.params),
             semantic_ret: ret,
         };
     }

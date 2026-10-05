@@ -1185,3 +1185,189 @@ fn an_enable_dependency_property_keeps_virtual_dispatch() {
     assert_eq!(result, "OK");
     let _ = std::fs::remove_dir_all(work);
 }
+
+/// Interface defaults a value class inherits without overriding them: a function, a `val` and a
+/// `var` accessor, an extension member, a member whose value-class parameter mangles its name, a
+/// nullable member, and one inherited through two interfaces (`Left` and `Right` both extend
+/// `Base`).
+const VALUE_CLASS_INHERITED_SOURCE: &str = r#"package vcd
+@JvmInline value class Tag(val id: Int)
+
+interface Base {
+    fun shared(x: Int, s: String): String = "shared$x$s"
+    val label: String get() = "label"
+    var count: Int
+        get() = 7
+        set(value) {}
+    fun String.decorate(times: Long): String = "decorate$this$times"
+    fun tagged(tag: Tag): Int = tag.id
+    fun maybe(s: String?): Any? = s
+}
+
+interface Left : Base {
+    fun left(): String = "left"
+}
+
+interface Right : Base
+
+interface Measured {
+    fun measure(): Int
+}
+
+@JvmInline value class Held(val raw: Long) : Left, Right, Measured {
+    override fun measure(): Int = raw.toInt()
+}
+
+@Suppress("unused")
+class Plain : Left, Right
+"#;
+
+/// kotlinc's value-class lowering gives every compatibility forwarder of a value class (the fake
+/// override it replaces) a static: `shared-impl(long, int, String)` checks its `@NotNull`
+/// parameters, boxes the carrier and calls the forwarder, which still calls the interface default
+/// (`invokespecial Left.shared` under `enable`; `checkcast Base` and `Base$DefaultImpls.shared`
+/// under `disable`). A mangled member keeps its name (`tagged-P2Mlbr0`). Each pair follows the
+/// class's own members and precedes its private constructor. krusty wrote only the forwarder,
+/// after `equals-impl0`, and the forwarder of every class carried the class's header line rather
+/// than the line its declaration starts on. Both classes are compared whole.
+#[test]
+fn a_value_class_realizes_an_inherited_default_with_an_impl_static() {
+    for (mode, flag) in [
+        (JvmDefaultMode::Enable, "enable"),
+        (JvmDefaultMode::Disable, "disable"),
+    ] {
+        let ours = compile_source(mode, VALUE_CLASS_INHERITED_SOURCE, "Inherited");
+        let reference = compile_reference_source(flag, VALUE_CLASS_INHERITED_SOURCE, "Inherited");
+        let classes = common::ClassSets {
+            reference: reference.into_iter().collect(),
+            krusty: ours.into_iter().collect(),
+        };
+        for class in ["vcd/Held", "vcd/Plain"] {
+            let (reference, krusty) = classes.class_listing(class);
+            assert_eq!(
+                krusty, reference,
+                "{class} diverges from kotlinc under -jvm-default={flag}"
+            );
+        }
+    }
+}
+
+/// A generic member and a `suspend` member get the same static-and-forwarder pair, measured on
+/// kotlinc's descriptors, flags and member order. (Their generic `Signature` attributes are a
+/// recorded gap of every inherited-member forwarder, so the comparison is the public shape.)
+#[test]
+fn a_value_class_inherited_generic_or_suspend_default_has_an_impl_static() {
+    const SOURCE: &str = "package vcs\n\
+        interface Base {\n\
+        \x20   fun <T> echo(t: T): T = t\n\
+        \x20   suspend fun later(n: Int): Int = n + 1\n\
+        }\n\
+        @JvmInline value class Held(val raw: Int) : Base\n";
+    for (mode, flag) in [
+        (JvmDefaultMode::Enable, "enable"),
+        (JvmDefaultMode::Disable, "disable"),
+        (JvmDefaultMode::NoCompatibility, "no-compatibility"),
+    ] {
+        let ours = compile_source(mode, SOURCE, "Shapes");
+        let reference = compile_reference_source(flag, SOURCE, "Shapes");
+        assert_eq!(
+            public_method_shape(&ours, "vcs/Held"),
+            public_method_shape(&reference, "vcs/Held"),
+            "vcs/Held diverges from kotlinc under -jvm-default={flag}"
+        );
+    }
+}
+
+/// The inherited defaults answer through the value class — an inherited property read or written
+/// on it boxes the carrier for the interface accessor — and through the interface, in every mode.
+#[test]
+fn an_inherited_default_runs_through_a_value_class_and_its_interface() {
+    let source = format!(
+        "{VALUE_CLASS_INHERITED_SOURCE}\n\
+         fun box(): String {{\n\
+         \x20   val held = Held(5L)\n\
+         \x20   val base: Base = held\n\
+         \x20   if (held.shared(1, \"a\") != \"shared1a\" || base.shared(2, \"b\") != \"shared2b\") return \"fail shared\"\n\
+         \x20   if (held.label != \"label\" || base.label != \"label\") return \"fail label\"\n\
+         \x20   held.count = 3\n\
+         \x20   base.count = 4\n\
+         \x20   if (held.count != 7 || base.count != 7) return \"fail count\"\n\
+         \x20   if (with(held) {{ \"s\".decorate(2L) }} != \"decorates2\") return \"fail decorate\"\n\
+         \x20   if (with(base) {{ \"t\".decorate(3L) }} != \"decoratet3\") return \"fail base decorate\"\n\
+         \x20   if (held.tagged(Tag(9)) != 9 || base.tagged(Tag(8)) != 8) return \"fail tagged\"\n\
+         \x20   if (held.maybe(null) != null || base.maybe(\"m\") != \"m\") return \"fail maybe\"\n\
+         \x20   if (held.left() != \"left\" || (held as Left).left() != \"left\") return \"fail left\"\n\
+         \x20   return if (held.measure() == 5) \"OK\" else \"fail measure\"\n\
+         }}\n"
+    );
+    for mode in [
+        JvmDefaultMode::Enable,
+        JvmDefaultMode::Disable,
+        JvmDefaultMode::NoCompatibility,
+    ] {
+        let classes = compile_source(mode, &source, "Runs");
+        let box_class = common::find_box_class(&classes).expect("value-class box class");
+        let result = common::run_box(&classes, &box_class, &[common::stdlib_jar()])
+            .expect("JVM unavailable for the value-class inherited-default test");
+        assert_eq!(result, "OK", "{mode:?}");
+    }
+}
+
+/// A kotlinc consumer calls an inherited default through a value class by its static
+/// (`Held.shared-impl`, `Held.setCount-impl`, `Held.tagged-P2Mlbr0`), so the static is the value
+/// class's published ABI: without it the mixed-compiler program is a `NoSuchMethodError`.
+#[test]
+fn a_kotlinc_consumer_links_against_a_value_class_inherited_default_static() {
+    for (mode, flag) in [
+        (JvmDefaultMode::Enable, "enable"),
+        (JvmDefaultMode::Disable, "disable"),
+    ] {
+        let work = common::scratch_dir().expect("allocate mixed-compiler value-class fixture");
+        let library = work.join("library");
+        let application = work.join("application");
+        compile_module_to(
+            mode,
+            VALUE_CLASS_INHERITED_SOURCE,
+            "Library",
+            &library,
+            None,
+        );
+        let app_source = work.join("Application.kt");
+        std::fs::write(
+            &app_source,
+            r#"package app
+                import vcd.*
+                fun box(): String {
+                    val held = Held(5L)
+                    held.count = 3
+                    return if (held.shared(1, "a") == "shared1a" && held.label == "label" &&
+                        held.count == 7 && with(held) { "s".decorate(2L) } == "decorates2" &&
+                        held.tagged(Tag(4)) == 4 && held.maybe(null) == null &&
+                        held.left() == "left") "OK" else "fail"
+                }
+            "#,
+        )
+        .expect("write kotlinc consumer source");
+        std::fs::create_dir_all(&application).expect("create kotlinc consumer output");
+        let args = vec![
+            "-d".to_string(),
+            application.to_string_lossy().into_owned(),
+            "-nowarn".to_string(),
+            format!("-jvm-default={flag}"),
+            "-classpath".to_string(),
+            library.to_string_lossy().into_owned(),
+            app_source.to_string_lossy().into_owned(),
+        ];
+        let (code, stderr) =
+            common::kotlinc_compile(&args).expect("reference compiler unavailable");
+        assert_eq!(code, 0, "kotlinc consumer failed under {flag}: {stderr}");
+        let mut classes = Vec::new();
+        collect_classes(&library, &library, &mut classes);
+        collect_classes(&application, &application, &mut classes);
+        let box_class = common::find_box_class(&classes).expect("mixed-compiler box class");
+        let result = common::run_box(&classes, &box_class, &[common::stdlib_jar()])
+            .expect("JVM unavailable for the mixed-compiler value-class test");
+        assert_eq!(result, "OK", "-jvm-default={flag}");
+        let _ = std::fs::remove_dir_all(work);
+    }
+}

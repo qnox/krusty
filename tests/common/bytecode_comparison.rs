@@ -288,6 +288,21 @@ pub struct ClassSets {
     pub krusty: std::collections::BTreeMap<String, Vec<u8>>,
 }
 
+/// One `javap -v` token with every constant-pool index erased to `#`: an operand (`#12,`), and the
+/// indices javap prints for an annotation's type and elements (`#72()`, `#154(#155=[I#156])`).
+/// Each annotation is printed decoded beneath that line, so its content is still compared.
+fn erase_pool_indices(token: &str) -> String {
+    let mut erased = String::with_capacity(token.len());
+    let mut characters = token.chars().peekable();
+    while let Some(character) = characters.next() {
+        erased.push(character);
+        if character == '#' {
+            while characters.next_if(char::is_ascii_digit).is_some() {}
+        }
+    }
+    erased
+}
+
 /// Complete output inventory from both compilers for one checked multi-file module.
 pub fn classes_against_kotlinc_module(sources: &[(&str, &str)]) -> ClassSets {
     classes_against_kotlinc_source_set(sources, 0)
@@ -420,14 +435,7 @@ impl ClassSets {
                 }
                 lines.push(
                     line.split_whitespace()
-                        .map(|token| match token.strip_prefix('#') {
-                            Some(rest)
-                                if rest.trim_end_matches([',', ':']).parse::<u32>().is_ok() =>
-                            {
-                                "#"
-                            }
-                            _ => token,
-                        })
+                        .map(erase_pool_indices)
                         .collect::<Vec<_>>()
                         .join(" "),
                 );
