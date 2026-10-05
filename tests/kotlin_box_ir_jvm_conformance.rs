@@ -318,14 +318,23 @@ fn compile_source(
     (!diags.has_errors() && !classes.is_empty()).then_some(classes)
 }
 
-/// `-Xsam-conversions` for a box file. `// SAM_CONVERSIONS: CLASS` selects the shared Java wrapper;
-/// anything else keeps kotlinc's default `indy`. Lambda literals stay on `-Xlambdas=indy`.
+/// `-Xlambdas` and `-Xsam-conversions` for a box file. `// LAMBDAS: CLASS` and
+/// `// SAM_CONVERSIONS: CLASS` select the class strategy; anything else keeps kotlinc's default
+/// `indy`.
 fn box_lambda_modes<'a>(
     sources: impl IntoIterator<Item = &'a str>,
 ) -> krusty::jvm::ir_emit::LambdaModes {
+    let sources = sources.into_iter().collect::<Vec<_>>();
     let mut modes = krusty::jvm::ir_emit::LambdaModes::default();
+    modes.lambdas = sources
+        .iter()
+        .copied()
+        .map(krusty::conformance::lambda_mode)
+        .find(|mode| *mode != krusty::jvm::ir_emit::LambdaMode::Indy)
+        .unwrap_or_default();
     modes.sam_conversions = sources
-        .into_iter()
+        .iter()
+        .copied()
         .map(krusty::conformance::sam_conversion_mode)
         .find(|mode| *mode != krusty::jvm::ir_emit::LambdaMode::Indy)
         .unwrap_or_default();
@@ -433,7 +442,14 @@ fn compile_multifile(
                 }
                 java_classes = classes;
             }
-            None => return compile_kotlin_first(src, &blocks, &java_blocks, cp_jars, jdk_modules),
+            None => {
+                let sources = UnitSources {
+                    kotlin: &blocks,
+                    common: 0,
+                    java: &java_blocks,
+                };
+                return compile_kotlin_first(src, sources, cp_jars, jdk_modules);
+            }
         }
     }
 
@@ -460,22 +476,14 @@ fn compile_multifile(
 /// ship. Header installation or javac failure means the corpus case failed to compile.
 fn compile_kotlin_first(
     src: &str,
-    blocks: &[(String, String)],
-    java_blocks: &[(String, String)],
+    sources: UnitSources<'_>,
     cp_jars: &[std::path::PathBuf],
     jdk_modules: Option<&std::path::Path>,
 ) -> Option<Vec<(String, Vec<u8>)>> {
+    let java_blocks = sources.java;
     let features = krusty::features::LangFeatures::from_source(src);
-    let kotlin_classes = compile_blocks_mixed(
-        blocks,
-        java_blocks,
-        cp_jars,
-        &[],
-        jdk_modules,
-        &features,
-        None,
-        &[],
-    )?;
+    let kotlin_classes =
+        compile_blocks_mixed(sources, cp_jars, &[], jdk_modules, &features, None, &[])?;
 
     static UID: AtomicU64 = AtomicU64::new(0);
     let uid = UID.fetch_add(1, Ordering::Relaxed);
@@ -514,8 +522,11 @@ fn compile_blocks(
     overlay: &[(String, Vec<u8>)],
 ) -> Option<Vec<(String, Vec<u8>)>> {
     compile_blocks_mixed(
-        blocks,
-        &[],
+        UnitSources {
+            kotlin: blocks,
+            common: 0,
+            java: &[],
+        },
         cp_jars,
         friend_paths,
         jdk_modules,
@@ -525,9 +536,17 @@ fn compile_blocks(
     )
 }
 
+/// One krusty compilation unit's sources. The first `common` Kotlin blocks are common (`dependsOn`)
+/// sources, exactly as `krusty::conformance::module_units` orders a unit's chain.
+#[derive(Clone, Copy)]
+struct UnitSources<'a> {
+    kotlin: &'a [(String, String)],
+    common: usize,
+    java: &'a [(String, String)],
+}
+
 fn compile_blocks_mixed(
-    blocks: &[(String, String)],
-    java_blocks: &[(String, String)],
+    sources: UnitSources<'_>,
     cp_jars: &[std::path::PathBuf],
     friend_paths: &[std::path::PathBuf],
     jdk_modules: Option<&std::path::Path>,
@@ -535,6 +554,11 @@ fn compile_blocks_mixed(
     progress: Option<&dyn Fn(&str)>,
     overlay: &[(String, Vec<u8>)],
 ) -> Option<Vec<(String, Vec<u8>)>> {
+    let UnitSources {
+        kotlin: blocks,
+        java: java_blocks,
+        ..
+    } = sources;
     let report = |phase: &str| {
         if let Some(progress) = progress {
             progress(phase);
@@ -560,7 +584,15 @@ fn compile_blocks_mixed(
         .collect();
     let mut inputs = blocks
         .iter()
-        .map(|(stem, content)| krusty::source::SourceInput::kotlin(content).with_file_stem(stem))
+        .enumerate()
+        .map(|(index, (stem, content))| {
+            let input = krusty::source::SourceInput::kotlin(content).with_file_stem(stem);
+            if index < sources.common {
+                input.common()
+            } else {
+                input
+            }
+        })
         .collect::<Vec<_>>();
     inputs.extend(
         java_blocks
@@ -654,6 +686,13 @@ fn compile_module_test(
             break;
         }
         let (files, java_files) = (&m.files, &m.java_files);
+        // The unit's `dependsOn` chain sources come first and are common sources, as in kotlinc's
+        // `-Xcommon-sources` compilation of one platform module.
+        let kotlin_only = UnitSources {
+            kotlin: files,
+            common: m.common_file_count,
+            java: &[],
+        };
         let report = |phase: &str| progress(&format!("module {}: {phase}", m.name));
         // A source-less unit (an empty hmpp intermediate built standalone) emits nothing; it still
         // gets a (created, empty) classpath dir so dependents resolve it.
@@ -670,8 +709,8 @@ fn compile_module_test(
         // only deps/JDK); when that fails — the Java references THIS module's Kotlin — fall back to
         // the Kotlin-first stub pipeline, exactly like the single-module path.
         let classes = if java_files.is_empty() {
-            compile_blocks(
-                files,
+            compile_blocks_mixed(
+                kotlin_only,
                 &cp,
                 &friend_paths,
                 jdk_modules,
@@ -694,8 +733,8 @@ fn compile_module_test(
                         // top-level functions resolve through the package catalog, which only
                         // directory/jar entries contribute to — an overlaid dependency module
                         // loses them (measured: -95 box passes).
-                        compile_blocks(
-                            files,
+                        compile_blocks_mixed(
+                            kotlin_only,
                             &cp,
                             &friend_paths,
                             jdk_modules,
@@ -709,7 +748,15 @@ fn compile_module_test(
                         k
                     })
                 }
-                None => compile_kotlin_first(src, files, java_files, &cp, jdk_modules),
+                None => compile_kotlin_first(
+                    src,
+                    UnitSources {
+                        java: java_files,
+                        ..kotlin_only
+                    },
+                    &cp,
+                    jdk_modules,
+                ),
             }
         };
         let Some(classes) = classes else {
@@ -1168,6 +1215,75 @@ fn a_single_file_marker_compiles_under_its_declared_stem() {
     .expect("a named Kotlin block is a complete compilation unit");
 
     assert_eq!(find_box_class(&classes).as_deref(), Some("DeclaredKt"));
+}
+
+/// The repository-owned regression for folded common sources must enter through the same
+/// `// MODULE:` path as the box corpus. That path alone turns `ModuleUnit.common_file_count` into
+/// the dependency-first `SourceInput::common()` prefix.
+#[test]
+fn folded_common_optional_expectation_uses_module_harness() {
+    const COMMON: &str = "package folded\n\
+class Registry {\n\
+    companion object {\n\
+        @kotlin.js.JsStatic\n\
+        fun value(): String = \"OK\"\n\
+    }\n\
+}\n";
+    const PLATFORM: &str = "package folded\n\
+fun box(): String = Registry.value()\n";
+    let source = format!(
+        "// WITH_STDLIB\n\
+         // LANGUAGE: +MultiPlatformProjects\n\
+         // MODULE: common\n\
+         // FILE: Common.kt\n\
+         {COMMON}\
+         // MODULE: platform()()(common)\n\
+         // FILE: Platform.kt\n\
+         {PLATFORM}"
+    );
+    let stdlib = common::stdlib_jar();
+    let jdk = common::jdk_modules();
+    let classpath = common::classpath_jars_for(&source);
+    let classes = compile_module_test(&source, &classpath, Some(jdk.as_path()), &|_| {})
+        .expect("the folded common source compiles through the module harness");
+    let classes: Vec<_> = classes
+        .into_iter()
+        .filter(|(_, bytes)| bytes.starts_with(&[0xCA, 0xFE, 0xBA, 0xBE]))
+        .collect();
+
+    let reference_root = common::scratch_dir().expect("allocate reference source-set directory");
+    let reference_output = reference_root.join("classes");
+    let common_path = reference_root.join("Common.kt");
+    let platform_path = reference_root.join("Platform.kt");
+    fs::write(&common_path, COMMON).expect("write common reference source");
+    fs::write(&platform_path, PLATFORM).expect("write platform reference source");
+    let arguments = vec![
+        "-d".to_string(),
+        reference_output.to_string_lossy().into_owned(),
+        "-Xmulti-platform".to_string(),
+        format!("-Xcommon-sources={}", common_path.to_string_lossy()),
+        common_path.to_string_lossy().into_owned(),
+        platform_path.to_string_lossy().into_owned(),
+    ];
+    let (reference_status, reference_diagnostics) =
+        common::kotlinc_compile(&arguments).expect("reference compiler is provisioned");
+    assert_eq!(
+        reference_status, 0,
+        "kotlinc rejected the folded source-set fixture: {reference_diagnostics}"
+    );
+    let reference = read_class_tree(&reference_output).expect("read reference classes");
+    let _ = fs::remove_dir_all(reference_root);
+    assert_eq!(
+        compare_class_sets(&classes, &reference),
+        Ok(()),
+        "the module-harness output must be byte-identical to kotlinc"
+    );
+
+    let box_class = find_box_class(&classes).expect("the platform source emits box()");
+    assert_eq!(
+        common::run_box(&classes, &box_class, std::slice::from_ref(&stdlib)),
+        Some("OK".to_string())
+    );
 }
 
 #[test]

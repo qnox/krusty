@@ -3,6 +3,7 @@
 mod backend_handoff;
 mod declaration_metadata;
 mod diagnostic_recovery;
+mod local_visibility;
 mod metadata_handoff;
 #[cfg(test)]
 mod streaming_tests;
@@ -578,6 +579,44 @@ fn check_body_group(
                 "internal error: checked local signatures were not publishable: {declarations:?}"
             ),
         );
+        return None;
+    }
+    // Most local classifiers retain public/default visibility, so their first checked body is
+    // already final. Repeat the body check only when publishing an override plan actually made a
+    // modifier-less member non-public; that later access check must consume the corrected header.
+    // Re-entering every body that merely contains a local classifier makes already-published local
+    // inheritance edges look like a second declaration and produces spurious `overrides nothing`.
+    let inherited_local_visibility =
+        local_visibility::group_published_non_public_member(active_file, active, &info, index);
+    if !inherited_local_visibility {
+        return Some(info);
+    }
+
+    // A body-local classifier does not have a stable checked signature until the first traversal
+    // has entered its lexical statement and the bridge above has published that signature. The
+    // inherited override plan is part of that signature: member access later in the same enclosing
+    // body must therefore be checked against the published plan, not the provisional parser
+    // declaration. Repeat the ordinary checker after publication instead of duplicating access or
+    // override semantics at this orchestration boundary. The first traversal is discovery-only for
+    // this group, so replace its diagnostics with the authoritative traversal's exact sequence.
+    diags.diags.truncate(diagnostics_start);
+    let info = crate::resolve::check_selected_declarations_in_pass_two(
+        active_file,
+        raw_source as u32,
+        &selected_roots,
+        &selected_bodies,
+        active,
+        &group.bodies,
+        symbols,
+        index,
+        streamed_cache,
+        diags,
+    );
+    diags.collapse_duplicates_from(diagnostics_start);
+    if diags.diags[diagnostics_start..]
+        .iter()
+        .any(|diagnostic| diagnostic.severity == crate::diag::Severity::Error)
+    {
         return None;
     }
     Some(info)
@@ -1179,7 +1218,7 @@ mod tests {
             state: &mut Self::State,
             _diags: &mut DiagSink,
         ) -> Vec<Artifact> {
-            *state += file.ir.file_annotations.len();
+            *state += file.ir.file_annotations.iter().len();
             Vec::new()
         }
 

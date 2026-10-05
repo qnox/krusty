@@ -40,7 +40,7 @@ impl Emitter<'_> {
         // A discarded `when` is a statement: its branches discard their own values, so no branch
         // leaves a value another branch does not. A block ending in one runs as a statement block,
         // which discards that `when` the same way. A discarded `Unit` is nothing at all.
-        if !self.machine_suspensions.contains(&expression) {
+        if !self.machine_suspensions.contains_key(&expression) {
             match node {
                 // A copied inline body's terminal `Unit` carries its mapped closing line on a
                 // `nop`, even though the value itself is not materialized.
@@ -111,6 +111,21 @@ impl Emitter<'_> {
                         discard(super::ir_ty_to_jvm(&erased), code);
                         return;
                     }
+                }
+                // The unnamed implicit check reads its temporary and consumes it: there is no
+                // duplicate to discard (`aload; invokestatic checkNotNull`).
+                IrExpr::NotNullAssert {
+                    operand,
+                    check: crate::ir::NullCheck::Unnamed,
+                } => {
+                    self.emit_value(*operand, code);
+                    let check = self.cw.methodref(
+                        "kotlin/jvm/internal/Intrinsics",
+                        "checkNotNull",
+                        "(Ljava/lang/Object;)V",
+                    );
+                    code.invokestatic(check, 1, 0);
+                    return;
                 }
                 _ => {}
             }

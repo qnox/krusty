@@ -3,7 +3,11 @@
 
 use super::*;
 
+mod constructor_positions;
 mod type_arguments;
+mod value_class_positions;
+
+pub(super) use constructor_positions::ConstructorParameter;
 
 /// Whether declaration-site variance becomes a JVM wildcard at the position being formatted.
 ///
@@ -92,7 +96,7 @@ impl<'a> JvmSignatureFormatter<'a> {
             let rendered = if vararg_index == Some(index) {
                 self.vararg_element_ty(parameter, Wildcards::Declared)?
             } else {
-                self.method_ty(parameter, Wildcards::Declared)?
+                self.parameter_ty(parameter)?
             };
             signature.push_str(&rendered);
         }
@@ -102,6 +106,25 @@ impl<'a> JvmSignatureFormatter<'a> {
             Wildcards::Suppressed,
         )?);
         Some(signature)
+    }
+
+    /// `(params)result` in a method's parameter and return modes, declaring no type parameter.
+    pub(super) fn method_positions(&self, params: &[Ty], ret: &Ty) -> Option<String> {
+        let mut signature = String::from("(");
+        for parameter in params {
+            signature.push_str(&self.parameter_ty(parameter)?);
+        }
+        signature.push(')');
+        signature.push_str(&self.method_ty(ret, Wildcards::Suppressed)?);
+        Some(signature)
+    }
+
+    /// A parameter position. `Unit` is a value there, the `kotlin.Unit` object, not `void`.
+    fn parameter_ty(&self, parameter: &Ty) -> Option<String> {
+        if *parameter == Ty::Unit {
+            return self.ty_at(parameter, Wildcards::Declared);
+        }
+        self.method_ty(parameter, Wildcards::Declared)
     }
 
     pub(super) fn new(ir: &'a IrFile, env: &'a EmitEnv<'_>) -> Self {
@@ -437,8 +460,12 @@ impl<'a> JvmSignatureFormatter<'a> {
 
     /// One parameter or return position in a method `Signature`. Positions without generic structure
     /// use their exact JVM descriptor spelling; structured positions are rendered from the semantic
-    /// type. This is a structural choice, not a recovery path after semantic formatting failed.
+    /// type. This is a structural choice, not a recovery path after semantic formatting failed. A
+    /// value class is spelled as the type it is carried as (see `value_class_positions`).
     pub(super) fn method_ty(&self, ty: &Ty, wildcards: Wildcards) -> Option<String> {
+        if let Some((expanded, wildcards)) = self.value_class_position(*ty, wildcards) {
+            return self.method_ty(&expanded, wildcards);
+        }
         let semantic = match ty {
             Ty::Nullable(inner) | Ty::PlatformNullable(inner) => inner,
             ty => ty,
@@ -530,6 +557,21 @@ impl<'a> JvmSignatureFormatter<'a> {
                 Some(format!(
                     "[{}",
                     self.ty_at(&element, wildcards.for_argument(variance))?
+                ))
+            }
+            // `KFunctionN` and `KSuspendFunctionN` have no JVM class of their own: they are carried
+            // as `kotlin.reflect.KFunction<out R>`, whose one parameter is the result. kotlinc
+            // writes that application, so the parameter types are not part of the signature.
+            Ty::Obj(owner, arguments)
+                if crate::libraries::function_classifiers::is_reflective_function_classifier(
+                    owner,
+                ) =>
+            {
+                let result = arguments.last()?;
+                Some(format!(
+                    "L{}<{}>;",
+                    crate::types::KFUNCTION_INTERNAL,
+                    self.type_argument(TypeVariance::Out, *result, wildcards)?
                 ))
             }
             Ty::Obj(owner, arguments) if self.is_written_raw(owner, arguments)? => Some(format!(

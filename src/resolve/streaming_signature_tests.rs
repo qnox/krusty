@@ -4977,6 +4977,78 @@ fn bounded_contract_declaration_publishes_by_stable_identity() {
 }
 
 #[test]
+fn generic_source_contract_uses_callee_type_parameter_identity_at_call_site() {
+    let source = r#"// WITH_STDLIB
+        import kotlin.contracts.contract
+        import kotlin.contracts.ExperimentalContracts
+
+        @OptIn(ExperimentalContracts::class)
+        inline fun <T, reified R> Refinement<T, R>.validate(value: T): Boolean {
+            contract { returns() implies (value is R) }
+            return true
+        }
+        class Refinement<T, R>
+        fun narrowed(refinement: Refinement<Any, String>, value: Any): String {
+            refinement.validate(value)
+            return value
+        }
+    "#;
+    let inputs = [SourceInput::kotlin(source).with_file_stem("GenericSourceContract")];
+    let mut classpath = crate::toolchain::classpath_jars_for(source);
+    if let Some(jdk) = crate::toolchain::jdk_modules() {
+        classpath.push(jdk);
+    }
+    let mut diagnostics = DiagSink::new();
+    let analysis = crate::frontend::analyze_source_set_with_features_and_prepare(
+        &inputs,
+        Box::new(
+            crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+                crate::jvm::classpath::Classpath::new(classpath),
+            ))
+            .expect("JVM provider initialization"),
+        ),
+        &LangFeatures::new(),
+        |_, _| {},
+        &mut diagnostics,
+    );
+
+    assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
+    let index = analysis
+        .streamed
+        .as_ref()
+        .expect("source contracts must finalize in Pass 1")
+        .module
+        .index();
+    let declaration = (0..index.declaration_count())
+        .map(|raw| crate::fir::DeclarationId::from_raw(raw as u32))
+        .find(|declaration| index.declaration_name(*declaration) == Some("validate"))
+        .expect("stable validate declaration");
+    let contract = index
+        .contract(declaration)
+        .expect("Pass 1 must publish the source contract")
+        .as_contract();
+    let [crate::contracts::Effect::ConditionalReturns {
+        conclusion:
+            crate::contracts::Condition::IsType {
+                ty: crate::contracts::ConditionType::Metadata(ty),
+                ..
+            },
+        ..
+    }] = contract.effects.as_slice()
+    else {
+        panic!("contract condition must be normalized to semantic type: {contract:?}");
+    };
+    assert!(
+        ty.ty_param_name().is_some(),
+        "the conclusion names the callee's type parameter: {ty:?}"
+    );
+    // The call site substitutes `R := String` through that identity, so `value` is narrowed.
+    let census = crate::compiler::check_frontend_only(analysis, &mut diagnostics);
+    assert!(census.failures.is_empty(), "{:?}", census.failures);
+    assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
+}
+
+#[test]
 fn pass_one_contract_is_visible_when_caller_source_streams_first() {
     let caller = r#"
         fun read(status: Status): String {

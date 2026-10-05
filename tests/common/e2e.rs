@@ -47,6 +47,25 @@ pub fn compile_in_process_files_language_settings(
     )
 }
 
+/// Compile a multiplatform JVM module whose first `common` sources are common (dependsOn)
+/// sources, as kotlinc's `-Xmulti-platform -Xcommon-sources=…` names them.
+pub fn compile_in_process_files_common(
+    sources: &[(&str, &str)],
+    common: usize,
+    cp_jars: &[PathBuf],
+    jdk_modules: Option<&std::path::Path>,
+) -> Option<Vec<(String, Vec<u8>)>> {
+    common::source_set_compile::compile_source_set(
+        sources,
+        common,
+        cp_jars,
+        jdk_modules,
+        None,
+        None,
+        &krusty::language_settings::LanguageSettings::default(),
+    )
+}
+
 /// A positive front-end coverage test upgraded to true e2e: the source must be checker-clean, the
 /// backend must emit it (a lowering/emit bail is a failure, not a skip), and when it declares
 /// `fun box()`, running it must return "OK". This belongs in the e2e-only helper module so the
@@ -133,10 +152,29 @@ pub struct CompilerError {
 /// Extract every rendered compiler error in emission order. The scratch-directory prefixes differ
 /// between invocations, so the stable source filename is the location boundary compared by tests.
 pub fn compiler_errors(output: &str) -> Vec<CompilerError> {
+    rendered_diagnostics(output, "error:")
+}
+
+/// Every rendered compiler warning in emission order, located like [`compiler_errors`].
+pub fn compiler_warnings(output: &str) -> Vec<CompilerError> {
+    rendered_diagnostics(output, "warning:")
+}
+
+/// Every warning about the compilation itself rather than a source position (`warning: …` with no
+/// location), in emission order.
+pub fn compiler_module_warnings(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .filter_map(|rendered| rendered.strip_prefix("warning: "))
+        .map(str::to_string)
+        .collect()
+}
+
+fn rendered_diagnostics(output: &str, severity: &str) -> Vec<CompilerError> {
     output
         .lines()
         .filter_map(|rendered| {
-            let (location, message) = rendered.split_once("error:")?;
+            let (location, message) = rendered.split_once(severity)?;
             let location = location.trim().trim_end_matches(':');
             let mut fields = location.rsplitn(3, ':');
             let column = fields.next()?.trim().parse().ok()?;
@@ -272,11 +310,15 @@ pub fn reference_error_ledger(sources: &[(&str, &str)], extra_args: &[String]) -
 /// Require krusty to report exactly kotlinc's errors for a single `Main.kt` and require kotlinc to
 /// accept `source`: the ledger is empty.
 pub fn assert_accepted_like_kotlinc(source: &str) {
-    let sources = [("Main.kt", source)];
     let reference_args = common::language_directives::kotlinc_args(source);
-    let expected = reference_error_ledger(&sources, &reference_args);
+    assert_sources_accepted_like_kotlinc(&[("Main.kt", source)], &reference_args);
+}
+
+/// Require kotlinc to accept `sources` and krusty to report exactly kotlinc's (empty) ledger.
+pub fn assert_sources_accepted_like_kotlinc(sources: &[(&str, &str)], reference_args: &[String]) {
+    let expected = reference_error_ledger(sources, reference_args);
     assert_eq!(
-        krusty_error_ledger_with_args(&sources, &reference_args),
+        krusty_error_ledger_with_args(sources, reference_args),
         expected,
         "krusty's ledger against kotlinc {}",
         krusty::kotlin_version::target()

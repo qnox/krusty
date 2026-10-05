@@ -61,6 +61,7 @@ impl CallSig {
                 .get(start..)
                 .unwrap_or_default()
                 .to_vec(),
+            result_enhancement: self.result_enhancement,
             required: self.required.saturating_sub(start),
             vararg: self.vararg,
             vararg_index: self.vararg_index.and_then(|index| index.checked_sub(start)),
@@ -95,6 +96,7 @@ impl CallSig {
             lambda_context_counts: selected(&self.lambda_context_counts, parameters),
             inline_modifiers: selected(&self.inline_modifiers, parameters),
             platform_nullable_params: selected(&self.platform_nullable_params, parameters),
+            result_enhancement: self.result_enhancement,
             required: crate::libraries::required_arity(parameters.len(), &param_defaults),
             param_defaults,
             vararg: vararg_index.is_some(),

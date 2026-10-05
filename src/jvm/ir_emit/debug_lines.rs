@@ -196,10 +196,7 @@ impl Emitter<'_> {
         result
     }
 
-    /// Emit a `when` branch condition's jump. kotlinc's `visitWhen` keeps a constant source
-    /// condition visible to a debugger: it marks the condition's line on a `nop` before deciding
-    /// the branch statically. A constant the compiler generated has no source line and no
-    /// instruction of its own.
+    /// Emit a `when` branch condition's jump (kotlinc's `isInsideCondition` around the jump).
     pub(super) fn emit_when_condition(
         &mut self,
         condition: ExprId,
@@ -207,22 +204,23 @@ impl Emitter<'_> {
         jump_when_true: bool,
         code: &mut CodeBuilder,
     ) -> bool {
-        let constant = matches!(
-            self.ir.expr(condition),
-            crate::ir::IrExpr::Const(crate::ir::IrConst::Boolean(_))
-        );
-        if let Some(&line) = self
-            .ir
-            .expr_source_lines
-            .get(&condition)
-            .filter(|_| constant)
-        {
-            if line != 0 {
-                code.mark_line(line);
-                code.nop();
-            }
-        }
         self.in_condition(|this| this.emit_cond_branch(condition, target, jump_when_true, code))
+    }
+
+    /// kotlinc's `visitConst` for a Boolean: a source constant marks its line on a `nop`, because a
+    /// Boolean constant need not be materialized and the debugger still has to stop on its line.
+    /// A constant condition is decided statically, so `while (true)`, `do … while (false)` and a
+    /// constant `when` branch condition keep their line only through that `nop`. A constant the
+    /// compiler generated has no source line and no instruction of its own; the `nop` of a line
+    /// that has other instructions is cleaned up with every other redundant `nop`.
+    pub(super) fn mark_boolean_constant(&mut self, constant: ExprId, code: &mut CodeBuilder) {
+        let Some(&line) = self.ir.expr_source_lines.get(&constant) else {
+            return;
+        };
+        if line != 0 {
+            self.mark_expression_line(constant, line, code);
+            code.nop();
+        }
     }
 
     /// Put a call's own line back in effect at its physical dispatch.
@@ -241,7 +239,7 @@ impl Emitter<'_> {
     /// - `IrExpr::InvokeFunction` — a function value's `FunctionN.invoke`;
     /// - `IrExpr::EnumValueOf` — the member `E.valueOf` realization;
     /// - a property read or write whose accessor is a real method, not a field access;
-    /// - the intrinsics whose lowering IS a call: `PrimitiveCompare`'s `Integer.compare`,
+    /// - the intrinsics whose lowering IS a call: `PrimitiveCompare`'s `Intrinsics.compare`,
     ///   `String.get`'s `charAt`.
     ///
     /// Deliberately NOT dispatches: an array read or write, a field read or write, an arithmetic

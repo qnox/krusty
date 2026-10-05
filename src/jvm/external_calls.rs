@@ -395,6 +395,7 @@ pub(super) fn realize(
                     | crate::libraries::CompilerIntrinsic::PrimitiveIteratorNext
                     | crate::libraries::CompilerIntrinsic::NullableAnyToString
                     | crate::libraries::CompilerIntrinsic::PrimitiveHashCode
+                    | crate::libraries::CompilerIntrinsic::PrimitiveEquals
             ) {
                 let (receiver, arguments) = match &ir.exprs[index] {
                     IrExpr::Call {
@@ -424,7 +425,7 @@ pub(super) fn realize(
                 )
                 .ok_or(target)?;
                 ir.ext_call_source_receiver.remove(&expression);
-                ir.exprs[index] = operation;
+                operation.commit(ir, expression);
                 continue;
             }
         }
@@ -834,7 +835,6 @@ pub(super) fn realize(
                 | crate::libraries::CompilerIntrinsic::StartCoroutine
                 | crate::libraries::CompilerIntrinsic::CoroutineContext
                 | crate::libraries::CompilerIntrinsic::CoroutineSuspended
-                | crate::libraries::CompilerIntrinsic::SuspendCoroutine
                 | crate::libraries::CompilerIntrinsic::SuspendCoroutineUninterceptedOrReturn
                 | crate::libraries::CompilerIntrinsic::EnumValues
                 | crate::libraries::CompilerIntrinsic::EnumName
@@ -862,6 +862,7 @@ pub(super) fn realize(
                 | crate::libraries::CompilerIntrinsic::PrimitiveUnsignedShiftRight
                 | crate::libraries::CompilerIntrinsic::BooleanNot
                 | crate::libraries::CompilerIntrinsic::PrimitiveHashCode
+                | crate::libraries::CompilerIntrinsic::PrimitiveEquals
                 | crate::libraries::CompilerIntrinsic::PrimitiveBitNot
                 | crate::libraries::CompilerIntrinsic::PrimitiveBinary(_),
             )
@@ -1127,6 +1128,20 @@ pub(super) fn realize(
                                 target: Some(selected),
                             }
                         }
+                    };
+                }
+                // kotlinc's `ExplicitEquals`: both operands as objects, through `Object.equals`.
+                crate::libraries::MemberRealization::Intrinsic(
+                    crate::libraries::CompilerIntrinsic::PrimitiveEquals,
+                ) => {
+                    *callee = Callee::Virtual {
+                        owner: crate::types::wk::java_object(),
+                        name: physical_name.clone(),
+                        descriptor: "(Ljava/lang/Object;)Z".to_string(),
+                        params: None,
+                        interface: false,
+                        module_target: None,
+                        target: Some(selected),
                     };
                 }
                 crate::libraries::MemberRealization::Intrinsic(_)
