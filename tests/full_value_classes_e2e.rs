@@ -36,9 +36,13 @@ fn class_bytes<'a>(classes: &'a [(String, Vec<u8>)], name: &str) -> &'a [u8] {
 fn value_class_without_jvm_inline_is_rejected_until_the_feature_is_enabled() {
     const SRC: &str = "value class A(val x: Int)\nfun box() = \"OK\"\n";
     assert_eq!(
-        common::front_end_diagnostics(SRC, &[], None),
-        vec!["value classes without '@JvmInline' annotation are not yet supported.".to_string()]
+        common::front_end_diagnostics_located(SRC, &[], None),
+        vec![
+            "1:1: error: value classes without '@JvmInline' annotation are not yet supported."
+                .to_string()
+        ]
     );
+    common::assert_errors_match_kotlinc(&[("Value.kt", SRC)], &[]);
 }
 
 #[test]
@@ -71,6 +75,11 @@ fun box(): String {
 }
 ";
     common::expect_box_ok_with_stdlib(SRC, "full_value_class_matches_data_class_equality");
+    common::expect_box_same_as_kotlinc_with_args(
+        SRC,
+        "full_value_class_matches_data_class_equality_differential",
+        &["-XXLanguage:+FullValueClasses"],
+    );
 
     let classes = compile(SRC, "full_value_class_matches_data_class_equality");
     for (name, init) in [("A1", "(I)V"), ("A2", "(II)V"), ("Outer$Inner", "(II)V")] {

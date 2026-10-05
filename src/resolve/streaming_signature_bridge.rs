@@ -3994,12 +3994,17 @@ pub(crate) fn finalized_streamed_signature_index(
         {
             return false;
         }
-        let Some(class) = classifier_types
-            .get(&owner)
-            .and_then(|classifier| table.class_by_type_name(*classifier))
-        else {
-            return true;
-        };
+        let classifier = classifier_types.get(&owner).unwrap_or_else(|| {
+            panic!(
+                "value-keyword owner {owner:?} must have a compact classifier identity before generated method finalization"
+            )
+        });
+        let class = table.class_by_type_name(*classifier).unwrap_or_else(|| {
+            panic!(
+                "value-keyword owner {owner:?} ({}) must have one collected classifier declaration",
+                classifier.render(),
+            )
+        });
         !class.full_value
     }
 
