@@ -193,6 +193,9 @@ pub struct IrProperty {
     /// accessor for it (`access$get<X>$p` on the JVM); without one the splice would be illegal, and
     /// silently degrading the `inline` call instead would change what the program does.
     pub needs_access_bridge: bool,
+    /// Annotations written on this property's accessors, whether source declared each accessor or
+    /// a backend realizes its default.
+    pub accessor_annotations: super::AccessorAnnotations,
 }
 
 /// A property declared by another file of the module, as the file's code selects it.
@@ -225,4 +228,7 @@ pub struct IrModuleProperty {
     pub compile_time_constant: Option<IrConst>,
     /// Where the property lives when `owner` is absent.
     pub placement: IrStaticPlacement,
+    /// The own, unapplied types of the properties this one overrides, as the override edges its
+    /// classifier published them (see [`super::IrModuleCallable::overridden_results`]).
+    pub overridden_types: Box<[Ty]>,
 }

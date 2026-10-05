@@ -17,7 +17,8 @@
 
 use super::bytecode_machine::{eligible_points, owned_suspensions, Route, Routed, Subject};
 use super::cps::{
-    SuspendLambdaCapture, SuspendLambdaClass, SuspendLambdaMachine, TransformedMachine,
+    SuspendLambdaCapture, SuspendLambdaClass, SuspendLambdaMachine, SuspendLambdaParameters,
+    TransformedMachine,
 };
 use super::{append_continuation, box_returns, continuation_ty, ensure_tail_return, int_ty};
 use crate::ir::{
@@ -32,8 +33,6 @@ const SUSPEND_LAMBDA: &str = "kotlin/coroutines/jvm/internal/SuspendLambda";
 struct Capture {
     name: String,
     ty: Ty,
-    /// Whether its constructor parameter uses kotlinc's `$receiver` spelling.
-    receiver: bool,
 }
 
 /// One of the lambda's own parameters.
@@ -84,7 +83,7 @@ pub(super) fn route(
     if eligible_points(ir, fid, body, &route, Subject::SuspendLambda).is_none() {
         return Routed::NotEligible;
     }
-    let Some((captures, parameters)) = layout(ir, fid, body, &site) else {
+    let Some((captures, parameters, member_parameters)) = layout(ir, fid, body, &site) else {
         crate::trace_compiler!("suspend", "suspend lambda fid={fid}: no field layout");
         return Routed::NotEligible;
     };
@@ -155,6 +154,10 @@ pub(super) fn route(
     ) {
         ir.expr_source_lines.insert(unit, close);
     }
+    let Some(form) = ir.lambda_origins.get(&fid).map(|origin| origin.form) else {
+        crate::trace_compiler!("suspend", "suspend lambda fid={fid}: no source form");
+        return Routed::Failed;
+    };
     become_invoke_suspend(ir, fid, internal);
     enclose_in_invoke_suspend(ir, fid);
     ir.classes[class as usize].methods.push(fid);
@@ -162,18 +165,24 @@ pub(super) fn route(
 
     // The lambda value is a fresh instance with no completion. Its type is the class's: a
     // consumer that needs its `FunctionN` casts it, one that takes `Any` does not.
-    let mut arguments = site.captures.clone();
-    arguments.push(ir.add_expr(IrExpr::Const(IrConst::Null)));
-    ir.exprs[site.node as usize] = IrExpr::New {
-        internal,
-        args: arguments,
-        ctor_params: None,
-        ctor_desc: None,
-        external_target: None,
-        defaults: Box::new([]),
-        default_prefix_count: 0,
-    };
-    ir.logical_types.insert(site.node, Ty::obj_name(internal));
+    // A copy in an enclosing inline-lambda template builds it from that template's captures.
+    for node in std::iter::once(site.node).chain(site.template_copies.iter().copied()) {
+        let IrExpr::Lambda { captures, .. } = &ir.exprs[node as usize] else {
+            unreachable!("a suspend lambda site builds a lambda value");
+        };
+        let mut arguments = captures.clone();
+        arguments.push(ir.add_expr(IrExpr::Const(IrConst::Null)));
+        ir.exprs[node as usize] = IrExpr::New {
+            internal,
+            args: arguments,
+            ctor_params: None,
+            ctor_desc: None,
+            external_target: None,
+            defaults: Box::new([]),
+            default_prefix_count: 0,
+        };
+        ir.logical_types.insert(node, Ty::obj_name(internal));
+    }
 
     let mut declared_spill_fields: Vec<(String, usize)> = Vec::new();
     for field in parameters
@@ -200,9 +209,9 @@ pub(super) fn route(
                 .map(|(index, capture)| SuspendLambdaCapture {
                     field: index as u32,
                     ty: capture.ty,
-                    receiver: capture.receiver,
                 })
                 .collect(),
+            member_parameters,
             parameters: parameters
                 .iter()
                 .map(|parameter| {
@@ -218,6 +227,7 @@ pub(super) fn route(
                 .filter_map(|parameter| parameter.metadata_name.clone())
                 .collect(),
             type_parameters: ir.lambda_type_parameters(fid).to_vec(),
+            form,
         },
     );
     route.machines.record_transformed(
@@ -269,13 +279,14 @@ pub(super) fn innermost_first(ir: &IrFile, fids: Vec<u32>) -> Vec<u32> {
 }
 
 /// The class's captured values and the lambda's own parameters, when every one of them has the
-/// identity its field or local needs.
+/// identity its field or local needs, and the parameter identities of the members the class
+/// declares over them.
 fn layout(
     ir: &IrFile,
     fid: u32,
     body: ExprId,
     site: &Site,
-) -> Option<(Vec<Capture>, Vec<Parameter>)> {
+) -> Option<(Vec<Capture>, Vec<Parameter>, SuspendLambdaParameters)> {
     let function = &ir.functions[fid as usize];
     let parameter_info = ir.fn_params.get(&fid)?;
     let identities = &parameter_info.identities;
@@ -285,22 +296,35 @@ fn layout(
     {
         return None;
     }
-    let mut captures = Vec::with_capacity(own_from);
-    for (parameter, identity) in identities[..own_from].iter().enumerate() {
-        let (name, receiver) = match identity.role {
-            IrParameterRole::CapturedValue { .. } => {
-                (format!("${}", identity.source_name.as_ref()?), false)
-            }
+    let captured_receivers = &parameter_info.captured_receivers;
+    let recorded = identities[..own_from]
+        .iter()
+        .all(|identity| match identity.role {
+            IrParameterRole::CapturedValue { .. } => identity.source_name.is_some(),
             IrParameterRole::CapturedReceiver { ordinal } => {
-                crate::jvm::capture_names::lifted_receiver(ir, fid, ordinal as usize)?
+                (ordinal as usize) < captured_receivers.len()
             }
-            _ => return None,
-        };
+            _ => false,
+        });
+    if !recorded {
+        return None;
+    }
+    let member_parameters = SuspendLambdaParameters::new(
+        identities[..own_from].to_vec(),
+        identities.len() - own_from,
+        captured_receivers.clone(),
+        crate::jvm::lifted_names::lifting_root(ir, fid),
+    );
+    let mut captures = Vec::with_capacity(own_from);
+    for (parameter, identity) in member_parameters.captures().iter().enumerate() {
+        let name =
+            crate::jvm::capture_names::suspend_lambda_capture(ir, &member_parameters, identity)
+                .field;
         let ty = match ir.shared_capture_parameters.get(&(fid, parameter as u32)) {
             Some(element) => crate::jvm::shared_captures::holder_ty(element),
             None => function.params[parameter],
         };
-        captures.push(Capture { name, ty, receiver });
+        captures.push(Capture { name, ty });
     }
     let expressions = crate::ir::value_namespace_expressions(ir, body);
     let read = |value: usize| {
@@ -372,7 +396,7 @@ fn layout(
             field,
         });
     }
-    Some((captures, parameters))
+    Some((captures, parameters, member_parameters))
 }
 
 /// kotlinc's `Type.normalize()` descriptor: every reference is `Object`, and the sub-int
@@ -564,6 +588,7 @@ fn become_invoke_suspend(ir: &mut IrFile, fid: u32, class: TypeName) {
     ir.synthetic_methods.remove(&fid);
     ir.class_static_local_functions.remove(&fid);
     ir.lambda_own_params_from.remove(&fid);
+    ir.vc_declared_sigs.remove(&fid);
     ir.lambda_origins.remove(&fid);
     ir.lifted_functions.remove(&fid);
     ir.lifted_names.remove(&fid);

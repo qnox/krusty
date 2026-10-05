@@ -1,6 +1,7 @@
 //! Fallible metadata wire decoders shared by target adapters.
 
 mod klib;
+mod module_mapping;
 mod parameter_shape;
 mod type_shape;
 mod wire;
@@ -8,13 +9,15 @@ mod wire;
 pub use klib::PackageFragmentDecodeError;
 pub(crate) use klib::{
     decode_package_fragment, field, parse_module_header, require_wire, strip_builtins_header,
-    Cursor, DecodedPackageFragment, QName,
+    ClassAnnotationProtocol, Cursor, DecodedPackageFragment, QName,
 };
+pub(crate) use module_mapping::decode_module_optional_annotations;
 pub(crate) use parameter_shape::{
     parse_type_param, parse_value_parameter, ParameterDecodeError, ParsedTypeParam,
     ParsedValueParam, ParsedVariance,
 };
 pub(crate) use type_shape::{
-    parse_type_node, ParsedProjection, ParsedTypeArgument, ParsedTypeNode,
+    parse_type_node, AnnotationArgumentValue, ParsedProjection, ParsedTypeArgument, ParsedTypeNode,
+    TypeAnnotation,
 };
 pub(crate) use wire::{packed_varints, Pb};

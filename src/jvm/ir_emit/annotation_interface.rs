@@ -7,7 +7,7 @@ use super::*;
 /// `@Target(...)`, or `None` when it declares none — an ABSENT `@Target` and an EMPTY one are
 /// different classfiles (the latter mirrors to `value = []`, and kotlinc emits it).
 ///
-/// The Kotlin target set is PROJECTED, not copied: [`crate::types::java_element_type_of_annotation_target`]
+/// The Kotlin target set is PROJECTED, not copied: [`crate::types::KotlinTarget::java_element_type`]
 /// maps each target to at most one `ElementType`, Kotlin-only targets drop out, and the survivors are
 /// deduplicated and ordered by `ElementType` declaration order (kotlinc builds an `EnumSet`). The
 /// projection can be empty — a set of only Kotlin-only targets still mirrors to `value = []`, matching
@@ -30,8 +30,8 @@ fn java_target_mirror(
     let mut elements: Vec<usize> = targets
         .iter()
         .filter_map(|target| match target {
-            crate::ir::AnnoValue::Enum(_, name) => {
-                crate::types::java_element_type_of_annotation_target(name)
+            crate::ir::AnnoValue::Enum(owner, name) => {
+                crate::types::KotlinTarget::of_entry(*owner, name)?.java_element_type()
             }
             _ => None,
         })

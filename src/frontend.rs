@@ -982,6 +982,9 @@ where
             let needs_bounded_pass_one_syntax = multiplatform
                 || has_signature_defaults(&file)
                 || retained_syntax::has_classifier_annotation_arguments(&file)
+                // File annotation policies are resolved once, after every header is collected.
+                || !file.file_annotations.is_empty()
+                || !file.type_annotation_arguments.is_empty()
                 || stubs.iter().any(|stub| {
                     stub.flags.has(crate::fir::DeclarationFlags::INLINE)
                         || stub.flags.has(crate::fir::DeclarationFlags::CONST)
@@ -1300,8 +1303,21 @@ where
             &files[..inferred_end],
             &mut symbols,
         );
+        crate::resolve::publish_checked_type_use_annotations(
+            &files[..inferred_end],
+            &mut index,
+            &mut symbols,
+            diags,
+        );
         crate::resolve::publish_stable_declaration_metadata(&mut index, &symbols);
-        crate::resolve::publish_override_plans(&mut index, &symbols);
+        crate::resolve::publish_file_lexical_policies(&files[..inferred_end], &symbols, &mut index);
+        crate::resolve::publish_named_class_constructors(
+            &files[..inferred_end],
+            &mut index,
+            &symbols,
+            diags,
+        );
+        crate::resolve::publish_override_plans(&mut index, &mut symbols);
         crate::resolve::function_type_parameters::publish_function_type_parameters(
             &mut index, &symbols,
         );

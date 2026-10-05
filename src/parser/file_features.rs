@@ -24,4 +24,5 @@ pub(super) fn apply_file_features(file: &mut File, features: &LangFeatures) {
     file.unit_conversions_on_arbitrary_expressions =
         features.has("UnitConversionsOnArbitraryExpressions");
     file.eager_lambda_analysis = features.has("EagerLambdaAnalysis");
+    file.opted_in_markers = features.opted_in().map(str::to_string).collect();
 }

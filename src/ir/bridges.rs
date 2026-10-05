@@ -85,6 +85,10 @@ pub struct Bridge {
     /// (`size()` for `Collection.size`). It is final and not synthetic, so a subclass inherits it
     /// rather than declaring it again.
     pub special: bool,
+    /// This bridge publishes an `internal` member's JVM slot. Its name still matches the
+    /// implementation when it is recorded, because the module suffix is applied later; the
+    /// value-class pass must keep it instead of dropping it as a duplicate of that method.
+    pub module_name_bridge: bool,
     /// The method this bridge delegates to, when it differs from `name` — a value-class-returning
     /// override is emitted under a mangled name (`foo-<hash>`), so the unmangled bridge (`foo`, the
     /// supertype's erased signature) must call the mangled one. `None` ⇒ same as `name`.

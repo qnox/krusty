@@ -1,25 +1,23 @@
 //! The subclass an enum entry with a body becomes.
 //!
-//! `Enum$ENTRY extends Enum`: a package-private `final` class whose one constructor delegates to
-//! the enum's, plus the entry's overriding methods. It has no fields of its own — the overrides
-//! read the enum's through the inherited `this`.
+//! `Enum$ENTRY extends Enum`: a package-private `final` class whose one constructor takes the
+//! constant's name and ordinal and calls the enum's constructor with the constant's arguments,
+//! plus the entry's overriding methods.
 
 use super::bridge_emission::emit_bridges;
-use super::constructor_defaults::emit_ctor_default_stub_with_prefix;
 use super::frame_map::FrameKey;
 use super::*;
 
 /// Emit a synthesized enum-entry subclass (`Enum$ENTRY extends Enum`) for an entry with a body: a
-/// package-private `final` class with one constructor `(String name, int ordinal, <user fields>)V`
-/// that delegates to the enum's `(String,int,<user>)V` constructor, plus the entry's overriding
-/// methods. It has no fields of its own — overrides read the enum's fields via the inherited `this`.
+/// package-private `final` class with one constructor `(String name, int ordinal)V` that evaluates
+/// the constant's arguments and calls the enum's constructor with them, plus the entry's overriding
+/// methods.
 pub(super) fn emit_enum_entry_subclass(
     ir: &IrFile,
     c: &crate::ir::IrClass,
     facade: &str,
     env: &EmitEnv,
     opts: &EmitOptions,
-    user_tys: &[Ty],
 ) -> Vec<u8> {
     let superclass = c.superclass();
     let fq_name = c.fq_name();
@@ -34,30 +32,28 @@ pub(super) fn emit_enum_entry_subclass(
         cw.add_field(acc, &field.name, &ir_type_desc(&field.ty));
     }
 
-    // Constructor: `(String, int, <user>)V` → `super(name, ordinal, <user>)`, then the property
-    // initializers (`this.<prop> = <init>`, from `init_body`).
-    let user_jvm = jvm_tys(user_tys);
-    let ctor_params: Vec<Ty> = [Ty::String, Ty::Int]
-        .into_iter()
-        .chain(user_jvm.iter().copied())
-        .collect();
-    let ctor_words: u16 = ctor_params.iter().map(|t| slot_words(*t)).sum();
-    let mut ctor = CodeBuilder::new(1 + ctor_words);
-    ctor.aload(0);
-    let mut slot = 1u16;
-    for t in &ctor_params {
-        load(*t, slot, &mut ctor);
-        slot += slot_words(*t);
-    }
-    let super_init = cw.methodref(
-        &superclass,
-        "<init>",
-        &method_descriptor(&ctor_params, Ty::Unit),
+    // Constructor: `(String, int)V` → `super(name, ordinal, <the constant's arguments>)`, then the
+    // property initializers (`this.<prop> = <init>`, from `init_body`). The enum's constructors
+    // are private, so the call goes through its `$default` overload when the constant omits an
+    // argument and through the marker accessor otherwise, as any subclass's `super(…)` does.
+    let enum_prefix = [Ty::String, Ty::Int];
+    let ctor_desc = method_descriptor(&enum_prefix, Ty::Unit);
+    let prefix_words: u16 = enum_prefix.iter().map(|ty| slot_words(*ty)).sum();
+    // kotlinc visits the name, descriptor and signature before the body's constants.
+    cw.reserve_method_name("<init>");
+    cw.reserve_descriptor(&ctor_desc);
+    // Its only parameters are the enum's synthetic `(name, ordinal)` prefix, so the generic
+    // `Signature` has no source parameters.
+    let ctor_signature = super::constructor_signatures::enum_entry_constructor_signature(
+        &signature_formatter,
+        &[],
+        &[],
     );
-    let argw: i32 = ctor_params.iter().map(|t| slot_words(*t) as i32).sum();
-    ctor.invokespecial(super_init, argw, 0);
-    let mut ctor_max = 1 + ctor_words;
-    if let Some(init_body) = c.init_body {
+    if let Some(signature) = &ctor_signature {
+        cw.reserve_descriptor(signature);
+    }
+    let mut ctor = CodeBuilder::new(1 + prefix_words);
+    let ctor_max = {
         let mut e = Emitter::new(
             ir,
             &mut cw,
@@ -66,48 +62,97 @@ pub(super) fn emit_enum_entry_subclass(
             &fq_name,
             facade,
             Ty::Unit,
-            [init_body],
+            c.super_arg_prelude
+                .iter()
+                .chain(&c.super_args)
+                .copied()
+                .chain(c.init_body),
         );
+        e.this_uninitialized = true;
         let receiver = e.frame.enter(FrameKey::Receiver, Ty::obj_name(c.fq_name));
         e.slots.insert(0, (receiver, Ty::obj_name(c.fq_name))); // `this`
-        for (index, &ty) in ctor_params.iter().enumerate() {
+        for (index, &ty) in enum_prefix.iter().enumerate() {
             e.frame.enter(FrameKey::Parameter(index as u16), ty);
         }
-        e.render_initializer_boundaries = true;
-        e.emit(init_body, &mut ctor);
-        e.render_initializer_boundaries = false;
-        ctor_max = e.frame.max();
-    }
+        for &statement in &c.super_arg_prelude {
+            e.emit(statement, &mut ctor);
+        }
+        e.emit_constructor_delegation_arguments(
+            &c.super_args,
+            &c.super_ctor_params,
+            &enum_prefix,
+            &mut ctor,
+        );
+        let mut super_params = enum_prefix.to_vec();
+        super_params.extend(jvm_tys(&c.super_ctor_params));
+        let super_defaults = ir
+            .super_constructor_default_arguments
+            .get(&c.fq_name_id())
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let marker = Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker");
+        if !super_defaults.is_empty() {
+            for mask in constructor_default_masks(super_defaults, c.super_ctor_params.len()) {
+                ctor.push_int(mask, e.cw);
+                super_params.push(Ty::Int);
+            }
+            ctor.aconst_null();
+            super_params.push(marker);
+        } else if super::constructor_accessors::reached_through_accessor(
+            c.super_ctor,
+            Some(c.fq_name_id()),
+            c.superclass,
+        ) {
+            ctor.aconst_null();
+            super_params.push(marker);
+        }
+        let super_init = e.cw.methodref(
+            &superclass,
+            "<init>",
+            &method_descriptor(&super_params, Ty::Unit),
+        );
+        let argw: i32 = super_params.iter().map(|t| slot_words(*t) as i32).sum();
+        ctor.invokespecial(super_init, argw, 0);
+        e.this_uninitialized = false;
+        if let Some(init_body) = c.init_body {
+            e.render_initializer_boundaries = true;
+            e.emit(init_body, &mut ctor);
+            e.render_initializer_boundaries = false;
+        }
+        e.frame.max()
+    };
     ctor.ret_void();
     ctor.ensure_locals(ctor_max);
     ctor.link();
-    cw.add_method(
+    cw.add_method_sig(
         0x0000,
         "<init>",
-        &method_descriptor(&ctor_params, Ty::Unit),
+        &ctor_desc,
         &ctor,
+        ctor_signature.as_deref(),
     );
-    if let Some(defaults) = ir
-        .class_ctor_defaults(&superclass)
-        .filter(|defaults| defaults.iter().any(Option::is_some))
-    {
-        emit_ctor_default_stub_with_prefix(
-            ir,
-            &fq_name,
-            c.fq_name,
-            facade,
-            &[Ty::String, Ty::Int],
-            0,
-            &user_jvm,
-            defaults,
-            None,
-            false,
-            false,
-            0x1000,
-            &mut cw,
-            env,
-        );
-    }
+    // The constructor maps to its entry's line and lists the receiver and the enum prefix.
+    let locals = [
+        ("this".to_string(), format!("L{fq_name};"), 0),
+        (
+            "$enum$name".to_string(),
+            "Ljava/lang/String;".to_string(),
+            1,
+        ),
+        ("$enum$ordinal".to_string(), "I".to_string(), 2),
+    ];
+    let line = ir
+        .class_id_by_name(c.superclass)
+        .and_then(|enum_class| {
+            ir.classes[enum_class as usize]
+                .enum_entries
+                .iter()
+                .find(|entry| entry.subclass == Some(c.fq_name))
+        })
+        .map(|entry| entry.decl_line)
+        .filter(|&line| line != 0)
+        .map(|line| (0, line));
+    cw.set_method_debug("<init>", &ctor_desc, line, &locals);
 
     // The overriding methods + synthesized property getters.
     emit_declared_property_accessors(
@@ -151,7 +196,7 @@ pub(super) fn emit_enum_entry_subclass(
                 c.decl_line,
             );
         }
-        if let Some(defaults) = ir.param_defaults(fid) {
+        if let Some(defaults) = ir.declared_param_defaults(fid) {
             if function.is_static {
                 emit_facade_default_stub(
                     ir,

@@ -61,9 +61,12 @@ pub struct BackendClassifierFact {
     pub own_type_parameter_count: usize,
     pub type_param_variances: Box<[TypeVariance]>,
     pub value_underlying: Option<Ty>,
-    pub value_underlying_property: Option<Box<str>>,
+    pub value_declaration: Option<crate::types::DeclaredValueClass>,
     /// The role its provider published for the declaration in type checks and casts.
     pub role: Option<crate::types::ClassifierRole>,
+    /// The declared companion object: the name of the static field holding it and its classifier.
+    /// Kotlin metadata publishes it for a dependency and the source declaration for this module.
+    pub companion: Option<(Box<str>, TypeName)>,
 }
 
 /// Declaration facts of a current-module classifier that a dependency's classifier record carries
@@ -95,6 +98,10 @@ pub struct BackendMemberFact {
     pub suspend: bool,
     pub abstract_member: bool,
     pub visibility: Visibility,
+    /// The member's last physical parameter is its declared `vararg`. Drives `ACC_VARARGS` on the
+    /// synthetic compatibility surface (`access$…$jd` bridges and `$DefaultImpls` forwarders),
+    /// which kotlinc keeps element-form callable like the member itself.
+    pub vararg: bool,
     pub parameter_identities: Box<[crate::fir::ResolvedParameterIdentity]>,
 }
 
@@ -164,11 +171,12 @@ impl BackendClassifierFact {
             own_type_parameter_count: shape.own_type_parameter_count,
             type_param_variances: shape.type_param_variances().to_vec().into_boxed_slice(),
             value_underlying: shape.value_underlying,
-            value_underlying_property: shape
-                .value_underlying_property
-                .as_deref()
-                .map(Box::<str>::from),
+            value_declaration: shape.value_declaration.clone(),
             role: shape.classifier_role(),
+            companion: shape
+                .companion_object
+                .as_ref()
+                .map(|(field, companion)| (Box::from(field.as_str()), *companion)),
         }
     }
 
@@ -189,8 +197,23 @@ impl BackendClassifierFact {
 }
 
 impl BackendMemberFact {
+    /// Whether the member's LAST physical parameter is its declared `vararg` (kotlinc's
+    /// `ACC_VARARGS` condition). `vararg_index` counts the logical (context + value) parameters;
+    /// an extension receiver leads the physical list and shifts it by one.
+    fn trailing_vararg(
+        call_sig: &crate::libraries::CallSig,
+        receiver_param: bool,
+        physical_len: usize,
+    ) -> bool {
+        call_sig
+            .vararg_index
+            .is_some_and(|index| index + usize::from(receiver_param) + 1 == physical_len)
+    }
+
     fn from_function(function: &crate::libraries::FunctionInfo) -> Self {
         let callable = &function.callable;
+        let receiver_param = function.is_extension()
+            && callable.params.len() == function.call_sig.parameter_identities.len() + 1;
         Self {
             name: BackendMemberName::Declared(callable.name.as_str().into()),
             physical_name: callable.physical_name.as_deref().map(Into::into),
@@ -205,6 +228,11 @@ impl BackendMemberFact {
             suspend: function.flags.suspend,
             abstract_member: function.flags.is_abstract,
             visibility: function.visibility,
+            vararg: Self::trailing_vararg(
+                &function.call_sig,
+                receiver_param,
+                callable.physical_params.len(),
+            ),
             parameter_identities: function
                 .call_sig
                 .physical_parameter_identities(
@@ -220,6 +248,8 @@ impl BackendMemberFact {
     }
 
     fn from_member(member: &LibraryMember) -> Self {
+        let receiver_param = member.is_member_extension()
+            && member.params.len() == member.call_sig.parameter_identities.len() + 1;
         Self {
             name: BackendMemberName::Declared(member.name.as_str().into()),
             physical_name: member.physical_name.as_deref().map(Into::into),
@@ -234,6 +264,11 @@ impl BackendMemberFact {
             suspend: member.suspend(),
             abstract_member: member.is_abstract(),
             visibility: member.visibility,
+            vararg: Self::trailing_vararg(
+                &member.call_sig,
+                receiver_param,
+                member.physical_params.len(),
+            ),
             parameter_identities: member
                 .call_sig
                 .physical_parameter_identities(
@@ -293,6 +328,8 @@ impl BackendMemberFact {
             suspend: callable.suspend,
             abstract_member: callable.is_abstract,
             visibility,
+            // A property accessor never declares a `vararg`.
+            vararg: false,
             parameter_identities: logical_identities.into_boxed_slice(),
         }
     }
@@ -415,7 +452,7 @@ impl BackendModuleFacts {
                 ))? as usize;
             let mut surface = Vec::new();
             let mut value_underlying = None;
-            let mut value_underlying_property = None;
+            let mut value_declaration = None;
             for child_raw in 0..index.declaration_count() {
                 let child = crate::fir::DeclarationId::from_raw(
                     u32::try_from(child_raw).expect("too many stable declarations for a packed id"),
@@ -457,6 +494,15 @@ impl BackendModuleFacts {
                             .ok_or(BackendFactError::IncompleteClassifier(
                                 classifier.classifier,
                             ))?;
+                        // kotlinc's ACC_VARARGS condition: the declared `vararg` is the LAST
+                        // physical parameter (an extension receiver leads and does not move it).
+                        let vararg = (0..signature.parameters.len())
+                            .find(|ordinal| {
+                                index
+                                    .callable_parameter(callable.id, *ordinal as u32)
+                                    .is_some_and(|parameter| parameter.flags().is_vararg())
+                            })
+                            .is_some_and(|ordinal| ordinal + 1 == signature.parameters.len());
                         surface.push((
                             index.source_order(child).unwrap_or(u32::MAX),
                             BackendMemberFact {
@@ -484,6 +530,7 @@ impl BackendModuleFacts {
                                     .flags
                                     .has(crate::fir::DeclarationFlags::ABSTRACT),
                                 visibility: child_header.visibility,
+                                vararg,
                                 parameter_identities,
                             },
                         ));
@@ -507,7 +554,15 @@ impl BackendModuleFacts {
                                 .has(crate::fir::DeclarationFlags::PROPERTY_PARAMETER)
                         {
                             value_underlying = Some(signature.result.get());
-                            value_underlying_property = Some(Box::<str>::from(name));
+                            value_declaration = Some(crate::types::DeclaredValueClass {
+                                property: name.into(),
+                                underlying: signature.result.get(),
+                                type_parameters: index
+                                    .own_type_parameter_types(declaration)
+                                    .ok_or(BackendFactError::IncompleteClassifier(
+                                        classifier.classifier,
+                                    ))?,
+                            });
                         }
                         let mut parameters = signature
                             .parameters
@@ -549,6 +604,7 @@ impl BackendModuleFacts {
                                 suspend: false,
                                 abstract_member,
                                 visibility: child_header.visibility,
+                                vararg: false,
                                 parameter_identities: getter_parameter_identities.clone(),
                             },
                         ));
@@ -586,6 +642,7 @@ impl BackendModuleFacts {
                                     suspend: false,
                                     abstract_member,
                                     visibility: setter_visibility,
+                                    vararg: false,
                                     parameter_identities: setter_parameter_identities,
                                 },
                             ));
@@ -618,9 +675,10 @@ impl BackendModuleFacts {
                 own_type_parameter_count,
                 type_param_variances,
                 value_underlying,
-                value_underlying_property,
+                value_declaration,
                 // A source declaration is neither a mapped collection builtin nor a `FunctionN`.
                 role: None,
+                companion: companion.clone(),
             };
             source_declarations.insert(
                 classifier.classifier,
@@ -935,7 +993,16 @@ impl crate::types::ClassifierFactSource for CheckedBackendClassifiers<'_> {
 
     fn classifier_value_property(&self, classifier: TypeName) -> Option<String> {
         BackendClassifierSource::classifier(self, classifier)
-            .and_then(|fact| fact.value_underlying_property.as_deref().map(str::to_owned))
+            .and_then(|fact| Some(fact.value_declaration.as_ref()?.property.to_string()))
+    }
+
+    fn classifier_value_declaration(
+        &self,
+        classifier: TypeName,
+    ) -> Option<crate::types::DeclaredValueClass> {
+        BackendClassifierSource::classifier(self, classifier)?
+            .value_declaration
+            .clone()
     }
 
     fn classifier_role(&self, classifier: TypeName) -> Option<crate::types::ClassifierRole> {

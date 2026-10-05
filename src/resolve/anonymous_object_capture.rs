@@ -12,7 +12,7 @@ use super::{
 };
 use crate::ast::{DeclId, ExprId, File, StmtId};
 use crate::diag::Span;
-use crate::fir::FirCapturedReceiver;
+use crate::fir::{CapturedCallableOwner, FirCapturedReceiver};
 use crate::types::{CapturedContextKind, Ty};
 use std::collections::HashMap;
 
@@ -102,18 +102,18 @@ impl AnonymousObjectReceiverSource {
 }
 
 impl Checker<'_> {
-    /// What the implicit receiver `identity` was in source: the enclosing class instance, a context
-    /// parameter of its kind, the extension receiver of the named callable declared at `extension`,
-    /// or a receiver lambda's.
+    /// What the implicit receiver `identity` was in source: the instance of the enclosing class
+    /// when `class_receiver` carries that instance's type, a context parameter of its kind, the
+    /// extension receiver of the named callable declared at `extension`, or a receiver lambda's.
     pub(super) fn captured_receiver(
         &self,
         scope: &CheckerScope<'_>,
         identity: (usize, usize),
         extension: Option<Span>,
-        class_receiver: bool,
+        class_receiver: Option<Ty>,
     ) -> FirCapturedReceiver {
-        if class_receiver {
-            return FirCapturedReceiver::Enclosing;
+        if let Some(ty) = class_receiver {
+            return enclosing_instance(ty);
         }
         if let Some(context) = scope.implicit_receiver_context(identity) {
             let kind = match context.kind {
@@ -142,7 +142,15 @@ impl Checker<'_> {
             .find(|(_, candidate)| *candidate == declaration)
             .expect("an extension callable's receiver is labeled while its body is checked");
         let (label, _, _, _) = &self.this_labels[*index];
-        FirCapturedReceiver::Callable(label.clone().into_boxed_str())
+        let owner = if self.local_function_receivers.contains(&declaration) {
+            CapturedCallableOwner::LocalFunction
+        } else {
+            CapturedCallableOwner::Declaration
+        };
+        FirCapturedReceiver::Callable {
+            label: label.clone().into_boxed_str(),
+            owner,
+        }
     }
 }
 
@@ -275,7 +283,7 @@ impl Checker<'_> {
                         scope,
                         receiver.identity,
                         receiver.extension_receiver,
-                        receiver.class_receiver,
+                        receiver.class_receiver.then_some(receiver.ty),
                     )),
                     semantic_receiver: Some(
                         if matches!(
@@ -1135,4 +1143,15 @@ pub(super) fn record_anonymous_construction_captures(
     );
     captures.insert(declaration, selected);
     field_remap
+}
+
+/// The captured instance of the enclosing class whose receiver type is `ty`: a class scope's or a
+/// member's dispatch receiver is that class's instance type.
+pub(super) fn enclosing_instance(ty: Ty) -> FirCapturedReceiver {
+    FirCapturedReceiver::Enclosing {
+        classifier: ty
+            .non_null()
+            .kotlin_class_internal()
+            .expect("an enclosing class receiver is an instance of that class"),
+    }
 }

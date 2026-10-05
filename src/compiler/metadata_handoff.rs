@@ -197,7 +197,7 @@ fn attach_function_metadata(
     };
     let annotations =
         super::declaration_metadata::declaration_annotations(&function.annotations, info);
-    if !annotations.is_empty() {
+    if annotations.declares_annotations() {
         ir.function_annotations.insert(function_id, annotations);
     }
     let mut parameter_annotations = function
@@ -215,7 +215,7 @@ fn attach_function_metadata(
     }
     if parameter_annotations
         .iter()
-        .any(|annotations| !annotations.is_empty())
+        .any(crate::ir::DeclarationAnnotations::declares_annotations)
     {
         ir.fn_param_annotations
             .insert(function_id, parameter_annotations);
@@ -269,6 +269,24 @@ pub(super) fn attach_stable_function_inference_metadata(
     }
 }
 
+/// Record the annotations on `property`'s accessors for the accessor declarations lowering
+/// materializes from it.
+fn attach_accessor_annotations(
+    property: &crate::ast::PropDecl,
+    declaration: DeclarationId,
+    info: &crate::resolve::TypeInfo,
+    index: &ResolvedModuleIndex,
+    ir: &mut IrFile,
+) {
+    let annotations = super::declaration_metadata::accessor_annotations(property, info);
+    if !annotations.declares_annotations() {
+        return;
+    }
+    if let Some(property) = index.property_for_declaration(declaration) {
+        ir.accessor_annotations.insert(property, annotations);
+    }
+}
+
 pub(super) fn attach_checked_declaration_metadata(
     file: &File,
     active: &ActiveSourceDeclarations,
@@ -290,6 +308,9 @@ pub(super) fn attach_checked_declaration_metadata(
     }
     if let Some(function) = active.function(file, selected_root) {
         attach_function_metadata(function, selected_root, info, index, ir);
+    }
+    if let Some(property) = active.property(file, selected_root) {
+        attach_accessor_annotations(property, selected_root, info, index, ir);
     }
     let Some((source_class, class)) = active.class(file, selected_root) else {
         return;
@@ -334,6 +355,17 @@ pub(super) fn attach_checked_declaration_metadata(
             super::declaration_metadata::declaration_annotations(&constructor.annotations, info);
     }
 
+    // The superclass's slot among the declared supertypes, as resolution recorded it.
+    if let Some(header) = index.classifier_header(stable_class) {
+        let position = header.interfaces_written_before_superclass().len();
+        if header.superclass.is_some() && position > 0 {
+            ir.class_superclass_positions.insert(
+                classifier,
+                u32::try_from(position).expect("too many source supertypes"),
+            );
+        }
+    }
+
     if let Some(header) = index.declaration_spellings(stable_class) {
         ir.class_declared_spellings
             .insert(classifier, header.clone());
@@ -357,14 +389,19 @@ pub(super) fn attach_checked_declaration_metadata(
             );
         }
     }
+    let body_property_declaration = |property_index: usize| {
+        active.class_body_property_declaration(
+            source_class,
+            u32::try_from(property_index).expect("too many class properties"),
+        )
+    };
     for (property_index, property) in class.body_props.iter().enumerate() {
-        attach_property_spelling(
-            active.class_body_property_declaration(
-                source_class,
-                u32::try_from(property_index).expect("too many class properties"),
-            ),
-            &property.name,
-        );
+        attach_property_spelling(body_property_declaration(property_index), &property.name);
+    }
+    for (property_index, property) in class.body_props.iter().enumerate() {
+        if let Some(declaration) = body_property_declaration(property_index) {
+            attach_accessor_annotations(property, declaration, info, index, ir);
+        }
     }
 
     for (method, source_method) in class.methods.iter().enumerate() {

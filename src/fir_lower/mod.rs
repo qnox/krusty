@@ -57,6 +57,7 @@ mod local_delegates;
 #[cfg(test)]
 mod local_property_reference_tests;
 mod local_property_references;
+mod local_type_parameters;
 mod loops;
 mod member_dispatch;
 mod module_declarations;
@@ -170,6 +171,7 @@ pub(crate) fn lower_body_with_context(
     let owner = body.owner();
     ir.source_line_count = ir.source_line_count.max(body.source_line_count());
     local_callables::record_lifting_sites(&body, index, ir);
+    interface_delegation::record_delegate_calls(&body, ir);
     #[cfg(feature = "trace")]
     body_trace::trace_checked_body(&body, index);
     let declaration = crate::fir::DeclarationId::from_raw(owner.raw());
@@ -338,6 +340,13 @@ struct BodyLowering<'a> {
     /// [`crate::ir::IrFile::callable_scopes`]).
     root_block: Option<FirExprId>,
     lowered_root_block: Option<ExprId>,
+    /// The call each `{ val t = operand…; call(t…) }` block this body built evaluates once its
+    /// stored operands are bound, recorded when the block is created.
+    operand_bound_calls: HashMap<ExprId, ExprId>,
+    /// The lambda literal about to be lowered for a functional interface whose method returns
+    /// `Unit`: its implementation returns nothing, as the interface method does, rather than the
+    /// `Unit` value a function type's `invoke` returns.
+    unit_method_lambda: Option<FirExprId>,
 }
 
 /// The block a body's executable root evaluates, through the implicit conversions checking put on
@@ -448,6 +457,8 @@ pub(crate) struct LocalCallableRealization {
     implicit_receiver_captures: Vec<crate::fir::FirImplicitReceiverCapture>,
     context_parameter_count: u32,
     has_extension_receiver: bool,
+    /// The type parameters the callable's closure captures (see `local_type_parameters`).
+    captured_type_parameters: Box<[crate::types::Ty]>,
 }
 
 impl LocalCallableRealization {
@@ -556,6 +567,8 @@ impl<'a> BodyLowering<'a> {
             expression_depth: 0,
             root_block: root_scope_block(body),
             lowered_root_block: None,
+            operand_bound_calls: HashMap::new(),
+            unit_method_lambda: None,
         }
     }
 
@@ -772,9 +785,16 @@ fn lower_captured_receiver(
     receiver: &crate::fir::FirCapturedReceiver,
 ) -> crate::ir::IrCapturedReceiver {
     match receiver {
-        crate::fir::FirCapturedReceiver::Enclosing => crate::ir::IrCapturedReceiver::Enclosing,
-        crate::fir::FirCapturedReceiver::Callable(label) => {
-            crate::ir::IrCapturedReceiver::Callable(label.clone())
+        crate::fir::FirCapturedReceiver::Enclosing { classifier } => {
+            crate::ir::IrCapturedReceiver::Enclosing {
+                classifier: *classifier,
+            }
+        }
+        crate::fir::FirCapturedReceiver::Callable { label, owner } => {
+            crate::ir::IrCapturedReceiver::Callable {
+                label: label.clone(),
+                owner: *owner,
+            }
         }
         crate::fir::FirCapturedReceiver::Lambda(label) => {
             crate::ir::IrCapturedReceiver::Lambda(label.clone())
@@ -843,13 +863,25 @@ fn directly_shared_locals(
     shared
 }
 
+/// The source line an implicit `Unit` return carries, which depends on the body's shape.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum UnitReturnLine {
+    /// A lambda falls off its closing `}` on this line. kotlinc's
+    /// `setExtraLineNumberForVoidReturningFunction` marks it before the `Unit` the lambda returns.
+    ClosingBrace(u32),
+    /// An expression body `= expression`. fir2ir's `ExpressionBodyTransformer` builds the return
+    /// at the expression's end offset, so the return instruction carries the expression's END
+    /// line once its value has been evaluated.
+    ExpressionEnd,
+}
+
 fn finish_callable_body(
     ir: &mut IrFile,
     mut roots: Vec<ExprId>,
     result: crate::types::Ty,
     implicit_return: bool,
     unit_as_value: bool,
-    close_line: u32,
+    unit_return_line: Option<UnitReturnLine>,
     origin: crate::fir::OriginId,
 ) -> Result<ExprId, FirLoweringFailure> {
     let first_generated = ir.exprs.len();
@@ -862,6 +894,9 @@ fn finish_callable_body(
             value: None,
         })
     } else if result == crate::types::Ty::Unit {
+        let expression_end = roots
+            .last()
+            .and_then(|&trailing| unit_expression_end(ir, trailing));
         consume_trailing_unit_result(ir, &mut roots);
         let return_unit = if unit_as_value {
             let unit = ir.add_expr(crate::ir::IrExpr::UnitInstance);
@@ -869,10 +904,17 @@ fn finish_callable_body(
         } else {
             ir.add_expr(crate::ir::IrExpr::Return(None))
         };
-        // A lambda falls off its closing brace into this return, which kotlinc marks there
-        // before the `Unit` it returns.
-        if close_line != 0 {
-            ir.mark_fallthrough_return_line(return_unit, close_line);
+        let exit = match unit_return_line {
+            Some(UnitReturnLine::ClosingBrace(line)) => {
+                Some(crate::ir::UnitBodyExit::ClosingBrace(line))
+            }
+            Some(UnitReturnLine::ExpressionEnd) => {
+                expression_end.map(crate::ir::UnitBodyExit::ExpressionEnd)
+            }
+            None => None,
+        };
+        if let Some(exit) = exit {
+            ir.mark_unit_body_exit(return_unit, exit);
         }
         roots.push(return_unit);
         ir.add_expr(crate::ir::IrExpr::Block {
@@ -920,6 +962,24 @@ fn finish_callable_body(
         );
     }
     Ok(body)
+}
+
+/// The end line of a `Unit` expression body's trailing root. A checked `CoerceToUnit` wraps the
+/// expression in `Block { effects, value: UnitInstance }`; its last effect is then the expression.
+pub(super) fn unit_expression_end(ir: &IrFile, trailing: ExprId) -> Option<u32> {
+    ir.expr_end_lines.get(&trailing).copied().or_else(|| {
+        let crate::ir::IrExpr::Block {
+            stmts,
+            value: Some(value),
+        } = ir.expr(trailing)
+        else {
+            return None;
+        };
+        if !matches!(ir.expr(*value), crate::ir::IrExpr::UnitInstance) {
+            return None;
+        }
+        ir.expr_end_lines.get(stmts.last()?).copied()
+    })
 }
 
 /// Consume the implicit result of a Unit body before adding the callable's one physical return.

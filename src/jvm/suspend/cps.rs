@@ -13,13 +13,15 @@
 
 mod inline_suspension;
 mod liveness;
+mod member_parameters;
 mod routing;
 
 pub(crate) use inline_suspension::{
-    calls_an_inline_function, frame_suspensions, spliced_inline_suspensions,
-    spliced_return_crosses_finally, spliced_suspension_lambda_impls, suspends_in_a_value_try,
+    frame_suspensions, spliced_inline_suspensions, spliced_return_crosses_finally,
+    spliced_suspension_lambda_impls, suspends_in_a_value_try,
 };
 pub(crate) use liveness::LocalLiveness;
+pub(crate) use member_parameters::{SuspendLambdaMember, SuspendLambdaParameters};
 pub(crate) use routing::{
     EmitTimeMachines, SplicedSuspension, SuspendLambdaCapture, SuspendLambdaClass,
     SuspendLambdaMachine, TransformedMachine, TransformedSuspension,
