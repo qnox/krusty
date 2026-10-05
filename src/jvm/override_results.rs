@@ -229,7 +229,7 @@ impl OverrideResults {
 pub(super) fn realizes_overrides(ir: &IrFile, class: usize) -> bool {
     let declaration = &ir.classes[class];
     declaration.is_source_declared
-        || declaration.enum_entry_of.is_some()
+        || declaration.is_enum_entry
         || ir
             .specialized_anonymous_classes
             .contains_key(&u32::try_from(class).expect("class index"))

@@ -750,21 +750,16 @@ impl BodyFirChecker<'_> {
                 let Some(anchor) = index.declaration_anchor(current) else {
                     break None;
                 };
-                if anchor.kind == crate::fir::DeclarationKind::EnumEntry && first {
-                    // Constructor arguments of the entry itself execute in the enclosing enum's
-                    // initialization container. Members owned below the entry select it normally.
-                    current = match anchor.owner {
-                        Some(owner) => owner,
-                        None => break None,
-                    };
-                    first = false;
-                    continue;
-                }
-                if matches!(
-                    anchor.kind,
-                    crate::fir::DeclarationKind::Classifier
-                        | crate::fir::DeclarationKind::EnumEntry
-                ) {
+                // A body-less constant's own arguments run in the enum's initializer. A constant
+                // with a body is its own subclass, whose constructor evaluates them.
+                let selects = match anchor.kind {
+                    crate::fir::DeclarationKind::Classifier => true,
+                    crate::fir::DeclarationKind::EnumEntry => {
+                        !first || index.enum_entry_has_body(current)
+                    }
+                    _ => false,
+                };
+                if selects {
                     break Some(current);
                 }
                 current = match anchor.owner {

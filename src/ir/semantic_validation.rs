@@ -462,9 +462,6 @@ fn validate_class(class: &IrClass) -> Result<(), UndeterminedIrType> {
         "super-constructor parameter",
         class.super_ctor_params.iter().copied(),
     )?;
-    if let Some(types) = &class.enum_entry_of {
-        reject_all("enum-entry constructor parameter", types.iter().copied())?;
-    }
     if let Some(reference) = &class.prop_ref {
         validate_prop_ref(reference)?;
     }

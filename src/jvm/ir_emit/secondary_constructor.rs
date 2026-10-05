@@ -82,22 +82,12 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
             Some(crate::types::Visibility::Protected) => 0x0004,
             _ => 0x0001,
         };
-        let enum_entry_subclass_target = !owner_prefix_tys.is_empty()
-            && c.enum_entries.iter().any(|entry| {
-                entry.subclass.is_some()
-                    && jvm_tys(&entry.constructor_parameter_types) == sc_source_tys
-            });
         let semantically_private =
             super::constructor_accessors::hides_secondary(ir, c, secondary_ordinal)
                 || sc.vc_params
                 || !owner_prefix_tys.is_empty()
                 || declared_access == 0x0002;
-        let sc_access = (if enum_entry_subclass_target {
-            // Kotlin uses nestmate access for an entry-body subclass. Krusty does not emit
-            // nestmate attributes yet, so use the same package-private synthetic bridge contract
-            // as the enum primary constructor instead of emitting an inaccessible private target.
-            0x1000
-        } else if semantically_private {
+        let sc_access = (if semantically_private {
             0x0002
         } else {
             declared_access
@@ -588,18 +578,24 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
             let stub_access = if semantically_private { 0x1000 } else { 0x1001 };
             super::constructor_defaults::emit_ctor_default_stub_with_prefix(
                 ir,
-                fq_name,
-                c.fq_name,
-                facade,
-                &forwarded_prefix_tys,
-                sc_prefix_tys.len(),
-                &sc_source_tys,
-                &sc.defaults,
-                Some((sc.lines.decl_line, &default_lines, sc.lines.decl_end_line)),
-                sc.vc_params
-                    || super::constructor_accessors::hides_secondary(ir, c, secondary_ordinal),
-                sc.annotations.deprecated(),
-                stub_access,
+                super::constructor_defaults::ConstructorDefaultStub {
+                    owner: fq_name,
+                    owner_identity: c.fq_name,
+                    facade,
+                    physical_prefix: &forwarded_prefix_tys,
+                    logical_prefix_count: sc_prefix_tys.len(),
+                    real_params: &sc_source_tys,
+                    defaults: &sc.defaults,
+                    secondary_lines: Some((
+                        sc.lines.decl_line,
+                        &default_lines,
+                        sc.lines.decl_end_line,
+                    )),
+                    target_uses_marker_accessor: sc.vc_params
+                        || super::constructor_accessors::hides_secondary(ir, c, secondary_ordinal),
+                    deprecated: sc.annotations.deprecated(),
+                    access: stub_access,
+                },
                 cw,
                 env,
             );

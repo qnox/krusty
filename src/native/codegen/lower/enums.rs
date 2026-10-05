@@ -87,8 +87,8 @@ impl<'a> FileLowering<'a> {
         let items = self.enum_entries[&class].clone();
         // A constant with a BODY is an instance of a synthesized subclass of the enum — that is
         // how it can override a member — so its own type, size and constructor are the ones used.
-        // The subclass declares no fields of its own and delegates to the enum's constructor with
-        // the same arguments, so nothing else about the constant changes.
+        // The subclass's constructor takes nothing and calls the enum's with the constant's
+        // arguments, so nothing else about the constant changes.
         let mut shapes = Vec::with_capacity(declaration.enum_entries.len());
         for entry in &declaration.enum_entries {
             let owner = match entry.subclass {
@@ -122,17 +122,7 @@ impl<'a> FileLowering<'a> {
                 constructor,
             ));
         }
-        for (slot, entry) in items.slots.iter().zip(&declaration.enum_entries) {
-            // A constant with a BODY that also omits an argument still declines: its instance is a
-            // synthesized subclass whose own constructor takes the entry's arguments, while the
-            // defaults are recorded against the enum, so the wrapper below has nothing to read.
-            if !entry.default_parameters.is_empty() && entry.subclass.is_some() {
-                return Err(format!(
-                    "an enum constant with a body omitting a constructor argument (`{}.{}`)",
-                    declaration.fq_name(),
-                    entry.name
-                ));
-            }
+        for slot in &items.slots {
             let mut description = DataDescription::new();
             description.define_zeroinit(8);
             description.set_align(8);

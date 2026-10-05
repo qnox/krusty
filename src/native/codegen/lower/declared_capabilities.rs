@@ -88,13 +88,14 @@ pub(super) fn declares_its_own_comparable(ir: &IrFile) -> bool {
             )
             .any(super::super::super::intrinsics::is_comparable_supertype)
     };
-    ir.classes.iter().any(|class| {
-        !class.enum_entries.is_empty() || class.enum_entry_of.is_some() || named(class)
-    }) || ir.function_overrides.values().flatten().any(|edge| {
-        matches!(
-            edge.overridden,
-            crate::fir::ResolvedFunctionOverrideTarget::External(_)
-        ) && edge.overridden_semantic_role
-            == Some(crate::types::SemanticCallRole::KotlinComparableCompareTo)
-    })
+    ir.classes
+        .iter()
+        .any(|class| !class.enum_entries.is_empty() || class.is_enum_entry || named(class))
+        || ir.function_overrides.values().flatten().any(|edge| {
+            matches!(
+                edge.overridden,
+                crate::fir::ResolvedFunctionOverrideTarget::External(_)
+            ) && edge.overridden_semantic_role
+                == Some(crate::types::SemanticCallRole::KotlinComparableCompareTo)
+        })
 }

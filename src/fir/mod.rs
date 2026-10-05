@@ -13,6 +13,7 @@ pub mod coverage;
 mod declaration_stub;
 mod delegate_calls;
 mod entry_point;
+mod enum_entries;
 mod header;
 mod identities;
 mod inline_body;
