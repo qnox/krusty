@@ -181,11 +181,19 @@ impl Checker<'_> {
         receiver_ty: Ty,
         signature: &'static crate::types::FnSig,
     ) -> bool {
+        // A function-type value has neither callable type parameters nor stable source parameter
+        // names. Reject those two source forms before feeding its positional shape to the common
+        // scorer; another callable at the same tower spelling may still accept the call.
         if self
             .file
             .call_type_args
             .get(&call.0)
             .is_some_and(|arguments| !arguments.is_empty())
+            || self
+                .file
+                .call_arg_names
+                .get(&call.0)
+                .is_some_and(|names| names.iter().any(Option::is_some))
         {
             return false;
         }
