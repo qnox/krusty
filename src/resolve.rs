@@ -59317,6 +59317,12 @@ impl<'a> Checker<'a> {
         }
         if types.is_empty() {
             self.nominal_function_types(scope, nominal)
+                .into_iter()
+                // Callable hierarchy traversal describes the non-null value's invoke shapes.
+                // Contextual assignment must retain the expression's own nullability; merely
+                // discovering a FunctionN supertype is not a successful smart cast.
+                .map(|function| nominal.rewrap_nullability(function))
+                .collect()
         } else {
             types
         }
@@ -59354,7 +59360,7 @@ impl<'a> Checker<'a> {
         expression: ExprId,
         nominal: Ty,
     ) -> Option<Ty> {
-        if matches!(nominal, Ty::Fun(_)) {
+        if matches!(nominal.non_null(), Ty::Fun(_)) {
             return Some(nominal);
         }
         if let Some(function) = self.callable_reference_types.get(&expression).copied() {
@@ -59377,15 +59383,9 @@ impl<'a> Checker<'a> {
             })
         {
             let nominal = local.ty;
-            if let Some(function) = matches!(nominal, Ty::Fun(_))
+            if let Some(function) = matches!(nominal.non_null(), Ty::Fun(_))
                 .then_some(nominal)
                 .or(local.callable_reference_type)
-                .or_else(|| {
-                    crate::symbol_resolver::classifier_callable_signature(
-                        &self.fed_source(),
-                        nominal,
-                    )
-                })
             {
                 return Some(function);
             }
