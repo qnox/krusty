@@ -63832,11 +63832,13 @@ impl<'a> Checker<'a> {
                 if let Some(fname) = op.arith_operator_name() {
                     match self.member_extension_operator_call(
                         scope,
-                        e,
+                        CallArgs {
+                            call: e,
+                            args: &[rhs],
+                            arg_tys: &[rt],
+                        },
                         lt,
                         fname,
-                        &[rhs],
-                        &[rt],
                         operator_span,
                     ) {
                         Ok(Some((ret, target))) => {
@@ -63968,11 +63970,13 @@ impl<'a> Checker<'a> {
             {
                 match self.member_extension_operator_call(
                     scope,
-                    e,
+                    CallArgs {
+                        call: e,
+                        args: &[rhs],
+                        arg_tys: &[rt],
+                    },
                     lt,
                     "compareTo",
-                    &[rhs],
-                    &[rt],
                     operator_span,
                 ) {
                     Ok(Some((Ty::Int, target))) => {
@@ -68533,7 +68537,17 @@ impl<'a> Checker<'a> {
         }
         let member_extension = match site {
             Some(IncDecSite::Expression(expression)) => self
-                .member_extension_operator_call(scope, expression, recv, name, &[], &[], span)?
+                .member_extension_operator_call(
+                    scope,
+                    CallArgs {
+                        call: expression,
+                        args: &[],
+                        arg_tys: &[],
+                    },
+                    recv,
+                    name,
+                    span,
+                )?
                 .map(|(_, target)| target),
             Some(IncDecSite::Statement(statement)) => {
                 self.member_extension_zero_arg_operator(scope, statement, recv, name, span)?

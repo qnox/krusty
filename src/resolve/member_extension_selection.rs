@@ -287,13 +287,16 @@ impl Checker<'_> {
     pub(super) fn member_extension_operator_call(
         &mut self,
         scope: &CheckerScope<'_>,
-        expression: ExprId,
+        call: CallArgs<'_>,
         extension_receiver: Ty,
         name: &str,
-        args: &[ExprId],
-        arg_tys: &[Ty],
         span: Span,
     ) -> Result<Option<(Ty, ResolvedCall)>, ()> {
+        let CallArgs {
+            call: expression,
+            args,
+            arg_tys,
+        } = call;
         let request = MemberExtensionFunctionCall {
             extension_receiver,
             result_constraint: CallResultConstraint::direct(None),
