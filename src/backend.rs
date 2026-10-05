@@ -15,8 +15,8 @@ pub use dependency_facts::{
 };
 
 pub use module_facts::{
-    BackendClassifierFact, BackendClassifierSource, BackendFactError, BackendMemberFact,
-    BackendMemberName, BackendModuleFacts, CheckedBackendClassifiers, UndeterminedType,
+    BackendClassifierFact, BackendClassifierSource, BackendFactError, BackendModuleFacts,
+    CheckedBackendClassifiers, UndeterminedType,
 };
 
 use crate::diag::DiagSink;
