@@ -12338,6 +12338,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   so a jump the constant folder removes shares their output line instead of remaining as its own
   `nop`. Tests: `tests/comparison_jump_line_e2e.rs`, `tests/constant_conditions_e2e.rs`.
 
+- **A subject `when`'s type-test and range conditions read the subject at their own line.**
+  fir2ir builds every condition's read of `tmp_subject` at that condition's offsets, so each
+  `is T` / `in r` condition reads the subject afresh with the condition's source line rather than
+  sharing one read. When the subject's temporary survives (it is read more than once), the line
+  sits on that load; when the bytecode temporaries pass folds a once-read temporary into its
+  initializer's load, the line moves to the next instruction, the `instanceof`, as in kotlinc's
+  output. Test: `tests/when_type_condition_line_e2e.rs`.
+
 - **A source Boolean constant in a condition marks its line on a `nop`** (kotlinc's `visitConst`,
   which marks the line and emits a `nop` for every Boolean constant because the constant need not
   be materialized). A constant condition is decided statically and emits no test of its own, so
