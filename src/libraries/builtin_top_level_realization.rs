@@ -550,19 +550,6 @@ fn coroutine(facts: &BuiltinFunctionDeclaration<'_>) -> Option<CompilerIntrinsic
     }
     if facts.package.matches("kotlin/coroutines") {
         return match (facts.name, facts.kind, facts.receiver, facts.params) {
-            ("suspendCoroutine", FnKind::TopLevel, None, [block])
-                if facts.type_parameter_count == 1
-                    && facts.is_suspend
-                    && function_shape(*block, 1, false)
-                    && block.fun_ret() == Some(Ty::Unit)
-                    && block
-                        .fun_params()
-                        .and_then(|params| params.first().copied())
-                        .and_then(continuation_argument)
-                        == Some(facts.ret) =>
-            {
-                Some(CompilerIntrinsic::SuspendCoroutine)
-            }
             ("startCoroutine", FnKind::Extension, Some(receiver), parameters)
                 if facts.type_parameter_count >= 1
                     && !facts.is_suspend

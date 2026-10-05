@@ -714,10 +714,18 @@ impl ProductionSignatureSemantics<'_> {
         &self,
         scope: crate::fir::SignatureScope,
         spelling: &str,
-    ) -> (Option<crate::types::TypeName>, Option<String>) {
+    ) -> (
+        Option<crate::types::TypeName>,
+        Option<crate::symbol_resolver::ClassifierMiss>,
+    ) {
         let segments = spelling.split('.').collect::<Vec<_>>();
         let Some(&first) = segments.first() else {
-            return (None, Some(spelling.to_string()));
+            return (
+                None,
+                Some(crate::symbol_resolver::ClassifierMiss::Unresolved(
+                    spelling.to_string(),
+                )),
+            );
         };
         let mut lexical_owners = Vec::new();
         let mut owner = self
@@ -727,7 +735,12 @@ impl ProductionSignatureSemantics<'_> {
             .and_then(|anchor| anchor.owner);
         while let Some(declaration) = owner {
             let Some(anchor) = self.headers.declarations.anchor(declaration) else {
-                return (None, Some(first.to_string()));
+                return (
+                    None,
+                    Some(crate::symbol_resolver::ClassifierMiss::Unresolved(
+                        first.to_string(),
+                    )),
+                );
             };
             if anchor.kind == crate::fir::DeclarationKind::Classifier {
                 if let Some(classifier) = self.classifier_types.get(&declaration).copied() {
@@ -799,7 +812,12 @@ impl ProductionSignatureSemantics<'_> {
                         return Some((Some(classifier), None));
                     }
                     crate::symbol_resolver::CandidateSelection::Ambiguous => {
-                        return Some((None, Some(first.to_string())));
+                        return Some((
+                            None,
+                            Some(crate::symbol_resolver::ClassifierMiss::Unresolved(
+                                first.to_string(),
+                            )),
+                        ));
                     }
                     crate::symbol_resolver::CandidateSelection::None => {}
                 }
@@ -807,13 +825,30 @@ impl ProductionSignatureSemantics<'_> {
             let (selection, failed_segment) =
                 resolver.qualified_type_classifier_binding_in_scope(spelling);
             match selection {
-                crate::symbol_resolver::CandidateSelection::Selected(classifier) => {
+                crate::symbol_resolver::CandidateSelectionWithTies::Selected(classifier) => {
                     return Some((Some(classifier), None));
                 }
-                crate::symbol_resolver::CandidateSelection::Ambiguous => {
-                    return Some((None, failed_segment));
+                // Conflicting explicit imports name no complete candidates; the import list
+                // owns that conflict, so the reference reports its unbound root.
+                crate::symbol_resolver::CandidateSelectionWithTies::Ambiguous(candidates)
+                    if candidates.is_empty() =>
+                {
+                    return Some((
+                        None,
+                        Some(crate::symbol_resolver::ClassifierMiss::Unresolved(
+                            failed_segment.unwrap_or_else(|| first.to_string()),
+                        )),
+                    ));
                 }
-                crate::symbol_resolver::CandidateSelection::None => {
+                crate::symbol_resolver::CandidateSelectionWithTies::Ambiguous(candidates) => {
+                    return Some((
+                        None,
+                        Some(crate::symbol_resolver::ClassifierMiss::Ambiguous(
+                            candidates,
+                        )),
+                    ));
+                }
+                crate::symbol_resolver::CandidateSelectionWithTies::None => {
                     if failure.is_none() && failed_segment.is_some() {
                         failure = failed_segment;
                     }
@@ -825,15 +860,32 @@ impl ProductionSignatureSemantics<'_> {
                         return Some((Some(classifier), None));
                     }
                     crate::symbol_resolver::CandidateSelection::Ambiguous => {
-                        return Some((None, Some(first.to_string())));
+                        return Some((
+                            None,
+                            Some(crate::symbol_resolver::ClassifierMiss::Unresolved(
+                                first.to_string(),
+                            )),
+                        ));
                     }
                     crate::symbol_resolver::CandidateSelection::None => {}
                 }
             }
-            Some((None, failure.or_else(|| Some(first.to_string()))))
+            Some((
+                None,
+                Some(crate::symbol_resolver::ClassifierMiss::Unresolved(
+                    failure.unwrap_or_else(|| first.to_string()),
+                )),
+            ))
         })
         .ok()
-        .unwrap_or_else(|| (None, Some(first.to_string())))
+        .unwrap_or_else(|| {
+            (
+                None,
+                Some(crate::symbol_resolver::ClassifierMiss::Unresolved(
+                    first.to_string(),
+                )),
+            )
+        })
     }
 
     pub(super) fn qualified_classifier_or_source_alias(

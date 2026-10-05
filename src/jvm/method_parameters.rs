@@ -106,20 +106,14 @@ pub(super) fn function(
     let projected_names =
         crate::jvm::parameter_names::function_method_parameters(ir, function, physical_parameters)
             .expect("published MethodParameters identities have JVM projections");
+    let value_class_static = ir.jvm_value_class_receiver_impls.contains(&function);
     let mut parameters = identities
         .into_iter()
         .enumerate()
         .map(|(index, identity)| {
             (
                 projected_names[index].clone(),
-                u16::from(matches!(
-                    identity.role,
-                    IrParameterRole::Generated(
-                        IrGeneratedParameterRole::HolderReceiver
-                            | IrGeneratedParameterRole::ValueClassCarrier
-                    ) | IrParameterRole::CapturedValue { .. }
-                        | IrParameterRole::CapturedReceiver { .. }
-                )) * SYNTHETIC,
+                function_parameter_flags(identity.role, value_class_static),
             )
         })
         .collect::<Vec<_>>();
@@ -127,6 +121,22 @@ pub(super) fn function(
         parameters.insert(0, parameter("$this", SYNTHETIC));
     }
     parameters
+}
+
+/// kotlinc flags a compiler-generated receiver or capture `SYNTHETIC`. A value-class member lowered
+/// to a static moves its dispatch receiver into the carrier (`arg0`, synthetic) and its extension
+/// receiver into an ordinary parameter, which it flags `MANDATED` (`$this$mext`); an extension
+/// receiver that stays one, of an ordinary class's member or a top-level function, has no flag.
+fn function_parameter_flags(role: IrParameterRole, value_class_static: bool) -> u16 {
+    match role {
+        IrParameterRole::Generated(
+            IrGeneratedParameterRole::HolderReceiver | IrGeneratedParameterRole::ValueClassCarrier,
+        )
+        | IrParameterRole::CapturedValue { .. }
+        | IrParameterRole::CapturedReceiver { .. } => SYNTHETIC,
+        IrParameterRole::ExtensionReceiver if value_class_static => MANDATED,
+        _ => 0,
+    }
 }
 
 fn constructor_prefix(ir: &IrFile, class: &IrClass, count: usize) -> Vec<MethodParameter> {

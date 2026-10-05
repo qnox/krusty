@@ -2148,6 +2148,8 @@ impl ResolvedAnnotation {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct AnnotationSemanticFacts {
     pub deprecated_hidden: bool,
+    /// An `@OptionalExpectation` without an actual here (see `ir::DeclarationAnnotations`).
+    pub optional_expectation: bool,
 }
 
 /// A plugin-generated classifier published with the source header that owns it. The common

@@ -126,6 +126,7 @@ mod local_method_dependencies;
 mod loop_flow;
 mod member_extension_selection;
 mod member_overload_clash;
+mod named_class_constructors;
 mod operator_calls;
 use operator_calls::{range_operator, ResolvedInRangeComparison};
 mod overload_diagnostics;
@@ -240,6 +241,7 @@ use loop_flow::collect_all_reassigned;
 pub(crate) use member_extension_selection::{
     MemberExtensionFunctionSelection, MemberExtensionSelection,
 };
+pub(crate) use named_class_constructors::publish_named_class_constructors;
 pub(crate) use override_plans::publish_override_plans;
 use postponed_constraints::PostponedCallConstraints;
 use postponed_diagnostics::PostponedDiagnostics;
@@ -5259,24 +5261,46 @@ fn classifier_from_imports<S: SymbolSource + ?Sized>(
     levels: &[crate::symbol_resolver::ClassifierImportLevel],
     source: &S,
 ) -> InheritedNestedClassifier {
+    match imported_classifier_selection(name, explicit, levels, source) {
+        crate::symbol_resolver::CandidateSelectionWithTies::Selected(classifier) => {
+            InheritedNestedClassifier::Found(classifier)
+        }
+        crate::symbol_resolver::CandidateSelectionWithTies::Ambiguous(_) => {
+            InheritedNestedClassifier::Ambiguous
+        }
+        crate::symbol_resolver::CandidateSelectionWithTies::None => {
+            InheritedNestedClassifier::NotFound
+        }
+    }
+}
+
+/// The classifier the imports bind `name` to: an explicit import, else the nearest import level
+/// that has any candidate, keeping every candidate of an ambiguous level.
+fn imported_classifier_selection<S: SymbolSource + ?Sized>(
+    name: &str,
+    explicit: &HashMap<String, String>,
+    levels: &[crate::symbol_resolver::ClassifierImportLevel],
+    source: &S,
+) -> crate::symbol_resolver::CandidateSelectionWithTies<TypeName> {
+    use crate::symbol_resolver::CandidateSelectionWithTies;
     if let Some(fq) = explicit.get(name) {
         // Imports share syntax but not namespaces. An explicit import of a callable named `Foo`
         // must not erase a same-file classifier `Foo`; it contributes to classifier lookup only
         // when the imported path actually resolves to a classifier.
         if let Ok(classifier) = classifier_path(fq, source, None) {
-            return InheritedNestedClassifier::Found(classifier);
+            return CandidateSelectionWithTies::Selected(classifier);
         }
     }
     for level in levels {
         let hits =
             crate::symbol_resolver::classifier_candidates_at_import_level(source, name, level);
-        match hits.len() {
-            0 => continue,
-            1 => return InheritedNestedClassifier::Found(hits[0]),
-            _ => return InheritedNestedClassifier::Ambiguous,
+        match hits.as_slice() {
+            [] => continue,
+            [classifier] => return CandidateSelectionWithTies::Selected(*classifier),
+            _ => return CandidateSelectionWithTies::Ambiguous(hits),
         }
     }
-    InheritedNestedClassifier::NotFound
+    CandidateSelectionWithTies::None
 }
 
 /// Map a single JVM field descriptor to a krusty `Ty` (the v0 supported set).
@@ -13385,6 +13409,17 @@ fn instantiate_member_extension_with(
         generic.map_or(function.signature.ret, |signature| signature.ret),
         &bindings,
     );
+    // Ordinary extension and member calls publish these solutions on the call. A member
+    // extension publishes them too, so an inlined `typeOf<T>()` receives the call-site argument.
+    let type_arguments = generic
+        .map(|signature| {
+            signature
+                .formals
+                .iter()
+                .map(|formal| solved_member_extension_type_argument(&bindings, formal))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     Some(InstantiatedMemberExtension {
         extension_receiver: apply_inference_bindings(declared_receiver, &bindings),
         logical_params,
@@ -13395,7 +13430,20 @@ fn instantiate_member_extension_with(
         physical_vararg_index: full_call_sig.vararg_index,
         score,
         argument_parameters,
+        type_arguments,
     })
+}
+
+/// A formal's call-site solution, or `None` when it is still the formal itself.
+fn solved_member_extension_type_argument(
+    bindings: &crate::symbol_resolver::GSigBinds,
+    formal: &str,
+) -> Option<Ty> {
+    let solution = bindings.get(formal).copied()?;
+    (solution != Ty::Error
+        && !solution.mentions_pending()
+        && !matches!(solution.non_null(), Ty::TyParam(identity, _) if identity == formal))
+    .then_some(solution)
 }
 
 impl<'a> Checker<'a> {
@@ -13645,6 +13693,12 @@ impl<'a> Checker<'a> {
                     .is_some_and(|shape| shape.is_interface());
                 let dispatch_receiver =
                     self.implicit_receiver_selection(candidate.dispatch_receiver);
+                if !candidate.type_arguments.is_empty()
+                    && candidate.type_arguments.iter().all(Option::is_some)
+                {
+                    self.resolved_call_type_args
+                        .insert(call, candidate.type_arguments.clone());
+                }
                 self.resolved_calls.insert(
                     call,
                     candidate.resolved_call(dispatch_receiver, extension_receiver, interface),
@@ -18305,7 +18359,7 @@ impl<'a> Checker<'a> {
                                     scope,
                                     identity,
                                     extension_declaration,
-                                    receiver.class_receiver,
+                                    receiver.class_receiver.then_some(receiver.ty),
                                 )),
                                 receiver_capture: self.implicit_receiver_capture_id(
                                     receiver.class_receiver,
@@ -25904,6 +25958,22 @@ fn inaccessible_classifier_message(
         ClassifierAccess::Public => "public",
     };
     format!("cannot access '{name}': it is {kind}")
+}
+
+/// kotlinc's `OVERLOAD_RESOLUTION_AMBIGUITY` for a classifier name: each equally visible
+/// classifier rendered as its declaration header, in candidate order.
+fn ambiguous_classifier_message<Shape: std::ops::Deref<Target = crate::libraries::LibraryType>>(
+    candidates: &[TypeName],
+    shape: impl Fn(TypeName) -> Option<Shape>,
+) -> String {
+    let mut message = "overload resolution ambiguity between candidates:".to_string();
+    for &candidate in candidates {
+        if let Some(shape) = shape(candidate) {
+            message.push('\n');
+            message.push_str(&classifier_access_display_from_shape(candidate, &shape));
+        }
+    }
+    message
 }
 
 fn classifier_access_display_from_shape(
@@ -38357,6 +38427,8 @@ pub(crate) struct MemberExtensionFunctionCandidate {
     overridden_results: Box<[Ty]>,
     owner: TypeName,
     physical_name: String,
+    /// Solved method type arguments in formal order. `None` is an unsolved formal.
+    type_arguments: Vec<Option<Ty>>,
 }
 
 #[derive(Clone)]
@@ -38383,6 +38455,9 @@ struct InstantiatedMemberExtension {
     physical_vararg_index: Option<usize>,
     score: (usize, std::cmp::Reverse<usize>, bool),
     argument_parameters: Vec<(usize, usize)>,
+    /// Solved method type arguments in formal order. Published on the call when every formal
+    /// has one, matching an ordinary extension call.
+    type_arguments: Vec<Option<Ty>>,
 }
 
 struct MemberExtensionCall<'a> {
@@ -38658,7 +38733,7 @@ struct Checker<'a> {
     /// See [`TypeInfo::when_subject_numeric_equalities`].
     when_subject_numeric_equalities: HashMap<ExprId, when_flow::WhenSubjectNumericEquality>,
     resolved_type_tys: HashMap<(u32, u32), Ty>,
-    unresolved_type_segments: HashMap<(u32, u32), String>,
+    unresolved_type_segments: HashMap<(u32, u32), crate::symbol_resolver::ClassifierMiss>,
     /// Transient diagnostic directives inherited from annotated enclosing statements.
     active_statement_suppressions: Vec<String>,
     resolved_type_bounds: HashMap<(u32, u32), (Ty, bool)>,
@@ -49528,15 +49603,12 @@ impl<'a> Checker<'a> {
             .scoped_source_alias_identity(scope, &spelling)
             .and_then(|identity| self.source_alias_expansion(identity))
             .and_then(|(_, expansion)| expansion.obj_internal());
-        let classifier =
-            alias_classifier.or_else(
-                || match self.select_classifier_binding(scope, &spelling).0 {
-                    InheritedNestedClassifier::Found(internal) => Some(internal),
-                    InheritedNestedClassifier::Ambiguous | InheritedNestedClassifier::NotFound => {
-                        None
-                    }
-                },
-            );
+        let classifier = alias_classifier.or_else(|| {
+            match self.select_type_classifier_binding(scope, &spelling).0 {
+                InheritedNestedClassifier::Found(internal) => Some(internal),
+                InheritedNestedClassifier::Ambiguous | InheritedNestedClassifier::NotFound => None,
+            }
+        });
         let declaration = match classifier {
             Some(classifier) => Ty::obj_name(classifier),
             None => {
@@ -49581,7 +49653,7 @@ impl<'a> Checker<'a> {
             // Never rediscover alias-ness from the spelling after a classifier has been selected:
             // a lower same-named alias may expand to that very classifier while still losing to it.
             let (selection, failed_segment, selected_alias) =
-                self.select_classifier_binding(scope, &r.name);
+                self.select_type_classifier_binding(scope, &r.name);
             match selection {
                 InheritedNestedClassifier::Found(internal) => {
                     if let Some(alias) = selected_alias {
@@ -61994,9 +62066,19 @@ impl<'a> Checker<'a> {
     /// Report the failed classifier binding recorded by [`Self::type_ref_ty`]. Unsupported shapes
     /// have no binding failure and continue to their shape-specific diagnostic.
     fn report_unresolved_type_ref(&mut self, r: &TypeRef) -> bool {
-        if let Some(segment) = self.unresolved_type_segments.get(&(r.span.lo, r.span.hi)) {
-            self.diags
-                .error(r.span, format!("unresolved reference '{segment}'."));
+        if let Some(miss) = self.unresolved_type_segments.get(&(r.span.lo, r.span.hi)) {
+            let message = match miss {
+                crate::symbol_resolver::ClassifierMiss::Unresolved(segment) => {
+                    format!("unresolved reference '{segment}'.")
+                }
+                crate::symbol_resolver::ClassifierMiss::Ambiguous(candidates) => {
+                    let resolver = self.resolver();
+                    ambiguous_classifier_message(candidates, |candidate| {
+                        resolver.classifier(candidate)
+                    })
+                }
+            };
+            self.diags.error(r.span, message);
             return true;
         }
         let nested = r

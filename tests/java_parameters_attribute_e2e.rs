@@ -433,6 +433,70 @@ fn java_parameters_names_a_value_class_member_extension_receiver_capture() {
     );
 }
 
+/// An object written in a member of an anonymous object or local class inside a value-class member
+/// reflects the value class's instance as the static's value it captures, `$arg0`, synthetic,
+/// ahead of the enclosing class's instance `this$0` when it captures that too.
+#[test]
+fn java_parameters_names_a_nested_objects_value_class_receiver() {
+    assert_parameter_parity(
+        "JavaParametersNestedObjectCapture",
+        "package demo\n\
+         interface Box { fun get(k: Int): Any }\n\
+         @JvmInline value class Held(val raw: String) {\n\
+         \x20 fun inObj(): Box = object : Box {\n\
+         \x20\x20 override fun get(k: Int): Any {\n\
+         \x20\x20\x20 val o = object : Box { override fun get(k: Int): Any = this@Held }\n\
+         \x20\x20\x20 return o.get(k)\n\
+         \x20\x20 }\n\
+         \x20 }\n\
+         \x20 fun inLocal(): Box {\n\
+         \x20\x20 class L(val n: Int) : Box {\n\
+         \x20\x20\x20 override fun get(k: Int): Any {\n\
+         \x20\x20\x20\x20 val o = object : Box { override fun get(k: Int): Any = this@Held.raw + this@L.n }\n\
+         \x20\x20\x20\x20 return o.get(k)\n\
+         \x20\x20\x20 }\n\
+         \x20\x20 }\n\
+         \x20\x20 return L(1)\n\
+         \x20 }\n\
+         }\n",
+        &[
+            "demo/Held$inObj$1",
+            "demo/Held$inObj$1$get$o$1",
+            "demo/Held$inLocal$L",
+            "demo/Held$inLocal$L$get$o$1",
+        ],
+    );
+}
+
+/// kotlinc's value-class lowering moves a member's dispatch receiver into the static's carrier
+/// `arg0`, flagged synthetic, and its extension receiver into an ordinary parameter `$this$name`,
+/// flagged mandated: a member function's and a property accessor's alike. An extension receiver
+/// that stays one has no flag: an ordinary class's member extension and a top-level extension.
+#[test]
+fn java_parameters_flags_a_value_class_static_members_extension_receiver_mandated() {
+    assert_parameter_parity(
+        "JavaParametersMovedExtensionReceiver",
+        "package demo\n\
+         @JvmInline value class Tag(val raw: String)\n\
+         @JvmInline value class Held(val raw: String) {\n\
+         \x20 fun Tag.mext(x: Int): Int = x\n\
+         \x20 var String.pp: Int\n\
+         \x20\x20 get() = length\n\
+         \x20\x20 set(v) {}\n\
+         \x20 fun String.withDefault(x: Int = 1): Int = x\n\
+         }\n\
+         class Plain(val raw: String) {\n\
+         \x20 fun Tag.pmext(x: Int): Int = x\n\
+         }\n\
+         fun Tag.top(x: Int): Int = x\n",
+        &[
+            "demo/Held",
+            "demo/Plain",
+            "demo/JavaParametersMovedExtensionReceiverKt",
+        ],
+    );
+}
+
 #[test]
 fn method_parameters_remain_opt_in() {
     let jdk = common::jdk_modules();

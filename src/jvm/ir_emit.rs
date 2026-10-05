@@ -2166,29 +2166,8 @@ fn return_primitive(code: &mut CodeBuilder, ty: Ty) {
     }
 }
 
-/// Attach any user annotations recorded for `field` (by name) to the most recently added field.
-/// The annotations on a property's synthetic `$annotations` marker — the PROPERTY's own, which
-/// `@Metadata` records as `Property.annotation`. Both retentions rejoin into the single list a
-/// metadata record keeps.
-fn property_marker_annotations(
-    ir: &IrFile,
-    c: &crate::ir::IrClass,
-    property: &str,
-) -> Vec<crate::ir::AppliedAnnotation> {
-    let Some(marker) = ir
-        .property_annotation_markers
-        .get(&(c.fq_name_id(), property.to_string()))
-    else {
-        return Vec::new();
-    };
-    ir.function_annotations
-        .get(marker)
-        .map(|annotations| annotations.applications().cloned().collect())
-        .unwrap_or_default()
-}
-
-/// `(name, descriptor)` of that marker, read from the emitted function so a value-class-mangled
-/// getter's marker is named as the class file spells it.
+/// `(name, descriptor)` of a property's synthetic `$annotations` marker, read from the emitted
+/// function so a value-class-mangled getter's marker is named as the class file spells it.
 fn property_marker_signature(
     ir: &IrFile,
     c: &crate::ir::IrClass,
@@ -2199,19 +2178,6 @@ fn property_marker_signature(
         .get(&(c.fq_name_id(), property.to_string()))?;
     let function = ir.functions.get(*marker as usize)?;
     Some((function.name.clone(), "()V".to_string()))
-}
-
-/// The annotations that landed on the property's BACKING FIELD (`@Target(FIELD)`) — the same records
-/// the field's own class-file attribute carries, mirrored as `Property.backingFieldAnnotation`.
-fn property_backing_field_annotations(
-    c: &crate::ir::IrClass,
-    property: &str,
-) -> Vec<crate::ir::AppliedAnnotation> {
-    c.field_annotations
-        .iter()
-        .find(|annotations| annotations.field == property)
-        .map(|annotations| annotations.annotations.applications().cloned().collect())
-        .unwrap_or_default()
 }
 
 fn apply_enum_entry_annotations(cw: &mut ClassWriter, c: &crate::ir::IrClass, field: &str) {
@@ -3108,36 +3074,8 @@ fn emit_class(
                     }
                 }
             }
-            // Debug metadata consumes the position emission actually reached. Reconstructing this
-            // later from constructor parameters, constant-pool widths, or assertion policy makes a
-            // semantic description masquerade as bytecode layout and can point inside an opcode.
-            let mut debug_start = ctor.bytes.len();
             let ctor_param_fields = primary_ctor_parameter_fields(c, param_tys.len());
-            // Store only constructor fields explicitly marked as pre-super: an inner class's
-            // enclosing instance and a local class's captured values, which a superclass argument
-            // may read. Keeping this as ordering metadata avoids interpreting a JVM
-            // field name as source semantics. A `putfield` of the current class's own field on the
-            // still-uninitialized `this` is legal per JVMS 4.10.2.4.
-            for &(param_i, field_i) in &c.pre_super_param_fields {
-                let param_i = param_i as usize;
-                let field = &c.fields[field_i as usize];
-                let param_ty = param_tys[param_i];
-                let param_slot = 1 + param_tys[..param_i]
-                    .iter()
-                    .map(|ty| slot_words(*ty))
-                    .sum::<u16>();
-                ctor.aload(0);
-                load(param_ty, param_slot, &mut ctor);
-                let physical_name = instance_field_jvm_name(ir, c, field);
-                let fref =
-                    e.cw.fieldref(&fq_name, &physical_name, &type_descriptor(field.ty));
-                ctor.putfield(fref, slot_words(field.ty) as i32);
-            }
-            // A local class's captured values are stored without a line; its first line is the
-            // delegation that follows them. An inner class's enclosing-instance store has one.
-            if c.is_local_class {
-                debug_start = ctor.bytes.len();
-            }
+            let debug_start = e.emit_pre_super_field_stores(c, &fq_name, &param_tys, &mut ctor);
             primary_ctor_debug = Some((
                 ctor_desc.clone(),
                 u16::try_from(debug_start).expect("a JVM method body fits in u16"),
@@ -3293,7 +3231,7 @@ fn emit_class(
         // Declared PRIMARY-constructor annotations (`class C @Mark constructor(…)`), with the same
         // `Deprecated` / `ACC_SYNTHETIC` companions a secondary constructor's carry.
         let primary_annotations = &c.primary_ctor_annotations;
-        if !primary_annotations.is_empty() {
+        if !primary_annotations.retains_none() {
             let ctor_desc = method_descriptor(&param_tys, Ty::Unit);
             cw.set_method_annotations("<init>", &ctor_desc, primary_annotations);
             if primary_annotations.deprecated() {
@@ -3453,7 +3391,7 @@ fn emit_class(
                 // primary's declared annotations on it (the `$default` overload between them, being
                 // synthetic, gets none). Their descriptors already interned at the primary.
                 let annotations = &c.primary_ctor_annotations;
-                if !annotations.is_empty() {
+                if !annotations.retains_none() {
                     cw.set_method_annotations("<init>", "()V", annotations);
                     if annotations.deprecated() {
                         cw.mark_method_deprecated("<init>", "()V");

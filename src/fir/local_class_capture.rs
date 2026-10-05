@@ -76,8 +76,10 @@ impl FirLocalClassCaptureSource {
 /// parameter after it; kotlinc's `LocalDeclarationsLowering` names each kind differently.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FirCapturedReceiver {
-    /// The enclosing class instance.
-    Enclosing,
+    /// The instance of an enclosing class, with that class's resolved identity. A capture written
+    /// in a local class's member may reach past that class to an outer instance; the identity says
+    /// whose, so a target can realize the instance as the value its declaring member holds.
+    Enclosing { classifier: crate::types::TypeName },
     /// The extension receiver of the named callable with this source name, and whether that
     /// callable is a local function or the declaration the capture is written in.
     Callable {
@@ -108,7 +110,7 @@ pub enum CapturedCallableOwner {
 impl FirCapturedReceiver {
     pub(super) fn storage_payload_bytes(&self) -> usize {
         match self {
-            Self::Enclosing | Self::Lambda(None) => 0,
+            Self::Enclosing { .. } | Self::Lambda(None) => 0,
             Self::Callable { label, .. } | Self::Lambda(Some(label)) => label.len(),
             Self::Context { types, .. } => types.len() * std::mem::size_of::<ResolvedTy>(),
         }

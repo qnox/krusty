@@ -47,9 +47,7 @@ mod fields;
 mod function_scope;
 mod inline_copies;
 mod suspension_points;
-pub use suspension_points::{
-    IrIntrinsicSuspensionKind, IrIntrinsicSuspensionPoint, IrValueClassSuspendResult,
-};
+pub use suspension_points::{IrIntrinsicSuspensionPoint, IrValueClassSuspendResult};
 mod intrinsic;
 mod jvm_static_realization;
 mod lambda_classes;
@@ -101,7 +99,7 @@ pub use constructors::{
     IrCapturedReceiver, IrConstructorCapture, IrCtorParameterProvenance,
     IrJvmValueClassSecondaryCtor,
 };
-pub use constructors::{IrConstructorAccess, IrConstructorTarget};
+pub use constructors::{IrConstructorAccess, IrConstructorTarget, IrCustomSerializerConstruction};
 pub use constructors::{IrSecondaryCtor, IrSecondaryCtorLines};
 pub use expression_provenance::{EnumValueOfDeclaration, IrShortCircuitKind};
 pub use field_flags::IrfFlags;
@@ -1178,7 +1176,8 @@ pub struct IrClass {
     /// `@Target` admits `PROPERTY`), by property name. Kotlin properties have no class-file
     /// declaration, so these are emitted onto a synthetic `get<Name>$annotations()` marker method
     /// that the property's `JvmPropertySignature` names. Empty for a class whose properties carry
-    /// none.
+    /// none. The marker pass consumes every entry that retains an annotation; an entry left after
+    /// it records only erased optional expectations, which reach `@Metadata` as a flag alone.
     pub property_annotations: Vec<PropertyAnnotations>,
     /// User annotations declared on the PRIMARY constructor (`class C @Mark constructor(…)`) — the
     /// primary-`<init>` analogue of [`IrSecondaryCtor::annotations`], carrying retention per
@@ -1565,6 +1564,14 @@ pub struct IrSpecializedAnonymousClass {
     /// Later materialization appends backing fields and accessors past these prefixes.
     pub field_count: u32,
     pub property_count: u32,
+    /// Property reads and writes in the inlined caller whose receiver is this copy's construction.
+    /// Accessor functions are not available when the construction is retargeted, so the read is
+    /// rebound once the copy's properties exist.
+    pub caller_property_uses: Vec<ExprId>,
+    /// Cloned property initializer and accessor roots. Accessor functions do not exist yet, and
+    /// these roots are not constructor statements. Nested specialization walks this field;
+    /// [`IrClass::init_body`] stays the constructor body.
+    pub pending_property_roots: Vec<ExprId>,
 }
 
 /// One lowered source file (`IrFile`) — its arenas. Index-based, bulk-freeable.
@@ -1627,6 +1634,10 @@ pub struct IrFile {
     /// Common resolution records the path distinction before flattening the complete hierarchy;
     /// target emitters consume it without reopening a classifier provider.
     pub superclass_interfaces: std::collections::HashMap<TypeName, Vec<TypeName>>,
+    /// The frontend-selected custom serializer construction of each source classifier whose
+    /// `@Serializable(with = …)` names a serializer class, keyed by that classifier.
+    pub custom_serializer_constructions:
+        std::collections::HashMap<TypeName, IrCustomSerializerConstruction>,
     /// Exact semantic property-override edges copied from stable FIR. A target backend may erase
     /// these types and materialize representation bridges, but it must not search declarations.
     pub property_overrides: std::collections::HashMap<TypeName, Vec<IrPropertyOverride>>,
@@ -2816,6 +2827,7 @@ mod debug_lines;
 mod debug_locals;
 mod generated_members;
 pub(crate) use data_class_members::IrDataClassMemberRole;
+pub(crate) use debug_lines::UnitBodyExit;
 pub use debug_locals::{IrCatchBinding, IrLambdaForm, IrLambdaOrigin};
 pub(crate) use debug_locals::{IrDebugLocalProvenance, IrInlineLocalRole};
 pub use generated_members::{

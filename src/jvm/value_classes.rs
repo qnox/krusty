@@ -1057,9 +1057,8 @@ pub(crate) fn lower_value_classes(
     for (call, classifier) in boxed_calls {
         ir.physical_types.insert(call, Ty::obj_name(classifier));
     }
-    // An intrinsic point's value comes through a generic slot: `suspendCoroutine<T>` reads
-    // `SafeContinuation.getOrThrow(): Object`, and `suspendCoroutineUninterceptedOrReturn<T>`'s block
-    // returns `Any?`. A value-class `T` therefore crosses as its box (or null for `T?`), never as the
+    // An intrinsic point's value comes through a generic slot: a
+    // `suspendCoroutineUninterceptedOrReturn<T>` block returns `Any?`. A value-class `T` therefore crosses as its box (or null for `T?`), never as the
     // carrier, on either path. Preserve that physical fact on the exact FIR-selected intrinsic point
     // so a value-class suspend-function tail does not descend into the inlined user block and attempt
     // to box that block's own result.
@@ -4655,7 +4654,7 @@ fn restore_boxed_suspension_tails(ir: &mut IrFile, id: ExprId, unboxes: &HashSet
 fn box_ref_tail(ir: &mut IrFile, id: ExprId, x: TypeName, inputs: ReprInputs<'_>) {
     let under = inputs.under;
     // A structural intrinsic point may contain an inlined user block whose own tail has a different
-    // type (`suspendCoroutine<T> { ... }` contains a `Unit` block). Its exact physical result belongs
+    // type (`suspendCoroutineUninterceptedOrReturn<T> { ... }` may end in a `Unit` block). Its exact physical result belongs
     // to the point as a whole; never recurse through that semantic boundary and reinterpret the block
     // tail as the enclosing function's value-class result.
     if ir.physical_types.get(&id).is_some_and(|ty| {
