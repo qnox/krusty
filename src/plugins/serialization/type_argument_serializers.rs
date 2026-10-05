@@ -14,9 +14,9 @@
 //! on its root (`typealias Coded = @Serializable(with = S::class) Item`).
 
 use super::SERIALIZABLE_FQ;
+use crate::ir::Spelled;
 use crate::ir::{ClassId, IrFile};
 use crate::plugins::PluginContext;
-use crate::spelling::Spelled;
 use crate::types::{type_name, AnnotationValue, TypeName};
 
 /// The checked declared spelling of property `property` of `class`, detached from `ir` so the
