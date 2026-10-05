@@ -175,15 +175,16 @@ fun box(): String {
 /// that merged provider set instead of collapsing it back to either declaration.
 #[test]
 fn mixed_actual_and_expect_defaults_reach_direct_and_override_calls() {
-    const SRC: &str = r#"// LANGUAGE: +MultiPlatformProjects
+    const COMMON: &str = r#"// LANGUAGE: +MultiPlatformProjects
 expect fun choose(a: Int = 1, b: Int = 2): Int
-
-@Suppress("ACTUAL_FUNCTION_WITH_DEFAULT_ARGUMENTS")
-actual fun choose(a: Int = 10, b: Int): Int = a + b
 
 expect open class Base() {
     open fun text(a: String = "expect-a", b: String = "expect-b"): String
 }
+"#;
+    const PLATFORM: &str = r#"// LANGUAGE: +MultiPlatformProjects
+@Suppress("ACTUAL_FUNCTION_WITH_DEFAULT_ARGUMENTS")
+actual fun choose(a: Int = 10, b: Int): Int = a + b
 
 actual open class Base {
     @Suppress("ACTUAL_FUNCTION_WITH_DEFAULT_ARGUMENTS")
@@ -201,7 +202,25 @@ fun box(): String {
     return "OK"
 }
 "#;
-    common::expect_box_same_as_kotlinc(SRC, "MixedActualExpectDefaults");
+    let classes = common::classes_against_kotlinc_source_set(
+        &[("Common.kt", COMMON), ("Platform.kt", PLATFORM)],
+        1,
+    );
+    let stdlib = common::stdlib_jar();
+    for (compiler, output) in [("kotlinc", &classes.reference), ("krusty", &classes.krusty)] {
+        let output = output
+            .iter()
+            .map(|(name, bytes)| (name.clone(), bytes.clone()))
+            .collect::<Vec<_>>();
+        let box_class =
+            common::find_box_class(&output).unwrap_or_else(|| panic!("{compiler} emitted no box"));
+        assert_eq!(
+            common::run_box(&output, &box_class, std::slice::from_ref(&stdlib))
+                .unwrap_or_else(|| panic!("{compiler} box did not run")),
+            "OK",
+            "{compiler} used the wrong per-parameter default provider"
+        );
+    }
 }
 
 /// An interface actual's default is what an override's call site inserts. The expect string is not.

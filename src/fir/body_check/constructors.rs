@@ -1267,12 +1267,18 @@ pub(super) fn check_and_dispatch_signature_constructor_defaults(
         )?;
         (parameters, defaults, constructor.span)
     };
-    if work.parameters.len() != signature.parameters.len() {
+    let value_parameter_count = signature
+        .parameters
+        .len()
+        .checked_sub(context_count)
+        .ok_or(CheckedBodyDriverFailure::ParameterShapeMismatch)?;
+    if work.parameters.len() != value_parameter_count {
         return Err(CheckedBodyDriverFailure::ParameterShapeMismatch);
     }
     defaults.retain(|default| {
         usize::try_from(default.parameter)
             .ok()
+            .and_then(|parameter| parameter.checked_sub(context_count))
             .and_then(|parameter| work.parameters.get(parameter))
             .copied()
             .unwrap_or(false)
