@@ -1555,7 +1555,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   generate `equals`/`hashCode`/`toString`; a regular class that extends one keeps `Any`'s identity
   members. A secondary constructor may omit a parameter that has a default, the same way an
   ordinary class does. `Unit` and `Nothing` are legal constructor properties: their JVM value
-  positions are `kotlin.Unit` and `java.lang.Void`, not `void`. `tests/full_value_classes_e2e.rs`.
+  positions are `kotlin.Unit` and `java.lang.Void`, not `void`. A local-variable descriptor follows
+  the same rule, including a type parameter that erases to `Unit`. `tests/full_value_classes_e2e.rs`.
 - `==` on `String` (Kotlin `==` = `.equals`, `===` = reference). Structural
   `==`/`!=` on reference operands compiles to `kotlin/jvm/internal/Intrinsics.areEqual(Object,Object)Z`
   — the exact helper kotlinc's JVM backend emits (`backend.jvm/.../intrinsics/Equals.kt`), so the

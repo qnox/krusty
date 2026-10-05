@@ -65,11 +65,14 @@ pub(super) fn ir_type_desc(ty: &Ty) -> String {
 }
 
 pub(super) fn local_variable_desc(ty: Ty) -> String {
-    type_descriptor(if ty == Ty::Unit {
-        Ty::obj("kotlin/Unit")
+    // A local is a value slot. `void` is only a method result, so a type that erases to `Unit`
+    // — the type itself, or a parameter bounded by it — is the `kotlin.Unit` singleton here.
+    let descriptor = type_descriptor(ty);
+    if descriptor == "V" {
+        type_descriptor(Ty::obj("kotlin/Unit"))
     } else {
-        ty
-    })
+        descriptor
+    }
 }
 
 pub(super) fn field_jvm_tys(fields: &[IrField]) -> Vec<Ty> {
