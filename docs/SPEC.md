@@ -1539,6 +1539,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   unboxed carrier, so an unrejected `a === b` silently compares two scalar carriers or boxes one as an
   unrelated JVM wrapper. No source/classpath branch is part of the identity policy.
   `referential_equality_on_a_value_class_operand` in `tests/resolve_parser_diag_coverage_e2e.rs`.
+- **A `value class` without `@JvmInline` is boxed when `FullValueClasses` is on, and rejected
+  otherwise.** kotlinc's message is `value classes without '@JvmInline' annotation are not yet
+  supported.`, pointed at the `value` keyword. The annotation is the resolved `kotlin.jvm.JvmInline`
+  identity, so `import kotlin.jvm.JvmInline as Inline` / `@Inline` stays unboxed. A legacy
+  `inline class` is unboxed without the annotation. With the feature, the class is a final JVM
+  class: public constructor, private final fields, getters, and data-class `equals`/`hashCode`/
+  `toString` (`A(x=1)`, `31 * acc + field.hashCode()`) without `componentN`, `copy`, or the
+  `-impl`/`box-impl` family. `@JvmInline value class` keeps the unboxed inline ABI either way.
+  `tests/full_value_classes_e2e.rs`.
 - `==` on `String` (Kotlin `==` = `.equals`, `===` = reference). Structural
   `==`/`!=` on reference operands compiles to `kotlin/jvm/internal/Intrinsics.areEqual(Object,Object)Z`
   — the exact helper kotlinc's JVM backend emits (`backend.jvm/.../intrinsics/Equals.kt`), so the

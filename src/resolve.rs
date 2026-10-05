@@ -2011,8 +2011,12 @@ pub struct ClassSig {
     pub generic_property_shapes: HashMap<String, Ty>,
     /// For a `@JvmInline value class X(val v: U)` — the sole underlying property's `(name, type U)`.
     /// A value-class value is represented unboxed as `U`; `X` carries static `box-impl`/`unbox-impl`/
-    /// `constructor-impl` members for boxed contexts. `None` for an ordinary class.
+    /// `constructor-impl` members for boxed contexts. `None` for an ordinary class and for a boxed
+    /// `value class` enabled by `FullValueClasses`.
     pub value_field: Option<(String, Ty)>,
+    /// Boxed `value class` (`+FullValueClasses`, no `@JvmInline`): structural `equals`/`hashCode`/
+    /// `toString`, no `componentN`/`copy`, and no unboxed carrier.
+    pub full_value: bool,
     /// For a generic higher-order method (`fun <R> map(f: (T) -> R): R`), the un-erased declared shape
     /// needed to substitute the receiver's type arguments into the lambda parameter types and infer the
     /// method's own type parameters from the lambda body. Keyed by method name; only methods whose
@@ -2127,6 +2131,7 @@ impl ClassSig {
             nullable_tparam_props: HashMap::new(),
             generic_property_shapes: HashMap::new(),
             value_field: None,
+            full_value: false,
             generic_methods: HashMap::new(),
         }
     }

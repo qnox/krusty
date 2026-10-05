@@ -1169,7 +1169,14 @@ fn extract_file_stub_inventory(
                 .with(DeclarationFlags::INTERFACE, class.is_interface())
                 .with(DeclarationFlags::SINGLETON, class.is_singleton())
                 .with(DeclarationFlags::DATA, class.is_data)
-                .with(DeclarationFlags::VALUE, class.is_value)
+                .with(
+                    DeclarationFlags::VALUE,
+                    class.is_value && class.value_modifier_span.is_none(),
+                )
+                .with(
+                    DeclarationFlags::VALUE_KEYWORD,
+                    class.value_modifier_span.is_some(),
+                )
                 .with(DeclarationFlags::ENUM, class.is_enum())
                 .with(DeclarationFlags::FUN_INTERFACE, class.is_fun_interface)
                 .with(DeclarationFlags::OPEN, class.is_open())
@@ -1296,7 +1303,9 @@ fn extract_file_stub_inventory(
                 },
             ));
         }
-        if class.is_data {
+        // A `value class` gets the same structural trio as a data class. `componentN`/`copy` stay
+        // data-only. `@JvmInline` later suppresses these stubs and unboxes the class instead.
+        if class.is_data || class.value_modifier_span.is_some() {
             for (ordinal, (name, parameter_count)) in
                 [("toString", 0), ("hashCode", 0), ("equals", 1)]
                     .into_iter()
