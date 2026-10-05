@@ -318,9 +318,8 @@ pub(crate) struct EmitRun {
     /// The reason an inline splice failed during emission (a required stdlib-inline call the backend
     /// could not splice), else `None`.
     inline_bail: std::cell::RefCell<Option<String>>,
-    /// Set when a `GetValue`/`SetValue` references a value slot that was never allocated (malformed IR
-    /// from an unsupported lowering). The emitter never panics: it sets this and the file is dropped —
-    /// a compiler must never crash on its own IR.
+    /// Set when a supported emission path lacks a checked backend fact and must reject the file with
+    /// a diagnostic. Broken common-IR ownership contracts are invariants and do not use this path.
     emit_bail: std::cell::Cell<bool>,
     emit_error: std::cell::RefCell<Option<String>>,
     /// Lambda impl `FunId`s that got a REAL `invokedynamic` this pass. A lambda spliced by the inliner
@@ -6530,10 +6529,11 @@ impl<'a> Emitter<'a> {
             IrExpr::InlineFrameMarker => self.emit_inline_frame_marker(e, code),
             IrExpr::SetValue { var, value } => {
                 let Some(&(slot, jt)) = self.slots.get(&var) else {
-                    self.run.set_emit_error(
-                        "assignment references a value slot that was never declared".to_string(),
+                    panic!(
+                        "malformed IR: assignment target {var} has no allocated JVM slot while emitting {}; known slots: {:?}",
+                        self.owner,
+                        self.slots.keys().collect::<Vec<_>>()
                     );
-                    return;
                 };
                 match local_updates::iinc_delta(self.ir, e, var, value, jt) {
                     Some(delta) => code.iinc(slot, delta),
@@ -8027,7 +8027,7 @@ fn methodref_owner<'a>(body: &'a MethodCode, name: &str, descriptor: &str) -> Op
 #[cfg(test)]
 mod invariant_tests {
     use super::*;
-    use crate::ir::{IrExpr, IrFile, IrFunction};
+    use crate::ir::{IrConst, IrExpr, IrFile, IrFunction};
     use crate::jvm::classreader::MethodCode;
     use crate::jvm::inline::MethodBodies;
     use crate::types::Ty;
@@ -8291,10 +8291,12 @@ mod invariant_tests {
         );
     }
 
-    // A `GetValue` of a value slot that was never allocated is malformed IR. Letting emission
-    // silently skip it would preserve a second, fail-soft path around the authoritative final-body
-    // analysis; the backend rejects the broken contract with an emission error at the method.
+    // A `GetValue` of a value slot that was never allocated is malformed IR. It is not an
+    // unsupported source construct and must not enter the recoverable emit-error path.
     #[test]
+    #[should_panic(
+        expected = "malformed IR: value 99 has no allocated JVM slot while emitting TestKt"
+    )]
     fn getvalue_of_unallocated_slot_is_an_explicit_backend_invariant_violation() {
         let mut ir = IrFile::default();
         let body = ir.add_expr(IrExpr::GetValue(99));
@@ -8307,12 +8309,27 @@ mod invariant_tests {
             dispatch_receiver: None,
             param_checks: vec![],
         });
-        let run = EmitRun::default();
-        assert!(emit_for_test(&ir, "TestKt", &run).is_none());
-        assert_eq!(
-            run.emit_error().as_deref(),
-            Some("value read references a slot that was never declared")
-        );
+        let _ = emit_for_test(&ir, "TestKt", &EmitRun::default());
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "malformed IR: assignment target 99 has no allocated JVM slot while emitting TestKt"
+    )]
+    fn setvalue_of_unallocated_slot_is_an_explicit_backend_invariant_violation() {
+        let mut ir = IrFile::default();
+        let value = ir.add_expr(IrExpr::Const(IrConst::Int(1)));
+        let body = ir.add_expr(IrExpr::SetValue { var: 99, value });
+        ir.add_fun(IrFunction {
+            name: "box".into(),
+            params: vec![],
+            ret: Ty::Unit,
+            body: Some(body),
+            is_static: true,
+            dispatch_receiver: None,
+            param_checks: vec![],
+        });
+        let _ = emit_for_test(&ir, "TestKt", &EmitRun::default());
     }
 
     // A `Unit` declaration owns a `kotlin/Unit` reference slot, so reading it pushes one operand. A

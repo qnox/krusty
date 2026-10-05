@@ -61,19 +61,12 @@ impl super::Emitter<'_> {
                 type_argument,
             } => self.emit_kclass_literal(*classifier, *value, *type_argument, code),
             IrExpr::GetValue(i) => {
-                // A slot that was never allocated means the lowering produced malformed IR (e.g. an
-                // unsupported suspend shape). Don't panic — flag the file unemittable and skip it.
                 let Some(&(slot, jt)) = self.slots.get(i) else {
-                    crate::trace_compiler!(
-                        "suspend",
-                        "EMIT_BAIL GetValue unallocated slot i={i} owner={} known={:?}",
+                    panic!(
+                        "malformed IR: value {i} has no allocated JVM slot while emitting {}; known slots: {:?}",
                         self.owner,
                         self.slots.keys().collect::<Vec<_>>()
                     );
-                    self.run.set_emit_error(
-                        "value read references a slot that was never declared".to_string(),
-                    );
-                    return;
                 };
                 self.load_constructor_value(*i, jt, slot, code);
             }
