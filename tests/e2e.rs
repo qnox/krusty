@@ -2621,3 +2621,6 @@ mod value_class_receiver_inline_only_e2e;
 
 #[path = "covariant_bridge_cast_e2e.rs"]
 mod covariant_bridge_cast_e2e;
+
+#[path = "field_store_lines_e2e.rs"]
+mod field_store_lines_e2e;

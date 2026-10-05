@@ -7489,6 +7489,9 @@ impl<'a> Emitter<'a> {
                 let owner = owner.render();
                 let words = crate::jvm::physical_type::field_slot(&descriptor).words();
                 let fref = self.cw.fieldref(&owner, &name, &descriptor);
+                // kotlinc's `visitSetField` marks the assignment's line at the store, so the line
+                // returns after a value that ran on another line or under an inlined body.
+                self.mark_dispatch_line(operation.expression, code);
                 if is_static {
                     code.putstatic(fref, words);
                 } else {
@@ -7522,8 +7525,7 @@ impl<'a> Emitter<'a> {
                     self.cw.methodref(&owner, &name, &descriptor)
                 };
                 // The write through an ACCESSOR is a dispatch, so the assignment's own line returns
-                // here, after the value expression has marked its. A write realized as a FIELD is
-                // not one and marks nothing.
+                // here, after the value expression has marked its.
                 self.mark_dispatch_line(operation.expression, code);
                 if is_static {
                     code.invokestatic(m, words, ret_words);
