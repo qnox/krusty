@@ -1904,9 +1904,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `private_methods`/`internal_methods` sets a declared member uses (and gates its param guards the
   same way `param_checks_for` gates a declared private member's), so the emitter's existing
   visibility machinery produces all of the above. An INTERNAL primary ctor records internal copy
-  visibility in `@Metadata` while the JVM method stays public and UNMANGLED — krusty's systemic
-  internal-member convention (no `$module` mangling anywhere yet); kotlinc's `copy$<module>` byte
-  shape is deferred until internal mangling lands module-wide. A PROTECTED primary ctor currently
+  visibility in `@Metadata` and the JVM method is the public `copy$<module>` (`copy$main` for the
+  default module), with `copy$<module>$default` beside it — the same suffix every other internal
+  instance member takes. A PROTECTED primary ctor currently
   falls back to a public `copy` (kotlinc emits a protected `copy` with a public `copy$default`) —
   the IR visibility sets model neither, a silent divergence on a rare shape, like a declared
   `protected fun`. krusty also does not yet ENFORCE the copy's visibility at call sites: an
@@ -2035,6 +2035,41 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   lifted name and descriptor are already taken in the class it lands in (an enum entry's argument
   lambdas are placed in the enum rather than the entry class kotlinc uses, so they are numbered
   with the enum's) (`tests/lifted_callable_names_e2e.rs`).
+- **Internal instance members are public and named `name$<module>`.** An `internal` method or
+  property accessor is `ACC_PUBLIC` in bytecode, with `$` and the compilation's module name
+  appended. The module is sanitized by keeping letters, digits, and `_` and turning every other
+  character, including `$`, into `_` (`-module-name my-lib` → `m$my_lib`, `a.b` and `a$b` →
+  `m$a_b`; a letter outside ASCII stays, so `Я` is `m$Я`). The default module is `main`, so an
+  internal `m` is `m$main` even when metadata omits the module name. The suffix is applied after
+  value-class mangling (`m-WAeUQJs$lib1`, a value-class member's `m-impl$lib1`) and after lifted
+  callable naming, so a lambda inside the member does not carry it. Top-level functions and
+  properties, constructors, and private or protected members stay unmangled; fields stay private
+  and unmangled. A same-module override that stays `internal` keeps the mangled name and does not
+  gain a second method.   A public override keeps the Kotlin name and also emits
+  `ACC_PUBLIC|ACC_BRIDGE|ACC_SYNTHETIC` under the mangled name; that bridge `invokevirtual`s the
+  public method, so a call through the internal declaration reaches the override. An override that
+  stays `internal` is renamed with the member. A signature bridge for that override calls the
+  suffixed method (`build-<hash>$<module>`), not the spelling from before the suffix. A property
+  reference calls the suffixed accessor (`getX$<module>`). A public
+  overload of the same Kotlin name is a different method: the call and any bridge select the
+  internal signature by its declaration and JVM descriptor, and the public overload keeps its
+  name. A default stub is its own signature (`name$default` plus the mask and marker), so a
+  public overload's stub stays `name$default` when the internal stub becomes
+  `name$<module>$default`. A public JVM name that happens to end in `$` is not an internal slot. A public
+  override of an internal `var` emits that bridge for both accessors (`getV$<module>` and
+  `setV$<module>`), including when the accessors are still spelled with the Kotlin name because
+  the overridden declaration is in another file of the same module. A call
+  from another file of the same module is not a same-file method index: it keeps the Kotlin
+  spelling until this suffix, then uses `name$<module>` (a default stub keeps `$default` after
+  the suffix). `@PublishedApi` leaves the member on its Kotlin name (`demo`, `getV`): a public inline function in another
+  module links that name, and a same-named method there overrides the slot. A class in
+  another module that declares the same Kotlin name without `override` does not override the
+  mangled slot. A module that is not a friend cannot take the slot with `override` either:
+  the member is not visible there, so the internal call still reaches the declaring module.
+  `@Metadata` keeps the Kotlin name and records the JVM name when it differs.
+  Tests: `tests/internal_member_names_e2e.rs`, and
+  `compiler/testData/codegen/box/bridges/internalMethodOverrideInOtherModule.kt` plus
+  `internalMethodOverrideMultipleInheritance.kt`.
 - **Lifted names in a value-class-renamed function.** kotlinc renames a function whose signature
   mentions a value class before it lifts anything out of it, so the outermost segment is that JVM
   name with `-` spelled `_`: `lamP_txdesME$lambda$0` in `lamP-txdesME`, `local_txdesME$inner`,

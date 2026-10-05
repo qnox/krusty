@@ -162,6 +162,7 @@ pub(crate) fn run_backend_passes(
     run_backend_passes_after_plugins(
         ir,
         facade,
+        plugins.module_name,
         classifiers,
         callables,
         classpath,
@@ -174,6 +175,7 @@ pub(crate) fn run_backend_passes(
 fn run_backend_passes_after_plugins(
     ir: &mut crate::ir::IrFile,
     facade: &str,
+    module_name: &str,
     classifiers: &CheckedBackendClassifiers<'_>,
     callables: &crate::backend::CheckedBackendCallables,
     classpath: &crate::jvm::classpath::Classpath,
@@ -332,6 +334,9 @@ fn run_backend_passes_after_plugins(
     crate::jvm::ir_emit::reparent_lambda_impls(ir);
     // After reparenting: a lifted name is distinct only within the class the method lands in.
     crate::jvm::lifted_names::realize(ir, &facts.override_results);
+    // After lifted names are fixed. The module suffix must not leak into `$lambda$N`: kotlinc
+    // names those from the value-class spelling and only then appends `$<module>` to the member.
+    crate::jvm::internal_names::mangle_internal_members(ir, module_name, facade);
     // A specialized suspend lambda is already a real class when suspend lowering completes, but
     // its JVM name depends on the caller's final placement and lifted spelling. Realize that name
     // only now and keep the coroutine-emission facts keyed by the same physical identity.
@@ -1897,6 +1902,10 @@ mod tests {
             (
                 "derive_bridges(",
                 &["src/jvm/bridges.rs", "src/jvm/backend.rs"],
+            ),
+            (
+                "mangle_internal_members(",
+                &["src/jvm/internal_names.rs", "src/jvm/backend.rs"],
             ),
             ("collection_barriers::select(", &["src/jvm/backend.rs"]),
             (
