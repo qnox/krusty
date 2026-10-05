@@ -4615,6 +4615,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   signature first. The classes are byte-identical to kotlinc 2.4.20's. Tests:
   `tests/constructor_argument_specificity_e2e.rs`.
 
+- **A captured `var` initialized to its holder's default leaves the holder unset.** A `Ref$XxxRef`
+  holder starts at its field's JVM default, so a constant initializer equal to it (zero, positive
+  zero for `Float`/`Double`, `false`, `'\u0000'`, or `null` in an `ObjectRef`) is not stored, as
+  kotlinc's `SharedVariablesManager` skips it. `-0.0`, an unsigned zero and a zero boxed into an
+  `ObjectRef` are stored. Tests: `tests/shared_cell_initial_values_e2e.rs`.
+
 - **A lambda returns what kotlinc infers for it.** A lambda whose every result is `Unit` (a statement
   tail such as an assignment, a declaration or an `else`-less `if`, or a `Unit` call) has the result
   type `Unit` even where the expected function type returns `Any` or `Any?`, so its implementation
